@@ -534,6 +534,7 @@ starts it, through `run_scheduled`). The two use identity like this:
 | Audit row `operator_sub` / `actor_sub` | person / agent | agent / null |
 | Broadcast `principal_sub` / `actor_sub` | person / agent | agent / null |
 | Grants that limit each call | the person's **and** the agent's (stricter wins) | the agent's |
+| Role and flags of each tool call | the person's role, but at most `operator`; no `approver`, self-approval or `platform_admin` flag | the agent's (`operator`) |
 
 A direct run works "on behalf of" the person: the person stays the subject
 and the agent is the actor (RFC 8693 `sub` + `act`). `run` and
@@ -541,6 +542,18 @@ and the agent is the actor (RFC 8693 `sub` + `act`). `run` and
 for the whole run. Every audit row, broadcast event and approval request the
 run makes reads that binding, so they all name both identities and carry the
 run id as `agent_session_id`.
+
+The loop's tool calls do not use the person's `Operator` as it is. `run` and
+`stream_events` hand the loop `auth/delegation.py::delegated_operator(operator)`:
+the same `sub`, tenant and token, but with the role the agent's own login
+would get. A `tenant_admin` is narrowed to `operator` (an agent acts with
+operator rights at most, see `auth/jwt.py::_cap_agent_role`), and the
+`approver`, self-approval and `platform_admin` flags are cleared, because an
+agent never approves. A tenant-admin-only operation (for example
+`targets.remove`) therefore fails in a direct run, even when a tenant admin
+started it. The run row, the budget check and `poll` / `cancel` still use the
+person's own `Operator`. A child run (`invoke_agent`) inherits the narrowed
+identity of its parent.
 
 The policy gate (`operations/_validate.py::policy_gate`) also reads the
 binding. It works out the agent's verdict from its `agent:<name>` grants

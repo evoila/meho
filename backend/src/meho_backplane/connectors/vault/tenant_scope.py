@@ -35,10 +35,12 @@ The canonical KV layout is now per-tenant
   ``"tenants/{tenant_id}/"`` would render to ``tenants/<id>/`` and never
   match the ``secret/tenants/<id>/...`` candidate, denying every legitimate
   per-tenant call.
-* **empty** (``VAULT_KV_TENANT_SCOPE_PREFIX=""``) → :func:`enforce_tenant_scope`
-  is a no-op; behaviour is byte-for-byte what it was before #1643. A deploy
-  still mid-migration (secrets under the retired per-``sub`` layout) opts out
-  this way until its secrets are relocated.
+* **empty** (``VAULT_KV_TENANT_SCOPE_PREFIX=""``) → the tenant prefix check
+  is off and any plain path passes, as before the guard. A path with a ``.`` /
+  ``..`` segment, a ``%`` or a backslash is still refused
+  (:func:`is_plain_kv_path`): that rule does not depend on a prefix. A
+  deploy still mid-migration (secrets under the retired per-``sub`` layout)
+  opts out this way until its secrets are relocated.
 
 The system/shim operator (Nil-UUID tenant, empty ``raw_jwt``) is exempt:
 its only callers exercise the unauthenticated ``vault.sys.health`` op and
@@ -69,6 +71,8 @@ from meho_backplane.settings import get_settings
 
 __all__ = [
     "PLATFORM_EXEMPT_PATHS",
+    "REASON_OUTSIDE_TENANT",
+    "REASON_PATH_COULD_MOVE",
     "VaultTenantScopeError",
     "enforce_tenant_scope",
     "is_plain_kv_path",
@@ -111,14 +115,23 @@ _REFUSED_SEGMENTS: frozenset[str] = frozenset({".", ".."})
 #: backslash can act as a path separator. A KV path never needs either.
 _REFUSED_CHARACTERS: frozenset[str] = frozenset({"%", "\\"})
 
+#: The two reasons :class:`VaultTenantScopeError` carries. Neither names
+#: the path, so a caller that must not echo the path can still say why.
+REASON_PATH_COULD_MOVE = "the path has a '.' or '..' segment, a '%' or a backslash"
+REASON_OUTSIDE_TENANT = "the path is outside the caller's tenant"
+
 
 class VaultTenantScopeError(Exception):
-    """A ``vault.kv.*`` call requested a path outside the operator's tenant namespace.
+    """A ``vault.kv.*`` call requested a path the operator may not name.
 
     Raised by :func:`enforce_tenant_scope` **before** the hvac call when
+    the requested logical path has a ``.`` / ``..`` segment, a ``%`` or a
+    backslash (with any prefix setting), or when
     :attr:`~meho_backplane.settings.Settings.vault_kv_tenant_scope_prefix`
-    is configured and the requested logical path does not begin with the
-    operator's rendered tenant prefix. The dispatcher's ``connector_error``
+    is configured and the path does not begin with the operator's rendered
+    tenant prefix. :attr:`reason` says which, without the path
+    (:data:`REASON_PATH_COULD_MOVE` or :data:`REASON_OUTSIDE_TENANT`). The
+    dispatcher's ``connector_error``
     branch wraps the raised exception into a structured
     :class:`~meho_backplane.connectors.schemas.OperationResult` with
     ``extras["exception_class"] == "VaultTenantScopeError"`` — distinct
@@ -129,6 +142,10 @@ class VaultTenantScopeError(Exception):
     The message names the rendered prefix but **never** echoes secret
     material — only the (non-secret) mount/path the caller already supplied.
     """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def rendered_tenant_prefix(operator: Operator, *, template: str) -> str:
@@ -174,17 +191,22 @@ def is_plain_kv_path(candidate: str) -> bool:
 def enforce_tenant_scope(operator: Operator, *, mount: str, path: str, read_only: bool) -> None:
     """Deny a ``vault.kv.*`` call whose path escapes the operator's tenant namespace.
 
-    Enforced by default
-    (``vault_kv_tenant_scope_prefix="secret/tenants/{tenant_id}/"``). No-op
-    only when the prefix is explicitly emptied
-    (``VAULT_KV_TENANT_SCOPE_PREFIX=""``), when *operator* is the Nil-tenant
-    system shim, or — for **read-only** ops only — when the normalised
-    ``<mount>/<path>`` is one of the fixed :data:`PLATFORM_EXEMPT_PATHS`
-    (shared non-tenant platform secrets, e.g. the federation-proof health
-    read). Otherwise renders the operator's tenant prefix from the template
-    and raises :class:`VaultTenantScopeError` unless the normalised
-    ``<mount>/<path>`` begins with it and has no ``.`` / ``..`` segment, no
-    ``%`` (a URL-encoded character) and no backslash.
+    Two rules, in this order:
+
+    1. The normalised ``<mount>/<path>`` must be plain: no ``.`` / ``..``
+       segment, no ``%`` (a URL-encoded character) and no backslash. This
+       rule runs for every caller and with any prefix setting, also when the
+       prefix is empty.
+    2. The path must begin with the operator's rendered tenant prefix.
+       Enforced by default
+       (``vault_kv_tenant_scope_prefix="secret/tenants/{tenant_id}/"``).
+       Skipped only when the prefix is explicitly emptied
+       (``VAULT_KV_TENANT_SCOPE_PREFIX=""``), when *operator* is the
+       Nil-tenant system shim, or — for **read-only** ops only — when the
+       path is one of the fixed :data:`PLATFORM_EXEMPT_PATHS` (shared
+       non-tenant platform secrets, e.g. the federation-proof health read).
+
+    Raises :class:`VaultTenantScopeError` when either rule fails.
 
     Parameters
     ----------
@@ -211,18 +233,28 @@ def enforce_tenant_scope(operator: Operator, *, mount: str, path: str, read_only
     Raises
     ------
     VaultTenantScopeError
-        The requested path falls outside the operator's tenant prefix.
+        The requested path could move, or falls outside the operator's
+        tenant prefix.
     """
+    candidate = _normalised_logical_path(mount, path)
+    if not is_plain_kv_path(candidate):
+        # Refused with any prefix setting: the HTTP client or Vault could
+        # resolve such a path to a place the caller did not name.
+        raise VaultTenantScopeError(
+            f"vault.kv request refused: requested {candidate!r} has a '.' or '..' "
+            f"segment, a '%' or a backslash (tenant_id={operator.tenant_id})",
+            reason=REASON_PATH_COULD_MOVE,
+        )
+
     template = get_settings().vault_kv_tenant_scope_prefix.strip()
     if not template:
-        # Guard disabled — preserve pre-#1643 behaviour exactly.
+        # Tenant prefix check off — any plain path passes, as before the guard.
         return
     if operator.tenant_id == _SYSTEM_TENANT_ID:
         # System/shim operator: no real tenant to bind against; its only
         # callers run the unauthenticated sys.health op.
         return
 
-    candidate = _normalised_logical_path(mount, path)
     if read_only and candidate in PLATFORM_EXEMPT_PATHS:
         # A fixed, shared, non-tenant platform secret (e.g. the
         # federation-proof health read) — exempt by closed allow-list so
@@ -237,16 +269,13 @@ def enforce_tenant_scope(operator: Operator, *, mount: str, path: str, read_only
     # Match on a path-segment boundary so a "tenant-1" prefix cannot be
     # satisfied by a "tenant-12/..." path. The candidate is normalised to
     # "<mount>/<path>"; an in-namespace request is the prefix itself or the
-    # prefix followed by "/". A "." or ".." segment, a URL-encoded
-    # character or a backslash is refused even after the prefix: the HTTP
-    # client or Vault could resolve it to a path outside the prefix.
-    in_prefix = candidate == normalised_prefix or candidate.startswith(normalised_prefix + "/")
-    if in_prefix and is_plain_kv_path(candidate):
+    # prefix followed by "/".
+    if candidate == normalised_prefix or candidate.startswith(normalised_prefix + "/"):
         return
 
     raise VaultTenantScopeError(
         "vault.kv request outside tenant namespace: "
         f"requested {candidate!r} is not within tenant prefix "
-        f"{normalised_prefix!r} (tenant_id={operator.tenant_id}); a path with a "
-        "'.' or '..' segment, a '%' or a backslash is always refused"
+        f"{normalised_prefix!r} (tenant_id={operator.tenant_id})",
+        reason=REASON_OUTSIDE_TENANT,
     )

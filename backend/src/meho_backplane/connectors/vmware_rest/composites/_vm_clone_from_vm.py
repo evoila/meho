@@ -45,7 +45,6 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
 )
 from meho_backplane.connectors.vmware_rest.snapshot_tree import snapshot_rows
 from meho_backplane.connectors.vmware_rest.vim_body import VIM_TYPE_NAME_KEY, vim_moref
-from meho_backplane.operations._preview import register_preview_builder
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -284,6 +283,3 @@ async def vm_clone_from_vm_preview(ctx: PreviewContext) -> dict[str, Any] | None
         **{n: as_str(ctx.params.get(n)) for n in ("folder", "resource_pool", "datastore", "host")},
         "power_on": bool(ctx.params.get("power_on", False)),
     }
-
-
-register_preview_builder(VM_CLONE_FROM_VM_OP_ID, vm_clone_from_vm_preview)

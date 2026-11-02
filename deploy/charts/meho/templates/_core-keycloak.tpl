@@ -43,6 +43,7 @@ issuerUrl: {{ printf "https://%s/auth/realms/meho" .Values.coreKeycloak.hostname
 discoveryUrl: {{ printf "%s/realms/meho" $service | quote }}
 audience: meho-backplane
 cliClientId: meho-cli
+cliApproveClientId: meho-cli-approve
 uiClientId: meho-web
 adminUrl: {{ printf "%s/admin/realms/meho" $service | quote }}
 adminClientId: meho-admin
@@ -52,6 +53,7 @@ adminSecretKey: client_secret
 issuerUrl: {{ .Values.config.keycloakIssuerUrl | quote }}
 audience: {{ .Values.config.keycloakAudience | quote }}
 cliClientId: {{ .Values.config.keycloakCliClientId | quote }}
+cliApproveClientId: {{ .Values.config.keycloakCliApproveClientId | quote }}
 uiClientId: {{ .Values.config.uiKeycloakClientId | quote }}
 {{- if .Values.keycloakAdmin.enabled }}
 adminUrl: {{ .Values.keycloakAdmin.url | quote }}

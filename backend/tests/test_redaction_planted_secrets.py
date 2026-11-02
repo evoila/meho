@@ -30,14 +30,13 @@ A trace test hands the same answers (and a request with an
 redaction that every vendor call goes through, and checks the recorded span.
 
 What the normal answer holds: secrets with a label in the text
-(``Bearer ...``, ``password=...``). The normal result path removes a
-secret-named field such as ``{"password": ...}`` only for a credential read,
-and the audit row's ``raw_payload`` keeps the raw answer on purpose (see
-``docs/codebase/redaction.md``), so neither is checked for the normal answer.
-The row of a multi-step error envelope keeps the raw answer too, so its
-``raw_payload`` is not checked either; its result, its ``payload`` and the
-stored copy behind a result handle are cleaned. The trace removes
-secret-named fields for every answer.
+(``Bearer ...``, ``password=...``) and the same secrets as fields
+(``{"password": ...}``). The normal result path hides a secret-named field
+in every answer, and the audit row's ``raw_payload`` keeps a keyed
+fingerprint in place of each hidden value (see
+``docs/codebase/redaction.md``), so the result and the whole row are checked
+for every answer, the row of a multi-step error envelope included. The
+trace removes secret-named fields for every answer.
 
 Every planted value starts with :data:`PLANTED_MARKER`. The capture check
 (``test_capture_secret_scan.py``) fails when that marker is in a saved test
@@ -115,9 +114,10 @@ _VENDOR_STRUCTURED_ANSWER: dict[str, Any] = {
     "encryptedPassword": PLANTED_ENCRYPTED,
 }
 
-#: A normal answer with secrets the normal result path removes: text with a label.
+#: A normal answer with secrets as text with a label and as fields.
 _VENDOR_NORMAL_ANSWER: dict[str, Any] = {
-    "items": [{"name": "item-1", "state": "ready"}],
+    **_VENDOR_STRUCTURED_ANSWER,
+    "items": [{"name": "item-1", "state": "ready", "token": PLANTED_TOKEN}],
     "debug": f"Authorization: Bearer {PLANTED_TOKEN}",
     "note": f"connected with password={PLANTED_PASSWORD} and secret: {PLANTED_ENCRYPTED}",
 }
@@ -419,11 +419,11 @@ async def test_planted_secrets_stay_out_of_results_audit_rows_and_logs(
 
         rows = await _audit_rows(op_ids[answer])
         assert len(rows) == 1, answer
-        # An error row keeps no raw answer. A normal row keeps it on purpose,
-        # and so does the row of a multi-step error envelope: the handler
-        # returned it like a normal answer (#4223).
-        keeps_raw = answer in ("normal", _COMPOSITE_ANSWER)
-        row_text = _row_text(rows[0], with_raw_payload=not keeps_raw)
+        # An error row keeps no raw answer. A normal row keeps it with a
+        # fingerprint in place of each hidden value, and so does the row of
+        # a multi-step error envelope: the handler returned it like a normal
+        # answer (#4223).
+        row_text = _row_text(rows[0], with_raw_payload=True)
 
         for place, text in (
             ("result", result.model_dump_json()),

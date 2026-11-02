@@ -148,10 +148,9 @@ func runOneShot(cmd *cobra.Command, backplaneURL string, jsonOut bool) error {
 		if api.IsRefreshRejected(err) {
 			// A refresh_token was present but the IdP rejected it as
 			// invalid_grant — the session genuinely expired. Say so
-			// (exit auth_expired), and point at --offline for a session
-			// that survives a workday (#3320).
+			// (exit auth_expired) and point at a new login (#3320).
 			return output.RenderError(cmd.ErrOrStderr(),
-				output.AuthExpired(fmt.Sprintf("session expired (refresh token rejected); run `meho login %s` (add --offline for a durable session)", backplaneURL)),
+				output.AuthExpired(fmt.Sprintf("session expired (refresh token rejected); run `meho login %s`", backplaneURL)),
 				jsonOut)
 		}
 		if api.IsNoRefreshToken(err) {

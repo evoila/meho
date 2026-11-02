@@ -77,7 +77,9 @@ __all__ = [
     "PORTGROUP_SHOW_WHEN_TO_USE",
     "PORT_SETTING_FIELDS",
     "SWITCH_DEFAULTS_PROPERTY",
+    "TYPED_OPS",
     "VMWARE_NETWORK_PORTGROUP_SHOW_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "portgroup_show_impl",
 ]
 
@@ -620,3 +622,6 @@ VMWARE_NETWORK_PORTGROUP_SHOW_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_NETWORK_PORTGROUP_SHOW_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {PORTGROUP_SHOW_GROUP_KEY: PORTGROUP_SHOW_WHEN_TO_USE}

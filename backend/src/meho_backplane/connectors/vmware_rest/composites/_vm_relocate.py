@@ -37,7 +37,6 @@ from meho_backplane.connectors.vmware_rest.composites._write import _OP_RETRIEVE
 from meho_backplane.connectors.vmware_rest.composites.schemas import VM_MOID_PATTERN
 from meho_backplane.connectors.vmware_rest.vim_body import VIM_TYPE_NAME_KEY, vim_moref
 from meho_backplane.connectors.vmware_rest.vm_relocate_preview import vm_relocate_preview
-from meho_backplane.operations._preview import register_preview_builder
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -260,6 +259,3 @@ async def vm_relocate_preview_builder(ctx: PreviewContext) -> dict[str, Any] | N
     )
     copy_preview = await vm_relocate_preview(inner)
     return {"action": "relocate_vm", "requested": _requested(ctx.params), **(copy_preview or {})}
-
-
-register_preview_builder(VM_RELOCATE_OP_ID, vm_relocate_preview_builder)

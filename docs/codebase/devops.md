@@ -859,7 +859,7 @@ on a person directly: the claim always comes from the group.
 | Client | Kind | Notes |
 | --- | --- | --- |
 | `meho-backplane` | confidential, no login flow | the token audience only |
-| `meho-cli` | public, device flow | `meho login`; no `offline_access` (as `bootstrap-clients` without `--cli-offline-access`) |
+| `meho-cli` | public, device flow | `meho login`; optional scope `offline_access`; offline login idle limit 48 hours (as `bootstrap-clients` with its default `--cli-offline-access`) |
 | `meho-mcp` | public, authorization code + PKCE (S256) | redirect URIs `http://localhost:*`, `http://127.0.0.1:*`; optional scopes `offline_access`, `mcp:read`, `mcp:execute`, `mcp:admin`; offline login idle limit 48 hours |
 | `meho-web` | confidential, authorization code + PKCE (S256) | redirect `https://<host>/ui/auth/callback`, after logout `https://<host>/ui/auth/login` |
 | `meho-admin` | confidential, service account | realm-management roles `manage-clients` and `manage-users`; with the company login on, the chart adds `manage-identity-providers` and `manage-realm` (#4592) |
@@ -898,6 +898,7 @@ realm file, not from `config.*` or `keycloakAdmin.*`:
 | `KEYCLOAK_DISCOVERY_URL` | `http://<release>-keycloak:8080/auth/realms/meho`, the Service |
 | `KEYCLOAK_AUDIENCE` | `meho-backplane` |
 | `KEYCLOAK_CLI_CLIENT_ID` | `meho-cli` |
+| `KEYCLOAK_CLI_APPROVE_CLIENT_ID` | `meho-cli-approve` |
 | `UI_KEYCLOAK_CLIENT_ID` | `meho-web` |
 | `KEYCLOAK_ADMIN_URL` | `http://<release>-keycloak:8080/auth/admin/realms/meho` |
 | `KEYCLOAK_ADMIN_CLIENT_ID` | `meho-admin` |

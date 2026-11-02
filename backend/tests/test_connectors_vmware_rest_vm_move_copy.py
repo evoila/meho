@@ -260,7 +260,6 @@ async def test_a_failed_move_reads_back_with_the_vendor_error(gate: GateRecorder
         out["status_read"]["params"],
     )
     assert status["state"] == "error"
-    assert status["done"] is True
     assert status["error_type"] == "InsufficientDisk"
     assert status["error_message"] == "Insufficient disk space on datastore."
 

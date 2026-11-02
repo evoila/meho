@@ -451,8 +451,11 @@ def _approval_queue_block(settings: Settings) -> dict[str, Any]:
 
     ``fresh_sign_in_max_age_seconds`` and ``one_time_code_acr_values``
     (#3979) show how an approve on the command line or REST must prove a
-    person is present: a sign-in no older than that many seconds, and the
-    ``acr`` values that count as a one-time code step (empty = off).
+    person is present: an approval sign-in no older than that many seconds
+    (the approval window, #5515), and the ``acr`` values that count as a
+    one-time code step (empty = off). ``per_action_sign_in_max_age_seconds``
+    is the limit for a ``destructive`` approve, which also needs a sign-in
+    of its own.
     """
     agent_runtime = _agent_runtime_block(settings)
     return {
@@ -470,6 +473,7 @@ def _approval_queue_block(settings: Settings) -> dict[str, Any]:
         ),
         "sandbox_mode": sandbox_mode_label(),
         "fresh_sign_in_max_age_seconds": settings.fresh_sign_in_max_age_seconds,
+        "per_action_sign_in_max_age_seconds": settings.per_action_sign_in_max_age_seconds,
         "one_time_code_acr_values": list(settings.approval_one_time_code_acr_values),
     }
 

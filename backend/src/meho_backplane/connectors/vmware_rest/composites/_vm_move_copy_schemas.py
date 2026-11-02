@@ -306,10 +306,10 @@ VM_RELOCATE_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
         "host, resource_pool, folder, datastores}, requested, guidance}."
     ),
     "next_step": (
-        "accepted or already_running: call vmware.task.info with the task id until done is "
-        "true, then read the VM (vmware.vm.info). After a lost reply, do not start again: "
-        "read vmware.tasks.recent or the VM first; a move that still runs is returned as "
-        "already_running."
+        "accepted or already_running: call vmware.task.info with the task id until the state "
+        "is success or error, then read the VM (vmware.vm.info). After a lost reply, do not "
+        "start again: read vmware.tasks.recent or the VM first; a move that still runs is "
+        "returned as already_running."
     ),
 }
 
@@ -334,9 +334,9 @@ VM_CLONE_FROM_VM_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
         "status_read: {op_id: vmware.task.info, params: {task}}, guidance}."
     ),
     "next_step": (
-        "accepted or already_running: call vmware.task.info with the task id until done is "
-        "true, then find the new VM by name (vmware.vm.info). After a lost reply, do not "
-        "start again: read vmware.task.info or look for the name first; a VM with the name "
-        "is returned as already_exists."
+        "accepted or already_running: call vmware.task.info with the task id until the state "
+        "is success or error, then find the new VM by name (vmware.vm.info). After a lost "
+        "reply, do not start again: read vmware.task.info or look for the name first; a VM "
+        "with the name is returned as already_exists."
     ),
 }

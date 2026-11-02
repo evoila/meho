@@ -40,7 +40,15 @@ For each request, oldest first:
   (:func:`persist_resume_result` writes it when that run ends) and goes
   on only when that result is ``ok``. A failed result, no result within
   ``_RESULT_WAIT_SECONDS``, any other status, or a refusal
-  (self-approval, role, already decided, expired) stops it.
+  (self-approval, role, already decided, expired) stops it;
+* a step whose approval needs a new sign-in -- the run stops there and
+  the modal links to the console login that asks for the password again
+  and comes back to this change ticket. Every step is an approval, so the
+  sign-in behind the console session must be recent and must have asked
+  for the password, and a ``destructive`` step needs a sign-in that
+  approved nothing else (the same rules as a single approve). After the
+  new sign-in the operator starts the run again; the steps that ran OK
+  are skipped.
 
 Why a server-side sequencer (v0.1-spec §7)
 ------------------------------------------
@@ -67,6 +75,7 @@ import asyncio
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Final
+from urllib.parse import quote
 
 import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
@@ -85,6 +94,7 @@ from meho_backplane.operations.approval_queue import (
     resume_dispatch_after_approval,
 )
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.routes import login_location
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.routes.approvals import routes as _routes
 from meho_backplane.ui.routes.approvals.render import (
@@ -123,6 +133,15 @@ _NOT_ENDED: Final[str] = (
     "Check the step and run this again when it has ended."
 )
 
+_SIGN_IN_AGAIN: Final[str] = (
+    "This step needs a new sign-in: an approval needs a recent sign-in that asked "
+    "for your password, and a destructive step needs a sign-in of its own. "
+    "Sign in again, then start this run again. The steps that ran OK are skipped."
+)
+
+#: The machine-readable prefixes of a refusal that a new sign-in fixes.
+_SIGN_IN_PREFIXES: Final[tuple[str, ...]] = ("fresh_sign_in_required", "fresh_sign_in_already_used")
+
 _require_session = Depends(require_ui_session)
 
 
@@ -136,6 +155,8 @@ class _Step:
     #: ``stopped``, or ``not_run``.
     outcome: str = "planned"
     detail: str | None = None
+    #: The approval was refused because it needs a new sign-in.
+    sign_in_needed: bool = False
 
     @property
     def safety_level(self) -> str | None:
@@ -150,6 +171,8 @@ class _Run:
     #: The step the run waits at for a yes, or the step it stopped at.
     waiting: _Step | None = None
     stopped: _Step | None = None
+    #: The run stopped because the step's approval needs a new sign-in.
+    sign_in_needed: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -269,6 +292,7 @@ async def _run_steps(
             run.waiting = step
         elif step.outcome == "stopped":
             run.stopped = step
+            run.sign_in_needed = step.sign_in_needed
 
 
 async def _run_step(
@@ -298,7 +322,11 @@ async def _run_step(
             operator=operator, request_id=row.id, decision="approved", reason=reason
         )
     except HTTPException as exc:
-        step.outcome, step.detail = "stopped", f"The approval was refused: {exc.detail}"
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        if detail.startswith(_SIGN_IN_PREFIXES):
+            step.outcome, step.detail, step.sign_in_needed = "stopped", _SIGN_IN_AGAIN, True
+        else:
+            step.outcome, step.detail = "stopped", f"The approval was refused: {detail}"
         return
     result = await resume_dispatch_after_approval(operator=operator, request=approved, params=None)
     status = getattr(result, "status", None)
@@ -383,6 +411,11 @@ async def _render(
         "waiting": _project_step(run.waiting) if run.waiting else None,
         "waiting_context": waiting_context,
         "stopped": _project_step(run.stopped) if run.stopped else None,
+        "sign_in_url": (
+            login_location(_ticket_page(work_ref), fresh_sign_in=True)
+            if run.sign_in_needed
+            else None
+        ),
         "approved_now": run.approved_now,
         "reason": reason,
         "csrf_token": csrf_token,
@@ -392,6 +425,11 @@ async def _render(
     response = get_templates().TemplateResponse(request, "approvals/_in_order.html", context)
     set_csrf_cookie(response, csrf_token)
     return response
+
+
+def _ticket_page(work_ref: str) -> str:
+    """The Pending tab filtered to *work_ref*: where the new sign-in comes back to."""
+    return f"/ui/approvals?tab=pending&work_ref={quote(work_ref, safe='')}"
 
 
 def _project_step(step: _Step) -> dict[str, Any]:

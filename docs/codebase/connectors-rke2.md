@@ -360,7 +360,10 @@ The posture tier reads **no secret material**. The join-token entry reports
 presence + mode only — the handler `stat`s the path and never `cat`s its
 content, so the token value cannot appear in the result envelope, the audit
 `raw_payload`, or the logs. Every token entry carries `redacted: true` to
-make the guarantee explicit to agents reading the schema. This is the T1
+make the guarantee explicit to agents reading the schema. The module
+declares the `token` entry as a plain field (`register_plain_fields`), so
+the default view of every answer (`docs/codebase/redaction.md`) keeps the
+file's mode and owner instead of hiding the entry for its name. This is the T1
 foundation for the load-bearing Initiative #2172 rule: a secret-returning
 handler must never return the secret (the audit `raw_payload` stores the raw
 result).
@@ -396,7 +399,7 @@ the sudo script (a shell `$(cat ...)`, never entering Python) and passed to
 `rke2` via the `RKE2_TOKEN` env, and the NEW token is minted node-side by
 `rke2 token rotate` itself, read back over the SSH channel, written to Vault,
 and returned only as a pointer. The
-op is additionally pinned in `broadcast/events._CREDENTIAL_MINT_OPS`
+op is additionally declared `credential_mint` in `rke2/op_classes.py`
 (defence-in-depth: `.rotate` would otherwise classify `other` and broadcast
 full detail) and its park-time preview carries no token value.
 
@@ -466,8 +469,8 @@ log line.
 - `rke2.node.service.restart` classifies plain `write` via the `.restart`
   write-suffix added to `broadcast/events.py::_WRITE_SUFFIXES`; its params
   (a single unit) carry no secret.
-- `rke2.node.config.update` is pinned in
-  `broadcast/events.py::_CREDENTIAL_WRITE_OPS` (its `patch` may carry a
+- `rke2.node.config.update` is declared `credential_write` in
+  `rke2/op_classes.py` (its `patch` may carry a
   `token:` value), so the broadcast collapses to aggregate-only.
 - Approval-park previews: `_rke2_service_restart_preview` renders
   `{resource: systemd_unit, unit, action, node}`; `_rke2_config_update_preview`

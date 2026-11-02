@@ -60,6 +60,19 @@ on a **fresh boot with zero catalog ingest**.
 | `vcfa-vra8-inventory` | `vcfa.vra8.project.list`, `.deployment.list`, `.deployment.get`, `.about` |
 | `vcfa-vra8-content` | `vcfa.vra8.blueprint.list`, `.catalog-item.list` |
 | `vcfa-vra8-api-files` | `vcfa.vra8.api_file.get` (see [API description files](#api-description-files-vcfavra8api_fileget) below) |
+| `vcfa-vra8-governance` | `vcfa.vra8.approval.list`, `.approval.decide` (dangerous, approval), `.policy.list`, `.policy.set` (dangerous, approval) |
+| `vcfa-vra8-extensibility` | `vcfa.vra8.abx.action.list`, `.abx.action.run` (destructive, preview), `.abx.run.get`, `.subscription.list`, `.subscription.set` (destructive, preview) |
+
+**Approvals, policies, ABX actions and event subscriptions.** The two groups
+`vcfa-vra8-governance` and `vcfa-vra8-extensibility` hold the nine ops this
+connector shares with VCF Automation 9 (written once in
+`connectors/vmware_shared/vra_governance.py` and `vra_extensibility.py`,
+registered here by `governance_ops.py` with its own registrar). The handlers
+come from the `VraSharedHandlers` mixin (`vmware_shared/vra_handlers.py`);
+this connector adds `vra_gov_calls`, the bearer GET and send. The table, the
+approval and preview rules, the secret rules and the version notes are in
+[connectors-vcf-automation.md](connectors-vcf-automation.md) ("Approvals,
+policies, ABX actions and event subscriptions").
 
 Op ids are namespaced `vcfa.vra8.*` (distinct from the modern impl's
 `vcfa.provider.*` / `vcfa.tenant.*`): the two impls publish different read surfaces
@@ -89,6 +102,37 @@ dialled during the build; the read core is unit-tested end-to-end against a
 respx-mocked vRA 8 (dispatch `status="ok"` through the two-step session-mint seam)
 and manifest-pinned — the same unit-tested-first posture `vcd` / `fleet-lcm`
 shipped with.
+
+## Day-2 work: actions, lease, delete, machines and disks
+
+Aria Automation 8.18 serves the same deployment and IaaS APIs as the VCF
+Automation 9 tenant plane, so the day-2 ops are written once (in
+`connectors/vcf_automation/day2_ops.py`, `_day2_specs.py`,
+`_day2_specs_iaas.py`, `_day2.py` and `_day2_create.py`) and registered here with the
+`vcfa.vra8.` prefix as `VRA8_DAY2_OPS` (group `vcfa-vra8-day2`). The thin
+shims on `Vra8Connector` call the shared handlers with the vRA 8 login.
+
+| op_id | What it does | risk level / approval | Versions |
+|---|---|---|---|
+| `vcfa.vra8.deployment.actions.list` | The day-2 actions of a deployment or one resource, flat. | safe | 8.18, 9.x |
+| `vcfa.vra8.deployment.action.run` | Runs a built-in deployment action (owner, lease, tags, power). | dangerous, approval | 8.18, 9.x |
+| `vcfa.vra8.resource.action.run` | Runs a built-in machine action (power, reboot, resize, add disk, snapshot). | dangerous, approval | 8.18, 9.x |
+| `vcfa.vra8.deployment.lease.change` | Changes the lease end of a deployment. | caution, approval | 8.18, 9.x |
+| `vcfa.vra8.deployment.delete` | Deletes a deployment and its resources. | destructive, approval, preview first | 8.18, 9.x |
+| `vcfa.vra8.machine.list` | Every machine as a flat row. | safe | 8.18, 9.x |
+| `vcfa.vra8.block_device.list` | Every disk with its machines, as a flat row. | safe | 8.18, 9.x |
+| `vcfa.vra8.machine.create` | Creates a machine outside a template. | dangerous, approval | 8.18, 9.x |
+| `vcfa.vra8.block_device.create` | Creates a disk and attaches it to a machine. | dangerous, approval | 8.18, 9.x |
+
+The vendor calls, the answers, the fixed action lists and the blast-radius
+preview of the delete are described once in
+[connectors-vcf-automation.md](connectors-vcf-automation.md) ("Day-2 work").
+The guidance texts name the `vcfa.vra8.*` ops. After an action or a lease
+change they say to read `vcfa.vra8.deployment.get` until `lastRequest.status`
+is `SUCCESSFUL`, `FAILED`, `ABORTED` or `APPROVAL_REJECTED`, and to stop after
+10 minutes; `leaseExpireAt` of the same read shows a new lease end. The two
+lists refuse more than 10,000 rows and ask for a `$filter`. These are the only
+changes this connector makes; every one waits for approval.
 
 ## Key types
 
@@ -391,6 +435,12 @@ update the manifest consciously. **Strengthening (deferred):** the sibling
 `/blueprint` + `/catalog` paths against the three vra-sdk-go swaggers once shelved.
 Full evidence + activation trigger live in the `vcfa-vra8` entry of
 [`spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
+
+The day-2 paths are the exception: they are shared with VCF Automation 9, so
+the lane pins them in their own manifest (`test_day2_op_id_manifest_is_pinned`)
+and checks them against `vra-iaas.json` and `vra-catalog-deployment.json` of the
+pinned `vra-sdk-go` v0.6.5 shelf (`vcf-automation-9.0/`), the same files the
+VCF Automation lane uses. That check skips without the shelf; CI has it.
 
 ## Dependencies
 

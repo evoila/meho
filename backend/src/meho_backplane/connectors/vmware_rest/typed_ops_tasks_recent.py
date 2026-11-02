@@ -53,7 +53,9 @@ if TYPE_CHECKING:
 __all__ = [
     "TASKS_RECENT_GROUP_KEY",
     "TASKS_RECENT_WHEN_TO_USE",
+    "TYPED_OPS",
     "VMWARE_TASKS_RECENT_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "build_recent_tasks_retrieve_params",
     "build_task_info_retrieve_params",
     "tasks_recent_impl",
@@ -313,12 +315,15 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
 
 #: Curated ``when_to_use`` blurb for the tasks-recent group.
 TASKS_RECENT_WHEN_TO_USE = (
-    "Use to read vCenter tasks. Reads only: the recent tasks for "
-    "change-window monitoring -- what ran, on which object, the state "
-    "(queued / running / success / error), progress and times "
-    "(vmware.tasks.recent); and one task by its id, to follow a change "
-    "that answered with a task id until it ends (vmware.task.info). "
-    "Distinct from event.tail, which reads the event log, not the task list."
+    "Use to read vCenter tasks. Reads: the recent tasks for change-window "
+    "monitoring -- what operations ran, on which entity, their state "
+    "(queued / running / success / error), progress, and the queued / "
+    "started / completed timestamps (vmware.tasks.recent); one task by its "
+    "id, for example the task a start call such as host.add returned "
+    "(vmware.task.info). The 'what changed here, and did it finish?' read "
+    "-- distinct from event.tail, which reads the event log, not the Task "
+    "list. Both read Task.info via PropertyCollector directly on the "
+    "connector session, so they work with zero catalog ingest. Read-only."
 )
 
 VMWARE_TASKS_RECENT_OP = VmwareTypedOp(
@@ -359,3 +364,6 @@ VMWARE_TASKS_RECENT_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_TASKS_RECENT_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {TASKS_RECENT_GROUP_KEY: TASKS_RECENT_WHEN_TO_USE}

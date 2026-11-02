@@ -13,6 +13,7 @@ from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 __all__ = [
     "VMWARE_APPLIANCE_AND_ACCESS_WRITES",
     "VMWARE_STOP_RESTART_AND_REMEDIATE_WRITES",
+    "VMWARE_VIM_HOST_CONFIG_WRITES",
     "VMWARE_VIM_SNAPSHOT_CREATES",
     "VMWARE_VIM_VM_STATE_WRITES",
     "is_vmware_appliance_or_access_write",
@@ -20,6 +21,7 @@ __all__ = [
     "is_vmware_library_item_delete",
     "is_vmware_stop_restart_or_remediate_write",
     "is_vmware_tagging_removal",
+    "is_vmware_vim_host_config_write",
     "is_vmware_vim_snapshot_create",
     "is_vmware_vim_vm_state_write",
     "is_vmware_vm_relocate",
@@ -167,6 +169,26 @@ VMWARE_VIM_VM_STATE_WRITES: frozenset[tuple[str, str]] = frozenset(
     }
 )
 
+# Host time, name, logging and service changes on the older API (#4351).
+# They set a host's NTP servers, DNS servers and host name, advanced options
+# such as the syslog target (the same call also sets vCenter's own advanced
+# settings), and start, stop or restart a host service or change its start
+# policy. Each is a ``POST`` to ``/<Type>/{moId}/<Method>``, so the parser gave
+# it ``caution`` without approval. Each is ``dangerous`` with approval, like
+# the typed ``host.ntp.set``, ``host.dns.set``, ``host.syslog.set`` and
+# ``host.service_control``.
+VMWARE_VIM_HOST_CONFIG_WRITES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("POST", "/HostDateTimeSystem/{}/UpdateDateTimeConfig"),
+        ("POST", "/HostNetworkSystem/{}/UpdateDnsConfig"),
+        ("POST", "/OptionManager/{}/UpdateOptions"),
+        ("POST", "/HostServiceSystem/{}/UpdateServicePolicy"),
+        ("POST", "/HostServiceSystem/{}/StartService"),
+        ("POST", "/HostServiceSystem/{}/StopService"),
+        ("POST", "/HostServiceSystem/{}/RestartService"),
+    }
+)
+
 # Taking a VM snapshot on the older API (#3869) waits for approval but keeps
 # its ``caution`` level, like the typed ``vm.snapshot.create``: a new snapshot
 # changes nothing in the running VM.
@@ -284,6 +306,14 @@ def is_vmware_vim_vm_state_write(method: str, path: str) -> bool:
     return _operation_key(method, path) in VMWARE_VIM_VM_STATE_WRITES
 
 
+def is_vmware_vim_host_config_write(method: str, path: str) -> bool:
+    """Return whether ``(method, path)`` is in :data:`VMWARE_VIM_HOST_CONFIG_WRITES`.
+
+    Matches like :func:`is_vmware_vim_vm_state_write`.
+    """
+    return _operation_key(method, path) in VMWARE_VIM_HOST_CONFIG_WRITES
+
+
 def is_vmware_vim_snapshot_create(method: str, path: str) -> bool:
     """Return whether ``(method, path)`` is in :data:`VMWARE_VIM_SNAPSHOT_CREATES`.
 
@@ -302,6 +332,7 @@ def _requires_vmware_safety_floor(method: str, path: str) -> bool:
         or is_vmware_appliance_or_access_write(method, path)
         or is_vmware_stop_restart_or_remediate_write(method, path)
         or is_vmware_vim_vm_state_write(method, path)
+        or is_vmware_vim_host_config_write(method, path)
     ):
         return True
     canonical_path, _query = _canonical(path)
@@ -330,7 +361,9 @@ def vmware_rest_safety_floor(
     disconnect, remediate and access writes are
     :func:`is_vmware_stop_restart_or_remediate_write`. The older-API VM power,
     terminate, clone, snapshot revert and migrate calls are
-    :func:`is_vmware_vim_vm_state_write`. The older-API snapshot creates
+    :func:`is_vmware_vim_vm_state_write`. The older-API host time, name,
+    logging and service changes are :func:`is_vmware_vim_host_config_write`.
+    The older-API snapshot creates
     (:func:`is_vmware_vim_snapshot_create`) keep their level and wait for
     approval.
     """

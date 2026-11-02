@@ -902,7 +902,15 @@ async def test_service_control_refuses_out_of_allowlist_service(gate: _GateRecor
     assert isinstance(out, dict)
     assert out["status"] == "service_not_allowed"
     assert out["service"] == "vpxa"
-    assert out["allowed_services"] == ["TSM", "TSM-SSH", "ntpd", "ptpd"]
+    assert out["allowed_services"] == [
+        "TSM",
+        "TSM-SSH",
+        "ntpd",
+        "ptpd",
+        "sfcbd-watchdog",
+        "slpd",
+        "snmpd",
+    ]
     assert conn.writes == []
     assert gate.calls == []  # never resolved a host, never gated
 
@@ -1093,7 +1101,10 @@ async def test_service_control_human_operator_auto_executes(session: AsyncSessio
 @pytest.mark.asyncio
 async def test_service_control_allowlist_is_the_expected_bounded_set() -> None:
     """Pin the curated allowlist so an accidental widening is caught in review."""
-    assert frozenset({"TSM-SSH", "TSM", "ntpd", "ptpd"}) == _host._SERVICE_ALLOWLIST
+    assert (
+        frozenset({"TSM-SSH", "TSM", "ntpd", "ptpd", "snmpd", "sfcbd-watchdog", "slpd"})
+        == _host._SERVICE_ALLOWLIST
+    )
 
 
 # ===========================================================================

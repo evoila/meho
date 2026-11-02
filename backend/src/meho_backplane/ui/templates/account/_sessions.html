@@ -9,6 +9,11 @@
   swap this whole block (``hx-swap="outerHTML"``) with the freshly-queried
   list.
 
+  The per-row revoke posts to one fixed URL and sends the session id in
+  the form body (``hx-vals``), so the id never appears in a URL: the
+  ingress access log and the audit row's path see the same path for
+  every row.
+
   Each row carries a confirm ``<dialog>`` (DaisyUI modal). The current
   device's row ("This device" badge) gets an explicit self-logout warning
   in its confirm body and its revoke POST returns an ``HX-Redirect`` to
@@ -115,7 +120,8 @@
                 type="button"
                 class="btn btn-sm btn-error"
                 data-action="confirm-revoke"
-                hx-post="/ui/account/sessions/{{ s.id | urlencode }}/revoke"
+                hx-post="/ui/account/sessions/revoke"
+                hx-vals='{"session_id": "{{ s.id }}"}'
                 hx-target="#account-sessions"
                 hx-swap="outerHTML"
                 onclick="document.getElementById('account-revoke-modal-{{ s.id }}').close()"

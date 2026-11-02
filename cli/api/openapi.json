@@ -22571,25 +22571,23 @@
         }
       }
     },
-    "/ui/account/sessions/{session_id}/revoke": {
+    "/ui/account/sessions/revoke": {
       "post": {
         "tags": [
           "ui-account"
         ],
         "summary": "Ui Account Revoke Session",
-        "description": "``POST /ui/account/sessions/{session_id}/revoke``.",
-        "operationId": "ui_account_revoke_session_ui_account_sessions__session_id__revoke_post",
-        "parameters": [
-          {
-            "name": "session_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Session Id"
+        "description": "``POST /ui/account/sessions/revoke`` -- the id is a form field.",
+        "operationId": "ui_account_revoke_session_ui_account_sessions_revoke_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_account_revoke_session_ui_account_sessions_revoke_post"
+              }
             }
           }
-        ],
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -22602,7 +22600,7 @@
             }
           },
           "404": {
-            "description": "Session id is malformed, does not exist, or belongs to another operator / tenant. Collapsed to 404 so another operator's session id is never confirmed.",
+            "description": "The session_id form field is missing or malformed, the session does not exist, or it belongs to another operator / tenant. Collapsed to 404 so another operator's session id is never confirmed.",
             "content": {
               "text/html": {}
             }
@@ -26107,6 +26105,17 @@
         },
         "type": "object",
         "title": "Body_runbooks_runs_start_ui_runbooks_runs_post"
+      },
+      "Body_ui_account_revoke_session_ui_account_sessions_revoke_post": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_account_revoke_session_ui_account_sessions_revoke_post"
       },
       "Body_ui_agent_grants_create_submit_ui_agents_grants_create_post": {
         "properties": {

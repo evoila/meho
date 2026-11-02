@@ -984,8 +984,8 @@ user and network namespace (`unshare --map-root-user --net`), so the
 machine's own firewall stays as it is. It needs `nft`, user namespaces and
 a kernel with `nft_ct` and `nft_fib_inet`, and the service test also needs
 `ip` and dummy network cards. It is skipped without them.
-The CI job installs `nftables` and sets `MEHO_REQUIRE_NFT_CHECK=1`, which
-turns that skip into a failure.
+The CI job installs `nftables` and `iproute2` and sets
+`MEHO_REQUIRE_NFT_CHECK=1`, which turns that skip into a failure.
 
 `tests/test_cis.py` covers RKE2's CIS profile: the two lines in
 `config.yaml`, the pod security file against RKE2's own file (only

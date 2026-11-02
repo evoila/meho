@@ -2220,6 +2220,27 @@ finding of its four rule packs (error, warning and info) to the GitHub
 Security tab and shows new ones as annotations on pull requests, but it
 fails only on a finding from an error-level rule.
 
+### Secret scan (`secret-scan.yml`)
+
+Two jobs scan for secrets:
+
+- **`TruffleHog Secret Scan`** (a required check) scans the commits of
+  the push, pull request or merge-queue range.
+- **`Gitleaks whole-tree scan`** (#5333) scans every file of the
+  checkout with `gitleaks dir`. It uses the same gitleaks version as the
+  pre-commit hook (`.pre-commit-config.yaml`), downloaded from the
+  release and checked against a pinned SHA-256. The hook checks only the
+  lines a commit adds. So without this job, a made-up secret with no
+  skip mark showed up only later, when a merge of main into an older
+  branch brought the whole file into a commit.
+
+A test that needs a made-up secret marks its line with a
+`# gitleaks:allow` comment (gitleaks skips any line that holds this
+text). The repo has no `.gitleaksignore` file: its entries name a line
+number, so they stopped working when the value moved. When a value
+cannot carry a comment on its own line (for example a shell line that
+ends in `\`), move it to a line that can.
+
 ### Coverage handoff to SonarCloud
 
 Coverage runs **once a night**, not after every merge (#4910). `ci.yml`
@@ -2384,7 +2405,7 @@ their isolation posture:
 | `readme-version-check.yml` | yes (inline shell over PR content) | **route**: fork PR → disposable GitHub-hosted runner |
 | `plugin-version-check.yml` | yes (runs `check_plugin_version.py`) | **route**: fork PR → disposable GitHub-hosted runner |
 | `linux-server-test.yml` | yes (shellcheck, and the unit tests run `deploy/linux-server/install.sh` against stub commands) | **route**: fork PR → disposable GitHub-hosted runner |
-| `secret-scan.yml` | yes (`docker run` TruffleHog over PR content) | **route**: fork PR → disposable GitHub-hosted runner |
+| `secret-scan.yml` | yes (`docker run` TruffleHog and the gitleaks binary over PR content) | **route**: fork PR → disposable GitHub-hosted runner |
 | `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** (skip on fork PR — the job runs inside the internal Harbor-proxied container, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`) |
 | `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted) |
 

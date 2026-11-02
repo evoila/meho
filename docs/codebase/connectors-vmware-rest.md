@@ -6014,8 +6014,9 @@ U2, U3 and 9.0, 9.1, 9.1.1 all have them, so no version check is needed.
 - the login, read from Vault with the target's `secret_ref` (the same
   reader the connector logs in with). The login goes only into the
   `RelocateVM_Task` request body. It is never in the call, the answer, the
-  approval request or the broadcast. The op is pinned `credential_write`
-  in `broadcast/events.py`, so the flight recorder does not keep that body.
+  approval request or the broadcast. The op is declared `credential_write`
+  in `connectors/vmware_rest/op_classes.py`, so the flight recorder does
+  not keep that body.
 
 **Checks before the start.** Nothing is sent when one fails.
 
@@ -6026,16 +6027,26 @@ U2, U3 and 9.0, 9.1, 9.1.1 all have them, so no version check is needed.
 3. A move of the VM (`VirtualMachine.relocate`) that is `queued` or
    `running` gives `already_running` with its task id. This check is a
    help, not a lock: two callers can both look before either starts.
-4. MEHO opens its own TLS connection to the other vCenter (one GET of
-   `/sdk/vimServiceVersions.xml`, with the target's TLS settings) and
-   hashes the certificate it shows. A hash that is not the
-   `ssl_thumbprint` gives `certificate_mismatch`, before any login.
-5. MEHO reads the login from Vault and logs in to read `instanceUuid`
-   (sent in upper case). A failed Vault read or login gives
-   `destination_login_failed`; a connection failure gives
-   `destination_unreachable`.
+4. MEHO opens a short-lived HTTP client of its own to the other vCenter
+   (`composites/_vm_cross_vcenter_destination.py`). The client keeps the
+   target's TLS settings and the connector's address pin, and adds one check:
+   after every TLS handshake, before a request goes out, the SHA-1 hash of
+   the certificate the server showed must be the `ssl_thumbprint`. A
+   connection that shows another certificate is closed and the call
+   answers `certificate_mismatch`. The check runs on every new connection,
+   so a second connection cannot show another certificate and still
+   receive the login. The first request is one GET of
+   `/sdk/vimServiceVersions.xml`, which also gives the API version for the
+   VI-JSON paths.
+5. On that client MEHO reads the login from Vault and logs in with it
+   (`POST /api/session` with the exact username and password), then reads
+   `instanceUuid` (sent in upper case). The connector's cached session of
+   that target is not used, so a wrong password in Vault is found here. A
+   failed Vault read or a refused login gives `destination_login_failed`;
+   a connection failure or an HTTP error gives `destination_unreachable`.
 6. The host, pool, datastore, folder and networks exist in the other
-   vCenter (`not_found` lists the missing ones in `missing`). A
+   vCenter, read on the same client (`not_found` lists the missing ones in
+   `missing`). The client logs out and closes after these checks. A
    distributed port group becomes a `DistributedVirtualSwitchPortConnection`
    backing (port group key and switch uuid); a standard network becomes a
    `VirtualEthernetCardNetworkBackingInfo` backing.
@@ -6043,8 +6054,8 @@ U2, U3 and 9.0, 9.1, 9.1.1 all have them, so no version check is needed.
 **A vendor job.** The start returns as soon as vCenter took the task:
 `status: accepted` with the task id in `task`, and `status_read: {op_id:
 vmware.task.info, params: {task}}` on the source vCenter's target. It never
-says the move is done. `vmware.task.info` is the status read the VM move
-and copy work adds; this op only names it.
+says the move is done. `vmware.task.info` (`typed_ops_task_info.py`) is on
+both catalogs; the dispatch test reads the returned task with it on each.
 
 - After a lost reply, do not start again blindly. Read `vmware.tasks.recent`
   or the VM first: a move that still runs comes back as `already_running`.
@@ -6055,13 +6066,17 @@ and copy work adds; this op only names it.
   fault.
 
 Code: `composites/_vm_cross_vcenter.py` (the handler and its checks),
-`composites/_vm_cross_vcenter_schemas.py` (schemas and agent guidance) and
-`composites/_vm_cross_vcenter_ops.py` (registry row, approval card and
-child-op list). Tests:
+`composites/_vm_cross_vcenter_destination.py` (the pinned client and the
+login on the other vCenter), `composites/_vm_cross_vcenter_schemas.py`
+(schemas and agent guidance) and `composites/_vm_cross_vcenter_ops.py`
+(registry row with the child calls, and the approval card). Tests:
 `tests/test_connectors_vmware_rest_vm_cross_vcenter.py` (handler against a
 two-vCenter fake), `tests/test_connectors_vmware_rest_vm_cross_vcenter_dispatch.py`
-(approval, an agent without a grant, both catalogs, the vCenter 8.0.3 and
-9.0 VI-JSON paths over mocked HTTP, a failed login, the certificate read)
+(approval, an agent without a grant, both catalogs, the status read on each
+catalog, the vCenter 8.0.3 and 9.0 VI-JSON paths over mocked HTTP, a refused
+login, a cached session that does not stand in for the Vault login),
+`tests/test_connectors_vmware_rest_vm_cross_vcenter_tls.py` (the certificate
+check on every connection, over an in-memory transport)
 and `tests/test_connectors_vmware_rest_vm_cross_vcenter_reconcile.py`
 (methods, fields and enums against the pinned 9.0 and 8.0 U1, U2, U3
 `vi-json` files).

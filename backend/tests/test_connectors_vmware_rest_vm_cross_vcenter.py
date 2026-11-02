@@ -8,7 +8,8 @@
   target objects there; the answer is ``accepted`` with the task id.
 * The login never reaches the answer or the approval gate.
 * A wrong thumbprint, a failed Vault read or login, an unreachable vCenter
-  and a missing target object each stop the move before the start.
+  and a missing target object each stop the move before the start. The
+  session on the other vCenter is closed after the checks.
 * A move that still runs is returned; a vendor fault on the start reaches
   the caller.
 """
@@ -27,9 +28,11 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _vm_cross_vcenter_ops,
     _write,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_cross_vcenter_destination import (
+    DestinationLoginFailedError,
+)
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS
 from tests._vmware_cross_vcenter_fake import (
-    CERT,
     DEST_NAME,
     DEST_UUID,
     LOGIN,
@@ -62,21 +65,19 @@ def gate(monkeypatch: pytest.MonkeyPatch) -> GateRecorder:
 
 @pytest.fixture
 def destination(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """The other vCenter's target and the certificate it shows; tests may change both."""
-    state: dict[str, Any] = {"target": dest_target(), "cert": CERT}
+    """The other vCenter's target; the pinned session is the fake's ``open_destination``."""
+    state: dict[str, Any] = {"target": dest_target()}
 
     async def _resolve(_operator: Any, name: str) -> Any:
         assert name == DEST_NAME
         return state["target"]
 
-    async def _cert(_connector: Any, target: Any) -> bytes:
-        assert target is state["target"]
-        if isinstance(state["cert"], Exception):
-            raise state["cert"]
-        return bytes(state["cert"])
+    async def _open(connector: CrossVimFake, dest: Any, op: Any, thumbprint: str) -> Any:
+        assert dest is state["target"]
+        return await connector.open_destination(connector, dest, op, thumbprint)
 
     monkeypatch.setattr(_vm_cross_vcenter, "resolve_destination", _resolve)
-    monkeypatch.setattr(_vm_cross_vcenter, "presented_certificate", _cert)
+    monkeypatch.setattr(_vm_cross_vcenter, "open_destination", _open)
     return state
 
 
@@ -118,6 +119,8 @@ async def test_the_move_starts_once_with_the_service_locator(gate: GateRecorder)
     assert spec["pool"]["value"] == "resgroup-8"
     assert spec["datastore"]["value"] == "datastore-12"
     assert spec["folder"]["value"] == "group-v3"
+    (session,) = conn.sessions
+    assert session.closed is True
     (change,) = spec["deviceChange"]
     assert change["operation"] == "edit"
     assert change["device"]["key"] == 4000
@@ -171,11 +174,10 @@ async def test_a_parked_gate_is_returned_and_nothing_starts(
     assert conn.starts() == []
 
 
-async def test_a_wrong_thumbprint_stops_before_the_login(
-    gate: GateRecorder, destination: dict[str, Any]
-) -> None:
-    destination["cert"] = b"another-certificate"
+@pytest.mark.usefixtures("destination")
+async def test_a_wrong_thumbprint_stops_before_the_login(gate: GateRecorder) -> None:
     conn = _seeded()
+    conn.cert = b"another-certificate"
     out = await _move(conn)
     assert out["status"] == "certificate_mismatch", out
     assert "ssl_thumbprint" in out["guidance"]
@@ -206,13 +208,22 @@ async def test_the_thumbprint_may_be_written_without_colons(
     assert conn.starts()[0][1]["spec"]["service"]["sslThumbprint"] == THUMBPRINT
 
 
-async def test_an_unreachable_vcenter_stops_the_move(
-    gate: GateRecorder, destination: dict[str, Any]
-) -> None:
-    destination["cert"] = httpx.ConnectError("refused")
+@pytest.mark.usefixtures("destination")
+async def test_an_unreachable_vcenter_stops_the_move(gate: GateRecorder) -> None:
     conn = _seeded()
+    conn.cert = httpx.ConnectError("refused")
     out = await _move(conn)
     assert out["status"] == "destination_unreachable", out
+    assert conn.starts() == []
+
+
+@pytest.mark.usefixtures("destination")
+async def test_an_http_error_from_the_other_vcenter_is_unreachable(gate: GateRecorder) -> None:
+    conn = _seeded()
+    conn.content_fault = http_status_error(503, "maintenance")
+    out = await _move(conn)
+    assert out["status"] == "destination_unreachable", out
+    assert "503" in out["guidance"]
     assert conn.starts() == []
 
 
@@ -221,7 +232,10 @@ async def test_an_unreachable_vcenter_stops_the_move(
     ("where", "fault"),
     [
         ("login_fault", VaultCredentialsReadError("no secret at the path")),
-        ("content_fault", RuntimeError("vsphere session establish failed: HTTP 401")),
+        (
+            "content_fault",
+            DestinationLoginFailedError("target refused the login from Vault (HTTP 401)"),
+        ),
     ],
 )
 async def test_a_failed_login_stops_the_move(
@@ -231,6 +245,7 @@ async def test_a_failed_login_stops_the_move(
     setattr(conn, where, fault)
     out = await _move(conn)
     assert out["status"] == "destination_login_failed", out
+    assert "secret_ref" in out["guidance"]
     assert conn.starts() == []
     assert gate.calls == []
 
@@ -253,6 +268,7 @@ async def test_missing_objects_in_the_other_vcenter_are_listed(gate: GateRecorde
     assert out["status"] == "not_found", out
     assert out["missing"] == ["datastore datastore-12", "network dvportgroup-34"]
     assert conn.starts() == []
+    assert conn.sessions[0].closed is True
 
 
 @pytest.mark.usefixtures("destination")

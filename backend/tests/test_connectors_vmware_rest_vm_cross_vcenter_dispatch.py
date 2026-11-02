@@ -8,10 +8,14 @@
 * A person's call waits until a second person approves; then the move starts
   once. The other vCenter is a real target row, found by name. An agent
   without a grant is refused.
-* The real connector reads the other vCenter's certificate on its own TLS
-  connection, logs in there, and sends the VIM calls on the vCenter 8 path
-  (``/sdk/vim25/8.0.3.0/...``) and the vCenter 9 path
-  (``/sdk/vim25/9.0.0.0/...``). A failed login there stops the move.
+* The status read the answer names (``vmware.task.info`` with the task id)
+  works on both catalogs.
+* The real connector logs in to the other vCenter with the login from Vault
+  on its own client, never with a cached session, and sends the VIM calls on
+  the vCenter 8 path (``/sdk/vim25/8.0.3.0/...``) and the vCenter 9 path
+  (``/sdk/vim25/9.0.0.0/...``). A refused login there stops the move. The
+  certificate check of that client is in
+  ``test_connectors_vmware_rest_vm_cross_vcenter_tls.py``.
 """
 
 from __future__ import annotations
@@ -29,13 +33,18 @@ import respx
 from sqlalchemy import func, select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
-from meho_backplane.connectors.vmware_rest import VmwareRestConnector
+from meho_backplane.connectors.vmware_rest import VmwareRest80Connector, VmwareRestConnector
 from meho_backplane.connectors.vmware_rest.composites import (
     _vm_cross_vcenter,
     _write,
     register_vmware_composite_operations,
     register_vmware_composite_operations_8_0,
+)
+from meho_backplane.connectors.vmware_rest.typed_ops import (
+    register_vmware_typed_operations,
+    register_vmware_typed_operations_8_0,
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
@@ -49,7 +58,6 @@ from meho_backplane.operations.approval_queue import (
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.settings import get_settings
 from tests._vmware_cross_vcenter_fake import (
-    CERT,
     DEST_NAME,
     DEST_UUID,
     LOGIN,
@@ -68,6 +76,9 @@ from tests._vmware_teardown_fake import GateRecorder
 
 _OP = "vmware.composite.vm.migrate_cross_vcenter"
 _CONNECTOR_ID = "vmware-rest-9.0"
+_CONNECTOR_ID_8_0 = "vmware-rest-8.0"
+#: A second source vCenter on version 8.0.3, served by the 8.0 catalog.
+_SOURCE_8_0_NAME = "example-vcenter-c"
 _TENANT_ID = UUID("00000000-0000-0000-0000-000000004347")
 
 
@@ -80,10 +91,10 @@ def _dispatch_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     reset_dispatcher_caches()
     clear_registry()
 
-    async def _cert(_connector: Any, _target: Any) -> bytes:
-        return CERT
+    async def _open(connector: CrossVimFake, dest: Any, op: Operator, thumbprint: str) -> Any:
+        return await connector.open_destination(connector, dest, op, thumbprint)
 
-    monkeypatch.setattr(_vm_cross_vcenter, "presented_certificate", _cert)
+    monkeypatch.setattr(_vm_cross_vcenter, "open_destination", _open)
     yield
     reset_dispatcher_caches()
     clear_registry()
@@ -110,7 +121,7 @@ def _person(sub: str, kind: PrincipalKind = PrincipalKind.USER) -> Operator:
     )
 
 
-def _target_row(name: str, host: str, extras: dict[str, Any]) -> TargetORM:
+def _target_row(name: str, host: str, extras: dict[str, Any], *, version: str = "9.0") -> TargetORM:
     return TargetORM(
         id=uuid.uuid4(),
         tenant_id=_TENANT_ID,
@@ -124,7 +135,7 @@ def _target_row(name: str, host: str, extras: dict[str, Any]) -> TargetORM:
         auth_model="shared_service_account",
         vpn_required=False,
         extras=extras,
-        fingerprint={"version": "9.0"},
+        fingerprint={"version": version},
         preferred_impl_id="vmware-rest",
         notes="seeded by test_connectors_vmware_rest_vm_cross_vcenter_dispatch",
     )
@@ -134,11 +145,18 @@ async def _bootstrap(conn: CrossVimFake) -> None:
     register_connector_v2(
         product="vmware", version="9.0", impl_id="vmware-rest", cls=VmwareRestConnector
     )
+    register_connector_v2(
+        product="vmware", version="8.0", impl_id="vmware-rest", cls=VmwareRest80Connector
+    )
     _CONNECTOR_INSTANCE_CACHE[VmwareRestConnector] = conn  # type: ignore[assignment]
+    _CONNECTOR_INSTANCE_CACHE[VmwareRest80Connector] = conn  # type: ignore[assignment]
     await register_vmware_composite_operations(embedding_service=_embedding_stub())
     await register_vmware_composite_operations_8_0(embedding_service=_embedding_stub())
+    await register_vmware_typed_operations(embedding_service=_embedding_stub())
+    await register_vmware_typed_operations_8_0(embedding_service=_embedding_stub())
     async with get_sessionmaker()() as s:
         s.add(_target_row(SOURCE_NAME, "vc-a.example.test", {}))
+        s.add(_target_row(_SOURCE_8_0_NAME, "vc-c.example.test", {}, version="8.0.3"))
         s.add(_target_row(DEST_NAME, "vc-b.example.test", {"ssl_thumbprint": THUMBPRINT}))
         await s.commit()
 
@@ -195,6 +213,71 @@ async def test_a_person_waits_for_a_second_person_then_the_move_starts_once() ->
 
 
 @pytest.mark.usefixtures("_dispatch_env")
+@pytest.mark.parametrize(
+    ("connector_id", "source_name", "about", "release"),
+    [
+        (_CONNECTOR_ID, SOURCE_NAME, "9.0.0", "9.0.0.0"),
+        (_CONNECTOR_ID_8_0, _SOURCE_8_0_NAME, "8.0.3", "8.0.3.0"),
+    ],
+)
+async def test_the_status_read_of_the_answer_works_on_each_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+    connector_id: str,
+    source_name: str,
+    about: str,
+    release: str,
+) -> None:
+    """``status_read`` names a registered op; its params read the task on each catalog."""
+    monkeypatch.setattr(_write, "enforce_subop_policy", GateRecorder())
+    conn = CrossVimFake()
+    seed(conn)
+    await _bootstrap(conn)
+    async with get_sessionmaker()() as s:
+        source = (
+            await s.execute(select(TargetORM).where(TargetORM.name == source_name))
+        ).scalar_one()
+    out = await _vm_cross_vcenter.vm_migrate_cross_vcenter_composite(
+        operator=_person("op-status"), target=source, params=params(), connector=conn
+    )
+    assert out["status"] == "accepted", out
+    status_read = out["status_read"]
+
+    # The status read runs on the real connector of each catalog, over HTTP.
+    real: dict[type[Any], Any] = {
+        VmwareRestConnector: VmwareRestConnector(session_loader=_stub_loader),
+        VmwareRest80Connector: VmwareRest80Connector(session_loader=_stub_loader),
+    }
+    _CONNECTOR_INSTANCE_CACHE.update(real)
+    base = f"https://{source.host}"
+    task_info = {"state": "running", "descriptionId": "VirtualMachine.relocate", "progress": 40}
+    try:
+        async with respx.mock(assert_all_called=False) as mock:
+            mock.post(f"{base}/api/session").respond(200, json="tok")
+            mock.get(f"{base}/api/about").respond(200, json={"version": about})
+            mock.post(
+                f"{base}/sdk/vim25/{release}/PropertyCollector/propertyCollector/"
+                "RetrievePropertiesEx"
+            ).mock(side_effect=_retrieve({("Task", out["task"]): {"info": task_info}}))
+            read = await call_operation(
+                _person("op-status"),
+                {
+                    "connector_id": connector_id,
+                    "op_id": status_read["op_id"],
+                    "target": source_name,
+                    "params": status_read["params"],
+                },
+            )
+    finally:
+        for connector in real.values():
+            for client in connector._clients.values():
+                await client.aclose()
+    assert read["status"] == "ok", read
+    assert read["result"]["task"] == out["task"]
+    assert read["result"]["state"] == "running"
+    assert read["result"]["progress"] == 40
+
+
+@pytest.mark.usefixtures("_dispatch_env")
 async def test_an_agent_without_a_grant_is_refused() -> None:
     conn = CrossVimFake()
     seed(conn)
@@ -223,24 +306,6 @@ async def test_an_agent_without_a_grant_is_refused() -> None:
 
 _SOURCE = "https://vc-a.example.test"
 _DEST = "https://vc-b.example.test"
-
-
-class _TlsStream:
-    """The ``network_stream`` extension of an answer: the TLS connection's certificate."""
-
-    def __init__(self, cert: bytes) -> None:
-        self._cert = cert
-
-    def get_extra_info(self, info: str) -> Any:
-        if info != "ssl_object":
-            return None
-        cert = self._cert
-
-        class _Ssl:
-            def getpeercert(self, binary_form: bool = False) -> bytes:
-                return cert
-
-        return _Ssl()
 
 
 def _retrieve(objects: dict[tuple[str, str], dict[str, Any]]) -> Callable[..., httpx.Response]:
@@ -300,25 +365,41 @@ async def _stub_loader(_target: Any, _operator: Operator) -> dict[str, str]:
     return dict(LOGIN)
 
 
+def _versions_xml(release: str) -> str:
+    return (
+        '<namespaces version="1.0"><namespace><name>urn:vim25</name>'
+        f"<version>{release}</version></namespace></namespaces>"
+    )
+
+
+class _OverHttp:
+    """The answer of one move over HTTP, and the routes of the other vCenter."""
+
+    def __init__(self, out: dict[str, Any], start: respx.Route, dest_login: respx.Route) -> None:
+        self.out = out
+        self.start = start
+        self.dest_login = dest_login
+
+
 async def _over_http(
-    about: str, release: str, *, dest_login: int = 200
-) -> tuple[dict[str, Any], respx.Route]:
+    about: str, release: str, *, dest_login: int = 200, cached_session: str | None = None
+) -> _OverHttp:
     connector = VmwareRestConnector(session_loader=_stub_loader)
     destination = dest_target()
+    if cached_session is not None:
+        connector._session_tokens[target_cache_key(destination)] = cached_session
 
     async def _resolve(_operator: Any, _name: str) -> Target:
         return destination
 
     try:
         async with respx.mock(assert_all_called=False) as mock:
-            for base in (_SOURCE, _DEST):
-                mock.get(f"{base}/api/about").respond(200, json={"version": about})
+            mock.get(f"{_SOURCE}/api/about").respond(200, json={"version": about})
             mock.post(f"{_SOURCE}/api/session").respond(200, json="tok-a")
-            mock.post(f"{_DEST}/api/session").respond(dest_login, json="tok-b")
-            mock.get(f"{_DEST}/sdk/vimServiceVersions.xml").mock(
-                side_effect=lambda _r: httpx.Response(
-                    200, text="<x/>", extensions={"network_stream": _TlsStream(CERT)}
-                )
+            login = mock.post(f"{_DEST}/api/session").respond(dest_login, json="tok-b")
+            mock.delete(f"{_DEST}/api/session").respond(204)
+            mock.get(f"{_DEST}/sdk/vimServiceVersions.xml").respond(
+                200, text=_versions_xml(release)
             )
             read = "PropertyCollector/propertyCollector/RetrievePropertiesEx"
             mock.post(f"{_SOURCE}/sdk/vim25/{release}/{read}").mock(
@@ -343,7 +424,11 @@ async def _over_http(
                     params=params(),
                     connector=connector,
                 )
-        return out, start
+            if cached_session is not None:
+                for call in mock.calls:
+                    if call.request.url.host == "vc-b.example.test":
+                        assert call.request.headers.get("vmware-api-session-id") != cached_session
+        return _OverHttp(out, start, login)
     finally:
         connector._session_tokens.clear()
         for client in connector._clients.values():
@@ -351,44 +436,48 @@ async def _over_http(
         connector._clients.clear()
 
 
+def _basic_auth(login: dict[str, str]) -> str:
+    return httpx.BasicAuth(login["username"], login["password"])._auth_header
+
+
 @pytest.mark.parametrize(("about", "release"), [("8.0.3", "8.0.3.0"), ("9.0.0", "9.0.0.0")])
 async def test_the_move_starts_on_the_vi_json_path_of_each_version(
     monkeypatch: pytest.MonkeyPatch, about: str, release: str
 ) -> None:
     monkeypatch.setattr(_write, "enforce_subop_policy", GateRecorder())
-    out, start = await _over_http(about, release)
-    assert out["status"] == "accepted", out
-    assert out["task"] == "task-31"
-    assert start.call_count == 1
-    spec = json.loads(start.calls.last.request.content)["spec"]
+    run = await _over_http(about, release)
+    assert run.out["status"] == "accepted", run.out
+    assert run.out["task"] == "task-31"
+    assert run.start.call_count == 1
+    spec = json.loads(run.start.calls.last.request.content)["spec"]
     assert spec["service"]["url"] == _DEST
     assert spec["service"]["instanceUuid"] == DEST_UUID.upper()
     assert spec["service"]["sslThumbprint"] == THUMBPRINT
+    assert spec["service"]["credential"]["username"] == LOGIN["username"]
     assert spec["deviceChange"][0]["device"]["backing"]["port"]["switchUuid"] == (
         "dest-switch-uuid"
     )
+    # The login that was tested on the other vCenter is the one in the locator.
+    assert run.dest_login.call_count == 1
+    assert run.dest_login.calls.last.request.headers["authorization"] == _basic_auth(LOGIN)
 
 
-async def test_a_failed_login_on_the_other_vcenter_stops_the_move(
+async def test_a_refused_login_on_the_other_vcenter_stops_the_move(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(_write, "enforce_subop_policy", GateRecorder())
-    out, start = await _over_http("9.0.0", "9.0.0.0", dest_login=401)
-    assert out["status"] == "destination_login_failed", out
-    assert start.call_count == 0
+    run = await _over_http("9.0.0", "9.0.0.0", dest_login=401)
+    assert run.out["status"] == "destination_login_failed", run.out
+    assert run.start.call_count == 0
 
 
-async def test_the_certificate_is_read_from_the_tls_connection() -> None:
-    connector = VmwareRestConnector(session_loader=_stub_loader)
-    try:
-        async with respx.mock() as mock:
-            mock.get(f"{_DEST}/sdk/vimServiceVersions.xml").mock(
-                side_effect=lambda _r: httpx.Response(
-                    200, extensions={"network_stream": _TlsStream(CERT)}
-                )
-            )
-            assert await _vm_cross_vcenter.presented_certificate(connector, dest_target()) == CERT
-    finally:
-        for client in connector._clients.values():
-            await client.aclose()
-        connector._clients.clear()
+async def test_a_cached_session_does_not_stand_in_for_the_vault_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid cached session of the other vCenter, but the Vault login is wrong: no move."""
+    monkeypatch.setattr(_write, "enforce_subop_policy", GateRecorder())
+    run = await _over_http("9.0.0", "9.0.0.0", dest_login=401, cached_session="tok-cached")
+    assert run.out["status"] == "destination_login_failed", run.out
+    assert run.start.call_count == 0
+    assert run.dest_login.call_count == 1
+    assert run.dest_login.calls.last.request.headers["authorization"] == _basic_auth(LOGIN)

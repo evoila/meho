@@ -3,10 +3,11 @@
 
 """Shared fake for the ``vm.migrate_cross_vcenter`` tests: two vCenters, one connector.
 
-:class:`CrossVimFake` is the teardown vim fake of the source vCenter; calls
-on the other vCenter's target go to :attr:`CrossVimFake.dest`, a second
-store. A ``RelocateVM_Task`` start records the call and returns a new task
-that runs. Names and ids are made up.
+:class:`CrossVimFake` is the teardown vim fake of the source vCenter. The
+other vCenter is :attr:`CrossVimFake.dest`, a second store, read through
+:class:`FakeDestination`, the stand-in for the pinned session
+(``open_destination``). A ``RelocateVM_Task`` start records the call and
+returns a new task that runs. Names and ids are made up.
 """
 
 from __future__ import annotations
@@ -18,6 +19,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.base import ConnectorResourceNotFoundError
+from meho_backplane.connectors.vmware_rest.composites._teardown_reads import _objects
+from meho_backplane.connectors.vmware_rest.composites._vm_cross_vcenter_destination import (
+    DestinationCertificateMismatchError,
+    certificate_thumbprint,
+)
+from meho_backplane.connectors.vmware_rest.vim_body import retrieve_properties_body
 from tests._vmware_teardown_fake import VimFake, moref
 
 VM = "vm-42"
@@ -59,8 +67,42 @@ def dest_target(**extras: Any) -> Target:
     )
 
 
+_RETRIEVE_PATH = "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+
+
+class FakeDestination:
+    """Stand-in for the pinned session on the other vCenter: reads come from *store*."""
+
+    def __init__(self, store: VimFake, login: dict[str, str]) -> None:
+        self.store = store
+        self.login = login
+        self.instance_uuid = DEST_UUID
+        self.closed = False
+
+    async def read_object(
+        self, *, mo_type: str, moid: str, props: list[str]
+    ) -> dict[str, Any] | None:
+        body = retrieve_properties_body(mo_type, [moid], props)
+        self.store.calls.append((_RETRIEVE_PATH, copy.deepcopy(body)))
+        try:
+            result = self.store._retrieve(body, True)
+        except ConnectorResourceNotFoundError:
+            return None
+        found = _objects(result).get(moid)
+        return found[0] if found is not None else None
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 class CrossVimFake(VimFake):
-    """The source vCenter's vim fake; :attr:`dest` answers for the other vCenter."""
+    """The source vCenter's vim fake; :attr:`dest` is the other vCenter's store.
+
+    :meth:`open_destination` replaces the real one in the tests: it checks
+    :attr:`cert` against the target's thumbprint (the way the pinned
+    connection does), reads the login through ``_session_loader``, then
+    answers with a :class:`FakeDestination`.
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -68,7 +110,9 @@ class CrossVimFake(VimFake):
         self.start_fault: Exception | None = None
         self.login_fault: Exception | None = None
         self.content_fault: Exception | None = None
+        self.cert: bytes | Exception = CERT
         self.loader_calls: list[str] = []
+        self.sessions: list[FakeDestination] = []
 
     async def _session_loader(self, target: Any, operator: Operator) -> dict[str, str]:
         self.loader_calls.append(target.name)
@@ -78,6 +122,22 @@ class CrossVimFake(VimFake):
 
     def _target_is_esxi(self, target: Any) -> bool:
         return False
+
+    async def open_destination(
+        self, connector: Any, dest: Any, operator: Operator, thumbprint: str
+    ) -> FakeDestination:
+        assert connector is self
+        if isinstance(self.cert, Exception):
+            raise self.cert
+        shown = certificate_thumbprint(self.cert)
+        if shown != thumbprint:
+            raise DestinationCertificateMismatchError(thumbprint, shown)
+        login = await self._session_loader(dest, operator)
+        if self.content_fault is not None:
+            raise self.content_fault
+        session = FakeDestination(self.dest, login)
+        self.sessions.append(session)
+        return session
 
     async def _post_vmomi_json(
         self,
@@ -90,14 +150,10 @@ class CrossVimFake(VimFake):
         session_used: Any = None,
         session_token: str | None = None,
     ) -> Any:
+        assert getattr(target, "name", None) != DEST_NAME, (
+            "the other vCenter is read on the pinned session, not on the connector"
+        )
         method = path.rsplit("/", 1)[-1]
-        if getattr(target, "name", None) == DEST_NAME:
-            self.dest.calls.append((path, copy.deepcopy(json)))
-            if method == "RetrieveServiceContent":
-                if self.content_fault is not None:
-                    raise self.content_fault
-                return {"_typeName": "ServiceContent", "about": {"instanceUuid": DEST_UUID}}
-            return self.dest._retrieve(json, promote_managed_object_not_found)
         if method == "RelocateVM_Task":
             self.calls.append((path, copy.deepcopy(json)))
             if self.start_fault is not None:

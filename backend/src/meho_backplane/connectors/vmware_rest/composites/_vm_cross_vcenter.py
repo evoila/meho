@@ -15,13 +15,16 @@ Checks before the start (nothing is sent when one fails):
    is not the call's own target, and has a SHA-1 ``ssl_thumbprint``.
 2. The VM exists; a move of it that still runs is returned
    (``already_running``) -- a help, not a lock.
-3. The certificate the other vCenter shows matches the thumbprint
-   (``certificate_mismatch`` when not).
-4. MEHO reads the other vCenter's login from Vault and logs in to read its
-   ``instanceUuid`` (``destination_login_failed`` /
-   ``destination_unreachable`` when that fails).
+3. MEHO opens its own, short-lived client to the other vCenter
+   (:mod:`._vm_cross_vcenter_destination`). Every TLS connection of it is
+   checked against the thumbprint before a request goes out
+   (``certificate_mismatch`` when a connection shows another certificate).
+4. On that client MEHO logs in with the exact login from Vault and reads
+   the ``instanceUuid`` (``destination_login_failed`` when Vault or the
+   login fails, ``destination_unreachable`` when the vCenter does not
+   answer). The connector's cached session of that target is not used.
 5. The host, pool, datastore, folder and networks exist in the other
-   vCenter (``not_found`` lists the missing ones).
+   vCenter, read on the same client (``not_found`` lists the missing ones).
 
 A vendor job: the answer says ``accepted`` with the vCenter task id, and
 ``vmware.task.info`` follows it. One vendor call, so there is no partial
@@ -30,7 +33,6 @@ result.
 
 from __future__ import annotations
 
-import hashlib
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
@@ -41,6 +43,12 @@ from meho_backplane.connectors.vmware_rest.composites._teardown_reads import (
     moref_values,
     read_many,
     read_object,
+)
+from meho_backplane.connectors.vmware_rest.composites._vm_cross_vcenter_destination import (
+    DestinationCertificateMismatchError,
+    DestinationLoginFailedError,
+    DestinationSession,
+    open_destination,
 )
 from meho_backplane.connectors.vmware_rest.composites._vm_cross_vcenter_schemas import (
     NETWORK_MOID_PATTERN,
@@ -57,11 +65,7 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_FOLDER_MOID_PATTERN,
     VM_MOID_PATTERN,
 )
-from meho_backplane.connectors.vmware_rest.vim_body import (
-    VIM_TYPE_NAME_KEY,
-    unwrap_vim_value,
-    vim_moref,
-)
+from meho_backplane.connectors.vmware_rest.vim_body import VIM_TYPE_NAME_KEY, vim_moref
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -71,7 +75,6 @@ if TYPE_CHECKING:
 __all__ = [
     "VM_MIGRATE_CROSS_VCENTER_OP_ID",
     "placement",
-    "presented_certificate",
     "resolve_destination",
     "vm_migrate_cross_vcenter_composite",
 ]
@@ -88,9 +91,6 @@ _VIM_SUB_OPS_VM_MIGRATE_CROSS_VCENTER: Final[tuple[str, ...]] = (
     _OP_RETRIEVE_SERVICE_CONTENT,
     _OP_RELOCATE_VM_TASK,
 )
-_SERVICE_CONTENT_PATH: Final = "/ServiceInstance/ServiceInstance/RetrieveServiceContent"
-#: Served without a login on every vCenter; the read only opens a TLS connection.
-_SERVICE_VERSIONS_PATH: Final = "/sdk/vimServiceVersions.xml"
 #: ``TaskInfo.descriptionId`` of a move (``<Type>.<method>``).
 _RELOCATE_DESCRIPTION_ID: Final = "VirtualMachine.relocate"
 _RUNNING_TASK_STATES: Final = frozenset({"queued", "running"})
@@ -224,28 +224,6 @@ async def resolve_destination(operator: Operator, name: str) -> Any:
         structlog.contextvars.bind_contextvars(**saved)
 
 
-async def presented_certificate(connector: VmwareRestConnector, target: Any) -> bytes:
-    """The DER certificate *target* shows on MEHO's own connection to it.
-
-    One GET of the version file, which vCenter serves without a login, on the
-    pooled client of the target (its address checks and TLS settings apply).
-    The certificate comes from the TLS connection of that answer (the httpx
-    ``network_stream`` extension). Transport errors propagate.
-    """
-    client = await connector._http_client(target)
-    extensions = connector._request_extensions(target)
-    async with client.stream("GET", _SERVICE_VERSIONS_PATH, extensions=extensions) as response:
-        stream = response.extensions.get("network_stream")
-        ssl_object = stream.get_extra_info("ssl_object") if stream is not None else None
-        der = ssl_object.getpeercert(binary_form=True) if ssl_object is not None else None
-    if not der:
-        raise _StopError(
-            "destination_unreachable",
-            "the other vCenter showed no TLS certificate on MEHO's connection. Nothing was sent.",
-        )
-    return bytes(der)
-
-
 def _destination_problem(dest: Any, source: Any, connector: VmwareRestConnector) -> str | None:
     name = getattr(dest, "name", None)
     if getattr(dest, "product", None) != _VMWARE_PRODUCT or connector._target_is_esxi(dest):
@@ -256,55 +234,41 @@ def _destination_problem(dest: Any, source: Any, connector: VmwareRestConnector)
     return None
 
 
-async def _check_certificate(connector: VmwareRestConnector, dest: Any, thumbprint: str) -> None:
+async def _open(
+    connector: VmwareRestConnector, dest: Any, operator: Operator, thumbprint: str
+) -> DestinationSession:
+    """The pinned, logged-in session on the other vCenter; :class:`_StopError` when not."""
     try:
-        der = await presented_certificate(connector, dest)
-    except httpx.HTTPError as exc:
-        raise _StopError(
-            "destination_unreachable",
-            f"MEHO could not reach target {dest.name!r} to check its certificate "
-            f"({type(exc).__name__}). Nothing was sent.",
-        ) from exc
-    if hashlib.new("sha1", der, usedforsecurity=True).hexdigest() != thumbprint:
+        return await open_destination(connector, dest, operator, thumbprint)
+    except DestinationCertificateMismatchError:
         raise _StopError(
             "certificate_mismatch",
             f"target {dest.name!r} shows a certificate whose SHA-1 hash is not the "
             f"{THUMBPRINT_EXTRA} of the target. Check the certificate and fix the target's "
             f"{THUMBPRINT_EXTRA}. Nothing was sent.",
-        )
-
-
-async def _login(
-    connector: VmwareRestConnector, dest: Any, operator: Operator
-) -> tuple[dict[str, str], str]:
-    """``(login, instanceUuid)`` of the other vCenter: a Vault read, then a logged-in read."""
-    try:
-        creds = await connector._session_loader(dest, operator)
-        raw = await connector._post_vmomi_json(
-            dest, _SERVICE_CONTENT_PATH, operator=operator, json={}
-        )
+        ) from None
     except httpx.TransportError as exc:
         raise _StopError(
             "destination_unreachable",
             f"MEHO could not reach target {dest.name!r} ({type(exc).__name__}). Nothing was sent.",
         ) from exc
+    except httpx.HTTPStatusError as exc:
+        raise _StopError(
+            "destination_unreachable",
+            f"target {dest.name!r} answered HTTP {exc.response.status_code} to "
+            f"{exc.request.url.path}. Nothing was sent.",
+        ) from exc
+    except DestinationLoginFailedError as exc:
+        raise _StopError(
+            "destination_login_failed",
+            f"{exc}. Check the target's secret_ref. Nothing was sent.",
+        ) from exc
     except Exception as exc:
         raise _StopError(
             "destination_login_failed",
-            f"MEHO could not read the Vault login of target {dest.name!r} or log in with it "
+            f"MEHO could not read the Vault login of target {dest.name!r} "
             f"({type(exc).__name__}). Check the target's secret_ref. Nothing was sent.",
         ) from exc
-    content = unwrap_vim_value(raw)
-    about = content.get("about") if isinstance(content, dict) else None
-    uuid = about.get("instanceUuid") if isinstance(about, dict) else None
-    username, password = creds.get("username"), creds.get("password")
-    if not isinstance(uuid, str) or not uuid:
-        raise _StopError("destination_login_failed", f"target {dest.name!r} gave no instanceUuid")
-    if not isinstance(username, str) or not isinstance(password, str):
-        raise _StopError(
-            "destination_login_failed", f"the Vault login of target {dest.name!r} is incomplete"
-        )
-    return {"username": username, "password": password}, uuid
 
 
 def _nic_devices(devices: Any) -> dict[int, dict[str, Any]]:
@@ -340,15 +304,10 @@ def _nic_networks(params: dict[str, Any], nics: dict[int, Any]) -> dict[int, str
     return {key: override.get(key, str(default)) for key in nics}
 
 
-async def _network_backing(
-    connector: VmwareRestConnector, dest: Any, operator: Operator, network: str
-) -> dict[str, Any] | None:
+async def _network_backing(session: DestinationSession, network: str) -> dict[str, Any] | None:
     """The NIC backing of *network* in the other vCenter; ``None`` when it does not exist."""
     if network.startswith("dvportgroup-"):
-        props = await read_object(
-            connector,
-            dest,
-            operator,
+        props = await session.read_object(
             mo_type="DistributedVirtualPortgroup",
             moid=network,
             props=["key", "config.distributedVirtualSwitch"],
@@ -358,9 +317,7 @@ async def _network_backing(
         switch = moref_values([props.get("config.distributedVirtualSwitch")])
         key = props.get("key")
         switch_props = (
-            await read_object(
-                connector, dest, operator, mo_type=switch[0][0], moid=switch[0][1], props=["uuid"]
-            )
+            await session.read_object(mo_type=switch[0][0], moid=switch[0][1], props=["uuid"])
             if switch
             else None
         )
@@ -373,9 +330,7 @@ async def _network_backing(
             "portgroupKey": key,
         }
         return {VIM_TYPE_NAME_KEY: _DV_PORT_BACKING_TYPE, "port": port}
-    props = await read_object(
-        connector, dest, operator, mo_type="Network", moid=network, props=["name"]
-    )
+    props = await session.read_object(mo_type="Network", moid=network, props=["name"])
     if props is None:
         return None
     return {
@@ -386,9 +341,8 @@ async def _network_backing(
 
 
 async def _destination_changes(
-    connector: VmwareRestConnector,
+    session: DestinationSession,
     dest: Any,
-    operator: Operator,
     params: dict[str, Any],
     nic_networks: dict[int, str],
     nics: dict[int, dict[str, Any]],
@@ -396,14 +350,12 @@ async def _destination_changes(
     """Check every target object in the other vCenter; the NIC edits of the move."""
     missing: list[str] = []
     for name, mo_type, _pattern, _field in _PLACEMENT:
-        found = await read_object(
-            connector, dest, operator, mo_type=mo_type, moid=params[name], props=["name"]
-        )
+        found = await session.read_object(mo_type=mo_type, moid=params[name], props=["name"])
         if found is None:
             missing.append(f"{name} {params[name]}")
     backings: dict[str, dict[str, Any]] = {}
     for network in sorted(set(nic_networks.values())):
-        backing = await _network_backing(connector, dest, operator, network)
+        backing = await _network_backing(session, network)
         if backing is None:
             missing.append(f"network {network}")
         else:
@@ -503,15 +455,13 @@ async def _prepare(
             task=running,
             vm_name=vm_name,
         )
-    await _check_certificate(connector, dest, thumbprint)
-    login, uuid = await _login(connector, dest, operator)
-    device_change = await _destination_changes(
-        connector, dest, operator, params, nic_networks, nics
-    )
-    spec: dict[str, Any] = {
-        VIM_TYPE_NAME_KEY: "VirtualMachineRelocateSpec",
-        "service": _service_locator(dest, uuid, login, thumbprint),
-    }
+    session = await _open(connector, dest, operator, thumbprint)
+    try:
+        device_change = await _destination_changes(session, dest, params, nic_networks, nics)
+        service = _service_locator(dest, session.instance_uuid, session.login, thumbprint)
+    finally:
+        await session.aclose()
+    spec: dict[str, Any] = {VIM_TYPE_NAME_KEY: "VirtualMachineRelocateSpec", "service": service}
     for name, mo_type, _pattern, field in _PLACEMENT:
         spec[field] = vim_moref(mo_type, params[name])
     if device_change:

@@ -753,6 +753,7 @@ Every other result has an `outcome` field:
 | `unknown_group` | The `group` filter names no visible group. | Retry with a group key from `narrowing`. |
 | `zero_enabled_operations` | The connector is loaded, but no operation is enabled for this caller. | Do not call it. An operator must enable operations. |
 | `package_not_installed` | The connector's operations come from a connector package that is not installed in this MEHO. The advisory names the package. | Do not call it. An operator must install the package again. |
+| `code_not_installed` | The code of the connector is not in this MEHO (its rows have no package name, and no handler imports). Also the answer in exact-op mode. | Do not call it. An operator must run a MEHO image that has this connector. |
 
 `advisory` explains any outcome other than `matched` in one sentence.
 `narrowing` lists next steps, at most `SEARCH_NARROWING_MAX` entries.

@@ -24,6 +24,7 @@ from meho_backplane.connectors.vmware_rest.composites._teardown import (
 )
 from meho_backplane.connectors.vmware_rest.composites._teardown_reads import moid_problem
 from meho_backplane.connectors.vmware_rest.composites._vapp import (
+    _VIM_SUB_OPS_VAPP_START_ORDER,
     ENTITY_FIELDS,
     OP_UPDATE_VAPP_CONFIG,
     STATUS_NOT_CONFIRMED,
@@ -234,6 +235,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VAPP_START_ORDER_SET_LLM_INSTRUCTIONS,
         preview=_start_order_preview,
+        governed_subops=_VIM_SUB_OPS_VAPP_START_ORDER,
         classifier_other=True,
     ),
 )

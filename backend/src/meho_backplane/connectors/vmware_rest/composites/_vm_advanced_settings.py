@@ -365,6 +365,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_ADVANCED_SETTINGS_SET_LLM_INSTRUCTIONS,
         preview=_vm_advanced_settings_set_preview,
+        governed_subops=VIM_SUB_OPS_VM_ADVANCED_SETTINGS_SET,
         classifier_other=True,
     ),
 )

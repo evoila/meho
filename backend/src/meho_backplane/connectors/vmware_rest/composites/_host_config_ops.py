@@ -3,8 +3,8 @@
 
 """Registry rows and approval previews of the host NTP, DNS and syslog changes.
 
-``_register.py`` collects :data:`COMPOSITES`, and ``_governed_subops.py`` reads
-:data:`HOST_CONFIG_GOVERNED_SUBOPS`. All three changes are ``dangerous`` with
+``_register.py`` collects :data:`COMPOSITES`. Each row names the vim calls the
+change may make. All three changes are ``dangerous`` with
 ``requires_approval=True``. The handlers are in :mod:`._host_config_writes`.
 """
 
@@ -55,13 +55,6 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = ["COMPOSITES", "HOST_CONFIG_GOVERNED_SUBOPS"]
-
-#: composite op id -> the vim calls it may make.
-HOST_CONFIG_GOVERNED_SUBOPS: Final[dict[str, tuple[str, ...]]] = {
-    OP_ID_NTP_SET: VIM_SUB_OPS_HOST_NTP_SET,
-    OP_ID_DNS_SET: VIM_SUB_OPS_HOST_DNS_SET,
-    OP_ID_SYSLOG_SET: VIM_SUB_OPS_HOST_SYSLOG_SET,
-}
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +152,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=NTP_SET_LLM_INSTRUCTIONS,
         preview=_ntp_preview,
+        governed_subops=VIM_SUB_OPS_HOST_NTP_SET,
         classifier_other=True,
     ),
     CompositeSpec(
@@ -178,6 +172,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=DNS_SET_LLM_INSTRUCTIONS,
         preview=_dns_preview,
+        governed_subops=VIM_SUB_OPS_HOST_DNS_SET,
         classifier_other=True,
     ),
     CompositeSpec(
@@ -197,6 +192,12 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=SYSLOG_SET_LLM_INSTRUCTIONS,
         preview=_syslog_preview,
+        governed_subops=VIM_SUB_OPS_HOST_SYSLOG_SET,
         classifier_other=True,
     ),
 )
+
+#: composite op id -> the vendor calls it may make, read from the rows.
+HOST_CONFIG_GOVERNED_SUBOPS: Final[dict[str, tuple[str, ...]]] = {
+    row.op_id: row.governed_subops for row in COMPOSITES if row.governed_subops
+}

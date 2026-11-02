@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _write
 from meho_backplane.connectors.vmware_rest.composites._spec import (
     CompositeSpec,
 )
@@ -52,6 +53,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS[
             "vmware.composite.network.portgroup.create"
         ],
+        governed_subops=_write._VIM_SUB_OPS_NETWORK_PORTGROUP_CREATE,
         no_preview=True,
     ),
     CompositeSpec(
@@ -72,6 +74,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS[
             "vmware.composite.network.portgroup.security.set"
         ],
+        governed_subops=_write._VIM_SUB_OPS_NETWORK_PORTGROUP_SECURITY_SET,
         no_preview=True,
         classifier_other=True,
     ),
@@ -94,6 +97,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS[
             "vmware.composite.network.portgroup.vlan.set"
         ],
+        governed_subops=_write._VIM_SUB_OPS_NETWORK_PORTGROUP_VLAN_SET,
         no_preview=True,
         classifier_other=True,
     ),

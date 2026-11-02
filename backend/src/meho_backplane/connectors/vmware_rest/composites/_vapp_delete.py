@@ -41,6 +41,7 @@ from meho_backplane.connectors.vmware_rest.composites._teardown_reads import (
     read_object,
 )
 from meho_backplane.connectors.vmware_rest.composites._vapp import (
+    _VIM_SUB_OPS_VAPP_DELETE,
     VAPP_MO_TYPE,
     child_pools,
     read_vapp,
@@ -193,5 +194,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VAPP_DELETE_LLM_INSTRUCTIONS,
         preview=_vapp_delete_preview,
+        governed_subops=_VIM_SUB_OPS_VAPP_DELETE,
     ),
 )

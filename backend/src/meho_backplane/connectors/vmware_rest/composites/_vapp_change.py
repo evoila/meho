@@ -34,6 +34,8 @@ from meho_backplane.connectors.vmware_rest.composites._teardown_reads import (
     read_object,
 )
 from meho_backplane.connectors.vmware_rest.composites._vapp import (
+    _VIM_SUB_OPS_VAPP_CREATE,
+    _VIM_SUB_OPS_VAPP_POWER,
     OP_CREATE_VAPP,
     OP_POWER_OFF_VAPP_TASK,
     OP_POWER_ON_VAPP_TASK,
@@ -482,6 +484,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VAPP_CREATE_LLM_INSTRUCTIONS,
         preview=_create_preview,
+        governed_subops=_VIM_SUB_OPS_VAPP_CREATE,
     ),
     CompositeSpec(
         op_id=OP_ID_VAPP_POWER,
@@ -500,6 +503,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VAPP_POWER_LLM_INSTRUCTIONS,
         preview=_power_preview,
+        governed_subops=_VIM_SUB_OPS_VAPP_POWER,
         classifier_other=True,
     ),
 )

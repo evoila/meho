@@ -60,6 +60,12 @@
 # CLI, the workflows, the docs). The fan-in requires that job to pass on this
 # path. push and merge_group always run everything.
 #
+# Test map run (#5642): a PR that would otherwise run all the unit shards
+# runs one unit job with only the tests its change can break. The nightly
+# run makes the test map (which tests run each source file) from its
+# coverage data; the `changes` job picks the tests with it. Any doubt means
+# all the shards. push and merge_group always run all the shards.
+#
 # Out of scope (deliberately delegated to existing workflows; do not
 # duplicate here):
 #   * Backplane image build / push  -> .github/workflows/image.yml
@@ -237,16 +243,34 @@ jobs:
     #                which diffs qualify, and any doubt, any error, and every
     #                merge_group / push run give empty (the full run).
     #
+    #   test_map — `true` when the test map picked the unit tests of a PR
+    #                (#5642). Only computed on a PR that is not docs-only, has
+    #                a backend change and is not a one-connector run. The
+    #                step `map` downloads the newest map that the nightly run
+    #                on `main` made, and backend/tests/_unit_test_map.py picks
+    #                the tests. The step `upload-selection` stores them for
+    #                the `python-unit-shard` job. Same fail-closed rule: no
+    #                map, an old map, a file the map cannot judge, too many
+    #                tests, any error, and every merge_group / push run give
+    #                `false` (the full run).
+    #
     # Same fork-PR guard as the other jobs; the dependent jobs re-check
     # head.repo in their own `if:`.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # actions: read lets the step `map` list and download the test map
+    # artifact of the nightly run (#5642).
+    permissions:
+      contents: read
+      actions: read
     outputs:
       migrations: ${{ steps.detect.outputs.migrations }}
       docs_only: ${{ steps.detect.outputs.docs_only }}
       backend_python: ${{ steps.detect.outputs.backend_python }}
       single_connector: ${{ steps.detect.outputs.single_connector }}
+      # `true` only when the picked tests were also stored.
+      test_map: ${{ steps.map.outputs.test_map == 'true' && steps.upload-selection.outcome == 'success' && 'true' || 'false' }}
     steps:
       - name: Checkout
         # On a PR, HEAD is the test merge: the PR on top of the newest
@@ -346,6 +370,54 @@ jobs:
             echo "backend_python=${backend_python}"
             echo "single_connector=${single_connector}"
           } >> "$GITHUB_OUTPUT"
+      - name: Pick unit tests with the test map
+        # #5642. Only on a pull request that would otherwise run all the unit
+        # shards. Every failure below gives test_map=false (the full run);
+        # the step itself never fails. The artifact must come from a run on
+        # `main`: only the nightly run makes it (python-coverage-combine).
+        id: map
+        if: >-
+          github.event_name == 'pull_request' &&
+          steps.detect.outputs.docs_only == 'false' &&
+          steps.detect.outputs.backend_python == 'true' &&
+          steps.detect.outputs.single_connector == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set +e -o pipefail
+          test_map=false
+          dir="${RUNNER_TEMP}/unit-test-map"
+          mkdir -p "${dir}"
+          if [ "${EVENT_NAME}" != "pull_request" ]; then
+            line="full suite: not a pull request (${EVENT_NAME})"
+          elif ! artifact="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=unit-test-map&per_page=20" --jq '[.artifacts[] | select(.expired == false and .workflow_run.head_branch == "main")][0].id // empty')"; then
+            line="full suite: could not list the test map artifacts"
+          elif [ -z "${artifact}" ]; then
+            line="full suite: no test map from a nightly run on main"
+          elif ! gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact}/zip" > "${dir}/map.zip"; then
+            line="full suite: could not download the test map"
+          elif ! line="$(git -c core.quotePath=false diff --name-only --no-renames HEAD^1 HEAD | python3 backend/tests/_unit_test_map.py pick --map "${dir}/map.zip" --out "${dir}/selection.txt")"; then
+            line="full suite: the test map tool failed"
+          elif [ -s "${dir}/selection.txt" ]; then
+            test_map=true
+          fi
+          echo "${line}"
+          echo "::notice title=Unit tests::${line}"
+          echo "test_map=${test_map}" >> "$GITHUB_OUTPUT"
+      - name: Store the picked unit tests
+        # The python-unit-shard job downloads this list. A failed upload
+        # gives test_map=false (see the job outputs), so the full run.
+        id: upload-selection
+        if: steps.map.outputs.test_map == 'true'
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: unit-test-selection
+          path: ${{ runner.temp }}/unit-test-map/selection.txt
+          retention-days: 1
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------
   # Required unit lane, sharded (#3251). The pre-#3251 monolithic
@@ -449,12 +521,16 @@ jobs:
         run: uv run mypy src/
 
   python-unit-shard:
-    name: ${{ needs.changes.outputs.single_connector != '' && format('Python unit tests for connector {0}', needs.changes.outputs.single_connector) || format('Python unit shard {0}/5', matrix.shard) }}
+    name: ${{ needs.changes.outputs.single_connector != '' && format('Python unit tests for connector {0}', needs.changes.outputs.single_connector) || needs.changes.outputs.test_map == 'true' && 'Python unit tests picked by the test map' || format('Python unit shard {0}/5', matrix.shard) }}
     # One-connector run (#5297): when `changes` sets single_connector, the
     # matrix below has ONE leg, and the pytest step runs that connector's
     # tests plus the contract set (tests/_unit_connector_select.py) instead
     # of a quarter of the suite. Only a pull request can get there; the
     # merge queue and pushes to `main` always run the five shards.
+    # Test map run (#5642): when `changes` sets test_map, the matrix also has
+    # ONE leg, and the pytest step runs the tests that `changes` picked and
+    # stored as the artifact `unit-test-selection`. Same rule: only a
+    # pull request.
     #
     # Non-required checks (one per matrix leg: `Python unit shard 1/5`
     # to `.../5/5`) — the required context is carried by
@@ -497,7 +573,7 @@ jobs:
       # (tests/_unit_shard_durations.json, see tests/_unit_shard_split.py).
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(needs.changes.outputs.single_connector != '' && '[1]' || '[1, 2, 3, 4, 5]') }}
+        shard: ${{ fromJSON((needs.changes.outputs.single_connector != '' || needs.changes.outputs.test_map == 'true') && '[1]' || '[1, 2, 3, 4, 5]') }}
     # 20-min cap: hang backstop only. Expected job wall is ~8 min (setup ~2 min
     # + pytest ~6 min); the perf-budget step below is the PR-level early-warning
     # gate that fires well before this cap. The pre-shard lane's 25-min cap
@@ -969,6 +1045,15 @@ jobs:
           sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends php-cli
           php --version | head -1
 
+      - name: Download the picked unit tests
+        # Test map run (#5642): the list the `changes` job stored.
+        if: needs.changes.outputs.test_map == 'true'
+        timeout-minutes: 2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: unit-test-selection
+          path: ${{ runner.temp }}/unit-test-selection
+
       - name: Pytest (unit shard ${{ matrix.shard }}/5)
         # `shell: bash` for `mapfile` + arrays (and the pipefail/-e the
         # default self-hosted shell does not enable — #2865). Under -e a
@@ -1012,6 +1097,8 @@ jobs:
           MEHO_SKIP_SPEC_INGEST_TESTS: "1"
           # #5297: set only on a pull request that changes one connector.
           SINGLE_CONNECTOR: ${{ needs.changes.outputs.single_connector }}
+          # #5642: `true` on a pull request whose tests the test map picked.
+          TEST_MAP: ${{ needs.changes.outputs.test_map }}
         # PARALLELIZED two ways now (#3251): by test FILE across shards
         # (this matrix) AND pytest-xdist WITHIN each shard. #585 unblocked
         # xdist by adding process-wide global-registry snapshot/restore +
@@ -1071,6 +1158,11 @@ jobs:
             # non-zero (and fails this step) if the short run is not safe.
             TOTAL=1
             find tests -name 'test_*.py' -not -path 'tests/integration/*' -not -path 'tests/migrations/*' | sort | uv run python tests/_unit_connector_select.py select --connector "${SINGLE_CONNECTOR}" > "${RUNNER_TEMP}/unit-files.txt"
+          elif [ "${TEST_MAP}" = "true" ]; then
+            # Test map run (#5642): one job, no split. The list holds test
+            # files and pytest test ids; the `changes` job picked them.
+            TOTAL=1
+            cp "${RUNNER_TEMP}/unit-test-selection/selection.txt" "${RUNNER_TEMP}/unit-files.txt"
           else
             find tests -name 'test_*.py' -not -path 'tests/integration/*' -not -path 'tests/migrations/*' | sort | uv run python tests/_unit_shard_split.py --shard "${SHARD}" --total "${TOTAL}" > "${RUNNER_TEMP}/unit-files.txt"
           fi
@@ -1139,9 +1231,9 @@ jobs:
         # a shard that ran over the budget still shows where the time went.
         # continue-on-error + timeout-minutes: a failed or hung upload must
         # never fail or hold the shard.
-        # Not on a one-connector run (#5297): its times cover only some
-        # files, so they must not be mixed into a refresh.
-        if: always() && hashFiles('backend/pytest-unit-shard.xml') != '' && needs.changes.outputs.single_connector == ''
+        # Not on a one-connector run (#5297) or a test map run (#5642): their
+        # times cover only some files, so they must not be mixed into a refresh.
+        if: always() && hashFiles('backend/pytest-unit-shard.xml') != '' && needs.changes.outputs.single_connector == '' && needs.changes.outputs.test_map != 'true'
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -1572,7 +1664,7 @@ jobs:
     # all their data; on the 7 GiB heavy runner, 5 shards of ~4,000-4,700
     # tests still ran 19-29 min of pytest and peaked at the memory limit.
     # ~2,700 tests per shard keeps each one near 15-20 min and ~4 GiB.
-    # If a shard's wall approaches its 30-min step cap, or its memory nears
+    # If a shard's wall approaches its 45-min step cap, or its memory nears
     # the runner's limit, raise the shard count — bump the matrix, TOTAL in
     # the pytest step AND the combine job's download steps, in lockstep
     # (tests/test_ci_coverage_shards.py pins the lockstep). This job stays
@@ -1621,8 +1713,9 @@ jobs:
     #      runner itself is wedged — step 9 still `in_progress` at the ~60-min
     #      job kill on the v0.28.0 cut (run 31199593016, cancelled 2×) — so a
     #      runner-enforced timeout is not a reliable backstop for a pytest hang.
-    #   2. STEP `timeout-minutes: 30` (~19-min per-shard wall + growth
-    #      headroom, #3172) — runner-enforced backstop for a hang the per-test
+    #   2. STEP `timeout-minutes: 45` (~19-min per-shard wall + growth
+    #      headroom, #3172; 45 since the shards record test names, #5642)
+    #      — runner-enforced backstop for a hang the per-test
     #      SIGALRM cannot reach (a stall during COLLECTION before any test
     #      item starts, or a GIL-locked C call that never returns to the main
     #      thread). A step timeout is a step FAILURE, absorbed by whole-job
@@ -1633,8 +1726,8 @@ jobs:
     #      shard-data upload 2, log upload 2, memory print 1 — the v0.31.0
     #      cut proved a hang CAN escape into a post-pytest step via the
     #      pytest step's debris), so the bounded-step worst case is
-    #      30 + 2 + 2 + 1 = 35 min + pre-pytest setup (35–75 s observed)
-    #      ≈ 36 — the step caps always fire before
+    #      1 + 45 + 2 + 2 + 1 = 51 min + pre-pytest setup (35–75 s observed)
+    #      ≈ 52 — the step caps always fire before
     #      this job cap for any hang under a bounded step, and a job-level
     #      expiry (which CANCELS the job; `cancelled` leaks past
     #      continue-on-error into the run conclusion — the exact
@@ -1766,7 +1859,10 @@ jobs:
         # 55-min job cap. A shard that hits this cap loses ALL its coverage
         # data (its processes are killed before they write), so raise the
         # shard count before any shard gets near it.
-        timeout-minutes: 30
+        # 45 (#5642): the shards record which test ran each line (the test
+        # map), which needs the slower C tracer. In the measurement (#5298)
+        # pytest took 1.7 times as long, and the slowest shard 37 min.
+        timeout-minutes: 45
         # Force bash so the run below gets pipefail + PIPESTATUS: the
         # self-hosted pool's default shell does NOT enable `pipefail`, which
         # let `pytest | tee` mask a hang's non-zero exit as step SUCCESS
@@ -1777,7 +1873,7 @@ jobs:
           MEHO_REDACTION_SPACY_MODEL: en_core_web_sm
           # Same lane-placement opt-out as the required unit lane's
           # Pytest step (#2980) — this job re-runs that sweep, serially
-          # and under a 30-min per-shard step cap, so the canary's full-ingest
+          # and under a 45-min per-shard step cap, so the canary's full-ingest
           # tests are opted out here for the same budget reason. Today
           # this is belt-and-suspenders (this job has no spec-shelf
           # checkout, so those tests skip on shelf absence anyway);
@@ -1792,10 +1888,13 @@ jobs:
           # never runs — the combine is deferred to a standalone step after
           # this one, by which point all workers are dead and their memory freed.
           COVERAGE_PROCESS_START: .coveragerc.ci
-          # sysmon (PEP 669) is the faster tracer; line counts match the C
-          # tracer exactly (SonarCloud parity), and it does not raise the peak
-          # vs the C tracer in measurement.
-          COVERAGE_CORE: sysmon
+          # The C tracer (#5642). .coveragerc.ci sets dynamic_context =
+          # test_function, so every line records the test that ran it (the
+          # input of the test map). The faster sysmon (PEP 669) core cannot
+          # record that: coverage 7.14 warns and falls back to the C tracer
+          # anyway, so name it here. Line counts are the same in both cores
+          # (SonarCloud parity).
+          COVERAGE_CORE: ctrace
         # Same unit sweep as the required lane (--ignore=tests/integration), but
         # -n 1 (serial) to keep the coverage-inflated peak under the pod limit
         # (see the memory table in this job's header). --dist loadscope keeps a
@@ -1816,7 +1915,7 @@ jobs:
         # no re-run. --max-worker-restart=0 then caps ANY other worker death
         # (segfault / OOM-kill) at zero retries, so a single failure can never
         # multiply into a job-cap overrun. 300 s sits well above the slowest
-        # honest test yet far below the 30-min step cap. tee preserves the full
+        # honest test yet far below the 45-min step cap. tee preserves the full
         # log for the hang-diagnostic artifact below; `exit ${PIPESTATUS[0]}`
         # propagates pytest's OWN exit (not tee's) so a hang reads as a step
         # FAILURE the job's continue-on-error absorbs — `shell: bash` above
@@ -1837,8 +1936,11 @@ jobs:
             echo "::error::shard ${SHARD} selected 0 test files — stride selection broken"
             exit 1
           fi
+          # --junitxml (#5642): every test id of this shard. The combine job
+          # turns coverage's test names into pytest test ids with it.
           uv run pytest -n 1 --dist loadscope -p no:cov \
             --timeout=300 --timeout-method=signal --max-worker-restart=0 \
+            --junitxml="pytest-coverage-junit-${SHARD}.xml" \
             "${SHARD_FILES[@]}" 2>&1 | tee pytest-coverage.log
           exit "${PIPESTATUS[0]}"
 
@@ -1859,7 +1961,10 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: python-coverage-data-shard-${{ matrix.shard }}
-          path: backend/.coverage.*
+          # The junit file (#5642) goes with the data: the test map needs both.
+          path: |
+            backend/.coverage.*
+            backend/pytest-coverage-junit-*.xml
           include-hidden-files: true
           retention-days: 1
           if-no-files-found: warn
@@ -1958,11 +2063,11 @@ jobs:
         github.event.pull_request.head.repo.full_name == github.repository &&
         contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate')))
     runs-on: meho-runners-ci
-    # 26 > the 22 min of bounded step caps below + ~1-2 min of honest
+    # 33 > the 29 min of bounded step caps below + ~1-2 min of honest
     # checkout/uv/sync — the step caps always fire before this job cap, so
     # a stall degrades to an absorbed step failure, never a run-level
     # cancellation (the #2800/#3172 leak).
-    timeout-minutes: 26
+    timeout-minutes: 33
     continue-on-error: true
     defaults:
       run:
@@ -1984,6 +2089,7 @@ jobs:
         run: uv sync --locked --all-groups
 
       - name: Download shard 1 coverage data
+        id: shard-1
         # Same pinned download-artifact as quality-gate.yml. Eight explicit
         # name-addressed downloads (not a pattern match) keep the step free
         # of newer-action feature dependencies; continue-on-error tolerates
@@ -1996,6 +2102,7 @@ jobs:
           path: backend
 
       - name: Download shard 2 coverage data
+        id: shard-2
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
@@ -2004,6 +2111,7 @@ jobs:
           path: backend
 
       - name: Download shard 3 coverage data
+        id: shard-3
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
@@ -2012,6 +2120,7 @@ jobs:
           path: backend
 
       - name: Download shard 4 coverage data
+        id: shard-4
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
@@ -2020,6 +2129,7 @@ jobs:
           path: backend
 
       - name: Download shard 5 coverage data
+        id: shard-5
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
@@ -2028,6 +2138,7 @@ jobs:
           path: backend
 
       - name: Download shard 6 coverage data
+        id: shard-6
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
@@ -2036,6 +2147,7 @@ jobs:
           path: backend
 
       - name: Download shard 7 coverage data
+        id: shard-7
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
@@ -2044,6 +2156,7 @@ jobs:
           path: backend
 
       - name: Download shard 8 coverage data
+        id: shard-8
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
@@ -2076,9 +2189,10 @@ jobs:
         # RELEASING.md tag gate. A step cap converts that hang into an
         # absorbed step FAILURE — run stays `success`, coverage degrades to
         # "none for this run", the documented lossy contract. This fan-in
-        # job's budget: downloads 8 x 2 + this step 4 + upload 2 = 22 min
-        # of bounded steps + checkout/uv/sync (~1-2 min honest) under the
-        # 26-min job cap, so step caps always fire first.
+        # job's budget: downloads 8 x 2 + this step 4 + upload 2 + the test
+        # map 5 + its upload 2 = 29 min of bounded steps + checkout/uv/sync
+        # (~1-2 min honest) under the 33-min job cap, so step caps always
+        # fire first.
         if: always()
         timeout-minutes: 4
         run: |
@@ -2110,6 +2224,44 @@ jobs:
           name: python-coverage
           path: backend/coverage.xml
           retention-days: 7
+          if-no-files-found: warn
+
+      - name: Make the unit test map
+        # #5642. The map says which tests run each source file. Pull
+        # requests use it to run only the tests their change can break (the
+        # `changes` job, step `map`). Only the nightly run on `main` makes
+        # it, and only when all 8 shards delivered their data: a map from
+        # partial data would pick too few tests.
+        id: test-map
+        if: >-
+          always() && github.event_name == 'schedule' &&
+          hashFiles('backend/.coverage') != '' &&
+          steps.shard-1.outcome == 'success' && steps.shard-2.outcome == 'success' &&
+          steps.shard-3.outcome == 'success' && steps.shard-4.outcome == 'success' &&
+          steps.shard-5.outcome == 'success' && steps.shard-6.outcome == 'success' &&
+          steps.shard-7.outcome == 'success' && steps.shard-8.outcome == 'success'
+        # No map tonight is fine: pull requests then run all the shards.
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          mapfile -t junit < <(ls pytest-coverage-junit-*.xml 2>/dev/null)
+          if [ "${#junit[@]}" -ne 8 ]; then
+            echo "::warning::found ${#junit[@]} of 8 junit files; no test map tonight"
+            exit 0
+          fi
+          uv run python tests/_unit_test_map.py build --data .coverage \
+            --commit "${GITHUB_SHA}" --out unit-test-map.json "${junit[@]}"
+
+      - name: Upload the unit test map
+        # Pull requests use a map for at most 7 days, so keep it for 8.
+        if: always() && steps.test-map.outcome == 'success' && hashFiles('backend/unit-test-map.json') != ''
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: unit-test-map
+          path: backend/unit-test-map.json
+          retention-days: 8
           if-no-files-found: warn
 
 

@@ -4081,6 +4081,40 @@ class VmwareRestConnector(HttpConnector):
 
         return await local_account_policy_set_impl(self, operator, target, params)
 
+    async def host_certificate_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.certificate.show`` -- the TLS certificate of one ESXi host.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_certificate.host_certificate_show_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_certificate import (
+            host_certificate_show_impl,
+        )
+
+        return await host_certificate_show_impl(self, operator, target, params)
+
+    async def host_tpm_attestation(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.tpm.attestation`` -- TPM and attestation state of hosts.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_certificate.host_tpm_attestation_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_certificate import (
+            host_tpm_attestation_impl,
+        )
+
+        return await host_tpm_attestation_impl(self, operator, target, params)
+
     def trace_response_body(self, response: httpx.Response) -> Any:
         """Mask secret-named setting values before the flight recorder records the answer.
 

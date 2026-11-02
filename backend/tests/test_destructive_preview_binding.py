@@ -377,7 +377,7 @@ def test_blast_radius_refusal_carries_builder_error_with_secrets_redacted() -> N
     reason carries its error. That text is ``str(exc)``, so it goes through the
     same redaction + length cap as every other error a result builder emits.
     """
-    token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJlLXZhbHVl"
+    token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJlLXZhbHVl"  # gitleaks:allow
     leaky = {
         "preview_unavailable": True,
         "preview_error": f"RuntimeError: upstream said Authorization: Bearer {token}",

@@ -93,6 +93,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.vault_creds import (
     CredentialsReadError,
     VaultCredentialsReadError,
@@ -356,6 +357,8 @@ class KeycloakConnector(HttpConnector):
         # (``target_cache_key``) so two same-named targets in different
         # tenants never share a cached admin token (#1642/#1672).
         self._admin_tokens: dict[tuple[str, str], _CachedToken] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._token_lock = asyncio.Lock()
         self._credentials_loader: KeycloakAdminCredentialsLoader = (
             credentials_loader
@@ -417,8 +420,13 @@ class KeycloakConnector(HttpConnector):
             now = time.monotonic()
             cached = self._admin_tokens.get(cache_key)
             if cached is not None and cached.is_fresh(now):
+                # The caller's own Vault read, once per caller and target.
+                await self._readers.ensure_read(
+                    target, operator, lambda: self._credentials_loader(target, operator)
+                )
                 return cached.token
             token, ttl = await self._mint_admin_token(target, operator)
+            self._readers.record(target, operator)
             self._admin_tokens[cache_key] = _CachedToken(token, now + ttl)
             return token
 
@@ -1264,6 +1272,7 @@ class KeycloakConnector(HttpConnector):
         """
         async with self._token_lock:
             self._admin_tokens.pop(target_cache_key(target), None)
+            self._readers.forget(target)
 
     async def aclose(self) -> None:
         """Clear cached admin tokens then tear down the httpx pool.
@@ -1277,6 +1286,7 @@ class KeycloakConnector(HttpConnector):
         """
         async with self._token_lock:
             self._admin_tokens.clear()
+            self._readers.clear()
         await super().aclose()
 
 

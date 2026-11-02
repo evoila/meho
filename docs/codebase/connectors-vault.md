@@ -46,6 +46,16 @@ on:
 | `vault_role` | selector | JWT role to log in under | `settings.vault_oidc_role` (`meho-mcp`) |
 | `vault_mount` | optional | JWT auth-method mount the role lives on | `settings.vault_oidc_mount_path` |
 
+Only a platform admin may set or change these two keys. `POST` and
+`PATCH /api/v1/targets`, and `targets.register` (which calls the same
+create handler), run `enforce_vault_login_extras_platform_admin`
+(`targets/vault_login_extras.py`) before they store `extras`: when the
+stored value of `vault_role` or `vault_mount` would change and the
+operator has no `platform_admin`, the request gets HTTP 403
+`vault_login_role_requires_platform_admin`. A `PATCH` that re-sends the
+same values, or touches other fields, passes; so an existing target keeps
+its role and still logs in under it. The resolver below does not change.
+
 The Vault **address** stays global (`settings.vault_addr`) — there is one
 Vault. Only role + auth-mount are per-target.
 

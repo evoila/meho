@@ -103,6 +103,7 @@ from packaging.version import InvalidVersion, Version
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.profile_auth import SESSION_TOKEN_OBJECT_KEY
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import (
     CredentialsReadError,
@@ -862,6 +863,8 @@ class VmwareRestConnector(HttpConnector):
         # file read (the VM screenshot).
         self._file_access_cookies: dict[tuple[str, str], str] = {}
         self._file_access_lock = asyncio.Lock()
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._session_lock = asyncio.Lock()
         self._session_loader: VsphereSessionLoader = (
             session_loader if session_loader is not None else load_session_credentials_from_vault
@@ -1463,8 +1466,20 @@ class VmwareRestConnector(HttpConnector):
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
+                await self._ensure_read(target, operator)
                 return cached
             return await self._establish_and_cache_session(target, operator, cache_key)
+
+    async def _ensure_read(self, target: VsphereTargetLike, operator: Operator) -> None:
+        """Run the caller's own Vault read of *target*'s secret, once per caller.
+
+        A cached vAPI or SOAP session is used by a caller only after this
+        read passed. The read's result is not needed: the session is minted
+        already.
+        """
+        await self._readers.ensure_read(
+            target, operator, lambda: self._session_loader(target, operator)
+        )
 
     def _session_max_age_exceeded(self, cache_key: tuple[str, str]) -> bool:
         """Return ``True`` iff *cache_key*'s cached session is past the max-age (#3773a).
@@ -1505,6 +1520,7 @@ class VmwareRestConnector(HttpConnector):
         *cache_key* without a name reverse-map.
         """
         creds = await self._session_loader(target, operator)
+        self._readers.record(target, operator)
         client = await self._http_client(target)
         try:
             username = creds["username"]
@@ -1896,6 +1912,7 @@ class VmwareRestConnector(HttpConnector):
         any other fault a :class:`RuntimeError` naming only the target.
         """
         creds = await self._session_loader(target, operator)
+        self._readers.record(target, operator)
         try:
             username = creds["username"]
             password = creds["password"]
@@ -1968,6 +1985,8 @@ class VmwareRestConnector(HttpConnector):
         cache_key = target_cache_key(target)
         async with self._file_access_lock:
             cookie = self._file_access_cookies.get(cache_key)
+            if cookie is not None:
+                await self._ensure_read(target, operator)
             if cookie is None:
                 cookie = await self._vcenter_soap_login(
                     target, operator, service="datastore file access"
@@ -2022,6 +2041,7 @@ class VmwareRestConnector(HttpConnector):
             cookie = self._pbm_cookies.get(cache_key)
             profile_manager = self._pbm_profile_managers.get(cache_key)
             if cookie and profile_manager:
+                await self._ensure_read(target, operator)
                 return cookie, profile_manager
             # 1 + 2. vim SOAP login on /sdk → vmware_soap_session cookie.
             # httpx unquotes cookie values; strip any surviving quotes so the
@@ -2349,6 +2369,8 @@ class VmwareRestConnector(HttpConnector):
         cache_key = target_cache_key(target)
         async with self._vsan_lock:
             session = self._vsan_sessions.get(cache_key)
+            if session is not None:
+                await self._ensure_read(target, operator)
             if session is None:
                 cookie = await self._vcenter_soap_login(target, operator, service="vsan")
                 api_version = await self._service_versions_or_none(
@@ -2699,6 +2721,19 @@ class VmwareRestConnector(HttpConnector):
         self._file_access_cookies.pop(cache_key, None)
         if flavor == HOST_FLAVOR_ESXI and token is not None:
             await self._esxi_logout_quiet(cache_key, sm_moid, extensions or {})
+
+    async def invalidate_credentials(self, target: VsphereTargetLike) -> None:
+        """Drop every session of *target* and forget who has read its secret.
+
+        Called after a failed login and after a target change. The vAPI
+        session and the SOAP sessions (storage policy, vSAN, datastore file
+        access) are dropped as in :meth:`invalidate_session`. The next call
+        of every caller reads the secret from Vault again, under their own
+        login, and logs in with what it finds.
+        """
+        await self.invalidate_session(target)
+        async with self._session_lock:
+            self._readers.forget(target)
 
     async def fingerprint(
         self,
@@ -4263,6 +4298,7 @@ class VmwareRestConnector(HttpConnector):
             sm_moids = dict(self._esxi_session_manager_moids)
             extensions_by_key = dict(self._session_extensions)
             self._session_tokens.clear()
+            self._readers.clear()
             self._session_established_at.clear()  # #3773 max-age clock
             self._session_paths.clear()
             self._session_flavors.clear()

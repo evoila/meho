@@ -56,8 +56,8 @@ a re-run to report ``unchanged``. That write is audited inside this op's
 audit row (its params carry the store ref) and by Vault's own audit
 device; no separate ``vault.kv.patch`` row is written.
 
-``vcfa.provider.api_token.create`` is pinned ``credential_mint`` in
-:data:`meho_backplane.broadcast.events._CREDENTIAL_MINT_OPS`, so its
+``vcfa.provider.api_token.create`` is declared ``credential_mint`` in
+``vcf_automation/op_classes.py``, so its
 broadcast collapses to aggregate-only and the flight recorder never
 records its bodies (the OAuth form carries the session JWT as the
 ``assertion``; the token response carries the refresh token).

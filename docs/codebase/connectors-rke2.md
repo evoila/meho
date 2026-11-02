@@ -399,7 +399,7 @@ the sudo script (a shell `$(cat ...)`, never entering Python) and passed to
 `rke2` via the `RKE2_TOKEN` env, and the NEW token is minted node-side by
 `rke2 token rotate` itself, read back over the SSH channel, written to Vault,
 and returned only as a pointer. The
-op is additionally pinned in `broadcast/events._CREDENTIAL_MINT_OPS`
+op is additionally declared `credential_mint` in `rke2/op_classes.py`
 (defence-in-depth: `.rotate` would otherwise classify `other` and broadcast
 full detail) and its park-time preview carries no token value.
 
@@ -469,8 +469,8 @@ log line.
 - `rke2.node.service.restart` classifies plain `write` via the `.restart`
   write-suffix added to `broadcast/events.py::_WRITE_SUFFIXES`; its params
   (a single unit) carry no secret.
-- `rke2.node.config.update` is pinned in
-  `broadcast/events.py::_CREDENTIAL_WRITE_OPS` (its `patch` may carry a
+- `rke2.node.config.update` is declared `credential_write` in
+  `rke2/op_classes.py` (its `patch` may carry a
   `token:` value), so the broadcast collapses to aggregate-only.
 - Approval-park previews: `_rke2_service_restart_preview` renders
   `{resource: systemd_unit, unit, action, node}`; `_rke2_config_update_preview`

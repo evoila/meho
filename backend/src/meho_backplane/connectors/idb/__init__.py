@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.idb import op_classes  # noqa: F401 -- declares the op classes
 from meho_backplane.connectors.idb.connector import (
     IdbConnectorBase,
     IdbRestConnector,

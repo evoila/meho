@@ -3,8 +3,8 @@
 
 """Approval preview for ``vmware.composite.vm.guest.file.read`` (#4850).
 
-The op logs into the guest OS, so it is pinned ``credential_write``
-(:data:`~meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS`) and the
+The op logs into the guest OS, so it is declared ``credential_write``
+(``vmware_rest/op_classes.py``) and the
 generic echo of params is turned off. It is a ``caution`` read: an agent's
 call waits for approval, a person's call runs at once. Without this builder
 the approver of an agent's call saw only the op id and the target.

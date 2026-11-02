@@ -7639,8 +7639,8 @@ NAMESPACE_STATUS_RESPONSE_SCHEMA: dict[str, Any] = {
 #: Create a SUBSCRIBED content library subscribed to a remote publisher (the
 #: TKr/VKr image source for a vSphere Supervisor). The subscription
 #: ``password`` may be secret; it rides the request body but never a preview /
-#: broadcast / audit-hash surface (the op is pinned into
-#: ``_CREDENTIAL_WRITE_OPS`` and carries a bespoke identity-only preview).
+#: broadcast / audit-hash surface (the op is declared ``credential_write`` in
+#: ``vmware_rest/op_classes.py`` and carries a bespoke identity-only preview).
 CONTENT_LIBRARY_SUBSCRIBED_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {

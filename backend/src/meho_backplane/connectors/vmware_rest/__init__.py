@@ -36,14 +36,15 @@ themselves).
 """
 
 from meho_backplane.connectors.registry import register_connector_v2
-
-# Register the generic-ingest spec correction and safety advertisement through
-# the same package import lifecycle as this connector's v2 and typed-operation
-# registrations.
 from meho_backplane.connectors.vmware_rest import (  # noqa: F401
     ingest_corrections as _ingest_corrections,
 )
 from meho_backplane.connectors.vmware_rest import ingest_safety as _ingest_safety  # noqa: F401
+
+# Register the op classes, the generic-ingest spec correction and the safety
+# advertisement through the same package import lifecycle as this connector's
+# v2 and typed-operation registrations.
+from meho_backplane.connectors.vmware_rest import op_classes  # noqa: F401 -- declares the op classes
 from meho_backplane.connectors.vmware_rest import (  # noqa: F401
     tagging_delete_preview as _tagging_delete_preview,
 )

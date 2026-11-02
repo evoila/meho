@@ -45,6 +45,7 @@ from meho_backplane.connectors.vcf_automation import (  # noqa: F401
     _feature_flags,
     _images,
     _provisioning_preview,
+    op_classes,
 )
 from meho_backplane.connectors.vcf_automation.connector import (
     VcfAutomationConfigurationError,

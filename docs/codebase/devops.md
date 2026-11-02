@@ -2037,8 +2037,10 @@ runs one short job instead.
 - **Classification (fail-closed).** The `changes` job has a third output,
   `backend_python`. It starts `true` and is `false` only when the event is
   `pull_request`, the diff could be computed, no changed path apart from
-  `.md` files is under `backend/`, and `.github/workflows/ci.yml` did not
-  change. `push` and `merge_group` always keep it `true`. It uses the same
+  `.md` files is under `backend/`, and neither `.github/workflows/ci.yml`
+  nor the spec-shelf lists (`ci/spec-shelf/`, `scripts/ci/spec_shelf.sh`)
+  changed. The shelf check runs only in the unit and integration shards,
+  so a new list file must not skip them. `push` and `merge_group` always keep it `true`. It uses the same
   `HEAD^1..HEAD` diff as `docs_only`. The diff runs with
   `core.quotePath=false`, so a path with non-ASCII characters (for example
   `café.json`) is printed as is and the `backend/` check sees it. Git still
@@ -2241,7 +2243,7 @@ repo. `ci.yml` provisions them at runtime, gated on a secret:
 - Both Python test jobs (`python-unit-shard` and
   `python-integration-shard` — every shard of each) carry a
   secret-gated "Checkout vendor vCenter spec-shelf" step: a cone-mode sparse
-  checkout of `docs/vcenter-9.0/` from the private
+  checkout of the listed shelf folders (for example `docs/vcenter-9.0/`) from the private
   `evoila-bosnia/claude-rdc-hetzner-dc` shelf repo into
   `$GITHUB_WORKSPACE/spec-shelf`, authenticated by the **`SPEC_SHELF_TOKEN`**
   repo secret (fine-grained PAT, Contents read-only, that single repo).
@@ -2269,9 +2271,18 @@ repo. `ci.yml` provisions them at runtime, gated on a secret:
   the shared-corpus pattern for future heavy lanes:
   [`spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md)
   §Lane placement.
+- The required shelf files are listed in `ci/spec-shelf/`, one small
+  `.txt` file per product version, one file path per line. The script
+  `scripts/ci/spec_shelf.sh` reads the lists: a step before the checkout
+  prints the shelf folders as its `paths` output (the checkout's
+  `sparse-checkout` input), and the verify step checks each file and
+  prints one line per file. A missing file fails the job with the
+  "Spec-shelf layout drift" error; a missing, empty or bad list fails it
+  too. `ci.yml` names no shelf file. Tests:
+  `backend/tests/test_ci_spec_shelf_lists.py`.
 - Per-vendor reconcile lanes beyond vCenter (#2981-#2993) extend the same
-  wiring — one `sparse-checkout` line + one verify line per product dir,
-  same `SPEC_SHELF_TOKEN`, never a new secret. Standard + extension
+  wiring — one new list file per product version, no change in
+  `ci.yml`, same `SPEC_SHELF_TOKEN`, never a new secret. Standard + extension
   mechanics + red-lane protocol:
   [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 - The `secrets` context is unavailable in step-level `if:`, so the gate is

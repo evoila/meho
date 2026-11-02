@@ -1,0 +1,2 @@
+docs/rabbitmq-4.3/http-api-index.md
+docs/rabbitmq-4.3/rabbit_shovel_mgmt_shovels.erl

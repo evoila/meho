@@ -226,6 +226,24 @@ def test_zero_window_checks_every_read_also_for_a_marked_session(
     assert check.calls == [session.id]
 
 
+def test_dropped_entry_means_a_check_even_inside_the_window(
+    clock: _FakeClock,
+    window: Callable[[int], None],
+    disabled: tuple[DecryptedSession, _FakeTokenCheck],
+) -> None:
+    """Filling the map right after login does not buy the disabled session a free read."""
+    session, check = disabled
+    revalidation.mark_session_validated(session.id)
+    clock.advance(1)
+    for _ in range(_BOUND):
+        revalidation.mark_session_validated(uuid.uuid4())
+    clock.advance(1)
+
+    assert session.id not in revalidation._last_validated
+    assert _run(_served(session)) is False
+    assert check.calls == [session.id]
+
+
 def test_full_map_drops_only_the_oldest_anchors(clock: _FakeClock) -> None:
     revalidation.reset_read_revalidation_cache_for_testing()
     ids = [uuid.uuid4() for _ in range(_BOUND + 2)]

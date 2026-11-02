@@ -468,10 +468,13 @@ var cliRedirectURIs = []string{"http://127.0.0.1:*"}
 // the description in a 255-character column; a longer one fails the
 // create with HTTP 500.
 //
-// The standard (browser) flow is on with PKCE S256 and loopback
-// redirect URIs only: `meho approvals approve` uses it for the fresh
-// sign-in an approval needs (#3979). `meho login` still uses the
-// device flow.
+// The standard (browser) flow is on with loopback redirect URIs only:
+// older CLI versions use it for the fresh sign-in an approval needs
+// (#3979). `meho login` uses the device flow, and it sends no PKCE.
+// Keycloak checks PKCE at the device login the same way as at the
+// browser sign-in, so a required PKCE method would refuse every
+// `meho login`. The client therefore requires no PKCE method; a
+// sign-in that sends a challenge is still accepted.
 func (o BootstrapOptions) desiredCLIClient() *clientRep {
 	c := &clientRep{
 		ClientID:                  o.CLIClientID,
@@ -485,7 +488,9 @@ func (o BootstrapOptions) desiredCLIClient() *clientRep {
 		ServiceAccountsEnabled:    boolPtr(false),
 		FrontchannelLogout:        boolPtr(false),
 		Attributes: map[string]string{
-			"pkce.code.challenge.method":                  "S256",
+			// An empty value makes Keycloak drop a PKCE method that an
+			// earlier run (0.40.0, 0.41.0) set on this client.
+			"pkce.code.challenge.method":                  "",
 			"oauth2.device.authorization.grant.enabled":   "true",
 			"use.refresh.tokens":                          "true",
 			"client.use.lightweight.access.token.enabled": "false",

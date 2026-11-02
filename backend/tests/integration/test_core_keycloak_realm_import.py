@@ -17,6 +17,8 @@ environment values the subchart's StatefulSet sets. Then:
    environment, so Keycloak filled the placeholders. ``meho-admin`` can read
    the realm's clients; ``meho-check-runner`` tokens carry only their own
    audience, not ``meho-backplane``.
+4. A device login on ``meho-cli`` starts without PKCE, as ``meho login``
+   starts it, and gets a device code.
 
 The login uses the password grant, switched on for ``meho-cli`` by this test
 only (people use the device flow); the client's mappers and scopes are the
@@ -347,6 +349,24 @@ def test_confidential_clients_use_the_secrets_from_the_environment(keycloak: _Ke
     audience = claims["aud"] if isinstance(claims["aud"], list) else [claims["aud"]]
     assert "meho-check-runner" in audience
     assert "meho-backplane" not in audience
+
+
+def test_device_login_on_the_cli_client_needs_no_pkce(keycloak: _Keycloak) -> None:
+    """``meho login`` starts a device login without PKCE and gets a device code.
+
+    Keycloak checks PKCE at the device login the same way as at the browser
+    sign-in. A required PKCE method on ``meho-cli`` refuses the request with
+    ``invalid_request`` ("Missing parameter: code_challenge_method").
+    """
+    resp = httpx.post(
+        f"{keycloak.base_url}/realms/meho/protocol/openid-connect/auth/device",
+        data={"client_id": "meho-cli", "scope": "openid"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["device_code"]
+    assert body["user_code"]
+    assert body["verification_uri"]
 
 
 def test_imported_realm_remembers_the_browser_and_offers_passkeys(keycloak: _Keycloak) -> None:

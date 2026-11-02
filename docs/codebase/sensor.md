@@ -106,7 +106,13 @@ See `docs/codebase/audit_query.md` § *Loose rows: the standing check*.
    `_run_evaluation`, "Dispatch identity"): a descriptor re-ingested
    above `safe` after create records `unknown`
    (`reason: op_not_safe_at_dispatch`) instead of auto-executing on
-   schedule. The platform-level reporting/triage mitigation is #2702: a
+   schedule. A `safe` operation that its connector marks as a safe write
+   (`declare_safe_writes` / `is_safe_write` in `meho_backplane.op_classes`, for example the
+   GitHub ticket writes, which need no approval) is refused the same way:
+   422 `sensor_requires_safe_operation` at create
+   (`SensorRequiresReadOperationError`) and `unknown`
+   (`reason: op_is_write_at_dispatch`) at dispatch. A Sensor runs only
+   reads. The platform-level reporting/triage mitigation is #2702: a
    connector re-ingest
    that overwrites a pinned op's `safety_level` surfaces the diff — with
    each affected sensor's id/name/tenant_id, scoped to the ingest's

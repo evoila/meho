@@ -357,8 +357,17 @@ def _is_mutating(descriptor: EndpointDescriptor) -> bool:
     return descriptor.safety_level != "safe"
 
 
-def _sandbox_delete_grant_note() -> str:
-    """The sentence a park reason adds in sandbox mode (#4622)."""
+def _sandbox_delete_grant_note(*, decide_only: bool = False) -> str:
+    """The sentence a park reason adds in sandbox mode (#4622).
+
+    The preview (``decide_only``, #5492) has already looked for a delete
+    grant when it shows this reason, so it says that none covers the call.
+    """
+    if decide_only:
+        return (
+            "; this instance is in sandbox mode, but no live delete grant covers "
+            "this call, so it waits for approval"
+        )
     return (
         "; this instance is in sandbox mode, so a delete grant made in the web console may cover it"
     )
@@ -525,6 +534,13 @@ async def _service_grant_verdict(
             target_id=target_id_str,
             grant_id=str(grant_id),
         )
+    if grant_id is not None and decide_only and descriptor.safety_level == "destructive":
+        # #5492: only a delete grant can cover a destructive call, and the
+        # real call uses it only with the hash of this preview.
+        return PermissionVerdict.AUTO_EXECUTE, (
+            f"auto-granted by delete grant {grant_id}, when the call sends the "
+            "preview_hash of this preview"
+        )
     if grant_id is not None:
         return PermissionVerdict.AUTO_EXECUTE, f"auto-granted by standing grant {grant_id}"
 
@@ -539,7 +555,9 @@ async def _service_grant_verdict(
     return None, gate_reason
 
 
-def _non_agent_park_reason(descriptor: EndpointDescriptor, *, is_service: bool) -> str | None:
+def _non_agent_park_reason(
+    descriptor: EndpointDescriptor, *, is_service: bool, decide_only: bool = False
+) -> str | None:
     """Why a non-agent call parks, or ``None`` when it runs at once.
 
     * ``destructive`` (#3198): mandatory human approval for EVERY non-agent
@@ -561,7 +579,7 @@ def _non_agent_park_reason(descriptor: EndpointDescriptor, *, is_service: bool) 
             "auto-executes, and no standing grant can pre-clear it (#3183)"
         )
         if is_service and sandbox_mode_active():
-            reason += _sandbox_delete_grant_note()
+            reason += _sandbox_delete_grant_note(decide_only=decide_only)
         return reason
     if descriptor.requires_approval:
         return "requires_approval is True; routed to the approval queue (G11.7-T1)"
@@ -617,7 +635,7 @@ async def _non_agent_verdict(
     """
     target_id_str = str(getattr(target, "id", None)) if target is not None else None
     is_service = operator.principal_kind is PrincipalKind.SERVICE
-    gate_reason = _non_agent_park_reason(descriptor, is_service=is_service)
+    gate_reason = _non_agent_park_reason(descriptor, is_service=is_service, decide_only=decide_only)
 
     if gate_reason is None and is_service:
         denial = await _service_read_scope_denial(operator=operator, target=target)
@@ -753,10 +771,8 @@ async def policy_gate(
     ``preview_hash`` and ``params`` (#4622) matter only to the
     service-principal grant consult in sandbox mode (a ``destructive``
     delete must present its own preview hash and a valid blast radius
-    first). ``decide_only`` (#4923) returns the verdict and writes nothing:
-    a grant that would clear the call is reported but not used; the
-    preview relies on this.
-    """
+    first). ``decide_only`` (#4923, #5492) returns the verdict and writes
+    nothing: a grant that would clear the call is reported but not used."""
     actor_sub = resolve_actor_sub()
     if actor_sub is not None:
         return await _direct_run_verdict(

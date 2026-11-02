@@ -18,12 +18,13 @@ live GitHub. All names are made up. Coverage:
 * ``issue_view`` reads the issue, its parent (404 means none), its
   sub-issues and the newest comments.
 * ``issue_create`` returns the number, node id and database id, and the
-  database id works as ``sub_issue_id`` for ``sub_issue_add``.
+  number works as ``sub_issue_number`` for ``sub_issue_add``.
 * ``issue_comment`` posts the body and returns the comment's id and link.
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -44,6 +45,8 @@ _OWNER = "acme"
 _REPO = "widgets"
 _ISSUES_PATH = "/repos/acme/widgets/issues"
 _SEARCH_PATH = "/search/issues"
+#: The writes need a target that names their repository.
+_WRITE_TARGET = SimpleNamespace(name="gh-acme", host="api.github.com/repos/acme/widgets", extras={})
 
 
 def _make_operator() -> Operator:
@@ -471,17 +474,18 @@ async def test_issue_view_of_a_missing_issue_raises_the_404() -> None:
 
 
 @pytest.mark.asyncio
-async def test_issue_create_returns_the_ids_and_sub_issue_add_takes_the_database_id() -> None:
+async def test_issue_create_returns_the_ids_and_sub_issue_add_takes_the_number() -> None:
     created = _issue(200, id=555, node_id="I_child", labels=[{"name": "bug"}], assignees=[])
     connector = _RecordingConnector(
+        get={f"{_ISSUES_PATH}/200": created},
         post={
             _ISSUES_PATH: created,
             f"{_ISSUES_PATH}/100/sub_issues": {"number": 100},
-        }
+        },
     )
     result = await issue_create_composite(
         operator=_make_operator(),
-        target=object(),
+        target=_WRITE_TARGET,
         params={
             "owner": _OWNER,
             "repo": _REPO,
@@ -510,12 +514,12 @@ async def test_issue_create_returns_the_ids_and_sub_issue_add_takes_the_database
 
     linked = await sub_issue_add_composite(
         operator=_make_operator(),
-        target=object(),
+        target=_WRITE_TARGET,
         params={
             "owner": _OWNER,
             "repo": _REPO,
             "issue_number": 100,
-            "sub_issue_id": result["id"],
+            "sub_issue_number": result["number"],
         },
         connector=connector,  # type: ignore[arg-type]
     )
@@ -532,7 +536,7 @@ async def test_issue_create_sends_only_the_title_when_nothing_else_is_given() ->
     connector = _RecordingConnector(post={_ISSUES_PATH: _issue(1)})
     await issue_create_composite(
         operator=_make_operator(),
-        target=object(),
+        target=_WRITE_TARGET,
         params={"owner": _OWNER, "repo": _REPO, "title": "Only a title"},
         connector=connector,  # type: ignore[arg-type]
     )
@@ -545,7 +549,7 @@ async def test_issue_create_refuses_a_bad_assignee_before_any_call() -> None:
     with pytest.raises(ValueError, match="login"):
         await issue_create_composite(
             operator=_make_operator(),
-            target=object(),
+            target=_WRITE_TARGET,
             params={"owner": _OWNER, "repo": _REPO, "title": "t", "assignees": ["@someone"]},
             connector=connector,  # type: ignore[arg-type]
         )
@@ -565,7 +569,7 @@ async def test_issue_comment_posts_the_body() -> None:
     )
     result = await issue_comment_composite(
         operator=_make_operator(),
-        target=object(),
+        target=_WRITE_TARGET,
         params={"owner": _OWNER, "repo": _REPO, "issue_number": 7, "body": "Done."},
         connector=connector,  # type: ignore[arg-type]
     )

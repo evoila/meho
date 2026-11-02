@@ -32,7 +32,8 @@ registers at start-up, of every connector, against ten rules:
     (``create``, ``delete``, ``set``, ``start``, ...; the list is
     :data:`meho_backplane.delete_names.WRITE_WORDS`). The real reads whose
     id holds such a word are in :data:`READS_WITH_A_WRITE_WORD`, each with
-    a reason.
+    a reason. The few writes that are ``safe`` on purpose are in
+    :data:`SAFE_WRITES_ON_PURPOSE`, each with its decision record.
 
 Today's gaps live in ``tests/data/operation_contract_gaps.yaml``. The test
 fails on a gap that is not in that list (a new gap) and on a listed gap that
@@ -61,6 +62,7 @@ from sqlalchemy import select
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.delete_names import write_word_in_op_id
+from meho_backplane.op_classes import is_safe_write
 from meho_backplane.operations._param_errors import describe_violation
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS
 from meho_backplane.operations.typed_register import run_typed_op_registrars
@@ -87,6 +89,23 @@ RULES: Final[tuple[str, ...]] = (
 READS_WITH_A_WRITE_WORD: Final[Mapping[str, str]] = {
     "mssql.ha.sync-health": "reads the health of the availability-group sync",
     "winsrv.system.pending-reboot": "reads whether a reboot is pending; reboots nothing",
+}
+
+#: Writes that are ``safe`` on purpose: they need no approval. Each names the
+#: decision record that says why. Their connector marks them as safe writes
+#: (``meho_backplane.op_classes``), so no health check and no satellite runner
+#: takes them as reads. The live test fails when an entry is no longer a
+#: registered ``safe`` operation or is not marked as a safe write.
+_TICKET_WRITES_DECISION: Final[str] = (
+    "a GitHub ticket write inside the target's repository and board; "
+    "docs/decisions/2026-11-02-github-ticket-writes-are-safe.md"
+)
+SAFE_WRITES_ON_PURPOSE: Final[Mapping[str, str]] = {
+    "gh.composite.issue_create": _TICKET_WRITES_DECISION,
+    "gh.composite.issue_comment": _TICKET_WRITES_DECISION,
+    "gh.composite.sub_issue_add": _TICKET_WRITES_DECISION,
+    "gh.composite.project_item_add": _TICKET_WRITES_DECISION,
+    "gh.composite.project_item_set_field": _TICKET_WRITES_DECISION,
 }
 
 SUMMARY_MAX: Final[int] = 120
@@ -293,6 +312,8 @@ def check_preview_builder(op: OperationContract) -> list[str]:
 def check_write_name(op: OperationContract) -> list[str]:
     if op.safety_level != "safe" or op.op_id in READS_WITH_A_WRITE_WORD:
         return []
+    if op.op_id in SAFE_WRITES_ON_PURPOSE:
+        return []
     word = write_word_in_op_id(op.op_id)
     if word is None:
         return []
@@ -456,6 +477,18 @@ async def test_reads_with_a_write_word_are_registered_and_safe() -> None:
     safe_ops = {op.op_id for op in await _registered_operations() if op.safety_level == "safe"}
     stale = sorted(set(READS_WITH_A_WRITE_WORD) - safe_ops)
     assert not stale, f"not registered as a 'safe' operation; remove from the allow list: {stale}"
+
+
+@pytest.mark.asyncio
+async def test_safe_writes_on_purpose_are_registered_safe_and_marked() -> None:
+    """Each safe write is a registered 'safe' operation that its connector marks as a safe write."""
+    safe_ops = {op.op_id for op in await _registered_operations() if op.safety_level == "safe"}
+    stale = sorted(set(SAFE_WRITES_ON_PURPOSE) - safe_ops)
+    assert not stale, f"not registered as a 'safe' operation; remove from the list: {stale}"
+    undeclared = sorted(op_id for op_id in SAFE_WRITES_ON_PURPOSE if not is_safe_write(op_id))
+    assert not undeclared, (
+        f"mark these with declare_safe_writes in the connector's op_classes: {undeclared}"
+    )
 
 
 def test_gap_list_names_only_known_rules() -> None:

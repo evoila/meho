@@ -184,28 +184,21 @@ gh-rest:
     - summary
     - llm_instructions
     - examples
-  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
   gh.composite.project_item_add:
-    - summary
     - llm_instructions
     - examples
-    - requires_approval
-  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
   gh.composite.project_item_set_field:
     - summary
     - llm_instructions
     - examples
-    - requires_approval
   gh.composite.project_view:
     - summary
     - llm_instructions
     - examples
-  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
   gh.composite.sub_issue_add:
     - summary
     - llm_instructions
     - examples
-    - requires_approval
 harbor-rest:
   harbor.about:
     - response_schema

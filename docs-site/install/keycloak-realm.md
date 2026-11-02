@@ -70,7 +70,7 @@ In the realm that hosts `meho-backplane`, create a client with:
 | Client ID | `meho-cli` (suggested — any identifier works) | Must match `config.keycloakCliClientId` in your chart values. |
 | Client authentication | **Off** (public client) | The CLI has nowhere to store a secret; the device grant against a confidential client fails with `unauthorized_client`. |
 | Standard flow | **On** | Older `meho` CLI versions open the approval sign-in on this client. The current CLI uses `meho-cli-approve` (below). `meho login` uses the device flow. |
-| PKCE method (Advanced → Proof Key for Code Exchange) | (none) | Leave it empty. `meho login` uses the device flow and sends no PKCE, so a required method refuses every `meho login`. The approval sign-in of older CLI versions sends PKCE by itself. |
+| PKCE method (Advanced → Proof Key for Code Exchange) | (none) | `meho login` sends no PKCE, and Keycloak checks PKCE at the device login too. A required method refuses every `meho login`. The browser sign-in of older CLI versions still sends a challenge, and Keycloak accepts it. |
 | Direct access grants | Off | Password grant is out of scope by design. |
 | Implicit flow | Off | Deprecated by OAuth 2.1. |
 | Service accounts roles | Off | Public clients cannot hold credentials. |
@@ -538,7 +538,7 @@ set them once (see [A realm that already runs](#a-realm-that-already-runs)).
   [The web console session](#the-web-console-session)). Deny needs no new
   sign-in.
 - **The console keeps its own limit.** MEHO ends a console session after
-  `UI_SESSION_ABSOLUTE_LIFETIME_SECONDS` (12 hours by default). The longer
+  `UI_SESSION_ABSOLUTE_LIFETIME_SECONDS` (10 hours by default). The longer
   Keycloak login does not make it longer. After that limit the console
   sends the person to the login page. In a remembered browser, that login
   asks nothing, and the new session can read and deny, but not approve
@@ -682,6 +682,7 @@ usually appear:
 | Symptom | Cause | Fix |
 |---|---|---|
 | `unauthorized_client` at login start | The client is confidential, or the device grant is off | Step 2 — public client, device grant **On**. |
+| `meho login` fails at once with `invalid_request` and "Missing parameter: code_challenge_method" | The login client (`meho-cli`) requires a PKCE method. `meho login` sends no PKCE, and Keycloak checks PKCE at the device login too. A realm made with MEHO 0.40.0, 0.41.0 or 0.42.0 (the built-in Keycloak, or `meho admin keycloak bootstrap-clients`) set `S256` on it. | Clear the PKCE method on the login client: in the admin console (Advanced → Proof Key for Code Exchange, set it to empty), or with the operation `keycloak.client.update` and the representation `{"attributes": {"pkce.code.challenge.method": ""}}` (an empty value removes the attribute). Step 2. |
 | Token issued, every call 401s with `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` | Missing protocol mappers, or the person is in none of the five groups | Step 3 — add all the mappers; Step 5 — put the person in one group. Then log out and back in. |
 | Everyone gets the same role, whatever their group | A fixed-value (Hardcoded claim) `tenant_role` mapper is still on the client | Delete it, or re-run `meho admin keycloak bootstrap-clients`, which replaces it. |
 | Token issued, every call 401s with `invalid_token` or `missing_sub`; the decoded token has no `sub` | The `basic` scope is not a default scope on the client | Step 4 — assign it, re-login (existing tokens stay broken). |

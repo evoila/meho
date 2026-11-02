@@ -191,7 +191,7 @@ For a target tagged `shared_service_account`:
 | vmware-rest | `backend/src/meho_backplane/connectors/vmware_rest/connector.py` | `_session_tokens` (in `_session_token`) | `vmware-api-session-id` cache; the G3.9 precedent every other cache here copied. |
 | harbor | `backend/src/meho_backplane/connectors/harbor/connector.py` | `_creds_cache` (in `_load_credentials`) | Credential dict cache; per-target `{username, password}` consumed via HTTP Basic. |
 | sddc-manager | `backend/src/meho_backplane/connectors/sddc_manager/connector.py` | `_creds_cache` (in `_load_credentials`) | Credential dict cache; per-target `{username, password}` consumed via HTTP Basic (username suffixed with `@sso_realm`). |
-| SSH adapter (every connector built on `SshConnector`) | `backend/src/meho_backplane/connectors/adapters/ssh.py` | `_connections` (in `_connect`) | Open SSH connection pool, keyed on `(tenant_id, id, caller kind, caller sub)`. Not a credential cache: an entry is a logged-in session, so it is handed back only to the caller whose own Vault read opened it. The caller kind keeps the check runner and an operator-less probe in their own slots, also when the runner runs a Sensor under its creator's `sub`. `invalidate_credentials` drops every caller's connection to the target. |
+| SSH adapter (every connector built on `SshConnector`) | `backend/src/meho_backplane/connectors/adapters/ssh.py` | `_connections` (in `_connect`) | Open SSH connection pool, keyed on `(tenant_id, id, caller kind, caller sub)`. Not a credential cache: an entry is a logged-in session, so it is handed back only to the caller whose own Vault read opened it. The caller kind keeps the check runner, a call without a token (a runbook verification) and an operator-less probe in their own slots, also when they run under a person's `sub`. `invalidate_credentials` drops every caller's connection to the target. |
 
 Every cache site applies a fail-closed guard before the cache lookup so a
 cache hit can never short-circuit past the loader and return
@@ -261,11 +261,13 @@ The SSH connection pool is the one cache keyed on the caller. It does not
 hold the credential; it holds an open, logged-in session. Serving that
 session to a second caller would skip the Vault read for that caller, so
 the pool keeps one connection per caller and target. A caller is the kind
-of login (a person or machine, the check runner, or the system caller)
-plus the `sub`: a Sensor runs under its creator's `sub` with the check
-runner's own token and Vault role, so it gets its own slot and never the
-person's session. The cost is one SSH login per caller per target instead
-of one per target.
+of login (a person or machine, a call without a token, the check runner,
+or the system caller) plus the `sub`. A Sensor runs under its creator's
+`sub` with the check runner's own token and Vault role, and a runbook
+verification runs under the assigned person's `sub` with no token, so
+Vault refuses its read. Each gets its own slot and never the person's
+session. The cost is one SSH login per caller per target instead of one
+per target.
 
 ### When this changes — `per_user` / `impersonation`
 

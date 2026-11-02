@@ -14,6 +14,10 @@ The check runner runs a Sensor under the ``sub`` of the person who made it,
 with the runner's own token and Vault role (``check_runner_dispatch``). So
 the runner stand-in here carries a person's ``sub``, and the Vault stand-in
 tells the runner apart by that marker, not by the ``sub``.
+
+A runbook verification runs under the assigned person's ``sub`` with no
+token (``raw_jwt=""``). The real Vault backend refuses such a read before
+any network call; the stand-in here does the same.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ import pytest
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.vault import VaultRoleDeniedError
 from meho_backplane.connectors._shared.system_operator import SYSTEM_OPERATOR_SUB
+from meho_backplane.connectors._shared.vault_creds import OperatorTokenRequiredError
 from meho_backplane.connectors.adapters.ssh import _pool_key
 from meho_backplane.connectors.linux.connector import LinuxSshConnector
 
@@ -77,8 +82,30 @@ def _check_runner(sub: str) -> Operator:
     )
 
 
+def _runbook_verification(sub: str) -> Operator:
+    """The identity a runbook verification dispatches with.
+
+    Shaped like ``runbooks.run_service._build_operator_for_dispatch``: the
+    ``sub`` of the assigned person and no token at all.
+    """
+    return Operator(
+        sub=sub,
+        name=sub,
+        email=None,
+        raw_jwt="",
+        tenant_id=_TENANT_ID,
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+
 def _reader(operator: Operator) -> str:
-    """Name the Vault reader as the stand-in records it: ``runner:<sub>`` for the runner."""
+    """Name the Vault reader as the stand-in records it.
+
+    ``runner:<sub>`` for the check runner, ``no-token:<sub>`` for a call
+    without a token, else the ``sub``.
+    """
+    if not operator.raw_jwt:
+        return f"no-token:{operator.sub}"
     return f"runner:{operator.sub}" if operator.check_runner_dispatch else operator.sub
 
 
@@ -127,6 +154,8 @@ class _Harness:
         del target
         reader = _reader(operator)
         self.vault_reads.append(reader)
+        if not operator.raw_jwt:
+            raise OperatorTokenRequiredError(f"read refused for {reader}: no token")
         if reader not in self.allowed:
             raise VaultRoleDeniedError(f"read refused for {reader}")
         return dict(_SECRET)
@@ -224,6 +253,43 @@ async def test_sensor_of_a_person_never_reuses_their_login(harness: Any) -> None
     assert len(harness.logins) == 3
     assert conn._connections[_pool_key(target, sensor_of_carol)][0] is harness.logins[1]
     assert conn._connections[_pool_key(target, carol)][0] is harness.logins[2]
+
+
+@pytest.mark.asyncio
+async def test_runbook_verification_without_token_never_reuses_a_login(harness: Any) -> None:
+    """A runbook verification runs under the assigned person's ``sub`` with no token.
+
+    After the person opened a connection, the verification with the same
+    ``sub`` must still run its own Vault read, be refused for the missing
+    token, and get no connection. A connection of the person's Sensor is
+    out of its reach too.
+    """
+    conn = LinuxSshConnector()
+    target = _Target()
+    alice, verification_as_alice = _person("alice"), _runbook_verification("alice")
+
+    await _run(conn, target, alice)
+    assert len(harness.logins) == 1
+
+    with pytest.raises(OperatorTokenRequiredError):
+        await _run(conn, target, verification_as_alice)
+
+    assert harness.vault_reads == ["alice", "no-token:alice"]
+    assert len(harness.logins) == 1
+    assert _pool_key(target, verification_as_alice) != _pool_key(target, alice)
+    assert list(conn._connections) == [_pool_key(target, alice)]
+    assert not harness.logins[0].closed
+
+    harness.allowed.add("runner:alice")
+    await _run(conn, target, _check_runner("alice"))
+    assert len(harness.logins) == 2
+
+    with pytest.raises(OperatorTokenRequiredError):
+        await _run(conn, target, verification_as_alice)
+
+    assert harness.vault_reads == ["alice", "no-token:alice", "runner:alice", "no-token:alice"]
+    assert len(harness.logins) == 2
+    assert all(not login.closed for login in harness.logins)
 
 
 @pytest.mark.asyncio

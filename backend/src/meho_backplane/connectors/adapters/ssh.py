@@ -44,15 +44,17 @@ system-initiated calls cannot read per-target vendor credentials
 :class:`SshConnector` instance keeps a pool of live
 ``asyncssh.SSHClientConnection`` objects keyed on
 :func:`_pool_key`: the tenant-unique target key, the caller's kind
-(:func:`_caller_kind`: a person or machine login, the check runner, or
-the system caller for ``operator=None``) and the caller's
-``operator.sub``. So every caller logs in once, after their own Vault
-read of the target's secret, and reuses only the connection they opened.
-The check runner, a person and an operator-less probe never share one
-login, also when the check runner runs a Sensor under a person's ``sub``
-(a Sensor carries its creator's ``sub`` with the runner's own token and
-Vault role). A connection is reused
-until closed or idle past ``_POOL_TTL_S`` (default 5 min). A per-key lock
+(:func:`_caller_kind`: a person or machine login, a call without a
+token, the check runner, or the system caller for ``operator=None``) and
+the caller's ``operator.sub``. So every caller logs in once, after their
+own Vault read of the target's secret, and reuses only the connection
+they opened. Callers of different kinds never share one login, also when
+they carry the same ``sub``: the check runner runs a Sensor under its
+creator's ``sub`` with the runner's own token and Vault role, and a
+runbook verification runs under the assigned person's ``sub`` with no
+token at all, so its Vault read is refused and it must not find that
+person's open connection. A connection is reused until closed or idle
+past ``_POOL_TTL_S`` (default 5 min). A per-key lock
 lets concurrent requests to distinct keys proceed in parallel; only
 requests for the *same* caller and target serialize during the SSH
 handshake. SSH key exchange is expensive — pooling matters more here than
@@ -129,13 +131,17 @@ def _caller_kind(operator: Operator | None) -> str:
 
     Each kind logs in to Vault in its own way, so each gets its own slot
     even for the same ``sub``: ``operator=None`` is the system caller,
-    whose Vault read fails closed on a live Vault; the check runner
-    (``check_runner_dispatch``) uses its own token and role but runs a
-    Sensor under its creator's ``sub``; everything else is a person or
-    machine login reading with its own token.
+    whose Vault read fails closed on a live Vault; an operator with an
+    empty ``raw_jwt`` (a runbook verification runs under the assigned
+    person's ``sub`` this way) has no token, so Vault refuses its read;
+    the check runner (``check_runner_dispatch``) uses its own token and
+    role but runs a Sensor under its creator's ``sub``; everything else
+    is a person or machine login reading with its own token.
     """
     if operator is None:
         return "system"
+    if not operator.raw_jwt:
+        return "no-token"
     if operator.check_runner_dispatch:
         return "check-runner"
     return "operator"

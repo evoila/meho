@@ -3,11 +3,12 @@
 
 """``vault.token.create_and_store``: make a Vault token and store it, never show it.
 
-``vault.token.create`` returns the new token to the caller. When the token
-must end up in a Vault KV path or in a Kubernetes Secret, someone then has
-to copy it there by hand. This op does the whole job inside MEHO: it makes
-the token and writes it to the place the caller names. The token is never
-a parameter, never in the result, the audit row, a log line or an error.
+``vault.token.create`` never shows the new token: its result holds only
+the accessor and the policies. So a caller who needs a token in a Vault KV
+path or in a Kubernetes Secret uses this op. It does the whole job inside
+MEHO: it makes the token and writes it to the place the caller names. The
+token is never a parameter, never in the result, the audit row, a log line
+or an error.
 
 Steps, in this order:
 

@@ -8032,7 +8032,7 @@
           "agents"
         ],
         "summary": "Run Agent",
-        "description": "Run the named agent for the operator's tenant.\n\nSync (default) blocks up to ``agent_sync_timeout_seconds`` and returns\nthe final output at 200; a longer run converts to async and returns a\nhandle at 202. ``async=true`` returns the handle immediately. A\ncross-tenant / absent name is 404; a disabled definition is 409; a\nbudget-refused run (per-identity cap reached, per-tenant or global\nkill switch on \u2014 G11.5-T6 #1080) is 429 with the reason in the\n``detail`` body so the operator sees which gate fired.\n\nThe optional ``Meho-Work-Ref`` header binds the run to an external\nchange ticket (work_ref I3-T2 #1662); it is stamped on the durable run\nrow at create time and filterable on ``GET /agents/runs``.",
+        "description": "Run the named agent for the operator's tenant.\n\nSync (default) blocks up to ``agent_sync_timeout_seconds`` and returns\nthe final output at 200; a longer run converts to async and returns a\nhandle at 202. ``async=true`` returns the handle immediately. A\ncross-tenant / absent name is 404; a disabled definition is 409; an\nagent login that asks for a definition other than its own is 403\n(``agent_not_owned``; a person may start any definition); a\nbudget-refused run (per-identity cap reached, per-tenant or global\nkill switch on \u2014 G11.5-T6 #1080) is 429 with the reason in the\n``detail`` body so the operator sees which gate fired.\n\nThe optional ``Meho-Work-Ref`` header binds the run to an external\nchange ticket (work_ref I3-T2 #1662); it is stamped on the durable run\nrow at create time and filterable on ``GET /agents/runs``.",
         "operationId": "run_agent_api_v1_agents__name__run_post",
         "parameters": [
           {
@@ -9437,7 +9437,7 @@
           "checks"
         ],
         "summary": "Put Assignment",
-        "description": "Replace runner *runner*'s assignment document (operator-authenticated).\n\nValidates every authored item before storing; a failing item is a\nstructured 422 (``assignment_target_unknown`` / ``assignment_op_unknown``\n/ ``assignment_op_not_safe``) and nothing is written.",
+        "description": "Replace runner *runner*'s assignment document (tenant-admin-authenticated).\n\nValidates every authored item before storing; a failing item is a\nstructured 422 (``assignment_target_unknown`` / ``assignment_op_unknown``\n/ ``assignment_op_not_safe``) and nothing is written.",
         "operationId": "put_assignment_api_v1_checks_assignment__runner__put",
         "parameters": [
           {
@@ -22571,25 +22571,23 @@
         }
       }
     },
-    "/ui/account/sessions/{session_id}/revoke": {
+    "/ui/account/sessions/revoke": {
       "post": {
         "tags": [
           "ui-account"
         ],
         "summary": "Ui Account Revoke Session",
-        "description": "``POST /ui/account/sessions/{session_id}/revoke``.",
-        "operationId": "ui_account_revoke_session_ui_account_sessions__session_id__revoke_post",
-        "parameters": [
-          {
-            "name": "session_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Session Id"
+        "description": "``POST /ui/account/sessions/revoke`` -- the id is a form field.",
+        "operationId": "ui_account_revoke_session_ui_account_sessions_revoke_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_account_revoke_session_ui_account_sessions_revoke_post"
+              }
             }
           }
-        ],
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -22602,7 +22600,7 @@
             }
           },
           "404": {
-            "description": "Session id is malformed, does not exist, or belongs to another operator / tenant. Collapsed to 404 so another operator's session id is never confirmed.",
+            "description": "The session_id form field is missing or malformed, the session does not exist, or it belongs to another operator / tenant. Collapsed to 404 so another operator's session id is never confirmed.",
             "content": {
               "text/html": {}
             }
@@ -26107,6 +26105,17 @@
         },
         "type": "object",
         "title": "Body_runbooks_runs_start_ui_runbooks_runs_post"
+      },
+      "Body_ui_account_revoke_session_ui_account_sessions_revoke_post": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_account_revoke_session_ui_account_sessions_revoke_post"
       },
       "Body_ui_agent_grants_create_submit_ui_agents_grants_create_post": {
         "properties": {

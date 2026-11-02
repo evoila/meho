@@ -214,7 +214,7 @@ def password_credential(end: str | None, n: int = 1) -> dict[str, Any]:
 def key_credential(end: str | None, n: int = 1) -> dict[str, Any]:
     """One certificate as Graph lists it, with certificate data."""
     return {
-        "customKeyIdentifier": "RVhBTVBMRVRIVU1CUFJJTlQ=",
+        "customKeyIdentifier": "RVhBTVBMRVRIVU1CUFJJTlQ=",  # gitleaks:allow
         "displayName": f"CN=example certificate {n}",
         "endDateTime": end,
         "key": CERTIFICATE_DATA,

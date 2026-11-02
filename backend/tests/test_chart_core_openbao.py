@@ -69,7 +69,7 @@ _ON = [
     "--set",
     "coreKeycloak.hostname=meho.test",
     "--set",
-    "coreKeycloak.firstTenantId=3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c",
+    "coreKeycloak.firstTenantId=3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c",  # gitleaks:allow
 ]
 _POLICY_DIR = _CHART_DIR / "files" / "openbao" / "policies"
 

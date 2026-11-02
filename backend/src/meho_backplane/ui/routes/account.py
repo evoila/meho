@@ -21,12 +21,14 @@ This module adds an operator-tier Account page at ``/ui/account``:
   "revoke all other sessions" action.
 
 * ``POST /ui/account/sessions/revoke-others`` -- revoke every active
-  session for this operator **except** the current one. Registered
-  **before** the parametrised single-revoke route so the literal
-  ``revoke-others`` segment is never captured as a ``{session_id}``.
+  session for this operator **except** the current one.
 
-* ``POST /ui/account/sessions/{session_id}/revoke`` -- revoke one
-  session. Ownership (``operator_sub`` AND ``tenant_id``) is enforced
+* ``POST /ui/account/sessions/revoke`` -- revoke one session. The
+  session id travels in the form body (field ``session_id``), never in
+  the URL: the request path is the same for every row, so neither the
+  ingress access log nor the audit row's ``path`` ever holds a live
+  session id (the console session id is the session cookie value).
+  Ownership (``operator_sub`` AND ``tenant_id``) is enforced
   **server-side** from the validated session context before
   :func:`~meho_backplane.ui.auth.session_store.revoke_session` runs
   (that helper does no ownership check); a non-owned / cross-tenant id
@@ -53,7 +55,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -253,11 +255,12 @@ async def _do_revoke_one(
 ) -> HTMLResponse:
     """Revoke one session after enforcing server-side ownership.
 
-    Ownership is asserted from the validated ``session_ctx`` -- never a
-    form field: the target row's ``operator_sub`` AND ``tenant_id`` must
-    match the caller's. A malformed id, a missing row, or a
+    *raw_session_id* is the ``session_id`` form field. Ownership is
+    asserted from the validated ``session_ctx`` -- never a form field:
+    the target row's ``operator_sub`` AND ``tenant_id`` must match the
+    caller's. A missing or malformed id, a missing row, or a
     non-owned / cross-tenant row all return 404 so another operator's
-    session id is never confirmed (a 403 would leak existence).
+    session id is never confirmed (a 403 would reveal existence).
     """
     try:
         session_id = uuid.UUID(raw_session_id)
@@ -314,13 +317,9 @@ async def _do_revoke_others(
 def build_account_router() -> APIRouter:
     """Construct the Account surface :class:`APIRouter`.
 
-    Registration order is **load-bearing**: the literal
-    ``POST /ui/account/sessions/revoke-others`` route is registered
-    **before** the parametrised
-    ``POST /ui/account/sessions/{session_id}/revoke`` so the
-    first-match-wins lookup binds ``revoke-others`` as the literal route
-    rather than capturing ``session_id="revoke-others"`` (mirrors the
-    connectors surface's literal-before-param discipline).
+    Both revoke routes are literal paths; the single revoke reads the
+    target session id from the form body so no route under
+    ``/ui/account/sessions/`` carries a session id in its path.
     """
     router = APIRouter(tags=["ui-account"])
 
@@ -342,11 +341,11 @@ def build_account_router() -> APIRouter:
 
     async def _revoke_one(
         request: Request,
-        session_id: str,
+        session_id: str = Form(default=""),
         session_ctx: UISessionContext = _require_ui_session_dep,
         db_session: AsyncSession = _get_session_dep,
     ) -> HTMLResponse:
-        """``POST /ui/account/sessions/{session_id}/revoke``."""
+        """``POST /ui/account/sessions/revoke`` -- the id is a form field."""
         return await _do_revoke_one(
             request,
             raw_session_id=session_id,
@@ -361,7 +360,6 @@ def build_account_router() -> APIRouter:
         name="ui_account",
         response_class=HTMLResponse,
     )
-    # Literal route BEFORE the parametrised one -- first-match-wins.
     router.add_api_route(
         "/ui/account/sessions/revoke-others",
         _revoke_others,
@@ -370,7 +368,7 @@ def build_account_router() -> APIRouter:
         response_class=HTMLResponse,
     )
     router.add_api_route(
-        "/ui/account/sessions/{session_id}/revoke",
+        "/ui/account/sessions/revoke",
         _revoke_one,
         methods=["POST"],
         name="ui_account_revoke_session",
@@ -378,8 +376,9 @@ def build_account_router() -> APIRouter:
         responses={
             404: {
                 "description": (
-                    "Session id is malformed, does not exist, or belongs to "
-                    "another operator / tenant. Collapsed to 404 so another "
+                    "The session_id form field is missing or malformed, the "
+                    "session does not exist, or it belongs to another "
+                    "operator / tenant. Collapsed to 404 so another "
                     "operator's session id is never confirmed."
                 ),
                 "content": {"text/html": {}},

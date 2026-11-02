@@ -111,7 +111,7 @@ STORAGE_OP_IDS = [
 ]
 
 #: Made-up values that look like storage secrets. None may reach a result.
-FAKE_ACCOUNT_KEY = "ZmFrZS1hY2NvdW50LWtleS1mb3ItdGVzdHMtb25seQ=="
+FAKE_ACCOUNT_KEY = "ZmFrZS1hY2NvdW50LWtleS1mb3ItdGVzdHMtb25seQ=="  # gitleaks:allow
 FAKE_CONNECTION = (
     f"DefaultEndpointsProtocol=https;AccountName={ACCOUNT};"
     f"AccountKey={FAKE_ACCOUNT_KEY};EndpointSuffix=core.windows.net"

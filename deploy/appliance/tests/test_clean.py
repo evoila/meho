@@ -28,6 +28,8 @@ GONE = (
     "/var/lib/kubelet",
     "/etc/cni",
     "/var/lib/cni",
+    "/var/log/pods",
+    "/var/log/containers",
     "/etc/meho/values-place.yaml",
     "/etc/meho/install.json",
     "/root/.ssh/authorized_keys",
@@ -70,9 +72,7 @@ class CleanTests(CleanTestCase):
                 self.assertTrue(self.vm.host_path(path).exists(), path)
         self.assertEqual(["sh.helm.release.v1.meho.v1"], self.vm.secrets())
         self.assertEqual("uninitialized\n", self.vm.host_path("/etc/machine-id").read_text())
-        for log in ("/var/log/syslog", "/var/log/pods/meho_core/0.log"):
-            with self.subTest(log=log):
-                self.assertEqual(0, self.vm.host_path(log).stat().st_size)
+        self.assertEqual(0, self.vm.host_path("/var/log/syslog").stat().st_size)
         self.assertIn("[ok]   nothing that must differ between appliances is left", result.stdout)
 
     def test_rke2_stays_off_at_the_first_boot(self) -> None:
@@ -247,6 +247,16 @@ class CheckTests(CleanTestCase):
                 "/var/lib/cni/networks/x",
                 "/var/lib/cni",
                 "/var/lib/cni is still there",
+            ),
+            "the pods' log folders": (
+                "/var/log/pods/x/0.log",
+                "/var/log/pods",
+                "/var/log/pods is still there",
+            ),
+            "the pods' log links": (
+                "/var/log/containers/x.log",
+                "/var/log/containers",
+                "/var/log/containers is still there",
             ),
             "the install's answers": (
                 "/etc/meho/values-place.yaml",

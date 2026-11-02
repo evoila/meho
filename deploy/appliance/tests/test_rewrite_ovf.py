@@ -61,6 +61,22 @@ class RewriteTests(unittest.TestCase):
         self.assertNotIn("builder", self.ovf.read_text())
         ET.parse(self.ovf)
 
+    def test_the_build_network_becomes_vm_network(self) -> None:
+        fixture = FIXTURE.read_text()
+        # vCenter's export names the build VM's port group, with regex characters here.
+        self.ovf.write_text(fixture.replace("VM Network", "lab.net (build)+1"))
+
+        result = self.run_rewrite()
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        text = self.ovf.read_text()
+        self.assertNotIn("lab.net", text)
+        self.assertEqual(fixture.count("VM Network"), text.count("VM Network"))
+        self.assertEqual(
+            "VM Network",
+            ET.parse(self.ovf).find(f".//{OVF}NetworkSection/{OVF}Network").get(f"{OVF}name"),
+        )
+
     def test_our_section_replaces_the_cloud_init_section(self) -> None:
         result = self.run_rewrite()
 

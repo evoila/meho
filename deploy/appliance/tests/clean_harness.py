@@ -163,7 +163,9 @@ MACHINE_FILES = {
     "/var/lib/cloud/instance/user-data.txt": "#cloud-config\n",
     "/var/log/syslog": "many lines\n",
     "/var/log/cloud-init.log": "cloud-init lines\n",
-    "/var/log/pods/meho_core/0.log": "pod lines\n",
+    # A static pod is named after the node, and so are its log folder and link.
+    f"/var/log/pods/kube-system_apiserver-{BUILD_HOSTNAME}_0a1b/apiserver/0.log": "pod lines\n",
+    f"/var/log/containers/apiserver-{BUILD_HOSTNAME}_kube-system_apiserver-0a1b.log": "",
     "/root/.bash_history": "sudo ./install.sh\n",
     "/root/.ssh/authorized_keys": 'command="echo login as meho-build" ssh-ed25519 fake build key\n',
     f"/home/{BUILD_USER}/.ssh/authorized_keys": "ssh-ed25519 fake build key\n",

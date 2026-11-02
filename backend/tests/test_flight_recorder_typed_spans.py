@@ -468,6 +468,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "hcx-rest",
         "holodeck-ssh",
         "hyperv-ssh",
+        "installer-cb",
         "installer-rest",
         "inventory",
         "k8s",
@@ -516,6 +517,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
 #: distinct ``impl_id``s (F8: keyed on impl_id, both covered).
 _DUAL_IMPL_PAIRS: tuple[tuple[str, str], ...] = (
     ("fleet-rest", "fleet-lcm"),
+    ("installer-rest", "installer-cb"),
     ("sddc-rest", "sddc-vcf5"),
     ("vcfa-rest", "vcfa-vra8"),
     ("vrli-rest", "vrli-vrli8"),

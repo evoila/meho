@@ -102,6 +102,9 @@ class _StubTarget:
     tenant_id: object = field(default_factory=lambda: UUID(int=0))
 
 
+#: Secret refs named in params must sit in the operator's tenant subtree.
+_REF_ROOT = "tenants/00000000-0000-0000-0000-00000000a0a0"
+
 _TARGET = _StubTarget(
     name="rke2-meho",
     host="rke2-meho.test.invalid",
@@ -1076,7 +1079,7 @@ async def test_secret_create_resolves_vault_ref_never_leaks(
     params = {
         "name": "argocd-spoke",
         "namespace": "argocd",
-        "string_data_secret_ref": {"bearer": "argocd/rke2-mgmt#token"},
+        "string_data_secret_ref": {"bearer": f"{_REF_ROOT}/argocd/rke2-mgmt#token"},
     }
     with _patch_kubeconfig(), _core_v1_patch() as core_cls:
         core_cls.return_value.create_namespaced_secret = AsyncMock()
@@ -1092,7 +1095,7 @@ async def test_secret_create_resolves_vault_ref_never_leaks(
     # The KV-v2 read ran under the operator's own JWT (operator-context read),
     # against the scheme-stripped, fragment-stripped logical path.
     assert fake.auth.jwt.login_calls[-1]["jwt"] == operator.raw_jwt
-    assert fake.secrets.kv.v2.read_calls[-1]["path"] == "argocd/rke2-mgmt"
+    assert fake.secrets.kv.v2.read_calls[-1]["path"] == f"{_REF_ROOT}/argocd/rke2-mgmt"
 
 
 @pytest.mark.asyncio
@@ -1110,8 +1113,8 @@ async def test_secret_create_multi_key_refs(monkeypatch: pytest.MonkeyPatch) -> 
                 "name": "argocd-spoke",
                 "namespace": "argocd",
                 "string_data_secret_ref": {
-                    "token": "argocd/rke2-mgmt#bearer",
-                    "ca.crt": "argocd/rke2-mgmt#ca",
+                    "token": f"{_REF_ROOT}/argocd/rke2-mgmt#bearer",
+                    "ca.crt": f"{_REF_ROOT}/argocd/rke2-mgmt#ca",
                 },
             },
         )
@@ -1134,7 +1137,7 @@ async def test_secret_create_inline_and_ref_merged(monkeypatch: pytest.MonkeyPat
                 "name": "db-creds",
                 "namespace": "argocd",
                 "string_data": {"username": "admin"},
-                "string_data_secret_ref": {"password": "db/creds#password"},
+                "string_data_secret_ref": {"password": f"{_REF_ROOT}/db/creds#password"},
             },
         )
     body = core_cls.return_value.create_namespaced_secret.call_args.kwargs["body"]
@@ -1158,7 +1161,7 @@ async def test_secret_create_data_secret_ref_merges_into_data(
                 "name": "regcred",
                 "namespace": "argocd",
                 "type": "kubernetes.io/dockerconfigjson",
-                "data_secret_ref": {".dockerconfigjson": "registry/pull#dockercfg"},
+                "data_secret_ref": {".dockerconfigjson": f"{_REF_ROOT}/registry/pull#dockercfg"},
             },
         )
     body = core_cls.return_value.create_namespaced_secret.call_args.kwargs["body"]
@@ -1192,6 +1195,9 @@ async def test_secret_create_gsm_ref_resolves_through_seam(
 
     fake_backend = _FakeGsmBackend()
     monkeypatch.setitem(cb.CREDENTIAL_BACKEND_REGISTRY, "gsm", fake_backend)
+    # A gsm: secret named in a parameter must be in an allowed project.
+    monkeypatch.setenv("GSM_PARAM_ALLOWED_PROJECTS", "my-project")
+    get_settings.cache_clear()
 
     conn = _make_connector()
     with _patch_kubeconfig(), _core_v1_patch() as core_cls:
@@ -1232,7 +1238,7 @@ async def test_secret_create_ref_missing_field_raises(
                 params={
                     "name": "x",
                     "namespace": "argocd",
-                    "string_data_secret_ref": {"token": "argocd/spoke#token"},
+                    "string_data_secret_ref": {"token": f"{_REF_ROOT}/argocd/spoke#token"},
                 },
             )
 
@@ -1301,7 +1307,7 @@ async def test_secret_create_sets_labels_and_annotations_with_ref_value(
         "labels": {"argocd.argoproj.io/secret-type": "repository"},
         "annotations": {"managed-by": "meho"},
         "string_data": {"url": "ssh://git.example.invalid/charts.git"},
-        "string_data_secret_ref": {"sshPrivateKey": "argocd/repo"},
+        "string_data_secret_ref": {"sshPrivateKey": f"{_REF_ROOT}/argocd/repo"},
     }
     with _patch_kubeconfig(), _core_v1_patch() as core_cls:
         core_cls.return_value.create_namespaced_secret = AsyncMock()

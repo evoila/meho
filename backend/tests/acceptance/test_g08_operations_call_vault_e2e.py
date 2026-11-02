@@ -379,7 +379,11 @@ async def test_operations_call_vault_kv_read_through_verify_jwt_and_bind(
     assert "'Target' object has no attribute 'raw_jwt'" not in resp.text
     envelope = resp.json()
     assert envelope["status"] == "ok", envelope
-    assert envelope["result"] == {"data": _SECRET_DATA, "version": 1}
+    # The answer has the key names; the values are hidden by default.
+    assert envelope["result"] == {
+        "data": dict.fromkeys(_SECRET_DATA, "[REDACTED:secret_value]"),
+        "version": 1,
+    }
 
     # AC 5 / #629 — the operator threaded into vault_client_for_operator
     # is the one verify_jwt_and_bind produced from the real Bearer

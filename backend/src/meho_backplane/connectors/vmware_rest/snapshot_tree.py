@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Any, Final
 
-__all__ = ["SNAPSHOT_ROW_SCHEMA", "descendants", "snapshot_rows"]
+__all__ = ["SNAPSHOT_ROW_SCHEMA", "descendants", "snapshot_rows", "snapshot_size"]
 
 #: One snapshot row, as :func:`snapshot_rows` builds it.
 SNAPSHOT_ROW_SCHEMA: Final[dict[str, Any]] = {
@@ -136,3 +136,100 @@ def descendants(rows: list[dict[str, Any]], snapshot_id: str) -> list[dict[str, 
             below.add(row["snapshot_id"])
             out.append(row)
     return out
+
+
+def _keys(disks: Any) -> list[int]:
+    """The file keys of a ``VirtualMachineFileLayoutExDiskLayout[]``, chain by chain."""
+    keys: list[int] = []
+    for disk in disks if isinstance(disks, list) else []:
+        chain = disk.get("chain") if isinstance(disk, dict) else None
+        for link in chain if isinstance(chain, list) else []:
+            file_keys = link.get("fileKey") if isinstance(link, dict) else None
+            keys.extend(k for k in file_keys or [] if isinstance(k, int))
+    return keys
+
+
+def _remove_first(keys: list[int], key: int) -> None:
+    if key in keys:
+        keys.remove(key)
+
+
+def _size(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return 0
+
+
+def _layouts(layout_ex: dict[str, Any]) -> list[dict[str, Any]]:
+    """The ``VirtualMachineFileLayoutExSnapshotLayout`` entries (a lone one may be a dict)."""
+    layouts = layout_ex.get("snapshot")
+    layouts = [layouts] if isinstance(layouts, dict) else layouts
+    return [x for x in layouts if isinstance(x, dict)] if isinstance(layouts, list) else []
+
+
+def _own_files(
+    layouts: list[dict[str, Any]], snapshot_id: str, parent_id: str | None
+) -> list[int] | None:
+    """The file keys of the snapshot without its parent's; ``None`` when it has no layout."""
+    wanted: list[int] | None = None
+    parent_files: list[int] = []
+    for layout in layouts:
+        layout_id = _moref_value(layout.get("key"))
+        if layout_id == snapshot_id:
+            data_key = layout.get("dataKey")
+            wanted = [data_key] if isinstance(data_key, int) else []
+            wanted.extend(_keys(layout.get("disk")))
+        elif parent_id is not None and layout_id == parent_id:
+            parent_files.extend(_keys(layout.get("disk")))
+    if wanted is not None:
+        for key in parent_files:
+            _remove_first(wanted, key)
+    return wanted
+
+
+def _running_files(layout_ex: dict[str, Any], layouts: list[dict[str, Any]]) -> list[int]:
+    """The VM's disk files no snapshot has (the running delta disks)."""
+    disk_files = _keys(layout_ex.get("disk"))
+    for layout in layouts:
+        for key in _keys(layout.get("disk")):
+            _remove_first(disk_files, key)
+    return disk_files
+
+
+def snapshot_size(
+    layout_ex: Any, snapshot_id: str, parent_id: str | None, *, current: bool
+) -> int | None:
+    """Bytes on disk of one snapshot, from ``VirtualMachine.layoutEx``; ``None`` when unknown.
+
+    The same count as govc (``object.SnapshotSize`` in govmomi): the
+    snapshot's ``.vmsn`` file and the disk files of its chains that its parent
+    does not have; for a root snapshot, without the base disks. The current
+    snapshot also counts the disk files no snapshot has yet (the running
+    delta disks).
+    """
+    if not isinstance(layout_ex, dict) or not isinstance(layout_ex.get("file"), list):
+        return None
+    layouts = _layouts(layout_ex)
+    wanted = _own_files(layouts, snapshot_id, parent_id)
+    if wanted is None:
+        return None
+    by_key = {
+        f["key"]: f
+        for f in layout_ex["file"]
+        if isinstance(f, dict) and isinstance(f.get("key"), int)
+    }
+    size = sum(
+        _size(by_key.get(key, {}).get("size"))
+        for key in wanted
+        if parent_id is not None
+        or by_key.get(key, {}).get("type") not in ("diskDescriptor", "diskExtent")
+    )
+    if current:
+        size += sum(
+            _size(by_key.get(k, {}).get("size")) for k in _running_files(layout_ex, layouts)
+        )
+    return size

@@ -38,7 +38,7 @@ PowerShell 5.1 does not escape double quotes when it builds a program's
 command line, so the message must keep to a simple rule: at most 512
 characters (the ``shutdown.exe /c`` limit); no double quotes (ASCII or
 typographic), backslashes or control characters (C0, DEL and C1); and it must
-not start with ``/`` or ``-``. The parameter schema refuses a bad value
+not start with whitespace, ``/`` or ``-``. The parameter schema refuses a bad value
 before anything runs, and :func:`_validate_message` checks it again where the
 command is built. Then the message always reaches ``shutdown.exe`` as one
 argument that it never reads as an option.
@@ -71,19 +71,28 @@ _DEFAULT_DELAY_SECONDS: int = 15
 #: ``shutdown.exe /c`` accepts a comment of at most 512 characters.
 _MESSAGE_MAX_LEN: int = 512
 
-#: What the message must not contain: a leading ``/`` or ``-`` (so
+#: What the message must not contain: a leading whitespace, ``/`` or ``-`` (so
 #: ``shutdown.exe`` never reads it as an option), and anywhere a double quote
 #: (ASCII or typographic), a backslash or a control character (C0, DEL, C1).
 #: Shared by the parameter schema (``not``/``pattern``, which searches the
 #: whole string) and :func:`_validate_message`, so the two checks cannot drift
 #: apart.
-_MESSAGE_FORBIDDEN_PATTERN: str = r'^[/-]|["\u201c\u201d\u201e\\\x00-\x1f\x7f-\x9f]'
+_MESSAGE_FORBIDDEN_PATTERN: str = r'^[\s/-]|["\u201c\u201d\u201e\\\x00-\x1f\x7f-\x9f]'
 _MESSAGE_FORBIDDEN_RE: re.Pattern[str] = re.compile(_MESSAGE_FORBIDDEN_PATTERN)
 
 #: The error text names the rule, never the value.
 _MESSAGE_RULE: str = (
     f"message must be a string of at most {_MESSAGE_MAX_LEN} characters with no "
-    "double quotes, backslashes or control characters, and must not start with / or -"
+    "double quotes, backslashes or control characters, and must not start with "
+    "whitespace, / or -"
+)
+
+
+#: The agent hint for ``message`` states the same rule as the schema.
+_MESSAGE_HINT: str = (
+    f"Optional comment shown to logged-in users. At most {_MESSAGE_MAX_LEN} characters; no "
+    "double quotes, backslashes or control characters; must not start with "
+    "whitespace, / or -. A message that breaks this rule is refused."
 )
 
 
@@ -189,7 +198,7 @@ _POWER_PARAM_SCHEMA: dict[str, Any] = {
             "description": (
                 "Optional comment shown to logged-in users (``shutdown.exe /c``). "
                 "At most 512 characters; no double quotes, backslashes or "
-                "control characters; must not start with ``/`` or ``-``."
+                "control characters; must not start with whitespace, ``/`` or ``-``."
             ),
         },
     },
@@ -238,7 +247,7 @@ POWER_OPS: tuple[WinsrvOp, ...] = (
             ),
             "parameter_hints": {
                 "delay_seconds": "Optional; seconds before going down. Default 15.",
-                "message": "Optional comment shown to logged-in users.",
+                "message": _MESSAGE_HINT,
             },
             "output_shape": (
                 "{'ok': true, 'action': 'reboot', 'delay_seconds', 'message', "
@@ -269,7 +278,7 @@ POWER_OPS: tuple[WinsrvOp, ...] = (
             ),
             "parameter_hints": {
                 "delay_seconds": "Optional; seconds before going down. Default 15.",
-                "message": "Optional comment shown to logged-in users.",
+                "message": _MESSAGE_HINT,
             },
             "output_shape": (
                 "{'ok': true, 'action': 'shutdown', 'delay_seconds', "

@@ -81,6 +81,8 @@ def test_scrub_tier1_pass_redacts_labelled_string_shapes() -> None:
         ("license_key", True),
         ("licenseKey", True),
         ("licence-key", True),
+        ("product_key", True),
+        ("productKey", True),
         # attribute / reference names — not the secret itself
         ("token_policies", False),
         ("token_ttl", False),
@@ -101,6 +103,7 @@ def test_is_secret_param_name(name: str, expected: bool) -> None:
     ("name", "expected"),
     [
         ("licensekey", True),
+        ("productkey", True),
         ("clientsecret", True),
         ("apikey", True),
         ("x-licensekey", True),

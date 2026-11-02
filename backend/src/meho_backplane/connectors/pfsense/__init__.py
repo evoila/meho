@@ -33,6 +33,7 @@ never shipped behind it. Skipping the v1 write keeps the resolver
 tie-break ladder unambiguous: only the v2 triple advertises this class.
 """
 
+from meho_backplane.connectors.pfsense import op_classes  # noqa: F401 -- declares the op classes
 from meho_backplane.connectors.pfsense.connector import PfSenseConnector
 from meho_backplane.connectors.pfsense.ops import PFSENSE_OPS, PfSenseOp
 from meho_backplane.connectors.registry import register_connector_v2

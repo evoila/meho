@@ -1010,7 +1010,8 @@ async def test_dispatch_typed_invokes_handler_and_returns_result(
         connector_id="vault-1.x",
         op_id="vault.kv.read",
         target=target,
-        params={"key": "value"},
+        # vault.kv.read hides values by default; the echo needs them.
+        params={"key": "value", "reveal_secret": True},
     )
     assert result.status == "ok", result.error
     assert isinstance(result.result, dict)

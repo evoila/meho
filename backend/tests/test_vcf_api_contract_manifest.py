@@ -12,13 +12,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-from meho_backplane.connectors.sddc_manager.typed_ops import SDDC_TYPED_OPS
-from meho_backplane.connectors.vmware_rest.composites._register import (
-    _COMPOSITES,
-    COMPOSITES_NOT_ON_8_0,
-)
-from meho_backplane.connectors.vmware_rest.typed_ops import VMWARE_TYPED_OPS
-
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "docs" / "compatibility" / "vcf-api-contract-manifest.yaml"
 VALIDATOR = ROOT / "backend" / "scripts" / "validate_vcf_api_contract_manifest.py"
@@ -47,40 +40,6 @@ def _manifest() -> dict[str, object]:
     loaded = yaml.safe_load(MANIFEST.read_text(encoding="utf-8"))
     assert isinstance(loaded, dict)
     return loaded
-
-
-def _safety_groups(operations: object) -> dict[str, set[str]]:
-    groups: dict[str, set[str]] = {}
-    for operation in operations:
-        groups.setdefault(operation.safety_level, set()).add(operation.op_id)
-    return groups
-
-
-def test_vcf_regression_subsets_match_registered_sddc_and_vmware_operations() -> None:
-    data = _manifest()
-    subsets = data["meho_regression_subsets"]
-    assert isinstance(subsets, dict)
-
-    sddc = subsets["sddc-rest"]
-    assert isinstance(sddc, dict)
-    assert set(sddc["typed_op_ids"]) == {operation.op_id for operation in SDDC_TYPED_OPS}
-    assert {
-        level: set(op_ids) for level, op_ids in sddc["typed_op_safety"].items()
-    } == _safety_groups(SDDC_TYPED_OPS)
-
-    vmware = subsets["vmware-rest"]
-    assert isinstance(vmware, dict)
-    assert set(vmware["typed_op_ids"]) == {operation.op_id for operation in VMWARE_TYPED_OPS}
-    assert {
-        level: set(op_ids) for level, op_ids in vmware["typed_composite_ops"].items()
-    } == _safety_groups(_COMPOSITES)
-
-    vmware_8_0 = subsets["vmware-rest-8.0"]
-    assert isinstance(vmware_8_0, dict)
-    assert set(vmware_8_0["typed_op_ids"]) == {operation.op_id for operation in VMWARE_TYPED_OPS}
-    assert {
-        level: set(op_ids) for level, op_ids in vmware_8_0["typed_composite_ops"].items()
-    } == _safety_groups([spec for spec in _COMPOSITES if spec.op_id not in COMPOSITES_NOT_ON_8_0])
 
 
 @pytest.mark.parametrize(
@@ -116,6 +75,10 @@ def test_vcf_regression_subsets_match_registered_sddc_and_vmware_operations() ->
         (
             lambda data: data.__setitem__("meho_regression_subsets", {}),
             "meho_regression_subsets.note",
+        ),
+        (
+            lambda data: data["meho_regression_subsets"]["vmware-rest"].pop("typed_source"),
+            "misses fields",
         ),
         (
             lambda data: data["artifacts"]["sddc-9.0"].__setitem__("source_url", "not-a-url"),

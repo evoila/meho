@@ -16,7 +16,7 @@ import (
 
 const (
 	environmentListOpID = "fleet.environment.list"
-	environmentGetOpID  = "GET:/lcm/lcops/api/v2/environments/{environmentId}"
+	environmentGetOpID  = "fleet.environment.get"
 )
 
 // newEnvironmentCmd returns the `meho vcf-fleet environment` sub-tree.
@@ -107,10 +107,9 @@ func newEnvironmentInfoCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "info <environment-id>",
 		Short: "Show the full detail of one Fleet environment",
-		Long: "info dispatches GET:/lcm/lcops/api/v2/environments/{environmentId}\n" +
-			"against connector_id=\"fleet-rest-9.0\". Returns products[] with full\n" +
-			"deployment metadata (nodes, IPs, versions, FQDN), configuration\n" +
-			"history, and status transitions.\n\n" +
+		Long: "info dispatches fleet.environment.get against\n" +
+			"connector_id=\"fleet-rest-9.0\". Returns the environment with its\n" +
+			"products[] (versions, nodes and settings). Secret values are replaced.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
 		Example:       "  meho vcf-fleet environment info env-vrops-prod --target rdc-fleet",
 		Args:          cobra.ExactArgs(1),
@@ -132,7 +131,7 @@ func runEnvironmentInfo(cmd *cobra.Command, environmentID, targetName string, js
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	params := map[string]any{"environmentId": environmentID}
+	params := map[string]any{"environment_id": environmentID}
 	r, err := conn.Call(cmd.Context(), backplaneURL, environmentGetOpID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)

@@ -67,6 +67,7 @@ __all__ = [
     "MAX_RUN_WAIT_SECONDS",
     "OperationRunService",
     "get_operation_run_service",
+    "run_result_visible_to",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -116,6 +117,18 @@ def _target_name(target: Any) -> str | None:
         name = target.get("name")
         return name if isinstance(name, str) and name else None
     return None
+
+
+def run_result_visible_to(row: OperationRun, operator: Operator) -> bool:
+    """Whether *operator* may read the stored result of the run in *row*.
+
+    Only the person who started the run may read its result. For an
+    approval resume that is the person who approved it. A run result can
+    hold a secret (a new credential, or a value read with
+    ``reveal_secret``), so other people in the tenant see the run's state
+    but not its result.
+    """
+    return row.identity_sub == operator.sub
 
 
 def _normalize_envelope(value: Any) -> dict[str, Any]:

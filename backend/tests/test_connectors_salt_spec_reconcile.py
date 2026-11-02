@@ -62,6 +62,10 @@ def test_salt_hand_coded_rpc_manifest_is_pinned() -> None:
         "cmd.get_cmds",
         "ret.get_returns",
         "tgt.get_target_group",
+        "tgt.get_target_group_minions",
+        "minions.set_minion_key_state",
+        "cmd.route_cmd",
+        "cmd.stop_job",
     }
     assert (_connector_module.LOGIN_PATH, _connector_module.RPC_PATH) == (
         "/account/login",

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for the Orchestrator connector (``vro-rest``): login and the seven reads.
+"""Tests for the Orchestrator connector (``vro-rest``): login and the first seven reads.
 
 What is covered, with a respx-mocked Orchestrator and no ingested catalog:
 
@@ -22,7 +22,8 @@ What is covered, with a respx-mocked Orchestrator and no ingested catalog:
   crosses the text cut is removed before the cut);
 * every call asks for JSON; a vendor error reaches the answer; an id with
   a ``..`` segment sends no request; a long list goes behind a result
-  handle; no password or token in a result; registration and fingerprint.
+  handle; no password or token in a result; registration (with the risk of
+  every operation) and fingerprint.
 
 Fixture values are made up; no real host, user or id appears here.
 """
@@ -1140,7 +1141,7 @@ async def test_results_hold_no_password_or_token(
 
 
 @pytest.mark.asyncio
-async def test_reads_are_registered_typed_safe_and_grouped(
+async def test_ops_are_registered_typed_and_grouped_with_their_risk(
     _stub_embedding: AsyncMock, session: AsyncSession
 ) -> None:
     await register_vro_typed_operations()
@@ -1165,15 +1166,27 @@ async def test_reads_are_registered_typed_safe_and_grouped(
         "vro.execution.list",
         "vro.execution.get",
         "vro.execution.logs",
+        "vro.action.list",
+        "vro.config_element.list",
+        "vro.package.list",
+        "vro.workflow.run",
+        "vro.execution.cancel",
     }
+    changes = {"vro.workflow.run": "destructive", "vro.execution.cancel": "dangerous"}
     assert {op.op_id for op in VRO_TYPED_OPS} == expected
     assert expected <= set(rows)
     for op in VRO_TYPED_OPS:
         row = rows[op.op_id]
         assert row.source_kind == "typed"
-        assert row.safety_level == "safe"
-        assert row.requires_approval is False
-        assert "read-only" in row.tags
+        if op.op_id in changes:
+            assert row.safety_level == changes[op.op_id]
+            assert row.requires_approval is True
+            assert "write" in row.tags
+            assert row.llm_instructions["preconditions"]
+        else:
+            assert row.safety_level == "safe"
+            assert row.requires_approval is False
+            assert "read-only" in row.tags
         assert row.parameter_schema["examples"]
         assert op.group_key in VRO_TYPED_WHEN_TO_USE_BY_GROUP
         assert "\n" not in row.summary and len(row.description) <= 300

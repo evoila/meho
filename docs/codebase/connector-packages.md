@@ -33,6 +33,9 @@ The rules:
   its files were installed by the distribution that the allowlist names.
 - Any other folder stops the start with `connector_package_not_allowed` and
   the folder name. Nothing is imported, not even the built-in folders.
+- Each listed package must name a range of connector kit versions, and the
+  kit in the image must fit it. Otherwise the start stops with
+  `connector_package_kit_mismatch` (see "The kit range at start").
 
 The plain public image has no allowlist file. There, only the built-in
 folders are allowed, and MEHO starts as before.
@@ -69,6 +72,28 @@ The start stops with `connector_package_list_invalid` when:
 A listed folder whose files were not all installed by its package stops the
 start with `connector_package_not_allowed`.
 
+### The kit range at start
+
+For each listed package, before MEHO looks at its folders, the start reads
+the package's kit range and the kit version of the image:
+
+- The range comes from the package's installed metadata: its
+  `Requires-Dist` values, read with `importlib.metadata`. A value counts
+  when it names `meho-connector-kit` with a version range, and has no link
+  and no environment marker (a marker can switch it off). Several such
+  values all apply.
+- The kit version is the installed version of `meho-connector-kit`.
+- The `packaging` library compares them.
+
+A package with no range, or with a range that the kit does not fit, stops
+the start with `connector_package_kit_mismatch`. The message names the
+package, its range and the kit version of the image. Nothing is imported.
+An image without the kit stops the same way.
+
+The overlay build already refuses both cases (see "What the build checks").
+So this stop only happens with an image made in another way. The plain
+public image has no allowlist file, so this check does not run there.
+
 ## How "installed by" is checked
 
 - Every installed distribution has a file list (`RECORD` in its
@@ -93,15 +118,25 @@ works the same way as a built-in typed connector (one with hand-written
 operations). The phpIPAM connector is a small, complete example:
 `backend/src/meho_backplane/connectors/phpipam/`.
 
+For a working start, copy the folder
+[`templates/connector-package/`](../../templates/connector-package/README.md).
+It holds a made-up connector package that imports MEHO only through the
+connector kit, with its tests, and its README says what to rename. The CI
+job "Connector package template" (`.github/workflows/ci.yml`) copies the
+sample into the checkout, runs its tests and the operation contract check,
+and runs the overlay wheel checks on its wheel. It runs on every pull
+request that is not docs-only, so a kit change that breaks the sample fails
+in the same pull request.
+
 The folder's `__init__.py` does three things when MEHO imports it:
 
-1. **Register the connector class** with `register_connector_v2` from
-   `meho_backplane/connectors/registry.py`. The class is a subclass of
-   `Connector` (`connectors/base.py`), or of `HttpConnector`
-   (`connectors/adapters/http.py`) for an HTTP API. It sets `product`,
-   `version` and `impl_id`, and has `fingerprint`, `probe` and `execute`.
-2. **Queue the registering function** with `register_typed_op_registrar`
-   from `meho_backplane/operations/typed_register.py`. Do not register the
+1. **Register the connector class** with `register_connector_v2` from the
+   connector kit (`meho_connector_kit`). The class is a subclass of the
+   kit's `Connector`, or of its `HttpConnector` for an HTTP API. It sets
+   `product`, `version` and `impl_id`, and has `fingerprint` and `probe`.
+   It needs no `execute` (see "`Connector.execute`" below).
+2. **Queue the registering function** with the kit's
+   `register_typed_op_registrar`. Do not register the
    operations at import: the import must stay quick and must not touch the
    database.
 3. **Register the approval previews**, if a change shows a person what it
@@ -130,7 +165,7 @@ Nothing else runs at import. Other code that runs at import is a reason to
 refuse the package in the review (see "The review checklist").
 
 At start, after every folder is imported, MEHO runs each queued function.
-It calls `register_typed_operation` (same module) once per operation. That
+It calls the kit's `register_typed_operation` once per operation. That
 call stores the operation as a row, with its input and answer schemas, its
 risk level (`safety_level`), whether it waits for approval
 (`requires_approval`), its group and its texts for agents. It is safe to
@@ -138,27 +173,28 @@ run twice: MEHO runs it at every start.
 
 ```python
 # meho_backplane/connectors/example_widget/__init__.py
+import meho_connector_kit as kit
+
 from meho_backplane.connectors.example_widget.connector import ExampleWidgetConnector
 from meho_backplane.connectors.example_widget.operations import register_widget_operations
-from meho_backplane.connectors.registry import register_connector_v2
-from meho_backplane.operations.typed_register import register_typed_op_registrar
 
-register_connector_v2(
+kit.register_connector_v2(
     product="example",
     version="1.x",
     impl_id="example-widget",
     cls=ExampleWidgetConnector,
 )
-register_typed_op_registrar(register_widget_operations)
+kit.register_typed_op_registrar(register_widget_operations)
 ```
 
 ```python
 # meho_backplane/connectors/example_widget/operations.py
 async def register_widget_operations(*, embedding_service=None) -> None:
-    from meho_backplane.connectors.example_widget.connector import ExampleWidgetConnector
-    from meho_backplane.operations.typed_register import register_typed_operation
+    import meho_connector_kit as kit
 
-    await register_typed_operation(
+    from meho_backplane.connectors.example_widget.connector import ExampleWidgetConnector
+
+    await kit.register_typed_operation(
         product=ExampleWidgetConnector.product,
         version=ExampleWidgetConnector.version,
         impl_id=ExampleWidgetConnector.impl_id,
@@ -196,15 +232,11 @@ Before you build, run MEHO's operation contract check
 (`backend/tests/test_operation_contracts.py`) with the package's folder in
 a MEHO checkout. The review for tier 2 asks for it too.
 
-**Which MEHO modules a package may import.** Today no MEHO module is a
-promise to a package: any of them can change in any release. Modules whose
-path has a part that starts with an underscore, such as
-`connectors/_shared/vault_creds.py`, are private by name. The connector
-kit (one module with the names a package may use, #5278) will be the
-promise. Its design is in
-[`docs/decisions/2026-11-01-connector-kit.md`](../decisions/2026-11-01-connector-kit.md).
-Until it ships, test your package against the exact MEHO release you build
-for.
+**Which MEHO modules a package may import.** Only the connector kit,
+`meho_connector_kit` (see "The connector kit" below). Every other MEHO
+module can change in any release. The page for connector authors in the
+docs site, [`docs-site/extend/connector-kit.md`](../../docs-site/extend/connector-kit.md)
+("Write a connector package"), lists every kit name.
 
 More to read:
 
@@ -260,12 +292,21 @@ environment cannot run code in the checks.
    - an extra wheel has no files in `meho_backplane/`, and no files for the
      `scripts`, `data` or `headers` parts of a wheel.
    - two connector wheels may not add the same folder.
+   - a connector wheel must say which versions of the connector kit it fits:
+     a `Requires-Dist` on `meho-connector-kit` with a version range, with no
+     link and no environment marker. A wheel without one is refused, and the
+     message names the package. Extra wheels need no kit range.
 2. **Snapshot**: the build records every file of `/app/.venv` and the version
    of every installed library. The public image installs exactly the
    versions of its lock file (`uv sync --locked`), so these versions are the
    lock to check against.
 3. **Install**: `uv pip install --offline --no-index --no-build` from the two
    local folders. No package index is used, and nothing is built from source.
+   The kit is already installed in the public image, so uv checks each
+   package's kit range against it. A range that the kit does not fit stops
+   the install with `No solution found`. `overlay_check.py` adds no code for
+   this. A unit test and the CI job (`.github/workflows/connector-overlay.yml`)
+   check it with the uv version that the Dockerfile pins.
 4. **After install**, against the snapshot:
    - every library keeps its version. Otherwise the build stops and names
      each library, for example `fakelib 1.0 -> 2.0`.
@@ -626,7 +667,10 @@ Where it lives and how it ships:
 
 The kit has its own version, starting at 1.0. It is not the MEHO release
 number. A package states the kit versions it fits in its `pyproject.toml`,
-for example `dependencies = ["meho-connector-kit>=1.0,<2"]`.
+for example `dependencies = ["meho-connector-kit>=1.0,<2"]`. The overlay
+build refuses a connector package without a range, and uv refuses a range
+that the kit in the image does not fit. MEHO checks the range again at
+start (see "The kit range at start").
 
 - The **first** number goes up when a name is removed or its inputs change.
   A package may break.
@@ -755,6 +799,9 @@ answer".
 - Wheel file format (`RECORD`, `.data` folder):
   https://packaging.python.org/en/latest/specifications/binary-distribution-format/
 - `uv pip install`: https://docs.astral.sh/uv/reference/cli/#uv-pip-install
+- Version ranges and `Requires-Dist`:
+  https://packaging.python.org/en/latest/specifications/version-specifiers/ and
+  https://packaging.python.org/en/latest/specifications/core-metadata/#requires-dist-multiple-use
 - cosign signing: https://docs.sigstore.dev/cosign/signing/signing_with_containers/
 - Python `importlib.metadata`:
   https://docs.python.org/3/library/importlib.metadata.html

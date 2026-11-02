@@ -13,8 +13,12 @@ three steps in a throwaway build stage:
    ``sitecustomize`` or ``usercustomize``: a module file, a compiled file,
    an extension module or a package folder), a wheel with a compiled-file
    cache (``__pycache__``) above its own folder, a connector wheel with
-   files outside its own connector folders, and an extra wheel with files
-   in MEHO's own package.
+   files outside its own connector folders, an extra wheel with files
+   in MEHO's own package, and a connector wheel that names no range of
+   the connector kit (no ``Requires-Dist`` on ``meho-connector-kit`` with
+   a version range). The range itself is checked by the install:
+   ``uv pip install --no-index`` refuses a range that the kit in the base
+   image does not meet.
 2. ``snapshot``: record every file and every installed package version of
    the base image's environment. The base image installs exactly the
    versions of its lock file, so this is the lock to check against.
@@ -62,6 +66,10 @@ CONNECTORS_PREFIX = ("meho_backplane", "connectors")
 ALLOWLIST_PATH = PurePosixPath("/app/connector-packages.json")
 STARTUP_HOOK_MODULES = frozenset({"sitecustomize", "usercustomize"})
 PYCACHE = "__pycache__"
+# The connector kit: every connector package names the range of its versions that it fits.
+KIT_DISTRIBUTION = "meho-connector-kit"
+# One Requires-Dist value: a name, optional extras, then the rest (range, link, marker).
+_REQUIREMENT_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(.*)$")
 # The file endings Python imports a module from: source, compiled, and extension modules.
 _MODULE_SUFFIXES = (".py", ".pyc", ".pyw", ".pyd", ".so")
 _FOLDER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -93,11 +101,30 @@ class Wheel:
     version: str
     digest: str
     folders: tuple[str, ...]
+    requires: tuple[str, ...] = ()
 
 
 def canonical_name(name: str) -> str:
     """The normalised package name (PEP 503), used to compare names."""
     return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def kit_ranges(requires: tuple[str, ...]) -> list[str]:
+    """The ranges of the connector kit that these ``Requires-Dist`` values name.
+
+    A value counts when it names ``meho-connector-kit`` with a version range,
+    and has no link and no environment marker (a marker can switch it off).
+    """
+    ranges: list[str] = []
+    for value in requires:
+        match = _REQUIREMENT_RE.match(value)
+        if match is None or canonical_name(match.group(1)) != KIT_DISTRIBUTION:
+            continue
+        spec, _, marker = match.group(2).partition(";")
+        spec = spec.strip().removeprefix("(").removesuffix(")").strip()
+        if spec and not spec.startswith("@") and not marker.strip():
+            ranges.append(spec)
+    return ranges
 
 
 def _metadata(text: str, where: str) -> tuple[str, str]:
@@ -217,7 +244,9 @@ def read_wheel(path: Path, *, connector: bool) -> Wheel:
         if len(dist_infos) != 1:
             raise BuildError(f"{where} must have exactly one .dist-info folder.")
         dist_info = dist_infos.pop()
-        name, version = _metadata(zf.read(f"{dist_info}/METADATA").decode("utf-8"), where)
+        metadata = zf.read(f"{dist_info}/METADATA").decode("utf-8")
+        name, version = _metadata(metadata, where)
+        requires = tuple(HeaderParser().parsestr(metadata).get_all("Requires-Dist") or ())
         _check_record(zf, dist_info, files, where)
         data_dir = dist_info.removesuffix(".dist-info") + ".data"
         folders: set[str] = set()
@@ -237,7 +266,7 @@ def read_wheel(path: Path, *, connector: bool) -> Wheel:
     if connector and not folders:
         raise BuildError(f"{where} adds no connector folder.")
     digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-    return Wheel(path, name, version, digest, tuple(sorted(folders)))
+    return Wheel(path, name, version, digest, tuple(sorted(folders)), requires)
 
 
 def _wheel_files(folder: Path | None) -> list[Path]:
@@ -251,6 +280,14 @@ def check_wheels(connectors_dir: Path, deps_dir: Path | None) -> list[Wheel]:
     connectors = [read_wheel(p, connector=True) for p in _wheel_files(connectors_dir)]
     if not connectors:
         raise BuildError(f"no connector wheel (*.whl) found in {connectors_dir}.")
+    for wheel in connectors:
+        if not kit_ranges(wheel.requires):
+            raise BuildError(
+                f"the connector package {wheel.name} {wheel.version} ({wheel.path.name}) does "
+                f"not say which versions of the connector kit it fits. Add a range to its "
+                f'dependencies, for example "{KIT_DISTRIBUTION}>=1.0,<2", and build the wheel '
+                "again. A range with an environment marker does not count."
+            )
     for path in _wheel_files(deps_dir):
         read_wheel(path, connector=False)
     owner: dict[str, str] = {}

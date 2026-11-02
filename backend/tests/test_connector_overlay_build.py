@@ -49,6 +49,9 @@ _UV = shutil.which("uv")
 needs_uv = pytest.mark.skipif(_UV is None, reason="uv is not on PATH")
 
 
+# The kit range every connector wheel must name. The base environment below has kit 1.0.
+_KIT = ("meho-connector-kit>=1.0,<2",)
+
 _WHEEL_FILE = "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
 
 
@@ -230,10 +233,59 @@ def test_changed_wheel_is_refused(tmp_path: Path) -> None:
 
 
 def test_two_connector_wheels_with_the_same_folder_are_refused(tmp_path: Path) -> None:
-    make_wheel(tmp_path, "first-connectors", "1.0", _connector_files("shared"))
-    make_wheel(tmp_path, "second-connectors", "1.0", _connector_files("shared"))
+    make_wheel(tmp_path, "first-connectors", "1.0", _connector_files("shared"), requires=_KIT)
+    make_wheel(tmp_path, "second-connectors", "1.0", _connector_files("shared"), requires=_KIT)
     with pytest.raises(oc.BuildError, match="'shared' is in both"):
         oc.check_wheels(tmp_path, None)
+
+
+@pytest.mark.parametrize(
+    "requires",
+    [
+        (),
+        ("helper-lib>=1",),
+        ("meho-connector-kit",),
+        ("meho-connector-kit>=1.0; python_version >= '3'",),
+        ("meho-connector-kit @ https://example.invalid/kit.whl",),
+        ("meho-connector-kit-extra>=1.0",),
+    ],
+    ids=["none", "other-library", "no-range", "with-marker", "link", "other-name"],
+)
+def test_connector_wheel_without_a_kit_range_is_refused(
+    tmp_path: Path, requires: tuple[str, ...]
+) -> None:
+    make_wheel(tmp_path, "example-connectors", "1.2.0", _connector_files(), requires=requires)
+    with pytest.raises(
+        oc.BuildError,
+        match=(
+            r"the connector package example-connectors 1\.2\.0 "
+            r"\(example_connectors-1\.2\.0-py3-none-any\.whl\) does not say which versions "
+            r"of the connector kit it fits"
+        ),
+    ):
+        oc.check_wheels(tmp_path, None)
+
+
+@pytest.mark.parametrize(
+    "requires",
+    [
+        "meho-connector-kit>=1.0,<2",
+        "meho-connector-kit (>=1.0,<2)",
+        "Meho_Connector.Kit~=1.0",
+        "meho-connector-kit[extra]>=1.0",
+    ],
+)
+def test_connector_wheel_with_a_kit_range_is_read(tmp_path: Path, requires: str) -> None:
+    make_wheel(tmp_path, "example-connectors", "1.2.0", _connector_files(), requires=(requires,))
+    [wheel] = oc.check_wheels(tmp_path, None)
+    assert wheel.requires == (requires,)
+
+
+def test_extra_wheel_needs_no_kit_range(tmp_path: Path) -> None:
+    connectors, deps = tmp_path / "connectors", tmp_path / "deps"
+    make_wheel(connectors, "example-connectors", "1.0", _connector_files(), requires=_KIT)
+    make_wheel(deps, "helper-lib", "1.0", {"helper_lib/__init__.py": ""})
+    assert len(oc.check_wheels(connectors, deps)) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +443,7 @@ def base_venv(tmp_path: Path) -> Path:
             ),
             make_wheel(base, "fakelib", "1.0", {"fakelib/__init__.py": "V = 1\n"}),
             make_wheel(base, "flat-lib", "1.0", {"flatlib.py": "F = 1\n"}),
+            make_wheel(base, "meho-connector-kit", "1.0", {"meho_connector_kit/__init__.py": ""}),
         ],
     )
     return venv
@@ -417,9 +470,11 @@ def test_allowlist_matches_the_installed_wheels(base_venv: Path, tmp_path: Path)
             "meho_backplane/connectors/example_widget/__init__.py": "A = 1\n",
             "meho_backplane/connectors/example_gadget/__init__.py": "B = 1\n",
         },
-        requires=("helper-lib>=1", "fakelib==1.0"),
+        requires=("helper-lib>=1", "fakelib==1.0", *_KIT),
     )
-    second = make_wheel(connectors, "other-connectors", "0.3", _connector_files("other_thing"))
+    second = make_wheel(
+        connectors, "other-connectors", "0.3", _connector_files("other_thing"), requires=_KIT
+    )
     make_wheel(deps, "helper-lib", "1.1", {"helper_lib/__init__.py": "H = 1\n"})
 
     _build(base_venv, connectors, deps, out)
@@ -451,7 +506,11 @@ def test_allowlist_matches_the_installed_wheels(base_venv: Path, tmp_path: Path)
 def test_clashing_library_fails_and_names_it(base_venv: Path, tmp_path: Path) -> None:
     connectors, deps, out = tmp_path / "connectors", tmp_path / "deps", tmp_path / "out"
     make_wheel(
-        connectors, "example-connectors", "1.0", _connector_files(), requires=("fakelib==2.0",)
+        connectors,
+        "example-connectors",
+        "1.0",
+        _connector_files(),
+        requires=("fakelib==2.0", *_KIT),
     )
     make_wheel(deps, "fakelib", "2.0", {"fakelib/__init__.py": "V = 2\n"})
     with pytest.raises(oc.BuildError, match=r"Changed: fakelib 1\.0 -> 2\.0"):
@@ -465,7 +524,11 @@ def test_extra_wheel_adding_files_to_a_base_package_is_refused(
 ) -> None:
     connectors, deps, out = tmp_path / "connectors", tmp_path / "deps", tmp_path / "out"
     make_wheel(
-        connectors, "example-connectors", "1.0", _connector_files(), requires=("sneaky-lib",)
+        connectors,
+        "example-connectors",
+        "1.0",
+        _connector_files(),
+        requires=("sneaky-lib", *_KIT),
     )
     make_wheel(deps, "sneaky-lib", "1.0", {"fakelib/extra.py": "x = 1\n"})
     with pytest.raises(oc.BuildError, match=r"fakelib/extra\.py \(is a new file in a folder"):
@@ -476,7 +539,11 @@ def test_extra_wheel_adding_files_to_a_base_package_is_refused(
 def test_extra_wheel_replacing_a_base_file_is_refused(base_venv: Path, tmp_path: Path) -> None:
     connectors, deps, out = tmp_path / "connectors", tmp_path / "deps", tmp_path / "out"
     make_wheel(
-        connectors, "example-connectors", "1.0", _connector_files(), requires=("sneaky-lib",)
+        connectors,
+        "example-connectors",
+        "1.0",
+        _connector_files(),
+        requires=("sneaky-lib", *_KIT),
     )
     make_wheel(deps, "sneaky-lib", "1.0", {"fakelib/__init__.py": "V = 666\n"})
     with pytest.raises(oc.BuildError, match=r"changed or removed files of the base image"):
@@ -493,6 +560,7 @@ def test_connector_folder_that_is_built_in_is_refused(base_venv: Path, tmp_path:
         {
             "meho_backplane/connectors/builtin_one/extra.py": "x = 1\n",
         },
+        requires=_KIT,
     )
     with pytest.raises(oc.BuildError, match=r"\['builtin_one'\] already exist"):
         _build(base_venv, connectors, deps, out)
@@ -503,7 +571,7 @@ def test_connector_folder_named_like_a_base_module_is_refused(
     base_venv: Path, tmp_path: Path
 ) -> None:
     connectors, deps, out = tmp_path / "connectors", tmp_path / "deps", tmp_path / "out"
-    make_wheel(connectors, "example-connectors", "1.0", _connector_files("registry"))
+    make_wheel(connectors, "example-connectors", "1.0", _connector_files("registry"), requires=_KIT)
     with pytest.raises(oc.BuildError, match=r"\['registry'\] already exist"):
         _build(base_venv, connectors, deps, out)
     assert not (out / "app" / "connector-packages.json").exists()
@@ -515,11 +583,47 @@ def test_extra_wheel_package_named_like_a_base_module_is_refused(
 ) -> None:
     connectors, deps, out = tmp_path / "connectors", tmp_path / "deps", tmp_path / "out"
     make_wheel(
-        connectors, "example-connectors", "1.0", _connector_files(), requires=("sneaky-lib",)
+        connectors,
+        "example-connectors",
+        "1.0",
+        _connector_files(),
+        requires=("sneaky-lib", *_KIT),
     )
     make_wheel(deps, "sneaky-lib", "1.0", {"flatlib/__init__.py": "F = 666\n"})
     with pytest.raises(oc.BuildError, match=r"flatlib/__init__\.py \(takes the place of a module"):
         _build(base_venv, connectors, deps, out)
+
+
+@needs_uv
+def test_kit_range_that_does_not_fit_stops_the_install(base_venv: Path, tmp_path: Path) -> None:
+    """The base environment has kit 1.0. uv refuses a wheel that needs kit 2, offline."""
+    connectors = tmp_path / "connectors"
+    wheel = make_wheel(
+        connectors,
+        "example-connectors",
+        "1.0",
+        _connector_files(),
+        requires=("meho-connector-kit>=2,<3",),
+    )
+    oc.check_wheels(connectors, None)
+    result = _uv(
+        "pip",
+        "install",
+        "--python",
+        str(base_venv / "bin" / "python"),
+        "--offline",
+        "--no-index",
+        "--no-build",
+        "--find-links",
+        str(connectors),
+        str(wheel),
+    )
+    assert result.returncode != 0
+    assert "No solution found" in result.stderr
+    assert "meho-connector-kit" in result.stderr
+    installed = oc.installed_versions(oc.site_packages(base_venv))
+    assert "example-connectors" not in installed
+    assert installed["meho-connector-kit"][1] == "1.0"
 
 
 def test_main_reports_a_refused_wheel(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:

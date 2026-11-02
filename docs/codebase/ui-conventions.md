@@ -48,13 +48,25 @@ one page.
 **4. One light theme.** No dark mode, no second palette, no theme
 switcher.
 
+**This is the target, not the current state.** The console ships both
+themes today: `base.html` sets `data-theme="meho-dark"` and
+`static/src/app/theme.js` switches between `meho-dark` and `meho-light`.
+Removing them is its own change. Until it lands, the rule binds *new*
+work — do not add a third theme, a new palette, or a second switcher, and
+do not write a style that only resolves in one of the two.
+
 ## Two things that cost an afternoon
 
-### The dev server serves new templates against old Python
+### The dev server can serve new templates against old Python
 
-It runs without `--reload`. Jinja re-reads a template from disk on every
-render; Python modules are imported once, at startup. Switch branches
-while it is running and you get the new templates against the old Python.
+**If you started it without `--reload`.** The documented commands in
+`dev/devserver.py` and [`ui.md`](./ui.md) do pass it, and with it this
+does not happen — but reload thrashes when new files appear under
+`dev/`, so it does get turned off.
+
+Without it: Jinja re-reads a template from disk on every render, while
+Python modules are imported once, at startup. Switch branches while the
+server is running and you get the new templates against the old Python.
 
 What it looks like: a 500 naming a variable the template expects, on a
 branch that reads correctly — because the branch *is* correct. Restart

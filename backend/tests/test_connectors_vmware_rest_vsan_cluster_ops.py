@@ -56,8 +56,6 @@ from meho_backplane.settings import get_settings
 _BASE = "https://vc-vsan-ops.test.invalid"
 _CLUSTER = "domain-c7"
 _TASK = "task-301"
-_V91 = "/sdk/vim25/9.1.0.0"
-_V80 = "/sdk/vim25/8.0.3.0"
 _SOAP_ENV = "http://schemas.xmlsoap.org/soap/envelope/"
 _XSI = "http://www.w3.org/2001/XMLSchema-instance"
 _FAULT_TEXT = "The vSAN service could not do the action."

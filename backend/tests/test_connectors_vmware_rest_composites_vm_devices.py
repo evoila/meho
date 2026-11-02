@@ -214,12 +214,42 @@ async def test_nic_connect_sends_the_action_and_reads_again(
     assert call["params"] == {"vm": _VM, "nic": "4000"}
 
 
-async def test_nic_connect_already_connected_sends_nothing(gate: _GateRecorder) -> None:
-    conn = _RestFake({_NIC: _nic_info("CONNECTED")})
-    out = await _nic(conn)
+@pytest.mark.parametrize(
+    ("action", "state"), [("connect", "CONNECTED"), ("disconnect", "NOT_CONNECTED")]
+)
+async def test_nic_connect_already_in_the_asked_state_sends_nothing(
+    gate: _GateRecorder, action: str, state: str
+) -> None:
+    conn = _RestFake({_NIC: _nic_info(state)})
+    out = await _nic(conn, action=action)
     assert out["status"] == "unchanged"
     assert conn.posts == []
     assert gate.calls == []
+
+
+@pytest.mark.parametrize("state", ["UNKNOWN", "RECOVERABLE_ERROR", "UNRECOVERABLE_ERROR"])
+@pytest.mark.parametrize("action", ["connect", "disconnect"])
+async def test_nic_connect_sends_the_action_for_an_error_or_unknown_state(
+    gate: _GateRecorder, action: str, state: str
+) -> None:
+    """An error or unknown state does not mean the adapter is where the caller wants it."""
+    conn = _RestFake({_NIC: _nic_info(state)})
+    conn.on_post = _becomes("CONNECTED" if action == "connect" else "NOT_CONNECTED")
+    out = await _nic(conn, action=action)
+    _valid(schemas.VM_NIC_CONNECT_RESPONSE_SCHEMA, out)
+    assert conn.posts == [("POST", f"{_NIC}?action={action}", None)]
+    assert out["status"] == f"{action}ed"
+    assert out["before"]["state"] == state
+    assert len(gate.calls) == 1
+
+
+async def test_nic_disconnect_with_no_state_sends_the_action(gate: _GateRecorder) -> None:
+    info = _nic_info("CONNECTED")
+    del info["state"]
+    conn = _RestFake({_NIC: info})
+    out = await _nic(conn, action="disconnect")
+    assert conn.posts == [("POST", f"{_NIC}?action=disconnect", None)]
+    assert out["status"] == "disconnected"
 
 
 async def test_nic_connect_unknown_adapter_is_not_found(gate: _GateRecorder) -> None:

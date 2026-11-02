@@ -4,10 +4,14 @@
 """Two VM device changes: connect or disconnect a network adapter, and add a serial port.
 
 * ``vmware.composite.vm.nic.connect`` (``dangerous``) -- reads
-  ``GET /vcenter/vm/{vm}/hardware/ethernet/{nic}`` first. When the adapter is
-  already in the asked state, nothing is sent (``unchanged``). Else
-  ``POST .../ethernet/{nic}?action=connect`` (or ``?action=disconnect``), then
-  it reads the adapter again. vCenter does this only on a powered-on VM.
+  ``GET /vcenter/vm/{vm}/hardware/ethernet/{nic}`` first. Nothing is sent
+  (``unchanged``) only when the adapter already reports the asked state:
+  ``CONNECTED`` for ``connect``, ``NOT_CONNECTED`` for ``disconnect``. Any
+  other state (``UNKNOWN``, ``RECOVERABLE_ERROR``, ``UNRECOVERABLE_ERROR``, or
+  none) does not show that the adapter is where the caller wants it, so the
+  request is sent. Then ``POST .../ethernet/{nic}?action=connect`` (or
+  ``?action=disconnect``), and it reads the adapter again. vCenter does this
+  only on a powered-on VM.
 * ``vmware.composite.vm.serial_port.add`` (``dangerous``) --
   ``POST /vcenter/vm/{vm}/hardware/serial`` with a top-level
   ``Serial.CreateSpec``: the port writes to a file on a datastore, or listens
@@ -89,11 +93,15 @@ SUB_OPS_VM_SERIAL_PORT_ADD: Final[tuple[str, ...]] = (
 )
 
 _CONNECTED: Final = "CONNECTED"
+_NOT_CONNECTED: Final = "NOT_CONNECTED"
 
-#: ``action`` -> (write sub-op, done status, state that means "already done").
-_NIC_ACTIONS: Final[dict[str, tuple[str, str, bool]]] = {
-    "connect": (_OP_CONNECT_VM_NIC, "connected", True),
-    "disconnect": (_OP_DISCONNECT_VM_NIC, "disconnected", False),
+#: ``action`` -> (write sub-op, done status, the one adapter state that means
+#: "already done"). vCenter also reports ``RECOVERABLE_ERROR``,
+#: ``UNRECOVERABLE_ERROR`` and ``UNKNOWN``; none of them means the adapter is
+#: in the asked state, so the request is sent for them.
+_NIC_ACTIONS: Final[dict[str, tuple[str, str, str]]] = {
+    "connect": (_OP_CONNECT_VM_NIC, "connected", _CONNECTED),
+    "disconnect": (_OP_DISCONNECT_VM_NIC, "disconnected", _NOT_CONNECTED),
 }
 
 
@@ -163,7 +171,7 @@ async def vm_nic_connect_composite(
     vm = check_vm_moid(params["vm"])
     nic = _check_device_id(params["nic"], "nic")
     action = params.get("action", "connect")
-    sub_op, done_status, want_connected = _NIC_ACTIONS[action]
+    sub_op, done_status, done_state = _NIC_ACTIONS[action]
     before = await _read_nic(connector, operator, target, vm, nic)
     envelope: dict[str, Any] = {
         "vm": vm,
@@ -181,7 +189,7 @@ async def vm_nic_connect_composite(
             "guidance": f"vCenter has no network adapter {nic} on {vm}. List the adapters "
             "with vmware.vm.info.",
         }
-    if (before.get("state") == _CONNECTED) is want_connected:
+    if before.get("state") == done_state:
         return {**envelope, "status": "unchanged", "guidance": "Already so; nothing sent."}
     try:
         gate, _ = await _write_sub_op(connector, target, operator, sub_op, {"vm": vm, "nic": nic})

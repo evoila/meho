@@ -59,7 +59,10 @@ _NIC_ROW_SCHEMA: Final[dict[str, Any]] = {
         "mac_address": {**_NULLABLE_STR, "description": "MAC address."},
         "state": {
             **_NULLABLE_STR,
-            "description": "Connection state, such as CONNECTED or NOT_CONNECTED.",
+            "description": (
+                "Connection state: CONNECTED, NOT_CONNECTED, RECOVERABLE_ERROR, "
+                "UNRECOVERABLE_ERROR or UNKNOWN."
+            ),
         },
         "start_connected": {**_NULLABLE_BOOL, "description": "Connect at power on."},
         "network": {**_NULLABLE_STR, "description": "Network id of the backing."},
@@ -74,8 +77,9 @@ VM_NIC_CONNECT_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
             "type": "string",
             "enum": ["connected", "disconnected", "unchanged", "not_found", "refused"],
             "description": (
-                "connected / disconnected: done; unchanged: already so, nothing sent; "
-                "not_found: no such adapter; refused: vCenter said no, nothing changed."
+                "connected / disconnected: done; unchanged: the adapter already reported "
+                "the asked state (CONNECTED or NOT_CONNECTED), nothing sent; not_found: no "
+                "such adapter; refused: vCenter said no, nothing changed."
             ),
         },
         "vm": {"type": "string", "description": "VM id."},
@@ -205,8 +209,10 @@ VM_NIC_CONNECT_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
         "after: {...}, error_type, guidance}."
     ),
     "next_step": (
-        "Safe to run twice: when the adapter is already in the asked state, nothing is "
-        "sent. On refused, read guidance (often the VM is off). Check after.state."
+        "Safe to run twice: when the adapter already reports the asked state (CONNECTED "
+        "for connect, NOT_CONNECTED for disconnect), nothing is sent. An error or UNKNOWN "
+        "state is not 'already so': the request is sent. On refused, read guidance (often "
+        "the VM is off). Check after.state."
     ),
 }
 

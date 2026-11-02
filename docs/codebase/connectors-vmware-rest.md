@@ -2400,10 +2400,12 @@ parameters, answers and AI guidance live in `composites/_vm_device_schemas.py`.
 | `vmware.composite.vm.device.cdrom` (`action=connect`) | Also connect a CD drive, not only disconnect it. | REST `POST /vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=connect` | dangerous | 8.0, 9.x |
 
 - **`vm.nic.connect`** (`composites/_vm_nic_serial.py`). Reads
-  `GET /vcenter/vm/{vm}/hardware/ethernet/{nic}` first. When the adapter is
-  already in the asked state, nothing is sent (`unchanged`), so it is safe to
-  run twice. Else the `connect` or `disconnect` action, then it reads the
-  adapter again. Answer: `before` and `after` with `label`, `mac_address`,
+  `GET /vcenter/vm/{vm}/hardware/ethernet/{nic}` first. Nothing is sent
+  (`unchanged`) only when the adapter already reports the asked state:
+  `CONNECTED` for `connect`, `NOT_CONNECTED` for `disconnect`. So it is safe
+  to run twice. Any other state (`UNKNOWN`, `RECOVERABLE_ERROR`,
+  `UNRECOVERABLE_ERROR`, or none) does not show the adapter is where the
+  caller wants it, so the action is sent. Then it reads the adapter again. Answer: `before` and `after` with `label`, `mac_address`,
   `state`, `start_connected`, `network`, `network_name`. vCenter refuses the
   call for a VM that is not powered on (`refused`). A missing adapter gives
   `not_found`.

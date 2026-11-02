@@ -2196,8 +2196,13 @@ way: `POST /ingest` (and the `meho connector ingest` CLI verb that
 drives it) accepts an optional body `tenant_id` with the same
 semantics as the MCP tool `meho_connector_ingest`'s argument —
 omitted or `null` targets the built-in / global scope (`tenant_id IS
-NULL`, tenant_admin only), the operator's own tenant UUID targets
-their tenant-curated namespace, and any other UUID is rejected with
+NULL`, platform_admin only: the rows are shared by every tenant, and a
+second ingest of an existing built-in connector updates those rows in
+place, so the write is a platform action like enable, disable, edit
+and delete; a tenant_admin without `platform_admin` gets a 403 with
+the message "built-in connector ingest requires platform_admin"), the
+operator's own tenant UUID targets their tenant-curated namespace, and
+any other UUID is rejected with
 a synchronous 403 by `IngestionPipelineService.authorize_scope` —
 run eagerly at the REST route on both the sync and async branches
 (before the async job row is created, #2208), eagerly in the MCP

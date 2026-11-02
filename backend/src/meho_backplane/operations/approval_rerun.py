@@ -165,8 +165,9 @@ class RerunParamsRequiredError(ApprovalError):
 
     def __init__(self, request_id: uuid.UUID) -> None:
         super().__init__(
-            f"approval request {request_id} has no stored params (a credential write "
-            "keeps them only until the first run). Send the original params again"
+            f"approval request {request_id} has no stored params (a credential write, "
+            "and a call whose params hold a password or a licence key, keeps them "
+            "only until the first run). Send the original params again"
         )
         self.request_id = request_id
 

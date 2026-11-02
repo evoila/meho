@@ -18,6 +18,7 @@ A person approves one exact release of MEHO. This suite pins the rule:
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -27,8 +28,10 @@ import pytest
 from sqlalchemy import select
 
 import meho_backplane.operations.dispatcher as dispatcher_module
+from meho_backplane import connector_packages
 from meho_backplane.api.v1.approvals import _view
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.connector_packages import ConnectorPackage
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog, Tenant
@@ -167,6 +170,62 @@ async def test_running_release_id_shapes(monkeypatch: pytest.MonkeyPatch) -> Non
     assert running_release_id() == _NEW_SHA
     monkeypatch.setenv("CHART_VERSION", "0.40.0")
     assert running_release_id() == f"{_NEW_SHA} (chart 0.40.0)"
+
+
+def _package(
+    name: str = "example-connectors", version: str = "0.1.0", digest: str = "b" * 64
+) -> ConnectorPackage:
+    return ConnectorPackage(
+        name=name, version=version, wheel_digest=f"sha256:{digest}", folders=[name.split("-")[0]]
+    )
+
+
+def _install(monkeypatch: pytest.MonkeyPatch, *packages: ConnectorPackage) -> None:
+    """Make MEHO run as an image that carries exactly *packages*."""
+    monkeypatch.setattr(connector_packages, "_installed", packages)
+
+
+async def test_release_id_changes_with_connector_packages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An image with a new, updated, rebuilt or removed connector package is another release."""
+    monkeypatch.setenv("GIT_SHA", _NEW_SHA)
+    monkeypatch.setenv("CHART_VERSION", "0.40.0")
+    _install(monkeypatch)
+    plain = f"{_NEW_SHA} (chart 0.40.0)"
+    assert running_release_id() == plain
+
+    _install(monkeypatch, _package())
+    with_package = running_release_id()
+    assert with_package is not None
+    assert re.fullmatch(re.escape(plain) + r" \(packages [0-9a-f]{12}\)", with_package)
+
+    _install(monkeypatch, _package(version="0.2.0"))
+    updated = running_release_id()
+    _install(monkeypatch, _package(version="0.2.0", digest="c" * 64))
+    rebuilt = running_release_id()
+    _install(monkeypatch, _package(), _package(name="other-connectors"))
+    two = running_release_id()
+    assert len({plain, with_package, updated, rebuilt, two}) == 5
+
+    _install(monkeypatch, _package(name="other-connectors"), _package())
+    assert running_release_id() == two
+
+    # A request that waits from the image with the first package ends at
+    # the start of the image with the updated package, and a request from
+    # that image ends when the package is removed.
+    tenant = await _seed_tenant()
+    _install(monkeypatch, _package())
+    first = await _park(tenant)
+    _install(monkeypatch, _package(version="0.2.0"))
+    assert await expire_approvals_from_older_release() == 1
+    second = await _park(tenant)
+    _install(monkeypatch)
+    assert await expire_approvals_from_older_release() == 1
+    for request_id, request_release in ((first, with_package), (second, updated)):
+        row = await _row(request_id)
+        assert row.status == ApprovalRequestStatus.EXPIRED.value
+        assert approval_expired_reason(row) is ApprovalExpiredReason.RELEASE_CHANGED
+        (audit,) = await _audit_rows(request_id, "approval.decision")
+        assert audit.payload["request_release"] == request_release
 
 
 async def test_request_records_the_running_release(monkeypatch: pytest.MonkeyPatch) -> None:

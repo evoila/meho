@@ -648,10 +648,11 @@ class BuiltinConnectorWriteForbiddenError(Exception):
 
     A built-in connector row (``tenant_id IS NULL``) is a shared,
     global-catalogue entry every tenant sees, so enabling / disabling
-    it, bulk-enabling its reads, or editing one of its groups / ops is a
-    platform action, not a tenant one. The write surfaces
+    it, bulk-enabling its reads, editing one of its groups / ops, or
+    deleting it is a platform action, not a tenant one. The write surfaces
     (``POST /{id}/enable``, ``/enable-reads``, ``/disable``; ``PATCH
-    /{id}/groups/{key}``, ``/operations/{op_id}``) carry a
+    /{id}/groups/{key}``, ``/operations/{op_id}``; the MCP tool
+    ``meho_connector_delete`` with ``tenant_id`` omitted) carry a
     ``tenant_admin`` floor that authorises a tenant to mutate *its own*
     curated rows; crossing into the built-in catalogue is the orthogonal
     ``platform_admin`` capability -- the same seat
@@ -684,9 +685,9 @@ class BuiltinConnectorWriteForbiddenError(Exception):
             "connector_id": connector_id,
             "message": (
                 f"connector {connector_id!r} is a built-in (global) connector; "
-                f"enabling, disabling, or editing it requires the platform_admin "
-                f"capability, not tenant_admin alone. A tenant-curated connector "
-                f"is editable by its tenant_admin."
+                f"enabling, disabling, editing, or deleting it requires the "
+                f"platform_admin capability, not tenant_admin alone. A "
+                f"tenant-curated connector is editable by its tenant_admin."
             ),
         }
         super().__init__(self.detail["message"])

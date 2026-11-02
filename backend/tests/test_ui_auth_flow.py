@@ -69,6 +69,7 @@ from meho_backplane.ui.auth.flow import (
 )
 from meho_backplane.ui.auth.middleware import require_ui_session
 from meho_backplane.ui.auth.revalidation import (
+    _last_validated,
     reset_read_revalidation_cache_for_testing,
 )
 from meho_backplane.ui.auth.routes import (
@@ -533,6 +534,9 @@ def test_callback_creates_session_and_sets_cookie(monkeypatch: pytest.MonkeyPatc
             assert refresh_token.encode("utf-8") not in row.refresh_token
 
     asyncio.run(_check_row())
+    # Step 5: creating the row seeded the read-path revalidation
+    # anchor, so the first reads of the new session skip the token check.
+    assert session_id in _last_validated
 
 
 # Non-HTML ``Accept`` -- a scripted probe / htmx fragment fetch. The
@@ -1410,12 +1414,13 @@ def test_read_path_revalidation_hits_cached_jwks_no_outbound_calls(
 def test_read_path_within_drift_window_skips_revalidation() -> None:
     """Inside the drift window the read path never touches the token.
 
-    Under the default threshold (300 s) the first sight of a session
-    seeds the anchor -- the token was validated at creation by the
-    callback -- and immediate follow-up reads render without a JWT
-    decode. This pins the amortisation contract: the per-request hot
-    path inside the window stays token-free, and the documented lag
-    window (token TTL + threshold) is the trade for it.
+    Under the default threshold (300 s) creating the row seeds the
+    anchor -- the callback validated the token before it created the
+    row -- and the follow-up reads render without a JWT decode. This
+    pins the amortisation contract: the per-request hot path inside
+    the window stays token-free, and the documented lag window (token
+    TTL + threshold) is the trade for it. The stored token is not a
+    JWT, so any check of it would redirect to login.
     """
     session_id = _seed_session_with_token("not-a-jwt")
 

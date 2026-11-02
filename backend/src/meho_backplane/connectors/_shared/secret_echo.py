@@ -31,6 +31,16 @@ def response_text(response: httpx.Response) -> str:
 
 
 def mentions_secret(texts: Iterable[str], secret: str) -> bool:
-    """True when any text holds *secret* as is, JSON-escaped, URL-encoded or HTML-escaped."""
-    forms = {secret, json.dumps(secret)[1:-1], quote(secret, safe=""), html.escape(secret)}
+    """True when any text holds *secret* as is, JSON-escaped, URL-encoded or HTML-escaped.
+
+    The JSON form comes twice: with a non-ASCII character as ``\\uXXXX`` and
+    as it is. Both escape ``\\`` and ``"``.
+    """
+    forms = {
+        secret,
+        json.dumps(secret)[1:-1],
+        json.dumps(secret, ensure_ascii=False)[1:-1],
+        quote(secret, safe=""),
+        html.escape(secret),
+    }
     return any(form in text for text in texts for form in forms if form)

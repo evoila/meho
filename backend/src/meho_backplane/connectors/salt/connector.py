@@ -41,7 +41,10 @@ versions and the masters RaaS knows.
 Operations
 ----------
 
-Six reads; their bodies live in :mod:`meho_backplane.connectors.salt.reads`.
+Six reads (bodies in :mod:`meho_backplane.connectors.salt.reads`) and six
+changes: accept, reject and delete minion keys
+(:mod:`meho_backplane.connectors.salt.key_writes`), and run a state, run a
+command and stop a job (:mod:`meho_backplane.connectors.salt.job_writes`).
 All exist on every covered version, so no operation needs a version check.
 
 Traces
@@ -95,8 +98,14 @@ __all__ = [
     "MINION_KEY_STATE_RPC",
     "MINION_PRESENCE_RPC",
     "RETURNS_RPC",
+    "ROUTE_CMD_RPC",
+    "SET_KEY_STATE_RPC",
+    "STOP_JOB_RPC",
     "TARGET_GROUP_RPC",
+    "TARGET_MINIONS_RPC",
+    "SaltChangeRefusedError",
     "SaltConnector",
+    "SaltLoginError",
     "SaltRpcError",
     "SaltServerVersion",
     "parse_server_version",
@@ -126,6 +135,10 @@ MINION_KEY_STATE_RPC: Final[tuple[str, str]] = ("minions", "get_minion_key_state
 CMDS_RPC: Final[tuple[str, str]] = ("cmd", "get_cmds")
 RETURNS_RPC: Final[tuple[str, str]] = ("ret", "get_returns")
 TARGET_GROUP_RPC: Final[tuple[str, str]] = ("tgt", "get_target_group")
+TARGET_MINIONS_RPC: Final[tuple[str, str]] = ("tgt", "get_target_group_minions")
+SET_KEY_STATE_RPC: Final[tuple[str, str]] = ("minions", "set_minion_key_state")
+ROUTE_CMD_RPC: Final[tuple[str, str]] = ("cmd", "route_cmd")
+STOP_JOB_RPC: Final[tuple[str, str]] = ("cmd", "stop_job")
 
 #: Longest vendor error text kept in an error message.
 _ERROR_TEXT_LIMIT: Final[int] = 500
@@ -135,6 +148,23 @@ _VERSION_PREFIX: Final[re.Pattern[str]] = re.compile(r"\d+(?:\.\d+)*")
 
 class SaltRpcError(RuntimeError):
     """The RPC answer carried an ``error``, or had no ``ret``. The message says which."""
+
+
+class SaltChangeRefusedError(RuntimeError):
+    """MEHO refuses a Salt change before it calls the vendor; the message says why."""
+
+
+class SaltLoginError(RuntimeError):
+    """The login call answered with an HTTP status that is not an auth refusal.
+
+    A ``401`` or ``403`` at login raises ``ConnectorAuthError`` instead. This
+    error keeps the status, so a read can tell a server that does not answer
+    (``502``, ``503``, ``504``) from any other failure.
+    """
+
+    def __init__(self, message: str, *, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -279,7 +309,7 @@ class SaltConnector(HttpConnector):
                 )
                 raise (
                     session_establish_auth_error(exc, message=message, target=target)
-                    or RuntimeError(message)
+                    or SaltLoginError(message, status_code=exc.response.status_code)
                 ) from exc
             cookies = {cookie.name: cookie.value for cookie in resp.cookies.jar if cookie.value}
             xsrf = cookies.get(_XSRF_COOKIE) or resp.headers.get(_XSRF_HEADER)
@@ -473,6 +503,54 @@ class SaltConnector(HttpConnector):
         from meho_backplane.connectors.salt.reads import target_list_impl
 
         return await target_list_impl(self, operator, target, params)
+
+    async def key_accept(
+        self, operator: Operator, target: SaltTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``salt.key.accept`` -- accept pending minion keys."""
+        from meho_backplane.connectors.salt.key_writes import key_change_impl
+
+        return await key_change_impl(self, operator, target, params, action="accept")
+
+    async def key_reject(
+        self, operator: Operator, target: SaltTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``salt.key.reject`` -- reject minion keys."""
+        from meho_backplane.connectors.salt.key_writes import key_change_impl
+
+        return await key_change_impl(self, operator, target, params, action="reject")
+
+    async def key_delete(
+        self, operator: Operator, target: SaltTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``salt.key.delete`` -- delete minion keys (the approver saw the keys)."""
+        from meho_backplane.connectors.salt.key_writes import key_change_impl
+
+        return await key_change_impl(self, operator, target, params, action="delete")
+
+    async def job_run_state(
+        self, operator: Operator, target: SaltTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``salt.job.run_state`` -- start ``state.apply`` on the approved minions."""
+        from meho_backplane.connectors.salt.job_writes import run_state_impl
+
+        return await run_state_impl(self, operator, target, params)
+
+    async def job_run_command(
+        self, operator: Operator, target: SaltTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``salt.job.run_command`` -- start ``cmd.run`` on the approved minions."""
+        from meho_backplane.connectors.salt.job_writes import run_command_impl
+
+        return await run_command_impl(self, operator, target, params)
+
+    async def job_cancel(
+        self, operator: Operator, target: SaltTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``salt.job.cancel`` -- stop a running job."""
+        from meho_backplane.connectors.salt.job_writes import job_cancel_impl
+
+        return await job_cancel_impl(self, operator, target, params)
 
     def trace_response_body(self, response: httpx.Response) -> Any:
         """Filter a vendor answer before the flight recorder records it.

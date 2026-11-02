@@ -13,15 +13,17 @@ Initiative #1842 (G10.11), Task #1892. Acceptance criteria from #1892:
    active rows (own ``operator_sub`` + ``tenant_id``, ``revoked_at IS NULL``,
    not expired); a second operator's / a revoked / an expired row never
    appears. The current row carries the "This device" marker.
-3. ``POST /ui/account/sessions/{session_id}/revoke`` with a foreign /
-   cross-tenant session id returns 404 and does NOT revoke it.
+3. ``POST /ui/account/sessions/revoke`` (the id in the ``session_id``
+   form field) with a foreign / cross-tenant session id returns 404 and
+   does NOT revoke it.
 4. ``POST /ui/account/sessions/revoke-others`` revokes all of this
    operator's *other* active sessions but leaves the current one active.
 5. Revoking the current session signs the operator out (self-logout
    warning string in the modal; response redirects to login). Missing
    CSRF token on a revoke gets ``csrf_token_invalid`` 403.
-6. ``revoke-others`` resolves as a literal route, not as
-   ``{session_id}="revoke-others"``.
+6. No URL the account page renders carries a session id: the revoke
+   posts to one fixed path and sends the id in the form body, and the
+   router has no path with a session id under ``/ui/account/sessions/``.
 
 Harness mirrors :mod:`backend.tests.test_ui_connectors_view`: a minimal
 FastAPI app with the UI session + CSRF middlewares, a ``web_session``
@@ -32,6 +34,7 @@ re-verify it, and a respx-mocked discovery + JWKS endpoint.
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 import warnings
 from collections.abc import Iterator
@@ -63,6 +66,7 @@ from meho_backplane.ui.auth.session_store import (
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
+from meho_backplane.ui.routes.account import build_account_router
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests._oidc_jwt_helpers import (
     AUDIENCE as _DEFAULT_AUDIENCE,
@@ -263,6 +267,18 @@ def _csrf_headers(token: str) -> dict[str, str]:
     return {"X-CSRF-Token": token, "HX-Request": "true"}
 
 
+_REVOKE_PATH = "/ui/account/sessions/revoke"
+
+
+def _post_revoke(client: TestClient, csrf: str, session_id: object) -> Any:
+    """POST the single-session revoke the way the page does: id in the form body."""
+    return client.post(
+        _REVOKE_PATH,
+        data={"session_id": str(session_id)},
+        headers=_csrf_headers(csrf),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Authentication boundary
 # ---------------------------------------------------------------------------
@@ -391,12 +407,8 @@ def test_revoke_rejects_foreign_session() -> None:
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         csrf = client.cookies[CSRF_COOKIE_NAME]
-        foreign_resp = client.post(
-            f"/ui/account/sessions/{foreign}/revoke", headers=_csrf_headers(csrf)
-        )
-        cross_resp = client.post(
-            f"/ui/account/sessions/{cross_tenant}/revoke", headers=_csrf_headers(csrf)
-        )
+        foreign_resp = _post_revoke(client, csrf, foreign)
+        cross_resp = _post_revoke(client, csrf, cross_tenant)
 
     assert foreign_resp.status_code == 404, foreign_resp.text
     assert cross_resp.status_code == 404, cross_resp.text
@@ -414,7 +426,7 @@ def test_revoke_other_owned_session_succeeds_and_returns_fragment() -> None:
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         csrf = client.cookies[CSRF_COOKIE_NAME]
-        response = client.post(f"/ui/account/sessions/{other}/revoke", headers=_csrf_headers(csrf))
+        response = _post_revoke(client, csrf, other)
     assert response.status_code == 200, response.text
     # The swapped-in fragment is the sessions list (no full-page chrome).
     assert 'id="account-sessions"' in response.text
@@ -466,9 +478,7 @@ def test_account_self_revoke_redirects_to_login() -> None:
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         csrf = client.cookies[CSRF_COOKIE_NAME]
-        response = client.post(
-            f"/ui/account/sessions/{session_id}/revoke", headers=_csrf_headers(csrf)
-        )
+        response = _post_revoke(client, csrf, session_id)
     assert response.status_code == 200, response.text
     # HTMX client-side redirect to the login surface.
     assert response.headers.get("HX-Redirect") == "/ui/auth/login"
@@ -505,7 +515,7 @@ def test_revoke_requires_csrf() -> None:
         # No X-CSRF-Token header and the CSRF cookie removed -> rejected.
         client.cookies.delete(CSRF_COOKIE_NAME)
         response = client.post(
-            f"/ui/account/sessions/{other}/revoke", headers={"HX-Request": "true"}
+            _REVOKE_PATH, data={"session_id": str(other)}, headers={"HX-Request": "true"}
         )
     assert response.status_code == 403, response.text
     assert "csrf_token_invalid" in response.text
@@ -514,39 +524,75 @@ def test_revoke_requires_csrf() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC6 -- route resolution: literal before param
+# AC6 -- no session id in any URL
 # ---------------------------------------------------------------------------
 
 
-def test_revoke_others_resolves_as_literal_route() -> None:
-    """``revoke-others`` binds the literal route, not ``{session_id}``.
+def test_account_page_urls_carry_no_session_id() -> None:
+    """The revoke buttons post to one fixed URL; the id rides in the form body.
 
-    If the literal route were registered after the parametrised one,
-    ``revoke-others`` would bind as ``session_id="revoke-others"``; the
-    single-revoke handler would then try ``uuid.UUID("revoke-others")``
-    and 404. A 200 + the sessions-list fragment proves the literal route
-    won the first-match-wins lookup.
+    Every ``hx-post``, ``href`` and ``action`` attribute on the rendered
+    page is checked against every session id the page lists. The ids
+    appear only in ``hx-vals`` (sent as the form body) and in element
+    ids / labels, never in a URL.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
-    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
-    _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
+    client, mock, _csrf, sid = _authenticated_client_with_role_jwks(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_SELF,
+        role=TenantRole.OPERATOR,
+    )
+    other = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
+    try:
+        response = client.get("/ui/account")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    urls = re.findall(r'\b(?:hx-post|hx-get|href|action)="([^"]*)"', body)
+    assert _REVOKE_PATH in urls
+    for session_id in (sid, other):
+        assert f'hx-vals=\'{{"session_id": "{session_id}"}}\'' in body
+        for url in urls:
+            assert str(session_id) not in url, url
 
+
+def test_no_account_route_has_a_session_id_in_its_path() -> None:
+    """No route under ``/ui/account/sessions/`` has a path parameter.
+
+    The request path is what the ingress access log and the audit row's
+    ``path`` column record, so it must be the same for every session.
+    """
+    paths = [
+        getattr(route, "path", "")
+        for route in build_account_router().routes
+        if getattr(route, "path", "").startswith("/ui/account/sessions/")
+    ]
+    assert paths, "the account router lost its session routes"
+    assert all("{" not in path for path in paths), paths
+
+
+def test_revoke_rejects_the_old_path_shape() -> None:
+    """A POST with the session id in the URL path is not a route (404) and revokes nothing."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
+    other = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         csrf = client.cookies[CSRF_COOKIE_NAME]
-        response = client.post("/ui/account/sessions/revoke-others", headers=_csrf_headers(csrf))
-    assert response.status_code == 200, response.text
-    assert 'id="account-sessions"' in response.text
+        response = client.post(f"/ui/account/sessions/{other}/revoke", headers=_csrf_headers(csrf))
+    assert response.status_code == 404, response.text
+    assert _revoked_at(other) is None
 
 
-def test_revoke_malformed_session_id_returns_404() -> None:
-    """A non-UUID session id on the single-revoke route 404s (not 500)."""
+@pytest.mark.parametrize("payload", [{"session_id": "not-a-uuid"}, {"session_id": ""}, {}])
+def test_revoke_malformed_or_missing_session_id_returns_404(payload: dict[str, str]) -> None:
+    """A non-UUID, empty or absent ``session_id`` form field 404s (not 422, not 500)."""
     _seed_tenant(_TENANT_A, "tenant-a")
     session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         csrf = client.cookies[CSRF_COOKIE_NAME]
-        response = client.post(
-            "/ui/account/sessions/not-a-uuid/revoke", headers=_csrf_headers(csrf)
-        )
+        response = client.post(_REVOKE_PATH, data=payload, headers=_csrf_headers(csrf))
     assert response.status_code == 404, response.text
+    assert _revoked_at(session_id) is None

@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_connector_overlay_build import _connector_files, make_wheel, oc
+from tests.test_connector_overlay_build import _KIT, _connector_files, make_wheel, oc
 
 _BUILD_SH = Path(__file__).resolve().parents[2] / "deploy" / "connector-overlay" / "build.sh"
 _BASE = "ghcr.io/example/meho@sha256:" + "a" * 64
@@ -52,7 +52,9 @@ def _record(folder: Path, wheel: Path, name: str, version: str, **change: object
 
 @pytest.fixture
 def wheel(tmp_path: Path) -> Path:
-    return make_wheel(tmp_path / "connectors", "example-connectors", "1.2.0", _connector_files())
+    return make_wheel(
+        tmp_path / "connectors", "example-connectors", "1.2.0", _connector_files(), requires=_KIT
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +85,7 @@ def test_changed_wheel_needs_a_new_review(tmp_path: Path, wheel: Path) -> None:
         "example-connectors",
         "1.2.0",
         _connector_files() | {"meho_backplane/connectors/example_widget/extra.py": "X = 2\n"},
+        requires=_KIT,
     )
     assert changed == wheel
     with pytest.raises(oc.BuildError, match="The wheel changed, so a person must review it again"):

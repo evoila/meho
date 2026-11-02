@@ -1,0 +1,5 @@
+vcf-automation-9.1/vcf-automation-9.1-provider-infrastructure-apis-reference-operations.tsv
+vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-abx-reference-operations.tsv
+vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-approval-reference-operations.tsv
+vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-event-broker-service-api-reference-operations.tsv
+vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-policies-reference-operations.tsv

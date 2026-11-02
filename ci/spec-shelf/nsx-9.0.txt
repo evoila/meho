@@ -1,0 +1,2 @@
+nsx-9.0/nsx_api.openapi3.json
+nsx-9.0/nsx_policy_api.openapi3.json

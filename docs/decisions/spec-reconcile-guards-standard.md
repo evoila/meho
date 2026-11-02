@@ -189,13 +189,17 @@ it chooses to add a spec file.
    `MANIFEST.md` provenance. Freely-licensed (OSS) specs need only that
    provenance note; vendor-licensed specs follow the signoff model
    below.
-3. **CI checkout widened** — one line per job in
-   `.github/workflows/ci.yml`: add the product dir to the spec-shelf
-   `sparse-checkout` list, and one line in the fail-loud verify step so
-   a shelf-layout move fails the job instead of silently regressing the
-   lane to skip. Same `SPEC_SHELF_TOKEN`; **no new secret, ever** — the
-   PAT already reads the whole private shelf repo. These one-liners
-   collide trivially across parallel lane tasks; rebase, don't battle.
+3. **CI list extended** — add one new file
+   `ci/spec-shelf/<product>-<version>.txt` that names the spec files,
+   one per line, relative to the shelf's `docs/` folder (for example
+   `nsx-9.0/nsx_api.openapi3.json`). Do not edit
+   `.github/workflows/ci.yml`. Both Python jobs read the folder through
+   `scripts/ci/spec_shelf.sh`: it gives the `sparse-checkout` folders,
+   and its fail-loud check fails the job when a listed file is missing,
+   so a shelf-layout move does not silently send the lane back to skip.
+   A file for a product that already has one goes into that product's
+   list file. Same `SPEC_SHELF_TOKEN`; **no new secret, ever** — the
+   PAT already reads the whole private shelf repo.
 4. **Signoff extended** — one paragraph per vendor appended to
    [`vendor-spec-ci-provisioning.md`](vendor-spec-ci-provisioning.md)'s
    signoff of record (what is fetched, same ephemeral-use conditions).

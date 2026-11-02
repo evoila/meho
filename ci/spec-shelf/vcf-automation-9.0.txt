@@ -1,0 +1,2 @@
+vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-catalog-deployment.json
+vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json

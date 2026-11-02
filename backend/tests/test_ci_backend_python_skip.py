@@ -125,6 +125,8 @@ def test_pull_request_without_backend_change_skips_the_python_lanes(
         ["backend/pyproject.toml", "docs/codebase/devops.md"],
         ["cli/main.go", "backend/tests/test_x.py"],
         [".github/workflows/ci.yml"],
+        ["ci/spec-shelf/new-product-1.0.txt"],
+        ["scripts/ci/spec_shelf.sh", "docs/codebase/devops.md"],
     ],
 )
 def test_pull_request_with_backend_or_ci_change_runs_everything(

@@ -1,0 +1,1 @@
+vmware-cloud-director-10.6/cloudapi-39.2.json

@@ -1,0 +1,2 @@
+vcf-protection-and-recovery-9.1/recovery-srm-v2.yaml
+vcf-protection-and-recovery-9.1/replication-vr-v2.yaml

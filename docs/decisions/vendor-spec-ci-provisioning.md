@@ -795,7 +795,9 @@ tests, none skipped).
 - Resolver contract: `backend/tests/acceptance/_vcenter_spec.py` (env-var
   priority; skip semantics).
 - Workflow wiring: `.github/workflows/ci.yml` — the two "Checkout vendor
-  vCenter spec-shelf" steps and the `SPEC_SHELF_TOKEN_PRESENT` /
+  vCenter spec-shelf" steps (their folders and files come from the lists
+  in `ci/spec-shelf/`, read by `scripts/ci/spec_shelf.sh`) and the
+  `SPEC_SHELF_TOKEN_PRESENT` /
   `MEHO_CONSUMER_DOCS_ROOT` job env rows; operator-facing summary in
   [`docs/codebase/devops.md`](../codebase/devops.md).
 - Precedent ADRs: [`shipped-spec-provenance.md`](shipped-spec-provenance.md)

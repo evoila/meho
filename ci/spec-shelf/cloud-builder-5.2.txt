@@ -1,0 +1,5 @@
+cloud-builder-5.2/cloud-builder-5.2.0-reference-operations.tsv
+cloud-builder-5.2/cloud-builder-5.2.1-reference-operations.tsv
+cloud-builder-5.2/cloud-builder-5.2.2-reference-operations.tsv
+cloud-builder-5.2/cloud-builder-5.2.3-reference-operations.tsv
+cloud-builder-5.2/cloud-builder-5.2.4-reference-operations.tsv

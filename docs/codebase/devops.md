@@ -2016,7 +2016,7 @@ runs one short job instead.
   `backend_python`. It starts `true` and is `false` only when the event is
   `pull_request`, the diff could be computed, no changed path apart from
   `.md` files is under `backend/`, and `.github/workflows/ci.yml` did not
-  change. `push` and `merge_group` always keep it `true`. It uses the same
+  change (nor a list in `ci/spec-shelf/` or `scripts/ci/spec_shelf.sh`). `push` and `merge_group` always keep it `true`. It uses the same
   `HEAD^1..HEAD` diff as `docs_only`. The diff runs with
   `core.quotePath=false`, so a path with non-ASCII characters (for example
   `café.json`) is printed as is and the `backend/` check sees it. Git still
@@ -2162,9 +2162,17 @@ repo. `ci.yml` provisions them at runtime, gated on a secret:
   [`spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md)
   §Lane placement.
 - Per-vendor reconcile lanes beyond vCenter (#2981-#2993) extend the same
-  wiring — one `sparse-checkout` line + one verify line per product dir,
-  same `SPEC_SHELF_TOKEN`, never a new secret. Standard + extension
-  mechanics + red-lane protocol:
+  wiring. The required shelf files are listed in `ci/spec-shelf/`, one
+  small file per product dir (#5575). A step in each job runs
+  `scripts/ci/spec_shelf.sh paths ci/spec-shelf`, and the checkout takes
+  its `sparse-checkout` folders from that step's output. The verify step
+  runs `scripts/ci/spec_shelf.sh verify ci/spec-shelf spec-shelf`: one
+  line per present file, and the `Spec-shelf layout drift` error for each
+  missing one. So a new product adds one list file and does not edit
+  `ci.yml`. A change in `ci/spec-shelf/` or the script gives the full
+  Python run, like a `ci.yml` change. Same `SPEC_SHELF_TOKEN`, never a
+  new secret. Tests: `backend/tests/test_ci_spec_shelf.py`. Standard +
+  extension mechanics + red-lane protocol:
   [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 - The `secrets` context is unavailable in step-level `if:`, so the gate is
   the job-env boolean `SPEC_SHELF_TOKEN_PRESENT` — presence only, never the

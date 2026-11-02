@@ -1,0 +1,1 @@
+azure-arm-2026.10/specification/resources/resource-manager/Microsoft.Resources/subscriptions/stable/2022-12-01/subscriptions.json

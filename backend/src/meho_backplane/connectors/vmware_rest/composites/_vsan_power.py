@@ -80,6 +80,10 @@ _DEFAULT_REASON: Final = "Planned maintenance"
 
 _RED: Final = "red"
 _YELLOW: Final = "yellow"
+_GREEN: Final = "green"
+#: The colours of a completed check. vSAN also answers ``unknown`` when the
+#: health is not available or not yet calculated; that is not a result.
+_COMPLETED: Final = frozenset({_GREEN, _YELLOW, _RED})
 
 
 def _invalid(problem: str, **fields: Any) -> dict[str, Any]:
@@ -164,20 +168,29 @@ async def _precheck(
         )
     groups = [_parse_vsan_health_group(g) for g in dict_items(summary.get("groups"))]
     blocking = _check_rows(groups, _RED)
-    overall = summary.get("overallHealth")
+    raw_overall = summary.get("overallHealth")
+    overall = raw_overall if isinstance(raw_overall, str) else None
     power = await _power_context(connector, target, operator, cluster)
-    ready = overall != _RED and not blocking
+    completed = overall in _COMPLETED
+    ready = completed and overall != _RED and not blocking
     if ready:
         guidance = (
             "No check is red: the cluster can be shut down. Read the warnings first. "
             "To shut it down, call vmware.composite.vsan.cluster.shutdown."
+        )
+    elif not completed:
+        guidance = (
+            f"vSAN sent no completed health result (overall_health: {overall or 'missing'}), "
+            "so MEHO cannot say the cluster is ready. Do not shut it down on this answer. "
+            "Run this check again in a minute; when it stays so, check the vSAN health "
+            "service of the cluster first."
         )
     else:
         guidance = "Fix each blocking check before a shut down, then run this check again."
     return {
         "cluster": cluster,
         "ready_to_shut_down": ready,
-        "overall_health": overall if isinstance(overall, str) else None,
+        "overall_health": overall,
         "blocking": blocking,
         "warnings": _check_rows(groups, _YELLOW),
         "checked_at": summary.get("timestamp"),
@@ -196,7 +209,9 @@ async def vsan_cluster_power_precheck_composite(
     """Can the whole vSAN cluster be shut down now, and what blocks it.
 
     Op-id: ``vmware.vsan.cluster.power.precheck``. A red check blocks the
-    shut down; a yellow check is a warning. The answer also gives the power
+    shut down; a yellow check is a warning. An overall health of ``unknown``
+    (vSAN has no result yet) or none at all is not ready either: MEHO never
+    says "shut down" without a completed check. The answer also gives the power
     state of the cluster and the task of the last power action, so it is the
     read to use after a lost reply of a shut down or start. A vSAN fault
     raises; the dispatcher answers with vCenter's fault type and text.

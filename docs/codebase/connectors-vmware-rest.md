@@ -4905,7 +4905,7 @@ spec ingest. They are on both vCenter catalogs (`vmware-rest-8.0` and
 
 | Operation | What it does | What it returns | Risk | Versions |
 |---|---|---|---|---|
-| `vmware.vsan.cluster.power.precheck` | Can the whole cluster be shut down now, and what blocks it. Runs `VsanQueryVcClusterHealthSummary` with the `clusterPowerOffPrecheck` view and reads `QueryClusterPowerContext`. | `ready_to_shut_down`, the red checks (`blocking`), the yellow ones (`warnings`), and `power`: the power state and the task of the last power action with its state. | read (`safe`) | 8.0, 9.x |
+| `vmware.vsan.cluster.power.precheck` | Can the whole cluster be shut down now, and what blocks it. Runs `VsanQueryVcClusterHealthSummary` with the `clusterPowerOffPrecheck` view and reads `QueryClusterPowerContext`. | `ready_to_shut_down` (false also when vSAN has no completed result, `overall_health` unknown or missing), the red checks (`blocking`), the yellow ones (`warnings`), and `power`: the power state and the task of the last power action with its state. | read (`safe`) | 8.0, 9.x |
 | `vmware.composite.vsan.hcl.update` | Replaces the HCL database (vCenter downloads it with `VsanVcUpdateHclDbFromWeb`, from the vendor or a given `url`; or MEHO sends a datastore file with `VsanVcUploadHclDb`) and the release catalog (a datastore file, `VsanVumSystem.VsanVcUploadReleaseDb`). | `updated`, or `failed` / `partly_done` with `steps_ran`, `failed_step` (step, vendor fault type and text) and `steps_not_run`. | change (`caution`) | 8.0, 9.x |
 | `vmware.composite.vsan.cluster.shutdown` | `PerformClusterPowerAction` with `clusterPoweredOff`. | `accepted` with the vCenter task id and `status_read` (`vmware.task.info`); `already_running`; `unchanged`. | change (`dangerous`) | 8.0, 9.x |
 | `vmware.composite.vsan.cluster.start` | `PerformClusterPowerAction` with `clusterPoweredOn`. | Same as the shut down. | change (`dangerous`) | 8.0, 9.x |
@@ -4922,7 +4922,8 @@ How the calls go:
   `vsan-vum-system`. The reconcile lanes check every constant against the
   9.0 `vi-json.yaml` and the 8.0 vSAN SDK method lists.
 - The vSAN SOAP writer (`soap_vsan.py`) now also writes whole numbers, texts,
-  lists and data objects (a dict with `_typeName` gets `xsi:type`).
+  lists and data objects. It drops the `_typeName` of a data object and sends
+  no `xsi:type`: each data object MEHO sends has the type the method declares.
 - Every change goes through the sub-call gate (`enforce_subop_policy`)
   before its vSAN call. A held or denied gate comes back as is; nothing is
   sent. Each change has an approval preview. The shut down preview runs the
@@ -4953,8 +4954,10 @@ Shut down and start are vendor jobs:
 - The status read `vmware.task.info` (typed read, `typed_ops_task_info.py`,
   group `tasks_recent`) gives the vendor's state, the progress and the error
   text, logs in again after an expired login, and answers `not_reachable`
-  (not `failed`) when vCenter does not answer. MEHO keeps no job state
-  between calls.
+  (not `failed`) when vCenter does not answer or its web server says the
+  service is not available (HTTP 502, 503 or 504, as during a maintenance).
+  The caller reads again later with the same task id. MEHO keeps no job
+  state between calls.
 - A shut down also stops a vCenter that runs on the cluster. The start then
   needs a vCenter that runs again.
 

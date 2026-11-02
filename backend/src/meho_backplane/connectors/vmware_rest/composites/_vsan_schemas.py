@@ -7,11 +7,6 @@ from __future__ import annotations
 
 from typing import Any, Final
 
-from meho_backplane.connectors.vmware_rest.composites.schemas import (
-    CLUSTER_MOID_PATTERN,
-    DATASTORE_MOID_PATTERN,
-)
-
 __all__ = [
     "HCL_UPDATE_LLM_INSTRUCTIONS",
     "HCL_UPDATE_PARAMETER_SCHEMA",
@@ -29,9 +24,11 @@ __all__ = [
 _STR_OR_NULL: Final[dict[str, Any]] = {"type": ["string", "null"]}
 _INT_OR_NULL: Final[dict[str, Any]] = {"type": ["integer", "null"]}
 
+#: The moid shape (``domain-c<n>``) is checked at run time by ``cluster_problem``,
+#: not by a schema pattern, so the published examples can use a placeholder.
 _CLUSTER: Final[dict[str, Any]] = {
     "type": "string",
-    "pattern": CLUSTER_MOID_PATTERN,
+    "minLength": 1,
     "description": "Managed object id of the vSAN cluster, for example <cluster-id>.",
 }
 
@@ -65,7 +62,7 @@ _STATUS_READ: Final[dict[str, Any]] = {
 _DATASTORE_FILE: Final[dict[str, Any]] = {
     "datastore": {
         "type": "string",
-        "pattern": DATASTORE_MOID_PATTERN,
+        "minLength": 1,
         "description": "Managed object id of the datastore with the file, for example "
         "<datastore-id>.",
     },
@@ -137,10 +134,10 @@ HCL_UPDATE_PARAMETER_SCHEMA: dict[str, Any] = {
         {
             "hcl": {
                 "source": "datastore_file",
-                "datastore": "datastore-15",
+                "datastore": "<datastore-id>",
                 "path": "<folder>/<file>.json",
             },
-            "release_catalog": {"datastore": "datastore-15", "path": "<folder>/<file>.json"},
+            "release_catalog": {"datastore": "<datastore-id>", "path": "<folder>/<file>.json"},
         },
     ],
 }
@@ -223,7 +220,7 @@ POWER_PRECHECK_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {"cluster": _CLUSTER},
     "required": ["cluster"],
     "additionalProperties": False,
-    "examples": [{"cluster": "domain-c7"}],
+    "examples": [{"cluster": "<cluster-id>"}],
 }
 
 _CHECK_ROW: Final[dict[str, Any]] = {
@@ -276,9 +273,14 @@ POWER_PRECHECK_RESPONSE_SCHEMA: dict[str, Any] = {
         "cluster": {"type": "string", "description": "The cluster that was checked."},
         "ready_to_shut_down": {
             "type": "boolean",
-            "description": "True when no check is red.",
+            "description": "True when the check completed and no check is red. False also "
+            "when vSAN sent no completed result (overall_health unknown or missing).",
         },
-        "overall_health": {**_STR_OR_NULL, "description": "The overall colour of the check."},
+        "overall_health": {
+            **_STR_OR_NULL,
+            "description": "The overall colour of the check. unknown or null: vSAN has no "
+            "result yet, and the cluster is not ready.",
+        },
         "blocking": {
             "type": "array",
             "items": _CHECK_ROW,
@@ -309,7 +311,9 @@ POWER_PRECHECK_LLM_INSTRUCTIONS: dict[str, Any] = {
     ),
     "next_step": (
         "ready_to_shut_down true: tell the operator the warnings, then call "
-        "vmware.composite.vsan.cluster.shutdown. False: report each blocking check."
+        "vmware.composite.vsan.cluster.shutdown. False: report each blocking check, or "
+        "that vSAN has no completed result yet (overall_health unknown); never shut down "
+        "on an answer without a completed check."
     ),
 }
 
@@ -331,7 +335,7 @@ SHUTDOWN_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["cluster"],
     "additionalProperties": False,
-    "examples": [{"cluster": "domain-c7", "reason": "<reason>"}],
+    "examples": [{"cluster": "<cluster-id>", "reason": "<reason>"}],
 }
 
 START_PARAMETER_SCHEMA: dict[str, Any] = {
@@ -339,7 +343,7 @@ START_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {"cluster": _CLUSTER},
     "required": ["cluster"],
     "additionalProperties": False,
-    "examples": [{"cluster": "domain-c7"}],
+    "examples": [{"cluster": "<cluster-id>"}],
 }
 
 POWER_ACTION_RESPONSE_SCHEMA: dict[str, Any] = {

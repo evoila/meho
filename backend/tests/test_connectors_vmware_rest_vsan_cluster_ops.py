@@ -426,6 +426,34 @@ async def test_precheck_on_vcenter_9_lists_blocking_checks_and_the_power_task() 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("overall", ["unknown", None])
+async def test_precheck_without_a_completed_health_result_is_not_ready(
+    overall: str | None,
+) -> None:
+    summary = _precheck_summary(red=False)
+    if overall is None:
+        del summary["overallHealth"]
+    else:
+        summary["overallHealth"] = overall
+    vcenter = _vc91(
+        **{
+            f"{_HEALTH}/VsanQueryVcClusterHealthSummary": summary,
+            f"{_POWER}/QueryClusterPowerContext": _power_context(task=None),
+        }
+    )
+    out = await _run(
+        vcenter, _call(_vsan_power.vsan_cluster_power_precheck_composite, cluster=_CLUSTER)
+    )
+
+    assert out["ready_to_shut_down"] is False
+    assert out["overall_health"] == overall
+    assert out["blocking"] == []
+    assert "no completed health result" in out["guidance"]
+    assert "shutdown" not in out["guidance"]
+    _schema_ok(_vsan_schemas.POWER_PRECHECK_RESPONSE_SCHEMA, out)
+
+
+@pytest.mark.asyncio
 async def test_precheck_on_vcenter_8_goes_over_vsan_soap() -> None:
     vcenter = _Vcenter("8.0.3.0")
     vcenter.soap["VsanQueryVcClusterHealthSummary"] = _soap(

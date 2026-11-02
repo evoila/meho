@@ -101,7 +101,8 @@
     "POST:/FileManager/{moId}/DeleteDatastoreFile_Task"
   ],
   "vmware.composite.folder.create": [
-    "POST:/Folder/{moId}/CreateFolder"
+    "POST:/Folder/{moId}/CreateFolder",
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
   ],
   "vmware.composite.folder.delete": [
     "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",

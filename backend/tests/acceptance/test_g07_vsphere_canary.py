@@ -162,9 +162,11 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors import registry as connector_registry
 from meho_backplane.connectors.registry import all_connectors_v2, clear_registry
 from meho_backplane.db import engine as engine_module
 from meho_backplane.db.engine import (
@@ -1002,14 +1004,21 @@ async def _ingest_canary_corpus(
     the stub client's call log) escapes.
 
     Also brackets the process-global registry/dispatcher caches: the
-    ingest registers the ``GenericRestConnector`` auto-shim, and the
-    per-test autouse ``_reset_module_state`` clears the registry before
-    every test body anyway, so the corpus leaves the globals as it
-    found them. Consequence (load-bearing): the shared-corpus tests run
-    with an EMPTY v2 registry — they may only exercise DB-backed reads
+    ingest registers the ``GenericRestConnector`` auto-shim. The
+    connector registry is saved before the first clear and put back in
+    ``finally``, so the corpus leaves it as it found it. This runs
+    before the per-test ``_isolate_global_registries`` net takes its
+    copy, so clearing without putting the copy back would leave the
+    registry empty for every later test file in the same process
+    (#5651). Consequence (load-bearing): the per-test autouse
+    ``_reset_module_state`` still clears the registry before every
+    test body, so the shared-corpus tests run with an EMPTY v2
+    registry — they may only exercise DB-backed reads
     (``connector_exists`` short-circuits
     ``_require_dispatchable_connector`` before any registry lookup).
     """
+    saved_v1 = dict(connector_registry._REGISTRY)
+    saved_v2 = dict(connector_registry._REGISTRY_V2)
     reset_dispatcher_caches()
     clear_registry()
     reset_engine_for_testing()
@@ -1093,6 +1102,41 @@ async def _ingest_canary_corpus(
         reset_engine_for_testing()
         reset_dispatcher_caches()
         clear_registry()
+        connector_registry._REGISTRY.update(saved_v1)
+        connector_registry._REGISTRY_V2.update(saved_v2)
+
+
+async def test_ingest_canary_corpus_puts_connector_registry_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The corpus ingest leaves the connector registry as it found it (#5651).
+
+    Fixture-less, so it runs in every unit invocation. An in-memory
+    SQLite engine makes the first SQL statement (``TRUNCATE``) fail,
+    which drives the ``finally`` block without Postgres or the spec
+    shelf. Before the fix, that block cleared the registry and left it
+    empty for every later test file in the same process.
+    """
+    sentinel = type("_SentinelConnector", (), {})
+    monkeypatch.setitem(connector_registry._REGISTRY, "canary-sentinel", sentinel)
+    monkeypatch.setitem(
+        connector_registry._REGISTRY_V2, ("canary-sentinel", "1.0", "sentinel"), sentinel
+    )
+    before_v1 = dict(connector_registry._REGISTRY)
+    before_v2 = dict(connector_registry._REGISTRY_V2)
+
+    with pytest.raises(OperationalError):
+        await _ingest_canary_corpus(
+            "sqlite+aiosqlite://",
+            operator=_make_canary_operator(),
+            stub_client=_PathPrefixStubLlmClient(),
+            embedding_service=None,
+            vcenter_spec_path=Path("unused-vcenter.yaml"),
+            vi_json_spec_path=None,
+        )
+
+    assert before_v1 == connector_registry._REGISTRY
+    assert before_v2 == connector_registry._REGISTRY_V2
 
 
 @pytest.fixture(scope="module")

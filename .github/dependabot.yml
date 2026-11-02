@@ -14,6 +14,12 @@
 # A release that carries harmful code is usually found and removed
 # within a few days, so the wait skips it. The wait applies to version
 # updates only; Dependabot security updates still come at once.
+#
+# Every entry runs on Sunday at 20:00 UTC, when the CI runners are free.
+# The GitHub Actions entry and the backend Python entry group their
+# minor and patch updates into one pull request each. A major update
+# still gets its own pull request. The groups cover version updates
+# only, so a security update still comes at once, one per package.
 
 version: 2
 updates:
@@ -24,11 +30,18 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
-      time: "09:00"
+      day: "sunday"
+      time: "20:00"
     cooldown:
       default-days: 7
     open-pull-requests-limit: 10
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
     labels:
       - "dependencies"
       - "github-actions"
@@ -70,11 +83,18 @@ updates:
     directory: "/backend"
     schedule:
       interval: "weekly"
-      day: "monday"
-      time: "09:00"
+      day: "sunday"
+      time: "20:00"
     cooldown:
       default-days: 7
     open-pull-requests-limit: 10
+    groups:
+      python-packages:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
     labels:
       - "dependencies"
       - "python"
@@ -100,8 +120,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
-      time: "09:00"
+      day: "sunday"
+      time: "20:00"
     cooldown:
       default-days: 7
     open-pull-requests-limit: 10
@@ -123,8 +143,8 @@ updates:
     directory: "/backend"
     schedule:
       interval: "weekly"
-      day: "monday"
-      time: "09:00"
+      day: "sunday"
+      time: "20:00"
     cooldown:
       default-days: 7
     open-pull-requests-limit: 10
@@ -144,8 +164,8 @@ updates:
     directory: "/.oss-scanner"
     schedule:
       interval: "weekly"
-      day: "monday"
-      time: "09:00"
+      day: "sunday"
+      time: "20:00"
     cooldown:
       default-days: 7
     open-pull-requests-limit: 10

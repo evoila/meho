@@ -25,7 +25,8 @@ readonly REQUIRED_UDP_PORTS=(8472)
 # install: etcd 2382, containerd 10010, the kubelet 10248, kube-proxy 10249
 # and 10256, the controller manager 10257, the cloud controller manager
 # 10258 and the scheduler 10259. A program that listens on one of them, on
-# any address, keeps that part from starting. They never answer from
+# any address, takes the port from that part: some parts then do not start,
+# others lose their health or metrics endpoint. They never answer from
 # another machine, so the port list of the firewall leaves them out.
 readonly REQUIRED_LOCAL_TCP_PORTS=(2382 10010 10248 10249 10256 10257 10258 10259)
 readonly IPV4_IN_TEXT_RE='([0-9]{1,3}\.){3}[0-9]{1,3}'

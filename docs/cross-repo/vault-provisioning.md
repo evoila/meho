@@ -539,14 +539,21 @@ kcadm.sh add-roles -r <realm> --uusername <operator> --rolename meho-operator
 # realm_access.roles too (default-roles-<realm>, offline_access, …), so the
 # claim's *presence* proves nothing; only this specific value does.
 
-vault write auth/jwt/role/meho-mcp \
-  role_type=jwt \
-  user_claim=sub \
-  bound_audiences=<keycloak-audience> \
-  bound_claims='{"/realm_access/roles":"meho-operator"}' \
-  policies=meho-mcp \
-  token_ttl=1h
+vault write auth/jwt/role/meho-mcp - <<'JSON'
+{
+  "role_type": "jwt",
+  "user_claim": "sub",
+  "bound_audiences": "<keycloak-audience>",
+  "bound_claims": {"/realm_access/roles": "meho-operator"},
+  "policies": "meho-mcp",
+  "token_ttl": "1h"
+}
+JSON
 ```
+
+The request goes in as JSON on stdin (the `-` argument). `bound_claims` is
+a map, and the `key=value` form of `vault write` can only send a string
+for it, which Vault rejects.
 
 Note what is deliberately **absent**: no `bound_claims_type`. Its default is
 `string`, under which bound values "will be treated as literals and must
@@ -561,8 +568,8 @@ clients, an exact `azp` allowlist is equivalent and needs no new role —
 (`JsonWebToken.issuedFor`), so it is `CHECK_RUNNER_CLIENT_ID` on the
 runner's token and the operator-facing client id on an operator's:
 
-```bash
-  bound_claims='{"azp":["<operator-facing-client-id>","<cli-client-id>"]}'
+```json
+  "bound_claims": {"azp": ["<operator-facing-client-id>", "<cli-client-id>"]},
 ```
 
 Either binding gates **every** `meho-mcp` login, not only the runner's —
@@ -667,14 +674,21 @@ meho targets register vault-teardown \
 **More than one tenant on the install?** Tie every extra role to one
 tenant, the same way the per-tenant roles of `VAULT_OIDC_ROLE_BY_TENANT`
 are tied. Add `bound_claims` with the tenant id to the role, so that only
-a login token of that tenant may use it:
+a login token of that tenant may use it. The request goes in as JSON on
+stdin, because `bound_claims` is a map and the `key=value` form of
+`vault write` cannot carry one:
 
 ```bash
-vault write auth/jwt-meho/role/meho-teardown \
-  role_type=jwt user_claim=sub \
-  bound_audiences=<keycloak-audience> \
-  bound_claims='{"tenant_id":"<tenant-id>"}' \
-  policies=meho-teardown token_ttl=1h
+vault write auth/jwt-meho/role/meho-teardown - <<'JSON'
+{
+  "role_type": "jwt",
+  "user_claim": "sub",
+  "bound_audiences": "<keycloak-audience>",
+  "bound_claims": {"tenant_id": "<tenant-id>"},
+  "policies": "meho-teardown",
+  "token_ttl": "1h"
+}
+JSON
 ```
 
 `tenant_id` is the claim MEHO reads the tenant from

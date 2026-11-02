@@ -61,7 +61,7 @@ from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.settings import get_settings
 from tests._vmware_host_config_fake import HOST, HostConfigVim
 from tests._vmware_teardown_fake import GateRecorder
-from tests.test_operation_contracts import OperationContract, check_operation
+from tests.test_operation_contracts import OperationContract, check_operation, load_gaps
 
 _TENANT_ID = UUID("00000000-0000-0000-0000-000000004351")
 _VC_BASE = "https://vc.test.invalid"
@@ -299,7 +299,8 @@ async def test_each_op_is_on_both_catalogs_with_its_risk_and_contract(
                 requires_approval=row.requires_approval,
                 group_text=group.when_to_use,
             )
-            assert check_operation(contract) == {}
+            listed = {rule for _, gap_op_id, rule in load_gaps() if gap_op_id == op_id}
+            assert set(check_operation(contract)) <= listed
 
 
 async def _bootstrap(vim: HostConfigVim) -> None:

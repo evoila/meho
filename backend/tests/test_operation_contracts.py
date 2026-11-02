@@ -6,7 +6,7 @@
 An AI picks an operation from its summary, description, group text and
 safety level, and fills in the parameters from the field descriptions. This
 test checks every hand-written (typed and multi-step) operation that MEHO
-registers at start-up, of every connector, against ten rules:
+registers at start-up, of every connector, against twelve rules:
 
 1. ``summary`` -- a one-line summary (at most 120 characters) and a short
    description (at most 300 characters).
@@ -34,6 +34,17 @@ registers at start-up, of every connector, against ten rules:
     id holds such a word are in :data:`READS_WITH_A_WRITE_WORD`, each with
     a reason. The few writes that are ``safe`` on purpose are in
     :data:`SAFE_WRITES_ON_PURPOSE`, each with its decision record.
+11. ``example_placeholders`` -- no example value looks real: no IP address
+    outside the documentation ranges, no host name with a real top-level
+    domain, no vendor-shaped id such as ``vm-42``, and no UUID other than the
+    all-zero one. A placeholder such as ``<vm-id>`` always passes. The value
+    checks are in :mod:`tests._operation_contract_placeholders`.
+12. ``named_operations_exist`` -- every operation id that ``llm_instructions``
+    names in backticks is registered. A backticked word counts as an
+    operation id when it has the shape of one (``k8s.pod.list``), whatever
+    its first part, so a wrong first part (``kubernetes.node.list``) is
+    caught. File names, field paths and API groups that only look like an
+    operation id are in :data:`NOT_OPERATION_IDS`, each with a reason.
 
 Today's gaps live in ``tests/data/operation_contract_gaps.yaml``. The test
 fails on a gap that is not in that list (a new gap) and on a listed gap that
@@ -48,7 +59,7 @@ be added here. The checker's own tests, with fake operations, are in
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -67,6 +78,7 @@ from meho_backplane.operations._param_errors import describe_violation
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS
 from meho_backplane.operations.typed_register import run_typed_op_registrars
 from meho_backplane.settings import get_settings
+from tests._operation_contract_placeholders import PLACEHOLDER, example_value_problems
 
 GAPS_FILE: Final[Path] = Path(__file__).parent / "data" / "operation_contract_gaps.yaml"
 
@@ -81,6 +93,8 @@ RULES: Final[tuple[str, ...]] = (
     "group",
     "preview_builder",
     "write_name",
+    "example_placeholders",
+    "named_operations_exist",
 )
 
 #: Real reads whose id holds a write word, with the reason. The live test
@@ -92,6 +106,27 @@ READS_WITH_A_WRITE_WORD: Final[Mapping[str, str]] = {
     "vcfa.tenant.abx.run.get": "reads the state and log of an ABX action run; runs nothing",
     "vcfa.vra8.abx.run.get": "reads the state and log of an ABX action run; runs nothing",
     "winsrv.system.pending-reboot": "reads whether a reboot is pending; reboots nothing",
+}
+
+#: Words in backticks that have the shape of an operation id but are none.
+#: The live test fails when an entry becomes a registered operation id, and
+#: when no guidance names it any more, so the list only holds what is needed.
+NOT_OPERATION_IDS: Final[Mapping[str, str]] = {
+    "apiregistration.k8s.io": "a Kubernetes API group",
+    "config.xml": "the file name of the pfSense configuration",
+    "config.yaml": "the file name of the RKE2 configuration",
+    "config.yaml.d": "the folder name of the RKE2 configuration snippets",
+    "existing.descr": "a field in the answer of the pfSense static route write",
+    "extras.named_conf_path": "a field of the bind9 target extras",
+    "graph_node.name": "a field of a topology graph node",
+    "metallb.io": "the API group of the MetalLB Kubernetes add-on",
+    "named.conf": "the file name of the bind9 main configuration",
+    "named.conf.local": "the file name of the bind9 zone list",
+    "named.conf.options": "the file name of the bind9 options",
+    "net.ipv4.ip_forward": "a Linux kernel setting (sysctl)",
+    "rke2.yaml": "the file name of the RKE2 kubeconfig",
+    "rndc.key": "the file name of the bind9 control key",
+    "token.redacted": "a field in the answer of the RKE2 posture read",
 }
 
 #: Writes that are ``safe`` on purpose: they need no approval. Each names the
@@ -141,7 +176,7 @@ class OperationContract:
 
 
 # ---------------------------------------------------------------------------
-# The ten rules. Each returns a list of problems; an empty list means pass.
+# The twelve rules. Each returns a list of problems; an empty list means pass.
 # ---------------------------------------------------------------------------
 
 
@@ -234,10 +269,6 @@ def check_llm_instructions(op: OperationContract) -> list[str]:
     ]
 
 
-#: A placeholder in an example: ``<vm-id>``, ``<device-key>``, ``<one-of-possible_answers>``.
-PLACEHOLDER: Final = re.compile(r"^<[a-z0-9][a-z0-9_.-]*>$")
-
-
 def example_problems(parameter_schema: Mapping[str, Any], example: Mapping[str, Any]) -> list[str]:
     """What is wrong with *example* under *parameter_schema*: ``[]`` when nothing.
 
@@ -326,6 +357,41 @@ def check_write_name(op: OperationContract) -> list[str]:
     ]
 
 
+def check_example_placeholders(op: OperationContract) -> list[str]:
+    examples = op.parameter_schema.get("examples")
+    if not isinstance(examples, list):
+        return []
+    return [
+        f"example {index}: {problem}"
+        for index, example in enumerate(examples)
+        if isinstance(example, Mapping)
+        for problem in example_value_problems(example)
+    ]
+
+
+_BACKTICKED: Final = re.compile(r"`([^`\s]+)`")
+_OPERATION_ID_SHAPE: Final = re.compile(r"^[a-z][a-z0-9_-]*(?:\.[a-z0-9_-]+)+$")
+
+
+def named_operation_ids(op: OperationContract) -> set[str]:
+    """The backticked words in the guidance of *op* that have the shape of an operation id."""
+    return {
+        word
+        for text in _texts(op.llm_instructions)
+        for word in _BACKTICKED.findall(text)
+        if _OPERATION_ID_SHAPE.match(word)
+    }
+
+
+def check_named_operations_exist(op: OperationContract, registered: Collection[str]) -> list[str]:
+    """The backticked operation ids in the guidance that are not in *registered*."""
+    known = {*registered, op.op_id, *NOT_OPERATION_IDS}
+    return [
+        f"guidance names {word!r}, which is no registered operation"
+        for word in sorted(named_operation_ids(op) - known)
+    ]
+
+
 CHECKS: Final[Mapping[str, Any]] = {
     "summary": check_summary,
     "field_descriptions": check_field_descriptions,
@@ -337,14 +403,25 @@ CHECKS: Final[Mapping[str, Any]] = {
     "group": check_group,
     "preview_builder": check_preview_builder,
     "write_name": check_write_name,
+    "example_placeholders": check_example_placeholders,
 }
 
 
-def check_operation(op: OperationContract) -> dict[str, list[str]]:
-    """Return the problems of *op*, by rule. A rule with no problem is left out."""
+def check_operation(
+    op: OperationContract, registered: Collection[str] | None = None
+) -> dict[str, list[str]]:
+    """Return the problems of *op*, by rule. A rule with no problem is left out.
+
+    *registered* holds the ids of every registered operation. Rule 12 needs
+    them, so it runs only when they are given (the live check and
+    :func:`find_problems` give them).
+    """
     result: dict[str, list[str]] = {}
     for rule in RULES:
-        problems = CHECKS[rule](op)
+        if rule == "named_operations_exist":
+            problems = [] if registered is None else check_named_operations_exist(op, registered)
+        else:
+            problems = CHECKS[rule](op)
         if problems:
             result[rule] = problems
     return result
@@ -387,9 +464,10 @@ def compare_with_gaps(
 
 
 def find_problems(ops: list[OperationContract]) -> dict[Gap, list[str]]:
+    registered = {op.op_id for op in ops}
     found: dict[Gap, list[str]] = {}
     for op in ops:
-        for rule, problems in check_operation(op).items():
+        for rule, problems in check_operation(op, registered).items():
             found[(op.connector, op.op_id, rule)] = problems
     return found
 
@@ -457,7 +535,7 @@ async def _registered_operations() -> list[OperationContract]:
 
 @pytest.mark.asyncio
 async def test_operation_contracts_match_the_gap_list() -> None:
-    """Every hand-written operation meets the ten rules, or its gap is in the list."""
+    """Every hand-written operation meets the twelve rules, or its gap is in the list."""
     ops = await _registered_operations()
     assert ops, "no typed or multi-step operation was registered"
 
@@ -480,6 +558,22 @@ async def test_reads_with_a_write_word_are_registered_and_safe() -> None:
     safe_ops = {op.op_id for op in await _registered_operations() if op.safety_level == "safe"}
     stale = sorted(set(READS_WITH_A_WRITE_WORD) - safe_ops)
     assert not stale, f"not registered as a 'safe' operation; remove from the allow list: {stale}"
+
+
+@pytest.mark.asyncio
+async def test_not_operation_ids_are_named_and_not_registered() -> None:
+    """Each entry is still named by some guidance and is no operation id, so the list stays short.
+
+    An entry that became a real operation id must leave the list, so that
+    rule 12 checks it. An entry that no guidance names any more is dead.
+    """
+    ops = await _registered_operations()
+    registered = {op.op_id for op in ops}
+    stale = sorted(set(NOT_OPERATION_IDS) & registered)
+    assert not stale, f"now a registered operation; remove from NOT_OPERATION_IDS: {stale}"
+    named = set().union(*(named_operation_ids(op) for op in ops))
+    unused = sorted(set(NOT_OPERATION_IDS) - named)
+    assert not unused, f"no guidance names these any more; remove from NOT_OPERATION_IDS: {unused}"
 
 
 @pytest.mark.asyncio

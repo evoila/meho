@@ -715,7 +715,7 @@ _RKE2_SERVICE_STATUS_OP = Rke2Op(
             "Call to check whether an RKE2 node's systemd service is up "
             "WITHOUT changing anything -- especially 'is rke2-server active, "
             "since when, and is it crash-looping?' when the Kubernetes API is "
-            "unreachable and node-level ops like ``kubernetes.node.list`` "
+            "unreachable and node-level ops like ``k8s.node.list`` "
             "cannot answer (the API server is what is down). Probes the fixed "
             "``rke2-server`` / ``rke2-agent`` pair; the unit reporting "
             "``load_state: not-found`` is simply not installed on this node, "

@@ -13,6 +13,9 @@
 # A 'requires_approval' or 'write_name' entry is a safety gap. Each one has
 # a comment with the reason it is still open. Fixing one changes who must
 # approve the operation, so the pull request that fixes it names the operation.
+#
+# The 'example_placeholders' entries were on main when that rule came in. Fix
+# one by putting a placeholder such as <vm-id> in place of the real-looking value.
 
 argocd-api:
   argocd.app.delete:
@@ -86,6 +89,9 @@ audit-integrity:
     - llm_instructions
     - examples
 
+azure-arm:
+  azure.operation.status:
+    - example_placeholders
 bind9-ssh:
   bind9.about:
     - summary
@@ -328,6 +334,9 @@ installer-rest:
   # A check that writes nothing; kept at caution without approval as today.
   installer.sddc.spec.validate:
     - requires_approval
+inventory:
+  inventory.export:
+    - example_placeholders
 k8s:
   k8s.about:
     - summary
@@ -1444,9 +1453,196 @@ vault:
     - llm_instructions
     - examples
 vmware-rest:
+  vmware.composite.cluster.drs_group.delete:
+    - example_placeholders
+  vmware.composite.cluster.drs_group.members.set:
+    - example_placeholders
+  vmware.composite.cluster.drs_recommendations:
+    - example_placeholders
+  vmware.composite.cluster.drs_rule.create:
+    - example_placeholders
+  vmware.composite.cluster.drs_rule.delete:
+    - example_placeholders
+  vmware.composite.cluster.drs_vm_host_rule.create:
+    - example_placeholders
+  vmware.composite.cluster.patch:
+    - example_placeholders
+  vmware.composite.content_library.item.export:
+    - example_placeholders
+  vmware.composite.content_library.publish.set:
+    - example_placeholders
+  vmware.composite.datastore.dir.create:
+    - example_placeholders
+  vmware.composite.datastore.file.delete:
+    - example_placeholders
+  vmware.composite.datastore.refresh:
+    - example_placeholders
+  vmware.composite.datastore.vsan.folder.list:
+    - example_placeholders
+  vmware.composite.event.tail:
+    - example_placeholders
+  vmware.composite.folder.create:
+    - example_placeholders
+  vmware.composite.folder.delete:
+    - example_placeholders
+  vmware.composite.host.add:
+    - example_placeholders
+  vmware.composite.host.connect:
+    - example_placeholders
+  vmware.composite.host.datastore_mount_nfs:
+    - example_placeholders
+  vmware.composite.host.detach_from_vds:
+    - example_placeholders
+  vmware.composite.host.disconnect:
+    - example_placeholders
+  vmware.composite.host.disk_mark_flash:
+    - example_placeholders
+  vmware.composite.host.evacuate:
+    - example_placeholders
+  vmware.composite.host.maintenance.exit:
+    - example_placeholders
+  vmware.composite.host.move:
+    - example_placeholders
+  vmware.composite.host.remove:
+    - example_placeholders
+  vmware.composite.host.service_control:
+    - example_placeholders
+  vmware.composite.host.standard_portgroup.delete:
+    - example_placeholders
+  vmware.composite.library.vm_template.check_in:
+    - example_placeholders
+  vmware.composite.library.vm_template.check_out:
+    - example_placeholders
+  vmware.composite.library.vm_template.deploy:
+    - example_placeholders
+  vmware.composite.network.portgroup.delete:
+    - example_placeholders
+  vmware.composite.network.portgroup.security.set:
+    - example_placeholders
+  vmware.composite.network.portgroup.vlan.set:
+    - example_placeholders
+  vmware.composite.performance.summary:
+    - example_placeholders
+  vmware.composite.resource_pool.create:
+    - example_placeholders
+  vmware.composite.resource_pool.delete:
+    - example_placeholders
+  vmware.composite.supervisor.disable:
+    - example_placeholders
+  vmware.composite.supervisor.enable:
+    - example_placeholders
+  vmware.composite.supervisor.status:
+    - example_placeholders
+  vmware.composite.vcenter.appliance.deploy:
+    - example_placeholders
+  vmware.composite.vm.advanced_settings.set:
+    - example_placeholders
+  vmware.composite.vm.boot.set:
+    - example_placeholders
+  vmware.composite.vm.capture_to_library:
+    - example_placeholders
+  vmware.composite.vm.cdrom.add:
+    - example_placeholders
+  vmware.composite.vm.cdrom.mount_library_iso:
+    - example_placeholders
+  vmware.composite.vm.cdrom.unmount_library_iso:
+    - example_placeholders
+  vmware.composite.vm.clone:
+    - example_placeholders
+  vmware.composite.vm.clone_from_template:
+    - example_placeholders
+  vmware.composite.vm.cpu_memory.options.set:
+    - example_placeholders
+  vmware.composite.vm.create:
+    - example_placeholders
+  vmware.composite.vm.deploy_from_library:
+    - example_placeholders
+  vmware.composite.vm.destroy:
+    - example_placeholders
+  vmware.composite.vm.device.cdrom:
+    - example_placeholders
+  vmware.composite.vm.disk.attach:
+    - example_placeholders
+  vmware.composite.vm.disk.grow:
+    - example_placeholders
+  vmware.composite.vm.export_ovf:
+    - example_placeholders
+  vmware.composite.vm.guest.env.read:
+    - example_placeholders
   # Kept on purpose: reads a file from a guest; an agent's call waits for approval, a person's call runs at once.
   vmware.composite.vm.guest.file.read:
     - requires_approval
+    - example_placeholders
+  vmware.composite.vm.guest.file.write:
+    - example_placeholders
+  vmware.composite.vm.guest.net.show:
+    - example_placeholders
+  vmware.composite.vm.guest.process.list:
+    - example_placeholders
+  vmware.composite.vm.guest.program.run:
+    - example_placeholders
+  vmware.composite.vm.hardware.upgrade:
+    - example_placeholders
+  vmware.composite.vm.import_from_library:
+    - example_placeholders
+  vmware.composite.vm.migrate:
+    - example_placeholders
+  vmware.composite.vm.nic.connect:
+    - example_placeholders
+  vmware.composite.vm.nic.repoint:
+    - example_placeholders
+  vmware.composite.vm.power:
+    - example_placeholders
+  vmware.composite.vm.resize:
+    - example_placeholders
+  vmware.composite.vm.resource_allocation.set:
+    - example_placeholders
+  vmware.composite.vm.resource_allocation.show:
+    - example_placeholders
+  vmware.composite.vm.serial_port.add:
+    - example_placeholders
+  vmware.composite.vm.snapshot.create:
+    - example_placeholders
+  vmware.composite.vm.snapshot.delete:
+    - example_placeholders
+  vmware.composite.vm.snapshot.revert:
+    - example_placeholders
+  vmware.composite.vm.tools.installer.unmount:
+    - example_placeholders
+  vmware.composite.vm.tools.upgrade:
+    - example_placeholders
+  vmware.content_library.item.files.list:
+    - example_placeholders
+  vmware.content_library.item.get:
+    - example_placeholders
+  vmware.content_library.item.ovf_options:
+    - example_placeholders
+  vmware.host.datastores:
+    - example_placeholders
+  vmware.host.network_uplinks:
+    - example_placeholders
+  vmware.host.storage_devices:
+    - example_placeholders
+  vmware.host.usage:
+    - example_placeholders
+  vmware.host.vsan_health:
+    - example_placeholders
+  vmware.migration.inventory:
+    - example_placeholders
+  vmware.object.collect:
+    - example_placeholders
+  vmware.tasks.history:
+    - example_placeholders
+  vmware.vm.advanced_settings.show:
+    - example_placeholders
+  vmware.vm.boot.show:
+    - example_placeholders
+  vmware.vm.hardware.show:
+    - example_placeholders
+  vmware.vm.question.answer:
+    - example_placeholders
+  vmware.vm.question.get:
+    - example_placeholders
 windns-ssh:
   windns.about:
     - summary

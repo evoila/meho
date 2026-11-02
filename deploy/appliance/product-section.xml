@@ -7,10 +7,9 @@ asks. rewrite-ovf.sh puts it into the exported .ovf in place of the Ubuntu
 cloud image's cloud-init section, and replaces @VERSION@.
 
 The properties are the ones of the form-1 design, section 2, in the order
-the wizard shows them. The first-start service that reads them is #4812
-and does not exist yet, so until it lands an appliance imported with these
-values does nothing with them. #4812 may change labels and descriptions
-here; the keys are the design's.
+the wizard shows them. firststart/firststart.sh reads them at the first
+boot and checks them; keep its checks and these descriptions in step.
+cluster.vip is not used yet, and first start refuses the two join fields.
 -->
     <ProductSection ovf:required="false">
       <Info>The settings of this MEHO appliance</Info>
@@ -60,11 +59,11 @@ here; the keys are the design's.
       <Category>Cluster (leave empty for one appliance)</Category>
       <Property ovf:key="cluster.join.address" ovf:type="string" ovf:userConfigurable="true">
         <Label>Join address</Label>
-        <Description>The address of a MEHO node to join. Leave empty for a single appliance.</Description>
+        <Description>For high availability in a later version. This version runs as a single appliance: leave it empty, or first start stops.</Description>
       </Property>
       <Property ovf:key="cluster.join.token" ovf:type="string" ovf:password="true" ovf:userConfigurable="true">
         <Label>Join token</Label>
-        <Description>The token of the node to join. Leave empty for a single appliance.</Description>
+        <Description>For high availability in a later version. This version runs as a single appliance: leave it empty, or first start stops.</Description>
       </Property>
       <Property ovf:key="cluster.vip" ovf:type="string" ovf:userConfigurable="true">
         <Label>Virtual IP</Label>

@@ -56,7 +56,9 @@ from meho_backplane.connectors.vcf_automation._infra_common import (
     state_hash,
 )
 from meho_backplane.connectors.vcf_automation._infra_connect import StepFailedError, run_step
-from meho_backplane.connectors.vcf_automation._infra_paths import (
+from meho_backplane.connectors.vcf_automation._infra_reads import find_region, list_vcf
+from meho_backplane.connectors.vcf_automation._lookups import find_org, list_all
+from meho_backplane.connectors.vcf_automation._provider_infra_paths import (
     INFRA_REGION_STORAGE_POLICIES_PATH,
     INFRA_SUPERVISORS_PATH,
     INFRA_VDC_PATH,
@@ -69,8 +71,6 @@ from meho_backplane.connectors.vcf_automation._infra_paths import (
     provider_vcf_path,
     safe_segment,
 )
-from meho_backplane.connectors.vcf_automation._infra_reads import find_region, list_vcf
-from meho_backplane.connectors.vcf_automation._lookups import find_org, list_all
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:

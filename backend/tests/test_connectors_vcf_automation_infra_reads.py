@@ -27,8 +27,8 @@ import pytest
 import respx
 from sqlalchemy import select
 
-from meho_backplane.connectors.vcf_automation import VCFA_INFRA_OPS, VcfAutomationConnector
-from meho_backplane.connectors.vcf_automation._infra_paths import (
+from meho_backplane.connectors.vcf_automation import VCFA_PROVIDER_INFRA_OPS, VcfAutomationConnector
+from meho_backplane.connectors.vcf_automation._provider_infra_paths import (
     INFRA_VDC_VM_CLASSES_PATH,
     provider_vcf_path,
     safe_segment,
@@ -126,7 +126,9 @@ def _mount_infra(mock: respx.MockRouter) -> None:
 
 
 def test_risk_levels_and_approval() -> None:
-    assert {op.op_id: (op.safety_level, op.requires_approval) for op in VCFA_INFRA_OPS} == {
+    assert {
+        op.op_id: (op.safety_level, op.requires_approval) for op in VCFA_PROVIDER_INFRA_OPS
+    } == {
         "vcfa.provider.infra.list": ("safe", False),
         "vcfa.provider.region.get": ("safe", False),
         "vcfa.provider.org_quota.list": ("safe", False),
@@ -142,12 +144,12 @@ async def test_ops_register_as_typed_rows_in_their_group(vcfa: VcfAutomationConn
         rows = (
             await session.execute(
                 select(EndpointDescriptor).where(
-                    EndpointDescriptor.op_id.in_([op.op_id for op in VCFA_INFRA_OPS])
+                    EndpointDescriptor.op_id.in_([op.op_id for op in VCFA_PROVIDER_INFRA_OPS])
                 )
             )
         ).scalars()
         by_op = {row.op_id: row for row in rows}
-    assert set(by_op) == {op.op_id for op in VCFA_INFRA_OPS}
+    assert set(by_op) == {op.op_id for op in VCFA_PROVIDER_INFRA_OPS}
     assert all(row.source_kind == "typed" for row in by_op.values())
     assert by_op["vcfa.provider.org_quota.set"].requires_approval is True
 

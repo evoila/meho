@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Schema parts shared by the VCFA region and quota ops (:mod:`.infra_ops`)."""
+"""Schema parts shared by the VCFA region and quota ops (:mod:`.provider_infra_ops`)."""
 
 from __future__ import annotations
 

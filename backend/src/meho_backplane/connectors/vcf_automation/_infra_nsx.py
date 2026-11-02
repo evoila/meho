@@ -22,14 +22,14 @@ from meho_backplane.connectors.vcf_automation._infra_connect import (
     match_existing,
     name_taken_guidance,
 )
-from meho_backplane.connectors.vcf_automation._infra_paths import (
-    INFRA_NSX_MANAGERS_PATH,
-    provider_vcf_path,
-)
 from meho_backplane.connectors.vcf_automation._infra_reads import list_vcf
 from meho_backplane.connectors.vcf_automation._lookups import (
     password_missing_guidance,
     read_password,
+)
+from meho_backplane.connectors.vcf_automation._provider_infra_paths import (
+    INFRA_NSX_MANAGERS_PATH,
+    provider_vcf_path,
 )
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 

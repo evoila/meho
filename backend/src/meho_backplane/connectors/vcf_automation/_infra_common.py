@@ -41,7 +41,10 @@ from urllib.parse import quote, quote_plus, unquote, unquote_plus
 
 import httpx
 
-from meho_backplane.connectors.vcf_automation._infra_paths import INFRA_TASK_PATH, safe_segment
+from meho_backplane.connectors.vcf_automation._provider_infra_paths import (
+    INFRA_TASK_PATH,
+    safe_segment,
+)
 from meho_backplane.operations._preview import approved_preview
 
 if TYPE_CHECKING:

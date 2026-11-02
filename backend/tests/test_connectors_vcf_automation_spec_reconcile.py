@@ -49,8 +49,9 @@ lane splits by plane:
   :func:`~meho_backplane.connectors.vcf_automation.typed_ops.provider_regions_path`
   picks for each version must be a ``GET`` line in that version's list.
 * **Region and quota paths — armed per version.** Every
-  :mod:`~meho_backplane.connectors.vcf_automation._infra_paths` call, in the
-  path form :func:`~meho_backplane.connectors.vcf_automation._infra_paths.provider_vcf_path`
+  :mod:`~meho_backplane.connectors.vcf_automation._provider_infra_paths` call, in
+  the path form
+  :func:`~meho_backplane.connectors.vcf_automation._provider_infra_paths.provider_vcf_path`
   gives each version (``/cloudapi/vcf/`` on 9.0, ``/cloudapi/v1/`` on 9.1 and
   9.1.1), must be a line of that version's reference list. Path parameter
   names are compared without their braces, because the lists write some of
@@ -74,6 +75,10 @@ that hand-code a path:
   :data:`_PATHS_METHODS`. The ``/oauth/*`` token endpoints are
   provider-plane by :func:`plane_for_path`, so they sit in the
   evidenced exclusion with the rest of the provider plane.
+* :mod:`~meho_backplane.connectors.vcf_automation._infra_paths` — the cloud
+  account, cloud zone, profile and project paths this connector shares with
+  vRA 8, each mapped to its method in :mod:`tests._vra_infra_paths`. They are
+  ``/iaas/api/*`` (tenant plane), so they are checked against ``vra-iaas.json``.
 * :mod:`~meho_backplane.connectors.vcf_automation._routing` — the three
   ``*_SESSION_PATH`` login endpoints (all POSTed by ``._auth``; the CSP
   token mint is the #3865 VCFA 9.1 fallback) and
@@ -100,11 +105,13 @@ from typing import TYPE_CHECKING
 import pytest
 
 from meho_backplane.connectors.vcf_automation import _day2_paths as _day2_paths_module
-from meho_backplane.connectors.vcf_automation import _infra_paths as _infra_paths_module
 from meho_backplane.connectors.vcf_automation import _paths as _paths_module
+from meho_backplane.connectors.vcf_automation import (
+    _provider_infra_paths as _provider_infra_paths_module,
+)
 from meho_backplane.connectors.vcf_automation import _routing as _routing_module
 from meho_backplane.connectors.vcf_automation import typed_ops as _typed_ops_module
-from meho_backplane.connectors.vcf_automation._infra_paths import (
+from meho_backplane.connectors.vcf_automation._provider_infra_paths import (
     LEGACY_API_PATHS,
     provider_vcf_path,
 )
@@ -115,12 +122,14 @@ from meho_backplane.connectors.vcf_automation.feature_flag_ops import VCFA_FEATU
 from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
 from meho_backplane.connectors.vcf_automation.infra_ops import VCFA_INFRA_OPS
 from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
+from meho_backplane.connectors.vcf_automation.provider_infra_ops import VCFA_PROVIDER_INFRA_OPS
 from meho_backplane.connectors.vcf_automation.provisioning_ops import VCFA_PROVISIONING_OPS
 from meho_backplane.connectors.vcf_automation.typed_ops import (
     VCFA_TYPED_OPS,
     provider_regions_path,
 )
 from tests._spec_shelf import assert_op_ids_served, require_shelf_spec
+from tests._vra_infra_paths import EXPECTED_INFRA_OP_IDS, infra_op_ids, infra_path_constants
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -193,9 +202,9 @@ _PATHS_METHODS: dict[str, frozenset[str]] = {
     "TENANT_ZONES_PATH": frozenset({"GET"}),
 }
 
-#: HTTP method(s) per ``_infra_paths`` constant -- the region and quota ops.
+#: HTTP method(s) per ``_provider_infra_paths`` constant -- the region and quota ops.
 #: Same contract as :data:`_PATHS_METHODS`: a new constant must be mapped here.
-_INFRA_PATHS_METHODS: dict[str, frozenset[str]] = {
+_PROVIDER_INFRA_PATHS_METHODS: dict[str, frozenset[str]] = {
     "INFRA_NSX_MANAGERS_PATH": frozenset({"GET", "POST"}),
     "INFRA_REGIONS_PATH": frozenset({"POST"}),
     "INFRA_REGION_PATH": frozenset({"GET", "PUT"}),
@@ -273,7 +282,7 @@ def _declared_op_ids() -> set[str]:
     for name, methods in _TYPED_OPS_EXTRA_METHODS.items():
         declared.update(f"{method}:{typed_paths[name]}" for method in methods)
     declared |= _mapped_op_ids(_paths_module, _PATHS_METHODS)
-    declared |= _mapped_op_ids(_infra_paths_module, _INFRA_PATHS_METHODS)
+    declared |= _mapped_op_ids(_provider_infra_paths_module, _PROVIDER_INFRA_PATHS_METHODS)
     declared |= _mapped_op_ids(_day2_paths_module, _DAY2_PATHS_METHODS)
     for name, path in _path_constants(_routing_module).items():
         for suffix, method in _ROUTING_METHOD_BY_SUFFIX.items():
@@ -286,6 +295,7 @@ def _declared_op_ids() -> set[str]:
                 "map the new constant's HTTP method there consciously so the "
                 "reconcile keeps covering it."
             )
+    declared |= infra_op_ids()
     return declared
 
 
@@ -308,7 +318,9 @@ def test_path_constant_names_are_pinned() -> None:
     ]
     assert sorted(_path_constants(_paths_module)) == sorted(_PATHS_METHODS)
     assert sorted(_path_constants(_day2_paths_module)) == sorted(_DAY2_PATHS_METHODS)
-    assert sorted(_path_constants(_infra_paths_module)) == sorted(_INFRA_PATHS_METHODS)
+    assert sorted(_path_constants(_provider_infra_paths_module)) == sorted(
+        _PROVIDER_INFRA_PATHS_METHODS
+    )
     assert sorted(_path_constants(_routing_module)) == [
         "PROVIDER_SESSION_PATH",
         "PROVIDER_VERSION_PATH",
@@ -331,7 +343,8 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
         *_path_constants(_paths_module).values(),
         *_path_constants(_day2_paths_module).values(),
         *_path_constants(_routing_module).values(),
-        *_path_constants(_infra_paths_module).values(),
+        *_path_constants(_provider_infra_paths_module).values(),
+        *infra_path_constants().values(),
     }
     unswept = {
         op.op_id: op.path
@@ -342,8 +355,9 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
             *VCFA_NETWORK_OPS,
             *VCFA_DEPLOY_OPS,
             *VCFA_FEATURE_FLAG_OPS,
-            *VCFA_DAY2_OPS,
             *VCFA_INFRA_OPS,
+            *VCFA_DAY2_OPS,
+            *VCFA_PROVIDER_INFRA_OPS,
         )
         if op.path not in swept
     }
@@ -420,6 +434,8 @@ def test_vcfa_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/cloudapi/1.0.0/featureFlags",
         "GET:/cloudapi/1.0.0/featureFlags/{id}",
         "PUT:/cloudapi/1.0.0/featureFlags/{id}",
+        # Cloud accounts, cloud zones, profiles and projects (shared with vRA 8).
+        *EXPECTED_INFRA_OP_IDS,
         # Day-2 ops, shared with Aria Automation 8.
         "GET:/deployment/api/deployments/{deploymentId}",
         "GET:/deployment/api/deployments/{deploymentId}/actions",
@@ -603,7 +619,7 @@ def test_infra_paths_are_in_the_reference_list_of_each_version(
         _without_braces(f"{method}:{provider_vcf_path(target, path)}")
         for method, _, path in (
             op_id.partition(":")
-            for op_id in _mapped_op_ids(_infra_paths_module, _INFRA_PATHS_METHODS)
+            for op_id in _mapped_op_ids(_provider_infra_paths_module, _PROVIDER_INFRA_PATHS_METHODS)
         )
         if path not in LEGACY_API_PATHS
     }

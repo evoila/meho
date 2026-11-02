@@ -9,19 +9,13 @@
 * ``vcfa.provider.org_quota.set`` -- create or change an organization quota
 
 Each starts a vendor job and returns ``accepted`` with the job id and the
-status read to follow. The reads and the full op list are in :mod:`.infra_ops`.
+status read to follow. The reads and the full op list are in :mod:`.provider_infra_ops`.
 """
 
 from __future__ import annotations
 
 from typing import Final
 
-from meho_backplane.connectors.vcf_automation._infra_paths import (
-    INFRA_NSX_MANAGERS_PATH,
-    INFRA_REGIONS_PATH,
-    INFRA_VCENTERS_PATH,
-    INFRA_VDCS_PATH,
-)
 from meho_backplane.connectors.vcf_automation._infra_schemas import (
     CHANGE_OBJECTS,
     CHANGE_SCALARS,
@@ -35,6 +29,12 @@ from meho_backplane.connectors.vcf_automation._infra_schemas import (
     change_response,
 )
 from meho_backplane.connectors.vcf_automation._op_schemas import field, guidance, obj
+from meho_backplane.connectors.vcf_automation._provider_infra_paths import (
+    INFRA_NSX_MANAGERS_PATH,
+    INFRA_REGIONS_PATH,
+    INFRA_VCENTERS_PATH,
+    INFRA_VDCS_PATH,
+)
 from meho_backplane.connectors.vcf_automation.typed_ops import VcfaTypedOp
 
 __all__ = ["VCFA_INFRA_CHANGE_OPS"]

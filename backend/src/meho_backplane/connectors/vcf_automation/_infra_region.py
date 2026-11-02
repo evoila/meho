@@ -36,7 +36,8 @@ from meho_backplane.connectors.vcf_automation._infra_common import (
     ref,
     state_hash,
 )
-from meho_backplane.connectors.vcf_automation._infra_paths import (
+from meho_backplane.connectors.vcf_automation._infra_reads import find_region, list_vcf
+from meho_backplane.connectors.vcf_automation._provider_infra_paths import (
     INFRA_NSX_MANAGERS_PATH,
     INFRA_REGION_PATH,
     INFRA_REGIONS_PATH,
@@ -44,7 +45,6 @@ from meho_backplane.connectors.vcf_automation._infra_paths import (
     provider_vcf_path,
     safe_segment,
 )
-from meho_backplane.connectors.vcf_automation._infra_reads import find_region, list_vcf
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:

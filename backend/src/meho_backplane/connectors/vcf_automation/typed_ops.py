@@ -84,6 +84,7 @@ from typing import Any, Final, Literal
 from packaging.version import InvalidVersion, Version
 
 from meho_backplane.connectors.resolver import resolve_target_version
+from meho_backplane.connectors.vcf_automation._infra_text import infra_when_to_use
 from meho_backplane.connectors.vcf_automation._op_schemas import (
     ABOUT_RESPONSE,
     IAAS_DEPLOYMENT_FIELDS,
@@ -294,6 +295,9 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "(vcfa.provider.region.set), and give an organization a quota in a region "
         "(vcfa.provider.org_quota.set). Each change starts a vendor job and returns its id; "
         "the reads show the job's state."
+    ),
+    "vcfa-tenant-infra": infra_when_to_use(
+        "vcfa.tenant", "a VCF Automation 9 VM Apps org, on the tenant plane", with_vra8_only=False
     ),
 }
 

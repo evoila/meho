@@ -43,18 +43,18 @@ from meho_backplane.connectors.vcf_automation._infra_common import (
     uuid_of,
     vendor_error_text,
 )
-from meho_backplane.connectors.vcf_automation._infra_paths import (
+from meho_backplane.connectors.vcf_automation._infra_reads import list_vcf
+from meho_backplane.connectors.vcf_automation._lookups import (
+    password_missing_guidance,
+    read_password,
+)
+from meho_backplane.connectors.vcf_automation._provider_infra_paths import (
     INFRA_TEST_CONNECTION_PATH,
     INFRA_TRUSTED_CERTIFICATES_PATH,
     INFRA_VCENTER_PATH,
     INFRA_VCENTER_REFRESH_PATH,
     INFRA_VCENTERS_PATH,
     safe_segment,
-)
-from meho_backplane.connectors.vcf_automation._infra_reads import list_vcf
-from meho_backplane.connectors.vcf_automation._lookups import (
-    password_missing_guidance,
-    read_password,
 )
 from meho_backplane.operations._preview import (
     PreviewContext,

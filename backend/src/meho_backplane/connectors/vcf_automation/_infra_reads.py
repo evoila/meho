@@ -31,7 +31,8 @@ from meho_backplane.connectors.vcf_automation._infra_common import (
     read_job,
     ref,
 )
-from meho_backplane.connectors.vcf_automation._infra_paths import (
+from meho_backplane.connectors.vcf_automation._lookups import fiql_safe, list_all
+from meho_backplane.connectors.vcf_automation._provider_infra_paths import (
     INFRA_NSX_MANAGERS_PATH,
     INFRA_REGION_PATH,
     INFRA_REGION_STORAGE_POLICIES_PATH,
@@ -45,7 +46,6 @@ from meho_backplane.connectors.vcf_automation._infra_paths import (
     provider_vcf_path,
     safe_segment,
 )
-from meho_backplane.connectors.vcf_automation._lookups import fiql_safe, list_all
 from meho_backplane.connectors.vcf_automation.typed_ops import provider_regions_path
 
 if TYPE_CHECKING:

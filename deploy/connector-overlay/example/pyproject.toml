@@ -11,6 +11,9 @@ name = "example-overlay-connector"
 version = "0.1.0"
 description = "Made-up connector package for the overlay image build check."
 requires-python = ">=3.14"
+# The connector kit versions this package fits. The overlay build refuses a
+# connector package without this range, and MEHO checks it again at start.
+dependencies = ["meho-connector-kit>=1.0,<2"]
 
 [build-system]
 requires = ["hatchling"]

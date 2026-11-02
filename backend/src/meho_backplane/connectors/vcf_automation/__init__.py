@@ -39,12 +39,14 @@ from meho_backplane.connectors.registry import register_connector_v2
 
 # Imported for its side effect: registers the park-time preview builders of
 # the provisioning writes (#3890), the image name change, the feature-flag
-# change, the deployment delete and the region and quota changes, like the
+# change, the deployment delete, the cloud account remove and the region and
+# quota changes, like the
 # keycloak / vmware-rest previews.
 from meho_backplane.connectors.vcf_automation import (  # noqa: F401
     _day2,
     _feature_flags,
     _images,
+    _infra,
     _infra_connect,
     _infra_nsx,
     _infra_quota,
@@ -66,6 +68,7 @@ from meho_backplane.connectors.vcf_automation.governance_ops import (
 from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
 from meho_backplane.connectors.vcf_automation.infra_ops import VCFA_INFRA_OPS
 from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
+from meho_backplane.connectors.vcf_automation.provider_infra_ops import VCFA_PROVIDER_INFRA_OPS
 from meho_backplane.connectors.vcf_automation.provisioning_ops import VCFA_PROVISIONING_OPS
 from meho_backplane.connectors.vcf_automation.session import (
     SessionCredentials,
@@ -138,7 +141,7 @@ register_connector_v2(
 # Queue the typed-op upsert onto the lifespan-driven registrar list. The
 # runner (``run_typed_op_registrars``) iterates after
 # ``_eager_import_connectors`` so the typed descriptors (the seven reads,
-# the #3890 provisioning ops, and the network + deploy ops) land
+# the #3890 provisioning ops, the network + deploy ops and the infrastructure ops) land
 # before the first dispatch — no ingested catalog state required (VCFA
 # ships no vendor spec; typed conversion is the only working read path).
 register_typed_op_registrar(register_vcfa_typed_operations)
@@ -156,6 +159,7 @@ __all__ = [
     "VCFA_INFRA_OPS",
     "VCFA_NETWORK_OPS",
     "VCFA_PRODUCT",
+    "VCFA_PROVIDER_INFRA_OPS",
     "VCFA_PROVISIONING_OPS",
     "VCFA_TYPED_OPS",
     "VCFA_TYPED_WHEN_TO_USE_BY_GROUP",

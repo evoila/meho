@@ -16,8 +16,9 @@
 # The chain prerouting does this filtering. The chains input, forward and
 # output hold the rules of the MEHO appliance, for traffic to this machine,
 # through it and from it. The appliance sets their policy to drop. Here
-# their policy is accept and they have no drop rule, so every packet passes
-# them.
+# their policy is accept. Their only drop rules are for a loopback address
+# from a network card, which the chain prerouting drops first, so every
+# packet that reaches them passes.
 #
 # The file changes only the table inet meho. It never runs "flush ruleset",
 # because RKE2's network layer (Canal) and kube-proxy keep their own rules
@@ -49,7 +50,7 @@ table inet meho {
         type filter hook prerouting priority mangle; policy drop;
 
         # The machine itself and its pods.
-        iifname "lo" accept
+        iif "lo" accept
         iifname "cali*" accept
         iifname "flannel*" accept
 
@@ -57,7 +58,9 @@ table inet meho {
         ct state established,related accept
         ct state invalid drop
 
-        # A pod or service address never comes from a network card.
+        # A loopback, pod or service address never comes from a network card.
+        ip saddr 127.0.0.0/8 drop
+        ip6 saddr ::1 drop
         ip saddr { 10.42.0.0/16, 10.43.0.0/16 } drop
 
         # "fib daddr type local": the packet is for this machine, not passed on.
@@ -84,9 +87,14 @@ table inet meho {
 
         # The machine itself and its pods. Programs on this machine reach
         # each other over lo, also through the machine's own address.
-        iifname "lo" accept
+        iif "lo" accept
         iifname "cali*" accept
         iifname "flannel*" accept
+
+        # From here on, the packet came in on a network card. A loopback
+        # address never comes from there (CIS Ubuntu 24.04 rule 4.3.6).
+        ip saddr 127.0.0.0/8 drop
+        ip6 saddr ::1 drop
 
         ct state established,related accept
 
@@ -132,9 +140,14 @@ table inet meho {
 
         # The machine itself and its pods, for example the health checks of
         # the kubelet.
-        oifname "lo" accept
+        oif "lo" accept
         oifname "cali*" accept
         oifname "flannel*" accept
+
+        # This machine to its own addresses, also after the port forwarding
+        # of kube-proxy: for example the Kubernetes API service, whose
+        # endpoint is this machine.
+        fib daddr type local accept
 
         ct state established,related accept
         ip daddr { 10.42.0.0/16, 10.43.0.0/16 } accept

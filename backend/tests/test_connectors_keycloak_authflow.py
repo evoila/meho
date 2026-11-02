@@ -33,7 +33,6 @@ import pytest
 import respx
 from sqlalchemy import select
 
-import meho_backplane.connectors.keycloak  # noqa: F401 -- import for registry side-effects
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors.keycloak import KeycloakConnector
@@ -527,6 +526,9 @@ def _mount_idp_flows(mock: respx.MockRouter) -> respx.Route:
         200,
         json={"id": "cfg-nested-on", "alias": "to-idp-1", "config": {"defaultProvider": "idp-1"}},
     )
+    mock.get(f"{_ADMIN}/authentication/config/cfg-off").respond(
+        200, json={"id": "cfg-off", "alias": "off", "config": {"defaultProvider": "idp-0"}}
+    )
     return mock.get(f"{_ADMIN}/authentication/config/cfg-nested-off").respond(
         200,
         json={
@@ -534,9 +536,6 @@ def _mount_idp_flows(mock: respx.MockRouter) -> respx.Route:
             "alias": "to-partner",
             "config": {"defaultProvider": "partner"},
         },
-    )
-    mock.get(f"{_ADMIN}/authentication/config/cfg-off").respond(
-        200, json={"id": "cfg-off", "alias": "off", "config": {"defaultProvider": "idp-0"}}
     )
 
 

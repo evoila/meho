@@ -45,7 +45,15 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ["fill_path"]
+__all__ = [
+    "_AUTH_CONFIG_PATH",
+    "_AUTH_FLOWS_PATH",
+    "_AUTH_FLOW_ADD_STEP_PATH",
+    "_AUTH_FLOW_ADD_SUBFLOW_PATH",
+    "_AUTH_FLOW_EXECUTIONS_PATH",
+    "_IDENTITY_PROVIDERS_PATH",
+    "fill_path",
+]
 
 # -- templates reconciled against the pinned Admin REST spec ----------------
 

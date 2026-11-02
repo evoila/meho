@@ -48,16 +48,21 @@ against the **vRLI v2 API corpus**:
 3. **Group.** T3's
    [`run_llm_grouping`](../../backend/src/meho_backplane/operations/ingest/llm_groups.py)
    pass derives operation groups with operator-readable
-   `when_to_use` hints + per-op group assignments. The path-prefix
-   classifier in
-   [`meho_backplane.connectors.vcf_logs.core_ops.VRLI_PATH_RULES`](../../backend/src/meho_backplane/connectors/vcf_logs/core_ops.py)
-   names the 5 groups the curated core spans (`vrli-system`,
-   `vrli-events`, `vrli-inventory`, `vrli-content`,
-   `vrli-alerts`).
-4. **Curate.** The operator drives `apply_vrli_core_curation`
-   (which uses `ReviewService.edit_group` + `enable_group` +
-   `edit_op(llm_instructions=…)`) against the staged connector to
-   land the 7 read-only core ops + their guidance blobs.
+   `when_to_use` hints + per-op group assignments. Grouping is derived
+   from the spec itself; there is no longer a hand-maintained
+   path-prefix classifier.
+4. **Enable.** The operator enables the reads generically via
+   `ReviewService.enable_reads` against the staged connector.
+
+   > **Changed in #2362.** This step used to drive
+   > `apply_vrli_core_curation` over a hand-curated list of 7 core ops.
+   > That apparatus — `VRLI_PATH_RULES`, `VRLI_CORE_GROUPS`,
+   > `VRLI_CORE_OPS`, `classify_vrli_op` and the applier — was retired:
+   > it had no production call sites, because real deploys always used
+   > the generic review flow. The audited-in-use ops are now **typed**
+   > ops in `typed_ops.py`; what remains ingested is enabled as generic
+   > breadth. See
+   > [`docs/codebase/connectors-vcf-logs.md`](../codebase/connectors-vcf-logs.md).
 5. **Verify.** The operator dispatches one list op through
    `call_operation` to prove the end-to-end agent path works.
    The JSONFlux *seam* (used by the event-query op when result
@@ -206,9 +211,9 @@ meho connector review vrli-rest-9.0
 Expected: a rendered table of 5-18 groups (the path-prefix
 classifier maps to 5 named groups; the LLM may propose extras for
 tails the classifier doesn't catch, e.g. `/api/v2/sessions`,
-`/api/v2/notification`, `/api/v2/config`). Compare against the
-canonical 5 groups in
-[`VRLI_CORE_GROUPS`](../../backend/src/meho_backplane/connectors/vcf_logs/core_ops.py):
+`/api/v2/notification`, `/api/v2/config`). The 5 groups the curated
+core used to span were, for reference (the `VRLI_CORE_GROUPS` constant
+that defined them was retired in #2362):
 
 | group_key | name | covers |
 |---|---|---|
@@ -218,43 +223,37 @@ canonical 5 groups in
 | `vrli-content` | vRLI Content Packs | `/api/v2/content/contentpack/list` |
 | `vrli-alerts` | vRLI Alert Definitions | `/api/v2/alerts` |
 
-### Step 3 — apply the curated read-core
+### Step 3 — enable the reads
 
-The Python entrypoint is `apply_vrli_core_curation`. From a
-backplane Python shell:
-
-```python
-from meho_backplane.connectors.vcf_logs import apply_vrli_core_curation
-from meho_backplane.operations.ingest import ReviewService
-
-review_service = ReviewService(operator)
-await apply_vrli_core_curation(review_service, tenant_id=None)
+```bash
+meho connector review vrli-rest-8.x --enable-reads
 ```
 
-This drives, for every entry in `VRLI_CORE_GROUPS`:
+Or, from a backplane Python shell:
 
-1. `ReviewService.edit_group(group_key, name=…, when_to_use=…)`
-   — lands the operator-reviewed text the agent reads through
-   `list_operation_groups`.
-2. `ReviewService.enable_group(group_key)` — flips
-   `review_status='enabled'`; cascades child ops to
-   `is_enabled=True` (except for non-core ops the helper
-   explicitly disabled in step 0 via the audit-log-driven
-   operator-override exclusion).
+```python
+from meho_backplane.operations.ingest.service import ReviewService
 
-Then for every entry in `VRLI_CORE_OPS`:
+await ReviewService().enable_reads(connector_id="vrli-rest-8.x", tenant_id=None)
+```
 
-3. `ReviewService.edit_op(op_id, llm_instructions=…)` — lands
-   the per-op JSON blob the agent inlines into reasoning context
-   when the op surfaces in `search_operations` hits.
+This enables the ingested read ops generically. It does not hand-pick a
+core set and does not write `llm_instructions`: the grouping and guidance
+come from the T3 LLM pass in step 2.
 
-Each op's `llm_instructions` is a three-key blob
-(`when_to_call` / `output_shape` / `next_step`) matching the
-typed-connector convention from
-[`connectors/bind9/ops_zone.py`](../../backend/src/meho_backplane/connectors/bind9/ops_zone.py)
-and [`connectors/harbor/core_ops.py`](../../backend/src/meho_backplane/connectors/harbor/core_ops.py).
-The same agent reads both surfaces, so the structure stays
-uniform across typed and ingested connectors.
+> **Changed in #2362.** This step used to call `apply_vrli_core_curation`,
+> which walked a hand-maintained `VRLI_CORE_GROUPS` / `VRLI_CORE_OPS`
+> list and applied `ReviewService.edit_group` + `enable_group` +
+> `edit_op(llm_instructions=…)` per entry. That apparatus was deleted: it
+> had no production call sites, because real deploys always used the
+> generic flow above.
+>
+> `vrli.event.query` — the op this canary exercises end to end — is now a
+> **typed** op in `typed_ops.py`, not an ingested one, so it needs no
+> enabling at all. Only the remaining ingested breadth goes through this
+> step. See
+> [`docs/codebase/connectors-vcf-logs.md`](../codebase/connectors-vcf-logs.md).
+
 
 ### Step 4 — verify the curation
 
@@ -266,7 +265,7 @@ meho operation search vrli-rest-9.0 "what hosts are reporting logs" --limit 5
 ```
 
 The first command should return 5 enabled groups, each with the
-canonical `when_to_use` from `VRLI_CORE_GROUPS`. The second should
+`when_to_use` hints the T3 LLM pass derived. The second should
 return `GET:/api/v2/events/{constraints}` in the top-3. The third
 should return `GET:/api/v2/alerts` in the top-3. The fourth should
 return `GET:/api/v2/hosts` in the top-3.
@@ -342,10 +341,11 @@ or the curated content:
 
 ### 1. Env-gated automated canary is a follow-up
 
-G3.6-T5 (#834) ships the operator-review substrate
-(`apply_vrli_core_curation` helper), the curated 7-op data
-(`VRLI_CORE_OPS`), the classifier + curation behavioural tests
-over a SQLite-backed seeded substrate, and this runbook. The
+G3.6-T5 (#834) shipped the operator-review substrate and this runbook.
+Its curation helper (`apply_vrli_core_curation`), the curated 7-op data
+(`VRLI_CORE_OPS`) and the classifier + curation behavioural tests over a
+SQLite-backed seeded substrate were all retired in #2362; the substrate
+itself (`ReviewService`) remains. The
 env-gated automated canary that mirrors
 `test_g07_vsphere_canary.py` for vRLI — drives the full ingest
 of `vcf-logs-9.0/api-v2.yaml` through `IngestionPipelineService`
@@ -377,9 +377,10 @@ operations (`meho vcf-logs query`, etc.).
 The curated v0.5 core is deliberately read-only. vRLI write ops
 (alert create / update / delete, content-pack import, query
 result export) remain in their respective groups but stay
-`is_enabled=False` — the classifier's `GET`-only gate (see
-[`classify_vrli_op`](../../backend/src/meho_backplane/connectors/vcf_logs/core_ops.py))
-ensures no non-GET op lands under a curated group. Lifting any
+`is_enabled=False`. `ReviewService.enable_reads` enables reads only, so
+no non-GET op is enabled by the step above. (The `classify_vrli_op`
+`GET`-only gate that used to enforce this was retired with the rest of
+the curation apparatus in #2362.) Lifting any
 write op to `enabled` requires a follow-up Task with explicit
 operator review.
 
@@ -398,8 +399,9 @@ operator review.
   (spec ingestion pipeline).
 - vRLI REST API reference — Broadcom developer portal:
   https://developer.broadcom.com/xapis/vrealize-log-insight-api/latest/
-- Curated data:
-  [`backend/src/meho_backplane/connectors/vcf_logs/core_ops.py`](../../backend/src/meho_backplane/connectors/vcf_logs/core_ops.py).
+- Typed ops:
+  [`backend/src/meho_backplane/connectors/vcf_logs/typed_ops.py`](../../backend/src/meho_backplane/connectors/vcf_logs/typed_ops.py).
+  (The curated-data module `core_ops.py` was retired in #2362.)
 - Codebase doc: [`docs/codebase/connectors-vcf-logs.md`](../codebase/connectors-vcf-logs.md).
 - Consumer wrapper this contract retires (per Initiative #369):
   `scripts/vcf-logs.sh` in the consumer's `claude-rdc-hetzner-dc`

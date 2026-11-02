@@ -454,12 +454,11 @@ def test_a_group_sync_matches_our_groups_by_name(
     baseline: dict[str, dict[str, list[str]]],
 ) -> None:
     result = _sync_groups(site, same_names.provider_id, same_names.mapper_ids["meho-role-groups"])
-    print(f"\n[A] group sync: {result}")
     assert result.get("added", 0) == 0, result
     _assert_our_groups_intact(site, baseline, foreign={"staff"})
     # A second sync changes nothing either.
     _sync_groups(site, same_names.provider_id, same_names.mapper_ids["meho-role-groups"])
-    print(f"[A] user sync: {_sync_users(site, same_names.provider_id)}")
+    _sync_users(site, same_names.provider_id)
     _assert_our_groups_intact(site, baseline, foreign={"staff"})
 
 
@@ -478,7 +477,6 @@ async def test_a_directory_member_gets_the_groups_tenant_and_role(
 
     access_token = _password_login(site, username, password)["access_token"]
     claims = _claims(access_token)
-    print(f"\n[A] {username}: groups claim {claims.get('groups')}")
     assert claims.get("tenant_id") == _TENANT_ID
     assert claims.get("tenant_role") == want_role.value
     if want_approver:
@@ -525,10 +523,8 @@ async def test_a_leaving_the_directory_group_removes_the_tenant(
 
     # Refresh of the session from before the change.
     refreshed = _refresh(site, before["refresh_token"])
-    print(f"\n[A] refresh after LDAP removal: {refreshed.status_code}")
     assert refreshed.status_code == 200, refreshed.text
     refreshed_claims = _claims(refreshed.json()["access_token"])
-    print(f"[A] refreshed claims: { {c: refreshed_claims.get(c) for c in _TENANT_CLAIMS} }")
     for claim in _TENANT_CLAIMS:
         assert claim not in refreshed_claims, claim
     await _assert_refused(
@@ -585,8 +581,8 @@ def test_a_cache_policy_decides_when_a_removal_counts(
         password = ldap.add_person(_PEOPLE_A, username, _GROUPS_A, ["MEHO-Operators"])
         assert _tenant_after_login(site, username, password) == _TENANT_ID
         ldap.set_member(_GROUPS_A, "MEHO-Operators", f"uid={username},{_PEOPLE_A}", member=False)
-        stale = _tenant_after_login(site, username, password)
-        print(f"\n[A] MAX_LIFESPAN 4s, login right after the removal: tenant_id={stale}")
+        # A login right after the removal may still have the tenant: no check.
+        _tenant_after_login(site, username, password)
         time.sleep(5)
         assert _tenant_after_login(site, username, password) is None
     finally:
@@ -601,9 +597,9 @@ def test_b_group_sync_puts_directory_groups_under_ours(
     renamed: _Federation,
     baseline: dict[str, dict[str, list[str]]],
 ) -> None:
-    for name, mapper_id in renamed.mapper_ids.items():
-        print(f"\n[B] group sync {name}: {_sync_groups(site, renamed.provider_id, mapper_id)}")
-    print(f"[B] user sync: {_sync_users(site, renamed.provider_id)}")
+    for mapper_id in renamed.mapper_ids.values():
+        _sync_groups(site, renamed.provider_id, mapper_id)
+    _sync_users(site, renamed.provider_id)
 
     groups = _assert_our_groups_intact(site, baseline, foreign={*_RENAMED, "staff"})
     for directory_group, meho_group in _RENAMED.items():
@@ -636,7 +632,6 @@ async def test_b_directory_member_gets_the_parent_groups_tenant_and_role(
 
     access_token = _password_login(site, username, password)["access_token"]
     claims = _claims(access_token)
-    print(f"\n[B] {username}: groups claim {claims.get('groups')}")
     assert claims.get("tenant_id") == _TENANT_ID
     assert claims.get("tenant_role") == want_role.value
     if want_approver:
@@ -665,17 +660,12 @@ async def test_b_two_directory_groups_need_the_sg_names_in_jwt_role_groups(
     password = ldap.add_person(_PEOPLE_B, username, _GROUPS_B, ["SG-MEHO-Ops", "SG-MEHO-Admin"])
     access_token = _password_login(site, username, password)["access_token"]
     claims = _claims(access_token)
-    print(
-        f"\n[B] two groups: groups claim {claims.get('groups')}, "
-        f"tenant_role {claims.get('tenant_role')}"
-    )
     assert sorted(claims["groups"]) == ["SG-MEHO-Admin", "SG-MEHO-Ops"]
     assert claims.get("tenant_role") in {"operator", "tenant_admin"}
 
     # The SG-* groups inherit meho_tenant from their MEHO parent, so the
     # meho_tenants claim lists the tenant twice. MEHO refuses that with or
     # without the directory names in JWT_ROLE_GROUPS.
-    print(f"[B] two groups: meho_tenants {claims.get('meho_tenants')}")
     assert len(claims["meho_tenants"]) == 2
     for role_groups in (None, ",".join([*_MEHO_GROUPS, *_RENAMED])):
         if role_groups is None:
@@ -683,7 +673,6 @@ async def test_b_two_directory_groups_need_the_sg_names_in_jwt_role_groups(
         else:
             monkeypatch.setenv("JWT_ROLE_GROUPS", role_groups)
         detail = await _assert_refused(site, access_token, "multiple_role_groups", monkeypatch)
-        print(f"[B] two groups, JWT_ROLE_GROUPS={role_groups}: {detail}")
         assert ":Operators" in detail
         assert ":Admins" in detail
 
@@ -709,7 +698,6 @@ async def test_b_leaving_the_directory_group_removes_the_tenant(
     ldap.set_member(_GROUPS_B, "SG-MEHO-Ops", f"uid={username},{_PEOPLE_B}", member=False)
 
     refreshed = _refresh(site, before["refresh_token"])
-    print(f"\n[B] refresh after LDAP removal: {refreshed.status_code}")
     assert refreshed.status_code == 200, refreshed.text
     refreshed_claims = _claims(refreshed.json()["access_token"])
     for claim in _TENANT_CLAIMS:

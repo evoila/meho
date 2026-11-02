@@ -95,6 +95,6 @@ def test_connectors_declare_their_sensitive_ops_at_import() -> None:
     _eager_import_connectors()
     assert declared_op_class("k8s.secret.create") == "credential_write"
     assert declared_op_class("harbor.robot.create") == "credential_mint"
-    assert declared_op_class("GET:/v1/credentials") == "credential_read"
+    assert declared_op_class("bind9.config.show") == "credential_read"
     assert declared_op_class("argocd.app.sync") == "write"
     assert classify_op("k8s.secret.create") == "credential_write"

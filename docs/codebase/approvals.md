@@ -107,7 +107,11 @@ It is the simple and strict choice.
 release on the new column `approval_request.release_id` (migration
 `0126`). The value comes from `version.running_release_id()`: the full
 commit hash (`GIT_SHA`), plus the chart version (`CHART_VERSION`) when it
-is set. These are the same values `GET /version` shows.
+is set, plus a short digest of the installed connector packages (name,
+version and wheel digest of each) when the image carries any. These are
+the same values `GET /version` shows. So an image with the same commit but
+a new chart, or a new, updated or removed connector package, is another
+release, and the waiting requests end at its start.
 
 **At start-up.** `main._run_lifespan_startup` calls
 `approval_expiry.expire_approvals_from_older_release()`. For each tenant

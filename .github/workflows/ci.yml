@@ -2447,6 +2447,20 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+      - name: Repeat the Keycloak login test file 10 times (temporary proof)
+        # Temporary step for one pull request: proves that the login test
+        # file passes 10 times in a row with the 60-second timeout. It is
+        # removed again before the merge.
+        if: matrix.shard == 4
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 10); do
+            echo "::group::run ${i} of 10"
+            uv run pytest -q -rs -o tmp_path_retention_policy=failed \
+              tests/integration/test_keycloak_bootstrap_mcp_login.py
+            echo "::endgroup::"
+          done
+
   python-integration:
     name: Python (integration testcontainers)
     # FAN-IN carrying the branch-protection required context (#5384). This

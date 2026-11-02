@@ -17,6 +17,7 @@ from meho_backplane.operations._validate import validate_params
 from tests.test_operation_contracts import (
     DESCRIPTION_MAX,
     GAPS_FILE,
+    NOT_OPERATION_IDS,
     READS_WITH_A_WRITE_WORD,
     SUMMARY_MAX,
     OperationContract,
@@ -36,7 +37,15 @@ _GOOD_PARAMS: Final[dict[str, Any]] = {
         },
     },
     "required": ["vm"],
-    "examples": [{"vm": "vm-1", "spec": {"cpu": 2}}],
+    "examples": [{"vm": "<vm-id>", "spec": {"cpu": 2}}],
+}
+
+
+_GUIDANCE: Final[dict[str, str]] = {
+    "when_to_call": "To change CPUs.",
+    "output_shape": "The VM id.",
+    "next_step": "Read the VM back.",
+    "preconditions": "The VM is powered off.",
 }
 
 
@@ -48,12 +57,7 @@ def _good_op(**overrides: Any) -> OperationContract:
         "description": "Sets the number of virtual CPUs of one VM.",
         "parameter_schema": _GOOD_PARAMS,
         "response_schema": {"type": "object", "properties": {"vm": {"type": "string"}}},
-        "llm_instructions": {
-            "when_to_call": "To change CPUs.",
-            "output_shape": "The VM id.",
-            "next_step": "Read the VM back.",
-            "preconditions": "The VM is powered off.",
-        },
+        "llm_instructions": _GUIDANCE,
         "safety_level": "caution",
         "requires_approval": True,
         "group_text": "VM changes.",
@@ -292,7 +296,7 @@ def test_a_new_gap_and_a_gone_gap_each_name_the_operation_and_rule() -> None:
 _NESTED_FIELD_NO_DESCRIPTION: Final[dict[str, Any]] = {
     **_GOOD_PARAMS,
     "properties": {"vm": {"type": "object", "description": "VM.", "properties": {"id": {}}}},
-    "examples": [{"vm": {"id": "vm-1"}}],
+    "examples": [{"vm": {"id": "<vm-id>"}}],
 }
 
 
@@ -307,6 +311,14 @@ _NESTED_FIELD_NO_DESCRIPTION: Final[dict[str, Any]] = {
         ({"requires_approval": False}, "requires_approval"),
         ({"safety_level": "destructive"}, "preview_builder"),
         ({"safety_level": "safe", "requires_approval": False}, "write_name"),
+        (
+            {"parameter_schema": {**_GOOD_PARAMS, "examples": [{"vm": "vm-42"}]}},
+            "example_placeholders",
+        ),
+        (
+            {"llm_instructions": {**_GUIDANCE, "next_step": "Call `fake.vm.nope`."}},
+            "named_operations_exist",
+        ),
     ],
 )
 def test_each_bad_operation_fails_with_a_message_naming_operation_and_rule(
@@ -315,3 +327,189 @@ def test_each_bad_operation_fails_with_a_message_naming_operation_and_rule(
     messages = compare_with_gaps(find_problems([_good_op(**overrides)]), set())
     assert len(messages) == 1
     assert messages[0].startswith(f"NEW GAP vmware-rest fake.vm.update rule {rule!r}: ")
+
+
+# ---------------------------------------------------------------------------
+# Rule 11: example values look made up
+# ---------------------------------------------------------------------------
+
+
+def _with_example(example: dict[str, Any]) -> OperationContract:
+    return _good_op(parameter_schema={**_GOOD_PARAMS, "examples": [example]})
+
+
+def test_a_real_looking_vm_id_fails_and_a_placeholder_passes() -> None:
+    problems = _only_rule(_with_example({"vm": "vm-42"}), "example_placeholders")
+    assert problems == [
+        "example 0: vm holds 'vm-42', which looks real; use a placeholder in angle "
+        "brackets, such as <vm-id>"
+    ]
+    assert check_operation(_with_example({"vm": "<vm-id>"})) == {}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "vm-42",
+        "host-12",
+        "domain-c8",
+        "domain-s3",
+        "datastore-15",
+        "resgroup-8",
+        "resgroup-v12",
+        "group-v3",
+        "dvportgroup-21",
+        "datacenter-2",
+        "moref=vm-42",
+        "10.20.30.40",
+        "10.9.0.0/24",
+        "https://172.16.0.5:443/api",
+        "fe80::1",
+        "fd00::10",
+        "vc01.not-a-real-host.com",
+        "esx-01.local",
+        "nas.lan",
+        "admin@made-up-domain.net",
+        "https://vcenter.made-up.de/ui",
+        "0b6e3e0c-1f2a-4c55-9a51-2f6d7a8b9c01",
+        "00000000-0000-4000-8000-000000000001",
+        "0B6E3E0C-1F2A-4C55-9A51-2F6D7A8B9C01",
+    ],
+)
+def test_a_real_looking_value_fails(value: str) -> None:
+    problems = _only_rule(_with_example({"vm": "<vm-id>", "target": value}), "example_placeholders")
+    assert len(problems) == 1, problems
+    assert "target holds" in problems[0]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "<vm-id>",
+        "<vcenter-host.example>",
+        "192.0.2.10",
+        "198.51.100.0/24",
+        "203.0.113.7",
+        "2001:db8::1",
+        "vc.example.com",
+        "example.org",
+        "mail.example.net",
+        "esx01.test",
+        "vc.lab.example",
+        "management.azure.com",
+        "sa@example-project.iam.gserviceaccount.com",
+        "kubernetes.default.svc.cluster.local",
+        "cert-manager.io",
+        "vsphere.local\\<group>",
+        "00000000-0000-0000-0000-000000000000",
+        "config.yaml",
+        "web-vm-01",
+        "vm-name",
+        "datastore1",
+        "12:30:00",
+        "aa:bb:cc:dd:ee:ff",
+        "https://<backup-store>/<folder>/",
+    ],
+)
+def test_a_made_up_value_passes(value: str) -> None:
+    assert check_operation(_with_example({"vm": "<vm-id>", "target": value})) == {}
+
+
+def test_a_nested_real_looking_id_fails_with_its_path() -> None:
+    example = {
+        "vm": "<vm-id>",
+        "spec": {"cpu": 2, "placement": {"cluster": "domain-c8"}},
+        "disks": [{"datastore": "datastore-15"}],
+    }
+    problems = _only_rule(_with_example(example), "example_placeholders")
+    assert [p.split(" holds ")[0] for p in problems] == [
+        "example 0: spec.placement.cluster",
+        "example 0: disks[].datastore",
+    ]
+
+
+def test_every_example_is_checked_not_only_the_first() -> None:
+    params = {**_GOOD_PARAMS, "examples": [{"vm": "<vm-id>"}, {"vm": "vm-7"}]}
+    problems = _only_rule(_good_op(parameter_schema=params), "example_placeholders")
+    assert len(problems) == 1
+    assert problems[0].startswith("example 1: vm holds 'vm-7'")
+
+
+def test_a_version_field_may_look_like_an_address() -> None:
+    """``9.0.2.0`` in a field named ``*version*`` is a version, not an IPv4 address."""
+    assert check_operation(_with_example({"vm": "<vm-id>", "target_version": "9.0.2.0"})) == {}
+    example = {"vm": "<vm-id>", "address": "9.0.2.0"}
+    problems = _only_rule(_with_example(example), "example_placeholders")
+    assert "'9.0.2.0'" in problems[0]
+
+
+# ---------------------------------------------------------------------------
+# Rule 12: the guidance names only registered operations
+# ---------------------------------------------------------------------------
+
+
+def _guided(next_step: str, **overrides: Any) -> OperationContract:
+    return _good_op(llm_instructions={**_GUIDANCE, "next_step": next_step}, **overrides)
+
+
+@pytest.mark.parametrize(
+    "next_step",
+    [
+        "Call `fake.vm.nope` next.",
+        "Call ``fake.vm.nope`` next.",
+        "Use `fake.vm.nope` or `fake.vm.update`.",
+    ],
+)
+def test_guidance_naming_an_unregistered_operation_fails(next_step: str) -> None:
+    result = check_operation(_guided(next_step), registered={"fake.vm.update"})
+    assert result == {
+        "named_operations_exist": [
+            "guidance names 'fake.vm.nope', which is no registered operation"
+        ]
+    }
+
+
+def test_rule_12_needs_the_registry() -> None:
+    """A check of one operation alone has no registry, so rule 12 does not run."""
+    assert check_operation(_guided("Call `fake.vm.nope` next.")) == {}
+
+
+def test_guidance_naming_a_registered_operation_passes() -> None:
+    reader = _good_op(op_id="fake.vm.get", safety_level="safe", requires_approval=False)
+    writer = _guided("Read it back with `fake.vm.get`, then `fake.vm.update` again.")
+    assert find_problems([reader, writer]) == {}
+
+
+def test_the_registry_spans_every_connector() -> None:
+    """Guidance may name an operation of another connector."""
+    other = _good_op(
+        connector="k8s", op_id="other.node.get", safety_level="safe", requires_approval=False
+    )
+    op = _guided("When the API is up, call `other.node.get`; never `other.node.lost`.")
+    assert find_problems([other, op]) == {
+        ("vmware-rest", "fake.vm.update", "named_operations_exist"): [
+            "guidance names 'other.node.lost', which is no registered operation"
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    "next_step",
+    [
+        "Edit `config.yaml` and check `status.phase`.",
+        "Run `call_operation` with `op_id`.",
+        "A wildcard such as `fake.vm.*` is no name.",
+        "`Fake.Vm.Nope` has capitals.",
+        "Plain text fake.vm.nope without backticks.",
+    ],
+)
+def test_backticked_words_that_are_no_operation_id_pass(next_step: str) -> None:
+    assert find_problems([_guided(next_step)]) == {}
+
+
+def test_a_listed_non_operation_name_passes_even_with_a_registered_first_part() -> None:
+    name = next(iter(NOT_OPERATION_IDS))
+    prefix = name.split(".", 1)[0]
+    probe = _good_op(op_id=f"{prefix}.probe.get", safety_level="safe", requires_approval=False)
+    assert find_problems([probe, _guided(f"Check `{name}`.")]) == {}
+    assert find_problems([probe, _guided(f"Check `{prefix}.probe.lost`.")]) != {}

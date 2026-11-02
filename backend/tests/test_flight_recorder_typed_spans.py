@@ -467,6 +467,8 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "harbor-rest",
         "hcx-rest",
         "holodeck-ssh",
+        "idb-rest",
+        "idb-wsa",
         "hyperv-ssh",
         "installer-cb",
         "installer-rest",

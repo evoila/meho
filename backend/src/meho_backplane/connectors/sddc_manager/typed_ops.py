@@ -52,8 +52,8 @@ mapped to the **existing** safety_level/policy mechanism:
   ``requires_approval`` op to the approval queue (G11.7-T1 #1401), so it
   is **not dispatchable without the elevated policy path** (operator
   approval).
-* op-id ``sddc.credential.list`` on
-  :data:`~meho_backplane.broadcast.events._CREDENTIAL_READ_OPS` (decision
+* op-id ``sddc.credential.list`` declared ``credential_read`` in
+  ``sddc_manager/op_classes.py`` (decision
   #3's op-id classifier) -- ``classify_op`` returns ``credential_read`` so
   audit + broadcast rows collapse to aggregate-only (redacted).
 * the handler additionally scrubs secret-keyed values at the connector
@@ -82,6 +82,7 @@ from meho_backplane.connectors.sddc_manager.typed_writes import (
     SDDC_HOST_VALIDATE_OP_ID,
     SDDC_NETWORK_POOL_CREATE_OP_ID,
 )
+from meho_backplane.operations import register_plain_fields
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -1934,3 +1935,8 @@ async def register_sddc_typed_operations(
         version=SddcManagerConnector.version,
         impl_id=SddcManagerConnector.impl_id,
     )
+
+
+# ``licenseKeyUsage`` holds the counts of a licence key (total, used, remaining)
+# and ``licenseKeyValidity`` its status and expiry date, never the key.
+register_plain_fields(_LICENSE_LIST.op_id, ("licenseKeyUsage", "licenseKeyValidity"))

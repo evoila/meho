@@ -76,6 +76,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from meho_backplane.connectors.rke2.ops import SSH_TRANSPORT_NOTE, Rke2Op
+from meho_backplane.operations import register_plain_fields
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -1020,3 +1021,8 @@ READ_OPS: tuple[Rke2Op, ...] = (
     _RKE2_SERVICE_STATUS_OP,
     _RKE2_CONFIG_GET_OP,
 )
+
+
+# The ``token`` entry of the posture read holds the mode and owner of the token
+# file (``redacted: true``), never its content.
+register_plain_fields(_RKE2_POSTURE_OP.op_id, ("token",))

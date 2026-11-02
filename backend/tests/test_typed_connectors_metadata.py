@@ -92,13 +92,19 @@ _VMWARE_COMPOSITE_GROUPS: Final[frozenset[str]] = frozenset(
         "content_library",
         # Shared with the two typed licence reads.
         "vmware-licensing",
+        # Host local users and Active Directory; shared with two typed reads.
+        "vmware-host-access",
         "alarms",
         # The migration inventory read.
         "migration",
+        # The host security changes; shared with the two typed reads.
+        "vmware-host-security",
         # Install a new vCenter; shared with the typed status read.
         "vcenter_install",
-        # The vSAN changes: configure, disk claim and wipe, encryption.
-        "vsan",
+        # Host certificate changes; shared with the certificate and TPM reads.
+        "vmware-host-certificates",
+        # The vSAN changes; shared with the six vSAN reads.
+        "vmware-vsan",
     }
 )
 _BIND9_GROUPS: Final[frozenset[str]] = frozenset({"identity", "zone", "record", "config"})

@@ -51,7 +51,6 @@ import meho_backplane.operations.result_query as result_query_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.argocd import ARGOCD_OPS, ArgoCdConnector
 from meho_backplane.connectors.argocd.connector import _augment_app_health
-from meho_backplane.connectors.argocd.redaction import REDACTED
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.jsonflux.query.contract import ResultQuerySpec
@@ -691,9 +690,10 @@ async def test_repo_list_redacts_credentials(
     # Non-secret fields survive; credential fields are blanked.
     assert item["repo"] == "https://github.com/example/gitops"
     assert item["username"] == "git-user"
-    assert item["password"] == REDACTED
-    assert item["sshPrivateKey"] == REDACTED
-    assert item["bearerToken"] == REDACTED
+    # The connector masks the field; the default view of every answer hides it once more.
+    assert item["password"] == "[REDACTED:param_name]"
+    assert item["sshPrivateKey"] == "[REDACTED:param_name]"
+    assert item["bearerToken"] == "[REDACTED:param_name]"
     # No repo secret rides back in the envelope.
     for secret in (_REPO_SECRET_PASSWORD, _REPO_SECRET_SSH_KEY, _REPO_SECRET_BEARER):
         assert secret not in str(result)

@@ -134,11 +134,11 @@ class LinuxWriteSafetyError(ValueError):
 
 #: The narrow allow-list of absolute POSIX roots ``linux.file.write`` confines
 #: its target path under -- the config / runtime-state trees a day-2
-#: remediation writes. Deliberately narrower than the *read* roots
+#: remediation writes. Separate from the *read* roots
 #: (:data:`~meho_backplane.connectors.linux.ops.LINUX_READ_ROOTS`): the read
-#: floor reads ``/proc`` / ``/sys`` / ``/var/log``, but writing there is a
-#: footgun (``/proc`` / ``/sys`` are the sysctl op's job; ``/var/log`` is not a
-#: config surface), so those are excluded here. Confinement is lexical (the
+#: floor reads ``/var/log`` and a few named ``/proc`` / ``/sys`` files, but
+#: writing there is a footgun (``/proc`` / ``/sys`` are the sysctl op's job;
+#: ``/var/log`` is not a config surface), so those are excluded here. Confinement is lexical (the
 #: bind9 mold): a resolved path must descend one of these roots.
 LINUX_WRITE_ROOTS: tuple[str, ...] = (
     "/etc",

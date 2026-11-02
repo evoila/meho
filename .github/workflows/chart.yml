@@ -298,9 +298,8 @@ jobs:
             --set corePostgres.enabled=true \
             --set coreKeycloak.enabled=true \
             --set coreKeycloak.hostname=meho.test \
-            --set coreKeycloak.firstTenantId=3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c \
             --set coreVault.enabled=true \
-            > /tmp/rendered-core.yaml
+            --set coreKeycloak.firstTenantId=3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c > /tmp/rendered-core.yaml  # gitleaks:allow
           kubeconform \
             -strict \
             -kubernetes-version 1.28.0 \
@@ -690,7 +689,7 @@ jobs:
             --set corePostgres.enabled=true
             --set coreKeycloak.enabled=true
             --set coreKeycloak.hostname=meho.test
-            --set coreKeycloak.firstTenantId=3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c
+            --set coreKeycloak.firstTenantId=3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c  # gitleaks:allow
             --set keycloak.issuer=
             --set config.keycloakIssuerUrl=
           )

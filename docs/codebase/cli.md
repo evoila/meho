@@ -2712,8 +2712,9 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      PKCE method: `meho login` sends no PKCE, and Keycloak checks PKCE
      at the device login too, so a required method would refuse every
      `meho login`. The run sends `pkce.code.challenge.method` as an
-     empty value, so Keycloak drops the `S256` that a run of 0.40.0 or
-     0.41.0 set. Implicit, password and service-account flows stay off.
+     empty value, so Keycloak drops the `S256` that a run of 0.40.0,
+     0.41.0 or 0.42.0 set. Implicit, password and service-account flows
+     stay off.
   2. Public authorization-code+PKCE MCP client (default name
      `meho-mcp`, `standardFlowEnabled=true`,
      `pkce.code.challenge.method=S256`, default redirect URIs for the

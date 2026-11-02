@@ -250,6 +250,12 @@ requests. Read "Breaking changes" and "Steps after the upgrade" first.
   release yet: it does not set itself up at its first start yet, and
   the release does not publish it (#5067).
 
+### Fixed
+- Linux server install (form 2): the console login and the approval
+  hand-off of credential writes work after the install. The values file
+  of the install turns both on with the Secrets that the install makes,
+  and an update turns them on too (#5647).
+
 ### Documentation
 - The 0.40.0 Keycloak step no longer asks for PKCE `S256` on the
   `meho login` clients. The same fix is in the 0.40.0 upgrade note, in

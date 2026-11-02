@@ -15,7 +15,6 @@ from meho_backplane.connectors.vmware_rest.composites._vsan_schemas import (
     _STATUS_READ,
     _STR_OR_NULL,
 )
-from meho_backplane.connectors.vmware_rest.composites.schemas import DATASTORE_MOID_PATTERN
 
 __all__ = [
     "OBJECT_REPAIR_LLM_INSTRUCTIONS",
@@ -49,9 +48,9 @@ PROACTIVE_TEST_PARAMETER_SCHEMA: dict[str, Any] = {
         },
         "datastore": {
             "type": "string",
-            "pattern": DATASTORE_MOID_PATTERN,
-            "description": "vm_creation only: the datastore for the test VM. Default: the "
-            "vSAN datastore of the cluster.",
+            "minLength": 1,
+            "description": "vm_creation only: the datastore for the test VM, for example "
+            "<datastore-id>. Default: the vSAN datastore of the cluster.",
         },
         "workload": {
             "type": "string",
@@ -80,7 +79,7 @@ PROACTIVE_TEST_PARAMETER_SCHEMA: dict[str, Any] = {
             "required": ["workload"],
         },
     ],
-    "examples": [{"cluster": "domain-c7", "test": "vm_creation"}],
+    "examples": [{"cluster": "<cluster-id>", "test": "vm_creation"}],
 }
 
 _HOST_ROW: Final[dict[str, Any]] = {
@@ -174,7 +173,7 @@ OBJECT_REPAIR_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["cluster"],
     "additionalProperties": False,
-    "examples": [{"cluster": "domain-c7"}],
+    "examples": [{"cluster": "<cluster-id>"}],
 }
 
 OBJECT_REPAIR_RESPONSE_SCHEMA: dict[str, Any] = {

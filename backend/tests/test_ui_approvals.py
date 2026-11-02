@@ -659,7 +659,7 @@ def test_detail_modal_reviewer_context_omits_secret_param() -> None:
         request_id=rid,
         op_id="POST:/vcenter/vm/{vm}/power?action=start",
         target_id=target_id,
-        params={"password": "hunter2", "token": "sk-abcdef0123456789"},
+        params={"password": "hunter2", "token": "sk-abcdef0123456789"},  # gitleaks:allow
     )
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)

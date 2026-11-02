@@ -398,7 +398,7 @@ def test_sensitive_headers_never_leak_into_logs(
     secrets = {
         "Authorization": "Bearer SECRET-BEARER-TOKEN-XYZ",
         "Cookie": "session=COOKIE-VAL-ABC",
-        "X-API-Key": "APIKEY-VAL-123",
+        "X-API-Key": "APIKEY-VAL-123",  # gitleaks:allow
     }
 
     response = client.get("/", headers=secrets)

@@ -309,7 +309,7 @@ async def test_secret_keyed_param_never_surfaces(session: AsyncSession) -> None:
     request = await _seed_request(
         session,
         op_id="POST:/vcenter/vm/{vm}/power?action=start",
-        params={"password": "hunter2", "token": "sk-abcdef0123456789"},
+        params={"password": "hunter2", "token": "sk-abcdef0123456789"},  # gitleaks:allow
     )
     ctx = await resolve_reviewer_context(session, request)
     assert ctx.subject is None
@@ -320,7 +320,8 @@ async def test_secret_keyed_param_never_surfaces(session: AsyncSession) -> None:
 @pytest.mark.asyncio
 async def test_secret_shaped_identity_value_is_dropped(session: AsyncSession) -> None:
     """A ``name`` whose value is secret-shaped is dropped by the redaction engine."""
-    jwt_shaped = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcDEF123456"
+    jwt_header = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"
+    jwt_shaped = jwt_header + ".eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcDEF123456"
     request = await _seed_request(
         session,
         op_id="POST:/vcenter/vm/{vm}/power?action=start",

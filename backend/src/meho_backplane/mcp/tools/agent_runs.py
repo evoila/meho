@@ -43,6 +43,7 @@ from meho_backplane.agent.invocation import (
     RUN_INPUT_MAX_CHARS,
     AgentDisabledError,
     AgentNotFoundError,
+    AgentNotOwnedError,
     AgentRunNotFoundError,
     BudgetExceededError,
     get_agent_invoker,
@@ -50,7 +51,7 @@ from meho_backplane.agent.invocation import (
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.models import AgentRunStatus
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 from meho_backplane.operations._audit import work_ref_var
 
 _log = structlog.get_logger(__name__)
@@ -174,6 +175,8 @@ async def _run_handler(
         raise McpInvalidParamsError("agent_not_found") from exc
     except AgentDisabledError as exc:
         raise McpInvalidParamsError("agent_disabled") from exc
+    except AgentNotOwnedError as exc:
+        raise McpPermissionDeniedError("agent_not_owned") from exc
     except BudgetExceededError as exc:
         # G11.5-T6 #1080 — the pre-execution budget gate refused this
         # run. JSON-RPC has no spec-blessed "too many requests" code,

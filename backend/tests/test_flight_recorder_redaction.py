@@ -46,7 +46,7 @@ from meho_backplane.settings import get_settings
 _BEARER = "Bearer PLACEHOLDER-TOKEN-abcdef0123456789"
 _JWT = "eyJPLACEHOLDER0aaa.PLACEHOLDER0bbbbb.PLACEHOLDER0ccccc"
 _AUTH_HEADER = "Authorization: Bearer PLACEHOLDER-abcdef012345"
-_API_KEY = "api_key=PLACEHOLDER-KEY-abcdef012345"
+_API_KEY = "api_key=PLACEHOLDER-KEY-abcdef012345"  # gitleaks:allow
 _SENTINEL = "PLACEHOLDER"
 
 
@@ -469,7 +469,7 @@ def test_non_utf8_json_typed_body_is_uncertain() -> None:
     ["text/plain", "application/x-www-form-urlencoded", "text/html"],
 )
 def test_known_non_json_content_type_is_uncertain(content_type: str) -> None:
-    out = redact_body("password=PLACEHOLDER-pw123456", content_type=content_type)
+    out = redact_body("password=PLACEHOLDER-pw123456", content_type=content_type)  # gitleaks:allow
     assert out.uncertain is True
     assert out.value == BODY_OMITTED_MARKER
     _assert_no_secret(out.value, _SENTINEL)

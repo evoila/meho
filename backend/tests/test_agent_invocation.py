@@ -47,6 +47,7 @@ from meho_backplane.agent.invocation import (
     AgentInvocationError,
     AgentInvoker,
     AgentNotFoundError,
+    AgentNotOwnedError,
     AgentRunNotFoundError,
     _finalize_child_run,
     _record_child_run,
@@ -1451,31 +1452,37 @@ async def test_direct_run_is_limited_by_the_agent_grants(
     assert [(s.identity_sub, s.identity_act) for s in summaries] == [("alice", "agent:reader")]
 
 
-async def test_direct_run_by_an_agent_caller_is_limited_by_the_hosted_agent_grants(
+async def test_direct_run_by_an_agent_caller_starts_only_its_own_definition(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """An agent-kind caller that may run the op cannot do what the hosted agent's grants deny.
+    """An agent-kind caller runs its own definition; another agent's is refused.
 
-    The caller holds an ``auto-execute`` grant for every op. The hosted agent
-    holds a ``*`` deny grant, so the call the run makes is denied. The audit
-    row names the caller as the subject and the hosted agent as the actor.
+    The refusal happens before a run row exists, so nothing is written. The
+    owner's run is limited by its own grants (the ``*`` deny grant), and the
+    audit row names the agent as subject and actor.
     """
     await _seed_echo_op(stub_embedding_service)
     await _seed_definition(toolset={"meta_tools": ["call_operation"]})
     await _seed_agent_grant(principal_sub="agent:caller", op_pattern="*", verdict="auto-execute")
     await _seed_agent_grant(principal_sub="agent:reader", op_pattern="*", verdict="deny")
     invoker = _invoker_with(_call_op_then_text("answer"))
-    caller = _make_operator(sub="agent:caller", principal_kind=PrincipalKind.AGENT)
+    other = _make_operator(sub="agent:caller", principal_kind=PrincipalKind.AGENT)
+    owner = _make_operator(sub="agent:reader", principal_kind=PrincipalKind.AGENT)
 
-    outcome = await invoker.run(caller, "reader", "go")
+    with pytest.raises(AgentNotOwnedError, match="do not own definition 'reader'"):
+        await invoker.run(other, "reader", "go")
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = (await session.execute(select(AgentRunRow))).scalars().all()
+    assert rows == []
+    assert await _dispatch_rows("vault.kv.read") == []
+
+    outcome = await invoker.run(owner, "reader", "go")
     assert outcome.status is AgentRunStatus.SUCCEEDED
-
-    rows = await _dispatch_rows("vault.kv.read")
-    assert len(rows) == 1
-    assert rows[0].policy_decision == "deny"
-    assert (rows[0].operator_sub, rows[0].actor_sub) == ("agent:caller", "agent:reader")
-    view = await invoker.poll(caller, outcome.run_id)
-    assert (view.identity_sub, view.identity_act) == ("agent:caller", "agent:reader")
+    rows_after = await _dispatch_rows("vault.kv.read")
+    assert len(rows_after) == 1
+    assert rows_after[0].policy_decision == "deny"
+    assert (rows_after[0].operator_sub, rows_after[0].actor_sub) == ("agent:reader", "agent:reader")
 
 
 async def test_streamed_direct_run_is_limited_by_the_agent_grants(

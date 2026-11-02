@@ -46,6 +46,7 @@ _EXPECTED_NAMES = {
     "kubeconfig",
     "pem_private_key",
     "password_hash",
+    "ceph_key",
     "bind_key_secret",
     "uuid",
     "ipv4",
@@ -96,6 +97,14 @@ _CERTIFICATE_FIXTURE = (
 )
 _SHA512_HASH_FIXTURE = "$" + "6$" + "saltsalt$" + "abcdefghijklmnopqrstuvwxyz0123456789./ABCD"
 _SHADOW_LINE_FIXTURE = "root:" + _SHA512_HASH_FIXTURE + ":19000:0:99999:7:::"
+# A Ceph key: 40 base64 characters that start with ``AQ`` and end in ``==``.
+_CEPH_KEY_VALUE_FIXTURE = "AQ" + "AAAAAAAAAAAAAAAAAAAA" + "bbbbbbbbbbbbbbbb" + "=="
+_CEPH_KEYRING_FIXTURE = (
+    "[client.admin]\n\tkey = " + _CEPH_KEY_VALUE_FIXTURE + '\n\tcaps mon = "allow *"\n'
+)
+_CEPH_AUTH_LS_FIXTURE = (
+    "client.admin\n    key: " + _CEPH_KEY_VALUE_FIXTURE + "\n    caps: [mon] allow *\n"
+)
 _BCRYPT_HASH_FIXTURE = "$" + "2b$" + "12$" + "abcdefghijklmnopqrstuvABCDEFGHIJKLMNOPQRSTUVWXYZ01234"
 _YESCRYPT_HASH_FIXTURE = "$" + "y$" + "j9T$" + "saltsaltsalt$" + "abcdefghijklmnopqrstuvwxyz012345"
 _ARGON2_HASH_FIXTURE = (
@@ -728,6 +737,16 @@ def test_get_pattern_unknown_raises() -> None:
         ("password_hash", _ARGON2_HASH_FIXTURE, True),
         ("password_hash", "daemon:*:19000:0:99999:7:::", False),
         ("password_hash", 'echo "$1$2" costs $6 per month', False),
+        # ceph_key: ``key = AQ...==`` in a keyring, ``key: AQ...==`` in ceph auth output
+        ("ceph_key", _CEPH_KEYRING_FIXTURE, True),
+        ("ceph_key", _CEPH_AUTH_LS_FIXTURE, True),
+        ("ceph_key", 'KEY="' + _CEPH_KEY_VALUE_FIXTURE + '"', True),
+        ("ceph_key", '{"entity": "client.admin", "key": "' + _CEPH_KEY_VALUE_FIXTURE + '"}', True),
+        ("ceph_key", "CEPH_KEY=" + _CEPH_KEY_VALUE_FIXTURE, True),
+        ("ceph_key", "key = /etc/ceph/ceph.client.admin.keyring", False),
+        ("ceph_key", "ssl_certificate_key = /etc/ssl/private/server.pem", False),
+        ("ceph_key", "key = AQshort==", False),
+        ("ceph_key", "key = " + _CEPH_KEY_VALUE_FIXTURE[2:], False),
         # ipv4: dotted quad with valid 0-255 octets
         (
             "ipv4",
@@ -838,6 +857,8 @@ _PATTERN_TEST_ROWS: list[tuple[str, str, bool]] = [
     ("bind_key_secret", _BIND_KEY_SECRET_FIXTURE_NEG, False),
     ("password_hash", _SHADOW_LINE_FIXTURE, True),
     ("password_hash", "daemon:*:19000:0:99999:7:::", False),
+    ("ceph_key", _CEPH_KEYRING_FIXTURE, True),
+    ("ceph_key", "key = /etc/ceph/ceph.client.admin.keyring", False),
     ("uuid", "tenant_id=12345678-1234-1234-1234-123456789abc", True),
     ("uuid", "build_hash=abcdef0123456789", False),
     ("ipv4", "192.168.1.42", True),
@@ -942,6 +963,32 @@ def test_default_policy_redacts_shadow_hash_and_keeps_the_other_columns() -> Non
     assert result.redacted == (
         "root:[REDACTED:password_hash]:19000:0:99999:7:::\ndaemon:*:19000:0:99999:7:::"
     )
+
+
+def test_default_policy_redacts_a_ceph_key_and_keeps_the_rest_of_the_keyring() -> None:
+    """The default policy hides the key line; the entry name and the caps stay readable."""
+    policy = load_policy_yaml(DEFAULT_POLICY_PACKAGE, DEFAULT_POLICY_RESOURCE)
+    result = redact(_CEPH_KEYRING_FIXTURE, policy)
+    assert result.redacted == '[client.admin]\n\t[REDACTED:ceph_key]\n\tcaps mon = "allow *"\n'
+    assert [entry.pattern for entry in result.manifest] == ["ceph_key"]
+
+
+def test_default_policy_redacts_a_ceph_key_in_log_rows() -> None:
+    """``linux.log.tail`` returns one row per line; the key row is hidden, the rest is kept."""
+    policy = load_policy_yaml(DEFAULT_POLICY_PACKAGE, DEFAULT_POLICY_RESOURCE)
+    rows = _CEPH_AUTH_LS_FIXTURE.rstrip("\n").split("\n")
+    payload = {"rows": rows, "total": len(rows), "path": "/var/log/ceph/ceph.log"}
+    result = redact(payload, policy)
+    redacted = result.redacted
+    assert isinstance(redacted, dict)
+    assert redacted["rows"] == [
+        "client.admin",
+        "    [REDACTED:ceph_key]",
+        "    caps: [mon] allow *",
+    ]
+    assert redacted["total"] == len(rows)
+    assert redacted["path"] == "/var/log/ceph/ceph.log"
+    assert _CEPH_KEY_VALUE_FIXTURE not in str(redacted)
 
 
 def test_default_policy_redacts_a_private_key_split_over_log_rows() -> None:

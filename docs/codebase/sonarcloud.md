@@ -85,11 +85,13 @@ new-code-period + scan-trigger section below for why it is kept advisory).
 `scripts/ci/measure_test_map.py` counts how many tests a "run only the tests
 for the changed code" map would pick for recent merged pull requests. CI does
 not use it. It needs coverage data that records which test ran each line:
-`dynamic_context = test_function` in `.coveragerc.ci`. That setting is **not**
-on `main`. To get the data, open a pull request that adds it, give it the
-`ci-coverage-validate` label, and keep the combined `.coverage` file from the
-combine job (it is not uploaded today, only `coverage.xml`). How to run the
-script is in its docstring.
+`dynamic_context = test_function` in `.coveragerc.ci`. Since #5642 that
+setting is on `main`: the nightly run records the test names and makes the
+unit test map that pull requests use (see "Test map run" in
+[`devops.md`](devops.md)). The combined `.coverage` file is not uploaded, only
+`coverage.xml` and the map. To get the data, give a pull request the
+`ci-coverage-validate` label and add an upload of `backend/.coverage` to the
+combine job. How to run the script is in its docstring.
 
 The script also needs the list from `pytest --collect-only`. Make that list
 on the **exact commit the coverage run tested**. For a `pull_request` run this
@@ -122,8 +124,9 @@ Things to know about the data:
 - `test_function` records only lines that run inside the test function
   itself. Lines that run in fixtures, at import time, or in background tasks
   get the empty context, so the map does not see them.
-- Coverage cannot use the faster `sysmon` core with test contexts. It falls
-  back to the C tracer, so the shards run slower and need more time.
+- Coverage cannot use the faster `sysmon` core with test contexts. The
+  coverage shards use the C tracer (`COVERAGE_CORE=ctrace`), so they run
+  slower: their pytest step limit is 45 minutes, not 30.
 
 ## When coverage collapses to ~24% — the invisible-import failure mode
 
@@ -205,7 +208,7 @@ Nothing turns red because the coverage jobs are non-blocking by design.
    nothing. **Fix:** the `pytest_sessionfinish` hook in `backend/tests/conftest.py`
    saves the worker's coverage data (and stops the tracer) before the worker
    reports "finished". Pinned by `backend/tests/test_ci_coverage_shards.py`.
-2. **The shard hits its 30-minute step limit.** Then all of its processes are
+2. **The shard hits its pytest step limit (45 minutes since #5642).** Then all of its processes are
    killed and every data file of that shard is lost (the shard uploads an
    empty or missing artifact). With 5 shards on the 7 GiB heavy runner, a
    shard with about 4,500 tests ran up to 29 minutes. **Fix:** the sweep runs
@@ -224,9 +227,9 @@ Nothing turns red because the coverage jobs are non-blocking by design.
    file reports under 20%.
 2. The shard's `coverage-pytest-log-shard-N` artifact (kept 7 days): a
    `KeyboardInterrupt` after the last test, or a step that stopped at the
-   30-minute limit, means the shard lost its worker data.
+   45-minute limit, means the shard lost its worker data.
 3. The `Print peak memory` step of each shard: a peak at the memory limit
-   or a pytest step near 30 minutes means the shard count must go up.
+   or a pytest step near 45 minutes means the shard count must go up.
 
 ## New-code period + scan trigger — how they're configured
 

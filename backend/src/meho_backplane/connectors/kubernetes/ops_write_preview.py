@@ -59,11 +59,12 @@ What is never shown
   shell splits it: the value is the rest of the item, spaces, quotes and
   shell operators included, so ``PGPASSWORD=x;tail`` and
   ``"PGPASSWORD=x"suffix`` are hidden whole. Only the item right after
-  ``-c`` is a shell command string (``sh -c "..."``): there the value is
-  one shell word, quotes and escapes included, and an unquoted shell
-  operator (``;`` ``&`` ``|`` ``<`` ``>`` ``(`` ``)``) ends it, so
-  ``sh -c "PGPASSWORD=x;id"`` keeps ``id`` and the commands after a secret
-  stay visible. Then the shared
+  ``-c``, or after a short option group that holds ``c`` (``-ec``,
+  ``-lc``), is a shell command string (``sh -c "..."``, ``bash -lc
+  "..."``): there the value is one shell word, quotes and escapes
+  included, and an unquoted shell operator (``;`` ``&`` ``|`` ``<`` ``>``
+  ``(`` ``)``) ends it, so ``sh -ec "PGPASSWORD=x;id"`` keeps ``id`` and
+  the commands after a secret stay visible. Then the shared
   params redaction of the generic echo runs over the spec: it hides
   secret-shaped text anywhere (JWTs, bearer tokens) and the value of a
   field with a secret-shaped name (a ``secret`` volume, for example). A
@@ -236,6 +237,15 @@ _KNOWN_TOKEN = re.compile(
 #: A command-line flag: ``-u``, ``--password``.
 _FLAG = re.compile(r"^--?(?P<name>[A-Za-z][A-Za-z0-9_-]*)$")
 
+#: The ``-c`` of a shell, alone or in a short option group (``-ec``, ``-lc``,
+#: ``-euc``): the argument after it is a shell command string.
+_SHELL_SCRIPT_OPTION = re.compile(r"^-[A-Za-z]*c[A-Za-z]*$")
+
+
+def _reads_shell_script(word: str) -> bool:
+    """Whether the argument after *word* is a shell command string (``sh -c``, ``bash -lc``)."""
+    return _SHELL_SCRIPT_OPTION.match(word) is not None
+
 
 def _secret_shaped_name(name: str) -> bool:
     """True when a variable or flag name on a command line can name a secret."""
@@ -302,8 +312,8 @@ def _hide_command_text(text: str, pending: str | None, *, shell: bool) -> tuple[
     string starts (``--password`` ended the item before). Returned with the
     text is the flag that waits at its end, for the next item.
 
-    With *shell* the text is a shell command string, the one after ``-c``.
-    It is split into shell words, in which a quoted or escaped part may hold
+    With *shell* the text is a shell command string, the one after ``-c``
+    (or ``-ec``, ``-lc``). It is split into shell words, in which a quoted or escaped part may hold
     spaces. For each word, in this order:
 
     * An unquoted shell operator (``;``, ``&&``, ``|``) ends the command
@@ -361,9 +371,10 @@ def _hide_word(
     if pending is not None and not word.startswith("-"):
         return _hide_flag_value(pending, value), None
     assignment = _secret_assignment(word)
-    quoted_assignment = assignment is not None and assignment.start() == 1 and before != "-c"
+    script = _reads_shell_script(before)
+    quoted_assignment = assignment is not None and assignment.start() == 1 and not script
     if shell and not quoted_assignment and _QUOTED_STRING.fullmatch(word):
-        inner, waiting = _hide_command_text(word[1:-1], None, shell=before == "-c")
+        inner, waiting = _hide_command_text(word[1:-1], None, shell=script)
         return f"{word[0]}{inner}{word[0]}", waiting
     if assignment is not None:
         return _hide_assignment(value, assignment), None
@@ -389,10 +400,10 @@ def _hide_command_secrets(parts: list[Any]) -> list[Any]:
     Each list item is one argument of the program, so a secret value in it
     runs to the end of the item, spaces and shell operators included
     (``PGPASSWORD=x;tail`` is hidden whole). Only the item right after
-    ``-c`` is a shell command string (``sh -c "..."``): there a value is
-    one shell word, quotes and backslash escapes included (``"a\\" b"``,
-    ``a\\ b``), and an unquoted shell operator ends it
-    (``PGPASSWORD=x;id`` keeps ``id``).
+    ``-c``, alone or in a short option group (``sh -ec``, ``bash -lc``),
+    is a shell command string: there a value is one shell word, quotes and
+    backslash escapes included (``"a\\" b"``, ``a\\ b``), and an unquoted
+    shell operator ends it (``PGPASSWORD=x;id`` keeps ``id``).
     """
     hidden: list[Any] = []
     pending: str | None = None
@@ -406,7 +417,9 @@ def _hide_command_secrets(parts: list[Any]) -> list[Any]:
             hidden.append(_hide_flag_value(pending, part))
             pending = None
         else:
-            text, pending = _hide_command_text(_hide_in_text(part), pending, shell=previous == "-c")
+            text, pending = _hide_command_text(
+                _hide_in_text(part), pending, shell=_reads_shell_script(previous)
+            )
             hidden.append(text)
         previous = part
     return hidden

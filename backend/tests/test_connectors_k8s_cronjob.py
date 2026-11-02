@@ -344,6 +344,12 @@ async def test_cronjob_run_preview_shows_job_template_and_active_jobs_not_values
         f'tool --password "{_SHORT}\\" phrase" run',
         "-c",
         f'sh -c "PGPASSWORD={_SHORT}; id" && echo done',
+        "-ec",
+        f"PGPASSWORD={_SHORT} pg_dump app; id",
+        "-lc",
+        f"PGPASSWORD={_SHORT} pg_dump app; id",
+        "-e",
+        f"PGPASSWORD={_SHORT} pg_dump app; id",
     ]
     ctx = PreviewContext(
         descriptor=_FakeDescriptor(op_id="k8s.cronjob.run"),  # type: ignore[arg-type]
@@ -397,6 +403,12 @@ async def test_cronjob_run_preview_shows_job_template_and_active_jobs_not_values
         "tool --password ***REDACTED*** run",
         "-c",
         'sh -c "PGPASSWORD=***REDACTED***; id" && echo done',
+        "-ec",
+        "PGPASSWORD=***REDACTED*** pg_dump app; id",
+        "-lc",
+        "PGPASSWORD=***REDACTED*** pg_dump app; id",
+        "-e",
+        "PGPASSWORD=***REDACTED***",
     ]
     assert container["securityContext"] == {"privileged": True}
     assert container["env"] == [{"name": "DB_PASSWORD", "value": "***REDACTED***"}]

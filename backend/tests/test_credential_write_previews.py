@@ -473,6 +473,41 @@ async def test_k8s_job_create_hides_a_direct_argument_to_its_end() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("command", "shown"),
+    [
+        (["sh", "-ec"], "PGPASSWORD=***REDACTED*** pg_dump app; id"),
+        (["bash", "-lc"], "PGPASSWORD=***REDACTED*** pg_dump app; id"),
+        (["bash", "-euxc"], "PGPASSWORD=***REDACTED*** pg_dump app; id"),
+        (["sh", "-e"], "PGPASSWORD=***REDACTED***"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_k8s_job_create_reads_a_shell_option_group_with_c_as_a_shell_command(
+    command: list[str], shown: str
+) -> None:
+    """``-c`` in a short option group (``sh -ec``, ``bash -lc``) starts a shell command string.
+
+    The commands after the secret stay visible. An option group without
+    ``c`` (``sh -e``) does not: the next item is a direct argument, hidden
+    to its end.
+    """
+    _, preview = await _preview(
+        "k8s.job.create",
+        _job_params(
+            {
+                "name": "run",
+                "image": "busybox:1.36",
+                "command": command,
+                "args": [f"PGPASSWORD={_SHORT} pg_dump app; id"],
+            }
+        ),
+    )
+    (container,) = preview["spec"]["template"]["spec"]["containers"]
+    assert container["command"] == command
+    assert container["args"] == [shown]
+
+
 @pytest.mark.asyncio
 async def test_k8s_job_create_reads_command_and_args_as_one_command_line() -> None:
     """A secret flag that ends ``command`` hides the first item of ``args``."""

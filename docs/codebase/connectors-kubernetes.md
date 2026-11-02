@@ -500,11 +500,13 @@ How far such a value runs depends on who reads the list item. A list item
 is one argument of the program, no shell splits it: the value is the rest
 of the item, spaces, quotes and shell operators included, so
 `PGPASSWORD=x;tail` and `"PGPASSWORD=x"suffix` are hidden whole. Only the
-item right after `-c` is a shell command string (`sh -c "..."`): there
-the value is one shell word, quotes and backslash escapes included, and an
-unquoted shell operator (`;` `&` `|` `<` `>` `(` `)`) ends it, so
-`sh -c "PGPASSWORD=x;id"` keeps `id` and the commands after a secret stay
-visible.
+item right after `-c`, or after a short option group that holds `c`
+(`-ec`, `-lc`), is a shell command string (`sh -c "..."`, `bash -lc
+"..."`): there the value is one shell word, quotes and backslash escapes
+included, and an unquoted shell operator (`;` `&` `|` `<` `>` `(` `)`)
+ends it, so `sh -ec "PGPASSWORD=x;id"` keeps `id` and the commands after
+a secret stay visible. An option group without `c` (`sh -e`) does not
+start a shell string: the next item is a direct argument.
 Then the same two-step redaction as the generic params echo
 runs over the spec: it hides secret-shaped text anywhere (JWTs, bearer
 tokens) and the value of a field with a secret-shaped name (a `secret`

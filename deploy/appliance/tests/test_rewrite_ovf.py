@@ -62,20 +62,19 @@ class RewriteTests(unittest.TestCase):
         ET.parse(self.ovf)
 
     def test_the_build_network_becomes_vm_network(self) -> None:
+        self.assertEqual(0, self.run_rewrite().returncode)
+        expected = self.ovf.read_text()
         fixture = FIXTURE.read_text()
-        # vCenter's export names the build VM's port group, with regex characters here.
-        self.ovf.write_text(fixture.replace("VM Network", "lab.net (build)+1"))
+        # vCenter's export names the build VM's port group: one with regex
+        # characters, and names that are also tag names in the descriptor.
+        for name in ("lab.net (build)+1", "Network", "Description", "rasd:Connection"):
+            with self.subTest(name=name):
+                self.ovf.write_text(fixture.replace("VM Network", name))
 
-        result = self.run_rewrite()
+                result = self.run_rewrite()
 
-        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        text = self.ovf.read_text()
-        self.assertNotIn("lab.net", text)
-        self.assertEqual(fixture.count("VM Network"), text.count("VM Network"))
-        self.assertEqual(
-            "VM Network",
-            ET.parse(self.ovf).find(f".//{OVF}NetworkSection/{OVF}Network").get(f"{OVF}name"),
-        )
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertEqual(expected, self.ovf.read_text())
 
     def test_our_section_replaces_the_cloud_init_section(self) -> None:
         result = self.run_rewrite()

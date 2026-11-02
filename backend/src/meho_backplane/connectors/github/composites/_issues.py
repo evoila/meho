@@ -23,9 +23,12 @@ add-on needs no raw generated operation and no knowledge of GitHub's API:
 * ``gh.composite.issue_view`` -- one issue with its parent, its direct
   sub-issues, its number of comments and, on request, the newest comments.
 * ``gh.composite.issue_create`` -- file one issue. The answer carries the
-  number, the node id (for ``project_item_add``) and the database id (for
-  ``sub_issue_add``).
+  number (for ``sub_issue_add``), the node id (for ``project_item_add``) and
+  the database id.
 * ``gh.composite.issue_comment`` -- add one comment to one issue.
+
+The two writes are ``safe`` and need no approval, but they work only in the
+repository the target names (:mod:`._scope`).
 
 All four use the direct-session substrate (``connector._get_json`` /
 ``_post_json`` through :class:`._git.GitRepo`), so they work on a fresh
@@ -42,6 +45,7 @@ from typing import TYPE_CHECKING, Any, Final
 import httpx
 
 from meho_backplane.connectors.github.composites._git import GitRepo
+from meho_backplane.connectors.github.composites._scope import require_target_repo
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -446,7 +450,11 @@ async def issue_create_composite(
     params: dict[str, Any],
     connector: GitHubRestConnector,
 ) -> dict[str, Any]:
-    """File one issue (``gh.composite.issue_create``) with ``POST .../issues``."""
+    """File one issue (``gh.composite.issue_create``) with ``POST .../issues``.
+
+    Only in the target's own repository (:func:`._scope.require_target_repo`).
+    """
+    require_target_repo(target, params.get("owner"), params.get("repo"))
     repo = _repo(connector, target, operator, params)
     body: dict[str, Any] = {"title": params["title"]}
     if params.get("body") is not None:
@@ -477,7 +485,11 @@ async def issue_comment_composite(
     params: dict[str, Any],
     connector: GitHubRestConnector,
 ) -> dict[str, Any]:
-    """Add one comment to one issue (``gh.composite.issue_comment``)."""
+    """Add one comment to one issue (``gh.composite.issue_comment``).
+
+    Only in the target's own repository (:func:`._scope.require_target_repo`).
+    """
+    require_target_repo(target, params.get("owner"), params.get("repo"))
     repo = _repo(connector, target, operator, params)
     number = int(params["issue_number"])
     comment = await repo.send(

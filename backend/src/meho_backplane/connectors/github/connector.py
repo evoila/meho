@@ -125,6 +125,7 @@ from meho_backplane.connectors.github.session import (
     load_github_credentials_from_vault,
     mint_github_app_jwt,
 )
+from meho_backplane.connectors.github.workflow_check import ticket_event_workflow_check
 from meho_backplane.connectors.schemas import (
     AuthModel,
     FingerprintResult,
@@ -397,7 +398,9 @@ class GitHubRestConnector(HttpConnector):
           ``extras['installations_count']``.
         * ``api.github.com/repos/<owner>/<repo>`` →
           ``GET /repos/{owner}/{repo}`` returns the repo's metadata for
-          a targeted-repo fingerprint.
+          a targeted-repo fingerprint. MEHO then reads the repo's
+          ``.github/workflows/`` files and warns about each workflow that
+          a ticket write would start (:mod:`.workflow_check`).
 
         ``operator`` (optional, G0.16-T4 #1306) is forwarded to the
         credentials loader so the per-target Vault read happens under
@@ -449,7 +452,10 @@ class GitHubRestConnector(HttpConnector):
 
         if repo_path is None:
             return _fingerprint_from_installations(payload, probed_at, probe_method)
-        return _fingerprint_from_repo(payload, probed_at, probe_method)
+        workflows: dict[str, Any] = {}
+        if isinstance(payload, dict):
+            workflows = await ticket_event_workflow_check(self, target, eff_operator, repo_path)
+        return _fingerprint_from_repo(payload, probed_at, probe_method, workflows)
 
     async def probe(self, target: GitHubTargetLike) -> ProbeResult:
         """Lightweight reachability check.
@@ -652,13 +658,16 @@ def _fingerprint_from_repo(
     payload: Any,
     probed_at: datetime,
     probe_method: str,
+    workflows: dict[str, Any] | None = None,
 ) -> FingerprintResult:
     """Build a :class:`FingerprintResult` from ``GET /repos/{owner}/{repo}``.
 
     Returns the repo's identity (``full_name``, ``id``, ``private``)
     plus the owner's account type — sufficient for an operator to
     confirm "yes my App is installed on this repo" without a second
-    call.
+    call. *workflows* is the result of
+    :func:`~meho_backplane.connectors.github.workflow_check.ticket_event_workflow_check`,
+    merged into ``extras`` so the target shows the ticket-write warning.
     """
     if not isinstance(payload, dict):
         return FingerprintResult(
@@ -684,6 +693,7 @@ def _fingerprint_from_repo(
             "owner_login": owner.get("login") if owner else None,
             "owner_type": owner.get("type") if owner else None,
             "default_branch": payload.get("default_branch"),
+            **(workflows or {}),
         },
     )
 

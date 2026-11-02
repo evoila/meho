@@ -21,7 +21,8 @@ pinned file is not a step before coding.**
   internet research, and live exploration in the sandbox or the lab.
 - A live test is the proof that a path works.
 - The guards that exist stay as they are. CI keeps its list of required
-  spec files for the files that exist.
+  spec files for the files that exist, in `ci/spec-shelf/` (one small
+  file per product version; step 3 below).
 
 Why it changed: the old rule made a pinned file a step before coding, so
 build Tasks waited for separate file Tasks. Now one Task per capability
@@ -189,13 +190,18 @@ it chooses to add a spec file.
    `MANIFEST.md` provenance. Freely-licensed (OSS) specs need only that
    provenance note; vendor-licensed specs follow the signoff model
    below.
-3. **CI checkout widened** — one line per job in
-   `.github/workflows/ci.yml`: add the product dir to the spec-shelf
-   `sparse-checkout` list, and one line in the fail-loud verify step so
-   a shelf-layout move fails the job instead of silently regressing the
-   lane to skip. Same `SPEC_SHELF_TOKEN`; **no new secret, ever** — the
-   PAT already reads the whole private shelf repo. These one-liners
-   collide trivially across parallel lane tasks; rebase, don't battle.
+3. **CI checkout widened** — one new list file
+   `ci/spec-shelf/<product>-<version>.txt`. Each line names one required
+   file, as a path from the shelf repo root
+   (`docs/<product>-<version>/<spec-file>`). `scripts/ci/spec_shelf.sh`
+   reads every list: both Python test jobs in
+   `.github/workflows/ci.yml` check out the listed shelf folders, and
+   the fail-loud verify step fails the job with the "Spec-shelf layout
+   drift" error when a listed file is missing, so a shelf-layout move
+   fails the job instead of silently regressing the lane to skip.
+   `ci.yml` itself names no shelf file, so this step changes no line
+   there. Same `SPEC_SHELF_TOKEN`; **no new secret, ever** — the
+   PAT already reads the whole private shelf repo.
 4. **Signoff extended** — one paragraph per vendor appended to
    [`vendor-spec-ci-provisioning.md`](vendor-spec-ci-provisioning.md)'s
    signoff of record (what is fetched, same ephemeral-use conditions).

@@ -1,0 +1,6 @@
+docs/vcenter-8.0/vcenter.yaml
+docs/vcenter-8.0/vi-json-8.0u1.yaml
+docs/vcenter-8.0/vi-json-8.0u2.yaml
+docs/vcenter-8.0/vi-json-8.0u3.yaml
+docs/vcenter-8.0/vsan/8.0u1/vsan-8.0u1-methods.txt
+docs/vcenter-8.0/vsan/8.0u2/vsan-8.0u2-methods.txt

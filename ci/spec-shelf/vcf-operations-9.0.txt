@@ -1,0 +1,2 @@
+docs/vcf-operations-9.0/vcf-operations-for-logs-openapi.json
+docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json

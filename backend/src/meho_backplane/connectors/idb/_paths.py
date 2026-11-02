@@ -59,7 +59,21 @@ import re
 from collections.abc import Mapping
 from urllib.parse import quote
 
-__all__ = ["fill"]
+__all__ = [
+    "IDB_GROUPS_SEARCH_PATH",
+    "IDB_OIDC_DISCOVERY_PATH",
+    "IDB_PROPERTIES_PATH",
+    "IDB_TOKEN_PATH",
+    "IDB_USERS_SEARCH_PATH",
+    "WSA_DIRECTORIES_PATH",
+    "WSA_DIRECTORY_SYNC_PATH",
+    "WSA_GROUPS_SEARCH_PATH",
+    "WSA_HEALTH_PATH",
+    "WSA_IDENTITY_PROVIDERS_PATH",
+    "WSA_TOKEN_PATH",
+    "WSA_USERS_SEARCH_PATH",
+    "fill",
+]
 
 # Workspace ONE Access 3.3
 WSA_TOKEN_PATH = "/SAAS/auth/oauthtoken"

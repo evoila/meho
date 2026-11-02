@@ -80,6 +80,7 @@ from meho_backplane.ui.auth.session_store import (
     create_session,
     reset_fernet_cache_for_testing,
 )
+from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.templating import reset_templating_for_testing
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -464,3 +465,41 @@ async def test_ui_auth_routes_write_no_ui_view_audit_row(
         assert row.payload.get("op_class") != UI_AUDIT_OP_CLASS, (
             f"auth route {row.path} should not carry ui_view op_class"
         )
+
+
+# ---------------------------------------------------------------------------
+# Session revoke -- the audit row's path carries no session id
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_session_revoke_audit_row_path_carries_no_session_id(
+    isolated_audit_engine: AsyncEngine,
+) -> None:
+    """Revoking a session writes one row whose ``path`` is the fixed revoke URL.
+
+    The revoked session id travels in the form body, so the audit row
+    (and any access log that records the request path) never holds it.
+    """
+    operator_sub = "op-ui-42"
+    session_id = await _seed_ui_session(operator_sub=operator_sub)
+    other = await _seed_ui_session(operator_sub=operator_sub)
+
+    client = _client_with_session(session_id)
+    csrf = mint_csrf_token(str(session_id))
+    client.cookies.set(CSRF_COOKIE_NAME, csrf)
+    response = client.post(
+        "/ui/account/sessions/revoke",
+        data={"session_id": str(other)},
+        headers={"X-CSRF-Token": csrf, "HX-Request": "true"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 200, response.text
+
+    rows = [r for r in await _fetch_audit_rows() if r.operator_sub == operator_sub]
+    assert len(rows) == 1, [(r.method, r.path) for r in rows]
+    row = rows[0]
+    assert row.method == "POST"
+    assert row.path == "/ui/account/sessions/revoke"
+    assert str(other) not in row.path
+    assert str(other) not in str(row.payload.get("op_id", ""))

@@ -63,6 +63,10 @@ from meho_backplane.connectors.vmware_rest.composites._migration_inventory_schem
     MIGRATION_GROUP_WHEN_TO_USE,
 )
 from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
+from meho_backplane.connectors.vmware_rest.customization_specs import (
+    GUEST_GROUP_KEY,
+    GUEST_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.host_access import (
     HOST_ACCESS_GROUP_KEY,
     HOST_ACCESS_WHEN_TO_USE,
@@ -260,15 +264,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "moref. Pair with 'networking' before host.detach_from_vds, and with "
         "'cluster' or 'vm' for the reads before a change."
     ),
-    "guest": (
-        "Use for guest OS customization: how a cloned VM gets its host name and "
-        "IP address on first boot. Changes: save a named customization spec "
-        "with host name, IP per NIC, gateway and DNS, or a Windows sysprep spec "
-        "(guest.customization_spec.create, dangerous); apply a saved spec to a "
-        "powered-off VM, and power it on if asked (vm.customize, dangerous). "
-        "Use it after a 'vm' clone or create. A spec can hold admin passwords; "
-        "they never reach a reviewer."
-    ),
+    # Shared with the typed customization spec reads: the same key and text.
+    GUEST_GROUP_KEY: GUEST_WHEN_TO_USE,
     "guest_ops": (
         "Use to work inside a running VM's guest OS through VMware Tools, "
         "instead of 'govc guest.run'. Reads: list the guest's processes "

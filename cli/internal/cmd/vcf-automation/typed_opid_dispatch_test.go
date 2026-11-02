@@ -132,6 +132,15 @@ var typedOpCLICoverage = map[string]string{
 	"vcfa.tenant.block_device.list":       "",
 	"vcfa.tenant.machine.create":          "",
 	"vcfa.tenant.block_device.create":     "",
+	// Regions and organization quotas: agent-surface-only, reached through
+	// `meho operation call` / MCP call_operation.
+	"vcfa.provider.infra.list":           "",
+	"vcfa.provider.region.get":           "",
+	"vcfa.provider.org_quota.list":       "",
+	"vcfa.provider.vcenter.register":     "",
+	"vcfa.provider.nsx_manager.register": "",
+	"vcfa.provider.region.set":           "",
+	"vcfa.provider.org_quota.set":        "",
 	// Sign-in settings (LDAP, OIDC): agent-surface-only, reached through
 	// `meho operation call` / MCP call_operation.
 	"vcfa.provider.identity.show": "",

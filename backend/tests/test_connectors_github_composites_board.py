@@ -25,6 +25,7 @@ Coverage:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -40,6 +41,23 @@ from meho_backplane.connectors.github.composites._graphql import (
     GitHubGraphQlError,
     github_graphql,
 )
+
+#: A target that names one repository (``o/r``) and one board (``PVT_board1``).
+_TARGET = SimpleNamespace(
+    name="gh-board", host="api.github.com/repos/o/r", extras={"project_id": "PVT_board1"}
+)
+
+
+def _content_in(owner: str, repo: str) -> dict[str, Any]:
+    """The GraphQL answer of the content lookup ``project_item_add`` makes first."""
+    return {
+        "data": {
+            "node": {
+                "__typename": "Issue",
+                "repository": {"owner": {"login": owner}, "name": repo},
+            }
+        }
+    }
 
 
 def _make_operator() -> Operator:
@@ -325,15 +343,18 @@ async def test_project_view_unknown_owner_raises() -> None:
 async def test_project_item_add_posts_mutation_and_returns_item_id() -> None:
     """``project_item_add`` posts addProjectV2ItemById with the right variables."""
     connector = _RecordingConnector(
-        [{"data": {"addProjectV2ItemById": {"item": {"id": "PVTI_new"}}}}]
+        [_content_in("o", "r"), {"data": {"addProjectV2ItemById": {"item": {"id": "PVTI_new"}}}}]
     )
     result = await project_item_add_composite(
         operator=_make_operator(),
-        target=object(),
+        target=_TARGET,
         params={"project_id": "PVT_board1", "content_id": "I_kwissue"},
         connector=connector,  # type: ignore[arg-type]
     )
-    call = connector.post_calls[0]
+    lookup = connector.post_calls[0]
+    assert "node(id: $id)" in lookup["json"]["query"]
+    assert lookup["json"]["variables"] == {"id": "I_kwissue"}
+    call = connector.post_calls[1]
     assert "addProjectV2ItemById" in call["json"]["query"]
     assert call["json"]["variables"] == {"projectId": "PVT_board1", "contentId": "I_kwissue"}
     assert result == {
@@ -347,12 +368,14 @@ async def test_project_item_add_posts_mutation_and_returns_item_id() -> None:
 @pytest.mark.asyncio
 async def test_project_item_add_missing_item_id_raises() -> None:
     """A mutation payload without an item id raises rather than returning None."""
-    connector = _RecordingConnector([{"data": {"addProjectV2ItemById": {"item": {}}}}])
+    connector = _RecordingConnector(
+        [_content_in("o", "r"), {"data": {"addProjectV2ItemById": {"item": {}}}}]
+    )
     with pytest.raises(GitHubGraphQlError, match="returned no item"):
         await project_item_add_composite(
             operator=_make_operator(),
-            target=object(),
-            params={"project_id": "P", "content_id": "C"},
+            target=_TARGET,
+            params={"project_id": "PVT_board1", "content_id": "C"},
             connector=connector,  # type: ignore[arg-type]
         )
 
@@ -365,7 +388,7 @@ async def test_project_item_set_field_posts_single_select_value() -> None:
     )
     result = await project_item_set_field_composite(
         operator=_make_operator(),
-        target=object(),
+        target=_TARGET,
         params={
             "project_id": "PVT_board1",
             "item_id": "PVTI_1",

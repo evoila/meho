@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from meho_backplane.connectors.github.op_classes import TICKET_WRITE_OP_IDS
 from meho_backplane.runner.satellite_tier import (
     REMOTE_WRITE_SAFETY_LEVELS,
     RemoteWriteAllowEntry,
@@ -36,13 +37,26 @@ _ALL_SAFETY_LEVELS = ("safe", "caution", "dangerous", "destructive")
     ],
 )
 def test_classify_maps_each_safety_level(level: str, expected: SatelliteMintTier) -> None:
-    assert classify_satellite_tier(level) is expected
+    assert classify_satellite_tier(level, op_id="net.ping") is expected
 
 
 def test_classify_is_fail_closed_on_unknown_level() -> None:
     # A level added upstream without updating the ladder is EXCLUDED, never
     # silently minted to a runner.
-    assert classify_satellite_tier("apocalyptic") is SatelliteMintTier.EXCLUDED
+    assert classify_satellite_tier("apocalyptic", op_id="net.ping") is SatelliteMintTier.EXCLUDED
+
+
+@pytest.mark.parametrize("op_id", TICKET_WRITE_OP_IDS)
+def test_a_safe_ticket_write_never_rides_the_read_path(op_id: str) -> None:
+    # The GitHub ticket writes are ``safe`` (no approval), but their connector
+    # declares them as writes, so a satellite never takes them as a read.
+    assert classify_satellite_tier("safe", op_id=op_id) is SatelliteMintTier.EXCLUDED
+
+
+def test_a_safe_op_with_no_declared_change_stays_on_the_read_path() -> None:
+    assert (
+        classify_satellite_tier("safe", op_id="gh.composite.issue_view") is SatelliteMintTier.SAFE
+    )
 
 
 def test_remote_write_gate_is_fail_closed() -> None:
@@ -73,7 +87,7 @@ def test_remote_write_safety_levels_match_classifier() -> None:
     classifier_remote_write = {
         level
         for level in _ALL_SAFETY_LEVELS
-        if classify_satellite_tier(level) is SatelliteMintTier.REMOTE_WRITE
+        if classify_satellite_tier(level, op_id="net.ping") is SatelliteMintTier.REMOTE_WRITE
     }
     assert classifier_remote_write == REMOTE_WRITE_SAFETY_LEVELS
     # Concretely, only ``caution`` today.

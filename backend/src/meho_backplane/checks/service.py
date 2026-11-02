@@ -75,6 +75,7 @@ from meho_backplane.checks.schemas import (
 from meho_backplane.db.connector_usage_lock import lock_connector_usage_shared
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, Sensor, SensorResult
+from meho_backplane.op_classes import declared_as_change
 from meho_backplane.operations._lookup import (
     lookup_descriptor,
     parse_connector_id,
@@ -86,6 +87,7 @@ __all__ = [
     "SensorIdentitySubForbiddenError",
     "SensorNameConflictError",
     "SensorOperationNotFoundError",
+    "SensorRequiresReadOperationError",
     "SensorRequiresSafeOperationError",
     "SensorResultsCursorError",
 ]
@@ -161,6 +163,26 @@ class SensorRequiresSafeOperationError(Exception):
             f"operation {op_id!r} on connector {connector_id!r} has "
             f"safety_level={safety_level!r}; a Sensor may reference only "
             "safe operations (it is evaluated unattended)",
+        )
+
+
+class SensorRequiresReadOperationError(SensorRequiresSafeOperationError):
+    """Raised when a Sensor's op is ``safe`` but changes something.
+
+    A few writes are ``safe`` because they need no approval, for example the
+    GitHub ticket writes (``docs/decisions/2026-11-02-github-ticket-writes-are-safe.md``).
+    Their connector declares them as a change
+    (:func:`meho_backplane.op_classes.declared_as_change`). A Sensor would run
+    such a write on every tick with no person, so it is refused like any other
+    non-read. Same error code and status as the parent class.
+    """
+
+    def __init__(self, connector_id: str, op_id: str, safety_level: str) -> None:
+        super().__init__(connector_id, op_id, safety_level)
+        self.args = (
+            f"operation {op_id!r} on connector {connector_id!r} is a write "
+            f"(safety_level={safety_level!r}, but it changes the target); a Sensor "
+            "may reference only reads (it is evaluated unattended)",
         )
 
 
@@ -362,6 +384,23 @@ async def _lock_and_require_operation(
         raise SensorOperationNotFoundError(payload.connector_id, payload.op_id)
 
 
+def _require_read(payload: SensorCreate, descriptor: EndpointDescriptor) -> None:
+    """Refuse a Sensor whose op is not ``safe``, or is a ``safe`` write.
+
+    Raises :class:`SensorRequiresSafeOperationError` for a non-safe op and
+    :class:`SensorRequiresReadOperationError` for a safe op its connector
+    declares as a change (:func:`~meho_backplane.op_classes.declared_as_change`).
+    """
+    if descriptor.safety_level != "safe":
+        raise SensorRequiresSafeOperationError(
+            payload.connector_id, payload.op_id, descriptor.safety_level
+        )
+    if declared_as_change(payload.op_id):
+        raise SensorRequiresReadOperationError(
+            payload.connector_id, payload.op_id, descriptor.safety_level
+        )
+
+
 class SensorAdminService:
     """Tenant-scoped CRUD over :class:`Sensor`.
 
@@ -428,12 +467,7 @@ class SensorAdminService:
         )
         if descriptor is None:
             raise SensorOperationNotFoundError(payload.connector_id, payload.op_id)
-        if descriptor.safety_level != "safe":
-            raise SensorRequiresSafeOperationError(
-                payload.connector_id,
-                payload.op_id,
-                descriptor.safety_level,
-            )
+        _require_read(payload, descriptor)
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             await _lock_and_require_operation(session, tenant_id, payload)

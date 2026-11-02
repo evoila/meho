@@ -18,31 +18,38 @@ the write directly on the resolved connector's session
 mounted through ``mount_op_path``), the #2255 direct-session substrate,
 so it works on a fresh deploy with zero gh catalog ingest.
 
-The ``sub_issue_id`` gotcha
----------------------------
+The child is named by its number
+--------------------------------
 
-GitHub's endpoint takes the sub-issue's **database id** (the ``id``
-field on the issue payload), **not** its issue number (the ``#N`` in the
-URL). The REST create-issue response an agent already holds carries that
-``id``, so the board-complete flow (create child issue -> link it) has
-the value in hand; the parameter schema and this docstring both call the
-distinction out because passing the number is the obvious mistake.
+GitHub's endpoint takes the sub-issue's **database id** (the ``id`` field on
+the issue payload), not its number. MEHO takes the child's **number**
+instead and reads ``GET /repos/{owner}/{repo}/issues/{sub_issue_number}``
+first. That read proves the child is an issue in the target's repository,
+and it gives the database id for the link. A database id alone cannot be
+checked: GitHub has no call that finds an issue by it.
 
 Governance posture
 ------------------
 
-A single REST write, registered ``safety_level="caution"`` /
-``requires_approval=False`` (see :mod:`._register`) -- linking a
-sub-issue is a low-blast-radius, reversible board-hygiene mutation. As
-with the board write composites, the composite is the reviewed unit: the
-dispatcher gates it via ``policy_gate`` before invoking the handler, so
-the one write it performs is fully governed and no ``enforce_subop_policy``
-seam is needed (there is no additional internal write to re-gate).
+A ticket write: ``safety_level="safe"`` / ``requires_approval=False`` (see
+:mod:`._register` and
+``docs/decisions/2026-11-02-github-ticket-writes-are-safe.md``). The parent
+and the child must both be in the repository the target names
+(:func:`._scope.require_target_repo`); anything else is refused before any
+call to GitHub. The dispatcher gates the composite via ``policy_gate``
+before it runs the handler, and the handler makes one write, so no
+``enforce_subop_policy`` seam is needed.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
+
+from meho_backplane.connectors.github.composites._git import GitRepo
+from meho_backplane.connectors.github.composites._scope import (
+    TicketWriteScopeError,
+    require_target_repo,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -50,10 +57,8 @@ if TYPE_CHECKING:
 
 __all__ = ["sub_issue_add_composite"]
 
-# REST wire path for the add-sub-issue endpoint, keyed with ``str.format``
-# placeholders. Mounted under ``https://api.github.com`` by the
-# connector's ``_base_url``; ``mount_op_path`` is identity for github.com.
-_SUB_ISSUES_PATH = "/repos/{owner}/{repo}/issues/{issue_number}/sub_issues"
+_ISSUE_PATH: Final = "/repos/{owner}/{repo}/issues/{number}"
+_SUB_ISSUES_PATH: Final = "/repos/{owner}/{repo}/issues/{number}/sub_issues"
 
 
 async def sub_issue_add_composite(
@@ -65,48 +70,61 @@ async def sub_issue_add_composite(
 ) -> dict[str, Any]:
     """Link a sub-issue to a parent issue via ``POST .../sub_issues``.
 
-    Op-id: ``gh.composite.sub_issue_add``. ``sub_issue_id`` is the
-    sub-issue's **database id** (not its issue number -- see the module
-    docstring). ``replace_parent=True`` moves a sub-issue that already
-    has a different parent under this one; omitted, GitHub uses its
-    default (reject when the sub-issue already has a parent).
+    Op-id: ``gh.composite.sub_issue_add``. The parent (``issue_number``) and
+    the child (``sub_issue_number``) are both issues of ``owner/repo``, which
+    must be the target's repository. ``replace_parent=True`` moves a child
+    that already has another parent; omitted, GitHub uses its default
+    (refuse when the child already has a parent).
 
     Returns
     -------
     dict[str, Any]
         ``{"parent": <parent issue payload>, "parent_number": <int>,
-        "sub_issue_id": <int>, "status": "linked"}``. GitHub returns the
-        full parent issue object (``201 Created``) on success; it is
-        surfaced verbatim under ``parent`` so the caller can read the
-        updated ``sub_issues_summary`` count.
+        "sub_issue_number": <int>, "sub_issue_id": <int>, "status": "linked"}``.
 
     Raises
     ------
+    TicketWriteScopeError
+        ``owner/repo`` is not the target's repository, the target names
+        none, or the child is a pull request or has no database id.
     httpx.HTTPStatusError
-        A non-2xx status -- 404 (unknown parent / sub-issue), 422 (the
-        sub-issue is in a different repo owner, or already parented and
-        ``replace_parent`` was not set). Propagates for the dispatcher's
-        outer branch to map to the matching structured result.
+        A non-2xx status from GitHub -- 404 (unknown parent or child), 422
+        (the child already has a parent and ``replace_parent`` was not set).
+        Propagates for the dispatcher to map.
     """
-    owner = params["owner"]
-    repo = params["repo"]
-    issue_number = params["issue_number"]
-    sub_issue_id = params["sub_issue_id"]
-    replace_parent = params.get("replace_parent")
+    require_target_repo(target, params.get("owner"), params.get("repo"))
+    repo = GitRepo(connector, target, operator, params["owner"], params["repo"])
+    issue_number = int(params["issue_number"])
+    sub_issue_number = int(params["sub_issue_number"])
 
-    path = await connector.mount_op_path(
-        target,
-        _SUB_ISSUES_PATH.format(owner=owner, repo=repo, issue_number=issue_number),
-        operator,
-    )
+    child = await repo.get(_ISSUE_PATH, number=str(sub_issue_number))
+    # A moved issue answers with a redirect to its new repository, so check
+    # where the answer comes from, not only what was asked.
+    child_repo = str(child.get("repository_url") or "").rsplit("/repos/", 1)[-1]
+    if child_repo.lower() != f"{repo.owner}/{repo.repo}".lower():
+        raise TicketWriteScopeError(
+            f"#{sub_issue_number} is not an issue of {repo.owner}/{repo.repo} "
+            f"(GitHub answered for {child_repo or 'an unknown repository'!r})"
+        )
+    if child.get("pull_request") is not None:
+        raise TicketWriteScopeError(
+            f"#{sub_issue_number} in {repo.owner}/{repo.repo} is a pull request, not an issue"
+        )
+    sub_issue_id = child.get("id")
+    if not isinstance(sub_issue_id, int) or isinstance(sub_issue_id, bool):
+        raise TicketWriteScopeError(
+            f"GitHub returned no database id for #{sub_issue_number} in {repo.owner}/{repo.repo}"
+        )
+
     body: dict[str, Any] = {"sub_issue_id": sub_issue_id}
+    replace_parent = params.get("replace_parent")
     if replace_parent is not None:
         body["replace_parent"] = bool(replace_parent)
-
-    parent = await connector._post_json(target, path, operator=operator, verb="POST", json=body)
+    parent = await repo.send("POST", _SUB_ISSUES_PATH, json=body, number=str(issue_number))
     return {
         "parent": parent,
         "parent_number": issue_number,
+        "sub_issue_number": sub_issue_number,
         "sub_issue_id": sub_issue_id,
         "status": "linked",
     }

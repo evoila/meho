@@ -35,8 +35,10 @@ from collections.abc import Iterable
 from typing import Final
 
 __all__ = [
+    "CHANGE_OP_CLASSES",
     "DECLARABLE_OP_CLASSES",
     "declare_op_classes",
+    "declared_as_change",
     "declared_op_class",
     "declared_op_ids",
 ]
@@ -48,6 +50,16 @@ __all__ = [
 #: op id does not end in a write word the pattern rules know.
 DECLARABLE_OP_CLASSES: Final[frozenset[str]] = frozenset(
     {"credential_read", "credential_mint", "credential_write", "write"}
+)
+
+#: The declared classes of an operation that changes something. A ``safe``
+#: operation with one of these classes is a write that needs no approval
+#: (for example a GitHub ticket write, see
+#: ``docs/decisions/2026-11-02-github-ticket-writes-are-safe.md``). It is
+#: never a read: a health check may not run it, and it never rides the
+#: read path of a satellite runner.
+CHANGE_OP_CLASSES: Final[frozenset[str]] = frozenset(
+    {"credential_mint", "credential_write", "write"}
 )
 
 _DECLARED: dict[str, str] = {}
@@ -86,6 +98,11 @@ def declare_op_classes(
 def declared_op_class(op_id: str) -> str | None:
     """Return the declared class of *op_id*, or ``None`` when none was declared."""
     return _DECLARED.get(op_id)
+
+
+def declared_as_change(op_id: str) -> bool:
+    """Return ``True`` when *op_id* is declared with a class in :data:`CHANGE_OP_CLASSES`."""
+    return _DECLARED.get(op_id) in CHANGE_OP_CLASSES
 
 
 def declared_op_ids(op_class: str) -> frozenset[str]:

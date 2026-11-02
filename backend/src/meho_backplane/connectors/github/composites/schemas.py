@@ -311,14 +311,18 @@ PROJECT_ITEM_ADD_PARAMETER_SCHEMA: dict[str, Any] = {
         "project_id": {
             "type": "string",
             "minLength": 1,
-            "description": "The board's GraphQL node id (from gh.composite.project_view).",
+            "description": (
+                "The board's GraphQL node id (from gh.composite.project_view). It must "
+                "be the target's own board, set as extras.project_id on the target."
+            ),
         },
         "content_id": {
             "type": "string",
             "minLength": 1,
             "description": (
                 "The issue or PR GraphQL node id (the ``node_id`` field on the "
-                "REST issue/PR payload) to add to the board."
+                "REST issue/PR payload) to add to the board. It must be an issue or "
+                "PR of the target's own repository."
             ),
         },
     },
@@ -361,7 +365,10 @@ PROJECT_ITEM_SET_FIELD_PARAMETER_SCHEMA: dict[str, Any] = {
         "project_id": {
             "type": "string",
             "minLength": 1,
-            "description": "The board's GraphQL node id (from gh.composite.project_view).",
+            "description": (
+                "The board's GraphQL node id (from gh.composite.project_view). It must "
+                "be the target's own board, set as extras.project_id on the target."
+            ),
         },
         "item_id": {
             "type": "string",
@@ -416,30 +423,33 @@ SUB_ISSUE_ADD_PARAMETER_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "additionalProperties": False,
-    "required": ["owner", "repo", "issue_number", "sub_issue_id"],
+    "required": ["owner", "repo", "issue_number", "sub_issue_number"],
     "properties": {
         "owner": {
             "type": "string",
             "minLength": 1,
-            "description": "The parent issue's repository owner (user or org login).",
+            "description": (
+                "The repository owner (user or org login). Must match the target's repository."
+            ),
         },
         "repo": {
             "type": "string",
             "minLength": 1,
-            "description": "The parent issue's repository name (without the owner prefix).",
+            "description": (
+                "The repository name, without the owner. Must match the target's repository."
+            ),
         },
         "issue_number": {
             "type": "integer",
             "minimum": 1,
             "description": "The parent issue's number (the ``#N`` the sub-issue is linked under).",
         },
-        "sub_issue_id": {
+        "sub_issue_number": {
             "type": "integer",
             "minimum": 1,
             "description": (
-                "The sub-issue's DATABASE id (the ``id`` field on the issue payload), "
-                "NOT its issue number. The REST create-issue response carries this id. "
-                "The sub-issue must belong to the same repository owner as the parent."
+                "The number of the issue to link under the parent. It must be an issue "
+                "(not a pull request) of the same repository. MEHO reads its database id."
             ),
         },
         "replace_parent": {
@@ -460,7 +470,7 @@ SUB_ISSUE_ADD_PARAMETER_SCHEMA: dict[str, Any] = {
 SUB_ISSUE_ADD_RESPONSE_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
-    "required": ["parent", "parent_number", "sub_issue_id", "status"],
+    "required": ["parent", "parent_number", "sub_issue_number", "sub_issue_id", "status"],
     "properties": {
         "parent": {
             "description": (
@@ -469,9 +479,13 @@ SUB_ISSUE_ADD_RESPONSE_SCHEMA: dict[str, Any] = {
             ),
         },
         "parent_number": {"type": "integer", "description": "Echo of the parent issue number."},
+        "sub_issue_number": {
+            "type": "integer",
+            "description": "Echo of the linked sub-issue number.",
+        },
         "sub_issue_id": {
             "type": "integer",
-            "description": "Echo of the linked sub-issue database id.",
+            "description": "The linked sub-issue's database id, as MEHO read it.",
         },
         "status": {
             "type": "string",

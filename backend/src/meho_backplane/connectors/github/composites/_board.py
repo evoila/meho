@@ -38,24 +38,21 @@ ingest.
 Governance posture
 ------------------
 
-``project_view`` is a read (``safety_level="safe"`` /
-``requires_approval=False``). The two write composites are
-``safety_level="caution"`` / ``requires_approval=False`` (set in
-:mod:`._register`): adding a card to a board and setting a status field
-are low-blast-radius, reversible board-hygiene mutations -- honestly a
-write, but not ``dangerous`` like the vmware VM-delete / host-maintenance
-composites. Each is a *single* logical GraphQL mutation, so the
-composite itself is the reviewed unit: the dispatcher runs
-``policy_gate`` against the composite's own descriptor before invoking
-the handler, which fully governs the one write it performs. There is no
-heterogeneous internal write sub-op to protect, so -- unlike the
-multi-write vmware composites -- these do not need the
-``enforce_subop_policy`` seam (which exists to re-gate *additional*
-writes a direct-session composite fans out to). Under this posture a
-human / service operator auto-executes a board write (board-complete
-filing without a ``gh`` CLI fallback), while an agent principal routes
-to the approval queue via the ``caution`` safety default -- exactly the
-governance a raw CLI fallback would have bypassed.
+``project_view`` is a read. The two board writes are ticket writes:
+``safety_level="safe"`` / ``requires_approval=False`` (set in
+:mod:`._register`; see
+``docs/decisions/2026-11-02-github-ticket-writes-are-safe.md``). They run at
+once because they stay inside the target's own board and repository:
+
+* ``project_id`` must be the node id of the target's board
+  (``extras["project_id"]`` on the target, :func:`._scope.require_target_board`).
+* ``project_item_add`` also reads the content node first: it must be an issue
+  or pull request of the target's repository
+  (:func:`._scope.require_target_repo`).
+
+Anything else is refused before the write. Each composite makes one GraphQL
+mutation, so the dispatcher's ``policy_gate`` on the composite governs the
+whole call and no ``enforce_subop_policy`` seam is needed.
 """
 
 from __future__ import annotations
@@ -65,6 +62,11 @@ from typing import TYPE_CHECKING, Any
 from meho_backplane.connectors.github.composites._graphql import (
     GitHubGraphQlError,
     github_graphql,
+)
+from meho_backplane.connectors.github.composites._scope import (
+    TicketWriteScopeError,
+    require_target_board,
+    require_target_repo,
 )
 
 if TYPE_CHECKING:
@@ -136,6 +138,18 @@ query ($login: String!, $number: Int!, $first: Int!) {
         }
       }
     }
+  }
+}
+""".strip()
+
+# Reads which repository an issue or pull request node belongs to, so
+# ``project_item_add`` can refuse content from another repository.
+_CONTENT_REPO_QUERY = """
+query ($id: ID!) {
+  node(id: $id) {
+    __typename
+    ... on Issue { repository { owner { login } name } }
+    ... on PullRequest { repository { owner { login } name } }
   }
 }
 """.strip()
@@ -363,12 +377,17 @@ async def project_item_add_composite(
 
     Raises
     ------
+    TicketWriteScopeError
+        ``project_id`` is not the target's board, or ``content_id`` is not an
+        issue or pull request of the target's repository.
     GitHubGraphQlError
         The mutation returned an ``errors`` array (unknown node id,
         insufficient project scope) or a payload without an item id.
     """
     project_id = params["project_id"]
     content_id = params["content_id"]
+    require_target_board(target, project_id)
+    await _require_content_in_target_repo(connector, target, operator, content_id)
     data = await github_graphql(
         connector,
         target,
@@ -402,6 +421,8 @@ async def project_item_set_field_composite(
 
     Raises
     ------
+    TicketWriteScopeError
+        ``project_id`` is not the target's board.
     GitHubGraphQlError
         The mutation returned an ``errors`` array (unknown id, or the
         option does not belong to the field) or a payload without an
@@ -411,6 +432,7 @@ async def project_item_set_field_composite(
     item_id = params["item_id"]
     field_id = params["field_id"]
     option_id = params["option_id"]
+    require_target_board(target, project_id)
     data = await github_graphql(
         connector,
         target,
@@ -432,6 +454,26 @@ async def project_item_set_field_composite(
         "option_id": option_id,
         "status": "updated",
     }
+
+
+async def _require_content_in_target_repo(
+    connector: GitHubRestConnector, target: Any, operator: Operator, content_id: str
+) -> None:
+    """Refuse unless *content_id* is an issue or pull request of the target's repository."""
+    data = await github_graphql(
+        connector, target, operator, query=_CONTENT_REPO_QUERY, variables={"id": content_id}
+    )
+    node = data.get("node")
+    repository = node.get("repository") if isinstance(node, dict) else None
+    owner = repository.get("owner") if isinstance(repository, dict) else None
+    login = owner.get("login") if isinstance(owner, dict) else None
+    name = repository.get("name") if isinstance(repository, dict) else None
+    if not isinstance(login, str) or not isinstance(name, str):
+        raise TicketWriteScopeError(
+            f"content {content_id!r} is not an issue or pull request GitHub can show; "
+            "a board write may add only issues and pull requests of the target's repository"
+        )
+    require_target_repo(target, login, name)
 
 
 def _extract_node_id(data: dict[str, Any], *, mutation: str, node_key: str) -> str:

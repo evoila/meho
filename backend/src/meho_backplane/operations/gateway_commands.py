@@ -472,7 +472,7 @@ async def mint_gateway_command(
     # the single source of truth shared with the edge executor and the
     # assignment materialiser (defence in depth), before the policy gate so a
     # refused op is never parked.
-    tier = classify_satellite_tier(descriptor.safety_level)
+    tier = classify_satellite_tier(descriptor.safety_level, op_id=op_id)
     if tier is SatelliteMintTier.EXCLUDED:
         # dangerous / destructive — never minted (composes with #3183).
         structlog.get_logger(__name__).warning(
@@ -486,7 +486,7 @@ async def mint_gateway_command(
         return _refused(
             MintRefusalCode.OP_NOT_SAFE,
             f"op {op_id!r} has safety_level {descriptor.safety_level!r}; "
-            "dangerous/destructive ops are never minted to a satellite",
+            "dangerous/destructive ops and safe writes are never minted to a satellite",
         )
     if tier is SatelliteMintTier.REMOTE_WRITE:
         # Revocation hardening (#3192, the Stage-3 gate): a revoked runner

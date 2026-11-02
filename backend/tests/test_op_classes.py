@@ -98,3 +98,17 @@ def test_connectors_declare_their_sensitive_ops_at_import() -> None:
     assert declared_op_class("GET:/v1/credentials") == "credential_read"
     assert declared_op_class("argocd.app.sync") == "write"
     assert classify_op("k8s.secret.create") == "credential_write"
+
+
+def test_declared_as_change_covers_every_class_but_credential_read(fresh_registry: None) -> None:
+    declare_op_classes(
+        credential_read=("example.secret.read",),
+        credential_mint=("example.token.create",),
+        credential_write=("example.user.set_password",),
+        write=("example.cache.flush",),
+    )
+    assert op_classes.declared_as_change("example.cache.flush")
+    assert op_classes.declared_as_change("example.token.create")
+    assert op_classes.declared_as_change("example.user.set_password")
+    assert not op_classes.declared_as_change("example.secret.read")
+    assert not op_classes.declared_as_change("example.never.declared")

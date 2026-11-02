@@ -208,14 +208,14 @@ of record for nested-infra credentials; its `GET /v1/credentials` read returns
 live account secrets. The typed op is gated via the existing mechanism:
 `requires_approval=True` (so `policy_gate` routes it to the approval queue —
 not dispatchable without operator approval), the op-id is on
-`broadcast.events._CREDENTIAL_READ_OPS` (so `classify_op` returns
+declared `credential_read` in `sddc_manager/op_classes.py` (so `classify_op` returns
 `credential_read` and audit/broadcast rows collapse to aggregate-only), and the
 handler scrubs every secret-keyed value at the connector boundary
 (`_redact_secrets`). Three layers; no secret ever rides the result. `safety_level`
 is `caution`; the other 16 reads are `safe` / no-approval. The ingested twins
 (`GET:/v1/credentials` and the other SDDC Manager reads whose answer holds
 credentials) get the same guards through the catalog row's `safety_overlay`
-and the same `_CREDENTIAL_READ_OPS` entry (#4617); see
+and the same `credential_read` declaration in `sddc_manager/op_classes.py` (#4617); see
 [spec-ingestion.md](spec-ingestion.md), "Catalog safety overlay".
 
 **License keys are masked (`sddc.license.list`).** The rows of

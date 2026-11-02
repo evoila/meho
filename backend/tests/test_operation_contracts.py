@@ -17,9 +17,10 @@ registers at start-up, of every connector, against ten rules:
 4. ``llm_instructions`` -- ``when_to_call``, ``output_shape`` and
    ``next_step``; a change (not ``safe``) also has ``preconditions``.
 5. ``examples`` -- at least one entry under ``examples`` in the parameter
-   schema, and each one validates against the schema. A placeholder for an
-   id (``<vapp-id>``) is swapped for a made-up id of the right shape first
-   (``tests/_example_placeholders.py``); the schema stays strict.
+   schema, and each one validates against the schema. A placeholder value
+   such as ``<vm-id>`` marks a value the caller must look up, so it is not
+   held to the field's type, pattern or enum (only here; a real call with a
+   placeholder is still refused).
 6. ``no_ticket_numbers`` -- no ticket number (``#1234``) in the summary,
    description or guidance.
 7. ``requires_approval`` -- every operation that is not ``safe`` has
@@ -54,16 +55,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 import yaml
+from jsonschema import Draft202012Validator
 from sqlalchemy import select
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.delete_names import write_word_in_op_id
+from meho_backplane.operations._param_errors import describe_violation
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS
-from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.typed_register import run_typed_op_registrars
 from meho_backplane.settings import get_settings
-from tests._example_placeholders import with_synthetic_ids
 
 GAPS_FILE: Final[Path] = Path(__file__).parent / "data" / "operation_contract_gaps.yaml"
 
@@ -86,6 +87,8 @@ RULES: Final[tuple[str, ...]] = (
 READS_WITH_A_WRITE_WORD: Final[Mapping[str, str]] = {
     "installer.system.depot.sync-status": "reads the state of the depot sync; starts none",
     "mssql.ha.sync-health": "reads the health of the availability-group sync",
+    "vcfa.tenant.abx.run.get": "reads the state and log of an ABX action run; runs nothing",
+    "vcfa.vra8.abx.run.get": "reads the state and log of an ABX action run; runs nothing",
     "winsrv.system.pending-reboot": "reads whether a reboot is pending; reboots nothing",
 }
 
@@ -212,6 +215,30 @@ def check_llm_instructions(op: OperationContract) -> list[str]:
     ]
 
 
+#: A placeholder in an example: ``<vm-id>``, ``<device-key>``, ``<one-of-possible_answers>``.
+PLACEHOLDER: Final = re.compile(r"^<[a-z0-9][a-z0-9_.-]*>$")
+
+
+def example_problems(parameter_schema: Mapping[str, Any], example: Mapping[str, Any]) -> list[str]:
+    """What is wrong with *example* under *parameter_schema*: ``[]`` when nothing.
+
+    An example shows the shape of a call, with placeholders such as
+    ``<vm-id>`` where the caller must look a value up (never a value that
+    looks real, so a model does not copy it). A placeholder fails the
+    field's own type, pattern, enum or range, so a violation whose value is
+    a placeholder is left out here. Only here: the runtime check
+    (``validate_params``) is unchanged and refuses a placeholder.
+    """
+    validator = Draft202012Validator(dict(parameter_schema))
+    problems = []
+    for err in validator.iter_errors(dict(example)):
+        if isinstance(err.instance, str) and PLACEHOLDER.match(err.instance):
+            continue
+        described = describe_violation(err)
+        problems.append(f"{described['path']} expects {described['expected']}")
+    return problems
+
+
 def check_examples(op: OperationContract) -> list[str]:
     examples = op.parameter_schema.get("examples")
     if not isinstance(examples, list) or not examples:
@@ -221,10 +248,10 @@ def check_examples(op: OperationContract) -> list[str]:
         if not isinstance(example, Mapping):
             problems.append(f"example {index} is not an object")
             continue
-        for error in validate_params(dict(op.parameter_schema), dict(with_synthetic_ids(example))):
-            problems.append(
-                f"example {index} does not validate: {error['path']} expects {error['expected']}"
-            )
+        problems.extend(
+            f"example {index} does not validate: {problem}"
+            for problem in example_problems(op.parameter_schema, example)
+        )
     return problems
 
 

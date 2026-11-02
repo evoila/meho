@@ -485,9 +485,10 @@ jobs:
     # pytest sweep is CPU/memory-bound enough to want the extra cores;
     # ruff/mypy run once in python-lint on a GitHub-hosted runner.
     # Two heavy runner sets share the same machines. Only merge-queue runs
-    # use `meho-runners-ci-heavy-queue` (5 runners, one merge-queue run's
-    # shards). Every other event (pull requests, pushes to `main`, the
-    # nightly run) uses `meho-runners-ci-heavy`.
+    # use `meho-runners-ci-heavy-queue` (6 runners: one per shard of one
+    # merge-queue run, so its size changes with the shard count). Every
+    # other event (pull requests, pushes to `main`, the nightly run) uses
+    # `meho-runners-ci-heavy`.
     # Before the split, merge-queue shards waited behind pull request shards
     # that were queued earlier, because GitHub gives jobs out in queue order.
     # Pushes to `main` stay off the queue set: otherwise every merged commit

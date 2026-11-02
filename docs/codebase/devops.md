@@ -1754,8 +1754,8 @@ The six `python-unit-shard` legs run on one of two heavy runner sets
 (ARC scale sets on the same machines; their sizes live outside this
 repo, #761). The set depends on the event:
 
-- `merge_group` only: `meho-runners-ci-heavy-queue` (5 runners, enough
-  for the shards of one merge-queue run).
+- `merge_group` only: `meho-runners-ci-heavy-queue` (6 runners, enough
+  for the six shards of one merge-queue run).
 - Every other event (pull requests, `push` to `main` and the nightly
   run): `meho-runners-ci-heavy`.
 
@@ -1763,7 +1763,7 @@ Why two sets: GitHub gives queued jobs to runners in queue order, with
 no priority for the merge queue. When many pull requests ran at once,
 their shards filled the heavy runners and the merge queue's shards
 waited behind them. Pushes to `main` stay on `meho-runners-ci-heavy`:
-otherwise every merged commit would run its shards on the 5 queue
+otherwise every merged commit would run its shards on the 6 queue
 runners twice (merge-queue run, then push run), and the queue would
 merge only about half as fast. The nightly `python-coverage` shards
 stay on `meho-runners-ci-heavy`. The four

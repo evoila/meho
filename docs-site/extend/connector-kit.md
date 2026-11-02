@@ -79,7 +79,7 @@ part that starts with an underscore is private by its name too.
 | Register | `register_typed_operation` | Register one operation: the shape of its inputs and its answer, its risk level, whether it waits for approval, and its texts for agents. |
 | Register | `EmbeddingService` | The type of the `embedding_service` value that MEHO hands to your registering function. Pass it on unchanged. |
 | Connector | `Connector` | The base class of every connector. |
-| Connector | `HttpConnector` | The base class for an HTTP API. It brings MEHO's checks for TLS, addresses, redirects and answer size. |
+| Connector | `HttpConnector` | The base class for an HTTP API. It brings MEHO's checks for TLS (secure, encrypted connections), addresses, redirects and answer size. |
 | Connector | `Target` | The target fields a connector may read. |
 | Answers | `FingerprintResult` | The answer of `fingerprint`: the detected product and version. |
 | Answers | `ProbeResult` | The answer of `probe`: can MEHO reach the target. |

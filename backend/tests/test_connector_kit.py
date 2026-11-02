@@ -60,7 +60,7 @@ from meho_backplane.targets import schemas
 
 _BACKEND = Path(__file__).resolve().parents[1]
 _UV_LOCK = _BACKEND / "uv.lock"
-_DOCS_PAGE = _BACKEND.parent / "docs-site" / "extend" / "connector-kit.md"
+_DOCS_PAGE = Path(__file__).resolve().parents[2] / "docs-site" / "extend" / "connector-kit.md"
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +488,7 @@ async def test_default_execute_says_to_use_a_registered_operation() -> None:
 # ---------------------------------------------------------------------------
 
 _PAGE_VERSION = re.compile(r"The kit version this page describes: \*\*([^*]+)\*\*")
+_OLD_WORD = re.compile(r"\bold\b", re.IGNORECASE)
 
 
 def _page_gaps(page: str, kit_version: str, names: dict[str, Entry]) -> list[str]:
@@ -498,7 +499,7 @@ def _page_gaps(page: str, kit_version: str, names: dict[str, Entry]) -> list[str
         name_rows = [row for row in rows if f"`{name}`" in row]
         if not name_rows:
             gaps.append(f"kit name {name} is not in a table")
-        elif entry.get("old") and not any("old" in row.lower() for row in name_rows):
+        elif entry.get("old") and not any(_OLD_WORD.search(row) for row in name_rows):
             gaps.append(f"old kit name {name} is not marked as old")
     found = _PAGE_VERSION.findall(page)
     if found != [kit_version]:
@@ -522,7 +523,7 @@ def test_docs_page_check_reports_a_missing_name_and_a_wrong_version() -> None:
         "The kit version this page describes: **1.2**.\n\n"
         "| Group | Name | What for |\n"
         "|---|---|---|\n"
-        "| Register | `count_things` | Count the things. |\n"
+        "| Register | `count_things` | Holds a count of the things. |\n"
         "Text that names `list_things` outside a table.\n"
     )
 

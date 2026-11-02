@@ -486,6 +486,10 @@ _PARTS_HELD_BACK: dict[str, str] = {
         "credential_write: before and after hold setting values, and a setting can be a "
         "secret from Vault. The answer is small (at most 20 settings), so a spill is rare."
     ),
+    "vmware.composite.vm.migrate_cross_vcenter": (
+        "credential_write: the request carries the other vCenter's login. The only list in "
+        "the answer names the missing target objects (a handful at most), so a spill is rare."
+    ),
 }
 
 _SAMPLE_PART_OBJECT: dict[str, Any] = {"note": "sample"}

@@ -521,7 +521,7 @@ your consumer repo, the equivalent is:
 - name: validate R1 example
   run: |
     cd backend
-    uv run pytest tests/examples/test_r1_tiered_triage_consumer.py
+    uv run pytest tests/test_examples_r1_tiered_triage.py
 ```
 
 The consumer-side test should at minimum validate the four JSON

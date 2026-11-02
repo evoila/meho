@@ -60,6 +60,7 @@ process-local ``IngestJobRegistry``.
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 import warnings
 from collections.abc import Iterator
@@ -658,6 +659,81 @@ def test_llm_unavailable_renders_panel() -> None:
     assert "data-registry-error" in body
     assert "Traceback" not in body
     assert "unavailable" in body.lower()
+
+
+def test_global_scope_forbidden_renders_panel() -> None:
+    """A 403 on the global write scope renders an inline panel, not a bare error.
+
+    The global scope needs ``platform_admin``; the panel carries the
+    route's message so the operator knows to pick "This tenant only".
+    """
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    forbidden = HTTPException(
+        status_code=403,
+        detail="built-in connector ingest requires platform_admin: pass your own tenant_id",
+    )
+    ingest_mock = AsyncMock(side_effect=forbidden)
+    try:
+        with patch(_INGEST_ENDPOINT, ingest_mock):
+            resp = client.post(
+                "/ui/connectors/registry/ingest",
+                data={
+                    "mode": "explicit",
+                    "product": "vmware",
+                    "version": "9.0",
+                    "impl_id": "vmware-rest",
+                    "spec_uri": ["https://vendor.example/openapi.yaml"],
+                    "scope": "global",
+                },
+                headers=_form_headers(csrf),
+            )
+    finally:
+        mock.stop()
+
+    assert resp.status_code == 403, resp.text
+    body = resp.text
+    assert "data-registry-error" in body
+    assert "Traceback" not in body
+    assert "requires platform_admin" in body
+
+
+def test_ingest_result_slot_lets_error_panels_swap() -> None:
+    """The browser shows the error panels: the result slot allows their statuses.
+
+    htmx 2.0.9 does not swap a 4xx / 5xx response body by default, so a
+    panel returned at 403 (or 400 / 422 / 502 / 503) would never appear in
+    the modal. The ``#ingest-result`` slot carries an ``hx-on::before-swap``
+    override that turns the swap on for exactly the statuses the submit
+    handler renders as a panel. Without it a tenant admin who submits the
+    default global scope gets no visible explanation.
+    """
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        resp = client.get("/ui/connectors/registry/ingest")
+    finally:
+        mock.stop()
+
+    assert resp.status_code == 200, resp.text
+    slot = re.search(r"<div\s+id=\"ingest-result\"[^>]*>", resp.text)
+    assert slot is not None, resp.text
+    attrs = slot.group(0)
+    override = re.search(r'hx-on::before-swap="([^"]*)"', attrs)
+    assert override is not None, attrs
+    handler = override.group(1)
+    assert "event.detail.shouldSwap = true" in handler
+    assert "event.detail.isError = false" in handler
+    for status in (400, 403, 422, 502, 503):
+        assert str(status) in handler, (status, handler)
+    # The handler keys on the status, so a 2xx swap stays htmx's default.
+    assert "event.detail.xhr.status" in handler
 
 
 # ---------------------------------------------------------------------------

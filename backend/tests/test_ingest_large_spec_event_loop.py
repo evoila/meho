@@ -188,6 +188,7 @@ def _operator() -> Operator:
         raw_jwt="header.payload.signature",
         tenant_id=uuid.uuid4(),
         tenant_role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
     )
 
 

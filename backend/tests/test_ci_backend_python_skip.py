@@ -69,19 +69,33 @@ def _git(repo: Path, *args: str) -> None:
     )
 
 
+_CONNECTOR_SELECT = "backend/tests/_unit_connector_select.py"
+
+
 def _detect(
-    tmp_path: Path, event: str, changed: list[str] | None, *, tool_dir: Path | None = None
+    tmp_path: Path,
+    event: str,
+    changed: list[str] | None,
+    *,
+    tool_dir: Path | None = None,
+    runner_temp: Path | None = None,
 ) -> dict[str, str]:
     """Run the detect step and return its outputs.
 
     ``changed`` lists the files the pull request changes. ``None`` builds a
     repository with one commit only, so ``git diff HEAD^1 HEAD`` fails.
     ``tool_dir`` goes first on ``PATH``, so a test can replace a tool.
+    ``runner_temp`` is where the step writes its list of changed files; the
+    default is a folder under ``tmp_path``. The repository holds the real
+    connector selection tool, which the step runs after the classifiers.
     """
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q")
     (repo / "README.md").write_text("base\n")
+    tool = repo / _CONNECTOR_SELECT
+    tool.parent.mkdir(parents=True)
+    tool.write_text((_REPO_ROOT / _CONNECTOR_SELECT).read_text())
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "base")
     if changed is not None:
@@ -98,7 +112,10 @@ def _detect(
     search_path = "/usr/bin:/bin:/usr/local/bin"
     if tool_dir is not None:
         search_path = f"{tool_dir}:{search_path}"
-    env = {"PATH": search_path, "GITHUB_OUTPUT": str(output)}
+    if runner_temp is None:
+        runner_temp = tmp_path / "runner-temp"
+        runner_temp.mkdir()
+    env = {"PATH": search_path, "GITHUB_OUTPUT": str(output), "RUNNER_TEMP": str(runner_temp)}
     result = _bash(script, repo, env)
     assert result.returncode == 0, result.stdout + result.stderr
     return dict(line.split("=", 1) for line in output.read_text().splitlines())
@@ -179,24 +196,96 @@ def test_large_diff_with_a_backend_change_runs_everything(tmp_path: Path) -> Non
     assert outputs["backend_python"] == "true"
 
 
+_FULL_RUN = {
+    "migrations": "true",
+    "docs_only": "false",
+    "backend_python": "true",
+    "single_connector": "",
+}
+
+_LOKI_CHANGE = ["backend/src/meho_backplane/connectors/loki/__init__.py"]
+
+
+def _fake_tool(tmp_path: Path, name: str, exit_code: int, *, only_with: str = "") -> Path:
+    """Put a ``name`` command that exits with ``exit_code`` first on PATH.
+
+    With ``only_with``, the command fails only when its arguments hold that
+    text, and otherwise runs the real tool from ``/usr/bin``.
+    """
+    tool_dir = tmp_path / "bin"
+    tool_dir.mkdir(exist_ok=True)
+    fake = tool_dir / name
+    if only_with:
+        fake.write_text(
+            "#!/bin/sh\n"
+            f'case " $* " in *" {only_with} "*) exit {exit_code} ;; esac\n'
+            f'exec /usr/bin/{name} "$@"\n'
+        )
+    else:
+        fake.write_text(f"#!/bin/sh\nexit {exit_code}\n")
+    fake.chmod(0o755)
+    return tool_dir
+
+
 def test_failing_classifier_runs_everything(tmp_path: Path) -> None:
     # A classifier `grep` that fails (exit code 2, not the "no match" exit
     # code 1) is an error, not an answer. The detector must then keep every
     # fail-safe default, also for a change that is not docs-only.
-    tool_dir = tmp_path / "bin"
-    tool_dir.mkdir()
-    fake_grep = tool_dir / "grep"
-    fake_grep.write_text("#!/bin/sh\nexit 2\n")
-    fake_grep.chmod(0o755)
+    tool_dir = _fake_tool(tmp_path, "grep", 2)
     outputs = _detect(
         tmp_path, "pull_request", ["backend/src/meho_backplane/app.py"], tool_dir=tool_dir
     )
+    assert outputs == _FULL_RUN
+
+
+def test_connector_only_change_selects_the_connector(tmp_path: Path) -> None:
+    # The control for the error-path test below: with working tools, a
+    # change to one connector folder gives the short connector-only run.
+    outputs = _detect(tmp_path, "pull_request", _LOKI_CHANGE)
     assert outputs == {
-        "migrations": "true",
+        "migrations": "false",
         "docs_only": "false",
         "backend_python": "true",
-        "single_connector": "",
+        "single_connector": "loki",
     }
+
+
+def test_failing_classifier_with_a_connector_change_runs_everything(tmp_path: Path) -> None:
+    # The connector selection runs only after every classifier gave an
+    # answer. Here the migration check answers and the docs-only check
+    # (the one `grep -qvE`) fails: the shorter connector-only run must
+    # not be selected.
+    tool_dir = _fake_tool(tmp_path, "grep", 2, only_with="-qvE")
+    outputs = _detect(tmp_path, "pull_request", _LOKI_CHANGE, tool_dir=tool_dir)
+    assert outputs == _FULL_RUN
+
+
+def test_failing_connector_selection_runs_everything(tmp_path: Path) -> None:
+    # When the selection tool fails, nothing the classifiers found is
+    # trusted either: a change outside backend/ then runs everything.
+    tool_dir = _fake_tool(tmp_path, "python3", 1)
+    outputs = _detect(tmp_path, "pull_request", ["cli/main.go"], tool_dir=tool_dir)
+    assert outputs == _FULL_RUN
+
+
+def test_list_file_cannot_be_written_runs_everything(tmp_path: Path) -> None:
+    # The step writes the changed files to a file under RUNNER_TEMP. When
+    # that write fails, no classifier runs and the full run stays, also for
+    # a docs-only change.
+    outputs = _detect(
+        tmp_path, "pull_request", ["docs/x.md"], runner_temp=tmp_path / "missing-runner-temp"
+    )
+    assert outputs == _FULL_RUN
+
+
+def test_detect_step_reads_the_list_from_a_file() -> None:
+    # No here-string and no pipe for the list of changed files: both can
+    # fail before `grep` runs, and that failure read as "no match".
+    script = _step_script("changes", step_id="detect")
+    assert "<<<" not in script
+    assert "| grep" not in script
+    assert "| python3" not in script
+    assert 'mktemp "${RUNNER_TEMP:-/tmp}/' in script
 
 
 def test_non_ascii_backend_path_runs_everything(tmp_path: Path) -> None:

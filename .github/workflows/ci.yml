@@ -285,108 +285,152 @@ jobs:
         id: detect
         run: |
           set -euo pipefail
-          # Fail-safe defaults: RUN the migration gate, and DO NOT take the
-          # docs-only fast path. Only a positive classification flips either.
+          # Full run unless proven. The four outputs start at the full run:
+          # the migration gate on, no docs-only fast path, every Python
+          # lane, six unit shards. `classify` below works out a shorter run
+          # into the c_* variables and returns 0 only when every step of it
+          # worked: the file list was written, each classifier `grep` exited
+          # 0 (match) or 1 (no match), and the connector selection ran
+          # after that. Only then are the outputs taken from the c_*
+          # variables. Any other result (an error, an early exit) keeps the
+          # full run, with one log line that says why. A plain
+          # `if grep ...; then ... else ...` would read a grep error as "no
+          # match" and could skip a required job; this shape cannot.
           migrations=true
           docs_only=false
           backend_python=true
           single_connector=
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            # push / merge_group: never fast-path; always the full matrix.
-            echo "non-PR event (${{ github.event_name }}) -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python} (full run)"
-          # HEAD^1, not `github.event.pull_request.base.sha`: the event's
-          # base sha is `main` as of when the PR was opened. Once `main`
-          # moves, a diff against it also lists other PRs' files and a
-          # docs-only PR loses the fast path (#4657).
-          # core.quotePath=false: git prints a path with non-ASCII bytes
-          # (e.g. `café.json`) as is. By default git wraps such a path in
-          # double quotes and escapes the bytes, and the classifiers below
-          # would not match it (#5310).
-          elif ! changed="$(git -c core.quotePath=false diff --name-only --no-renames HEAD^1 HEAD)"; then
-            # Diff unavailable -> keep fail-safe defaults (full run + migration gate on).
-            echo "git diff failed -> migrations=${migrations}, docs_only=${docs_only} (fail-safe full run)"
-          elif [ -z "${changed}" ]; then
-            # No file changes (e.g. an empty / branch-only PR) -> full run, fail-safe.
-            echo "empty diff -> migrations=${migrations}, docs_only=${docs_only} (fail-safe full run)"
-          elif grep -q '^"' <<<"${changed}"; then
+          reason=
+          c_migrations=
+          c_docs_only=
+          c_backend_python=
+          c_single_connector=
+
+          # Run `grep` on a file and return 0 (match), 1 (no match) or 2
+          # (error). `set -e` does not stop a command whose status is
+          # tested, so the caller reads the code from `$?`.
+          classify() {
+            local list non_md rc
+            # The list of changed files goes into a file under RUNNER_TEMP,
+            # and the classifiers get the file as an argument. Not a
+            # here-string: bash writes it to a temporary file of its own,
+            # and when that write fails the command exits 1 before `grep`
+            # runs, which looked like "no match" (docs only). Not a pipe:
+            # `grep -q` stops at its first match, a `printf` into the pipe
+            # then fails on a list longer than the pipe buffer, and with
+            # `pipefail` that also read as "no match".
+            if ! list="$(mktemp "${RUNNER_TEMP:-/tmp}/changed-files.XXXXXX")"; then
+              reason="could not make the list file"
+              return 1
+            fi
+            if ! non_md="$(mktemp "${RUNNER_TEMP:-/tmp}/changed-files-non-md.XXXXXX")"; then
+              reason="could not make the second list file"
+              return 1
+            fi
+            # HEAD^1, not `github.event.pull_request.base.sha`: the event's
+            # base sha is `main` as of when the PR was opened. Once `main`
+            # moves, a diff against it also lists other PRs' files and a
+            # docs-only PR loses the fast path (#4657).
+            # core.quotePath=false: git prints a path with non-ASCII bytes
+            # (e.g. `café.json`) as is. By default git wraps such a path in
+            # double quotes and escapes the bytes, and the classifiers below
+            # would not match it (#5310).
+            if ! git -c core.quotePath=false diff --name-only --no-renames HEAD^1 HEAD >"${list}"; then
+              reason="git diff failed"
+              return 1
+            fi
+            if [ ! -s "${list}" ]; then
+              # No file changes (e.g. an empty / branch-only PR).
+              reason="empty diff"
+              return 1
+            fi
+            printf 'changed files (HEAD^1..HEAD):\n'
+            cat "${list}"
             # git still quotes a path that holds a double quote, a backslash
             # or a control character. The classifiers below work line by
-            # line and cannot read such a path -> keep fail-safe defaults.
-            printf 'changed files (HEAD^1..HEAD):\n%s\n' "${changed}"
-            echo "quoted path in the diff -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python} (fail-safe full run)"
-          else
-            printf 'changed files (HEAD^1..HEAD):\n%s\n' "${changed}"
-            # Each classifier reads the exit code of its `grep` on its
-            # own: 0 and 1 are answers, any other code is an error. On an
-            # error `classify` returns 1 and the caller keeps every
-            # fail-safe default, so a broken classifier can never skip a
-            # job (a plain `if grep ...; then ... else ...` would read an
-            # error as "no match" and could take the fast path).
-            # The classifiers read the list from a here-string, not from a
-            # pipe: `grep -q` stops at its first match, a `printf` into the
-            # pipe then fails on a list longer than the pipe buffer, and with
-            # `pipefail` that failure would read as "no match" and skip jobs.
-            classify() {
-              local rc non_md
-              # --- migration classification (#2140, unchanged) ---
-              # Files that make the migration suite meaningful to run: the
-              # alembic tree, the relocated migration test suite, the db
-              # migrate/migrations modules under test, the compat script, and
-              # the workflows that define this gate.
-              rc=0
-              grep -qE '^(backend/alembic/|backend/tests/migrations/|backend/src/meho_backplane/db/(migrations|migrate)\.py$|scripts/ci/(check_migration_(compat|heads)|recheck_migration_prs)\.py$|\.github/workflows/(ci|migration-compat|migration-heads)\.yml$)' <<<"${changed}" || rc=$?
-              case "${rc}" in
-                0) migrations=true; echo "migration-related change detected -> migrations=true" ;;
-                1) migrations=false; echo "no migration-related change -> migrations=false" ;;
-                *) echo "migration check failed (grep exit ${rc})"; return 1 ;;
-              esac
-              # --- docs-only classification (allow-list; #3252) ---
-              # docs-only IFF every changed path matches the allow-list:
-              #   ^docs/   any file under docs/
-              #   \.md$    any Markdown file anywhere (covers CHANGELOG.md,
-              #            README.md, docs/**/*.md, backend/README.md, ...)
-              # `grep -qvE` exits 0 iff SOME line does NOT match the allow-list
-              # — that line is a non-docs path (code / tests / workflows /
-              # configs / cli/ / deploy/ ...) and forces the full run. Only when
-              # grep finds no such line (exit 1) is the diff proven docs-only.
-              rc=0
-              grep -qvE '(^docs/|\.md$)' <<<"${changed}" || rc=$?
-              case "${rc}" in
-                0) docs_only=false; echo "non-docs file(s) present -> docs_only=false (full run)" ;;
-                1) docs_only=true; echo "all changed files are docs/*.md -> docs_only=true (fast path)" ;;
-                *) echo "docs-only check failed (grep exit ${rc})"; return 1 ;;
-              esac
-              # --- backend Python classification (#5296) ---
-              # backend_python=false only when no changed path, apart from
-              # `.md` files, is under backend/ or is this workflow file.
-              # The first grep exits 1 when it selects no line (every file
-              # is `.md`); that is an answer, not an error.
-              rc=0
-              non_md="$(grep -vE '\.md$' <<<"${changed}")" || rc=$?
-              if [ "${rc}" -gt 1 ]; then
-                echo "could not filter the changed files (grep exit ${rc})"
+            # line and cannot read such a path.
+            rc=0
+            grep -q '^"' "${list}" || rc=$?
+            case "${rc}" in
+              0) reason="quoted path in the diff"; return 1 ;;
+              1) ;;
+              *) reason="quote check failed (grep exit ${rc})"; return 1 ;;
+            esac
+            # --- migration classification (#2140, unchanged) ---
+            # Files that make the migration suite meaningful to run: the
+            # alembic tree, the relocated migration test suite, the db
+            # migrate/migrations modules under test, the compat script, and
+            # the workflows that define this gate.
+            rc=0
+            grep -qE '^(backend/alembic/|backend/tests/migrations/|backend/src/meho_backplane/db/(migrations|migrate)\.py$|scripts/ci/(check_migration_(compat|heads)|recheck_migration_prs)\.py$|\.github/workflows/(ci|migration-compat|migration-heads)\.yml$)' "${list}" || rc=$?
+            case "${rc}" in
+              0) c_migrations=true; echo "migration-related change detected -> migrations=true" ;;
+              1) c_migrations=false; echo "no migration-related change -> migrations=false" ;;
+              *) reason="migration check failed (grep exit ${rc})"; return 1 ;;
+            esac
+            # --- docs-only classification (allow-list; #3252) ---
+            # docs-only IFF every changed path matches the allow-list:
+            #   ^docs/   any file under docs/
+            #   \.md$    any Markdown file anywhere (covers CHANGELOG.md,
+            #            README.md, docs/**/*.md, backend/README.md, ...)
+            # `grep -qvE` exits 0 iff SOME line does NOT match the allow-list
+            # — that line is a non-docs path (code / tests / workflows /
+            # configs / cli/ / deploy/ ...) and forces the full run. Only when
+            # grep finds no such line (exit 1) is the diff proven docs-only.
+            rc=0
+            grep -qvE '(^docs/|\.md$)' "${list}" || rc=$?
+            case "${rc}" in
+              0) c_docs_only=false; echo "non-docs file(s) present -> docs_only=false (full run)" ;;
+              1) c_docs_only=true; echo "all changed files are docs/*.md -> docs_only=true (fast path)" ;;
+              *) reason="docs-only check failed (grep exit ${rc})"; return 1 ;;
+            esac
+            # --- backend Python classification (#5296) ---
+            # backend_python=false only when no changed path, apart from
+            # `.md` files, is under backend/, is this workflow file or is
+            # a spec-shelf list or its script: the shelf check runs only in
+            # the unit and integration shards.
+            # The first grep writes the non-`.md` paths to the second file.
+            # It exits 1 when it selects no line (every file is `.md`); that
+            # is an answer, not an error, and the second grep then finds
+            # nothing.
+            rc=0
+            grep -vE '\.md$' "${list}" >"${non_md}" || rc=$?
+            if [ "${rc}" -gt 1 ]; then
+              reason="could not filter the changed files (grep exit ${rc})"
+              return 1
+            fi
+            rc=0
+            grep -qE '^(backend/|\.github/workflows/ci\.yml$|ci/spec-shelf/|scripts/ci/spec_shelf\.sh$)' "${non_md}" || rc=$?
+            case "${rc}" in
+              0) c_backend_python=true; echo "backend/, ci.yml or spec-shelf list change detected -> backend_python=true (full run)" ;;
+              1) c_backend_python=false; echo "no backend/ change -> backend_python=false (only the tests that read outside backend/)" ;;
+              *) reason="backend check failed (grep exit ${rc})"; return 1 ;;
+            esac
+            # --- one-connector selection (#5297) ---
+            # Only here, after every classifier gave an answer. The tool
+            # reads the list file and prints the connector name when the
+            # short run is safe, or nothing. When the tool fails, nothing
+            # above is trusted either: the caller keeps the full run.
+            if [ "${c_docs_only}" = "false" ]; then
+              if ! c_single_connector="$(python3 backend/tests/_unit_connector_select.py detect <"${list}")"; then
+                reason="connector selection failed"
                 return 1
               fi
-              rc=0
-              grep -qE '^(backend/|\.github/workflows/ci\.yml$|ci/spec-shelf/|scripts/ci/spec_shelf\.sh$)' <<<"${non_md}" || rc=$?
-              case "${rc}" in
-                0) backend_python=true; echo "backend/ or ci.yml change detected -> backend_python=true (full run)" ;;
-                1) backend_python=false; echo "no backend/ change -> backend_python=false (only the tests that read outside backend/)" ;;
-                *) echo "backend check failed (grep exit ${rc})"; return 1 ;;
-              esac
-            }
-            if ! classify; then
-              migrations=true
-              docs_only=false
-              backend_python=true
-              echo "classification failed -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python} (fail-safe full run)"
             fi
-            # --- one-connector classification (#5297) ---
-            # An error in the tool leaves single_connector empty (full run).
-            if [ "${docs_only}" = "false" ]; then
-              single_connector="$(printf '%s\n' "${changed}" | python3 backend/tests/_unit_connector_select.py detect)" || single_connector=
-              echo "single_connector=${single_connector:-<empty>} (empty -> six unit shards)"
-            fi
+            return 0
+          }
+
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            # push / merge_group: never fast-path; always the full matrix.
+            echo "non-PR event (${{ github.event_name }}) -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python}, single_connector=<empty> (full run)"
+          elif classify; then
+            migrations="${c_migrations}"
+            docs_only="${c_docs_only}"
+            backend_python="${c_backend_python}"
+            single_connector="${c_single_connector}"
+            echo "classified -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python}, single_connector=${single_connector:-<empty>} (empty -> six unit shards)"
+          else
+            echo "${reason:-classification failed} -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python}, single_connector=<empty> (fail-safe full run)"
           fi
           {
             echo "migrations=${migrations}"

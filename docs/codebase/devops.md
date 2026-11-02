@@ -2000,11 +2000,20 @@ completes CI in minutes.
   against it also lists other PRs' files, which cost docs-only PRs the fast
   path (#4657). `--no-renames` makes a rename appear as delete(old) +
   add(new) so a code→`*.md` (or `*.md`→code) rename can never smuggle a
-  non-docs path past the allow-list. The step is written to always exit `0`
-  and emit both outputs — an unresolvable diff or an empty diff keeps the
-  fail-safe defaults (`docs_only=false`). `merge_group` and `push` NEVER
-  fast-path (a queue batch may mix docs + code; a `main` push must always run
-  the full matrix).
+  non-docs path past the allow-list. The step always exits `0` and emits
+  every output. It is "full run unless proven": the outputs start at the
+  full run (`migrations=true`, `docs_only=false`, `backend_python=true`, no
+  `single_connector`), and a shorter run is taken only when every step of
+  the classification worked. The list of changed files is written to a file
+  under `RUNNER_TEMP` (not a here-string and not a pipe: both can fail
+  before `grep` runs, and that failure read as "no match"), each classifier
+  `grep` gets the file as an argument and must exit `0` (match) or `1` (no
+  match), and the connector selection runs after that. Anything else (the
+  list cannot be written, the diff fails or is empty, a quoted path, a
+  `grep` error, a failing selection tool) keeps the full run, with one log
+  line that says why. Tests: `backend/tests/test_ci_backend_python_skip.py`.
+  `merge_group` and `push` NEVER fast-path (a queue batch may mix docs +
+  code; a `main` push must always run the full matrix).
 - **What skips.** `python-lint`, the six `python-unit-shard` legs, and
   the four `python-integration-shard` legs gain `needs: changes` and an
   `if:` that skips them when `docs_only == 'true'` (same #2140 shape as the
@@ -2084,10 +2093,12 @@ plus a fixed contract set. The merge queue and pushes to `main` always run
 the six shards, so every test still runs before a change lands on `main`.
 
 - **Who decides.** The `changes` job sets the output `single_connector`.
-  It pipes the changed files into
+  It gives its file of changed files to
   `python3 backend/tests/_unit_connector_select.py detect` (standard
-  library only, because the job installs nothing). Empty means the full
-  run. It is only computed on a `pull_request` that is not docs-only.
+  library only, because the job installs nothing) on standard input. Empty
+  means the full run. It is only computed on a `pull_request` that is not
+  docs-only, and only after every classifier gave an answer; when the tool
+  fails, the whole step keeps the full run.
 - **When it is set.** Every changed file that is not `.md` is in one folder
   `backend/src/meho_backplane/connectors/<name>/`, or is that connector's
   test file (`backend/tests/test_connectors_<name>_*.py`,

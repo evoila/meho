@@ -656,11 +656,32 @@ vault write auth/jwt-meho/role/meho-teardown \
 # 3. Register a backplane target that selects the role. secret_ref is NULL
 #    (JWT-federated); version may be null (resolves via the connector's
 #    wildcard registration). The role/mount ride the target's extras.
+#    Only a platform admin may set or change `vault_role` and
+#    `vault_mount` (through REST, the UI import or `targets.register`).
 meho targets register vault-teardown \
   --product vault --host <vault-host> \
   --extra vault_role=meho-teardown \
   --extra vault_mount=jwt-meho
 ```
+
+**More than one tenant on the install?** Tie every extra role to one
+tenant, the same way the per-tenant roles of `VAULT_OIDC_ROLE_BY_TENANT`
+are tied. Add `bound_claims` with the tenant id to the role, so that only
+a login token of that tenant may use it:
+
+```bash
+vault write auth/jwt-meho/role/meho-teardown \
+  role_type=jwt user_claim=sub \
+  bound_audiences=<keycloak-audience> \
+  bound_claims='{"tenant_id":"<tenant-id>"}' \
+  policies=meho-teardown token_ttl=1h
+```
+
+`tenant_id` is the claim MEHO reads the tenant from
+(`JWT_TENANT_CLAIM_NAME`, default `tenant_id`). A role with
+`bound_audiences` only accepts every MEHO login token, from any tenant.
+Check first that every login that uses the role carries `tenant_id`, also
+the service logins.
 
 The reserved `extras` keys are the frozen contract:
 
@@ -668,6 +689,11 @@ The reserved `extras` keys are the frozen contract:
 |---|---|---|---|
 | `vault_role` | yes (on a teardown target) | JWT role to log in under | `settings.vault_oidc_role` (`meho-mcp`) |
 | `vault_mount` | optional | JWT auth-method mount the role lives on | `settings.vault_oidc_mount_path` |
+
+Both keys need `platform_admin` on the caller that sets or changes them. A
+`tenant_admin` may still update the target's other fields, and may re-send
+the same two values; a request that adds, changes or removes one of them
+gets HTTP 403 `vault_login_role_requires_platform_admin`.
 
 Fail-closed: if the role is denied (mis-scoped policy, wrong `bound_*`), the
 dispatch surfaces `VaultRoleDeniedError` — it never silently widens back to

@@ -8,7 +8,9 @@ Some operations write to a second target the caller names in the params.
 token through ``vault.kv.patch`` / ``vault.kv.put`` on the caller-named
 ``vault_target``. The handler calls those Vault handlers directly, so the
 dispatcher's policy gate never sees that write. This module is the one
-place that checks MEHO policy for it.
+place that checks MEHO policy for it. A targetless operation whose only
+target is named in the params uses it the same way: ``targets.probe``
+checks its own op on the target it found.
 
 Who is checked
 ==============

@@ -24,7 +24,7 @@ Alias resolution
 ----------------
 
 ``GET``, ``PATCH``, ``POST .../probe`` and ``DELETE`` on ``/{name}`` pass the
-caller-supplied value to :func:`_resolve_route_target`. It calls
+caller-supplied value to :func:`resolve_route_target`. It calls
 :func:`~meho_backplane.targets.resolver.resolve_target` (exact name → alias
 element-equality → near-miss 404) and, when that finds nothing and the value
 is a UUID, looks the target up by id. Callers can address a target by its
@@ -36,7 +36,7 @@ Audit enrichment
 
 Routes that call ``resolve_target`` get the resolved target's id bound
 into structlog contextvars at the resolver's single exit point (an id
-lookup in :func:`_resolve_route_target` binds the same keys);
+lookup in :func:`resolve_route_target` binds the same keys);
 :class:`~meho_backplane.audit.AuditMiddleware` reads ``target_id`` via
 :func:`~meho_backplane.audit._resolve_target_id` and writes it to
 ``audit_log.target_id``. ``create_target`` does not call
@@ -187,7 +187,13 @@ from meho_backplane.targets.secret_field_map import (
 )
 from meho_backplane.targets.vault_login_extras import enforce_vault_login_extras_platform_admin
 
-__all__ = ["count_graph_node_refs", "router", "soft_delete_target"]
+__all__ = [
+    "count_graph_node_refs",
+    "probe_and_store_fingerprint",
+    "resolve_route_target",
+    "router",
+    "soft_delete_target",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -422,7 +428,7 @@ def _to_full(t: TargetORM) -> Target:
 _NO_TARGET_BY_ID_MESSAGE: Final[str] = "No target has this name, alias or id."
 
 
-async def _resolve_route_target(
+async def resolve_route_target(
     session: AsyncSession, tenant_id: uuid.UUID, value: str
 ) -> TargetORM:
     """Find one target for the describe, update, probe and delete routes.
@@ -1260,11 +1266,11 @@ async def describe_target(
 ) -> Target:
     """Describe a target by name, alias or id.
 
-    Uses :func:`_resolve_route_target`: exact name, then alias, then
+    Uses :func:`resolve_route_target`: exact name, then alias, then
     id (only when the value is a UUID). Returns 404 with near-misses
     when nothing matches.
     """
-    t = await _resolve_route_target(session, operator.tenant_id, name)
+    t = await resolve_route_target(session, operator.tenant_id, name)
     return _to_full(t)
 
 
@@ -1326,9 +1332,29 @@ async def probe_target(
 
     No error branch writes to the DB row, so the column always
     reflects the *last successful* probe. The path value is a name,
-    an alias or an id (:func:`_resolve_route_target`); no match is 404.
+    an alias or an id (:func:`resolve_route_target`); no match is 404.
+    The work is done by :func:`probe_and_store_fingerprint`, which the
+    ``targets.probe`` operation calls too.
     """
-    t = await _resolve_route_target(session, operator.tenant_id, name)
+    t = await resolve_route_target(session, operator.tenant_id, name)
+    fp = await probe_and_store_fingerprint(session, t, operator=operator)
+    return fp
+
+
+async def probe_and_store_fingerprint(
+    session: AsyncSession, t: TargetORM, *, operator: Operator
+) -> FingerprintResult:
+    """Detect a target's product and version and store it on the target row.
+
+    The one code path behind ``POST /api/v1/targets/{name}/probe`` and the
+    ``targets.probe`` operation. *t* is the target row, found with
+    :func:`resolve_route_target`. The caller finds the row first, so the
+    operation can check MEHO's policy for that target before the system
+    is contacted. Returns the detected fingerprint. Raises
+    :class:`HTTPException` with the status codes :func:`probe_target`
+    lists. The caller owns the transaction: this function only
+    ``flush``-es.
+    """
     cls, label, exception_message = resolve_connector_or_label(t)
     if label == "no_connector":
         raise HTTPException(
@@ -1656,15 +1682,14 @@ async def update_target(
     diagnostic at PATCH time that they would see at probe time.
     ``updated_at`` is always refreshed on a successful write.
 
-    #2091. An explicit non-null ``secret_ref`` outside the operator's
-    tenant subtree is rejected with a structured 422
-    (``kind="secret_ref_outside_tenant_scope"``) — the same write-time
-    gate as POST. An explicit ``{"secret_ref": null}`` (clear) and a
-    PATCH not sending the field are untouched; no-op when the guard is
-    disabled. See :func:`_enforce_secret_ref_tenant_scope`. The path
-    value is a name, an alias or an id (:func:`_resolve_route_target`).
+    #2091. An explicit non-null ``secret_ref`` outside the operator's tenant subtree
+    is rejected with a structured 422 (``kind="secret_ref_outside_tenant_scope"``) — the
+    same write-time gate as POST. An explicit ``{"secret_ref": null}`` (clear) and a
+    PATCH not sending the field are untouched; no-op when the guard is disabled. See
+    :func:`_enforce_secret_ref_tenant_scope`. The path value is a name, an alias or an
+    id (:func:`resolve_route_target`).
     """
-    t = await _resolve_route_target(session, operator.tenant_id, name)
+    t = await resolve_route_target(session, operator.tenant_id, name)
     updates = body.model_dump(exclude_unset=True)
     # T1 (#1780). Snapshot the pre-patch TLS-verification state *before*
     # the ``setattr`` loop below mutates the row, so the audit fold-in
@@ -1835,7 +1860,7 @@ async def delete_target(
     queries can filter by op id prefix).
 
     The path value is a name, an alias or an id (see
-    :func:`_resolve_route_target`). Re-deletes collapse to 404 —
+    :func:`resolve_route_target`). Re-deletes collapse to 404 —
     every lookup step filters ``deleted_at IS NULL``, so the row no
     longer resolves once the first DELETE flushes.
 
@@ -1846,7 +1871,7 @@ async def delete_target(
         audit_op_id=_DELETE_OP_ID,
         audit_op_class="write",
     )
-    t = await _resolve_route_target(session, operator.tenant_id, name)
+    t = await resolve_route_target(session, operator.tenant_id, name)
     await soft_delete_target(session, t, operator=operator, force=force)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

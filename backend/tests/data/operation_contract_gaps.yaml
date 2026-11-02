@@ -331,10 +331,6 @@ hyperv-ssh:
   hyperv.vms.state:
     - llm_instructions
     - examples
-installer-rest:
-  # A check that writes nothing; kept at caution without approval as today.
-  installer.sddc.spec.validate:
-    - requires_approval
 k8s:
   k8s.about:
     - summary
@@ -1217,13 +1213,6 @@ rke2-ssh:
     - summary
     - llm_instructions
     - examples
-sddc-rest:
-  # A check that writes nothing; kept at caution without approval as today.
-  sddc.domain.validate:
-    - requires_approval
-  # A check that writes nothing; kept at caution without approval as today.
-  sddc.host.validate:
-    - requires_approval
 secret-broker:
   secret.move:
     - summary
@@ -1450,10 +1439,6 @@ vault:
     - summary
     - llm_instructions
     - examples
-vmware-rest:
-  # Kept on purpose: reads a file from a guest; an agent's call waits for approval, a person's call runs at once.
-  vmware.composite.vm.guest.file.read:
-    - requires_approval
 windns-ssh:
   windns.about:
     - summary

@@ -51,8 +51,7 @@ from meho_backplane.connectors.registry import (
     clear_registry,
     register_connector_v2,
 )
-from meho_backplane.connectors.schemas import AuthModel, FingerprintResult, ProbeResult
-from meho_backplane.connectors.vmware_rest import VmwareRestConnector
+from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
@@ -338,40 +337,6 @@ def test_result_connector_unsupported_caps_oversized_detail() -> None:
 # ---------------------------------------------------------------------------
 # No information lost: the two production raise-site messages verbatim
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_real_vmware_auth_model_message_preserved_verbatim() -> None:
-    """The real ``VmwareRestConnector.auth_headers`` text survives verbatim."""
-
-    async def _never_called_loader(target: Any, operator: Operator) -> Any:
-        raise AssertionError("session loader must not run for a rejected auth_model")
-
-    connector = VmwareRestConnector(session_loader=_never_called_loader)
-    target = _FakeTarget(
-        product="vmware",
-        version="9.0",
-        name="vcenter-per-user",
-        auth_model=AuthModel.PER_USER.value,
-    )
-    with pytest.raises(NotImplementedError) as exc_info:
-        await connector.auth_headers(target, _make_operator())
-
-    out = result_connector_unsupported(
-        "GET:/vcenter/vm",
-        exc_info.value,
-        cause="unsupported_feature",
-        connector_class=type(connector).__name__,
-        duration_ms=2.0,
-    )
-    # Verbatim: the structured detail IS the raise-site message.
-    assert out.extras["detail"] == str(exc_info.value)
-    assert out.error is not None
-    assert str(exc_info.value) in out.error
-    # The message already names the target and both auth models.
-    assert "vcenter-per-user" in out.error
-    assert AuthModel.SHARED_SERVICE_ACCOUNT.value in out.error
-    assert AuthModel.PER_USER.value in out.error
 
 
 @pytest.mark.asyncio

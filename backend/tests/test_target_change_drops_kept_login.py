@@ -47,10 +47,6 @@ from meho_backplane.connectors.github import GitHubPATCredentials, GitHubRestCon
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector, _CachedToken
 from meho_backplane.connectors.proxmox.connector import ProxmoxConnector
 from meho_backplane.connectors.proxmox.session import ProxmoxCredentials
-from meho_backplane.connectors.vcf_automation.connector import (
-    VcfAutomationConnector,
-    _plane_cache_key,
-)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._handler_resolve import (
@@ -162,21 +158,6 @@ async def test_keycloak_invalidate_credentials_drops_only_that_target() -> None:
 
     assert target_cache_key(changed) not in conn._admin_tokens
     assert target_cache_key(other) in conn._admin_tokens
-
-
-@pytest.mark.asyncio
-async def test_vcf_automation_invalidate_credentials_drops_both_planes() -> None:
-    changed, other = _Target(), _Target(name="other", secret_ref=_NARROW_REF)
-    conn = VcfAutomationConnector()
-    conn._provider_tokens[_plane_cache_key(changed, "provider")] = "provider-old"
-    conn._tenant_tokens[_plane_cache_key(changed, "tenant")] = "tenant-old"
-    conn._tenant_tokens[_plane_cache_key(other, "tenant")] = "tenant-other"
-
-    await conn.invalidate_credentials(changed)
-
-    assert _plane_cache_key(changed, "provider") not in conn._provider_tokens
-    assert _plane_cache_key(changed, "tenant") not in conn._tenant_tokens
-    assert _plane_cache_key(other, "tenant") in conn._tenant_tokens
 
 
 @pytest.mark.asyncio

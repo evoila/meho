@@ -115,12 +115,12 @@ Two cost classes of shelf-backed test, two CI homes:
   when armed (a full two-spec ingest measures ~164 s on CI runners,
   amortised once per module — see the shared-corpus pattern below).
   They run in exactly one armed lane: `python-integration` (its pytest
-  step selects the canary module alongside `tests/integration/`), and
-  the unit sweep opts out via `MEHO_SKIP_SPEC_INGEST_TESTS=1`, honored
-  by a collection-time `skipif` marker on every full-ingest test (so
-  an opted-out lane never even spins the module-scoped Postgres
-  container), with backstop re-checks in the canary's shared
-  `_canary_corpus` fixture and its `vcenter_spec_path` fixture.
+  step runs `tests/integration/`). A full-ingest test placed in the unit
+  sweep must opt out there with a collection-time `skipif` marker, so an
+  opted-out lane never even spins the module-scoped Postgres container.
+  (The vSphere canary that set this pattern left the public tree with
+  evoila's own connectors, #3345; its `MEHO_SKIP_SPEC_INGEST_TESTS`
+  opt-out left with it.)
   Everywhere the var is unset (local dev, the integration lane) the
   armed-shelf contract is unchanged.
 

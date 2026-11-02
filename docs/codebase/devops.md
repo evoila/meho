@@ -1877,8 +1877,7 @@ shape (deterministic file-level matrix + fan-in):
   hang left no test name in the log). `signal`, not `thread`, because
   the thread method calls `os._exit()`, which xdist reads as a worker
   crash. The `tests/integration` /
-  `tests/migrations` exclusions and the `MEHO_SKIP_SPEC_INGEST_TESTS` G0.7
-  canary opt-out (#2980) are preserved on **every** shard. Every shard also
+  `tests/migrations` exclusions are preserved on **every** shard. Every shard also
   installs Helm v3.16.4 (the same pinned `azure/setup-helm` step as
   `chart.yml`) and sets `MEHO_REQUIRE_HELM=1`, so the `tests/test_chart_*.py`
   render tests really run there and fail, not skip, if helm is missing.
@@ -2148,19 +2147,11 @@ repo. `ci.yml` provisions them at runtime, gated on a secret:
   five lanes run for real, and a fail-loud verify step turns any shelf-layout
   drift into a job failure instead of a silent regression to lane-skip.
 - Lane placement (#2980): the seconds-cheap reconcile lanes run armed in
-  the unit sweep; the canary's full-ingest tests run armed only in
-  `python-integration-shard` — its pytest step selects
-  `tests/acceptance/test_g07_vsphere_canary.py` explicitly, and the unit
-  sweep opts out via `MEHO_SKIP_SPEC_INGEST_TESTS=1` (a collection-time
-  `skipif` marker on the canary's full-ingest tests, backstopped in its
-  shared `_canary_corpus` fixture and its `vcenter_spec_path` fixture).
-  The armed cost is amortised: the ~164 s two-spec ingest runs ONCE per
-  module via the module-scoped `_canary_corpus` fixture (PR #2995 — the
-  original per-test-ingest shape was 25 ingests and timeout-killed the
-  60-min integration cap on its first armed run). Rationale + rule +
-  the shared-corpus pattern for future heavy lanes:
-  [`spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md)
-  §Lane placement.
+  the unit sweep. Full-ingest tests of a real vendor spec (minutes per
+  lane) belong in `python-integration-shard`, never in the unit sweep;
+  rule of record: `docs/decisions/spec-reconcile-guards-standard.md`.
+  The vSphere canary that first set this rule left with evoila's own
+  connectors (#3345) and runs in the private connector package.
 - Per-vendor reconcile lanes beyond vCenter (#2981-#2993) extend the same
   wiring — one `sparse-checkout` line + one verify line per product dir,
   same `SPEC_SHELF_TOKEN`, never a new secret. Standard + extension

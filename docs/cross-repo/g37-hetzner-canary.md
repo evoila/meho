@@ -15,7 +15,7 @@ deploy, when re-running after a connector or spec revision, or when
 verifying the curation against a staging Robot Webservice account.
 
 Companion to
-[`docs/cross-repo/g35-nsx-canary.md`](./g35-nsx-canary.md)
+`docs/cross-repo/g35-nsx-canary.md`
 (the NSX counterpart this runbook mirrors) and
 [`docs/cross-repo/connector-ingestion.md`](./connector-ingestion.md)
 (the connector-agnostic ingest runbook). The Hetzner-Robot-specific
@@ -365,7 +365,7 @@ off. Ordering and cancelling servers and add-ons stay manual by policy.
 - Parent Goal: [G3 #214](https://github.com/evoila/meho/issues/214).
 - Predecessor: [G3.7-T6 #846](https://github.com/evoila/meho/issues/846)
   — `HetznerRobotConnector` skeleton.
-- NSX counterpart: [`g35-nsx-canary.md`](./g35-nsx-canary.md).
+- NSX counterpart: `g35-nsx-canary.md`.
 - Harbor counterpart: see Initiative #368 docs.
 - Connector-agnostic ingest runbook: [`connector-ingestion.md`](./connector-ingestion.md).
 - Substrate: [#388 G0.6](https://github.com/evoila/meho/issues/388)

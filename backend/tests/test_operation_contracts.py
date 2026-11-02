@@ -85,10 +85,7 @@ RULES: Final[tuple[str, ...]] = (
 #: fails when an entry names an operation that no longer exists or is no
 #: longer ``safe``, so this list stays tidy.
 READS_WITH_A_WRITE_WORD: Final[Mapping[str, str]] = {
-    "installer.system.depot.sync-status": "reads the state of the depot sync; starts none",
     "mssql.ha.sync-health": "reads the health of the availability-group sync",
-    "vcfa.tenant.abx.run.get": "reads the state and log of an ABX action run; runs nothing",
-    "vcfa.vra8.abx.run.get": "reads the state and log of an ABX action run; runs nothing",
     "winsrv.system.pending-reboot": "reads whether a reboot is pending; reboots nothing",
 }
 

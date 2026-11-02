@@ -44,7 +44,7 @@ nothing, and writing no audit row.
 
 Operations are addressed by **`connector_id`**, which has the form
 `<impl_id>-<version>` — for example `k8s-1.x`, `vault-1.x`,
-`vmware-rest-9.0`. It is *not* the bare product name; a product can
+`harbor-rest-2.x`. It is *not* the bare product name; a product can
 have several connector implementations, and the resolver picks one
 per target.
 
@@ -58,13 +58,13 @@ per target.
     fingerprint to one implementation, with tenant or operator
     preference breaking a tie. You address the operation by its
     `connector_id`, but you never hand-pick which implementation runs
-    against a given target. Real pairs today: `fleet-rest-9.0` /
-    `fleet-lcm-9.0`, `sddc-rest-9.0` / `sddc-vcf5-5.0`, `vcfa-rest-9.0`
-    / `vcfa-vra8-8.0`, `vrli-rest-9.0` / `vrli-vrli8-8.0`, and
-    `vrops-rest-9.0` / `vrops-vrops8-8.0`. So one estate that spans old
-    and new appliances resolves each system to the right implementation
-    on its own — useful when you read and inventory an existing estate
-    during onboarding.
+    against a given target. The public connectors ship one
+    implementation per product today; connector packages (for example
+    evoila's enterprise pack for the VMware estate) add a second one for
+    older appliances where needed. So one estate that spans old and new
+    appliances resolves each system to the right implementation on its
+    own — useful when you read and inventory an existing estate during
+    onboarding.
 
 ```bash
 meho connector list

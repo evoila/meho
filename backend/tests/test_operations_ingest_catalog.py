@@ -64,12 +64,13 @@ from meho_backplane.operations.ingest.catalog import (
     validate_shipped_artifacts,
 )
 
-# The nine catalog entries currently shipped. The seven v0.3.0
-# connectors plus ``gh/3`` (G3.11-T3 #1223 -- the GitHub REST API
-# entry that consumes the GitHubRestConnector class shipped by
-# G3.11-T1 #1221) plus the ``_fixture/1.0`` profile-backed shipped-spec
-# mechanism row (#1964 T1 #1975 -- exercises the spec_resource /
-# profile_resource on-ramp + the boot-time dry-run-parse validator).
+# The catalog entries currently shipped: the public connectors plus
+# ``gh/3`` (G3.11-T3 #1223 -- the GitHub REST API entry that consumes the
+# GitHubRestConnector class shipped by G3.11-T1 #1221) plus the
+# ``_fixture/1.0`` profile-backed shipped-spec mechanism row (#1964 T1
+# #1975 -- exercises the spec_resource / profile_resource on-ramp + the
+# boot-time dry-run-parse validator). The VMware rows left with evoila's
+# own connectors; they ship in the private connector package.
 # The ``gh`` row's ``version`` field stores the
 # digit-prefix ``"3"`` (G3.11-T8 #1242 reconciled the catalog with
 # the registry's parse-friendly form -- the dispatcher's
@@ -77,17 +78,7 @@ from meho_backplane.operations.ingest.catalog import (
 # the upstream "v3" label lives in the row's ``notes`` and in
 # docs/cross-repo/github-connector.md.
 _EXPECTED_PRODUCT_VERSION = {
-    ("vmware", "9.0"),
-    # #3569: second versioned vmware-rest catalog (8.0 U3), dual-impl beside
-    # 9.0 so fingerprinted 8.0.x targets keep a governed generic path after
-    # the 9.0 catalog's target guard.
-    ("vmware", "8.0"),
-    ("sddc", "9.0"),
     ("harbor", "2.x"),
-    # #1530: NSX-T 4.x was renumbered onto the VCF train at VCF 9.0;
-    # the catalog row tracks the VCF-9-aligned "9.0" line (NsxConnector
-    # covers both 4.x and 9.x via supported_version_range ">=4.0,<10.0").
-    ("nsx", "9.0"),
     ("gh", "3"),
     ("vault", "1.x"),
     ("k8s", "1.x"),
@@ -109,11 +100,8 @@ _RUNTIME_SPEC_PRODUCTS = {"mehoauto"}
 # Products whose catalog row carries neither an ``upstream`` nor is a
 # hand-coded typed connector: the profile-backed shipped-spec rows whose
 # spec ships as package data via ``spec_resource``. The ``_fixture/1.0``
-# mechanism row landed with #1975; #1964 T2 (#1976) added the real
-# ``vmware/9.0`` + ``sddc/9.0`` rows whose Broadcom upstream the backend
-# can't dereference, so their MEHO-authored minimal specs + reviewed
-# ExecutionProfiles ship as package data instead of forcing a --spec upload.
-_SHIPPED_SPEC_PRODUCTS = {"_fixture", "vmware", "sddc"}
+# mechanism row landed with #1975.
+_SHIPPED_SPEC_PRODUCTS = {"_fixture"}
 
 
 @pytest.fixture(autouse=True)
@@ -193,7 +181,7 @@ def test_shipped_catalog_typed_connectors_have_null_upstream() -> None:
 
 @pytest.fixture
 def _registered_connectors() -> set[str]:
-    """Register the seven catalog connectors, return their class names.
+    """Register the catalog connectors, return their class names.
 
     The autouse ``_isolate_global_registries`` fixture snapshots/restores
     the registry around each test; depending on collection order it may
@@ -206,20 +194,14 @@ def _registered_connectors() -> set[str]:
     from meho_backplane.connectors.github import GitHubRestConnector
     from meho_backplane.connectors.harbor import HarborConnector
     from meho_backplane.connectors.kubernetes import KubernetesConnector
-    from meho_backplane.connectors.nsx import NsxConnector
-    from meho_backplane.connectors.sddc_manager import SddcManagerConnector
     from meho_backplane.connectors.vault import VaultConnector
-    from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 
     for cls in (
         Bind9Connector,
         GitHubRestConnector,
         HarborConnector,
         KubernetesConnector,
-        NsxConnector,
-        SddcManagerConnector,
         VaultConnector,
-        VmwareRestConnector,
     ):
         # Swallow the duplicate-key RuntimeError when the connector is
         # already registered this session (cached import history).
@@ -494,115 +476,6 @@ def test_validate_shipped_artifacts_passes_for_shipped_catalog() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("product", "spec_resource", "profile_resource", "expected_scheme", "expected_ops"),
-    [
-        (
-            "vmware",
-            "vmware_rest_minimal.yaml",
-            "vmware_rest_minimal.yaml",
-            "session_login_basic",
-            9,
-        ),
-        (
-            "sddc",
-            "sddc_manager_minimal.yaml",
-            "sddc_manager_minimal.yaml",
-            "session_login_token",
-            9,
-        ),
-    ],
-)
-def test_shipped_vmware_sddc_rows_are_profile_backed(
-    product: str,
-    spec_resource: str,
-    profile_resource: str,
-    expected_scheme: str,
-    expected_ops: int,
-) -> None:
-    """The real vmware/sddc rows ship a spec + profile and retire the upstream.
-
-    #1964 T2 (#1976): each row carries a null ``upstream`` (the Broadcom
-    portal is HTML the backend can't dereference), names the MEHO-authored
-    ``spec_resource`` + ``profile_resource``, and advertises
-    ``catalog_ingest: supported`` because the forced-upload friction is gone.
-    """
-    entry = load_catalog().get(product, "9.0")
-    assert entry is not None
-    assert entry.upstream is None
-    assert entry.spec_resource == spec_resource
-    assert entry.profile_resource == profile_resource
-    assert entry.catalog_ingest == "supported"
-
-
-@pytest.mark.parametrize(
-    ("spec_resource", "expected_ops", "needle_path"),
-    [
-        ("vmware_rest_minimal.yaml", 9, "GET:/vcenter/vm"),
-        ("sddc_manager_minimal.yaml", 9, "GET:/v1/sddc-managers"),
-    ],
-)
-def test_shipped_vmware_sddc_specs_parse_with_the_ingest_parser(
-    spec_resource: str,
-    expected_ops: int,
-    needle_path: str,
-) -> None:
-    """Each shipped spec parses under the SAME parser the live ingest uses.
-
-    Asserts the boot-validator contract directly: OpenAPI 3.x, self-contained,
-    local-``$ref`` only, every op carrying a ``METHOD:path`` op_id.
-    """
-    from meho_backplane.operations.ingest.openapi import parse_openapi
-
-    content = load_spec_resource(spec_resource)
-    rows = parse_openapi(
-        f"spec:{spec_resource}",
-        spec_source=f"spec:{spec_resource}",
-        content=content,
-    )
-    assert len(rows) == expected_ops
-    assert all(row.method == "GET" for row in rows)
-    assert needle_path in {row.op_id for row in rows}
-
-
-@pytest.mark.parametrize(
-    ("profile_resource", "expected_scheme"),
-    [
-        ("vmware_rest_minimal.yaml", "session_login_basic"),
-        ("sddc_manager_minimal.yaml", "session_login_token"),
-    ],
-)
-def test_shipped_vmware_sddc_profiles_validate_with_named_scheme(
-    profile_resource: str,
-    expected_scheme: str,
-) -> None:
-    """Each shipped profile validates against the closed named-auth catalog."""
-    import yaml
-
-    from meho_backplane.connectors.profile import (
-        ExecutionProfile,
-        validate_execution_profile,
-    )
-
-    raw = yaml.safe_load(load_profile_resource(profile_resource))
-    profile = ExecutionProfile.model_validate(raw)
-    validate_execution_profile(profile)  # must not raise
-    assert profile.auth.scheme == expected_scheme
-    # The declarative fingerprint version_key must be a literal top-level key
-    # (no dotted paths / array indexing — #1177); model_validate already
-    # enforced it, this is the regression anchor for the shipped artifact.
-    assert "." not in profile.fingerprint.version_key
-
-
-def test_shipped_vmware_sddc_resources_are_addressable() -> None:
-    """The real specs/profiles resolve as in-package wheel data (artifacts)."""
-    from importlib.resources import files
-
-    for name in ("vmware_rest_minimal.yaml", "sddc_manager_minimal.yaml"):
-        assert files(SPEC_RESOURCE_PACKAGE).joinpath(name).is_file()
-        assert files(PROFILE_RESOURCE_PACKAGE).joinpath(name).is_file()
-
-
 def test_validate_shipped_artifacts_crashes_on_missing_spec() -> None:
     cat = ConnectorSpecCatalog(
         entries=(
@@ -855,25 +728,6 @@ def test_spec_info_version_matches_wildcard_specifier() -> None:
     assert not match("not-a-version", "9.0.x")
 
 
-def test_shipped_vmware_catalog_declares_9_0_x_compatibility() -> None:
-    """vmware/9.0 catalog entry carries ``spec_info_versions_compatible=("9.0.x",)``.
-
-    G0.16-T6 Finding H (#1312). vSphere ships ``info.version="9.0.0.0"``
-    while the catalog labels the entry ``version="9.0"``; the
-    PEP-440 prefix-match already treats those as "exact" but the
-    explicit declaration documents the divergence per
-    ``docs/codebase/api-shape-conventions.md`` §9 and pairs with
-    T5 (#1307)'s gh-rest entry where the divergence is
-    load-bearing.
-    """
-    vmware = next(
-        entry
-        for entry in load_catalog().entries
-        if (entry.product, entry.version) == ("vmware", "9.0")
-    )
-    assert vmware.spec_info_versions_compatible == ("9.0.x",)
-
-
 # ---------------------------------------------------------------------------
 # Schema strictness + malformed-catalog crash path
 # ---------------------------------------------------------------------------
@@ -1041,15 +895,11 @@ def test_shipped_catalog_gh3_carries_compatibility_opt_in() -> None:
     assert info_version_matches_compatibility("1.1.4", gh.spec_info_versions_compatible)
 
 
-def test_shipped_catalog_only_gh_vmware_and_nsx_rows_opt_in() -> None:
+def test_shipped_catalog_only_gh_row_opts_in() -> None:
     """The opt-in is targeted. ``gh`` opts in to bridge the v3-vs-1.1.4
-    divergence (T5 #1307); ``vmware`` opts in as a belt-and-suspenders
-    declaration over the existing PEP-440 prefix-match (T6 Finding H
-    #1312); ``nsx`` opts in to the ``9.x.x`` band so a VCF-9 appliance
-    spec (info.version in the 9.x scheme) clears the spec/label gate
-    under the renumbered "9.0" catalog label (#1530). All other rows
-    keep ``spec_info_versions_compatible`` null."""
-    expected_opt_in = {"gh", "vmware", "nsx"}
+    divergence (T5 #1307). All other rows keep
+    ``spec_info_versions_compatible`` null."""
+    expected_opt_in = {"gh"}
     for entry in load_catalog().entries:
         if entry.product in expected_opt_in:
             continue
@@ -1088,34 +938,21 @@ def test_entry_rejects_unknown_catalog_ingest_value() -> None:
         _entry(catalog_ingest="maybe")  # type: ignore[arg-type]
 
 
-def test_shipped_catalog_marks_vcf_family_rows_spec_only() -> None:
-    """nsx/9.0 ships ``catalog_ingest: spec-only``; vmware/sddc no longer do.
+def test_shipped_catalog_marks_runtime_only_rows_spec_only() -> None:
+    """Only the meho-automation add-on row ships ``catalog_ingest: spec-only``.
 
-    G0.18-T8 (#1361, RDC #789 N8) originally marked all three VCF-family
-    rows ``spec-only`` because none could drive ``meho connector ingest
-    --catalog`` server-side. #1964 T2 (#1976) changed that for two of them:
-
-    * ``vmware/9.0`` + ``sddc/9.0`` — now PROFILE-BACKED. Their MEHO-
-      authored minimal specs ship as package data (``spec_resource``),
-      so catalog-driven ingest loads the bytes inline (no fetch, no
-      ``catalog_entry_upstream_not_spec`` 422) and the row advertises
-      ``catalog_ingest: supported``. The forced ``--spec`` upload friction
-      is gone.
-    * ``nsx/9.0`` — STILL ``spec-only``: its first upstream is
-      fqdn-templated (``<nsx-mgr-fqdn>``) and no shipped spec exists yet,
-      so the route's ``catalog_entry_templated_upstream`` 422 fires and
-      the listing emits the honest ``--spec`` ``next_step`` hint. (Row
-      renumbered from ``nsx/4.2`` for the VCF-9 alignment, #1530.)
+    G0.18-T8 (#1361, RDC #789 N8) introduced the marker for rows that cannot
+    drive ``meho connector ingest --catalog`` server-side. The add-on row is
+    profile-backed but has NO vendored spec: it is ingested at registration
+    from the live target's ``/openapi.json``, so the listing emits the honest
+    ``--spec`` ``next_step`` hint. Every other shipped row is ``supported``.
     """
-    # nsx/9.0 (fqdn-templated upstream, no shipped spec) plus the
-    # meho-automation add-on (profile-backed but NO vendored spec —
-    # ingested at registration from the live target's /openapi.json).
-    spec_only_pairs = {("nsx", "9.0"), ("mehoauto", "0.1.0")}
+    spec_only_pairs = {("mehoauto", "0.1.0")}
     for entry in load_catalog().entries:
         if (entry.product, entry.version) in spec_only_pairs:
             assert entry.catalog_ingest == "spec-only", (
                 f"{entry.product}/{entry.version} should be catalog_ingest: spec-only "
-                "(fqdn-templated/absent upstream, or runtime-only /openapi.json ingest)"
+                "(runtime-only /openapi.json ingest)"
             )
         else:
             assert entry.catalog_ingest == "supported", (

@@ -906,7 +906,7 @@ v0.x — see the carve-out in
 - Connector secret-ref convention (k8s `kubeconfig` field):
   [`kubernetes-onboarding.md`](./kubernetes-onboarding.md)
 - First connector wired against this runbook (vSphere `{username,password}`
-  read, rubric State 2): [`vmware-rest-onboarding.md`](./vmware-rest-onboarding.md)
+  read, rubric State 2): `vmware-rest-onboarding.md`
   (G3.9-T3 #942)
 - Vault — [ACL policy templating](https://developer.hashicorp.com/vault/docs/concepts/policies)
 - Vault — [ACL policy capabilities (`create`/`update`/`read`/`delete`)](https://developer.hashicorp.com/vault/docs/concepts/policies#capabilities)

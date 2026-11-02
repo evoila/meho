@@ -456,8 +456,8 @@ async def _add_stored_write(
 async def test_review_payload_reports_stored_deletes_below_destructive() -> None:
     """#3827: stored deletes that an earlier ingest left too weak are listed with a fix.
 
-    Rows persisted before the parser and floor changes keep their old
-    posture until the next ingest. The review report shows every stored
+    Rows persisted before the parser change keep their old posture until
+    the next ingest. The review report shows every stored
     ingested delete-shaped row below ``destructive`` next to what a fresh
     ingest would assign, and flags the rows that are weaker than that.
     """
@@ -467,13 +467,6 @@ async def test_review_payload_reports_stored_deletes_below_destructive() -> None
     await _add_stored_write(
         tenant_id=tenant_id,
         op_id="DELETE:/api/cis/tagging/category/{category_id}",
-        safety_level="caution",
-        requires_approval=False,
-    )
-    # A tag detach stored at caution: a POST the floor now treats as a removal.
-    await _add_stored_write(
-        tenant_id=tenant_id,
-        op_id="POST:/api/cis/tagging/tag-association?action=detach",
         safety_level="caution",
         requires_approval=False,
     )
@@ -514,22 +507,15 @@ async def test_review_payload_reports_stored_deletes_below_destructive() -> None
         "DELETE:/api/cis/tagging/category/{category_id}",
         "DELETE:/vcenter/datastore/{datastore}",
         "DELETE:/vcenter/folder/{folder}",
-        "POST:/api/cis/tagging/tag-association?action=detach",
     ]
-    assert payload.delete_ops_needing_correction_count == 3
+    assert payload.delete_ops_needing_correction_count == 2
 
     category = rows["DELETE:/api/cis/tagging/category/{category_id}"]
     assert category.safety_level == "caution"
     assert category.requires_approval is False
-    assert category.expected_safety_level == "destructive"
+    assert category.expected_safety_level == "dangerous"
     assert category.expected_requires_approval is True
     assert category.needs_correction is True
-    assert "a fresh ingest gives destructive" in category.reason
-
-    detach = rows["POST:/api/cis/tagging/tag-association?action=detach"]
-    assert detach.method == "POST"
-    assert detach.expected_safety_level == "destructive"
-    assert detach.needs_correction is True
 
     datastore = rows["DELETE:/vcenter/datastore/{datastore}"]
     assert datastore.expected_safety_level == "dangerous"

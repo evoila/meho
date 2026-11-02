@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
-
-	"github.com/evoila/meho/cli/internal/typedops"
 )
 
 // typedDispatchCases pins every SDDC Manager verb whose backend read
@@ -135,40 +133,6 @@ func TestIngestedVerbsDispatchPinnedOpIDs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assertVerbDispatchesOpID(t, tc.args, tc.wantOp, nil)
 		})
-	}
-}
-
-// TestBackendTypedOpsAreClassified reconciles the backend's typed-op
-// registry against typedOpCLICoverage so a typed op shipped without a
-// CLI-repoint decision fails this test instead of leaving the verb a
-// zero-catalog dead end (#2942).
-func TestBackendTypedOpsAreClassified(t *testing.T) {
-	inventory, err := typedops.BackendOpIDs("sddc_manager")
-	if err != nil {
-		t.Fatalf("read backend typed-op inventory: %v", err)
-	}
-	invSet := make(map[string]bool, len(inventory))
-	for _, id := range inventory {
-		invSet[id] = true
-	}
-	for _, id := range inventory {
-		if _, ok := typedOpCLICoverage[id]; !ok {
-			t.Errorf("backend typed op %q is unclassified — repoint the CLI verb "+
-				"covering this read (and add it to typedDispatchCases) or record it "+
-				"as agent-surface-only in typedOpCLICoverage (#2942 contract)", id)
-		}
-	}
-	for id := range typedOpCLICoverage {
-		if !invSet[id] {
-			t.Errorf("typedOpCLICoverage entry %q no longer exists in the backend "+
-				"registry — drop or rename it", id)
-		}
-	}
-	for _, tc := range typedDispatchCases {
-		if !invSet[tc.wantOp] {
-			t.Errorf("typed dispatch case %q asserts op_id %q that the backend "+
-				"does not register", tc.name, tc.wantOp)
-		}
 	}
 }
 

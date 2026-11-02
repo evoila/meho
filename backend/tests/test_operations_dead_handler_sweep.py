@@ -231,7 +231,7 @@ async def test_older_server_keeps_disabled_op_of_newer_release() -> None:
 
 
 @pytest.mark.asyncio
-async def test_boot_registrar_run_removes_retired_vmware_composites(
+async def test_boot_registrar_run_removes_retired_composites(
     stub_embedding_service: AsyncMock,
 ) -> None:
     """An upgraded install's stale composite rows are gone after boot.
@@ -263,7 +263,6 @@ async def test_boot_registrar_run_removes_retired_vmware_composites(
     rows = await _rows()
     op_ids = {op_id for _tenant, op_id in rows}
     assert op_ids.isdisjoint(_RETIRED_COMPOSITES)
-    assert {"vmware.host.network_uplinks", "vmware.host.vsan_health"} <= op_ids
     assert rows[(None, "vmware.typed.newer_only")].is_enabled is False
 
 

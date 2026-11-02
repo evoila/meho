@@ -152,7 +152,7 @@ not auto-execute), insert one `AgentPermission` row matching:
 | `verdict` | `needs-approval` | the gate verdict |
 
 [perms]: ../../backend/src/meho_backplane/auth/permissions.py
-[composites]: ../../backend/src/meho_backplane/connectors/vmware_rest/composites/_register.py
+[composites]: ../../backend/src/meho_backplane/operations/composite.py
 
 `permissions.json` in this directory carries the exact payload — one
 JSON row per grant. Apply each row via one of:

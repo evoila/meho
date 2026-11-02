@@ -1689,7 +1689,7 @@ requires-dist = [
     { name = "openapi-spec-validator", specifier = ">=0.9.0" },
     { name = "packaging", specifier = ">=26.3" },
     { name = "pgvector", specifier = ">=0.5.0,<1.0" },
-    { name = "presidio-analyzer", specifier = "==2.2.364" },
+    { name = "presidio-analyzer", specifier = "==2.2.365" },
     { name = "presidio-anonymizer", specifier = "==2.2.362" },
     { name = "prometheus-client", specifier = ">=0.26.0" },
     { name = "pyarrow", specifier = ">=25.0.1" },
@@ -2363,21 +2363,22 @@ wheels = [
 
 [[package]]
 name = "presidio-analyzer"
-version = "2.2.364"
+version = "2.2.365"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
     { name = "numpy" },
     { name = "phonenumbers" },
+    { name = "preshed" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "regex" },
     { name = "spacy" },
     { name = "tldextract" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c7/50/408a41cf99d076107d3823d514bb6408e249132418f068673cb807839ce5/presidio_analyzer-2.2.364.tar.gz", hash = "sha256:51f27bacf199fb9777ade9552c0f0111e00a1d73cfe2d4797fc05c998de1e0b6", size = 154117, upload-time = "2026-07-22T07:54:36.264Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d9/d8/2a456d7ebdb132d4a1e1f99458806b2ef17fbfb9722532597caeff1b0ee6/presidio_analyzer-2.2.365.tar.gz", hash = "sha256:0dc5700c1701a8f3429b066f9f1f5c4a931d393e3f54c0b1d23dcac3d731fa88", size = 168112, upload-time = "2026-10-25T19:03:39.676Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a6/15/44a64276cd5c45485716314addfb7966c24f61034d8ff8e9a78d13d0afbe/presidio_analyzer-2.2.364-py3-none-any.whl", hash = "sha256:0a9eeb60ccc416c505367b4989d056becb84ef082703ee3361c046fb75941739", size = 266299, upload-time = "2026-07-22T07:54:34.868Z" },
+    { url = "https://files.pythonhosted.org/packages/6a/a2/a91f185750b2c35bf39e270d98e8859c67ba17115a2241907b2422cfa043/presidio_analyzer-2.2.365-py3-none-any.whl", hash = "sha256:639077341d35ba2d9a71b2a5283934c6988e9f67e8471623ea40adc5fd0882ac", size = 291511, upload-time = "2026-10-25T19:03:38.214Z" },
 ]
 
 [[package]]

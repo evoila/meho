@@ -34,7 +34,7 @@ shard uploads its per-test times as the artifact
 CI usage (see the ``python-unit-shard`` job in ``.github/workflows/ci.yml``)::
 
     find tests -name 'test_*.py' ... | sort \\
-        | uv run python tests/_unit_shard_split.py --shard 2 --total 5
+        | uv run python tests/_unit_shard_split.py --shard 2 --total 6
 
 Integration tests: the ``python-integration-shard`` job passes
 ``--durations tests/_integration_shard_durations.json``. Its shards

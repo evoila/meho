@@ -581,6 +581,29 @@ async def test_mint_remote_write_refused_on_secret_value_swap(
     assert await _approval_resumed_at(approval_id) is None
 
 
+async def test_mint_remote_write_leaves_no_secret_value_on_the_consumed_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A consumed approval keeps its params without the secret-named values.
+
+    The mint got the real values; the row keeps a marker in their place and
+    the other fields as they were.
+    """
+    approved = {"host": "10.0.0.1", "password": "approved-test-value"}  # gitleaks:allow
+    approval_id = await _seed_committed_approval(params=approved)
+    await _seed_write_allowlist()
+
+    result = await _mint_caution(monkeypatch, params=dict(approved))
+
+    assert result.minted
+    assert await _approval_resumed_at(approval_id) is not None
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        approval = await session.get(ApprovalRequest, approval_id)
+    assert approval is not None
+    assert approval.params == {"host": "10.0.0.1", "password": "[REDACTED:param_name]"}
+
+
 async def test_mint_remote_write_binds_approval_stored_with_plain_hash(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

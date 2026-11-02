@@ -413,6 +413,9 @@ async def test_fingerprint_with_repo_coordinates_uses_repos_endpoint(
             },
         )
     )
+    respx.get(f"{DEFAULT_GITHUB_API_URL}/repos/evoila/meho/contents/.github/workflows").mock(
+        return_value=httpx.Response(404, json={"message": "Not Found"})
+    )
     target = _FakeTarget(
         name="github-evoila-meho",
         host="api.github.com/repos/evoila/meho",
@@ -425,6 +428,10 @@ async def test_fingerprint_with_repo_coordinates_uses_repos_endpoint(
     assert fp.extras["owner_login"] == "evoila"
     assert fp.extras["owner_type"] == "Organization"
     assert fp.extras["default_branch"] == "main"
+    # No workflow folder: the check ran and found nothing to warn about.
+    assert fp.extras["workflow_check"] == "ok"
+    assert fp.extras["ticket_event_workflows"] == []
+    assert fp.extras["ticket_write_warning"] is None
 
 
 @respx.mock
@@ -459,6 +466,9 @@ async def test_fingerprint_with_bare_owner_repo_uses_repos_endpoint(
                 "owner": {"login": "evoila", "type": "Organization"},
             },
         )
+    )
+    respx.get(f"{DEFAULT_GITHUB_API_URL}/repos/evoila/meho/contents/.github/workflows").mock(
+        return_value=httpx.Response(404, json={"message": "Not Found"})
     )
     target = _FakeTarget(name="github-evoila-meho", host="evoila/meho")
     fp = await connector_with_app_loader.fingerprint(target)

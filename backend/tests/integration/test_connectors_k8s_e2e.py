@@ -15,14 +15,13 @@ against the real G0.6 dispatcher with a Postgres-backed
 What this harness proves (Task #326 DoD)
 =========================================
 
-* All 14 K8s ops registered into ``endpoint_descriptor`` via
+* Every row of ``KUBERNETES_OPS`` is registered into
+  ``endpoint_descriptor`` via
   :func:`~meho_backplane.operations.typed_register.register_typed_operation`
-  by ``KubernetesConnector.register_operations()``. The full set is
-  reachable via ``search_operations(connector_id="k8s-1.x", query=...)``;
-  the meta-tool returns hits whose ``op_id`` covers every registered
-  op (existential per Initiative #320's "Agent reaches all 13 ops via
-  search_operations" DoD criterion -- note the actual op count
-  shipped by T1..T5 is 14).
+  by ``KubernetesConnector.register_operations()``, with the row's group,
+  risk level and approval flag. The test checks rules on the registered
+  rows; it keeps no copy of the op ids. The ops are reachable via
+  ``search_operations(connector_id="k8s-1.x", query=...)``.
 * Every op dispatches through :func:`call_operation` (the agent-facing
   surface; the CLI alias verb tree this Task adds is a separate
   operator surface that goes through the *same* dispatch route via
@@ -130,71 +129,6 @@ _OPERATOR_TENANT_ID: UUID = UUID("00000000-0000-0000-0000-00000000a0a0")
 #: ``{"target": {"name": _TARGET_NAME}}`` → :func:`resolve_target`.
 #: Matches the ``_K3sTarget`` stub the direct-``dispatch`` tests pass.
 _TARGET_NAME: str = "k3s-e2e"
-
-#: Every op id this harness exercises. Pinned here (rather than
-#: re-derived from ``KUBERNETES_OPS``) so a registration regression
-#: surfaces as a clear "missing op" assertion failure rather than a
-#: silent test-count change.
-EXPECTED_OP_IDS: tuple[str, ...] = (
-    "k8s.about",
-    "k8s.ls",
-    "k8s.namespace.list",
-    "k8s.node.list",
-    "k8s.pod.list",
-    "k8s.pod.info",
-    "k8s.deployment.list",
-    "k8s.deployment.info",
-    "k8s.job.list",
-    "k8s.job.info",
-    "k8s.workload.list",
-    "k8s.service.list",
-    "k8s.ingress.list",
-    "k8s.configmap.list",
-    "k8s.configmap.info",
-    "k8s.event.list",
-    # #2830 storage + custom-resource read tier.
-    "k8s.storageclass.list",
-    "k8s.persistentvolume.list",
-    "k8s.persistentvolumeclaim.list",
-    "k8s.crd.list",
-    "k8s.cr.list",
-    "k8s.cr.info",
-    "k8s.logs",
-    # G3.14-T1 single-call write ops (approval-gated mutations).
-    "k8s.scale",
-    "k8s.rollout.restart",
-    "k8s.namespace.create",
-    "k8s.annotate",
-    "k8s.label",
-    "k8s.cordon",
-    "k8s.apply",
-    "k8s.delete",
-    "k8s.secret.create",
-    "k8s.job.create",
-    # Start a CronJob's job now (caution, approval-gated).
-    "k8s.cronjob.run",
-    # G3.14-T2 exec op (websocket pod-exec, approval-gated).
-    "k8s.exec",
-    # #3496 governed guest-cluster kubeconfig read (credential_read,
-    # approval-gated): reads a Secret's data value and stages it to a
-    # tenant-scoped Vault secret_ref.
-    "k8s.secret.read_to_ref",
-    # Change or delete an existing Secret (approval-gated; delete is
-    # destructive and needs a preview hash).
-    "k8s.secret.update",
-    "k8s.secret.delete",
-    # List Secrets and look at one Secret: key names only, never a value.
-    "k8s.secret.list",
-    "k8s.secret.info",
-    # Check a Secret key against its Vault copy (safe; answers only
-    # same or different).
-    "k8s.secret.compare_to_ref",
-    # #3840 access checks and admission webhook read (safe reads).
-    "k8s.auth.can_i",
-    "k8s.auth.rules",
-    "k8s.admission_webhook.list",
-)
-
 
 # ---------------------------------------------------------------------------
 # Target stub -- minimal shape the dispatcher's resolver + handlers read
@@ -478,13 +412,24 @@ async def test_every_registered_op_present_in_endpoint_descriptor(
         )
         rows = result.scalars().all()
 
-    assert len(rows) == len(KUBERNETES_OPS)
+    by_id = {op.op_id: op for op in KUBERNETES_OPS}
+    assert len(rows) == len(by_id) == len(KUBERNETES_OPS)
     op_ids = {row.op_id for row in rows}
-    assert op_ids == set(EXPECTED_OP_IDS), (
-        f"registered ops drift: in DB but not expected: "
-        f"{op_ids - set(EXPECTED_OP_IDS)}; "
-        f"expected but missing: {set(EXPECTED_OP_IDS) - op_ids}"
+    assert op_ids == set(by_id), (
+        f"registered ops drift: in DB but not in KUBERNETES_OPS: "
+        f"{op_ids - set(by_id)}; in KUBERNETES_OPS but missing: {set(by_id) - op_ids}"
     )
+    for row in rows:
+        op = by_id[row.op_id]
+        assert row.op_id.startswith("k8s."), row.op_id
+        assert row.source_kind == "typed", row.op_id
+        assert (row.group_id is None) == (op.group_key is None), row.op_id
+        assert row.safety_level == op.safety_level, row.op_id
+        assert row.requires_approval == op.requires_approval, row.op_id
+        if op.safety_level == "safe":
+            assert not op.requires_approval, row.op_id
+        if op.safety_level in {"dangerous", "destructive"}:
+            assert op.requires_approval, row.op_id
 
 
 @pytest.mark.asyncio
@@ -912,7 +857,7 @@ async def test_dispatch_logs_against_running_pod(k8s_e2e: _K3sTarget) -> None:
 async def test_dispatch_unknown_op_returns_dispatcher_unknown_op_envelope(
     k8s_e2e: _K3sTarget,
 ) -> None:
-    """An op_id not in :data:`EXPECTED_OP_IDS` surfaces as the
+    """An op_id not in :data:`KUBERNETES_OPS` surfaces as the
     dispatcher's structured ``unknown_op`` envelope -- proving the
     descriptor lookup ran against the canonical ``("k8s","1.x","k8s")``
     triple. Before the precursor substrate fix, *every* op_id (known
@@ -930,7 +875,5 @@ async def test_dispatch_unknown_op_returns_dispatcher_unknown_op_envelope(
     assert result.error is not None and result.error.startswith("unknown_op:")
     extras = result.extras
     assert extras.get("error_code") == "unknown_op"
-    # ``known_op_count`` carries the descriptor count for the triple;
-    # post-#2830 this is len(EXPECTED_OP_IDS) (31: 20 read [14 + the 6
-    # storage/CR reads] + 10 write + 1 exec).
-    assert extras.get("known_op_count") == len(EXPECTED_OP_IDS)
+    # ``known_op_count`` carries the descriptor count for the triple.
+    assert extras.get("known_op_count") == len(KUBERNETES_OPS)

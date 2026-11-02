@@ -557,6 +557,10 @@ async def _delete_handler(
     service = ReviewService(operator)
     try:
         result = await service.delete_connector(connector_id, tenant_id=tenant_id)
+    except BuiltinConnectorWriteForbiddenError as exc:
+        # Built-in rows + tenant_admin without platform_admin → -32602
+        # builtin_connector_write_forbidden, the same answer as enable.
+        raise_invalid_params_for_builtin_write_forbidden(exc)
     except ConnectorInUseError as exc:
         # #5027: something still uses the connector; nothing was deleted.
         raise_invalid_params_for_connector_in_use(exc)
@@ -953,8 +957,11 @@ register_mcp_tool(
             "operations, batch failed mid-way) or to remove an "
             "unwanted ingested connector outright. The tenant_id "
             "parameter controls the scope: omit it or pass null for "
-            "built-in / global connectors; pass the operator's own "
-            "tenant UUID for tenant-curated rows. The REST sibling "
+            "built-in / global connectors (platform_admin only: the "
+            "rows are shared by every tenant, so a tenant_admin "
+            "without platform_admin gets builtin_connector_write_forbidden); "
+            "pass the operator's own tenant UUID for tenant-curated "
+            "rows. The REST sibling "
             "DELETE /api/v1/connectors/{connector_id} does NOT expose "
             "this parameter and always scopes to the calling "
             "operator's tenant — for global rows use this tool. "

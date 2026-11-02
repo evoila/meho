@@ -1203,8 +1203,9 @@ class RerunRequestBody(BaseModel):
         default=None,
         description=(
             "The original params, unchanged. Leave out to use the params MEHO "
-            "stored with the request. Required for a credential write, whose "
-            "params MEHO keeps only until the first run. Params that do not "
+            "stored with the request. Required for a credential write, and for "
+            "a call whose params hold a password or a licence key: MEHO keeps "
+            "those params only until the first run. Params that do not "
             "match the approved ones are refused (409)."
         ),
     )

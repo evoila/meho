@@ -7,7 +7,7 @@ A cloud template asks for an image by name (for example "RHEL 9"). An image
 profile maps each name to a template (a *fabric image*), one profile per
 region. These four ops read and change that mapping on Aria Automation 8.18:
 
-* ``vcfa.vra8.image_profile.list`` (safe) -- ``GET /iaas/api/image-profiles``
+* ``vcfa.vra8.image_profile.list`` (safe) -- ``GET /iaas/api/image-profiles``, every page
 * ``vcfa.vra8.fabric_image.list`` (safe) -- ``GET /iaas/api/fabric-images``
 * ``vcfa.vra8.cloud_account.enumerate_images`` (caution, approval) --
   ``POST /iaas/api/cloud-accounts/{id}/private-image-enumeration``, then
@@ -78,9 +78,10 @@ _IMAGE_PROFILE_LIST = Vra8TypedOp(
     handler_attr="image_profile_list",
     summary="List the image profiles of Aria Automation 8: each image name and its template.",
     description=(
-        "Reads GET /iaas/api/image-profiles. Each profile belongs to one region and maps "
-        "image names (for example 'RHEL 9') to templates. A long list comes back as a "
-        "link to the stored result."
+        "Reads every page of GET /iaas/api/image-profiles. Each profile belongs to one "
+        "region and maps image names (for example 'RHEL 9') to templates. The cloud config "
+        "of a name is hidden: it can hold a password. A long list comes back as a link to "
+        "the stored result."
     ),
     parameter_schema=IMAGE_PROFILE_LIST_PARAMS,
     response_schema=IMAGE_PROFILE_PAGE_RESPONSE,
@@ -94,10 +95,11 @@ _IMAGE_PROFILE_LIST = Vra8TypedOp(
             "name gives today, for example 'what does RHEL 9 give?'."
         ),
         output_shape=(
-            "{content: [ImageProfile], numberOfElements, totalElements}. Each profile has "
-            "id, name, externalRegionId, cloudAccountId and imageMappings.mapping: an "
-            "object from image name to {id (fabric image id), name (template name), "
-            "externalId, osFamily}."
+            "{content: [ImageProfile], numberOfElements, totalElements}, with every profile "
+            "in content. Each profile has id, name, externalRegionId, cloudAccountId and "
+            "imageMappings.mapping: an object from image name to {id (fabric image id), "
+            "name (template name), externalId, osFamily}. A cloudConfig shows as "
+            "'[REDACTED:cloudConfig]'."
         ),
         next_step=(
             "To change a name, find the template with vcfa.vra8.fabric_image.list, then "
@@ -112,7 +114,8 @@ _FABRIC_IMAGE_LIST = Vra8TypedOp(
     summary="List the templates (fabric images) Aria Automation 8 knows.",
     description=(
         "Reads GET /iaas/api/fabric-images: the templates an image name can point at, "
-        "with their region and cloud accounts. Supports $filter, $top and $skip."
+        "with their region and cloud accounts. Supports $filter, $top and $skip. The "
+        "cloud config of a template is hidden: it can hold a password."
     ),
     parameter_schema=FABRIC_IMAGE_LIST_PARAMS,
     response_schema=FABRIC_IMAGE_PAGE_RESPONSE,
@@ -128,7 +131,7 @@ _FABRIC_IMAGE_LIST = Vra8TypedOp(
         output_shape=(
             "{content: [FabricImage], numberOfElements, totalElements}. Each FabricImage "
             "has id, name, externalId, osFamily, isPrivate, externalRegionId and "
-            "cloudAccountIds."
+            "cloudAccountIds. A cloudConfig shows as '[REDACTED:cloudConfig]'."
         ),
         next_step=(
             "A new template is missing? Run vcfa.vra8.cloud_account.enumerate_images, then "

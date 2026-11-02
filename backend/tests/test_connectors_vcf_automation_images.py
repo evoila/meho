@@ -167,15 +167,22 @@ async def test_image_ops_register_as_typed_rows() -> None:
 
 
 async def test_image_profile_list_pins_api_version(vcfa: VcfAutomationConnector) -> None:
-    listing = {"content": [_profile(**{"RHEL 9": _UBUNTU})], "totalElements": 1}
+    """Reads every page (one here) and hides the cloud config of a name."""
+    listing = {"content": [_profile(**{"RHEL 9": _UBUNTU, "Win": _WIN})], "totalElements": 1}
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         mount_logins(mock)
         route = mock.get(_PROFILES).respond(200, json=listing)
         result = await run("vcfa.tenant.image_profile.list", {})
     assert result["status"] == "ok", result
-    assert result["result"] == listing
+    hidden = {**_WIN, "cloudConfig": "[REDACTED:cloudConfig]"}
+    assert result["result"] == {
+        "content": [_profile(**{"RHEL 9": _UBUNTU, "Win": hidden})],
+        "numberOfElements": 1,
+        "totalElements": 1,
+    }
     request = route.calls.last.request
     assert request.url.params["apiVersion"] == "2021-07-15"
+    assert request.url.params["$top"] == "200"
     assert request.headers["Authorization"] == f"Bearer {TENANT_TOKEN}"
 
 

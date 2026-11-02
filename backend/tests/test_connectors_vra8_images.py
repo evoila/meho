@@ -19,6 +19,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import httpx
 import pytest
 import respx
 from jsonschema import Draft202012Validator
@@ -269,11 +270,77 @@ async def test_image_profile_list_reads_the_names(vra8: Vra8Connector) -> None:
         route = mock.get(_PROFILES).respond(200, json=listing)
         result = await _run("vcfa.vra8.image_profile.list", {})
     assert result["status"] == "ok", result
-    assert result["result"] == listing
+    assert result["result"] == {
+        "content": listing["content"],
+        "numberOfElements": 1,
+        "totalElements": 1,
+    }
     request = route.calls.last.request
     assert request.url.params["apiVersion"] == "2021-07-15"
+    assert request.url.params["$top"] == "200"
+    assert request.url.params["$skip"] == "0"
     assert request.headers["Authorization"] == f"Bearer {_TOKEN}"
     _assert_no_secret(result)
+
+
+async def test_image_profile_list_reads_every_page(vra8: Vra8Connector) -> None:
+    """A second page (totalElements above the first page's rows) is read too."""
+    profiles = [{**_profile(**{"RHEL 9": _UBUNTU}), "id": f"ip-{n}"} for n in range(201)]
+
+    def _page(request: httpx.Request) -> httpx.Response:
+        skip = int(request.url.params["$skip"])
+        top = int(request.url.params["$top"])
+        return httpx.Response(
+            200, json={"content": profiles[skip : skip + top], "totalElements": len(profiles)}
+        )
+
+    with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mount_login(mock)
+        route = mock.get(_PROFILES).mock(side_effect=_page)
+        result = await _run("vcfa.vra8.image_profile.list", {})
+    assert result["status"] == "ok", result
+    assert route.call_count == 2
+    assert [call.request.url.params["$skip"] for call in route.calls] == ["0", "200"]
+    out = result["result"]
+    assert out["numberOfElements"] == out["totalElements"] == 201
+    assert [row["id"] for row in out["content"]] == [f"ip-{n}" for n in range(201)]
+
+
+_CLOUD_CONFIG_SECRET = "cloud-config-pw-sentinel"
+_CLOUD_CONFIG = f"#cloud-config\nchpasswd:\n  list: |\n    root:{_CLOUD_CONFIG_SECRET}\n"
+_WIN_WITH_CONFIG = {**_WIN, "cloudConfig": _CLOUD_CONFIG}
+
+
+async def test_image_profile_list_hides_the_cloud_config(vra8: Vra8Connector) -> None:
+    """A password in a name's cloud config never reaches the answer."""
+    listing = {
+        "content": [_profile(**{"RHEL 9": _UBUNTU, "Windows 2019": _WIN_WITH_CONFIG})],
+        "totalElements": 1,
+    }
+    with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mount_login(mock)
+        mock.get(_PROFILES).respond(200, json=listing)
+        result = await _run("vcfa.vra8.image_profile.list", {})
+    assert result["status"] == "ok", result
+    mapping = result["result"]["content"][0]["imageMappings"]["mapping"]
+    assert mapping["RHEL 9"] == _UBUNTU
+    assert mapping["Windows 2019"] == {**_WIN, "cloudConfig": "[REDACTED:cloudConfig]"}
+    assert _CLOUD_CONFIG_SECRET not in json.dumps(result)
+
+
+async def test_fabric_image_list_hides_the_cloud_config(vra8: Vra8Connector) -> None:
+    listing = {"content": [{**_RHEL, "cloudConfig": _CLOUD_CONFIG}, _UBUNTU], "totalElements": 2}
+    with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mount_login(mock)
+        mock.get(_FABRIC).respond(200, json=listing)
+        result = await _run("vcfa.vra8.fabric_image.list", {})
+    assert result["status"] == "ok", result
+    assert result["result"]["content"] == [
+        {**_RHEL, "cloudConfig": "[REDACTED:cloudConfig]"},
+        _UBUNTU,
+    ]
+    assert result["result"]["totalElements"] == 2
+    assert _CLOUD_CONFIG_SECRET not in json.dumps(result)
 
 
 async def test_fabric_image_list_forwards_odata(vra8: Vra8Connector) -> None:
@@ -445,6 +512,28 @@ async def test_mapping_update_keeps_the_other_names_of_three(vra8: Vra8Connector
     assert body["name"] == "example-profile"
     assert patch.calls.last.request.url.params["apiVersion"] == "2021-07-15"
     _assert_no_secret(result)
+
+
+async def test_mapping_update_keeps_the_cloud_config_of_the_other_names(
+    vra8: Vra8Connector,
+) -> None:
+    """The PATCH sends the real cloud config back; the answer and the card hide it."""
+    profile = _profile(**{**_THREE, "Windows 2019": _WIN_WITH_CONFIG})
+    params = {
+        "profile_id": "ip-1",
+        "image_name": "RHEL 9",
+        "fabric_image_id": "fi-rhel",
+        "expected_old_fabric_image_id": "fi-ubuntu",
+    }
+    with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        patch = _mount_change(mock, profile, patched=profile)
+        preview = await _preview(params, vra8)
+        result = await _run(_MAPPING_OP, params)
+    assert result["result"]["status"] == "updated", result
+    body = json.loads(patch.calls.last.request.content)
+    assert body["imageMapping"]["Windows 2019"] == {"id": "fi-win", "cloudConfig": _CLOUD_CONFIG}
+    assert _CLOUD_CONFIG_SECRET not in json.dumps(result)
+    assert _CLOUD_CONFIG_SECRET not in json.dumps(preview)
 
 
 async def test_mapping_update_refuses_a_changed_name(vra8: Vra8Connector) -> None:

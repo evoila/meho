@@ -9,7 +9,7 @@ image*), one profile per region. These four ops read and change that
 mapping:
 
 * ``vcfa.tenant.image_profile.list`` (safe) --
-  ``GET /iaas/api/image-profiles``
+  ``GET /iaas/api/image-profiles``, every page
 * ``vcfa.tenant.fabric_image.list`` (safe) -- ``GET /iaas/api/fabric-images``
 * ``vcfa.tenant.cloud_account.enumerate_images`` (safe) --
   ``POST /iaas/api/cloud-accounts/{id}/private-image-enumeration``, then
@@ -19,8 +19,9 @@ mapping:
 
 The ``PATCH`` replaces the whole mapping, so the change op reads the
 profile first and sends every other name back unchanged; it sends the
-profile's own region (``_links.region.href``). Handlers live in
-:mod:`._images`. Field names come from the ``vra-sdk-go`` v0.6.5 IaaS
+profile's own region (``_links.region.href``). The two lists hide each
+``cloudConfig`` (a startup script that can hold a password). Handlers
+live in :mod:`._images`. Field names come from the ``vra-sdk-go`` v0.6.5 IaaS
 spec (``ImageProfile``, ``ImageMapping``, ``ImageMappingDescription``,
 ``FabricImage``, ``RequestTracker``), the file the spec-reconcile lane
 pins.
@@ -76,6 +77,13 @@ _CONSTRAINTS = list_of(
     },
 )
 
+#: The lists hide a cloud config: it is a startup script that can hold a password.
+_CLOUD_CONFIG = field(
+    "string",
+    "Hidden: '[REDACTED:cloudConfig]' when the image has a cloud config (a startup "
+    "script, which can hold a password). A name change keeps the real cloud config.",
+)
+
 #: One entry of a profile's mapping: the template a name gives.
 _MAPPING_ENTRY_FIELDS: dict[str, Any] = {
     "id": field("string", "The fabric image id (the template Automation knows)."),
@@ -85,7 +93,7 @@ _MAPPING_ENTRY_FIELDS: dict[str, Any] = {
     "isPrivate": field("boolean", "True for a vCenter template or snapshot."),
     "externalRegionId": field("string", "The vCenter region of the template."),
     "constraints": _CONSTRAINTS,
-    "cloudConfig": field("string", "Cloud config added to machines made from this image."),
+    "cloudConfig": _CLOUD_CONFIG,
 }
 
 _IMAGE_PROFILE_FIELDS: dict[str, Any] = {
@@ -131,6 +139,7 @@ _FABRIC_IMAGE_FIELDS: dict[str, Any] = {
         "description": "The ids of the cloud accounts that see this template.",
         "items": {"type": "string"},
     },
+    "cloudConfig": _CLOUD_CONFIG,
     "updatedAt": field("string", "When Automation last saw a change (ISO 8601, UTC)."),
 }
 
@@ -154,8 +163,13 @@ IMAGE_PROFILE_LIST_PARAMS: Final[dict[str, Any]] = {
     "examples": [{}],
 }
 
-IMAGE_PROFILE_PAGE_RESPONSE: Final[dict[str, Any]] = iaas_page(
-    "image profiles", _IMAGE_PROFILE_FIELDS
+IMAGE_PROFILE_PAGE_RESPONSE: Final[dict[str, Any]] = obj(
+    "Every image profile, in the shape of one vendor page.",
+    {
+        "content": list_of("The image profiles, from every page.", _IMAGE_PROFILE_FIELDS),
+        "numberOfElements": field("integer", "The number of image profiles returned."),
+        "totalElements": field("integer", "The number of image profiles, the same number."),
+    },
 )
 
 FABRIC_IMAGE_LIST_PARAMS: Final[dict[str, Any]] = {
@@ -335,8 +349,9 @@ _IMAGE_PROFILE_LIST = VcfaTypedOp(
     path=TENANT_IMAGE_PROFILES_PATH,
     summary="List the image profiles of the tenant org: each image name and the template it gives.",
     description=(
-        "Reads GET /iaas/api/image-profiles on the tenant plane. Each profile belongs to "
-        "one region and maps image names (for example 'RHEL 9') to vCenter templates."
+        "Reads every page of GET /iaas/api/image-profiles on the tenant plane. Each "
+        "profile belongs to one region and maps image names (for example 'RHEL 9') to "
+        "vCenter templates. The cloud config of a name is hidden: it can hold a password."
     ),
     parameter_schema=IMAGE_PROFILE_LIST_PARAMS,
     response_schema=IMAGE_PROFILE_PAGE_RESPONSE,
@@ -350,10 +365,11 @@ _IMAGE_PROFILE_LIST = VcfaTypedOp(
             "gives today, for example 'what does RHEL 9 give?'."
         ),
         output_shape=(
-            "{content: [ImageProfile], numberOfElements, totalElements}. Each profile has "
-            "id, name, externalRegionId, cloudAccountId and imageMappings.mapping: an "
-            "object from image name to {id (fabric image id), name (template name), "
-            "externalId, osFamily}."
+            "{content: [ImageProfile], numberOfElements, totalElements}, with every profile "
+            "in content. Each profile has id, name, externalRegionId, cloudAccountId and "
+            "imageMappings.mapping: an object from image name to {id (fabric image id), "
+            "name (template name), externalId, osFamily}. A cloudConfig shows as "
+            "'[REDACTED:cloudConfig]'."
         ),
         next_step=(
             "To change a name, find the template with vcfa.tenant.fabric_image.list, then "
@@ -370,7 +386,8 @@ _FABRIC_IMAGE_LIST = VcfaTypedOp(
     summary="List the templates (fabric images) VCF Automation knows in the tenant org.",
     description=(
         "Reads GET /iaas/api/fabric-images on the tenant plane: the vCenter templates an "
-        "image name can point at. Supports $filter, $top and $skip."
+        "image name can point at. Supports $filter, $top and $skip. The cloud config of "
+        "a template is hidden: it can hold a password."
     ),
     parameter_schema=FABRIC_IMAGE_LIST_PARAMS,
     response_schema=FABRIC_IMAGE_PAGE_RESPONSE,
@@ -386,7 +403,7 @@ _FABRIC_IMAGE_LIST = VcfaTypedOp(
         output_shape=(
             "{content: [FabricImage], numberOfElements, totalElements}. Each FabricImage "
             "has id, name, externalId, osFamily, isPrivate, externalRegionId and "
-            "cloudAccountIds."
+            "cloudAccountIds. A cloudConfig shows as '[REDACTED:cloudConfig]'."
         ),
         next_step=(
             "A new template is missing? Run vcfa.tenant.cloud_account.enumerate_images, "

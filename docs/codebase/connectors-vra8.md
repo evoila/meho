@@ -80,8 +80,9 @@ image names and the template each name gives, make Aria Automation read new
 templates now, and change one name while every other name stays. They are the
 VCF Automation 9 image ops on this connector: the same handlers
 (`vcf_automation/_images.py`, through the `Vra8ImageOpsMixin` in
-`vra8/_images.py`) and the same schemas. One difference: on vRA 8 the name
-change requires `expected_old_fabric_image_id` (`null` for a new name), so
+`vra8/_images.py`) and the same schemas. The profile list reads every page
+and both lists hide a cloud config (it can hold a password). One difference:
+on vRA 8 the name change requires `expected_old_fabric_image_id` (`null` for a new name), so
 every run checks the template the approver saw. Metadata and their own
 registrar are in `vra8/image_ops.py`. Details: "Image ops" in
 [`connectors-vcf-automation.md`](connectors-vcf-automation.md). Their calls are

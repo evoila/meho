@@ -257,11 +257,20 @@ approval preview in `_images.py`, all on the tenant plane, in the group
 
 | op_id | risk / approval | wire |
 |---|---|---|
-| `vcfa.tenant.image_profile.list` | safe | `GET /iaas/api/image-profiles` |
+| `vcfa.tenant.image_profile.list` | safe | `GET /iaas/api/image-profiles` (every page) |
 | `vcfa.tenant.fabric_image.list` | safe | `GET /iaas/api/fabric-images` (`$filter`, `$top`, `$skip`) |
 | `vcfa.tenant.cloud_account.enumerate_images` | safe | `POST /iaas/api/cloud-accounts/{id}/private-image-enumeration`, then `GET /iaas/api/request-tracker/{id}` until it ends |
 | `vcfa.tenant.image_profile.mapping.update` | caution, approval | `GET /iaas/api/image-profiles/{id}` + `GET /iaas/api/fabric-images/{id}`, then `PATCH /iaas/api/image-profiles/{id}` |
 
+- **The profile list reads every page** (200 rows a page, at most 50 pages,
+  with `iaas_list` of `_day2.py`), so a link to the stored result holds every
+  profile. The answer keeps the shape of one vendor page: `{content,
+  numberOfElements, totalElements}`, both counts the number of profiles.
+- **The cloud config is hidden.** A name's `cloudConfig` (and a fabric
+  image's) is a startup script that can hold a cleartext password, so both
+  lists show `[REDACTED:cloudConfig]` in its place when there is one. The
+  name change reads the profile again and sends the real cloud config back,
+  so nothing is lost; its answer and its approval card name no cloud config.
 - **The enumeration** only reads vCenter, so it is `safe`. It waits up to
   60 seconds for the request (a lab run took 5). A request still running
   then is the result `in_progress`; a `FAILED` request is the result
@@ -326,8 +335,9 @@ schemas from `image_ops.py`. Only the texts and two risk levels differ:
 | `vcfa.vra8.image_profile.mapping.update` | dangerous, approval | 8.18 |
 
 They return the same answers as the VCF Automation 9 ops above: the two
-lists are the vendor page `{content, numberOfElements, totalElements}`
-(a long list goes behind a result handle), the enumeration
+lists have the shape of a vendor page `{content, numberOfElements,
+totalElements}`, the profile list with every page in `content` and both
+with the cloud config hidden (a long list goes behind a result handle), the enumeration
 `{status, request, guidance}`, and the name change the envelope above.
 
 `register_typed_operations` (a classmethod on the connector, queued onto

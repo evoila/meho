@@ -27,6 +27,13 @@ calls in this process and a PG advisory lock
 workers. A second call waits; after :data:`PROFILE_LOCK_WAIT_SECONDS` it
 fails instead of writing a stale mapping.
 
+The two lists hide ``cloudConfig``: a cloud config is a startup script that
+can hold a cleartext password (``chpasswd``). Each list answer carries
+:data:`CLOUD_CONFIG_HIDDEN` in its place; the name change reads the profile
+again and sends the real cloud config back, so nothing is lost. The profile
+list reads every page (:func:`~._day2.iaas_list`), so ``result_query`` sees
+every profile.
+
 Every ``/iaas/api`` call pins ``apiVersion`` (:data:`._paths.TENANT_IAAS_API_VERSION`).
 Path ids are percent-encoded with an empty safe set, like
 ``vcfa.tenant.deployment.get``; an empty id, ``.`` or ``..`` is refused,
@@ -46,6 +53,7 @@ from urllib.parse import quote
 
 import httpx
 
+from meho_backplane.connectors.vcf_automation._day2 import iaas_list
 from meho_backplane.connectors.vcf_automation._paths import (
     TENANT_FABRIC_IMAGE_PATH,
     TENANT_FABRIC_IMAGES_PATH,
@@ -64,6 +72,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.adapters.http import HttpConnector
 
 __all__ = [
+    "CLOUD_CONFIG_HIDDEN",
     "TENANT_PREFIX",
     "MappingPlan",
     "plan_mapping_change",
@@ -78,6 +87,9 @@ __all__ = [
 TENANT_PREFIX = "vcfa.tenant"
 
 _API_VERSION: dict[str, str] = {"apiVersion": TENANT_IAAS_API_VERSION}
+
+#: What the two lists show in place of a cloud config (it can hold a password).
+CLOUD_CONFIG_HIDDEN: str = "[REDACTED:cloudConfig]"
 
 #: How long the enumeration op waits for its request, and how often it looks.
 #: A lab run took about 5 seconds.
@@ -106,17 +118,41 @@ def _segment(value: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _without_cloud_config(row: dict[str, Any]) -> dict[str, Any]:
+    """A copy of *row* with a nonempty ``cloudConfig`` replaced by the marker."""
+    if not row.get("cloudConfig"):
+        return row
+    return {**row, "cloudConfig": CLOUD_CONFIG_HIDDEN}
+
+
+def _profile_view(profile: dict[str, Any]) -> dict[str, Any]:
+    """The profile with the cloud config of every image name hidden."""
+    mappings = profile.get("imageMappings")
+    if not isinstance(mappings, dict) or not isinstance(mappings.get("mapping"), dict):
+        return profile
+    raw: dict[str, Any] = mappings["mapping"]
+    mapping = {
+        name: _without_cloud_config(entry) if isinstance(entry, dict) else entry
+        for name, entry in raw.items()
+    }
+    return {**profile, "imageMappings": {**mappings, "mapping": mapping}}
+
+
 async def tenant_image_profile_list(
     connector: HttpConnector,
     operator: Operator,
     target: VcfTargetLike,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    """``<prefix>.image_profile.list`` -- ``GET /iaas/api/image-profiles``."""
+    """``<prefix>.image_profile.list`` -- every page of ``GET /iaas/api/image-profiles``.
+
+    The answer has the shape of one vendor page, with every profile in
+    ``content``. The cloud config of each image name is hidden.
+    """
     del params  # schema declares the param object empty
-    return await connector._request_json(
-        target, "GET", TENANT_IMAGE_PROFILES_PATH, operator=operator, params=_API_VERSION
-    )
+    rows = await iaas_list(connector, operator, target, TENANT_IMAGE_PROFILES_PATH, {})
+    content = [_profile_view(row) for row in rows]
+    return {"content": content, "numberOfElements": len(content), "totalElements": len(content)}
 
 
 async def tenant_fabric_image_list(
@@ -125,15 +161,20 @@ async def tenant_fabric_image_list(
     target: VcfTargetLike,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    """``<prefix>.fabric_image.list`` -- ``GET /iaas/api/fabric-images``."""
+    """``<prefix>.fabric_image.list`` -- ``GET /iaas/api/fabric-images``, cloud config hidden."""
     query: dict[str, Any] = {k: params[k] for k in ("$filter", "$top", "$skip") if k in params}
-    return await connector._request_json(
+    page = await connector._request_json(
         target,
         "GET",
         TENANT_FABRIC_IMAGES_PATH,
         operator=operator,
         params={**_API_VERSION, **query},
     )
+    content = page.get("content")
+    if not isinstance(content, list):
+        return page
+    rows = [_without_cloud_config(row) if isinstance(row, dict) else row for row in content]
+    return {**page, "content": rows}
 
 
 # ---------------------------------------------------------------------------

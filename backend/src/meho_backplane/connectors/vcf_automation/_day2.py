@@ -61,6 +61,7 @@ __all__ = [
     "deployment_delete_preview",
     "deployment_lease_change",
     "follow_up",
+    "iaas_list",
     "machine_list",
     "resource_action_run",
     "row_view",
@@ -92,8 +93,8 @@ LEASE_ACTION_ID: Final[str] = "Deployment.ChangeLease"
 LEASE_INPUT: Final[str] = "Lease Expiration Date"
 
 _API_VERSION: Final[dict[str, str]] = {"apiVersion": TENANT_IAAS_API_VERSION}
-#: Page size and page limit of the machine and disk lists. A list with more
-#: rows than :data:`LIST_ROW_LIMIT` is refused (:class:`IncompleteListError`).
+#: Page size and page limit of the machine, disk and image profile lists. A list
+#: with more rows than :data:`LIST_ROW_LIMIT` is refused (:class:`IncompleteListError`).
 _PAGE_SIZE: Final[int] = 200
 _MAX_PAGES: Final[int] = 50
 LIST_ROW_LIMIT: Final[int] = _PAGE_SIZE * _MAX_PAGES
@@ -301,7 +302,7 @@ async def deployment_actions_list(
     return {"items": [row_view(row, _ACTION_FIELDS) for row in rows if isinstance(row, Mapping)]}
 
 
-async def _iaas_list(
+async def iaas_list(
     connector: Any, operator: Any, target: Any, path: str, params: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
     """Every row of an IaaS list, page by page.
@@ -331,7 +332,7 @@ async def machine_list(
 ) -> dict[str, Any]:
     """``GET /iaas/api/machines`` -- every machine, as a flat list of rows."""
     del prefix
-    rows = await _iaas_list(connector, operator, target, MACHINES_PATH, params)
+    rows = await iaas_list(connector, operator, target, MACHINES_PATH, params)
     return {
         "items": [
             {
@@ -349,7 +350,7 @@ async def block_device_list(
 ) -> dict[str, Any]:
     """``GET /iaas/api/block-devices`` -- every disk with its machines, as a flat list."""
     del prefix
-    rows = await _iaas_list(connector, operator, target, BLOCK_DEVICES_PATH, params)
+    rows = await iaas_list(connector, operator, target, BLOCK_DEVICES_PATH, params)
     return {
         "items": [
             {**row_view(row, _DISK_FIELDS), "machineIds": _linked_ids(row, f"{MACHINES_PATH}/")}

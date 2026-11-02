@@ -36,6 +36,7 @@ from jsonschema import Draft202012Validator
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest.composites import (
@@ -160,6 +161,13 @@ class PciConsoleFake(VimFake):
         self.target = _FakeTarget()
         self._file_access_cookies: dict[tuple[str, str], str] = {}
         self._file_access_lock = asyncio.Lock()
+        # The connector hands a kept session to a caller only after that
+        # caller's own secret read: the fake has the readers list and a
+        # stand-in loader, so the borrowed session method can run that read.
+        self._readers = SecretReaders()
+        self._session_loader = AsyncMock(
+            return_value={"username": "svc", "password": "made-up-password"}
+        )
 
     def vm(self, power: str = "poweredOff", devices: list[dict[str, Any]] | None = None) -> None:
         self.add(
@@ -228,6 +236,7 @@ class PciConsoleFake(VimFake):
     # -- the screenshot file read ----------------------------------------------
     _ensure_file_access_session = VmwareRestConnector._ensure_file_access_session
     _drop_file_access_session = VmwareRestConnector._drop_file_access_session
+    _ensure_read = VmwareRestConnector._ensure_read
 
     async def _vcenter_soap_login(self, target: Any, operator: Operator, *, service: str) -> str:
         self.soap_logins += 1

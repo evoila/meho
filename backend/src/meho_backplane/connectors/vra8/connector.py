@@ -116,6 +116,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import is_acceptable_auth_model
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -201,6 +202,8 @@ class Vra8Connector(HttpConnector, VraSharedHandlers):
         # single lock serialises concurrent first-use callers so they don't
         # double-run the two-step login.
         self._session_tokens: dict[tuple[str, ...], str] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._session_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
@@ -250,8 +253,13 @@ class Vra8Connector(HttpConnector, VraSharedHandlers):
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
+                # The caller's own Vault read, once per caller and target.
+                await self._readers.ensure_read(
+                    target, operator, lambda: self._credentials_loader(target, operator)
+                )
                 return cached
             creds = await self._credentials_loader(target, operator)
+            self._readers.record(target, operator)
             client = await self._http_client(target)
             # Lazy import so pure fingerprint/probe unit tests don't pay the _auth
             # module's import; the login helper owns the two-step wire POSTs.
@@ -732,9 +740,12 @@ class Vra8Connector(HttpConnector, VraSharedHandlers):
         credential-bytes cache to evict; the only per-target state is the bearer, so
         this also drops it — a no-op when the establish already failed before caching,
         harmless otherwise. Kept so the connector advertises both dispatch-path
-        recovery hooks.
+        recovery hooks. It also forgets who has read the target's secret, so
+        the next call of every caller reads it again.
         """
         await self._evict_session_token(target)
+        async with self._session_lock:
+            self._readers.forget(target)
 
     async def _evict_session_token(
         self, target: Vra8TargetLike, *, rejected: httpx.Request | None = None
@@ -761,4 +772,5 @@ class Vra8Connector(HttpConnector, VraSharedHandlers):
         """
         async with self._session_lock:
             self._session_tokens.clear()
+            self._readers.clear()
         await super().aclose()

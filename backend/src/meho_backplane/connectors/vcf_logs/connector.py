@@ -400,6 +400,8 @@ class VcfLogsConnector(HttpConnector):
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
+                # The caller's own Vault read, once; a hit for a caller who has read.
+                await self._credentials.get(target, operator)
                 return cached
             creds = await self._credentials.get(target, operator)
             provider = getattr(target, "provider", None) or _DEFAULT_PROVIDER

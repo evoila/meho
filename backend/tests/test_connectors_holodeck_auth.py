@@ -56,7 +56,7 @@ import pytest
 import meho_backplane.connectors.holodeck  # noqa: F401 -- import for registry side-effects
 from meho_backplane.connectors import all_connectors_v2
 from meho_backplane.connectors._shared.pwsh import PwshRunError
-from meho_backplane.connectors.adapters.ssh import SshHostKeyUnpinnedError
+from meho_backplane.connectors.adapters.ssh import SshHostKeyUnpinnedError, _pool_key
 from meho_backplane.connectors.holodeck import HOLODECK_OPS, HolodeckConnector
 from meho_backplane.connectors.holodeck.connector import parse_photon_version
 from meho_backplane.connectors.registry import clear_registry
@@ -331,9 +331,10 @@ async def test_per_target_connection_isolation() -> None:
     assert a is conn_a
     assert b is conn_b
     assert a is not b
-    # Pool keyed by the tenant-unique ``(tenant_id, id)`` tuple; both present.
-    assert (target_a.tenant_id, target_a.id) in connector._connections
-    assert (target_b.tenant_id, target_b.id) in connector._connections
+    # Pool keyed by the tenant-unique ``(tenant_id, id)`` tuple plus the
+    # caller (the system caller here); both present.
+    assert _pool_key(target_a, None) in connector._connections
+    assert _pool_key(target_b, None) in connector._connections
 
 
 # ---------------------------------------------------------------------------

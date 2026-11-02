@@ -113,6 +113,7 @@ from meho_backplane.connectors._shared.cache_key import (
 )
 from meho_backplane.connectors._shared.profile_auth import SESSION_SCHEME_SPECS
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -244,6 +245,8 @@ class SddcManagerConnector(HttpConnector):
     ) -> None:
         super().__init__()
         self._creds_cache: dict[tuple[str, str], dict[str, str]] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._creds_lock = asyncio.Lock()
         self._session_tokens: dict[tuple[str, ...], str] = {}
         self._session_lock = asyncio.Lock()
@@ -287,7 +290,9 @@ class SddcManagerConnector(HttpConnector):
         shared :func:`vcf_session_login` helper, which wraps a non-2xx or a
         token-less 2xx in :exc:`SessionLoginError` naming the target.
 
-        The cache fast-path is closed to the synthesised system operator
+        A cached token is used by a caller only after their own Vault read of
+        the target's secret passed once (:meth:`_load_credentials` runs it on a
+        hit). The cache fast-path is closed to the synthesised system operator
         (``is_system_operator``): a system/operator-less caller always
         re-establishes (its :meth:`_load_credentials` re-runs the loader so the
         fail-closed guard applies), and its minted token is never written to the
@@ -298,6 +303,8 @@ class SddcManagerConnector(HttpConnector):
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None and not is_system_operator(operator):
+                # The caller's own Vault read, once; a hit for a caller who has read.
+                await self._load_credentials(target, operator)
                 return cached
             creds = await self._load_credentials(target, operator)
             client = await self._http_client(target)
@@ -372,6 +379,7 @@ class SddcManagerConnector(HttpConnector):
         """
         async with self._creds_lock:
             self._creds_cache.pop(target_cache_key(target), None)
+            self._readers.forget(target)
 
     async def _get_json_with_session_retry(
         self,
@@ -426,17 +434,18 @@ class SddcManagerConnector(HttpConnector):
         operator-context Vault read; injected test loaders accept the
         same ``(target, operator)`` pair.
 
-        The cache fast-path is closed to the synthesised system operator
-        (``is_system_operator``): a system/operator-less caller always
-        runs the loader so its fail-closed guard applies, and can never be
-        served warm credentials a real operator primed but it could not
-        resolve itself (#1008). Real-operator behaviour is unchanged —
-        cold load → cache → reuse.
+        A cached entry is handed to a caller only after that caller's own
+        Vault read of the target's secret passed once in this process
+        (:class:`~meho_backplane.connectors._shared.secret_readers.SecretReaders`).
+        A hit for another caller runs the loader under their login first.
+        The synthesised system operator is never recorded, so it always runs
+        the loader. A caller who has read keeps cold load → cache →
+        reuse.
         """
         cache_key = target_cache_key(target)
         async with self._creds_lock:
             cached = self._creds_cache.get(cache_key)
-            if cached is not None and not is_system_operator(operator):
+            if cached is not None and self._readers.has_read(target, operator):
                 return cached
             raw = await self._credentials_loader(target, operator)
             try:
@@ -449,6 +458,7 @@ class SddcManagerConnector(HttpConnector):
                     "{'username': str, 'password': str}"
                 ) from exc
             self._creds_cache[cache_key] = raw
+            self._readers.record(target, operator)
             _log.info(
                 "sddc_manager_credentials_loaded",
                 target=target.name,
@@ -780,4 +790,5 @@ class SddcManagerConnector(HttpConnector):
             self._session_tokens.clear()
         async with self._creds_lock:
             self._creds_cache.clear()
+            self._readers.clear()
         await super().aclose()

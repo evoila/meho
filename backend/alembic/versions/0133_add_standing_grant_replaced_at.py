@@ -3,8 +3,8 @@
 
 """Add ``replaced_at`` to both standing-grant tables (#5424).
 
-Revision ID: 0132
-Revises: 0131
+Revision ID: 0133
+Revises: 0132
 Create Date: 2026-11-02
 
 A grant that has ended (``expires_at`` in the past) but was never revoked
@@ -37,8 +37,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0132"
-down_revision: str | None = "0131"
+revision: str = "0133"
+down_revision: str | None = "0132"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

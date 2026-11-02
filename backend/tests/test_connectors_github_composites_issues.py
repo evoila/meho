@@ -18,7 +18,7 @@ live GitHub. All names are made up. Coverage:
 * ``issue_view`` reads the issue, its parent (404 means none), its
   sub-issues and the newest comments.
 * ``issue_create`` returns the number, node id and database id, and the
-  database id works as ``sub_issue_id`` for ``sub_issue_add``.
+  number works as ``sub_issue_number`` for ``sub_issue_add``.
 * ``issue_comment`` posts the body and returns the comment's id and link.
 """
 

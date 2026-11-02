@@ -26,6 +26,8 @@ import re
 from collections.abc import Mapping
 from typing import Any, Final
 
+# The probe uses the same private helper to read ``owner/repo`` from the
+# target host. Reusing it keeps the write scope and the probe in step.
 from meho_backplane.connectors.github.connector import _extract_repo_path
 
 __all__ = [

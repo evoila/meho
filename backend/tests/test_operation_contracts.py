@@ -6,7 +6,7 @@
 An AI picks an operation from its summary, description, group text and
 safety level, and fills in the parameters from the field descriptions. This
 test checks every hand-written (typed and multi-step) operation that MEHO
-registers at start-up, of every connector, against ten rules:
+registers at start-up, of every connector, against twelve rules:
 
 1. ``summary`` -- a one-line summary (at most 120 characters) and a short
    description (at most 300 characters).
@@ -33,6 +33,17 @@ registers at start-up, of every connector, against ten rules:
     :data:`meho_backplane.delete_names.WRITE_WORDS`). The real reads whose
     id holds such a word are in :data:`READS_WITH_A_WRITE_WORD`, each with
     a reason.
+11. ``example_placeholders`` -- no example value looks real: no IP address
+    outside the documentation ranges, no host name with a real top-level
+    domain (``.com``, ``.local``, ...; ``example.com`` and ``.test`` are
+    fine), no vSphere-style object id (``vm-42``, ``domain-c8``) and no
+    UUID other than the all-zero one. A ``<vm-id>`` placeholder always
+    passes. Public vendor names, and what counts as real-looking, are in
+    :mod:`tests.operation_contract_values`.
+12. ``named_operations_exist`` -- every operation id the guidance names in
+    backticks is registered. A name counts as an operation id when it starts
+    with the first part of a registered id (``k8s.``, ``vmware.``). Other
+    names of that shape are in :data:`NAMES_THAT_ARE_NOT_OPERATIONS`.
 
 Today's gaps live in ``tests/data/operation_contract_gaps.yaml``. The test
 fails on a gap that is not in that list (a new gap) and on a listed gap that
@@ -47,7 +58,7 @@ be added here. The checker's own tests, with fake operations, are in
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Set
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -65,6 +76,7 @@ from meho_backplane.operations._param_errors import describe_violation
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS
 from meho_backplane.operations.typed_register import run_typed_op_registrars
 from meho_backplane.settings import get_settings
+from tests.operation_contract_values import real_looking_parts
 
 GAPS_FILE: Final[Path] = Path(__file__).parent / "data" / "operation_contract_gaps.yaml"
 
@@ -79,6 +91,8 @@ RULES: Final[tuple[str, ...]] = (
     "group",
     "preview_builder",
     "write_name",
+    "example_placeholders",
+    "named_operations_exist",
 )
 
 #: Real reads whose id holds a write word, with the reason. The live test
@@ -90,6 +104,13 @@ READS_WITH_A_WRITE_WORD: Final[Mapping[str, str]] = {
     "vcfa.tenant.abx.run.get": "reads the state and log of an ABX action run; runs nothing",
     "vcfa.vra8.abx.run.get": "reads the state and log of an ABX action run; runs nothing",
     "winsrv.system.pending-reboot": "reads whether a reboot is pending; reboots nothing",
+}
+
+#: Names in backticks that look like an operation id but are not one, with
+#: the reason. The live test fails when an entry becomes a registered id.
+NAMES_THAT_ARE_NOT_OPERATIONS: Final[Mapping[str, str]] = {
+    "net.ipv4.ip_forward": "a Linux kernel setting (sysctl key)",
+    "rke2.yaml": "the name of the RKE2 kubeconfig file",
 }
 
 SUMMARY_MAX: Final[int] = 120
@@ -122,7 +143,7 @@ class OperationContract:
 
 
 # ---------------------------------------------------------------------------
-# The ten rules. Each returns a list of problems; an empty list means pass.
+# The twelve rules. Each returns a list of problems; an empty list means pass.
 # ---------------------------------------------------------------------------
 
 
@@ -305,6 +326,50 @@ def check_write_name(op: OperationContract) -> list[str]:
     ]
 
 
+def _example_strings(value: object, path: str) -> Iterator[tuple[str, str]]:
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            yield from _example_strings(item, f"{path}.{key}" if path else str(key))
+    elif isinstance(value, list | tuple):
+        for index, item in enumerate(value):
+            yield from _example_strings(item, f"{path}[{index}]")
+
+
+def check_example_placeholders(op: OperationContract) -> list[str]:
+    examples = op.parameter_schema.get("examples")
+    problems: list[str] = []
+    for index, example in enumerate(examples if isinstance(examples, list) else ()):
+        for path, value in _example_strings(example, ""):
+            problems.extend(
+                f"example {index} field {path!r} has the real-looking value {part!r}; "
+                "use a placeholder such as <vm-id>"
+                for part in real_looking_parts(value)
+            )
+    return problems
+
+
+_BACKTICKED: Final = re.compile(r"`([^`\n]+)`")
+_OP_ID_SHAPE: Final = re.compile(r"[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9_-]+)+")
+
+
+def check_named_operations_exist(op: OperationContract, op_ids: Set[str]) -> list[str]:
+    prefixes = {op_id.split(".", 1)[0] for op_id in op_ids}
+    missing = {
+        name
+        for text in _texts(op.llm_instructions)
+        for name in _BACKTICKED.findall(text)
+        if _OP_ID_SHAPE.fullmatch(name)
+        and name.split(".", 1)[0] in prefixes
+        and name not in op_ids
+        and name not in NAMES_THAT_ARE_NOT_OPERATIONS
+    }
+    return [
+        f"guidance names {name!r}, which is not a registered operation" for name in sorted(missing)
+    ]
+
+
 CHECKS: Final[Mapping[str, Any]] = {
     "summary": check_summary,
     "field_descriptions": check_field_descriptions,
@@ -316,14 +381,22 @@ CHECKS: Final[Mapping[str, Any]] = {
     "group": check_group,
     "preview_builder": check_preview_builder,
     "write_name": check_write_name,
+    "example_placeholders": check_example_placeholders,
 }
 
 
-def check_operation(op: OperationContract) -> dict[str, list[str]]:
-    """Return the problems of *op*, by rule. A rule with no problem is left out."""
+def check_operation(op: OperationContract, op_ids: Set[str] = frozenset()) -> dict[str, list[str]]:
+    """Return the problems of *op*, by rule. A rule with no problem is left out.
+
+    *op_ids* is every registered operation id, for rule 12. Without it, rule
+    12 finds nothing.
+    """
     result: dict[str, list[str]] = {}
     for rule in RULES:
-        problems = CHECKS[rule](op)
+        if rule == "named_operations_exist":
+            problems = check_named_operations_exist(op, op_ids)
+        else:
+            problems = CHECKS[rule](op)
         if problems:
             result[rule] = problems
     return result
@@ -367,8 +440,9 @@ def compare_with_gaps(
 
 def find_problems(ops: list[OperationContract]) -> dict[Gap, list[str]]:
     found: dict[Gap, list[str]] = {}
+    op_ids = {op.op_id for op in ops}
     for op in ops:
-        for rule, problems in check_operation(op).items():
+        for rule, problems in check_operation(op, op_ids).items():
             found[(op.connector, op.op_id, rule)] = problems
     return found
 
@@ -436,7 +510,7 @@ async def _registered_operations() -> list[OperationContract]:
 
 @pytest.mark.asyncio
 async def test_operation_contracts_match_the_gap_list() -> None:
-    """Every hand-written operation meets the ten rules, or its gap is in the list."""
+    """Every hand-written operation meets the twelve rules, or its gap is in the list."""
     ops = await _registered_operations()
     assert ops, "no typed or multi-step operation was registered"
 
@@ -444,6 +518,11 @@ async def test_operation_contracts_match_the_gap_list() -> None:
     seen_connectors = {op.connector for op in ops}
     unknown = {connector for connector, _, _ in gaps} - seen_connectors
     assert not unknown, f"the gap list names connectors that registered nothing: {sorted(unknown)}"
+
+    not_ops = sorted(set(NAMES_THAT_ARE_NOT_OPERATIONS) & {op.op_id for op in ops})
+    assert not not_ops, (
+        f"registered operations; remove from NAMES_THAT_ARE_NOT_OPERATIONS: {not_ops}"
+    )
 
     messages = compare_with_gaps(find_problems(ops), gaps)
     assert not messages, (

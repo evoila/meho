@@ -17,6 +17,7 @@ from meho_backplane.operations._validate import validate_params
 from tests.test_operation_contracts import (
     DESCRIPTION_MAX,
     GAPS_FILE,
+    NAMES_THAT_ARE_NOT_OPERATIONS,
     READS_WITH_A_WRITE_WORD,
     SUMMARY_MAX,
     OperationContract,
@@ -36,7 +37,7 @@ _GOOD_PARAMS: Final[dict[str, Any]] = {
         },
     },
     "required": ["vm"],
-    "examples": [{"vm": "vm-1", "spec": {"cpu": 2}}],
+    "examples": [{"vm": "<vm-id>", "spec": {"cpu": 2}}],
 }
 
 
@@ -277,6 +278,132 @@ def test_a_change_may_carry_a_write_word() -> None:
     assert check_operation(_good_op(op_id="fake.vm.power.start")) == {}
 
 
+def _with_example(value: object) -> OperationContract:
+    return _good_op(parameter_schema={**_GOOD_PARAMS, "examples": [{"vm": value}]})
+
+
+def test_a_vendor_id_in_an_example_fails_and_a_placeholder_passes() -> None:
+    problems = _only_rule(_with_example("vm-42"), "example_placeholders")
+    assert problems == [
+        "example 0 field 'vm' has the real-looking value 'vm-42'; use a placeholder such as <vm-id>"
+    ]
+    assert check_operation(_with_example("<vm-id>")) == {}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "host-12",
+        "domain-c8",
+        "datastore-15",
+        "resgroup-8",
+        "group-v3",
+        "10.0.0.1",
+        "https://172.16.4.20:443/sdk",
+        "10.20.0.0/16",
+        "fe80::1",
+        "[2a00:1450::1]:443",
+        "vcenter.corp.com",
+        "esx-01.lab.local",
+        "nas.home.lan",
+        "Admin@Example.NET.local",
+        "3f2b8c1e-6a4d-4e2f-9b7a-1c5d8e9f0a21",
+        "00000000-0000-4000-8000-000000000001",
+        "<vm-id> on host-12",
+    ],
+)
+def test_a_real_looking_value_fails(value: str) -> None:
+    problems = _only_rule(_with_example(value), "example_placeholders")
+    assert len(problems) == 1, problems
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "<vm-id>",
+        "https://<vcenter-host>/api/vcenter/vm/<vm-id>",
+        "192.0.2.10",
+        "198.51.100.0/24",
+        "203.0.113.7",
+        "2001:db8::1",
+        "vcenter.example.com",
+        "ntp.example.org",
+        "web-01.example.net",
+        "appliance.example.test",
+        "server.example",
+        "log.example.invalid",
+        "00000000-0000-0000-0000-000000000000",
+        "summary.capacity",
+        "Microsoft.Compute",
+        "lib.json",
+        "10:30:00",
+        "00:50:56:aa:bb:cc",
+        "my-vm-42",
+        "administrator@vsphere.local",
+        "https://kubernetes.default.svc.cluster.local",
+    ],
+)
+def test_a_placeholder_or_documentation_value_passes(value: str) -> None:
+    assert check_operation(_with_example(value)) == {}
+
+
+def test_a_real_looking_value_deep_in_an_example_names_its_field() -> None:
+    params = {
+        **_GOOD_PARAMS,
+        "examples": [
+            {"vm": "<vm-id>"},
+            {"vm": "<vm-id>", "spec": {"cpu": 2, "tags": ["a", "10.1.1.1"]}},
+        ],
+    }
+    problems = _only_rule(_good_op(parameter_schema=params), "example_placeholders")
+    assert problems == [
+        "example 1 field 'spec.tags[1]' has the real-looking value '10.1.1.1'; "
+        "use a placeholder such as <vm-id>"
+    ]
+
+
+def _guidance(next_step: str) -> dict[str, str]:
+    return {
+        "when_to_call": "To change CPUs.",
+        "output_shape": "The VM id.",
+        "next_step": next_step,
+        "preconditions": "The VM is powered off.",
+    }
+
+
+_OP_IDS: Final[frozenset[str]] = frozenset({"fake.vm.update", "fake.vm.get", "net.dns_lookup"})
+
+
+def test_guidance_that_names_an_unregistered_operation_fails() -> None:
+    op = _good_op(
+        llm_instructions=_guidance("Read it back with ``fake.vm.read`` or `fake.vm.get`.")
+    )
+    assert check_operation(op, _OP_IDS) == {
+        "named_operations_exist": [
+            "guidance names 'fake.vm.read', which is not a registered operation"
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    "next_step",
+    [
+        "Read the VM back with `fake.vm.get`.",
+        "Check `power_state` and `summary.cpu` in the answer.",
+        "Look at `fake.vm.get(vm)` output.",
+        f"The setting `{next(iter(NAMES_THAT_ARE_NOT_OPERATIONS))}` is a kernel key.",
+        "Then call fake.vm.remove, named without backticks.",
+    ],
+)
+def test_guidance_that_names_only_registered_operations_passes(next_step: str) -> None:
+    assert check_operation(_good_op(llm_instructions=_guidance(next_step)), _OP_IDS) == {}
+
+
+def test_without_the_registry_rule_12_finds_nothing() -> None:
+    op = _good_op(llm_instructions=_guidance("Then call `fake.vm.remove`."))
+    assert check_operation(op) == {}
+
+
 def test_a_new_gap_and_a_gone_gap_each_name_the_operation_and_rule() -> None:
     problems = {("vmware-rest", "fake.vm.update", "examples"): ["no example"]}
     known = {("nsx-rest", "fake.segment.list", "summary")}
@@ -292,7 +419,7 @@ def test_a_new_gap_and_a_gone_gap_each_name_the_operation_and_rule() -> None:
 _NESTED_FIELD_NO_DESCRIPTION: Final[dict[str, Any]] = {
     **_GOOD_PARAMS,
     "properties": {"vm": {"type": "object", "description": "VM.", "properties": {"id": {}}}},
-    "examples": [{"vm": {"id": "vm-1"}}],
+    "examples": [{"vm": {"id": "<vm-id>"}}],
 }
 
 
@@ -307,6 +434,11 @@ _NESTED_FIELD_NO_DESCRIPTION: Final[dict[str, Any]] = {
         ({"requires_approval": False}, "requires_approval"),
         ({"safety_level": "destructive"}, "preview_builder"),
         ({"safety_level": "safe", "requires_approval": False}, "write_name"),
+        (
+            {"parameter_schema": {**_GOOD_PARAMS, "examples": [{"vm": "vm-42"}]}},
+            "example_placeholders",
+        ),
+        ({"llm_instructions": _guidance("Then call `fake.vm.remove`.")}, "named_operations_exist"),
     ],
 )
 def test_each_bad_operation_fails_with_a_message_naming_operation_and_rule(

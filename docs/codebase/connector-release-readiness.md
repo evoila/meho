@@ -259,7 +259,7 @@ connector. It reads what MEHO registers at start-up and calls no vendor
 system. It runs in the normal unit test sweep. A new connector is covered
 as soon as its registrar runs; nothing needs to be added to the test.
 
-The ten rules (the rule name is in brackets):
+The twelve rules (the rule name is in brackets):
 
 1. A one-line summary of at most 120 characters, and a description of at
    most 300 characters. Longer guidance goes into `llm_instructions`.
@@ -292,6 +292,27 @@ The ten rules (the rule name is in brackets):
     holds a write word (for example `mssql.ha.sync-health`) goes into
     `READS_WITH_A_WRITE_WORD` at the top of the test, with a one-line
     reason. (`write_name`)
+11. No example value looks real, because an AI copies example values
+    into real calls. A value fails when it holds an IP address outside
+    the documentation ranges (`192.0.2.0/24`, `198.51.100.0/24`,
+    `203.0.113.0/24`, `2001:db8::/32`), a host name with a real top-level
+    domain (`.com`, `.net`, `.local`, `.lan`, ...; `example.com`,
+    `example.org`, `.test`, `.example` and `.invalid` are fine), a
+    vSphere-style object id (`vm-42`, `host-12`, `domain-c8`,
+    `datastore-15`, `resgroup-8`, `group-v3`) or a UUID other than the
+    all-zero one. A placeholder in angle brackets, such as `<vm-id>`,
+    always passes. A few public vendor names (for example
+    `management.azure.com` or `vsphere.local`, the default sign-on
+    domain) are in `PUBLIC_EXAMPLE_NAMES` in
+    `backend/tests/operation_contract_values.py`, each with a reason.
+    (`example_placeholders`)
+12. Every operation id that the guidance (`llm_instructions`) names in
+    backticks is a registered operation. A name in backticks counts as an
+    operation id when it has the shape `a.b` and its first part is the
+    first part of a registered id (`k8s.`, `vmware.`, `net.`). A name of
+    that shape that is not an operation (for example the Linux setting
+    `net.ipv4.ip_forward`) goes into `NAMES_THAT_ARE_NOT_OPERATIONS` at
+    the top of the test, with a reason. (`named_operations_exist`)
 
 Ingested (generic) operations are not checked here. Their safety level
 comes from the HTTP method and the connector's safety floor, for example
@@ -316,7 +337,7 @@ To shrink the list: fix the operation's texts or schemas, run
 `cd backend && uv run pytest tests/test_operation_contracts.py`,
 and delete the entries the test reports as fixed.
 
-A new connector should meet all ten rules from the start, so it adds
+A new connector should meet all twelve rules from the start, so it adds
 nothing to the gap list. Every operation states `safety_level` and
 `requires_approval` in its own spec; no connector keeps a default for
 them in its spec class or registrar.

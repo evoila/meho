@@ -5800,7 +5800,7 @@ HOST_SERVICE_CONTROL_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["service", "action"],
     "additionalProperties": False,
-    "examples": [{"host": "host-21", "service": "TSM-SSH", "action": "start", "policy": "off"}],
+    "examples": [{"host": "<host-id>", "service": "TSM-SSH", "action": "start", "policy": "off"}],
 }
 
 

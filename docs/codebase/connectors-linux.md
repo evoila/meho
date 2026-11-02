@@ -215,10 +215,16 @@ tokens), the etcd data under `/var/lib/etcd`, the Docker container config
 files (`/var/lib/docker/containers/*/config.v2.json`), NetworkManager
 connection files, `/etc/wireguard`, `/etc/ipsec.secrets`,
 `/etc/ipsec.d/private`, `/etc/sssd/sssd.conf`, `/var/lib/sss/secrets`,
-`/run/secrets`, and any `*.key`, `*.keytab`, `*.p12`, `*.pfx`, `id_rsa`, `id_dsa`,
-`id_ecdsa`, `id_ed25519` file. Public files next to them (`/etc/passwd`,
-`*.pub`, `/etc/ssl/certs`, RKE2 agent logs, pod logs under
-`/var/log/pods`, Docker container logs) stay readable.
+`/run/secrets`, any `*.key`, `*.keytab`, `*.p12`, `*.pfx`, `id_rsa`, `id_dsa`,
+`id_ecdsa`, `id_ed25519` or `.pgpass` file, every Ceph keyring (`*.keyring`
+and the bare `keyring` file of a monitor or OSD directory), every backup of
+`shadow` and `gshadow` (`shadow-`, `shadow.bak`, `shadow~`), and every path
+that contains `secret` or `credential`. The match ignores upper and lower
+case. Public files next to them (`/etc/passwd`, `*.pub`, `/etc/ssl/certs`,
+`/etc/ceph/ceph.conf`, `/var/log/secure`, RKE2 agent logs, pod logs under
+`/var/log/pods`, Docker container logs) stay readable. A Ceph key inside a
+readable file (`/etc/ceph/ceph.conf`, a log) is hidden by the `ceph_key`
+redaction rule of the default policy (`redaction.md`).
 
 The check runs twice:
 
@@ -504,10 +510,11 @@ connector has no `command.run` verb to extend it to.
   `known_hosts` pin (or the audited `known_hosts_insecure` opt-out) or
   dispatch is refused before connecting. This connector sets no host-key
   policy of its own beyond that inherited default.
-- **`file.read` is confined to read roots but not file-content-denylisted**
-  — a root-SSH operator can already read those trees over raw SSH; the
-  governed path adds audit, and confinement to config/log/state roots is
-  the T1 control. A per-file denylist, if ever wanted, is separate work.
+- **The deny list of `file.read` and `log.tail` is a list of names.** A
+  secret file with a name that is on no pattern (no `secret`, `credential`,
+  `key` or `keyring` in it) under an allowed root is still readable. An
+  allow list with approval for everything else would be the stronger
+  design; it is not built.
 
 ## References
 

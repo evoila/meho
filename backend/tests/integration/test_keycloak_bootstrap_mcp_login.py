@@ -57,6 +57,7 @@ or when the Go toolchain is missing (CI provides all three).
 
 from __future__ import annotations
 
+import ast
 import base64
 import hashlib
 import html
@@ -95,6 +96,11 @@ _GROUP_USER_PASSWORD = "group-user-pass-4590"
 _UPGRADE_REALM = "meho-upgrade"
 _OPT_OUT_REALM = "meho-opt-out"
 _LAB_B_ID = "5d0f7a3e-1c2b-4e8d-9f6a-7b3c2d1e0f9a"
+# Keycloak on a busy CI runner needs more than the httpx default of 5 seconds,
+# most of all to create a realm (it also makes the realm's default roles,
+# clients and keys). Every httpx call in this file passes this timeout; the
+# last test in this file checks that.
+_HTTP_TIMEOUT = httpx.Timeout(60.0)
 
 # The five role groups and what a member must get (docs/decisions/login-role-groups.md).
 _ROLE_GROUPS = {
@@ -122,6 +128,7 @@ def _admin_token(base_url: str) -> str:
             "username": _KC_ADMIN_USER,
             "password": _KC_ADMIN_PASSWORD,
         },
+        timeout=_HTTP_TIMEOUT,
     )
     resp.raise_for_status()
     return str(resp.json()["access_token"])
@@ -140,6 +147,7 @@ def _create_realm_per_docs(base_url: str, realm: str = _REALM) -> None:
         f"{base_url}/admin/realms",
         headers=headers,
         json={"realm": realm, "enabled": True, "sslRequired": "none"},
+        timeout=_HTTP_TIMEOUT,
     ).raise_for_status()
     httpx.post(
         f"{base_url}/admin/realms/{realm}/clients",
@@ -150,6 +158,7 @@ def _create_realm_per_docs(base_url: str, realm: str = _REALM) -> None:
             "standardFlowEnabled": False,
             "directAccessGrantsEnabled": False,
         },
+        timeout=_HTTP_TIMEOUT,
     ).raise_for_status()
 
 
@@ -207,6 +216,7 @@ def _client_uuid(base_url: str, realm: str, client_id: str) -> str:
         f"{base_url}/admin/realms/{realm}/clients",
         headers=_admin_headers(base_url),
         params={"clientId": client_id},
+        timeout=_HTTP_TIMEOUT,
     )
     resp.raise_for_status()
     return str(resp.json()[0]["id"])
@@ -217,6 +227,7 @@ def _client_mappers(base_url: str, realm: str, client_id: str) -> dict[str, dict
     resp = httpx.get(
         f"{base_url}/admin/realms/{realm}/clients/{uuid}/protocol-mappers/models",
         headers=_admin_headers(base_url),
+        timeout=_HTTP_TIMEOUT,
     )
     resp.raise_for_status()
     return {m["name"]: m for m in resp.json()}
@@ -227,6 +238,7 @@ def _group_id(base_url: str, realm: str, name: str) -> str:
         f"{base_url}/admin/realms/{realm}/groups",
         headers=_admin_headers(base_url),
         params={"search": name},
+        timeout=_HTTP_TIMEOUT,
     )
     resp.raise_for_status()
     return str(next(g["id"] for g in resp.json() if g["name"] == name))
@@ -249,11 +261,13 @@ def _create_user(base_url: str, username: str, group: str | None, *more: str) ->
                 {"type": "password", "value": _GROUP_USER_PASSWORD, "temporary": False}
             ],
         },
+        timeout=_HTTP_TIMEOUT,
     ).raise_for_status()
     found = httpx.get(
         f"{base_url}/admin/realms/{_REALM}/users",
         headers=headers,
         params={"username": username, "exact": "true"},
+        timeout=_HTTP_TIMEOUT,
     )
     found.raise_for_status()
     user_id = str(found.json()[0]["id"])
@@ -262,6 +276,7 @@ def _create_user(base_url: str, username: str, group: str | None, *more: str) ->
             f"{base_url}/admin/realms/{_REALM}/users/{user_id}/groups/"
             f"{_group_id(base_url, _REALM, name)}",
             headers=headers,
+            timeout=_HTTP_TIMEOUT,
         ).raise_for_status()
     return user_id
 
@@ -278,6 +293,7 @@ def _example_access_token(base_url: str, client_id: str, user_id: str) -> dict:
         "/evaluate-scopes/generate-example-access-token",
         headers=_admin_headers(base_url),
         params={"userId": user_id, "scope": "openid"},
+        timeout=_HTTP_TIMEOUT,
     )
     resp.raise_for_status()
     return dict(resp.json())
@@ -332,7 +348,7 @@ def _browser_login(
         jar.update(resp.cookies.items())
         return resp
 
-    with httpx.Client(follow_redirects=False) as client:
+    with httpx.Client(follow_redirects=False, timeout=_HTTP_TIMEOUT) as client:
         page = send(
             client,
             "GET",
@@ -554,11 +570,13 @@ def test_upgrade_replaces_fixed_mappers_and_second_run_changes_nothing(
                     _old_fixed_mapper("tenant-role", "tenant_role", "tenant_admin"),
                 ],
             },
+            timeout=_HTTP_TIMEOUT,
         ).raise_for_status()
     httpx.post(
         f"{fresh_keycloak}/admin/realms/{_UPGRADE_REALM}/groups",
         headers=headers,
         json={"name": "meho-admins"},
+        timeout=_HTTP_TIMEOUT,
     ).raise_for_status()
 
     first = _run_bootstrap(meho_binary, fresh_keycloak, _UPGRADE_REALM)
@@ -608,6 +626,7 @@ def _cli_sign_in_request(base_url: str, realm: str, scope: str) -> httpx.Respons
             "code_challenge_method": "S256",
         },
         follow_redirects=False,
+        timeout=_HTTP_TIMEOUT,
     )
 
 
@@ -634,6 +653,7 @@ def test_cli_offline_access_zero_removes_the_long_login(
     cli = httpx.get(
         f"{fresh_keycloak}/admin/realms/{_OPT_OUT_REALM}/clients/{cli_uuid}",
         headers=_admin_headers(fresh_keycloak),
+        timeout=_HTTP_TIMEOUT,
     ).json()
     assert "client.offline.session.idle.timeout" not in cli["attributes"]
 
@@ -682,3 +702,28 @@ def test_person_only_in_extra_tenant_gets_no_tenant_id(
     assert claims.get("meho_tenants") == [f"{_LAB_B_ID}:lab-b:Admins"]
     for name in ("tenant_id", "tenant_role", "approver", "platform_admin"):
         assert name not in claims, name
+
+
+def _is_long_timeout(kw: ast.keyword) -> bool:
+    return kw.arg == "timeout" and isinstance(kw.value, ast.Name) and kw.value.id == "_HTTP_TIMEOUT"
+
+
+def test_every_keycloak_call_in_this_file_uses_the_long_timeout() -> None:
+    """A new httpx call without ``timeout=_HTTP_TIMEOUT`` fails here, not on a busy runner.
+
+    The calls made through the ``httpx.Client`` of the browser login
+    inherit its timeout, so only the module-level ``httpx.*`` calls and
+    the client itself are checked.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    offenders = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "httpx"
+        and node.func.attr in {"get", "post", "put", "patch", "delete", "request", "Client"}
+        and not any(_is_long_timeout(kw) for kw in node.keywords)
+    ]
+    assert offenders == [], f"httpx calls without timeout=_HTTP_TIMEOUT at lines {offenders}"

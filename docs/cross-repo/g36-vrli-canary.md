@@ -84,11 +84,16 @@ against the **vRLI v2 API corpus**:
   the ingest against `IngestionPipelineService` is a follow-up to
   G3.6-T5; until it lands, the operator runs this procedure
   manually + the substrate-level dispatch tests live at:
-  - [`backend/tests/test_connectors_vcf_logs_core_ops.py`](../../backend/tests/test_connectors_vcf_logs_core_ops.py)
-    — classifier + curation behavioural suite covering the 7
-    curated ops, the read-only invariant (non-`GET` methods
-    classify as `none`), and the JSONFlux-handle advertisement
-    on `vrli.event.query`.
+  - [`backend/tests/test_connectors_vcf_logs_typed_event_query.py`](../../backend/tests/test_connectors_vcf_logs_typed_event_query.py)
+    — the typed `vrli.event.query` op: that its handler resolves to a
+    connector-bound method, that its signature is typed rather than
+    composite, and that its `llm_instructions` advertise the JSONFlux
+    handle.
+
+    The classifier + curation suite this list used to name covered the 7
+    curated ops and the read-only invariant. It no longer exists: the
+    ingested-curation apparatus was retired in #2362 because it had no
+    production call sites, and its tests went with it.
 - **A Postgres instance with pgvector + FTS extensions.** Local
   development uses the testcontainers fixture; production uses
   the `pgvector/pgvector:pg16`-derived chart image.
@@ -306,7 +311,7 @@ agent reads them by paging the handle with `result_query(handle_id,
 offset, limit)`. Handles are also
 exercised non-interactively via the per-op `llm_instructions` advertising
 the shape (assert covered by
-[`test_vrli_core_groups_event_query_op_is_jsonflux_handle_shaped`](../../backend/tests/test_connectors_vcf_logs_core_ops.py)).
+[`test_event_query_llm_instructions_advertise_the_jsonflux_handle`](../../backend/tests/test_connectors_vcf_logs_typed_event_query.py)).
 
 ## Rollback
 

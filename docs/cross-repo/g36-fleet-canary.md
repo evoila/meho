@@ -72,11 +72,14 @@ the **vRSLCM LCM REST corpus**:
 
   The env-gated **automated** canary acceptance test that drives the
   ingest against `IngestionPipelineService` is a follow-up; until it
-  lands, the operator runs this procedure manually, and the
-  substrate-level curation tests live at
-  [`backend/tests/test_connectors_vcf_fleet_core_ops.py`](../../backend/tests/test_connectors_vcf_fleet_core_ops.py)
-  (classifier rules, read-only invariants, and the SQLite-backed
-  `apply_fleet_core_curation` integration suite).
+  lands, the operator runs this procedure manually.
+
+  The substrate-level coverage is
+  [`backend/tests/test_connectors_vcf_fleet_typed_reads.py`](../../backend/tests/test_connectors_vcf_fleet_typed_reads.py).
+  The curation suite this section used to point at (`apply_fleet_core_curation`,
+  the classifier rules and the read-only invariants) no longer exists: the
+  two-layer ingested-curation apparatus was retired in #2362 because it had
+  no production call sites, and its tests went with it.
 
 - **A Postgres instance with pgvector + FTS extensions.** Local
   development uses the testcontainers fixture; production uses the

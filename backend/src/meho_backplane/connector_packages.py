@@ -27,6 +27,14 @@ allowed when:
 Any other folder stops the start with ``connector_package_not_allowed``.
 Nothing is imported in that case.
 
+Each listed package must also say which versions of the connector kit
+(``meho-connector-kit``) it fits: a version range in its installed
+metadata (``Requires-Dist``). A package with no range, or with a range
+that the kit of this image does not meet, stops the start with
+``connector_package_kit_mismatch``. Nothing is imported in that case
+either. The overlay build already refuses both cases, so this only
+happens with an image made in another way.
+
 The allowlist file (:data:`CONNECTOR_PACKAGES_FILE`) is written by the
 build of an overlay image. The plain public image has none, so only the
 built-in folders are allowed there.
@@ -63,11 +71,15 @@ from typing import Annotated, Final
 from urllib.parse import unquote, urlsplit
 
 import structlog
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.specifiers import SpecifierSet
+from packaging.utils import canonicalize_name
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 __all__ = [
     "BUILTIN_DISTRIBUTION",
     "CONNECTOR_PACKAGES_FILE",
+    "KIT_DISTRIBUTION",
     "ConnectorPackage",
     "ConnectorPackageError",
     "check_connector_folders",
@@ -85,6 +97,9 @@ CONNECTOR_PACKAGES_FILE: Path = Path("/app/connector-packages.json")
 
 BUILTIN_DISTRIBUTION: str = "meho-backplane"
 """The distribution whose connector folders are built in."""
+
+KIT_DISTRIBUTION: str = "meho-connector-kit"
+"""The connector kit. Every listed package names the range of its versions that it fits."""
 
 _PYCACHE: Final[str] = "__pycache__"
 
@@ -222,11 +237,61 @@ class _Installed:
         return True
 
 
+def _kit_version() -> str | None:
+    """The version of the connector kit in this image, or ``None`` when it has none."""
+    try:
+        return metadata.version(KIT_DISTRIBUTION)
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def _kit_range(dist: metadata.Distribution) -> SpecifierSet:
+    """The range of the connector kit that *dist* names in its metadata (empty when none).
+
+    A ``Requires-Dist`` value counts when it names the kit with a version
+    range, and has no link and no environment marker, the same rule as the
+    overlay build. Several such values all apply.
+    """
+    kit_range = SpecifierSet()
+    for value in dist.requires or ():
+        try:
+            requirement = Requirement(value)
+        except InvalidRequirement:
+            continue
+        if (
+            canonicalize_name(requirement.name) == KIT_DISTRIBUTION
+            and requirement.url is None
+            and requirement.marker is None
+        ):
+            kit_range &= requirement.specifier
+    return kit_range
+
+
+def _check_kit_range(dist: metadata.Distribution, name: str, kit_version: str | None) -> None:
+    """Stop the start unless the package names a kit range that the image's kit meets."""
+    kit_range = _kit_range(dist)
+    have = "no connector kit" if kit_version is None else f"connector kit {kit_version}"
+    if not kit_range:
+        raise ConnectorPackageError(
+            f"connector_package_kit_mismatch: the connector package {name!r} does not say which "
+            f"versions of the connector kit ({KIT_DISTRIBUTION}) it fits. This image has "
+            f"{have}. MEHO does not import the package. Build it again with a kit range in "
+            "its dependencies."
+        )
+    if kit_version is None or not kit_range.contains(kit_version, installed=True):
+        raise ConnectorPackageError(
+            f"connector_package_kit_mismatch: the connector package {name!r} fits the connector "
+            f"kit {KIT_DISTRIBUTION}{kit_range}, but this image has {have}. MEHO does not "
+            "import the package. Use a version of the package that fits this image."
+        )
+
+
 def _listed_folders(
     packages: list[ConnectorPackage], connectors_dir: Path, path: Path
 ) -> dict[str, str]:
     """Check each listed package against what is installed; map folder -> package name."""
     listed: dict[str, str] = {}
+    kit_version = _kit_version() if packages else None
     for package in packages:
         try:
             dist = metadata.distribution(package.name)
@@ -241,6 +306,7 @@ def _listed_folders(
                 f"in {path} with version {package.version!r}, but version {dist.version!r} "
                 "is installed."
             )
+        _check_kit_range(dist, package.name, kit_version)
         installed = _Installed(dist, connectors_dir)
         for folder in package.folders:
             if not installed.owns(connectors_dir, folder):

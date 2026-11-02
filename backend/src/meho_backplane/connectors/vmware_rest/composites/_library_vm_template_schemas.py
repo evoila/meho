@@ -3,7 +3,7 @@
 
 """Parameters, answers and AI guidance of the three VM-template library changes.
 
-The handlers are in :mod:`._vm_template`. Kept apart so each file stays small.
+The handlers are in :mod:`._library_vm_template`. Kept apart so each file stays small.
 """
 
 from __future__ import annotations

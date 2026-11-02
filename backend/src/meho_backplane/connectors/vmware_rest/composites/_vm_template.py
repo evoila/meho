@@ -1,548 +1,302 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""VM templates in a content library: deploy a VM, check out, check in.
+"""Turn a VM into a template and back -- ``vm.template.mark`` and ``vm.template.unmark``.
 
-Three ``dangerous`` changes on a content-library item that holds a VM
-template (the vendor ``Vcenter.VmTemplate.LibraryItems`` API). Each waits for
-approval (``requires_approval=True``); an agent needs a grant.
+vCenter's REST API has no call for this, so both use the VIM API as VI-JSON:
 
-* ``vmware.composite.library.vm_template.deploy`` --
-  ``POST /vcenter/vm-template/library-items/{item}?action=deploy`` with a
-  ``DeploySpec`` (name, placement, storage, power-on, guest customization
-  spec). vCenter answers with the new VM id when the copy is done. MEHO reads
-  the VM back.
-* ``vmware.composite.library.vm_template.check_out`` --
-  ``POST .../check-outs?action=check-out`` with a ``CheckOutSpec``. vCenter
-  makes a VM from the template to edit and answers with its id. The vendor
-  API needs the ``placement`` object; MEHO always sends it, empty when the
-  caller names no placement, and then the VM goes where the template is.
-  MEHO reads the check-out and the VM back.
-* ``vmware.composite.library.vm_template.check_in`` --
-  ``POST .../check-outs/{vm}?action=check-in`` with a ``CheckInSpec``
-  (``message``). The VM becomes the new template version; vCenter keeps the
-  previous one as a backup and answers with the new version. MEHO reads the
-  template back.
+* ``vmware.composite.vm.template.mark`` (``dangerous``) --
+  ``VirtualMachine.MarkAsTemplate``. The VM must be powered off; a template
+  answers ``unchanged``.
+* ``vmware.composite.vm.template.unmark`` (``dangerous``) --
+  ``VirtualMachine.MarkAsVirtualMachine`` with a resource pool and an
+  optional host. A VM that is no template answers ``unchanged``.
 
-The ``/api`` surface takes each ``*Spec`` at the top level of the body
-(not under ``spec``). Every input is an id, never a name, so the approved
-run changes exactly what the approver saw. vCenter answers HTTP 400 when it
-refuses and HTTP 404 when something does not exist; the answer is then
-``refused`` or ``not_found`` with vCenter's reason, and nothing changed.
-
-Each change is one synchronous call: vCenter copies the template's disks
-(deploy, check-out) or saves the VM as the new version (check-in) and holds
-the request open until it is done. A large template takes longer than the
-default HTTP timeout, so every change uses the long deploy timeout of
-``vm.clone`` (:data:`._write._LIBRARY_ITEM_DEPLOY_TIMEOUT`). Otherwise MEHO
-would report a failure while vCenter still creates the VM.
-
-All calls go through the shared write seam (:func:`._write._write_sub_op`)
-on the connector session, so the changes need no catalog ingest and work on
-vCenter 8 and 9 alike. The registry in ``_register.py`` collects
-:data:`COMPOSITES`; each row carries its preview builder and its child calls.
+Both calls are synchronous (no vCenter task). After the call MEHO reads the
+VM again and answers ``marked`` / ``unmarked`` only when ``config.template``
+reads back as asked. Shared parts: :mod:`._vm_lifecycle`; schemas:
+:mod:`._vm_lifecycle_schemas`; the registry in ``_register.py`` only splats
+:data:`VM_TEMPLATE_COMPOSITES`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Final
 
-import httpx
-
-from meho_backplane.connectors.vmware_rest.composites._library_checks import id_problem
 from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
-from meho_backplane.connectors.vmware_rest.composites._vm_template_schemas import (
-    CHECK_IN_LLM_INSTRUCTIONS,
-    CHECK_IN_PARAMETER_SCHEMA,
-    CHECK_IN_RESPONSE_SCHEMA,
-    CHECK_OUT_LLM_INSTRUCTIONS,
-    CHECK_OUT_PARAMETER_SCHEMA,
-    CHECK_OUT_RESPONSE_SCHEMA,
-    DEPLOY_LLM_INSTRUCTIONS,
-    DEPLOY_PARAMETER_SCHEMA,
-    DEPLOY_RESPONSE_SCHEMA,
+from meho_backplane.connectors.vmware_rest.composites._teardown import (
+    STATUS_INVALID_REQUEST,
+    STATUS_PRECONDITION_FAILED,
+    STATUS_UNCHANGED,
 )
-from meho_backplane.connectors.vmware_rest.composites._write import (
-    _LIBRARY_ITEM_DEPLOY_TIMEOUT,
-    _OP_DEPLOY_LIBRARY_VM,
-    _OP_GET_VM,
-    _parse_vsphere_error,
-    _read_sub_op,
-    _unwrap_value,
-    _vsphere_fault_detail,
-    _write_sub_op,
+from meho_backplane.connectors.vmware_rest.composites._teardown_reads import moid_problem
+from meho_backplane.connectors.vmware_rest.composites._vm_lifecycle import (
+    _VIM_SUB_OPS_VM_TEMPLATE_MARK,
+    _VIM_SUB_OPS_VM_TEMPLATE_UNMARK,
+    OP_MARK_AS_TEMPLATE,
+    OP_MARK_AS_VIRTUAL_MACHINE,
+    POWERED_OFF,
+    STATUS_NOT_CONFIRMED,
+    STATUS_NOT_FOUND,
+    read_vm,
+    run_vim_change,
 )
-from meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware import check_vm_moid
+from meho_backplane.connectors.vmware_rest.composites._vm_lifecycle_schemas import (
+    RESOURCE_POOL_MOID_PATTERN,
+    VM_TEMPLATE_MARK_LLM_INSTRUCTIONS,
+    VM_TEMPLATE_MARK_PARAMETER_SCHEMA,
+    VM_TEMPLATE_MARK_RESPONSE_SCHEMA,
+    VM_TEMPLATE_UNMARK_LLM_INSTRUCTIONS,
+    VM_TEMPLATE_UNMARK_PARAMETER_SCHEMA,
+    VM_TEMPLATE_UNMARK_RESPONSE_SCHEMA,
+)
+from meho_backplane.connectors.vmware_rest.composites.schemas import (
+    HOST_MOID_PATTERN,
+    VM_MOID_PATTERN,
+)
+from meho_backplane.connectors.vmware_rest.vim_body import vim_moref
+from meho_backplane.operations._preview import (
+    PreviewContext,
+    preview_failure_reason,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors import OperationResult
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
-    from meho_backplane.operations._preview import PreviewContext
 
 __all__ = [
     "COMPOSITES",
-    "OP_ID_CHECK_IN",
-    "OP_ID_CHECK_OUT",
-    "OP_ID_DEPLOY",
-    "SUB_OPS_CHECK_IN",
-    "SUB_OPS_CHECK_OUT",
-    "SUB_OPS_DEPLOY",
-    "vm_template_check_in_composite",
-    "vm_template_check_out_composite",
-    "vm_template_deploy_composite",
+    "unmark_body",
+    "vm_template_mark_composite",
+    "vm_template_unmark_composite",
 ]
 
-OP_ID_DEPLOY: Final = "vmware.composite.library.vm_template.deploy"
-OP_ID_CHECK_OUT: Final = "vmware.composite.library.vm_template.check_out"
-OP_ID_CHECK_IN: Final = "vmware.composite.library.vm_template.check_in"
+OP_ID_VM_TEMPLATE_MARK: Final = "vmware.composite.vm.template.mark"
+OP_ID_VM_TEMPLATE_UNMARK: Final = "vmware.composite.vm.template.unmark"
 
-_ITEM_PATH: Final = "/vcenter/vm-template/library-items/{templateLibraryItem}"
-_OP_CHECK_OUT: Final = f"POST:{_ITEM_PATH}/check-outs?action=check-out"
-_OP_CHECK_IN: Final = f"POST:{_ITEM_PATH}/check-outs/{{vm}}?action=check-in"
-_OP_GET_TEMPLATE: Final = f"GET:{_ITEM_PATH}"
-_OP_GET_CHECK_OUT: Final = f"GET:{_ITEM_PATH}/check-outs/{{vm}}"
-
-#: Every REST call of each change. The reconcile test checks them against the
-#: pinned vCenter 8.0 and 9.0 API files; the rows list them as their child
-#: calls, for the grant set.
-SUB_OPS_DEPLOY: Final[tuple[str, ...]] = (_OP_DEPLOY_LIBRARY_VM, _OP_GET_VM)
-SUB_OPS_CHECK_OUT: Final[tuple[str, ...]] = (_OP_CHECK_OUT, _OP_GET_CHECK_OUT, _OP_GET_VM)
-SUB_OPS_CHECK_IN: Final[tuple[str, ...]] = (_OP_CHECK_IN, _OP_GET_TEMPLATE)
-
-_PLACEMENT_KEYS: Final[tuple[str, ...]] = ("folder", "resource_pool", "host", "cluster")
+STATUS_MARKED: Final = "marked"
+STATUS_UNMARKED: Final = "unmarked"
 
 
-def _mapping(value: Any) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}
-
-
-def _text(value: Any) -> str | None:
-    return value if isinstance(value, str) else None
-
-
-def _int(value: Any) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
-def _count(value: Any) -> int | None:
-    return len(value) if isinstance(value, (Mapping, list)) else None
-
-
-def _template_item(params: Mapping[str, Any]) -> str:
-    """The template item id; refuse anything that is not a UUID before it reaches a path."""
-    item = params["template_library_item"]
-    problem = id_problem(item, "template_library_item")
-    if problem is not None:
-        raise ValueError(problem)
-    return str(item)
-
-
-def _placement(params: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: params[key] for key in _PLACEMENT_KEYS if isinstance(params.get(key), str)}
-
-
-def _vendor_answer(envelope: dict[str, Any], exc: httpx.HTTPError) -> dict[str, Any] | None:
-    """vCenter HTTP 400 is ``refused`` and 404 is ``not_found``; anything else is ``None``."""
-    status, error_type = _parse_vsphere_error(exc)
-    if status == 400:
-        word, text = "refused", "vCenter refused the change, nothing changed"
-    elif status == 404:
-        word, text = "not_found", "vCenter did not find the item, the VM or a placement object"
-    else:
-        return None
-    return {
-        **envelope,
-        "status": word,
-        "error_type": error_type,
-        "guidance": f"{text}: {_vsphere_fault_detail(exc)}",
+def _envelope(vm: str, status: str | None, **fields: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "status": status,
+        "vm": vm,
+        "before": None,
+        "after": None,
+        "task": None,
+        "guidance": None,
     }
+    out.update(fields)
+    return out
 
 
-async def _send(
+def _input_problem(params: dict[str, Any]) -> str | None:
+    problem = moid_problem(params.get("vm"), VM_MOID_PATTERN, "vm")
+    if problem is None and "resource_pool" in params:
+        problem = moid_problem(params["resource_pool"], RESOURCE_POOL_MOID_PATTERN, "resource_pool")
+    if problem is None and params.get("host") is not None:
+        problem = moid_problem(params["host"], HOST_MOID_PATTERN, "host")
+    return problem
+
+
+async def _precheck(
     connector: VmwareRestConnector,
     target: Any,
     operator: Operator,
+    params: dict[str, Any],
     *,
-    op_id: str,
-    params: dict[str, Any],
-    envelope: dict[str, Any],
-) -> tuple[dict[str, Any] | OperationResult | None, Any]:
-    """Send one governed write. Returns ``(early answer, None)`` or ``(None, payload)``.
-
-    vCenter holds each of these calls open until the copy or the save is done
-    (#3076), so every one gets the long deploy timeout.
-    """
-    try:
-        gate, payload = await _write_sub_op(
-            connector, target, operator, op_id, params, timeout=_LIBRARY_ITEM_DEPLOY_TIMEOUT
+    to_template: bool,
+) -> dict[str, Any]:
+    """The envelope the handler stops with, or one with ``status=None`` to go on."""
+    vm = params["vm"]
+    problem = _input_problem(params)
+    if problem is not None:
+        return _envelope(vm, STATUS_INVALID_REQUEST, guidance=problem)
+    before = await read_vm(connector, target, operator, vm)
+    if before is None:
+        return _envelope(vm, STATUS_NOT_FOUND, guidance=f"no VM {vm!r}; pass a VM id such as vm-42")
+    if before["is_template"] is to_template:
+        state = "a template" if to_template else "not a template"
+        return _envelope(
+            vm,
+            STATUS_UNCHANGED,
+            before=before,
+            after=before,
+            guidance=f"the VM is {state} already; nothing was sent",
         )
-    except httpx.HTTPError as exc:
-        answer = _vendor_answer(envelope, exc)
-        if answer is None:
-            raise
-        return answer, None
-    if gate is not None:
-        return gate, None
-    return None, _unwrap_value(payload)
+    if to_template and before["power_state"] != POWERED_OFF:
+        state = before["power_state"] or "in an unknown power state"
+        return _envelope(
+            vm,
+            STATUS_PRECONDITION_FAILED,
+            before=before,
+            guidance=f"the VM is {state}; power it off first",
+        )
+    return _envelope(vm, None, before=before)
 
 
-async def _read_back(
-    connector: VmwareRestConnector,
-    target: Any,
-    operator: Operator,
-    op_id: str,
-    params: dict[str, Any],
-) -> tuple[Mapping[str, Any] | None, str | None]:
-    """One read after the change: ``(answer, None)``, or ``(None, why it failed)``."""
-    try:
-        payload = await _read_sub_op(connector, target, operator, op_id, params)
-    except httpx.HTTPError as exc:
-        return None, f"read back failed: {_vsphere_fault_detail(exc)}"
-    return _mapping(_unwrap_value(payload)), None
-
-
-def _vm_row(info: Mapping[str, Any]) -> dict[str, Any]:
-    """Project a vendor ``VM.Info``. The wire uses ``guest_OS`` / ``size_MiB``."""
-    cpu = _mapping(info.get("cpu"))
-    memory = _mapping(info.get("memory"))
-    return {
-        "name": _text(info.get("name")),
-        "power_state": _text(info.get("power_state")),
-        "guest_os": _text(info.get("guest_OS", info.get("guest_os"))),
-        "cpu_count": _int(cpu.get("count")),
-        "memory_mib": _int(memory.get("size_MiB", memory.get("size_mib"))),
-    }
-
-
-def _template_row(info: Mapping[str, Any]) -> dict[str, Any]:
-    """Project a vendor ``VmTemplate.LibraryItems.Info``."""
-    cpu = _mapping(info.get("cpu"))
-    memory = _mapping(info.get("memory"))
-    return {
-        "vm_template": _text(info.get("vm_template")),
-        "guest_os": _text(info.get("guest_OS", info.get("guest_os"))),
-        "cpu_count": _int(cpu.get("count")),
-        "cores_per_socket": _int(cpu.get("cores_per_socket")),
-        "memory_mib": _int(memory.get("size_MiB", memory.get("size_mib"))),
-        "disk_count": _count(info.get("disks")),
-        "nic_count": _count(info.get("nics")),
-    }
-
-
-async def _vm_info(
-    connector: VmwareRestConnector, target: Any, operator: Operator, vm: str
-) -> tuple[dict[str, Any] | None, str | None]:
-    info, note = await _read_back(connector, target, operator, _OP_GET_VM, {"vm": vm})
-    return (None if info is None else _vm_row(info)), note
-
-
-def _new_vm_id(payload: Any, what: str) -> str:
-    if not isinstance(payload, str):
-        raise RuntimeError(f"{what}: vCenter answered without a VM id ({type(payload).__name__})")
-    return check_vm_moid(payload)
-
-
-# ---------------------------------------------------------------------------
-# library.vm_template.deploy
-# ---------------------------------------------------------------------------
-
-
-def _deploy_body(params: Mapping[str, Any]) -> dict[str, Any]:
-    """The ``DeploySpec``, top level, from the operation parameters."""
-    body: dict[str, Any] = {
-        "name": params["name"],
-        "placement": _placement(params),
-        "powered_on": bool(params.get("powered_on", False)),
-    }
-    if isinstance(params.get("description"), str):
-        body["description"] = params["description"]
-    datastore = params.get("datastore")
-    if isinstance(datastore, str):
-        body["vm_home_storage"] = {"datastore": datastore}
-        body["disk_storage"] = {"datastore": datastore}
-    spec_name = params.get("customization_spec_name")
-    if isinstance(spec_name, str):
-        body["guest_customization"] = {"name": spec_name}
+def unmark_body(params: dict[str, Any]) -> dict[str, Any]:
+    """The ``MarkAsVirtualMachine`` request body: the pool, and the host when given."""
+    body: dict[str, Any] = {"pool": vim_moref("ResourcePool", params["resource_pool"])}
+    if params.get("host") is not None:
+        body["host"] = vim_moref("HostSystem", params["host"])
     return body
 
 
-async def vm_template_deploy_composite(
-    *,
-    operator: Operator,
-    target: Any,
-    params: dict[str, Any],
+async def _change(
     connector: VmwareRestConnector,
-) -> dict[str, Any] | OperationResult:
-    """Deploy a VM from a VM-template library item. Op-id: ``library.vm_template.deploy``."""
-    item = _template_item(params)
-    envelope: dict[str, Any] = {
-        "template_library_item": item,
-        "vm": None,
-        "vm_info": None,
-        "read_note": None,
-        "error_type": None,
-        "guidance": None,
-    }
-    early, payload = await _send(
-        connector,
-        target,
-        operator,
-        op_id=_OP_DEPLOY_LIBRARY_VM,
-        params={"templateLibraryItem": item, **_deploy_body(params)},
-        envelope=envelope,
-    )
-    if early is not None:
-        return early
-    vm = _new_vm_id(payload, OP_ID_DEPLOY)
-    info, note = await _vm_info(connector, target, operator, vm)
-    return {**envelope, "status": "deployed", "vm": vm, "vm_info": info, "read_note": note}
-
-
-# ---------------------------------------------------------------------------
-# library.vm_template.check_out
-# ---------------------------------------------------------------------------
-
-
-async def vm_template_check_out_composite(
-    *,
-    operator: Operator,
     target: Any,
-    params: dict[str, Any],
-    connector: VmwareRestConnector,
-) -> dict[str, Any] | OperationResult:
-    """Check a VM template out as a VM to edit. Op-id: ``library.vm_template.check_out``."""
-    item = _template_item(params)
-    envelope: dict[str, Any] = {
-        "template_library_item": item,
-        "vm": None,
-        "check_out": None,
-        "vm_info": None,
-        "read_note": None,
-        "error_type": None,
-        "guidance": None,
-    }
-    # The vendor API needs ``placement``; an empty object means "where the
-    # template is" for the folder, the resource pool and the host.
-    body: dict[str, Any] = {
-        "name": params["name"],
-        "placement": _placement(params),
-        "powered_on": bool(params.get("powered_on", False)),
-    }
-    early, payload = await _send(
-        connector,
-        target,
-        operator,
-        op_id=_OP_CHECK_OUT,
-        params={"templateLibraryItem": item, **body},
-        envelope=envelope,
-    )
-    if early is not None:
-        return early
-    vm = _new_vm_id(payload, OP_ID_CHECK_OUT)
-    check_out, note = await _read_back(
-        connector, target, operator, _OP_GET_CHECK_OUT, {"templateLibraryItem": item, "vm": vm}
-    )
-    info, vm_note = await _vm_info(connector, target, operator, vm)
-    return {
-        **envelope,
-        "status": "checked_out",
-        "vm": vm,
-        "check_out": (
-            None
-            if check_out is None
-            else {"time": _text(check_out.get("time")), "user": _text(check_out.get("user"))}
-        ),
-        "vm_info": info,
-        "read_note": note or vm_note,
-    }
-
-
-# ---------------------------------------------------------------------------
-# library.vm_template.check_in
-# ---------------------------------------------------------------------------
-
-
-async def vm_template_check_in_composite(
-    *,
     operator: Operator,
-    target: Any,
     params: dict[str, Any],
-    connector: VmwareRestConnector,
+    *,
+    to_template: bool,
 ) -> dict[str, Any] | OperationResult:
-    """Check a VM back in as the new template version. Op-id: ``library.vm_template.check_in``."""
-    item = _template_item(params)
-    vm = check_vm_moid(params["vm"])
-    envelope: dict[str, Any] = {
-        "template_library_item": item,
-        "vm": vm,
-        "version": None,
-        "template": None,
-        "read_note": None,
-        "error_type": None,
-        "guidance": None,
-    }
-    early, payload = await _send(
-        connector,
-        target,
-        operator,
-        op_id=_OP_CHECK_IN,
-        params={"templateLibraryItem": item, "vm": vm, "message": params["message"]},
-        envelope=envelope,
-    )
-    if early is not None:
-        return early
-    template, note = await _read_back(
-        connector, target, operator, _OP_GET_TEMPLATE, {"templateLibraryItem": item}
-    )
-    return {
-        **envelope,
-        "status": "checked_in",
-        "version": _text(payload),
-        "template": None if template is None else _template_row(template),
-        "read_note": note,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Approval previews
-# ---------------------------------------------------------------------------
-
-_ECHO_KEYS: Final[tuple[str, ...]] = (
-    "template_library_item",
-    "name",
-    "vm",
-    "message",
-    *_PLACEMENT_KEYS,
-    "datastore",
-    "powered_on",
-    "customization_spec_name",
-)
-
-
-async def _live_reads(ctx: PreviewContext, item: str) -> dict[str, Any]:
-    """The template now, and for a check-in the check-out and the VM. Never raises on HTTP."""
-    connector: VmwareRestConnector = ctx.connector_instance  # type: ignore[assignment]
-    template, note = await _read_back(
-        connector, ctx.target, ctx.operator, _OP_GET_TEMPLATE, {"templateLibraryItem": item}
-    )
-    reads: dict[str, Any] = {
-        "template": None if template is None else _template_row(template),
-        "read_note": note,
-    }
-    vm = ctx.params.get("vm")
-    if isinstance(vm, str) and ctx.descriptor.op_id == OP_ID_CHECK_IN:
-        check_out, out_note = await _read_back(
-            connector,
-            ctx.target,
-            ctx.operator,
-            _OP_GET_CHECK_OUT,
-            {"templateLibraryItem": item, "vm": vm},
-        )
-        info, vm_note = await _vm_info(connector, ctx.target, ctx.operator, vm)
-        reads["check_out"] = (
-            None
-            if check_out is None
-            else {"time": _text(check_out.get("time")), "user": _text(check_out.get("user"))}
-        )
-        reads["vm_info"] = info
-        reads["read_note"] = note or out_note or vm_note
-    return reads
-
-
-async def _preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Show the approver the inputs and, with a connector, the template as it is now."""
-    item = ctx.params.get("template_library_item")
-    if id_problem(item, "template_library_item") is not None:
-        return None
-    op_id = ctx.descriptor.op_id
-    if op_id == OP_ID_DEPLOY:
-        summary = f"Deploy a new VM {ctx.params.get('name')!r} from VM template item {item}."
-    elif op_id == OP_ID_CHECK_OUT:
-        summary = f"Check out VM template item {item} as a new VM {ctx.params.get('name')!r}."
+    checked = await _precheck(connector, target, operator, params, to_template=to_template)
+    if checked["status"] is not None:
+        return checked
+    vm = params["vm"]
+    gate_params: dict[str, Any] = {"vm": params["vm"]}
+    if to_template:
+        method, op_id, body = "MarkAsTemplate", OP_MARK_AS_TEMPLATE, {}
+        gate_params["op"] = OP_ID_VM_TEMPLATE_MARK
+        path = f"/VirtualMachine/{vm}/MarkAsTemplate"
     else:
-        summary = (
-            f"Save VM {ctx.params.get('vm')} into VM template item {item} as its new version; "
-            "the previous version stays as a backup."
+        method, op_id, body = (
+            "MarkAsVirtualMachine",
+            OP_MARK_AS_VIRTUAL_MACHINE,
+            unmark_body(params),
         )
-    preview: dict[str, Any] = {
-        "summary": summary,
-        **{key: ctx.params[key] for key in _ECHO_KEYS if key in ctx.params},
-    }
-    if ctx.connector_instance is not None:
-        preview.update(await _live_reads(ctx, str(item)))
-    return preview
+        gate_params.update(
+            op=OP_ID_VM_TEMPLATE_UNMARK,
+            resource_pool=params["resource_pool"],
+            host=params.get("host"),
+        )
+        path = f"/VirtualMachine/{vm}/MarkAsVirtualMachine"
+    gate, _ = await run_vim_change(
+        connector,
+        target,
+        operator,
+        op_id=op_id,
+        vmomi_path=path,
+        body=body,
+        params=gate_params,
+    )
+    if gate is not None:
+        return gate
+    after = await read_vm(connector, target, operator, vm)
+    if after is None or after["is_template"] is not to_template:
+        want = "a template" if to_template else "a VM"
+        return {
+            **checked,
+            "after": after,
+            "status": STATUS_NOT_CONFIRMED,
+            "guidance": f"{method} succeeded, but the VM does not read back as {want}",
+        }
+    return {**checked, "after": after, "status": STATUS_MARKED if to_template else STATUS_UNMARKED}
 
 
-# ---------------------------------------------------------------------------
-# Registration rows
-# ---------------------------------------------------------------------------
+async def vm_template_mark_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Turn one powered-off VM into a template. Op-id: ``vm.template.mark``."""
+    return await _change(connector, target, operator, params, to_template=True)
 
-_TAGS: Final[list[str]] = ["composite", "write", "content-library", "vm-template", "vm"]
 
-#: The three registration rows. ``.deploy``, ``.check_out`` and ``.check_in``
-#: are not classifier suffixes, so the broadcast classifier puts the three
-#: op ids in its generic ``other`` class, like ``vm.deploy_from_library``.
+async def vm_template_unmark_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Turn one template back into a VM. Op-id: ``vm.template.unmark``."""
+    return await _change(connector, target, operator, params, to_template=False)
+
+
+def _preview_for(to_template: bool) -> Any:
+    async def _preview(ctx: PreviewContext) -> dict[str, Any] | None:
+        """Show the approver the VM now and whether the call would stop before the change."""
+        vm = ctx.params.get("vm")
+        if not isinstance(vm, str) or ctx.connector_instance is None:
+            return None
+        if not to_template and not isinstance(ctx.params.get("resource_pool"), str):
+            return None
+        connector: VmwareRestConnector = ctx.connector_instance  # type: ignore[assignment]
+        try:
+            checked = await _precheck(
+                connector, ctx.target, ctx.operator, ctx.params, to_template=to_template
+            )
+        except Exception as exc:
+            return {
+                "summary": f"MEHO could not read VM {vm}, so it cannot show its state.",
+                "vm": vm,
+                "read_error": preview_failure_reason(exc),
+            }
+        if to_template:
+            summary = f"Turn VM {vm} into a template. A template cannot be powered on."
+        else:
+            summary = (
+                f"Turn template {vm} back into a VM in resource pool {ctx.params['resource_pool']}."
+            )
+        preview: dict[str, Any] = {"summary": summary, "vm": vm, "current": checked["before"]}
+        if checked["status"] is not None:
+            preview["summary"] = f"The call will change nothing on {vm}: {checked['guidance']}."
+            preview["stops_with"] = checked["status"]
+        return preview
+
+    return _preview
+
+
+_mark_preview = _preview_for(True)
+_unmark_preview = _preview_for(False)
+
+
+#: The registration rows; ``_register.py`` collects them at start-up.
 COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
     CompositeSpec(
-        op_id=OP_ID_DEPLOY,
-        handler=vm_template_deploy_composite,
-        summary="Deploy a new VM from a VM template in a content library.",
+        op_id=OP_ID_VM_TEMPLATE_MARK,
+        handler=vm_template_mark_composite,
+        summary="Turn a powered-off VM into a template.",
         description=(
-            "Makes a new VM from a VM-template library item, with placement, optional "
-            "datastore, power-on and a saved guest customization spec. Waits for the copy, "
-            "then reads the VM back. Waits for approval."
+            "Marks a VM, named by its VM id, as a template (VIM MarkAsTemplate). The VM must be "
+            "off. A template can be cloned but not powered on. Returns the VM before and after. "
+            "Waits for approval."
         ),
-        parameter_schema=DEPLOY_PARAMETER_SCHEMA,
-        response_schema=DEPLOY_RESPONSE_SCHEMA,
-        group_key="content_library",
-        tags=[*_TAGS, "deploy"],
+        parameter_schema=VM_TEMPLATE_MARK_PARAMETER_SCHEMA,
+        response_schema=VM_TEMPLATE_MARK_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "template", "vi-json"],
         safety_level="dangerous",
         requires_approval=True,
-        llm_instructions=DEPLOY_LLM_INSTRUCTIONS,
-        preview=_preview,
-        governed_subops=SUB_OPS_DEPLOY,
+        llm_instructions=VM_TEMPLATE_MARK_LLM_INSTRUCTIONS,
+        preview=_mark_preview,
+        governed_subops=_VIM_SUB_OPS_VM_TEMPLATE_MARK,
         classifier_other=True,
     ),
     CompositeSpec(
-        op_id=OP_ID_CHECK_OUT,
-        handler=vm_template_check_out_composite,
-        summary="Check a VM template out of a content library as a VM you can edit.",
+        op_id=OP_ID_VM_TEMPLATE_UNMARK,
+        handler=vm_template_unmark_composite,
+        summary="Turn a template back into a VM in a resource pool.",
         description=(
-            "vCenter makes a VM from a VM-template library item so you can change it; the "
-            "template stays as it is until the check-in. Reads the check-out and the VM "
-            "back. Waits for approval."
+            "Turns a template, named by its VM id, back into a VM (VIM MarkAsVirtualMachine) "
+            "and places it in the given resource pool, optionally on a given host. The VM "
+            "stays powered off. Waits for approval."
         ),
-        parameter_schema=CHECK_OUT_PARAMETER_SCHEMA,
-        response_schema=CHECK_OUT_RESPONSE_SCHEMA,
-        group_key="content_library",
-        tags=[*_TAGS, "check-out"],
+        parameter_schema=VM_TEMPLATE_UNMARK_PARAMETER_SCHEMA,
+        response_schema=VM_TEMPLATE_UNMARK_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "template", "vi-json"],
         safety_level="dangerous",
         requires_approval=True,
-        llm_instructions=CHECK_OUT_LLM_INSTRUCTIONS,
-        preview=_preview,
-        governed_subops=SUB_OPS_CHECK_OUT,
-        classifier_other=True,
-    ),
-    CompositeSpec(
-        op_id=OP_ID_CHECK_IN,
-        handler=vm_template_check_in_composite,
-        summary="Check a changed VM back into its content-library item as a new template.",
-        description=(
-            "Saves a checked-out, powered-off VM into its VM-template library item as the "
-            "new version; vCenter keeps the previous version as a backup. Reads the template "
-            "back. Waits for approval."
-        ),
-        parameter_schema=CHECK_IN_PARAMETER_SCHEMA,
-        response_schema=CHECK_IN_RESPONSE_SCHEMA,
-        group_key="content_library",
-        tags=[*_TAGS, "check-in"],
-        safety_level="dangerous",
-        requires_approval=True,
-        llm_instructions=CHECK_IN_LLM_INSTRUCTIONS,
-        preview=_preview,
-        governed_subops=SUB_OPS_CHECK_IN,
+        llm_instructions=VM_TEMPLATE_UNMARK_LLM_INSTRUCTIONS,
+        preview=_unmark_preview,
+        governed_subops=_VIM_SUB_OPS_VM_TEMPLATE_UNMARK,
         classifier_other=True,
     ),
 )

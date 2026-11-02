@@ -410,6 +410,12 @@ Architecture references live under
 [`docs/architecture/`](./docs/architecture/) — topology, the operations
 substrate, audit, MCP surface, and the connector catalog.
 
+## Writing a connector package
+
+A connector package adds a connector to MEHO from a repository of your own.
+It imports MEHO only through the connector kit: one module, `meho_connector_kit`, with the names a package may use and its own version number.
+Read [Write a connector package](https://evoila.github.io/meho/latest/extend/connector-kit/) ([source](./docs-site/extend/connector-kit.md)), and start from the template folder [`templates/connector-package/`](./templates/connector-package/).
+
 ## FAQ
 
 **Do I need Vault + Keycloak to try it?**

@@ -32,7 +32,7 @@ import yaml
 
 from meho_backplane.connectors.vmware_rest import customization_specs
 from meho_backplane.connectors.vmware_rest.composites import _customization_spec_delete as delete
-from meho_backplane.connectors.vmware_rest.composites import _vm_template as tpl
+from meho_backplane.connectors.vmware_rest.composites import _library_vm_template as tpl
 from meho_backplane.connectors.vmware_rest.composites import _write
 from tests._spec_shelf import (
     assert_op_ids_served,

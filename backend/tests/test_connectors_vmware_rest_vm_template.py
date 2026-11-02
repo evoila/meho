@@ -33,7 +33,7 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
-from meho_backplane.connectors.vmware_rest.composites import _vm_template as tpl
+from meho_backplane.connectors.vmware_rest.composites import _library_vm_template as tpl
 from meho_backplane.connectors.vmware_rest.composites import _write
 from meho_backplane.connectors.vmware_rest.composites._register import (
     _COMPOSITES,

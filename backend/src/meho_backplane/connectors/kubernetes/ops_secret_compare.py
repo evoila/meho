@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
     from meho_backplane.connectors.kubernetes.kubeconfig import KubernetesTargetLike
 
-__all__ = ["SECRET_COMPARE_OPS", "k8s_secret_compare_to_ref"]
+__all__ = ["OPS", "SECRET_COMPARE_OPS", "k8s_secret_compare_to_ref"]
 
 _OP_ID = "k8s.secret.compare_to_ref"
 
@@ -258,3 +258,6 @@ SECRET_COMPARE_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=_LLM_INSTRUCTIONS,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = SECRET_COMPARE_OPS

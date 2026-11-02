@@ -27,6 +27,12 @@ declare_op_classes(
         # password read from ``password_secret_ref``. ``.revoke`` would
         # otherwise fall through to ``other`` and broadcast in full.
         "vcfa.provider.api_token.revoke",
+        # The cloud account add. Its params carry only a Vault path
+        # (``password_secret_ref``); the password is read in-process and sent
+        # only in the ``POST /iaas/api/cloud-accounts-vsphere|-nsx-t`` request
+        # BODY. Same posture as ``vcfa.provider.user.create``. The vRA 8
+        # connector declares its ``vcfa.vra8.cloud_account.create`` twin.
+        "vcfa.tenant.cloud_account.create",
         # The sign-in changes. Their params carry only a Vault path
         # (``password_secret_ref`` for the LDAP bind password,
         # ``client_secret_ref`` for the OIDC client secret); the value is read

@@ -1394,6 +1394,98 @@ class VcfAutomationConnector(HttpConnector, VraSharedHandlers):
             self, operator, target, params, prefix="vcfa.tenant"
         )
 
+    # ------------------------------------------------------------------
+    # Infrastructure: cloud accounts, cloud zones, profiles, project members.
+    # Shared with the vRA 8 connector; handlers in ``._infra`` and
+    # ``._infra_changes``, metadata in :mod:`.infra_ops`.
+    # ------------------------------------------------------------------
+
+    async def infra_cloud_account_list(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.cloud_account.list`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.cloud_account_list(self, operator, target, params, prefix="vcfa.tenant")
+
+    async def infra_cloud_account_create(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.cloud_account.create`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.cloud_account_create(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
+    async def infra_cloud_account_delete(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.cloud_account.delete`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.cloud_account_delete(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
+    async def infra_zone_set(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.zone.set`` -- see ``vcf_automation._infra_changes``."""
+        from meho_backplane.connectors.vcf_automation import _infra_changes
+
+        return await _infra_changes.zone_set(self, operator, target, params, prefix="vcfa.tenant")
+
+    async def infra_flavor_profile_list(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.flavor_profile.list`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.flavor_profile_list(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
+    async def infra_flavor_profile_set(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.flavor_profile.set`` -- see ``vcf_automation._infra_changes``."""
+        from meho_backplane.connectors.vcf_automation import _infra_changes
+
+        return await _infra_changes.flavor_profile_set(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
+    async def infra_network_profile_list(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.network_profile.list`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.network_profile_list(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
+    async def infra_storage_profile_list(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.storage_profile.list`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.storage_profile_list(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
+    async def infra_project_members_set(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.project.members.set`` -- see ``vcf_automation._infra_changes``."""
+        from meho_backplane.connectors.vcf_automation import _infra_changes
+
+        return await _infra_changes.project_members_set(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
     # Sign-in ops -- thin shims over :mod:`._identity`, :mod:`._identity_ldap`
     # and :mod:`._identity_oidc`; metadata in :mod:`.identity_ops`.
 
@@ -1454,7 +1546,8 @@ class VcfAutomationConnector(HttpConnector, VraSharedHandlers):
         :data:`~meho_backplane.connectors.vcf_automation.network_ops.VCFA_NETWORK_OPS`,
         :data:`~meho_backplane.connectors.vcf_automation.deploy_ops.VCFA_DEPLOY_OPS`,
         :data:`~meho_backplane.connectors.vcf_automation.feature_flag_ops.VCFA_FEATURE_FLAG_OPS`,
-        :data:`~meho_backplane.connectors.vcf_automation.day2_ops.VCFA_DAY2_OPS` and
+        :data:`~meho_backplane.connectors.vcf_automation.day2_ops.VCFA_DAY2_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.infra_ops.VCFA_INFRA_OPS` and
         :data:`~meho_backplane.connectors.vcf_automation.identity_ops.VCFA_IDENTITY_OPS`,
         resolves each op's ``handler_attr`` to the bound method, looks the
         group's curated ``when_to_use`` up in
@@ -1476,6 +1569,7 @@ class VcfAutomationConnector(HttpConnector, VraSharedHandlers):
         )
         from meho_backplane.connectors.vcf_automation.identity_ops import VCFA_IDENTITY_OPS
         from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
+        from meho_backplane.connectors.vcf_automation.infra_ops import VCFA_INFRA_OPS
         from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
         from meho_backplane.connectors.vcf_automation.provisioning_ops import (
             VCFA_PROVISIONING_OPS,
@@ -1493,6 +1587,7 @@ class VcfAutomationConnector(HttpConnector, VraSharedHandlers):
             *VCFA_NETWORK_OPS,
             *VCFA_DEPLOY_OPS,
             *VCFA_FEATURE_FLAG_OPS,
+            *VCFA_INFRA_OPS,
             *VCFA_DAY2_OPS,
             *VCFA_IDENTITY_OPS,
         )

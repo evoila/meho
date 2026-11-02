@@ -17,7 +17,10 @@ A connector package imports MEHO only through the kit. These tests check:
   private target field fails it;
 * ``target_cache_key`` keys on the target's tenant, which stays private;
 * a connector without its own ``execute`` registers and runs a typed
-  operation.
+  operation;
+* the docs page for connector authors (``docs-site/extend/connector-kit.md``)
+  names every kit name in a table, marks each old name as old, and states
+  the kit version.
 
 See ``docs/codebase/connector-packages.md``, "The connector kit".
 """
@@ -27,6 +30,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -56,6 +60,7 @@ from meho_backplane.targets import schemas
 
 _BACKEND = Path(__file__).resolve().parents[1]
 _UV_LOCK = _BACKEND / "uv.lock"
+_DOCS_PAGE = Path(__file__).resolve().parents[2] / "docs-site" / "extend" / "connector-kit.md"
 
 
 # ---------------------------------------------------------------------------
@@ -476,3 +481,62 @@ async def test_connector_without_execute_registers_and_runs_a_typed_operation() 
 async def test_default_execute_says_to_use_a_registered_operation() -> None:
     with pytest.raises(NotImplementedError, match="register_typed_operation"):
         await _KitOnlyConnector().execute(_FakeTarget(), "kitdemo.widget.list", {})
+
+
+# ---------------------------------------------------------------------------
+# The docs page for connector authors names every kit name and the version
+# ---------------------------------------------------------------------------
+
+_PAGE_VERSION = re.compile(r"The kit version this page describes: \*\*([^*]+)\*\*")
+_OLD_WORD = re.compile(r"\bold\b", re.IGNORECASE)
+
+
+def _page_gaps(page: str, kit_version: str, names: dict[str, Entry]) -> list[str]:
+    """Return what *page* lacks: kit names, old-name marks, the kit version."""
+    rows = [line for line in page.splitlines() if line.startswith("|")]
+    gaps: list[str] = []
+    for name, entry in sorted(names.items()):
+        name_rows = [row for row in rows if f"`{name}`" in row]
+        if not name_rows:
+            gaps.append(f"kit name {name} is not in a table")
+        elif entry.get("old") and not any(_OLD_WORD.search(row) for row in name_rows):
+            gaps.append(f"old kit name {name} is not marked as old")
+    found = _PAGE_VERSION.findall(page)
+    if found != [kit_version]:
+        gaps.append(f"kit version: the page says {found}, the kit is {kit_version}")
+    return gaps
+
+
+def test_docs_page_names_every_kit_name_and_the_kit_version() -> None:
+    data = read_names_file()
+    gaps = _page_gaps(_DOCS_PAGE.read_text(encoding="utf-8"), data["kit_version"], data["names"])
+    assert gaps == [], (
+        f"{_DOCS_PAGE.relative_to(_BACKEND.parent)} is behind the kit. Fix the page: "
+        + "; ".join(gaps)
+    )
+
+
+def test_docs_page_check_reports_a_missing_name_and_a_wrong_version() -> None:
+    names = _names(list_things=_list_before, count_things=_list_after)
+    names["count_things"]["old"] = "use list_things"
+    page = (
+        "The kit version this page describes: **1.2**.\n\n"
+        "| Group | Name | What for |\n"
+        "|---|---|---|\n"
+        "| Register | `count_things` | Holds a count of the things. |\n"
+        "Text that names `list_things` outside a table.\n"
+    )
+
+    assert _page_gaps(page, "1.3", names) == [
+        "old kit name count_things is not marked as old",
+        "kit name list_things is not in a table",
+        "kit version: the page says ['1.2'], the kit is 1.3",
+    ]
+
+
+def test_docs_page_check_reports_a_page_without_a_version() -> None:
+    page = "| Register | `list_things` | Old: use `count_things`. |\n"
+    names = _names(list_things=_list_before)
+    names["list_things"]["old"] = "use count_things"
+
+    assert _page_gaps(page, "1.0", names) == ["kit version: the page says [], the kit is 1.0"]

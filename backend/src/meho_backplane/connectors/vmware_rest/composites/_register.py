@@ -67,6 +67,10 @@ from meho_backplane.connectors.vmware_rest.host_access import (
     HOST_ACCESS_GROUP_KEY,
     HOST_ACCESS_WHEN_TO_USE,
 )
+from meho_backplane.connectors.vmware_rest.host_certificate import (
+    HOST_CERTIFICATES_GROUP_KEY,
+    HOST_CERTIFICATES_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.host_security import (
     HOST_SECURITY_GROUP_KEY,
     HOST_SECURITY_WHEN_TO_USE,
@@ -213,7 +217,10 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "order (vm.boot.set, dangerous); upgrade the hardware version or VMware "
         "Tools (vm.hardware.upgrade, vm.tools.upgrade, dangerous); set or remove "
         "advanced settings (vm.advanced_settings.set, dangerous); unmount the "
-        "VMware Tools installer (vm.tools.installer.unmount, caution); move a VM to another "
+        "VMware Tools installer (vm.tools.installer.unmount, caution); add or remove a PCI "
+        "passthrough device (vm.pci_device.add, vm.pci_device.remove, dangerous); "
+        "take a console screenshot (vm.screenshot, caution) or press special keys "
+        "on the console (vm.keys.send, dangerous); move a VM to another "
         "host (vm.migrate, dangerous); take a snapshot (vm.snapshot.create, "
         "caution), revert to one (vm.snapshot.revert, dangerous) or delete one "
         "(vm.snapshot.delete, destructive) or all of them (vm.snapshot.delete_all, "
@@ -280,6 +287,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     CONTENT_LIBRARY_GROUP_KEY: CONTENT_LIBRARY_WHEN_TO_USE,
     # Shared with the two typed licence reads: the same key and text.
     LICENSE_GROUP_KEY: LICENSE_WHEN_TO_USE,
+    # Shared with the typed host certificate and TPM reads: the same key and text.
+    HOST_CERTIFICATES_GROUP_KEY: HOST_CERTIFICATES_WHEN_TO_USE,
     # #4383: shared with the typed read vmware.alarm.triggered.list, which
     # registers under the same group key with the same text.
     ALARMS_GROUP_KEY: ALARMS_WHEN_TO_USE,

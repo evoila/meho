@@ -48,11 +48,15 @@ connector's surface.
 from typing import Final
 
 from meho_backplane.connectors.registry import register_connector_v2
+
+# Imported for its side effect: declares the op classes of this connector.
+from meho_backplane.connectors.vra8 import op_classes  # noqa: F401
 from meho_backplane.connectors.vra8.connector import Vra8Connector
 from meho_backplane.connectors.vra8.governance_ops import (
     VRA8_GOVERNANCE_OPS,
     register_vra8_governance_operations,
 )
+from meho_backplane.connectors.vra8.infra_ops import VRA8_INFRA_OPS
 from meho_backplane.connectors.vra8.session import (
     Vra8CredentialsLoader,
     Vra8TargetLike,
@@ -104,6 +108,7 @@ __all__ = [
     "VRA8_DAY2_OPS",
     "VRA8_GOVERNANCE_OPS",
     "VRA8_IMPL_ID",
+    "VRA8_INFRA_OPS",
     "VRA8_PRODUCT",
     "VRA8_TYPED_OPS",
     "VRA8_TYPED_WHEN_TO_USE_BY_GROUP",

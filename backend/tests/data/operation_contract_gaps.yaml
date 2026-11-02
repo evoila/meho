@@ -13,6 +13,9 @@
 # A 'requires_approval' or 'write_name' entry is a safety gap. Each one has
 # a comment with the reason it is still open. Fixing one changes who must
 # approve the operation, so the pull request that fixes it names the operation.
+#
+# The 'example_placeholders' entries were on main when that rule came in. Fix
+# one by putting a placeholder such as <vm-id> in place of the real-looking value.
 
 argocd-api:
   argocd.app.delete:
@@ -86,6 +89,9 @@ audit-integrity:
     - llm_instructions
     - examples
 
+azure-arm:
+  azure.operation.status:
+    - example_placeholders
 bind9-ssh:
   bind9.about:
     - summary
@@ -324,6 +330,9 @@ hyperv-ssh:
   hyperv.vms.state:
     - llm_instructions
     - examples
+inventory:
+  inventory.export:
+    - example_placeholders
 k8s:
   k8s.about:
     - summary

@@ -127,7 +127,7 @@ async def test_issue_ops_are_composites_in_the_issues_group(
 async def test_issue_ops_meet_the_operation_contract_rules(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Each operation passes the ten contract rules with no gap."""
+    """Each operation passes the contract rules with no gap."""
     await register_github_composite_operations(embedding_service=stub_embedding_service)
     rows, groups = await _registered_issue_ops()
     problems: dict[str, dict[str, list[str]]] = {}

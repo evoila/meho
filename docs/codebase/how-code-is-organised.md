@@ -37,9 +37,12 @@ These rules stop that.
 9. **A migration takes its number last.** Merge main first, then take the
    next free number. The "Migration chain (single head)" check tells you
    when a number is taken.
-10. **Old shared lists only get shorter.** A CI check pins the length of
+10. **Old shared lists only get shorter.** A CI check,
+    `backend/tests/test_shared_lists_only_shrink.py`, pins the length of
     each old shared list. If your change makes one longer, the check fails
-    and says where the entry goes instead.
+    and says where the entry goes instead. If your change makes one
+    shorter, lower its pin in the same pull request. When a list is gone,
+    remove its row.
 
 **Before you open a pull request:** merge main into your branch and run the
 tests again. Then check: does your change add a line to a file that other

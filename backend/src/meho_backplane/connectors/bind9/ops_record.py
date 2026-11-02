@@ -1902,7 +1902,7 @@ _DELETE_WARNING = (
     "confirms the deleted value is gone, and rolls the ``/etc/bind/`` tree "
     "back byte-identical on any failure. Prefer ``bind9.record.delete`` over "
     "``bind9.record.remove`` when a shared zone must retire a single record "
-    "under governance (environment teardown); ``record.remove`` is the "
+    "under governance (environment teardown); ``bind9.record.remove`` is the "
     "governed destructive-tier whole-name clear (every A + AAAA at the name, "
     "#3247) — same gate, broader blast radius."
 )

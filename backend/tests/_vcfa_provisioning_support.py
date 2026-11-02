@@ -45,9 +45,9 @@ PROVIDER_JWT = "prov-jwt-sentinel"
 TENANT_TOKEN = "tenant-bearer-sentinel"
 USER_JWT = "user-session-jwt-sentinel"
 #: The user password the stubbed Vault read returns.
-PASSWORD = "Pw-sentinel-9f3c"
+PASSWORD = "Pw-sentinel-9f3c"  # gitleaks:allow
 #: The refresh token the mocked OAuth grant mints.
-MINTED_TOKEN = "RT-sentinel-7b1d2e44aa90c3f1"
+MINTED_TOKEN = "RT-sentinel-7b1d2e44aa90c3f1"  # gitleaks:allow
 
 ORG_ID = "urn:vcloud:org:11111111-2222-3333-4444-555555555555"
 ORG_UUID = "11111111-2222-3333-4444-555555555555"

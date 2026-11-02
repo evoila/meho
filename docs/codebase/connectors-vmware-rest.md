@@ -274,8 +274,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
      `{spec_name, os_type, hostname_scheme, nic_count, static_ip_summary}`
      — it never touches the credential params, so no secret can reach the
      durable `ApprovalRequest.proposed_effect` row by construction.
-  2. **Broadcast frame.** `guest.customization_spec.create` is pinned into
-     `broadcast/events._CREDENTIAL_WRITE_OPS`, so `redact_payload` collapses
+  2. **Broadcast frame.** `guest.customization_spec.create` is declared
+     `credential_write` in `vmware_rest/op_classes.py`, so `redact_payload` collapses
      its params to aggregate-only on the feed. The pin is required (not just
      nice-to-have): the `password`-suffixed fields trip the runtime
      key-name scrub, but `product_key` does not (`key` is neither an
@@ -359,7 +359,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   hard-coded). `guest.program.run`'s `arguments` / `env` values may carry
   secrets and are kept off the governed surfaces (result / audit-hash /
   preview / gate) and clamped to aggregate-only on broadcast via the
-  `_CREDENTIAL_WRITE_OPS` pin; the resume-bound `ApprovalRequest.params` and
+  `credential_write` declaration in `vmware_rest/op_classes.py`; the resume-bound `ApprovalRequest.params` and
   flight-recorder spans still carry them (same characteristic as
   `guest.file.write`'s `content`), so operators must not pass bare secrets
   there. The design fork (vim guest-ops over a
@@ -407,7 +407,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   composites, not the generic-ingested row:** the subscribe body carries a
   `subscription_info.password` (BASIC auth) needing credential hygiene the raw
   ingested row cannot provide (broadcast aggregate-only via the
-  `_CREDENTIAL_WRITE_OPS` pin on `subscribed.create`, a park-time preview that
+  `credential_write` declaration of `subscribed.create` in `vmware_rest/op_classes.py`, a park-time preview that
   echoes identity fields only — never the password / username, `params_hash`-only
   audit), and the connector's governed ops must dispatch on a fresh boot with
   zero catalog ingest (a generic row requires a runtime spec-ingest +

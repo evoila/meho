@@ -407,8 +407,8 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     is hidden whole.
   - `vmware.composite.vm.guest.env.read` keeps each variable name and hides
     the value (`NAME=[REDACTED:secret_value]`).
-  - Every other operation, a secret read (a `credential_read` op,
-    `broadcast/events.py:_CREDENTIAL_READ_OPS`) or a plain read or write,
+  - Every other operation, a secret read (a `credential_read` op, a class
+    the connector declares in its own `op_classes.py`) or a plain read or write,
     built in or from a connector package: values under secret-shaped key
     names are replaced with `[REDACTED:param_name]`
     (`broadcast.events.scrub_secret_named_values(..., hide_numbers=True)`),
@@ -1024,7 +1024,7 @@ values have no in-leaf label the shape net could catch, so this
 delegation — not the pattern net — is what protects them, and the two
 planes cannot drift. The vSphere guest-ops composites that log into the
 guest (`vmware.composite.vm.guest.{process.list,env.read,file.read,file.write,program.run}`)
-are pinned in `_CREDENTIAL_WRITE_OPS` for the same reason: their guest OS
+are declared `credential_write` in `vmware_rest/op_classes.py` for the same reason: their guest OS
 password rides the downstream vim `NamePasswordAuthentication` block in the
 *request* body, not an op param or a declared property, so this `classify_op`
 delegation — not the shape/pattern net — is what keeps their vendor-call

@@ -472,7 +472,7 @@ vendor's VCF Operations 9.1.0 and 9.1.1 API files (both have all six calls).
   `new_password_ref` (`<vault-path>#<field>`), never a password. The handler
   reads both from the secret store only when the approved call runs, under the
   operator's identity, and puts them only in the vendor request body. The
-  operation is pinned as a credential write (`_CREDENTIAL_WRITE_OPS`), so the
+  operation is declared a credential write in `vcf_operations/op_classes.py`, so the
   approval input is stored encrypted, the broadcast shows no params, and the
   flight recorder keeps no request body. An error answer of the password
   change is handled like the other password changes in MEHO

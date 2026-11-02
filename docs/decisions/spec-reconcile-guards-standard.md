@@ -376,6 +376,18 @@ split.
   on 9.1 and 9.1.1. CI requires the three lists, so a missing list fails
   instead of skipping. The other provider op_ids stay in the exclusion
   above; this change checks only the region path.
+- **Region and quota paths checked per version.** The ops that connect
+  vCenters and NSX managers, build regions and set organization quotas
+  keep their paths in `_infra_paths.py`. The lane checks every one of
+  them against the same three lists, in the form the connector sends for
+  each version (`/cloudapi/vcf/...` on 9.0, `/cloudapi/v1/...` on 9.1
+  and 9.1.1). Path parameter names are compared without braces, because
+  the lists write some of them bare. Two legacy `/api` calls stay
+  excluded with evidence: no 9.x reference lists a legacy call, and the
+  vendor SDK (`go-vcloud-director` v3) uses them on VCF Automation 9 --
+  the vCenter refresh (`/api/admin/extension/vimServer/{id}/action/refresh`,
+  "there is no OpenAPI endpoint for this operation") and the task read
+  (`/api/task/{id}`) behind every `202` task link.
 
 ### vcd — CloudAPI paths ARMED 2026-10-31 (#4519); `/api` paths pinned only
 

@@ -76,3 +76,8 @@ rules:
     pattern: password_hash
     action: redact
     reason: "crypt(3) password hash, as in /etc/shadow"
+
+  - name: strip-ceph-key
+    pattern: ceph_key
+    action: redact
+    reason: "Ceph key, as in a keyring file or ceph auth output"

@@ -1750,9 +1750,23 @@ workflow files, this doc, and the changelog.
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
 
-The five `python-unit-shard` legs run on `meho-runners-ci-heavy`
-(dedicated ARC scale set, 6000m requests=limits — #761 /
-rdc-gitops#55; the pool size lives outside this repo). The four
+The five `python-unit-shard` legs run on one of two heavy runner sets
+(ARC scale sets on the same machines; their sizes live outside this
+repo, #761). The set depends on the event:
+
+- `merge_group` only: `meho-runners-ci-heavy-queue` (5 runners, enough
+  for the shards of one merge-queue run).
+- Every other event (pull requests, `push` to `main` and the nightly
+  run): `meho-runners-ci-heavy`.
+
+Why two sets: GitHub gives queued jobs to runners in queue order, with
+no priority for the merge queue. When many pull requests ran at once,
+their shards filled the heavy runners and the merge queue's shards
+waited behind them. Pushes to `main` stay on `meho-runners-ci-heavy`:
+otherwise every merged commit would run its shards on the 5 queue
+runners twice (merge-queue run, then push run), and the queue would
+merge only about half as fast. The nightly `python-coverage` shards
+stay on `meho-runners-ci-heavy`. The four
 `python-integration-shard` legs, `python-migration-tests` and the
 nightly `python-coverage-combine` run on the dense `meho-runners-ci` pool
 (4-core): they pull their test images from the internal image mirror or

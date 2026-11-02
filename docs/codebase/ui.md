@@ -785,11 +785,13 @@ false-positive bug report: a **raw-curl repro that sends a Bearer JWT but no
 `POST /ui/runbooks/runs/<id>/abort` while the same call to
 `POST /api/v1/runbooks/runs/<id>/abort` succeeds. The differential is the
 CSRF gate, **not** an RBAC / opacity-floor difference — the `/ui` abort route
-sits on the **same operator floor as REST** (`require_ui_session`, passing
+sits on the **same operator floor as REST** (`require_ui_operator`, passing
 `caller_is_admin=probe.is_tenant_admin` to the service), and a genuine
 assignee RBAC denial there renders an inline HTTP-**200** fragment, never a
 `403` (see [`runbooks/driver.py`](../../backend/src/meho_backplane/ui/routes/runbooks/driver.py)).
-So a `403` on a `/ui/*` write is **always** a CSRF rejection.
+So a `403` on a `/ui/*` write is a CSRF rejection (it carries the
+`x-csrf-rejection-reason` header) or a role refusal (`detail` is
+`operator_required` or `tenant_admin_required`), never an assignee check.
 
 **Known-repro pointer (for consumer bug reports):** a browser driving the run
 through the driver page carries the cookie + header (both re-minted on every
@@ -921,11 +923,28 @@ routes require `tenant_admin` role enforced by the new
 `GET /ui/kb/{slug}` in `build_kb_router()` so FastAPI's first-match-wins
 routing does not swallow the literal "upload" path segment as a slug.
 
-### RBAC gate (`require_ui_admin`)
+### RBAC gates (`require_ui_admin`, `require_ui_operator`)
 
 `UISessionContext` (the context returned by `require_ui_session`)
 deliberately omits the tenant role to keep read-only routes free of
-JWT-decode overhead. Upload routes chain `require_ui_admin` on top:
+JWT-decode overhead. Two role-gated dependencies in
+`meho_backplane.ui.auth.middleware` chain on top of it and share one
+body (`_require_ui_role`):
+
+- `require_ui_admin` — `tenant_admin` only; 403
+  `detail="tenant_admin_required"` below that. Upload routes, template
+  authoring, runbook reassign and the other admin writes use it.
+- `require_ui_operator` — `operator` or `tenant_admin`; 403
+  `detail="operator_required"` for `read_only`. It is the console twin of
+  the REST `require_role(TenantRole.OPERATOR)` floor and the MCP
+  `required_role=OPERATOR` on `call_operation`. Every console route that
+  runs or queues an operation, or starts, advances or aborts a runbook
+  run, declares it: `POST /ui/operations/call` and `/preview`,
+  `POST /ui/vault/put`, `/delete` and `/move`, `POST /ui/runbooks/runs`,
+  `POST /ui/runbooks/runs/{run_id}/next` and `/abort`. The confirm
+  modals and every read page stay on the session floor.
+
+Upload routes chain `require_ui_admin` on top:
 
 1. Loads the `DecryptedSession` from the DB (Fernet-decrypted
    `access_token`).
@@ -936,7 +955,8 @@ JWT-decode overhead. Upload routes chain `require_ui_admin` on top:
 4. Returns the same `UISessionContext` so callers use `tenant_id` /
    `operator_sub` without a second dependency.
 
-`operator` and `read_only` roles receive a 403, not a redirect.
+`operator` and `read_only` roles receive a 403, not a redirect (and
+`read_only` gets the same 403 shape from `require_ui_operator`).
 Unauthenticated requests still get the standard 302 → login from
 `require_ui_session`.
 
@@ -2940,10 +2960,10 @@ the stubs aggregate, first-match-wins).
 | `POST` | `/ui/runbooks/{slug}/discard` | `require_ui_admin` | (#2241) Delete an unpublished `(slug, version)` **draft** outright (mirrors REST discard). Success has no fragment to re-render (the row is gone) → empty `204` + `HX-Redirect: /ui/runbooks` back to the catalog. A non-draft version → 400 `TemplateNotDraftError` rendered as the inline `lifecycle_error` alert (a published / deprecated version is retired via `deprecate`, never discarded); a missing version → 404. Draft close-out only — Deprecate stays hidden on drafts (deprecate-on-draft is engine-illegal). |
 | `GET` | `/ui/runbooks/runs` | `require_ui_session` | (G10.11-T1 #1884) Runs list — the "Runs" sub-tab. Role-scoped + **service-enforced**: an `OPERATOR` only ever sees their own runs (the service forces `assignee=caller_sub` even on a forged `?assignee=`); a `TENANT_ADMIN` sees every tenant run and may filter by `assignee`. `status` (`in_progress` / `completed` / `abandoned`, a closed `Literal`) + admin-only `assignee` filters. `HX-Request: true` returns only the `runbooks/_runs_list.html` fragment. Each row links to the run driver. |
 | `GET` | `/ui/runbooks/runs/start` | `require_ui_session` | (G10.11-T1 #1884) HTMX start-run modal fragment. Pre-populates a `<datalist>` of the tenant's published template slugs (free text still allowed). Registered **before** `/ui/runbooks/runs/{run_id}` so the literal `start` segment is not swallowed by the `{run_id}` param route. CSRF re-mint + cookie refresh on render. |
-| `POST` | `/ui/runbooks/runs` | `require_ui_session` | (G10.11-T1 #1884) Start handler. Operator floor (the service auto-assigns the caller). Success → 204 + `HX-Redirect: /ui/runbooks/runs/{run_id}` (drops the operator into the driver). The typed start errors (`DeprecatedTemplateError` / `TemplateNotFoundError` / `MissingParamsError`) map to an inline modal `alert-error` (HTTP 200 fragment, not 500); a non-object `params` JSON → 422. |
+| `POST` | `/ui/runbooks/runs` | `require_ui_operator` | (G10.11-T1 #1884) Start handler. Operator floor (the service auto-assigns the caller). Success → 204 + `HX-Redirect: /ui/runbooks/runs/{run_id}` (drops the operator into the driver). The typed start errors (`DeprecatedTemplateError` / `TemplateNotFoundError` / `MissingParamsError`) map to an inline modal `alert-error` (HTTP 200 fragment, not 500); a non-object `params` JSON → 422. |
 | `GET` | `/ui/runbooks/runs/{run_id}` | `require_ui_session` | (G10.11-T2 #1893) Run **driver** page. Calls the opacity-safe `RunbookRunService.get_current_step` (the SAME single-step `CurrentStepResponse` projection `start_run` / `next_step` return — never `template.steps`) + `get_run_assignee`. Renders run coordinates + `position` ("step n of total") + the **single current** `StepBody` (Markdown body via the shared KB renderer). `RunNotFoundError` → 404 page. **Advance** shown ONLY when `session.operator_sub == assigned_to`; **Reassign** shown ONLY for a `tenant_admin` (soft probe). |
-| `POST` | `/ui/runbooks/runs/{run_id}/next` | `require_ui_session` | (G10.11-T2 #1893) Advance one step. Calls `next_step`; re-renders the step fragment from the returned `CurrentStepResponse` (or the completed banner on `RunCompletedResponse`). The assignee gate is **service-enforced, fail-closed**: a non-assignee (INCLUDING a `TENANT_ADMIN`) gets `NotRunAssigneeError` → an inline "reassigned away from you" message at HTTP 200 (never a 500). A `confirm` answered `no`/`escalate` → step `failed` → `PreviousStepFailedError` → a dead-end banner (Advance hidden, only Abort forward). |
-| `POST` | `/ui/runbooks/runs/{run_id}/abort` | `require_ui_session` | (G10.11-T2 #1893) Abort with a **required** non-empty reason (`AbortRunRequest.reason` is `min_length=1`, persisted to the abort audit row). Empty reason guarded client-side (HTMX `required`) AND handled server-side (a tampered empty reason → inline alert, not 500) so the audit guarantee holds. `caller_is_admin = probe.is_tenant_admin` (service allows `{assignee, tenant_admin}`). Success → the abandoned banner. |
+| `POST` | `/ui/runbooks/runs/{run_id}/next` | `require_ui_operator` | (G10.11-T2 #1893) Advance one step. Calls `next_step`; re-renders the step fragment from the returned `CurrentStepResponse` (or the completed banner on `RunCompletedResponse`). The assignee gate is **service-enforced, fail-closed**: a non-assignee (INCLUDING a `TENANT_ADMIN`) gets `NotRunAssigneeError` → an inline "reassigned away from you" message at HTTP 200 (never a 500). A `confirm` answered with anything but `yes` → step `failed` → `PreviousStepFailedError` → a dead-end banner (Advance hidden, only Abort forward). |
+| `POST` | `/ui/runbooks/runs/{run_id}/abort` | `require_ui_operator` | (G10.11-T2 #1893) Abort with a **required** non-empty reason (`AbortRunRequest.reason` is `min_length=1`, persisted to the abort audit row). Empty reason guarded client-side (HTMX `required`) AND handled server-side (a tampered empty reason → inline alert, not 500) so the audit guarantee holds. `caller_is_admin = probe.is_tenant_admin` (service allows `{assignee, tenant_admin}`). Success → the abandoned banner. |
 | `POST` | `/ui/runbooks/runs/{run_id}/reassign` | `require_ui_admin` | (G10.11-T2 #1893) Transfer ownership. **`require_ui_admin` hard gate** — an `OPERATOR` gets 403 at the dependency, before the body / service runs (the service itself does no role check; the gate is the sole authority). After the flip, the prior assignee's open page shows "reassigned away from you" on their next Advance. |
 
 **Route ordering.** The literal `list` / `new` / `preview` / `publish` /

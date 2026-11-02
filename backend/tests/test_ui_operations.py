@@ -91,6 +91,7 @@ _BACKPLANE_URL = "https://meho.test"
 _TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
 _OP_OPERATOR = "op-operator"
 _OP_ADMIN = "op-admin"
+_OP_READ_ONLY = "op-read-only"
 
 #: The per-op agent prompt text the operator-render must never carry. Used
 #: as the substring grep both ways in the RBAC drawer tests.
@@ -936,6 +937,75 @@ def test_operations_ui_run_call_ok_renders_result_inline(
     assert args["target"] == "gh-prod"
     assert args["params"] == {"owner": "evoila", "repo": "meho", "body": {"title": "go"}}
     assert args["work_ref"] == "gh:evoila/meho#7"
+
+
+def test_operations_ui_run_call_tenant_admin_can_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``tenant_admin`` session passes the operator floor and dispatches."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(tenant_id=None)
+    _seed_gh_target(tenant_id=_TENANT_A)
+    received = _patch_call_operation(monkeypatch, {"status": "ok", "result": {}, "extras": {}})
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_ADMIN, role=TenantRole.TENANT_ADMIN
+    )
+    with mock:
+        response = client.post(
+            "/ui/operations/call",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/repos/{owner}/{repo}/issues",
+                "target": "gh-prod",
+                "params": '{"owner": "evoila", "repo": "meho"}',
+            },
+        )
+    assert response.status_code == 200, response.text
+    assert len(received) == 1
+
+
+@pytest.mark.parametrize("path", ["/ui/operations/call", "/ui/operations/preview"])
+def test_operations_ui_call_and_preview_read_only_forbidden_403_no_dispatch(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """A ``read_only`` session gets 403 on call + preview; nothing is dispatched.
+
+    The POST clears the CSRF gate (valid token) but the real JWT carries
+    ``read_only``, so ``require_ui_operator`` refuses it before the handler
+    body runs -- the same ``operator`` floor REST ``/api/v1/operations/call``
+    and the MCP ``call_operation`` tool have. The patched ``call_operation``
+    records no call, the stand-in transport records no vendor request, and no
+    audit row lands.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    connector = _register_recording_gh_connector()
+    _seed_ingested_op(tenant_id=None)
+    _seed_gh_target(tenant_id=_TENANT_A)
+    received = _patch_call_operation(monkeypatch, {"status": "ok", "result": {}, "extras": {}})
+    audit_before = _count_audit_rows()
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_READ_ONLY, role=TenantRole.READ_ONLY
+    )
+    with mock:
+        response = client.post(
+            path,
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/repos/{owner}/{repo}/issues",
+                "target": "gh-prod",
+                "params": '{"owner": "evoila", "repo": "meho", "body": {"title": "go"}}',
+            },
+        )
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "operator_required"}
+    # Not a CSRF rejection: the middleware stamps no reason header.
+    assert "x-csrf-rejection-reason" not in response.headers
+    assert received == []
+    assert connector.calls == []
+    assert _count_audit_rows() == audit_before
 
 
 def test_operations_ui_run_call_awaiting_approval_deep_links_to_approvals() -> None:

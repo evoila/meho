@@ -1110,6 +1110,26 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_check_login(self, operator, target, params)
 
+    async def authflow_ensure_approval_flow(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.authflow.ensure_approval_flow``."""
+        from meho_backplane.connectors.keycloak.ops_authflow import (
+            keycloak_authflow_ensure_approval_flow,
+        )
+
+        return await keycloak_authflow_ensure_approval_flow(self, operator, target, params)
+
+    async def identity_provider_list(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.identity_provider.list``."""
+        from meho_backplane.connectors.keycloak.ops_identity_provider import (
+            keycloak_identity_provider_list,
+        )
+
+        return await keycloak_identity_provider_list(self, operator, target, params)
+
     # -- typed-op registrar (G3.13-T2 #1394 fills the read-op walk) ------
 
     @classmethod
@@ -1139,13 +1159,22 @@ class KeycloakConnector(HttpConnector):
         walk — every write registers ``requires_approval=True``. #3944 adds
         the destructive ``user.delete`` / ``group.delete`` /
         ``client.delete``. #3851 adds ``user.logout``; #3886 adds ``realm.delete``.
-        ``user.check_login`` (one login test) rides the same walk.
+        ``user.check_login`` (one login test) rides the same walk, and so do
+        ``authflow.ensure_approval_flow`` and ``identity_provider.list``.
         """
         # Lazy imports: the operations package pulls in the embedding
         # pipeline (ONNX runtime + a 100 MB+ model on first touch) that a
         # pure-fingerprint / pure-probe unit test should not pay. Lifespan
         # callers already have the embedding service warmed by the time
         # this runs.
+        from meho_backplane.connectors.keycloak.ops_authflow import (
+            APPROVAL_FLOW_OPS,
+            WHEN_TO_USE_AUTHFLOW_BY_GROUP,
+        )
+        from meho_backplane.connectors.keycloak.ops_identity_provider import (
+            IDENTITY_PROVIDER_OPS,
+            WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP,
+        )
         from meho_backplane.connectors.keycloak.ops_login_check import (
             LOGIN_CHECK_OPS,
             WHEN_TO_USE_LOGIN_CHECK_BY_GROUP,
@@ -1167,10 +1196,18 @@ class KeycloakConnector(HttpConnector):
             **WHEN_TO_USE_BY_GROUP,
             **WHEN_TO_USE_WRITE_BY_GROUP,
             **WHEN_TO_USE_LOGIN_CHECK_BY_GROUP,
+            **WHEN_TO_USE_AUTHFLOW_BY_GROUP,
+            **WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP,
         }
 
         bindings: list[tuple[Any, Any]] = []
-        for op in (*READ_OPS, *WRITE_OPS, *LOGIN_CHECK_OPS):
+        for op in (
+            *READ_OPS,
+            *WRITE_OPS,
+            *LOGIN_CHECK_OPS,
+            *APPROVAL_FLOW_OPS,
+            *IDENTITY_PROVIDER_OPS,
+        ):
             handler = getattr(cls, op.handler_attr, None)
             if handler is None:
                 raise AttributeError(

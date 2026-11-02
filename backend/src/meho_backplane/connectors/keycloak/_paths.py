@@ -80,6 +80,17 @@ _USER_GROUP_PATH = "/admin/realms/{realm}/users/{user-id}/groups/{groupId}"
 # Realm delete preview (#3886): how many users and groups go with the realm.
 _USERS_COUNT_PATH = "/admin/realms/{realm}/users/count"
 _GROUPS_COUNT_PATH = "/admin/realms/{realm}/groups/count"
+# Login flows: the approval sign-in flow op and the identity provider list.
+_AUTH_FLOWS_PATH = "/admin/realms/{realm}/authentication/flows"
+_AUTH_FLOW_EXECUTIONS_PATH = "/admin/realms/{realm}/authentication/flows/{flowAlias}/executions"
+_AUTH_FLOW_ADD_STEP_PATH = (
+    "/admin/realms/{realm}/authentication/flows/{flowAlias}/executions/execution"
+)
+_AUTH_FLOW_ADD_SUBFLOW_PATH = (
+    "/admin/realms/{realm}/authentication/flows/{flowAlias}/executions/flow"
+)
+_AUTH_CONFIG_PATH = "/admin/realms/{realm}/authentication/config/{id}"
+_IDENTITY_PROVIDERS_PATH = "/admin/realms/{realm}/identity-provider/instances"
 
 # -- dispatched, but outside the Admin REST spec's scope (see docstring) ----
 

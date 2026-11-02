@@ -163,8 +163,10 @@ upgrade (the realm finishing job adds a client that is missing, and sets
 the two token settings on an existing one). The job makes
 the login flow only when its account `meho-admin` has the
 `manage-realm` role, which it has when the company login is on.
-Otherwise create the flow by hand as above. Until the client exists,
-approve in the web interface.
+Otherwise add the flow through MEHO (see
+[Add the approval flow to a running realm through MEHO](#add-the-approval-flow-to-a-running-realm-through-meho))
+or by hand as above.
+Until the client exists, approve in the web interface.
 
 Two backplane settings control the check:
 
@@ -187,6 +189,44 @@ flow of the approval client must ask for the code at every sign-in:
 
 MEHO then records such an approval as a one-time code approval. The
 sign-in must still be recent: an `acr` value alone never approves.
+
+#### Add the approval flow to a running realm through MEHO
+
+The operation `keycloak.authflow.ensure_approval_flow` adds the flow
+`meho approval sign-in` to the realm of a Keycloak target (its managed
+realm) and makes it the browser flow of `meho-cli-approve`. A second
+person must approve it.
+
+```bash
+meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_flow \
+  --target <keycloak-target>
+```
+
+- The flow is missing: MEHO makes it with the steps above and binds it.
+- The flow is there with the same steps: MEHO changes nothing. When the
+  client already uses it, the result says `flow_created: false` and
+  `binding_changed: false`. So the call is safe to run twice.
+- The flow is there with other steps: MEHO stops, changes nothing, and
+  names the first difference. Fix the flow by hand, then run it again.
+- `meho-cli-approve` is missing: MEHO stops before it changes anything.
+  Create the client first.
+
+MEHO reads the client back after the change. `browser_flow_id` in the
+result is the flow the client now uses. Its other settings stay as they
+were.
+
+To check how people sign in to the realm through an outside login (a
+company login, for example), list the realm's identity providers:
+
+```bash
+meho operation call keycloak-admin-26.x keycloak.identity_provider.list \
+  --target <keycloak-target>
+```
+
+Each row has the alias, the type, whether it is on, whether it is hidden
+on the login page, and `redirect_flows`: the login flows that send people
+straight to it. The approval flow must not be in `redirect_flows`. The
+list never shows the provider's secret.
 
 ## Step 3 — Add the protocol mappers
 

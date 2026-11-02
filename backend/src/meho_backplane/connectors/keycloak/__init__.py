@@ -40,6 +40,7 @@ directly, keeping the resolver tie-break ladder unambiguous.
 # queue before approving. ``ops_login_check`` wires the same kind of card for
 # ``keycloak.user.check_login`` (which user, where the password comes from).
 from meho_backplane.connectors.keycloak import (
+    op_classes,  # noqa: F401 -- declares the op classes
     ops_login_check,  # noqa: F401
     ops_write_preview,  # noqa: F401
 )

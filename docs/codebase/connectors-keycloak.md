@@ -580,6 +580,55 @@ use `keycloak.realm.update` with `enabled: false`; that can be undone.
 The CLI verb is `meho keycloak realm delete --realm R`, with the same two
 steps as the other delete verbs.
 
+### Approval sign-in flow and identity providers (#5621)
+
+Two ops in their own modules, registered by the same walk:
+
+- `keycloak.authflow.ensure_approval_flow` (`ops_authflow.py`) — risk
+  level `caution`, approval required, group `authflow_write`. It gives a
+  realm that already runs the login flow `meho approval sign-in` from the
+  chart's realm file, and binds it as the browser flow of the client
+  `meho-cli-approve` (param `client_id` to name another client). On the
+  target's managed realm:
+  1. Find the client. None: stop with `client_not_found`; nothing is
+     written.
+  2. Find the flow by alias (`GET .../authentication/flows`).
+     - Missing: make it (`POST .../authentication/flows`), add the steps
+       (`POST .../flows/{flowAlias}/executions/execution` and
+       `.../executions/flow` for the sub-flow
+       `meho approval sign-in - one-time code`), then set each step's
+       requirement (`PUT .../flows/{flowAlias}/executions`); a new step
+       starts as `DISABLED`. The steps are read again and must match.
+     - Present with the same steps (same order, level, name and
+       requirement): nothing is written.
+     - Present with other steps: stop with `other_steps`, naming the first
+       difference. Nothing is written.
+  3. Bind: read the client, put `authenticationFlowBindingOverrides.browser`
+     on top (other overrides and every other field stay), write it back,
+     and read it again. A binding that does not read back is an error
+     (`check_failed`). Already bound: nothing is written.
+
+  The result is `{realm, flow_alias, flow_id, flow_created, flow_steps,
+  client_id, client_uuid, browser_flow_id, previous_browser_flow_id,
+  binding_changed}`. Safe to run twice. Errors raise
+  `KeycloakApprovalFlowError` with a stable `code`. The op is pinned as a
+  plain `write` in `connectors/keycloak/op_classes.py`.
+- `keycloak.identity_provider.list` (`ops_identity_provider.py`) — risk
+  level `safe`, group `identity_provider`. Reads every identity provider
+  page by page (`first` / `max`, pages of 100, until a short page;
+  `complete: false` past 100 pages), then the steps of each top-level flow.
+  A step `identity-provider-redirector` that is not `DISABLED` sends people
+  to the provider named by `defaultProvider` in its config
+  (`GET .../authentication/config/{id}`). Each row is `{alias,
+  display_name, type, enabled, hide_on_login, redirect_flows}`.
+  `hide_on_login` reads `hideOnLogin`, or the older config key
+  `hideOnLoginPage`. The provider `config` (with the client secret) is
+  never returned.
+
+Both ops read lists with `get_admin_list_strict`: a body that is not a JSON
+array raises `KeycloakUnexpectedResponseError`, so a failed read never looks
+like an empty list.
+
 ### Park-time approval preview (#1857)
 
 Eleven of the write ops register bespoke `proposed_effect` preview builders
@@ -639,9 +688,10 @@ Keycloak spec quirk). The lane
 [`backend/tests/test_connectors_keycloak_spec_reconcile.py`](../../backend/tests/test_connectors_keycloak_spec_reconcile.py)
 (the #2980 harness; parse-only, runs in the required unit sweep, uniform
 skip when the shelf is unconfigured) introspects those live constants and
-asserts all 37 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
+asserts all 45 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
 paths at #3280, +4 delete paths at #3944, +1 user logout path at #3851,
-+3 realm-delete paths at #3886) are served by the pinned
++3 realm-delete paths at #3886, +8 login flow and identity provider
+paths at #5621) are served by the pinned
 `keycloak-26.3` shelf spec (`keycloak-admin-openapi.json` — the vendor's
 Admin REST API OpenAPI at the lab's deployed 26.3.3, from Maven Central
 `org.keycloak:keycloak-api-docs-dist:26.3.3`, Apache-2.0). Three dispatched

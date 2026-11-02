@@ -114,7 +114,7 @@ CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_split_ready_imports.py",
 )
 
-_DOTTED = re.compile(r"\bmeho_backplane\.connectors\.([A-Za-z0-9_]+)")
+_DOTTED = re.compile(r"\bmeho_backplane(?:\.[A-Za-z0-9_]+)+")
 
 
 def connector_names(src_connectors: Path) -> frozenset[str]:
@@ -129,38 +129,52 @@ def connector_names(src_connectors: Path) -> frozenset[str]:
     )
 
 
-def referenced_connectors(text: str, module: str | None, names: frozenset[str]) -> set[str]:
-    """Return the connectors in ``names`` that the Python source ``text`` uses.
+def imported_names(text: str, module: str | None) -> set[str] | None:
+    """Return the dotted module names that the Python source ``text`` uses.
+
+    A name is used when an ``import`` statement (absolute or relative) names
+    it, or when the dotted name ``meho_backplane.<...>`` appears anywhere in
+    the text, for example in a ``mock.patch`` target string. For
+    ``from a.b import c`` both ``a.b`` and ``a.b.c`` count, because ``c`` may
+    be a module.
 
     ``module`` is the dotted name of the file (``a.b.c`` for ``a/b/c.py``,
-    ``a.b`` for ``a/b/__init__.py``). It resolves relative imports. Pass
-    ``None`` for a file outside the package; it then has no relative
-    imports to resolve.
+    ``a.b.__init__`` for ``a/b/__init__.py``). It resolves relative imports.
+    Pass ``None`` for a file outside a package; its relative imports are
+    then skipped. Returns ``None`` when Python cannot parse the text.
     """
-    found = {match for match in _DOTTED.findall(text) if match in names}
+    found = set(_DOTTED.findall(text))
     try:
         tree = ast.parse(text)
     except SyntaxError:
-        # A file Python cannot parse: treat it as using every connector, so
-        # the caller falls back to the full run.
-        return set(names)
+        return None
     for node in ast.walk(tree):
-        targets: list[str] = []
         if isinstance(node, ast.Import):
-            targets = [alias.name for alias in node.names]
+            found.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             base = _resolve_from(node, module)
             if base is None:
                 continue
-            targets = [base] + [f"{base}.{alias.name}" for alias in node.names]
-        for target in targets:
-            parts = target.split(".")
-            if (
-                parts[:2] == ["meho_backplane", "connectors"]
-                and len(parts) > 2
-                and parts[2] in names
-            ):
-                found.add(parts[2])
+            found.add(base)
+            found.update(f"{base}.{alias.name}" for alias in node.names)
+    return found
+
+
+def referenced_connectors(text: str, module: str | None, names: frozenset[str]) -> set[str]:
+    """Return the connectors in ``names`` that the Python source ``text`` uses.
+
+    ``module`` works as in :func:`imported_names`.
+    """
+    used = imported_names(text, module)
+    if used is None:
+        # A file Python cannot parse: treat it as using every connector, so
+        # the caller falls back to the full run.
+        return set(names)
+    found: set[str] = set()
+    for target in used:
+        parts = target.split(".")
+        if parts[:2] == ["meho_backplane", "connectors"] and len(parts) > 2 and parts[2] in names:
+            found.add(parts[2])
     return found
 
 

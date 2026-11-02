@@ -604,13 +604,18 @@ first.
   Google projects in `GSM_PARAM_ALLOWED_PROJECTS`, comma-separated
   (#5511).
 - Existing Keycloak realm: on each client that people use for
-  `meho login` (`meho-cli` by default), turn on the standard flow, PKCE
-  `S256` and the redirect address `http://127.0.0.1:*`, for example
-  with the operation `keycloak.client.update`. Do not run
+  `meho login` (`meho-cli` by default), turn on the standard flow and
+  the redirect address `http://127.0.0.1:*`, for example with the
+  operation `keycloak.client.update`. Do not set the PKCE method to
+  required (`S256`) on these clients, and clear it where it is set:
+  the device login of `meho login` sends no PKCE, so a required method
+  refuses every command line login. The fresh sign-in for approvals
+  sends PKCE by itself. Do not run
   `meho admin keycloak bootstrap-clients` for this: on an existing
   realm it also rewrites the `meho-cli` and `meho-mcp` clients and
-  their tenant and role mappers. Until then, approve in the web
-  interface (#5399, #5538).
+  their tenant and role mappers, and it sets the PKCE method of
+  `meho-cli` to required. Until then, approve in the web interface
+  (#5399, #5538).
 - Load the generic vCenter connectors `vmware-rest-9.0` and
   `vmware-rest-8.0` again with `meho connector ingest` and the same API
   files you used before, so the new approval levels of generic vCenter

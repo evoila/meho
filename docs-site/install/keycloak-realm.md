@@ -70,7 +70,7 @@ In the realm that hosts `meho-backplane`, create a client with:
 | Client ID | `meho-cli` (suggested — any identifier works) | Must match `config.keycloakCliClientId` in your chart values. |
 | Client authentication | **Off** (public client) | The CLI has nowhere to store a secret; the device grant against a confidential client fails with `unauthorized_client`. |
 | Standard flow | **On** | Older `meho` CLI versions open the approval sign-in on this client. The current CLI uses `meho-cli-approve` (below). `meho login` uses the device flow. |
-| PKCE method (Advanced → Proof Key for Code Exchange) | `S256` | The CLI sends a PKCE challenge with the browser sign-in. |
+| PKCE method (Advanced → Proof Key for Code Exchange) | (none) | Leave it empty. `meho login` uses the device flow and sends no PKCE, so a required method refuses every `meho login`. The approval sign-in of older CLI versions sends PKCE by itself. |
 | Direct access grants | Off | Password grant is out of scope by design. |
 | Implicit flow | Off | Deprecated by OAuth 2.1. |
 | Service accounts roles | Off | Public clients cannot hold credentials. |

@@ -415,7 +415,7 @@ in `_identity_preview.py`. Wire facts follow `go-vcloud-director` v3
 | op_id | what it does and returns | risk level / approval | wire | versions |
 |---|---|---|---|---|
 | `vcfa.provider.identity.show` | the provider's LDAP, and each org's LDAP and OIDC, as flat `rows` (`applies_to`, `org`, `kind`, server or OIDC fields, `error`) plus `org_count`; never a password or client secret | safe | `GET /api/admin/extension/settings/ldapSettings`, `GET /api/admin/org/{id}/settings/ldap`, `GET /api/admin/org/{id}/settings/oauth` (+ `GET /cloudapi/1.0.0/orgs`) | 9.x |
-| `vcfa.provider.ldap.set` | sets the provider's LDAP; returns `status` (`set`, `unreachable`, `tls_failed`, `certificate_not_trusted`, `certificate_mismatch`, `refused`, `invalid_request`), the settings and the certificate fingerprint | dangerous, approval | `POST /cloudapi/1.0.0/testConnection`, `POST /cloudapi/1.0.0/ssl/trustedCertificates`, `PUT /api/admin/extension/settings/ldapSettings` (`DELETE …/trustedCertificates/{id}` undoes a trust when the `PUT` fails) | 9.x |
+| `vcfa.provider.ldap.set` | sets the provider's LDAP; returns `status` (`set`, `unreachable`, `tls_failed`, `certificate_not_trusted`, `certificate_mismatch`, `refused`, `not_confirmed`, `invalid_request`), the settings and the certificate fingerprint | dangerous, approval | `POST /cloudapi/1.0.0/testConnection`, `POST /cloudapi/1.0.0/ssl/trustedCertificates`, `PUT /api/admin/extension/settings/ldapSettings` (`DELETE …/trustedCertificates/{id}` undoes a trust when the `PUT` is refused or the connection breaks) | 9.x |
 | `vcfa.provider.org.ldap.set` | sets an org's LDAP: `none`, `system` (the provider's) or `custom` (its own server); same answer, plus `refused_by_meho` | dangerous, approval | as above, with `PUT /api/admin/org/{id}/settings/ldap` | 9.x |
 | `vcfa.provider.org.oidc.set` | sets or removes an org's OIDC; returns `status` (`set`, `removed`, `well_known_failed`, `refused`, `refused_by_meho`, `invalid_request`) and the settings | dangerous, approval | `POST /api/admin/org/{id}/settings/oauth/openIdProviderConfig`, `PUT` / `GET` / `DELETE /api/admin/org/{id}/settings/oauth` | 9.x |
 
@@ -444,7 +444,10 @@ in `_identity_preview.py`. Wire facts follow `go-vcloud-director` v3
   `trust_certificate_sha256`; the run trusts the certificate only when the
   server still shows it (else `certificate_mismatch`). When the vendor
   refuses the `PUT` (a wrong bind password), MEHO removes the certificate
-  it trusted in this run, so nothing changes. Active Directory gets the
+  it trusted in this run, so nothing changes. When the connection breaks
+  during the `PUT`, MEHO removes that certificate too and answers
+  `not_confirmed`: the settings may or may not have changed, so the caller
+  reads them with `identity.show`. Active Directory gets the
   vendor SDK's default attribute maps; OpenLDAP needs `user_attributes`
   and `group_attributes`.
 - **OIDC.** The appliance reads the well-known address
@@ -459,7 +462,10 @@ in `_identity_preview.py`. Wire facts follow `go-vcloud-director` v3
   Vault is not read).
 - **Preview.** Each change has its own approval preview: the inputs, the
   secret only as its Vault path, the current settings, what is affected
-  and, for LDAPS, the certificate fingerprint and whether it matches.
+  and, for LDAPS, the certificate fingerprint and whether it matches. The
+  OIDC preview shows the `enabled` the call sends; a call with
+  `enabled: false` has the action `turn_off_org_oidc`, so the approver sees
+  that the org's users lose that sign-in.
 
 Source: `backend/src/meho_backplane/connectors/vcf_automation/`.
 

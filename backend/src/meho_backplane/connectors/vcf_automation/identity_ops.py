@@ -257,6 +257,7 @@ _LDAP_STATUSES: Final = [
     "certificate_not_trusted",
     "certificate_mismatch",
     "refused",
+    "not_confirmed",
     "invalid_request",
 ]
 
@@ -361,8 +362,9 @@ _LDAP_SET = VcfaTypedOp(
         ),
         output_shape=(
             "{status: set | unreachable | tls_failed | certificate_not_trusted | "
-            "certificate_mismatch | refused | invalid_request, settings, certificate_sha256, "
-            "trusted_certificate_id, vendor_message, guidance}. Only 'set' changed anything."
+            "certificate_mismatch | refused | not_confirmed | invalid_request, settings, "
+            "certificate_sha256, trusted_certificate_id, vendor_message, guidance}. Only 'set' "
+            "changed anything; after 'not_confirmed' read the settings to see."
         ),
         next_step="Check the result with vcfa.provider.identity.show.",
     ),
@@ -435,9 +437,10 @@ _ORG_LDAP_SET = VcfaTypedOp(
         ),
         output_shape=(
             "{status: set | unreachable | tls_failed | certificate_not_trusted | "
-            "certificate_mismatch | refused | refused_by_meho | invalid_request, settings, "
-            "certificate_sha256, trusted_certificate_id, vendor_message, guidance}. Only "
-            "'set' changed anything."
+            "certificate_mismatch | refused | not_confirmed | refused_by_meho | "
+            "invalid_request, settings, certificate_sha256, trusted_certificate_id, "
+            "vendor_message, guidance}. Only 'set' changed anything; after 'not_confirmed' "
+            "read the settings to see."
         ),
         next_step="Check the result with vcfa.provider.identity.show and org.",
     ),

@@ -38,6 +38,7 @@ from meho_backplane.connectors.vcf_automation import (
     VcfAutomationConnector,
 )
 from meho_backplane.connectors.vcf_automation import _identity as identity_module
+from meho_backplane.connectors.vcf_automation._identity import hide_secrets, vendor_text
 from meho_backplane.connectors.vcf_automation._identity_ldap import certificate_sha256
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
@@ -250,6 +251,24 @@ def _no_secret(value: Any) -> None:
     assert CLIENT_SECRET not in text
 
 
+def _strings(value: Any) -> Iterator[str]:
+    """Every string in *value*, as it is (not re-escaped by a JSON dump)."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, list | tuple):
+        for item in value:
+            yield from _strings(item)
+
+
+def _none_holds(value: Any, *needles: str) -> None:
+    for text in _strings(value):
+        for needle in needles:
+            assert needle not in text, text
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -406,6 +425,69 @@ async def test_ldap_set_unreachable_server_changes_nothing(
     assert vault == []
 
 
+#: A secret with a backslash, a quote and a non-ASCII letter: every JSON form differs.
+ESCAPED_SECRET = 'Pw\\sentinel"q\u00e9'
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        ESCAPED_SECRET,
+        json.dumps(ESCAPED_SECRET)[1:-1],
+        json.dumps(ESCAPED_SECRET, ensure_ascii=False)[1:-1],
+        "Pw%5Csentinel%22q%C3%A9",
+    ],
+    ids=["as-is", "json-ascii", "json-utf8", "percent-encoded"],
+)
+def test_hide_secrets_sees_every_form_of_the_secret(form: str) -> None:
+    assert hide_secrets(f"Bind failed for {form} at ldap", [ESCAPED_SECRET]).startswith(
+        "[MEHO hid this text"
+    )
+    assert hide_secrets("Bind failed for another text", [ESCAPED_SECRET]) == (
+        "Bind failed for another text"
+    )
+
+
+def test_vendor_text_hides_before_it_cuts() -> None:
+    """A secret that starts before the cut must not survive as its first part."""
+    message = "x" * 490 + json.dumps(ESCAPED_SECRET)[1:-1] + " rejected"
+    response = httpx.Response(400, json={"message": message}, request=httpx.Request("PUT", "/"))
+    exc = httpx.HTTPStatusError("refused", request=response.request, response=response)
+    assert vendor_text(exc, [ESCAPED_SECRET]).startswith("[MEHO hid this text")
+    assert len(vendor_text(exc)) == 500
+
+
+async def test_ldap_set_escaped_bind_password_is_hidden_in_result_and_audit(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A vendor that echoes the JSON body shows the secret escaped; it is hidden all the same."""
+
+    async def _load(target: Any, _operator: Any, *, param: str, mount: str) -> dict[str, Any]:
+        return {"password": ESCAPED_SECRET}
+
+    monkeypatch.setattr(identity_module, "load_param_secret_data", _load)
+    escaped = json.dumps(ESCAPED_SECRET)[1:-1]
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.post(_TEST_CONNECTION).respond(200, json=_probe())
+        mock.put(_PROVIDER_LDAP).respond(
+            400, json={"message": f'Bind failed for body {{"password": "{escaped}"}}'}
+        )
+        result = await run("vcfa.provider.ldap.set", _LDAP_PARAMS)
+    assert result["status"] == "ok", result
+    assert result["result"]["status"] == "refused"
+    assert result["result"]["vendor_message"].startswith("HTTP 400: [MEHO hid this text")
+    _none_holds(result, ESCAPED_SECRET, escaped)
+    async with get_sessionmaker()() as session:
+        audits = [
+            row.payload
+            for row in (await session.execute(select(AuditLog))).scalars().all()
+            if row.payload.get("op_id") == "vcfa.provider.ldap.set"
+        ]
+    assert audits
+    _none_holds(audits, ESCAPED_SECRET, escaped)
+
+
 async def test_ldap_set_wrong_bind_password_is_refused_and_hidden(
     vcfa: VcfAutomationConnector, vault: list[tuple[str, str]]
 ) -> None:
@@ -521,6 +603,33 @@ async def test_ldaps_refused_set_removes_the_trusted_certificate(
     assert out["vendor_message"] == "HTTP 400: Invalid credentials"
     assert undo.called
     assert "could not remove" not in out["guidance"]
+
+
+@pytest.mark.parametrize("undo_status", [204, 500], ids=["removed", "removal-failed"])
+async def test_ldaps_broken_connection_removes_the_trusted_certificate(
+    vcfa: VcfAutomationConnector, vault: list[tuple[str, str]], undo_status: int
+) -> None:
+    """A connection that breaks during the PUT must not leave the new certificate trusted."""
+    params = {**_LDAP_PARAMS, "is_ssl": True, "trust_certificate_sha256": CERT_SHA256}
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.post(_TEST_CONNECTION).respond(
+            200, json=_probe(ssl_result="ERROR_UNTRUSTED_CERTIFICATE")
+        )
+        mock.post(_TRUSTED).respond(201, json={"id": "urn:vcloud:cert:1"})
+        undo = mock.delete(f"{_TRUSTED}/urn%3Avcloud%3Acert%3A1").respond(undo_status)
+        mock.put(_PROVIDER_LDAP).mock(side_effect=httpx.ConnectError("connection reset"))
+        result = await run("vcfa.provider.ldap.set", params)
+    assert result["status"] == "ok", result
+    out = result["result"]
+    assert out["status"] == "not_confirmed"
+    assert "ConnectError" in out["guidance"]
+    assert "vcfa.provider.identity.show" in out["guidance"]
+    assert out["certificate_sha256"] == CERT_SHA256
+    assert out["trusted_certificate_id"] is None
+    assert undo.called
+    assert ("could not remove" in out["guidance"]) is (undo_status == 500)
+    _no_secret(result)
 
 
 async def test_ldap_set_preview_shows_the_vault_path_and_fingerprint(
@@ -749,6 +858,34 @@ async def test_oidc_set_preview_shows_only_the_vault_path(vcfa: VcfAutomationCon
     assert preview["client_secret_from_vault_path"] == "example/oidc-client"
     assert preview["org_id"] == ORG["id"]
     assert preview["current"]["client_id"] == "vcfa-client"
+    _no_secret(parked)
+
+
+@pytest.mark.parametrize(
+    ("params", "action", "enabled"),
+    [
+        (_OIDC_PARAMS, "set_org_oidc", True),
+        ({**_OIDC_PARAMS, "enabled": True}, "set_org_oidc", True),
+        ({**_OIDC_PARAMS, "enabled": False}, "turn_off_org_oidc", False),
+        ({"org": "example-org", "state": "absent"}, "remove_org_oidc", None),
+    ],
+    ids=["default", "enabled", "turn-off", "remove"],
+)
+async def test_oidc_set_preview_names_a_turn_off(
+    vcfa: VcfAutomationConnector, params: dict[str, Any], action: str, enabled: bool | None
+) -> None:
+    """The approver sees whether the call turns the sign-in on or off."""
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        _mount_orgs(mock)
+        mock.get(_ORG_OAUTH).respond(200, json=_oauth_answer())
+        parked = await _preview("vcfa.provider.org.oidc.set", params, vcfa)
+    assert parked is not None
+    preview = parked["preview"]
+    assert preview["action"] == action
+    assert preview["enabled"] is enabled
+    assert preview["current"]["enabled"] is True
+    assert ("cannot sign in" in preview["affects"]) is (action == "turn_off_org_oidc")
     _no_secret(parked)
 
 

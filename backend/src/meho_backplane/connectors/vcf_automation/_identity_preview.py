@@ -32,6 +32,7 @@ from meho_backplane.connectors.vcf_automation._identity_ldap import (
     probe_ldap_server,
     same_fingerprint,
 )
+from meho_backplane.connectors.vcf_automation._identity_oidc import wants_enabled
 from meho_backplane.connectors.vcf_automation._lookups import find_org
 from meho_backplane.connectors.vcf_automation._paths import (
     PROVIDER_LDAP_SETTINGS_PATH,
@@ -148,16 +149,25 @@ async def _org_ldap_set_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 
 async def _org_oidc_set_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     params = ctx.params
-    state = params.get("state") or "present"
+    org = params.get("org")
+    users = f"every user of org {org!r} who signs in with OIDC"
+    if params.get("state") == "absent":
+        action, enabled, affects = "remove_org_oidc", None, f"{users}: the sign-in is removed"
+    elif wants_enabled(params):
+        action, enabled, affects = "set_org_oidc", True, users
+    else:
+        action, enabled = "turn_off_org_oidc", False
+        affects = f"{users}: the sign-in is turned off and they cannot sign in with it"
     preview: dict[str, Any] = {
-        "action": "remove_org_oidc" if state == "absent" else "set_org_oidc",
-        "org": params.get("org"),
+        "action": action,
+        "org": org,
+        "enabled": enabled,
         "well_known_endpoint": params.get("well_known_endpoint"),
         "client_id": params.get("client_id"),
         "client_secret_from_vault_path": params.get("client_secret_ref"),
         "claims": params.get("claims"),
         **await _org_and_current(ctx, PROVIDER_ORG_OAUTH_SETTINGS_PATH, "oidc"),
-        "affects": f"every user of org {params.get('org')!r} who signs in with OIDC",
+        "affects": affects,
     }
     return preview
 

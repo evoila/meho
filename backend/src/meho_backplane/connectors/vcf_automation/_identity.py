@@ -21,6 +21,7 @@ provider's LDAP, and one LDAP row and one OIDC row per org.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
@@ -159,13 +160,25 @@ def secret_missing_guidance(params: Mapping[str, Any], prefix: str, default_key:
     )
 
 
+def _secret_forms(secret: str) -> set[str]:
+    """The ways a vendor message can carry *secret*: as is, percent-encoded or JSON-escaped.
+
+    A vendor that echoes the request body gives the JSON form: ``\\`` and
+    ``"`` escaped, and a non-ASCII character either kept or as ``\\uXXXX``.
+    """
+    return {
+        secret,
+        quote(secret, safe=""),
+        json.dumps(secret)[1:-1],
+        json.dumps(secret, ensure_ascii=False)[1:-1],
+        secret.replace('"', '\\"'),
+    }
+
+
 def hide_secrets(text: str, secrets: Iterable[str | None]) -> str:
     """*text*, or a fixed note when it holds one of *secrets* (as is or escaped)."""
     for secret in secrets:
-        if not secret:
-            continue
-        forms = {secret, quote(secret, safe=""), secret.replace('"', '\\"')}
-        if any(form in text for form in forms):
+        if secret and any(form in text for form in _secret_forms(secret)):
             return _HIDDEN_TEXT
     return text
 
@@ -185,7 +198,8 @@ def vendor_text(exc: httpx.HTTPStatusError, secrets: Iterable[str | None] = ()) 
         text = str(pick(body, "message") or pick(body, "minorErrorCode") or "")
     elif resp.text and not resp.headers.get("content-type", "").startswith("text/html"):
         text = resp.text
-    return hide_secrets(text.strip()[:500], list(secrets))
+    # Hide first, then cut: a cut could leave part of a secret in the text.
+    return hide_secrets(text.strip(), list(secrets))[:500]
 
 
 def http_error(exc: httpx.HTTPStatusError, secrets: Iterable[str | None] = ()) -> str:

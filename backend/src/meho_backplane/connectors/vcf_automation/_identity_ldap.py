@@ -17,7 +17,11 @@ Both follow ``go-vcloud-director`` v3 ``govcd/tm_ldap.go``:
    only in the ``PUT`` body of the classic LDAP settings path.
 4. When the vendor refuses the ``PUT`` (a wrong bind password, a search base
    it cannot read), MEHO answers ``refused`` with the vendor's message, and
-   removes a certificate this run trusted, so nothing changes.
+   removes a certificate this run trusted, so nothing changes. When the
+   connection breaks during the ``PUT`` (the appliance went away, a
+   timeout), MEHO also removes that certificate and answers
+   ``not_confirmed``: the settings may or may not have changed, so the
+   caller reads them with ``vcfa.provider.identity.show``.
 
 The org op also sets the modes ``none`` (no LDAP) and ``system`` (the
 provider's LDAP). It refuses the provider's own org: the provider admin
@@ -331,6 +335,22 @@ async def _untrust(
     return True
 
 
+async def _undo_trust(
+    connector: VcfAutomationConnector,
+    target: VcfAutomationTargetLike,
+    operator: Operator,
+    cert_id: str | None,
+    headers: dict[str, str] | None,
+) -> str:
+    """Remove a certificate this run trusted; the guidance to add when that failed."""
+    if cert_id is None or await _untrust(connector, target, operator, cert_id, headers):
+        return ""
+    return (
+        f" MEHO could not remove the certificate it trusted (id {cert_id!r}); remove it "
+        "in the VCF Automation console."
+    )
+
+
 async def _apply(
     connector: VcfAutomationConnector,
     target: VcfAutomationTargetLike,
@@ -341,7 +361,11 @@ async def _apply(
     build_body: Any,
     org: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    """Probe, trust, read the password, ``PUT``; undo the trust when the ``PUT`` fails."""
+    """Probe, trust, read the password, ``PUT``; undo the trust when the ``PUT`` fails.
+
+    A refused ``PUT`` and a broken connection both undo the trust: in both
+    cases the certificate must not stay trusted on its own.
+    """
     stop, cert = await _check_server(connector, target, operator, params)
     if stop is not None:
         return stop
@@ -362,20 +386,22 @@ async def _apply(
             extra_headers={"Content-Type": CLASSIC_JSON},
         )
     except httpx.HTTPStatusError as exc:
-        undone = await _untrust(connector, target, operator, cert_id, headers)
-        note = (
-            ""
-            if cert_id is None or undone
-            else (
-                f" MEHO could not remove the certificate it trusted (id {cert_id!r}); remove it "
-                "in the VCF Automation console."
-            )
-        )
+        note = await _undo_trust(connector, target, operator, cert_id, headers)
         return _outcome(
             "refused",
             "VCF Automation refused the LDAP settings (a wrong bind password, user or search "
             "base, or a server that refused the bind). The old settings stay." + note,
             vendor_message=http_error(exc, [password]),
+            certificate_sha256=cert["sha256"] if cert else None,
+        )
+    except httpx.TransportError as exc:
+        # No answer came back, so the settings may or may not have changed.
+        note = await _undo_trust(connector, target, operator, cert_id, headers)
+        return _outcome(
+            "not_confirmed",
+            f"the connection to VCF Automation broke while MEHO saved the LDAP settings "
+            f"({type(exc).__name__}). The settings may or may not have changed: read them "
+            "with vcfa.provider.identity.show before you call again." + note,
             certificate_sha256=cert["sha256"] if cert else None,
         )
     return _outcome(

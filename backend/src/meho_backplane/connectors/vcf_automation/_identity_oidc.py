@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vcf_automation.connector import VcfAutomationConnector
     from meho_backplane.connectors.vcf_automation.session import VcfAutomationTargetLike
 
-__all__ = ["OIDC_CLAIM_NAMES", "provider_org_oidc_set"]
+__all__ = ["OIDC_CLAIM_NAMES", "provider_org_oidc_set", "wants_enabled"]
 
 #: Caller claim names → vendor claim-mapping field names.
 OIDC_CLAIM_NAMES: Final = {
@@ -67,6 +67,12 @@ OIDC_CLAIM_NAMES: Final = {
 #: Endpoints the vendor needs before it saves OIDC settings (the vendor SDK
 #: checks the same three).
 _NEEDED_ENDPOINTS: Final = ("userAuthorizationEndpoint", "accessTokenEndpoint", "userInfoEndpoint")
+
+
+def wants_enabled(params: Mapping[str, Any]) -> bool:
+    """The ``enabled`` a set call sends: ``True`` unless the call says ``false``."""
+    value = params.get("enabled")
+    return True if value is None else bool(value)
 
 
 def _outcome(status: str, guidance: str | None, **extra: Any) -> dict[str, Any]:
@@ -84,7 +90,7 @@ def _merged(
 ) -> tuple[dict[str, Any], list[str]]:
     """The settings to send, and the names of required values that are still empty."""
     body = dict(found)
-    body[key_of(body, "enabled")] = bool(params.get("enabled", True))
+    body[key_of(body, "enabled")] = wants_enabled(params)
     body[key_of(body, "clientId")] = params["client_id"]
     body[key_of(body, "clientSecret")] = secret
     body[key_of(body, "wellKnownEndpoint")] = params["well_known_endpoint"]
@@ -150,7 +156,7 @@ async def provider_org_oidc_set(
     org = await find_org(connector, target, operator, name)
     if org is None:
         return _outcome("invalid_request", f"no org named {name!r}; nothing was sent")
-    turns_off = params.get("state") == "absent" or params.get("enabled") is False
+    turns_off = params.get("state") == "absent" or not wants_enabled(params)
     if turns_off and is_provider_org(org):
         return _provider_org_refusal(org)
     if params.get("state") == "absent":

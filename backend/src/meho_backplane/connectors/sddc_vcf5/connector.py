@@ -79,6 +79,7 @@ import structlog
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import is_system_operator
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import (
@@ -182,6 +183,8 @@ class SddcVcf5Connector(HttpConnector):
         # serialises concurrent first-use callers so they don't double-POST
         # /v1/tokens.
         self._session_tokens: dict[tuple[str, ...], str] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._session_lock = asyncio.Lock()
 
     async def auth_headers(self, target: SddcTargetLike, operator: Operator) -> dict[str, str]:
@@ -233,8 +236,13 @@ class SddcVcf5Connector(HttpConnector):
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None and not is_system_operator(operator):
+                # The caller's own Vault read, once per caller and target.
+                await self._readers.ensure_read(
+                    target, operator, lambda: self._credentials_loader(target, operator)
+                )
                 return cached
             creds = await self._credentials_loader(target, operator)
+            self._readers.record(target, operator)
             try:
                 username = creds["username"]
                 password = creds["password"]
@@ -493,9 +501,13 @@ class SddcVcf5Connector(HttpConnector):
         The dispatcher calls this on an establish-time login failure. This connector
         re-reads Vault on every mint, so it keeps no separate credential-bytes cache;
         the only per-target state is the token, so this also drops it. Kept so the
-        connector advertises both dispatch-path recovery hooks.
+        connector advertises both dispatch-path recovery hooks. It also forgets
+        who has read the target's secret, so the next call of every caller reads
+        it again.
         """
         await self._evict_session_token(target)
+        async with self._session_lock:
+            self._readers.forget(target)
 
     async def _evict_session_token(
         self, target: SddcTargetLike, *, rejected: httpx.Request | None = None
@@ -523,6 +535,7 @@ class SddcVcf5Connector(HttpConnector):
         """
         async with self._session_lock:
             self._session_tokens.clear()
+            self._readers.clear()
         await super().aclose()
 
 

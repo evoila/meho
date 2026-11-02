@@ -55,8 +55,8 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
-    is_system_operator,
     synthesise_system_operator,
 )
 from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
@@ -187,6 +187,8 @@ class RabbitMqConnector(HttpConnector):
         # same-named targets in different tenants never share cached
         # credentials (#1642/#1672).
         self._creds_cache: dict[tuple[str, str], dict[str, str]] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._creds_lock = asyncio.Lock()
         self._credentials_loader: RabbitMqCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
@@ -221,16 +223,20 @@ class RabbitMqConnector(HttpConnector):
         """Return the cached credentials for *target*, loading on first use.
 
         The loaded dict must contain ``username`` + ``password``; a missing
-        key raises :exc:`RuntimeError` naming the target. The cache
-        fast-path is closed to the synthesised system operator so a
-        system/operator-less caller always re-runs the loader (its
-        fail-closed guard applies) and can never be served a warm
-        credential a real operator primed (#1008).
+        key raises :exc:`RuntimeError` naming the target.
+
+        A cached entry is handed to a caller only after that caller's own
+        Vault read of the target's secret passed once in this process
+        (:class:`~meho_backplane.connectors._shared.secret_readers.SecretReaders`).
+        A hit for another caller runs the loader under their login first.
+        The synthesised system operator is never recorded, so it always runs
+        the loader. A caller who has read keeps cold load → cache →
+        reuse.
         """
         cache_key = target_cache_key(target)
         async with self._creds_lock:
             cached = self._creds_cache.get(cache_key)
-            if cached is not None and not is_system_operator(operator):
+            if cached is not None and self._readers.has_read(target, operator):
                 return cached
             raw = await self._credentials_loader(target, operator)
             missing = [k for k in ("username", "password") if k not in raw]
@@ -241,6 +247,7 @@ class RabbitMqConnector(HttpConnector):
                     "{'username': str, 'password': str}"
                 )
             self._creds_cache[cache_key] = raw
+            self._readers.record(target, operator)
             _log.info("rabbitmq_credentials_loaded", target=target.name, host=target.host)
             return raw
 
@@ -598,6 +605,7 @@ class RabbitMqConnector(HttpConnector):
         """
         async with self._creds_lock:
             self._creds_cache.pop(target_cache_key(target), None)
+            self._readers.forget(target)
 
     async def aclose(self) -> None:
         """Clear cached credentials, then tear down the httpx pool.
@@ -608,4 +616,5 @@ class RabbitMqConnector(HttpConnector):
         """
         async with self._creds_lock:
             self._creds_cache.clear()
+            self._readers.clear()
         await super().aclose()

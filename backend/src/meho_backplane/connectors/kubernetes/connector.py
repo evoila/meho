@@ -69,6 +69,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
 from meho_backplane.connectors._shared.pinned_transport import build_pinned_async_transport
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -482,6 +483,8 @@ class KubernetesConnector(Connector):
         # ``ApiClient`` cannot speak. Built lazily from the same
         # operator-identity kubeconfig and closed in :meth:`aclose`.
         self._ws_api_clients: dict[tuple[str, str], WsApiClient] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._lock = asyncio.Lock()
 
     async def fingerprint(
@@ -2049,6 +2052,7 @@ class KubernetesConnector(Connector):
             for ws_client in self._ws_api_clients.values():
                 await ws_client.close()
             self._ws_api_clients.clear()
+            self._readers.clear()
 
     @staticmethod
     def _cache_key(target: KubernetesTargetLike) -> tuple[str, str]:
@@ -2124,8 +2128,13 @@ class KubernetesConnector(Connector):
         async with self._lock:
             cached = self._api_clients.get(key)
             if cached is not None and not is_system_operator(operator):
+                # The caller's own Vault read, once per caller and target.
+                await self._readers.ensure_read(
+                    target, operator, lambda: self._credential_loader(target, operator)
+                )
                 return cached
             credential = await self._credential_loader(target, operator)
+            self._readers.record(target, operator)
             if isinstance(credential, WcpSsoCredential):
                 api_client = client.ApiClient(
                     configuration=await self._wcp_configuration(target, credential)
@@ -2220,8 +2229,13 @@ class KubernetesConnector(Connector):
         async with self._lock:
             cached = self._ws_api_clients.get(key)
             if cached is not None and not is_system_operator(operator):
+                # The caller's own Vault read, once per caller and target.
+                await self._readers.ensure_read(
+                    target, operator, lambda: self._credential_loader(target, operator)
+                )
                 return cached
             credential = await self._credential_loader(target, operator)
+            self._readers.record(target, operator)
             if isinstance(credential, WcpSsoCredential):
                 ws_config = await self._wcp_configuration(target, credential)
             else:
@@ -2276,6 +2290,7 @@ class KubernetesConnector(Connector):
             ws_client = self._ws_api_clients.pop(key, None)
             if ws_client is not None:
                 await ws_client.close()
+            self._readers.forget(target)
             if api_client is not None or ws_client is not None:
                 _log.info(
                     "kubernetes_client_cache_invalidated",

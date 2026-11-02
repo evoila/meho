@@ -43,6 +43,7 @@ from meho_backplane.connectors._shared.microsoft_login import (
     MicrosoftLoginError,
     fetch_client_credentials_token,
 )
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -213,6 +214,8 @@ class AzureConnector(
         )
         self._credentials: dict[_CredentialKey, AzureCredentials] = {}
         self._tokens: dict[_TokenKey, _CachedToken] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._credential_locks: dict[_CredentialKey, asyncio.Lock] = {}
         self._token_locks: dict[_TokenKey, asyncio.Lock] = {}
 
@@ -266,7 +269,7 @@ class AzureConnector(
         login = (credentials.tenant_id, credentials.client_id)
         scope = config.cloud.arm_scope if scope is None else scope
         key: _TokenKey = (*target_cache_key(target), *login, scope)
-        use_cache = _may_use_cache(operator)
+        use_cache = _may_use_cache(operator) and self._readers.has_read(target, operator)
         cached = self._tokens.get(key)
         if use_cache and cached is not None and _monotonic() < cached.renew_at:
             return cached.token, login
@@ -302,7 +305,9 @@ class AzureConnector(
     ) -> AzureCredentials:
         """Return the target's login, from the cache or from its secret."""
         key: _CredentialKey = (*target_cache_key(target), str(target.secret_ref or ""))
-        use_cache = _may_use_cache(operator)
+        checked = _may_use_cache(operator)
+        # A cached secret is used by a caller only after their own Vault read passed once.
+        use_cache = checked and self._readers.has_read(target, operator)
         cached = self._credentials.get(key)
         if use_cache and cached is not None:
             return cached
@@ -312,6 +317,8 @@ class AzureConnector(
                 return cached
             credentials = await self._credentials_loader(target, operator)
             self._credentials[key] = credentials
+            if checked:
+                self._readers.record(target, operator)
             return credentials
 
     async def invalidate_session(
@@ -339,6 +346,7 @@ class AzureConnector(
         prefix = target_cache_key(target)
         for key in [key for key in self._credentials if key[:2] == prefix]:
             del self._credentials[key]
+        self._readers.forget(target)
         self._drop_tokens(target)
 
     def _drop_tokens(self, target: AzureTargetLike) -> None:
@@ -350,6 +358,7 @@ class AzureConnector(
         """Forget every cached secret and token, then close the HTTP clients."""
         self._credentials.clear()
         self._tokens.clear()
+        self._readers.clear()
         await super().aclose()
 
     # ------------------------------------------------------------------

@@ -1,0 +1,577 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""Every connector cache hands a cached entry to a caller only after their own Vault read.
+
+A connector keeps a credential, a login token or a client per target. The
+first caller's Vault read fills the cache. These tests show, for every such
+cache, that a later caller does not get the cached entry for free:
+
+* a caller whose own Vault read is refused (a person without the right, the
+  check runner, the system operator) is refused on a warm cache too;
+* a second caller who may read the secret gets the cached entry after one
+  read of their own, with no second vendor login;
+* a caller who has read keeps using the cache without another read;
+* a target change forgets the readers of that target, and no other target.
+
+The cache is warmed by hand for the first person, so the tests need no
+vendor login and no HTTP mock. The Vault read is the only seam replaced:
+the stand-in allows named people only and counts its reads.
+"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.vault import VaultRoleDeniedError
+from meho_backplane.connectors._shared.cache_key import credential_cache_key, target_cache_key
+from meho_backplane.connectors._shared.microsoft_login import ClientSecretCredentials
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
+from meho_backplane.connectors.argocd.connector import ArgoCdConnector
+from meho_backplane.connectors.azure.connector import AzureConnector
+from meho_backplane.connectors.entra.connector import EntraConnector
+from meho_backplane.connectors.fleet_lcm.connector import FleetLcmConnector
+from meho_backplane.connectors.github.connector import GitHubRestConnector
+from meho_backplane.connectors.harbor.connector import HarborConnector
+from meho_backplane.connectors.hcx.connector import HcxConnector
+from meho_backplane.connectors.hetzner_robot.connector import HetznerRobotConnector
+from meho_backplane.connectors.idb.connector import IdbWsaConnector, _Token
+from meho_backplane.connectors.idb.session import IdbCredentials
+from meho_backplane.connectors.keycloak.connector import KeycloakConnector, _CachedToken
+from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
+from meho_backplane.connectors.nsx.connector import NsxConnector
+from meho_backplane.connectors.phpipam.connector import PhpipamConnector
+from meho_backplane.connectors.phpipam.session import PhpipamCredentials
+from meho_backplane.connectors.profiled import ProfiledRestConnector, _CachedSessionToken
+from meho_backplane.connectors.proxmox.connector import ProxmoxConnector
+from meho_backplane.connectors.proxmox.session import ProxmoxCredentials
+from meho_backplane.connectors.rabbitmq.connector import RabbitMqConnector
+from meho_backplane.connectors.salt.connector import SaltConnector, _SaltSession
+from meho_backplane.connectors.sddc_manager.connector import SddcManagerConnector
+from meho_backplane.connectors.sddc_vcf5.connector import SddcVcf5Connector
+from meho_backplane.connectors.srm.connector import SrmConnector
+from meho_backplane.connectors.vcd.connector import VcloudDirectorConnector
+from meho_backplane.connectors.vcf_automation.connector import (
+    VcfAutomationConnector,
+    _plane_cache_key,
+)
+from meho_backplane.connectors.vcf_cloud_builder.connector import CloudBuilderConnector
+from meho_backplane.connectors.vcf_fleet.connector import VcfFleetConnector
+from meho_backplane.connectors.vcf_installer.connector import InstallerConnector
+from meho_backplane.connectors.vcf_logs.connector import VcfLogsConnector
+from meho_backplane.connectors.vcf_logs.connector import (
+    _session_cache_key as _logs_session_key,
+)
+from meho_backplane.connectors.vcf_operations.connector import VcfOperationsConnector
+from meho_backplane.connectors.vcf_operations.connector import (
+    _session_cache_key as _ops_session_key,
+)
+from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
+from meho_backplane.connectors.vr.connector import VrConnector
+from meho_backplane.connectors.vra8.connector import Vra8Connector
+from meho_backplane.connectors.vra8.connector import _session_cache_key as _vra8_session_key
+from meho_backplane.connectors.vro.connector import VroConnector, _login_cache_key
+
+_TENANT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
+_SECRET_REF = "tenants/test/made-up-target"
+#: The people whose Vault read passes. Everyone else is refused.
+_ALLOWED = frozenset({"alice", "carol"})
+_FAR_FUTURE = 1e12
+
+
+@dataclass(frozen=True)
+class _Target:
+    """A target stub with every field the connector key helpers read."""
+
+    name: str = "made-up-target"
+    host: str = "target.example.invalid"
+    port: int | None = 443
+    secret_ref: str | None = _SECRET_REF
+    auth_model: str | None = "shared_service_account"
+    extras: dict[str, Any] = field(default_factory=dict)
+    id: uuid.UUID = field(default_factory=uuid.uuid4)
+    tenant_id: uuid.UUID = _TENANT_ID
+    fqdn: str | None = None
+    verify_tls: bool = True
+    tls_ca_pin: str | None = None
+    tls_server_name: str | None = None
+    provider_secret_ref: str | None = None
+    provider_username: str | None = None
+    provider: str | None = None
+    auth_source: str | None = None
+    fingerprint: Any = None
+
+
+def _person(sub: str) -> Operator:
+    return Operator(
+        sub=sub,
+        name=None,
+        email=None,
+        raw_jwt=f"{sub}.test.jwt",
+        tenant_id=_TENANT_ID,
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+
+def _check_runner() -> Operator:
+    """The identity the Sensor runner dispatches with: its own token, not a person's."""
+    return Operator(
+        sub="__sensor__",
+        name=None,
+        email=None,
+        raw_jwt="runner.test.jwt",
+        tenant_id=_TENANT_ID,
+        tenant_role=TenantRole.OPERATOR,
+        check_runner_dispatch=True,
+    )
+
+
+class _Vault:
+    """Stands in for the Vault read. Allows the named people only; counts reads."""
+
+    def __init__(self, secret: Any) -> None:
+        self._secret = secret
+        self.reads: list[str] = []
+
+    async def read(self, target: Any, operator: Operator) -> Any:
+        del target
+        self.reads.append(operator.sub)
+        if operator.sub not in _ALLOWED:
+            raise VaultRoleDeniedError(f"read refused for {operator.sub}")
+        return self._secret
+
+
+_BASIC = {"username": "svc", "password": "made-up-password"}
+
+
+@dataclass(frozen=True)
+class _Case:
+    """One connector cache: how to build it, warm it, call it and inspect it."""
+
+    name: str
+    secret: Any
+    make: Callable[[Callable[..., Awaitable[Any]]], Any]
+    warm: Callable[[Any, _Target], None]
+    call: Callable[[Any, _Target, Operator], Awaitable[Any]]
+    readers: Callable[[Any], SecretReaders]
+    cached: Callable[[Any, _Target], bool]
+
+    def __str__(self) -> str:
+        return self.name
+
+
+def _creds_cache_case(name: str, cls: type, secret: Any = _BASIC) -> _Case:
+    """A connector with a per-target ``_creds_cache`` read through ``auth_headers``."""
+    return _Case(
+        name=name,
+        secret=secret,
+        make=lambda loader: cls(credentials_loader=loader),
+        warm=lambda c, t: c._creds_cache.__setitem__(target_cache_key(t), secret),
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: target_cache_key(t) in c._creds_cache,
+    )
+
+
+def _warm_creds_and_token(c: Any, t: _Target) -> None:
+    c._creds_cache[target_cache_key(t)] = dict(_BASIC)
+    c._session_tokens[credential_cache_key(t)] = "made-up-token"
+
+
+def _warm_session_loader_token(c: Any, t: _Target) -> None:
+    c._session_tokens[credential_cache_key(t)] = "made-up-token"
+
+
+def _vcf_creds_token_case(name: str, cls: type, creds_attr: str, key: Callable[..., Any]) -> _Case:
+    """A VCF connector: a shared ``CredentialsCache`` plus a session token cache."""
+
+    def _warm(c: Any, t: _Target) -> None:
+        getattr(c, creds_attr)._cache[target_cache_key(t)] = dict(_BASIC)
+        c._session_tokens[key(t)] = "made-up-token"
+
+    return _Case(
+        name=name,
+        secret=_BASIC,
+        make=lambda loader: cls(credentials_loader=loader),
+        warm=_warm,
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: getattr(c, creds_attr).readers,
+        cached=lambda c, t: target_cache_key(t) in getattr(c, creds_attr)._cache,
+    )
+
+
+def _kubernetes_case(name: str, cache_attr: str, method: str) -> _Case:
+    def _warm(c: Any, t: _Target) -> None:
+        getattr(c, cache_attr)[KubernetesConnector._cache_key(t)] = MagicMock(close=AsyncMock())
+
+    return _Case(
+        name=name,
+        secret={
+            "apiVersion": "v1",
+            "kind": "Config",
+            "current-context": "default",
+            "contexts": [{"name": "default", "context": {"cluster": "c1", "user": "u1"}}],
+            "clusters": [{"name": "c1", "cluster": {"server": "https://k8s.example.invalid"}}],
+            "users": [{"name": "u1", "user": {"token": "made-up-token"}}],
+        },
+        make=lambda loader: KubernetesConnector(kubeconfig_loader=loader),
+        warm=_warm,
+        call=lambda c, t, op: getattr(c, method)(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: KubernetesConnector._cache_key(t) in getattr(c, cache_attr),
+    )
+
+
+def _vmware_rest_case(name: str, warm: Callable[[Any, _Target], None], method: str) -> _Case:
+    return _Case(
+        name=name,
+        secret=_BASIC,
+        make=lambda loader: VmwareRestConnector(session_loader=loader),
+        warm=warm,
+        call=lambda c, t, op: getattr(c, method)(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: (
+            target_cache_key(t) in c._session_tokens
+            or target_cache_key(t) in c._vsan_sessions
+            or target_cache_key(t) in c._pbm_cookies
+            or target_cache_key(t) in c._file_access_cookies
+        ),
+    )
+
+
+def _microsoft_case(name: str, cls: type) -> _Case:
+    creds = ClientSecretCredentials(
+        tenant_id="00000000-0000-0000-0000-00000000aaaa",
+        client_id="00000000-0000-0000-0000-00000000bbbb",
+        client_secret="made-up-secret",
+    )
+    return _Case(
+        name=name,
+        secret=creds,
+        make=lambda loader: cls(credentials_loader=loader),
+        warm=lambda c, t: c._credentials.__setitem__((*target_cache_key(t), _SECRET_REF), creds),
+        call=lambda c, t, op: c._credentials_for(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: (*target_cache_key(t), _SECRET_REF) in c._credentials,
+    )
+
+
+def _vcfa_case(plane: str) -> _Case:
+    tokens = f"_{plane}_tokens"
+    readers = f"_{plane}_readers"
+    return _Case(
+        name=f"vcf_automation-{plane}",
+        secret=_BASIC,
+        make=lambda loader: VcfAutomationConnector(credentials_loader=loader),
+        warm=lambda c, t: getattr(c, tokens).__setitem__(_plane_cache_key(t, plane), "tok"),  # type: ignore[arg-type]
+        call=lambda c, t, op: getattr(c, f"_{plane}_session_token")(t, op),
+        readers=lambda c: getattr(c, readers),
+        cached=lambda c, t: _plane_cache_key(t, plane) in getattr(c, tokens),  # type: ignore[arg-type]
+    )
+
+
+def _warm_idb(c: Any, t: _Target) -> None:
+    key = c._key(t)
+    c._credentials[key] = IdbCredentials(client_id="made-up", client_secret="made-up-secret")
+    c._tokens[key] = _Token("made-up-token", _FAR_FUTURE)
+
+
+def _warm_phpipam(c: Any, t: _Target) -> None:
+    key = PhpipamConnector._key(t)
+    c._credentials[key] = PhpipamCredentials(username="svc", password="made-up-password")
+    c._tokens[key] = "made-up-token"
+
+
+def _warm_vmware_pbm(c: Any, t: _Target) -> None:
+    c._pbm_cookies[target_cache_key(t)] = "made-up-cookie"
+    c._pbm_profile_managers[target_cache_key(t)] = "ProfileManager"
+
+
+CASES: list[_Case] = [
+    _creds_cache_case("harbor", HarborConnector),
+    _creds_cache_case("argocd", ArgoCdConnector, {"token": "made-up-token"}),
+    _creds_cache_case("hetzner_robot", HetznerRobotConnector),
+    _creds_cache_case("rabbitmq", RabbitMqConnector),
+    _creds_cache_case("vcf_cloud_builder", CloudBuilderConnector),
+    _creds_cache_case(
+        "proxmox",
+        ProxmoxConnector,
+        ProxmoxCredentials(mode="token", token_id="svc@pam!meho", token_secret="made-up"),
+    ),
+    _Case(
+        name="vcf_installer",
+        secret=_BASIC,
+        make=lambda loader: InstallerConnector(credentials_loader=loader),
+        warm=_warm_creds_and_token,
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: target_cache_key(t) in c._creds_cache,
+    ),
+    _Case(
+        name="sddc_manager",
+        secret=_BASIC,
+        make=lambda loader: SddcManagerConnector(credentials_loader=loader),
+        warm=_warm_creds_and_token,
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: target_cache_key(t) in c._creds_cache,
+    ),
+    _Case(
+        name="nsx",
+        secret=_BASIC,
+        make=lambda loader: NsxConnector(session_loader=loader),
+        warm=lambda c, t: c._session_tokens.__setitem__(target_cache_key(t), "made-up-xsrf"),
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: target_cache_key(t) in c._session_tokens,
+    ),
+    _Case(
+        name="hcx",
+        secret=_BASIC,
+        make=lambda loader: HcxConnector(session_loader=loader),
+        warm=_warm_session_loader_token,
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: credential_cache_key(t) in c._session_tokens,
+    ),
+    _Case(
+        name="salt",
+        secret=_BASIC,
+        make=lambda loader: SaltConnector(session_loader=loader),
+        warm=lambda c, t: c._sessions.__setitem__(
+            credential_cache_key(t),
+            _SaltSession(authorization="Basic made-up", cookie=None, xsrf=None),
+        ),
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: credential_cache_key(t) in c._sessions,
+    ),
+    _Case(
+        name="srm",
+        secret=_BASIC,
+        make=lambda loader: SrmConnector(session_loader=loader),
+        warm=lambda c, t: c._session_ids.__setitem__(credential_cache_key(t), "made-up-session"),
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: credential_cache_key(t) in c._session_ids,
+    ),
+    _Case(
+        name="vr",
+        secret=_BASIC,
+        make=lambda loader: VrConnector(session_loader=loader),
+        warm=lambda c, t: c._session_ids.__setitem__(credential_cache_key(t), "made-up-session"),
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: credential_cache_key(t) in c._session_ids,
+    ),
+    _Case(
+        name="vcd",
+        secret=_BASIC,
+        make=lambda loader: VcloudDirectorConnector(credentials_loader=loader),
+        warm=lambda c, t: c._session_tokens.__setitem__(c._session_cache_key(t), "made-up-jwt"),
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: c._session_cache_key(t) in c._session_tokens,
+    ),
+    _Case(
+        name="vra8",
+        secret=_BASIC,
+        make=lambda loader: Vra8Connector(credentials_loader=loader),
+        warm=lambda c, t: c._session_tokens.__setitem__(_vra8_session_key(t), "made-up-bearer"),
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: _vra8_session_key(t) in c._session_tokens,
+    ),
+    _Case(
+        name="sddc_vcf5",
+        secret=_BASIC,
+        make=lambda loader: SddcVcf5Connector(credentials_loader=loader),
+        warm=_warm_session_loader_token,
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: credential_cache_key(t) in c._session_tokens,
+    ),
+    _vcf_creds_token_case("vcf_logs", VcfLogsConnector, "_credentials", _logs_session_key),
+    _vcf_creds_token_case("vcf_operations", VcfOperationsConnector, "_creds", _ops_session_key),
+    _Case(
+        name="vcf_fleet",
+        secret=_BASIC,
+        make=lambda loader: VcfFleetConnector(credentials_loader=loader),
+        warm=lambda c, t: c._creds._cache.__setitem__(target_cache_key(t), dict(_BASIC)),
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._creds.readers,
+        cached=lambda c, t: target_cache_key(t) in c._creds._cache,
+    ),
+    _Case(
+        name="fleet_lcm",
+        secret={**_BASIC, "token": "made-up-token"},
+        make=lambda loader: FleetLcmConnector(credentials_loader=loader),
+        warm=lambda c, t: c._creds._cache.__setitem__(
+            target_cache_key(t), {**_BASIC, "token": "made-up-token"}
+        ),
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._creds.readers,
+        cached=lambda c, t: target_cache_key(t) in c._creds._cache,
+    ),
+    _vcfa_case("provider"),
+    _vcfa_case("tenant"),
+    _Case(
+        name="keycloak",
+        secret=_BASIC,
+        make=lambda loader: KeycloakConnector(credentials_loader=loader),
+        warm=lambda c, t: c._admin_tokens.__setitem__(
+            target_cache_key(t), _CachedToken("made-up-token", _FAR_FUTURE)
+        ),
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: target_cache_key(t) in c._admin_tokens,
+    ),
+    _Case(
+        name="github",
+        secret=_BASIC,
+        make=lambda loader: GitHubRestConnector(credentials_loader=loader),
+        warm=lambda c, t: c._pat_tokens.__setitem__(target_cache_key(t), "made-up-pat"),
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: target_cache_key(t) in c._pat_tokens,
+    ),
+    _Case(
+        name="vro",
+        secret=_BASIC,
+        make=lambda loader: VroConnector(credentials_loader=loader),
+        warm=lambda c, t: c._authorizations.__setitem__(
+            _login_cache_key(t), ("Basic made-up", None)
+        ),
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: _login_cache_key(t) in c._authorizations,
+    ),
+    _Case(
+        name="profiled",
+        secret=_BASIC,
+        make=lambda loader: ProfiledRestConnector(credentials_loader=loader),
+        warm=lambda c, t: c._session_tokens.__setitem__(
+            credential_cache_key(t), _CachedSessionToken("made-up-token", None)
+        ),
+        call=lambda c, t, op: c._session_token(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: credential_cache_key(t) in c._session_tokens,
+    ),
+    _kubernetes_case("kubernetes-rest", "_api_clients", "_get_api_client"),
+    _kubernetes_case("kubernetes-ws", "_ws_api_clients", "_get_ws_api_client"),
+    _vmware_rest_case(
+        "vmware_rest-session",
+        lambda c, t: c._session_tokens.__setitem__(target_cache_key(t), "made-up-session"),
+        "auth_headers",
+    ),
+    _vmware_rest_case(
+        "vmware_rest-vsan",
+        lambda c, t: c._vsan_sessions.__setitem__(target_cache_key(t), ("cookie", "action")),
+        "_ensure_vsan_session",
+    ),
+    _vmware_rest_case("vmware_rest-pbm", _warm_vmware_pbm, "_ensure_pbm"),
+    _vmware_rest_case(
+        "vmware_rest-file-access",
+        lambda c, t: c._file_access_cookies.__setitem__(target_cache_key(t), "made-up-cookie"),
+        "_ensure_file_access_session",
+    ),
+    _Case(
+        name="idb",
+        secret=IdbCredentials(client_id="made-up", client_secret="made-up-secret"),
+        make=lambda loader: IdbWsaConnector(credentials_loader=loader),
+        warm=_warm_idb,
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: c._key(t) in c._credentials,
+    ),
+    _Case(
+        name="phpipam",
+        secret=PhpipamCredentials(username="svc", password="made-up-password"),
+        make=lambda loader: PhpipamConnector(credentials_loader=loader),
+        warm=_warm_phpipam,
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: PhpipamConnector._key(t) in c._credentials,
+    ),
+    _microsoft_case("azure", AzureConnector),
+    _microsoft_case("entra", EntraConnector),
+]
+
+
+def _warm_for_alice(case: _Case) -> tuple[Any, _Vault, _Target]:
+    """A connector whose cache holds the target's entry, read by alice."""
+    vault = _Vault(case.secret)
+    connector = case.make(vault.read)
+    target = _Target()
+    case.warm(connector, target)
+    case.readers(connector).record(target, _person("alice"))
+    return connector, vault, target
+
+
+_REFUSED_CALLERS = {
+    "person-without-the-right": _person("bob"),
+    "check-runner": _check_runner(),
+    "system-operator": synthesise_system_operator(),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", CASES, ids=str)
+@pytest.mark.parametrize("caller", _REFUSED_CALLERS.values(), ids=list(_REFUSED_CALLERS))
+async def test_warm_cache_refuses_a_caller_whose_own_read_is_refused(
+    case: _Case, caller: Operator
+) -> None:
+    """A warm cache is no shortcut: the caller's own Vault read runs, and its refusal counts."""
+    connector, vault, target = _warm_for_alice(case)
+
+    with pytest.raises(VaultRoleDeniedError):
+        await case.call(connector, target, caller)
+
+    assert vault.reads == [caller.sub]
+    assert not case.readers(connector).has_read(target, caller)
+    # The entry alice read is still there for alice.
+    assert case.cached(connector, target)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", CASES, ids=str)
+async def test_second_allowed_caller_reads_once_then_uses_the_cache(case: _Case) -> None:
+    """A second person who may read the secret gets the entry after one read, with no login."""
+    connector, vault, target = _warm_for_alice(case)
+    carol = _person("carol")
+
+    await case.call(connector, target, carol)
+    await case.call(connector, target, carol)
+    await case.call(connector, target, _person("alice"))
+
+    # One read for carol, none for alice. No vendor login ran: the test
+    # mocks no HTTP, so a login would have failed.
+    assert vault.reads == ["carol"]
+    assert case.readers(connector).has_read(target, carol)
+    assert case.cached(connector, target)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", CASES, ids=str)
+async def test_target_change_forgets_the_readers_of_that_target_only(case: _Case) -> None:
+    """After a target change every caller reads the target's secret again."""
+    connector, vault, target = _warm_for_alice(case)
+    other = _Target(name="other-target", host="other.example.invalid")
+    case.warm(connector, other)
+    case.readers(connector).record(other, _person("alice"))
+
+    await connector.invalidate_credentials(target)
+
+    assert case.readers(connector).subs(target) == frozenset()
+    assert case.readers(connector).subs(other) == frozenset({"alice"})
+    assert not case.cached(connector, target)
+    assert case.cached(connector, other)
+    assert vault.reads == []

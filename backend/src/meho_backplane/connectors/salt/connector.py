@@ -71,6 +71,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vcf_auth import (
     basic_auth_header,
@@ -257,6 +258,8 @@ class SaltConnector(HttpConnector):
     def __init__(self, *, session_loader: SaltSessionLoader | None = None) -> None:
         super().__init__()
         self._sessions: dict[tuple[str, ...], _SaltSession] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._session_lock = asyncio.Lock()
         self._session_loader: SaltSessionLoader = (
             session_loader if session_loader is not None else load_session_credentials_from_vault
@@ -284,8 +287,13 @@ class SaltConnector(HttpConnector):
         async with self._session_lock:
             cached = self._sessions.get(cache_key)
             if cached is not None:
+                # The caller's own Vault read, once per caller and target.
+                await self._readers.ensure_read(
+                    target, operator, lambda: self._session_loader(target, operator)
+                )
                 return cached
             creds = await self._session_loader(target, operator)
+            self._readers.record(target, operator)
             try:
                 authorization = basic_auth_header(creds["username"], creds["password"])
             except KeyError as exc:
@@ -346,6 +354,17 @@ class SaltConnector(HttpConnector):
             client = self._clients.get(self._client_cache_key(target)) if dropped else None
             if client is not None:
                 client.cookies.clear()
+
+    async def invalidate_credentials(self, target: SaltTargetLike) -> None:
+        """Drop the session of *target* and forget who has read its secret.
+
+        Called after a failed login and after a target change. The next call
+        of every caller reads the secret from Vault again, under their own
+        login, and logs in with what it finds.
+        """
+        await self.invalidate_session(target)
+        async with self._session_lock:
+            self._readers.forget(target)
 
     async def rpc(
         self,
@@ -575,4 +594,5 @@ class SaltConnector(HttpConnector):
         """Clear cached sessions, then tear down the httpx pool."""
         async with self._session_lock:
             self._sessions.clear()
+            self._readers.clear()
         await super().aclose()

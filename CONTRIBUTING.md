@@ -127,10 +127,12 @@ Each language has a fixed toolchain. CI runs the same tools — no
 "works on my machine" surprises.
 
 - **Python (backplane, tests):** `ruff check` + `ruff format` are the
-  format-and-lint pair. `mypy --ignore-missing-imports` for
-  type-checking. Pinned versions live in
-  [`backend/pyproject.toml`](./backend/pyproject.toml) under the
-  `dev` group; the pre-commit hook uses the same pinned versions.
+  format-and-lint pair. `mypy` in strict mode checks the types. The
+  versions live in [`backend/pyproject.toml`](./backend/pyproject.toml)
+  under the `dev` group (and in `backend/uv.lock`). The pre-commit hook
+  does not run ruff or mypy. Only CI runs them. Run them yourself in
+  `backend/` before you push: `uv run ruff check src/ tests/`,
+  `uv run ruff format --check src/ tests/` and `uv run mypy src/`.
 - **Go (operator CLI):** `gofmt -s` + `golangci-lint run` from
   [`cli/.golangci.yml`](./cli/.golangci.yml). `go vet` is part of the
   same pipeline. Generated code (oapi-codegen output) is checked in
@@ -145,6 +147,13 @@ The full pre-commit config lives at
 locally with `pre-commit install --install-hooks` (and re-run them on
 the whole tree with `pre-commit run --all-files` if you need to
 verify a clean baseline).
+
+## Where new code goes
+
+Add a feature in new files. Do not add lines to a list that every feature
+edits, such as one long list of operations, imports or test ids. Two pull
+requests that add to the same list conflict. The rules and examples are on
+[How code is organised so pull requests do not conflict](./docs/codebase/how-code-is-organised.md).
 
 ## Write in plain English
 

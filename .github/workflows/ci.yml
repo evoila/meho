@@ -295,7 +295,11 @@ jobs:
             # alembic tree, the relocated migration test suite, the db
             # migrate/migrations modules under test, the compat script, and
             # the workflows that define this gate.
-            if printf '%s\n' "${changed}" | grep -qE '^(backend/alembic/|backend/tests/migrations/|backend/src/meho_backplane/db/(migrations|migrate)\.py$|scripts/ci/(check_migration_(compat|heads)|recheck_migration_prs)\.py$|\.github/workflows/(ci|migration-compat|migration-heads)\.yml$)'; then
+            # The classifiers read the list from a here-string, not from a
+            # pipe: `grep -q` stops at its first match, a `printf` into the
+            # pipe then fails on a list longer than the pipe buffer, and with
+            # `pipefail` that failure would read as "no match" and skip jobs.
+            if grep -qE '^(backend/alembic/|backend/tests/migrations/|backend/src/meho_backplane/db/(migrations|migrate)\.py$|scripts/ci/(check_migration_(compat|heads)|recheck_migration_prs)\.py$|\.github/workflows/(ci|migration-compat|migration-heads)\.yml$)' <<<"${changed}"; then
               migrations=true
               echo "migration-related change detected -> migrations=true"
             else
@@ -311,7 +315,7 @@ jobs:
             # — that line is a non-docs path (code / tests / workflows /
             # configs / cli/ / deploy/ ...) and forces the full run. Only when
             # grep finds no such line (exit 1) is the diff proven docs-only.
-            if printf '%s\n' "${changed}" | grep -qvE '(^docs/|\.md$)'; then
+            if grep -qvE '(^docs/|\.md$)' <<<"${changed}"; then
               docs_only=false
               echo "non-docs file(s) present -> docs_only=false (full run)"
             else

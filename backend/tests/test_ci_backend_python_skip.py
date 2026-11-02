@@ -154,6 +154,22 @@ def test_unknown_diff_runs_everything(tmp_path: Path) -> None:
     assert _detect(tmp_path, "pull_request", None)["backend_python"] == "true"
 
 
+def test_large_diff_with_a_backend_change_runs_everything(tmp_path: Path) -> None:
+    # The list of changed files is longer than a pipe buffer (64 KiB). A
+    # `grep -q` behind a pipe stops at the first non-docs line, the write
+    # into the pipe fails, and with `pipefail` the check read the diff as
+    # docs-only. The detector must read the list without a pipe.
+    # The migration check has the same shape; a migration file sorts first.
+    changed = ["backend/alembic/versions/0001_big_diff.py"] + [
+        f"backend/tests/data/big-diff/{'x' * 150}-{i:04d}.txt" for i in range(600)
+    ]
+    assert sum(len(name) + 1 for name in changed) > 65536
+    outputs = _detect(tmp_path, "pull_request", changed)
+    assert outputs["migrations"] == "true"
+    assert outputs["docs_only"] == "false"
+    assert outputs["backend_python"] == "true"
+
+
 def test_non_ascii_backend_path_runs_everything(tmp_path: Path) -> None:
     # By default git prints `"backend/tests/fixtures/caf\303\251.json"`, in
     # quotes, and the backend/ check would miss it (#5310).

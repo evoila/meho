@@ -1251,18 +1251,45 @@ func TestBootstrap_CLIClientHasDeviceGrantAttribute(t *testing.T) {
 		t.Errorf("CLI client publicClient = false, want true")
 	}
 	// The browser flow is on for the fresh sign-in of an approval
-	// (#3979): PKCE S256 and loopback redirects only.
+	// (#3979), with loopback redirects only.
 	if cliClient.StandardFlowEnabled == nil || !*cliClient.StandardFlowEnabled {
 		t.Errorf("CLI client standardFlow should be on")
 	}
-	if got := cliClient.Attributes["pkce.code.challenge.method"]; got != "S256" {
-		t.Errorf("CLI client PKCE method = %q, want S256", got)
+	// `meho login` sends no PKCE, and Keycloak checks PKCE at the device
+	// login too. So the login client must not require a PKCE method.
+	if got, ok := cliClient.Attributes["pkce.code.challenge.method"]; ok {
+		t.Errorf("CLI client PKCE method = %q, want none", got)
 	}
 	if !slices.Equal(cliClient.RedirectURIs, []string{"http://127.0.0.1:*"}) {
 		t.Errorf("CLI client redirect URIs = %v, want the 127.0.0.1 loopback only", cliClient.RedirectURIs)
 	}
 	if len(cliClient.WebOrigins) != 0 {
 		t.Errorf("CLI client web origins = %v, want none", cliClient.WebOrigins)
+	}
+}
+
+// A realm made with 0.40.0 or 0.41.0 has `pkce.code.challenge.method=S256`
+// on meho-cli, which refuses every `meho login`. A re-run drops it.
+func TestBootstrap_RerunDropsPKCEMethodFromCLIClient(t *testing.T) {
+	fake := newFakeKeycloak()
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("first Bootstrap: %v", err)
+	}
+	cliUUID := fake.clientUUID(t, "meho-cli")
+	fake.clients[cliUUID].Attributes["pkce.code.challenge.method"] = "S256"
+
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("second Bootstrap: %v", err)
+	}
+	if got, ok := fake.clients[cliUUID].Attributes["pkce.code.challenge.method"]; ok {
+		t.Errorf("second run left pkce.code.challenge.method=%q on meho-cli", got)
+	}
+	// The clients without a device login keep PKCE.
+	for _, id := range []string{"meho-cli-approve", "meho-mcp"} {
+		c := fake.clients[fake.clientUUID(t, id)]
+		if got := c.Attributes["pkce.code.challenge.method"]; got != "S256" {
+			t.Errorf("%s PKCE method = %q, want S256", id, got)
+		}
 	}
 }
 

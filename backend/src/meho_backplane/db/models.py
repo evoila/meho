@@ -9406,3 +9406,39 @@ class RequestUsageEvent(Base):
     route: Mapped[str] = mapped_column(Text, nullable=False)
     outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_ms: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+
+
+class InstanceSettingsRevision(Base):
+    """One applied settings-file import (``POST /api/v1/settings/import``).
+
+    Append-only: the service only INSERTs, and on PostgreSQL migration
+    ``0136`` installs a ``BEFORE UPDATE OR DELETE`` trigger that refuses any
+    mutation (a copy of the ``audit_log`` trigger from ``0100``). An import
+    that changes nothing writes no row.
+
+    ``spec_before`` / ``spec_after`` hold the ``spec`` of the tenants the
+    import touched, in the export's shape; the diff is worked out on read
+    (see :mod:`meho_backplane.instance_settings.diff`). ``audit_id`` is the
+    import request's ``audit_log`` id; the ``tenant_convention_history``
+    rows the import wrote link to it by ``request_id``. ``actor_sub`` is
+    always the human operator (machine principals cannot import).
+    """
+
+    __tablename__ = "instance_settings_revision"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    actor_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    audit_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    file_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    api_version: Mapped[str] = mapped_column(Text, nullable=False)
+    exported_from: Mapped[dict[str, object] | None] = mapped_column(_PORTABLE_JSON, nullable=True)
+    spec_before: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+    spec_after: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+    summary: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+
+    __table_args__ = (Index("instance_settings_revision_ts_idx", "ts"),)

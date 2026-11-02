@@ -102,6 +102,7 @@ from meho_backplane.api.v1.events_ingest import router as api_v1_events_ingest_r
 from meho_backplane.api.v1.feed import router as api_v1_feed_router
 from meho_backplane.api.v1.gateway import router as api_v1_gateway_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
+from meho_backplane.api.v1.instance_settings import router as api_v1_instance_settings_router
 from meho_backplane.api.v1.kb import router as api_v1_kb_router
 from meho_backplane.api.v1.memory import router as api_v1_memory_router
 from meho_backplane.api.v1.operation_overrides import (
@@ -1048,6 +1049,11 @@ app.include_router(api_v1_targets_router)
 # capture policy (PATCH /api/v1/tenants/flight-recorder-policy;
 # tenant-scoped, tenant_admin). Operator-plane REST + CLI only; no MCP tool.
 app.include_router(api_v1_tenants_router)
+# Settings file (core.md §5): GET /api/v1/settings/export, POST
+# /api/v1/settings/import (?preview=true), GET /api/v1/settings/history.
+# tenant_admin (own tenant) or platform_admin (several tenants); human-only
+# import. Operator-plane REST + CLI only; no MCP tool.
+app.include_router(api_v1_instance_settings_router)
 # T3 (#2880) -- event_source registry admin surface at
 # /api/v1/event-sources*. Tenant-scoped CRUD (operator reads,
 # tenant_admin writes) the inbound webhook ingest (#2881) resolves a

@@ -56,6 +56,7 @@ from meho_backplane.db.models import Tenant
 __all__ = [
     "announce_gate_blocks",
     "announce_gate_enabled",
+    "invalidate_announce_gate_cache",
     "reset_announce_gate_cache_for_testing",
 ]
 
@@ -93,6 +94,11 @@ _ANNOUNCE_REQUIRED_REMEDIATION: Final[str] = (
 def reset_announce_gate_cache_for_testing() -> None:
     """Clear the per-tenant enablement cache (test isolation only)."""
     _TENANT_GATE_CACHE.clear()
+
+
+def invalidate_announce_gate_cache(tenant_id: UUID) -> None:
+    """Evict *tenant_id*'s cached enablement so a flip applies on the next dispatch."""
+    _TENANT_GATE_CACHE.pop(tenant_id, None)
 
 
 async def announce_gate_enabled(tenant_id: UUID) -> bool:

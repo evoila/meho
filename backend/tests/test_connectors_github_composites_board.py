@@ -60,6 +60,19 @@ def _content_in(owner: str, repo: str) -> dict[str, Any]:
     }
 
 
+def _item_in(owner: str, repo: str, board: str = "PVT_board1") -> dict[str, Any]:
+    """The GraphQL answer of the item lookup ``project_item_set_field`` makes first."""
+    return {
+        "data": {
+            "node": {
+                "__typename": "ProjectV2Item",
+                "project": {"id": board},
+                "content": _content_in(owner, repo)["data"]["node"],
+            }
+        }
+    }
+
+
 def _make_operator() -> Operator:
     """Synthetic operator for composite-handler unit tests."""
     return Operator(
@@ -384,7 +397,10 @@ async def test_project_item_add_missing_item_id_raises() -> None:
 async def test_project_item_set_field_posts_single_select_value() -> None:
     """``project_item_set_field`` posts updateProjectV2ItemFieldValue with the option id."""
     connector = _RecordingConnector(
-        [{"data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "PVTI_1"}}}}]
+        [
+            _item_in("o", "r"),
+            {"data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "PVTI_1"}}}},
+        ]
     )
     result = await project_item_set_field_composite(
         operator=_make_operator(),
@@ -397,7 +413,10 @@ async def test_project_item_set_field_posts_single_select_value() -> None:
         },
         connector=connector,  # type: ignore[arg-type]
     )
-    call = connector.post_calls[0]
+    lookup = connector.post_calls[0]
+    assert "ProjectV2Item" in lookup["json"]["query"]
+    assert lookup["json"]["variables"] == {"id": "PVTI_1"}
+    call = connector.post_calls[1]
     assert "updateProjectV2ItemFieldValue" in call["json"]["query"]
     assert "singleSelectOptionId" in call["json"]["query"]
     assert call["json"]["variables"] == {

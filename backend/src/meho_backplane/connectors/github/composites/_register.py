@@ -305,8 +305,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "Status, Priority, Size, or any other single-select field -- "
             "wrapping the updateProjectV2ItemFieldValue GraphQL mutation with a "
             "singleSelectOptionId value. Every id comes from "
-            "gh.composite.project_view. Only the target's own board. A ticket "
-            "write: runs at once, no approval."
+            "gh.composite.project_view. Only the target's own board, and only an "
+            "item that is an issue or pull request of the target's own repository "
+            "(a draft issue is refused). A ticket write: runs at once, no approval."
         ),
         parameter_schema=PROJECT_ITEM_SET_FIELD_PARAMETER_SCHEMA,
         response_schema=PROJECT_ITEM_SET_FIELD_RESPONSE_SCHEMA,

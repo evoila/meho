@@ -373,7 +373,11 @@ PROJECT_ITEM_SET_FIELD_PARAMETER_SCHEMA: dict[str, Any] = {
         "item_id": {
             "type": "string",
             "minLength": 1,
-            "description": "The board item's node id (from project_view or project_item_add).",
+            "description": (
+                "The board item's node id (from project_view or project_item_add). It "
+                "must be on the target's board and hold an issue or pull request of "
+                "the target's repository."
+            ),
         },
         "field_id": {
             "type": "string",

@@ -53,9 +53,12 @@ is not part of this decision.
 - A write to another repository is refused. A board write with another
   board's node id is refused.
 - A board item can only be an issue or pull request of the target's
-  repository. A sub-issue link needs the parent and the child in the
-  target's repository. MEHO names the child by its number and reads it
-  first, because GitHub has no call that finds an issue by its database id.
+  repository, both when it is added and when one of its fields is set.
+  MEHO reads the item first; a draft issue has no repository, so its
+  fields cannot be set this way.
+- A sub-issue link needs the parent and the child in the target's
+  repository. MEHO names the child by its number and reads it first,
+  because GitHub has no call that finds an issue by its database id.
 - A target that names no repository cannot run the five writes. A target
   that names no board cannot run the two board writes. The refusal says
   what to add to the target.

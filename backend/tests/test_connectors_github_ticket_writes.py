@@ -224,9 +224,34 @@ async def test_a_board_write_on_a_target_without_a_board_is_refused(
         await _run(handler, target, {"project_id": _BOARD, **params}, _NoCallsConnector())
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("handler", "params"), _BOARD_WRITES)
+async def test_a_board_write_on_a_target_without_a_repository_is_refused(
+    handler: Handler, params: dict[str, Any]
+) -> None:
+    """A board write on a target with a board but no repository is refused before any call."""
+    target = SimpleNamespace(
+        name="gh-org", host="api.github.com/acme", extras={"project_id": _BOARD}
+    )
+    connector = _NoCallsConnector()
+    with pytest.raises(TicketWriteScopeError, match=r"names no repository.*api\.github\.com/repos"):
+        await _run(handler, target, {"project_id": _BOARD, **params}, connector)
+    assert connector.writes == []
+
+
 def _content(owner: str, repo: str, kind: str = "Issue") -> dict[str, Any]:
     repository = {"owner": {"login": owner}, "name": repo}
     return {"data": {"node": {"__typename": kind, "repository": repository}}}
+
+
+def _item(owner: str, repo: str, kind: str = "Issue", board: str = _BOARD) -> dict[str, Any]:
+    """The GraphQL answer of the board-item lookup ``project_item_set_field`` makes first."""
+    content = _content(owner, repo, kind)["data"]["node"]
+    return {
+        "data": {
+            "node": {"__typename": "ProjectV2Item", "project": {"id": board}, "content": content}
+        }
+    }
 
 
 @pytest.mark.asyncio
@@ -251,3 +276,70 @@ async def test_adding_content_from_another_repository_to_the_board_is_refused(
             connector,
         )
     assert connector.writes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "match"),
+    [
+        (_item("acme", "other"), "not the repository of target"),
+        (_item("other", "widgets", kind="PullRequest"), "not the repository of target"),
+        (_item("acme", "widgets", board="PVT_other"), "not on board"),
+        (
+            {"data": {"node": {"__typename": "ProjectV2Item", "project": {"id": _BOARD}}}},
+            "not an issue or pull request",
+        ),
+        (
+            {
+                "data": {
+                    "node": {
+                        "__typename": "ProjectV2Item",
+                        "project": {"id": _BOARD},
+                        "content": {"__typename": "DraftIssue"},
+                    }
+                }
+            },
+            "not an issue or pull request",
+        ),
+        (_content("acme", "widgets"), "not a board item"),
+        ({"data": {"node": None}}, "not a board item"),
+    ],
+)
+async def test_setting_a_field_on_an_item_outside_the_target_is_refused(
+    answer: dict[str, Any], match: str
+) -> None:
+    """An item of another repository, another board, a draft, or no item: refused, no write."""
+    connector = _NoCallsConnector(graphql=[answer])
+    with pytest.raises(TicketWriteScopeError, match=match):
+        await _run(
+            project_item_set_field_composite,
+            _TARGET,
+            {"project_id": _BOARD, "item_id": "PVTI", "field_id": "F", "option_id": "o"},
+            connector,
+        )
+    assert connector.writes == []
+
+
+@pytest.mark.asyncio
+async def test_setting_a_field_on_an_item_of_the_target_reads_the_item_first() -> None:
+    """The item lookup goes to GitHub before the write, and the write carries the ids."""
+
+    class _Connector(_NoCallsConnector):
+        async def _post_json(self, target: Any, path: str, *, json: Any = None, **_: Any) -> Any:
+            query = (json or {}).get("query", "")
+            if "updateProjectV2ItemFieldValue" in query:
+                self.writes.append(path)
+                return {
+                    "data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "PVTI"}}}
+                }
+            return await super()._post_json(target, path, json=json)
+
+    connector = _Connector(graphql=[_item("Acme", "Widgets", kind="PullRequest")])
+    result = await _run(
+        project_item_set_field_composite,
+        _TARGET,
+        {"project_id": _BOARD, "item_id": "PVTI", "field_id": "F", "option_id": "o"},
+        connector,
+    )
+    assert result["status"] == "updated"
+    assert connector.writes == ["/graphql"]

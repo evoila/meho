@@ -34,6 +34,7 @@ __all__ = [
     "BOARD_EXTRAS_KEY",
     "TicketWriteScopeError",
     "require_target_board",
+    "require_target_names_repo",
     "require_target_repo",
     "target_repo",
 ]
@@ -68,10 +69,11 @@ def target_repo(target: Any) -> tuple[str, str] | None:
     return owner, repo
 
 
-def require_target_repo(target: Any, owner: object, repo: object) -> None:
-    """Refuse unless ``owner/repo`` is the repository the target names.
+def require_target_names_repo(target: Any) -> tuple[str, str]:
+    """Return the ``(owner, repo)`` the target names, or refuse.
 
-    GitHub names are not case-sensitive, so the compare is not either.
+    A board write calls this before it reads anything from GitHub, so a
+    target with no repository is refused before any call.
     """
     named = target_repo(target)
     if named is None:
@@ -80,6 +82,15 @@ def require_target_repo(target: Any, owner: object, repo: object) -> None:
             "GitHub ticket writes; set the target's host to "
             "'api.github.com/repos/<owner>/<repo>'"
         )
+    return named
+
+
+def require_target_repo(target: Any, owner: object, repo: object) -> None:
+    """Refuse unless ``owner/repo`` is the repository the target names.
+
+    GitHub names are not case-sensitive, so the compare is not either.
+    """
+    named = require_target_names_repo(target)
     asked = f"{owner}/{repo}"
     if asked.lower() != f"{named[0]}/{named[1]}".lower():
         raise TicketWriteScopeError(

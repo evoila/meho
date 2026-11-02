@@ -45,10 +45,15 @@ Governance posture
 once because they stay inside the target's own board and repository:
 
 * ``project_id`` must be the node id of the target's board
-  (``extras["project_id"]`` on the target, :func:`._scope.require_target_board`).
+  (``extras["project_id"]`` on the target, :func:`._scope.require_target_board`),
+  and the target must name a repository
+  (:func:`._scope.require_target_names_repo`).
 * ``project_item_add`` also reads the content node first: it must be an issue
   or pull request of the target's repository
   (:func:`._scope.require_target_repo`).
+* ``project_item_set_field`` also reads the board item first: it must be on
+  the target's board, and its content must be an issue or pull request of the
+  target's repository. A draft issue has no repository, so it is refused.
 
 Anything else is refused before the write. Each composite makes one GraphQL
 mutation, so the dispatcher's ``policy_gate`` on the composite governs the
@@ -66,6 +71,7 @@ from meho_backplane.connectors.github.composites._graphql import (
 from meho_backplane.connectors.github.composites._scope import (
     TicketWriteScopeError,
     require_target_board,
+    require_target_names_repo,
     require_target_repo,
 )
 
@@ -150,6 +156,25 @@ query ($id: ID!) {
     __typename
     ... on Issue { repository { owner { login } name } }
     ... on PullRequest { repository { owner { login } name } }
+  }
+}
+""".strip()
+
+# Reads which board a board item is on and which repository its content
+# belongs to, so ``project_item_set_field`` can refuse an item of another
+# board or another repository.
+_ITEM_SCOPE_QUERY = """
+query ($id: ID!) {
+  node(id: $id) {
+    __typename
+    ... on ProjectV2Item {
+      project { id }
+      content {
+        __typename
+        ... on Issue { repository { owner { login } name } }
+        ... on PullRequest { repository { owner { login } name } }
+      }
+    }
   }
 }
 """.strip()
@@ -378,8 +403,9 @@ async def project_item_add_composite(
     Raises
     ------
     TicketWriteScopeError
-        ``project_id`` is not the target's board, or ``content_id`` is not an
-        issue or pull request of the target's repository.
+        ``project_id`` is not the target's board, the target names no
+        repository, or ``content_id`` is not an issue or pull request of the
+        target's repository.
     GitHubGraphQlError
         The mutation returned an ``errors`` array (unknown node id,
         insufficient project scope) or a payload without an item id.
@@ -387,6 +413,7 @@ async def project_item_add_composite(
     project_id = params["project_id"]
     content_id = params["content_id"]
     require_target_board(target, project_id)
+    require_target_names_repo(target)
     await _require_content_in_target_repo(connector, target, operator, content_id)
     data = await github_graphql(
         connector,
@@ -422,7 +449,9 @@ async def project_item_set_field_composite(
     Raises
     ------
     TicketWriteScopeError
-        ``project_id`` is not the target's board.
+        ``project_id`` is not the target's board, the target names no
+        repository, or ``item_id`` is not an item of that board whose content
+        is an issue or pull request of the target's repository.
     GitHubGraphQlError
         The mutation returned an ``errors`` array (unknown id, or the
         option does not belong to the field) or a payload without an
@@ -433,6 +462,8 @@ async def project_item_set_field_composite(
     field_id = params["field_id"]
     option_id = params["option_id"]
     require_target_board(target, project_id)
+    require_target_names_repo(target)
+    await _require_item_in_target_repo(connector, target, operator, item_id, project_id)
     data = await github_graphql(
         connector,
         target,
@@ -456,6 +487,21 @@ async def project_item_set_field_composite(
     }
 
 
+def _content_repository(node: object) -> tuple[str, str] | None:
+    """Return ``(owner, repo)`` of an issue or pull request node, or ``None``.
+
+    A draft issue, an unknown node and a node of any other type carry no
+    repository, so they give ``None``.
+    """
+    repository = node.get("repository") if isinstance(node, dict) else None
+    owner = repository.get("owner") if isinstance(repository, dict) else None
+    login = owner.get("login") if isinstance(owner, dict) else None
+    name = repository.get("name") if isinstance(repository, dict) else None
+    if not isinstance(login, str) or not isinstance(name, str):
+        return None
+    return login, name
+
+
 async def _require_content_in_target_repo(
     connector: GitHubRestConnector, target: Any, operator: Operator, content_id: str
 ) -> None:
@@ -463,17 +509,47 @@ async def _require_content_in_target_repo(
     data = await github_graphql(
         connector, target, operator, query=_CONTENT_REPO_QUERY, variables={"id": content_id}
     )
-    node = data.get("node")
-    repository = node.get("repository") if isinstance(node, dict) else None
-    owner = repository.get("owner") if isinstance(repository, dict) else None
-    login = owner.get("login") if isinstance(owner, dict) else None
-    name = repository.get("name") if isinstance(repository, dict) else None
-    if not isinstance(login, str) or not isinstance(name, str):
+    repository = _content_repository(data.get("node"))
+    if repository is None:
         raise TicketWriteScopeError(
             f"content {content_id!r} is not an issue or pull request GitHub can show; "
             "a board write may add only issues and pull requests of the target's repository"
         )
-    require_target_repo(target, login, name)
+    require_target_repo(target, *repository)
+
+
+async def _require_item_in_target_repo(
+    connector: GitHubRestConnector,
+    target: Any,
+    operator: Operator,
+    item_id: str,
+    project_id: str,
+) -> None:
+    """Refuse unless *item_id* is on the target's board with an issue or PR of its repository."""
+    data = await github_graphql(
+        connector, target, operator, query=_ITEM_SCOPE_QUERY, variables={"id": item_id}
+    )
+    node = data.get("node")
+    if not isinstance(node, dict) or node.get("__typename") != "ProjectV2Item":
+        raise TicketWriteScopeError(
+            f"item {item_id!r} is not a board item GitHub can show; "
+            "a board write may change only items of the target's board"
+        )
+    project = node.get("project")
+    board = project.get("id") if isinstance(project, dict) else None
+    if board != project_id:
+        raise TicketWriteScopeError(
+            f"item {item_id!r} is not on board {project_id!r}; "
+            "a board write may change only items of the target's board"
+        )
+    repository = _content_repository(node.get("content"))
+    if repository is None:
+        raise TicketWriteScopeError(
+            f"item {item_id!r} is not an issue or pull request GitHub can show; a board "
+            "write may change only items that are issues or pull requests of the "
+            "target's repository"
+        )
+    require_target_repo(target, *repository)
 
 
 def _extract_node_id(data: dict[str, Any], *, mutation: str, node_key: str) -> str:

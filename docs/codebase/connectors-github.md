@@ -147,6 +147,10 @@ gh catalog ingest.
     that is not an issue or pull request of the target's repository.
   - `gh.composite.project_item_set_field` (write) —
     `updateProjectV2ItemFieldValue` with a `singleSelectOptionId` value.
+    It first reads the board item (`node(id:)`) and refuses an item that
+    is not on the target's board, or whose content is not an issue or
+    pull request of the target's repository (a draft issue has no
+    repository, so it is refused).
 - **`composites/_sub_issues.py`** — the sub-issue link of the `issues`
   group, `gh.composite.sub_issue_add` (write), wrapping
   `POST /repos/{owner}/{repo}/issues/{issue_number}/sub_issues`.
@@ -204,7 +208,10 @@ Two guards make "safe" true:
      node id (`project_id` from `project_view`). A board write with another
      `project_id` is refused.
    - `project_item_add` adds only issues and pull requests of the target's
-     repository. `sub_issue_add` links only issues of that repository.
+     repository. `project_item_set_field` changes only a board item that
+     holds such an issue or pull request; it reads the item first. A
+     draft issue has no repository, so its fields cannot be set this
+     way. `sub_issue_add` links only issues of that repository.
    - A target with no repository cannot run the five writes. A target with
      no board cannot run the two board writes. The refusal says what to
      set on the target.

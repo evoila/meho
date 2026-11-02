@@ -151,7 +151,11 @@ class _BoardFlowConnector:
             return _PROJECT_VIEW_RESPONSE
         if "node(id: $id)" in query:
             repository = {"owner": {"login": _OWNER}, "name": _REPO}
-            return {"data": {"node": {"__typename": "Issue", "repository": repository}}}
+            content = {"__typename": "Issue", "repository": repository}
+            if "ProjectV2Item" in query:
+                item = {"__typename": "ProjectV2Item", "project": {"id": "PVT_board"}}
+                return {"data": {"node": {**item, "content": content}}}
+            return {"data": {"node": content}}
         if "addProjectV2ItemById" in query:
             return {"data": {"addProjectV2ItemById": {"item": {"id": "PVTI_main"}}}}
         if "updateProjectV2ItemFieldValue" in query:
@@ -246,6 +250,7 @@ async def test_file_board_complete_ticket_without_gh_cli() -> None:
         ("/graphql", "POST"),
         ("/graphql", "POST"),
         ("/graphql", "POST"),
+        ("/graphql", "POST"),
         (f"/repos/{_OWNER}/{_REPO}/issues/200", "GET"),
         (f"/repos/{_OWNER}/{_REPO}/issues/100/sub_issues", "POST"),
     ]
@@ -254,9 +259,10 @@ async def test_file_board_complete_ticket_without_gh_cli() -> None:
     assert connector.calls[3]["json"]["variables"] == {"id": "I_kwMAIN"}
     add_call = connector.calls[4]
     assert add_call["json"]["variables"] == {"projectId": "PVT_board", "contentId": "I_kwMAIN"}
-    set_field_call = connector.calls[5]
+    assert connector.calls[5]["json"]["variables"] == {"id": "PVTI_main"}
+    set_field_call = connector.calls[6]
     assert set_field_call["json"]["variables"]["fieldId"] == "F_status"
     assert set_field_call["json"]["variables"]["optionId"] == "opt_todo"
-    sub_issue_call = connector.calls[7]
+    sub_issue_call = connector.calls[8]
     # GitHub gets the child's DATABASE id (555) that MEHO read for number 200.
     assert sub_issue_call["json"] == {"sub_issue_id": 555}

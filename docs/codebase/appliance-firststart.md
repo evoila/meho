@@ -27,7 +27,7 @@ The design is the internal design note `form-1-appliance.md`, section 2.
 
 | File | What it holds |
 | --- | --- |
-| `firststart/firststart.sh` | The six steps, the done-markers, the [FAIL] line kept for the banner. |
+| `firststart/firststart.sh` | The seven steps, the done-markers, the [FAIL] line kept for the banner. |
 | `firststart/banner.sh` | Writes `/etc/issue`. |
 | `firststart/meho-firststart.service` | Runs `firststart.sh` once, before SSH and the console login. |
 | `firststart/meho-banner.service` | Runs `banner.sh` at every boot, after first start. |
@@ -140,6 +140,12 @@ cloud image's kernel line ends with `console=ttyS0`.
    `GRUB_TIMEOUT_STYLE=menu`, `GRUB_TIMEOUT=5` and
    `GRUB_RECORDFAIL_TIMEOUT=5` (the wait after a boot that did not finish):
    the menu shows for 5 seconds at every boot. Then `update-grub`.
+7. **The AIDE database.** `aideinit --yes --force` builds the database of
+   this appliance's files (CIS 6.3.1), after the core is installed. The
+   build hardened the appliance but left the database out, because it
+   must hold each appliance's own files. AIDE's daily check
+   (`dailyaidecheck.timer`) compares the files with it. Which folders AIDE
+   skips is in [appliance-cis.md](appliance-cis.md).
 
 Each step writes `/var/lib/meho/firststart/<n>-<name>.done`, and
 `/var/lib/meho/firststart.done` follows the last one. A failed step writes

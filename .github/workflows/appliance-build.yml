@@ -7,12 +7,14 @@
 #
 # Runs by hand (workflow_dispatch) with a release tag. It fetches the
 # signed form-2 download of that tag from the GitHub release, checks the
-# signature and the checksum, builds the OVA, and keeps the OVA and
-# SHA256SUMS as workflow artifacts. Publishing is #4814. A run on every
-# release tag comes once the release test exists (#4816).
+# signature and the checksum, builds the OVA, and keeps the OVA,
+# SHA256SUMS and the CIS scan's result list (#4640) as workflow artifacts.
+# Publishing is #4814. A run on every release tag comes once the release
+# test exists (#4816).
 #
 # Runner: the lab's self-hosted pool, which must reach the lab's vCenter
-# and the build VM's address. The lab's test place is an internal ticket.
+# and the build VM's address, and GitHub for the CIS content. The build VM
+# must reach the Ubuntu archive. The lab's test place is an internal ticket.
 # The vCenter login is in repository secrets
 # GOVC_URL, GOVC_USERNAME and GOVC_PASSWORD. Where the build VM goes and
 # its network are repository secrets too (below), not variables: the job
@@ -157,13 +159,16 @@ jobs:
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Keep the OVA and the checksums as artifacts
+      - name: Keep the OVA, the checksums and the CIS scan as artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: meho-appliance-ova
+          # The CIS result list holds rule names and results only, nothing
+          # of the lab.
           path: |
             ${{ runner.temp }}/ova/meho-appliance-*.ova
             ${{ runner.temp }}/ova/SHA256SUMS
+            ${{ runner.temp }}/ova/meho-appliance-*-cis.txt
           if-no-files-found: error
           retention-days: 3
           # The disk in the OVA is already compressed (stream-optimized).

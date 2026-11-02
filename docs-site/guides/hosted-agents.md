@@ -405,6 +405,10 @@ definition in their tenant.
     you may run more. `meho agent run-status <run-id>` shows both, for
     example `identity: agent:pod-reader for <your sub>`.
 
+    The agent also acts with the `operator` role at most, like its own
+    login. So a run that a `tenant_admin` starts cannot do tenant-admin
+    work.
+
 ```bash
 meho agent run pod-reader \
   --input "List the pods in namespace web on cluster-a that are not running."

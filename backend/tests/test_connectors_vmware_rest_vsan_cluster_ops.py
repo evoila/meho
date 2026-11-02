@@ -44,7 +44,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _vsan_schemas,
 )
 from meho_backplane.connectors.vmware_rest.composites._vsan_ops import (
-    VSAN_CLUSTER_COMPOSITES,
+    COMPOSITES,
     VSAN_CLUSTER_GOVERNED_SUBOPS,
 )
 from meho_backplane.connectors.vmware_rest.soap_vsan import build_vsan_envelope
@@ -376,22 +376,22 @@ _EXPECTED_POLICY = {
 
 
 def test_every_operation_has_the_risk_level_and_approval_of_the_table() -> None:
-    rows = {row["op_id"]: row for row in VSAN_CLUSTER_COMPOSITES}
+    rows = {row.op_id: row for row in COMPOSITES}
     assert set(rows) == set(_EXPECTED_POLICY)
     for op_id, (safety, approval) in _EXPECTED_POLICY.items():
-        assert rows[op_id]["safety_level"] == safety, op_id
-        assert rows[op_id]["requires_approval"] is approval, op_id
+        assert rows[op_id].safety_level == safety, op_id
+        assert rows[op_id].requires_approval is approval, op_id
 
 
 def test_every_change_has_a_preview_and_a_sub_call_list() -> None:
-    changes = {row["op_id"] for row in VSAN_CLUSTER_COMPOSITES if row["requires_approval"]}
+    changes = {row.op_id for row in COMPOSITES if row.requires_approval}
     assert changes == set(VSAN_CLUSTER_GOVERNED_SUBOPS)
     assert changes <= set(_PREVIEW_BUILDERS)
 
 
 def test_every_example_validates_against_its_schema() -> None:
-    for row in VSAN_CLUSTER_COMPOSITES:
-        schema = row["parameter_schema"]
+    for row in COMPOSITES:
+        schema = row.parameter_schema
         for example in schema["examples"]:
             Draft202012Validator(schema).validate(example)
 

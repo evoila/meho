@@ -13,6 +13,7 @@ from typing import Any, Final
 
 import pytest
 
+from meho_backplane.operations._validate import validate_params
 from tests.test_operation_contracts import (
     DESCRIPTION_MAX,
     GAPS_FILE,
@@ -162,6 +163,64 @@ def test_example_that_does_not_validate_fails() -> None:
     problems = _only_rule(_good_op(parameter_schema=params), "examples")
     assert len(problems) == 2
     assert all(p.startswith("example 0 does not validate") for p in problems)
+
+
+@pytest.mark.parametrize(
+    "example",
+    [
+        {"vm": "<vm-id>", "spec": {"cpu": "<cpu-count>"}},
+        {"vm": "<one-of-possible_answers>"},
+        {"vm": "<vm.id>"},
+    ],
+)
+def test_placeholder_in_an_example_passes_the_fields_own_rules(example: dict[str, Any]) -> None:
+    """A ``<name>`` placeholder is not held to the field's type or pattern (the aim of #4111)."""
+    schema = {
+        **_GOOD_PARAMS,
+        "properties": {
+            **_GOOD_PARAMS["properties"],
+            "vm": {"type": "string", "pattern": "^vm-[0-9]+$", "description": "VM id."},
+        },
+        "examples": [example],
+    }
+    assert check_operation(_good_op(parameter_schema=schema)) == {}
+
+
+@pytest.mark.parametrize(
+    "example",
+    [
+        {"vm": "vm 1"},
+        {"vm": "<VM-ID>"},
+        {"vm": "<vm-id", "spec": {"cpu": "two"}},
+        {"spec": {"cpu": "<cpu-count>"}},
+    ],
+)
+def test_a_value_that_is_no_placeholder_still_fails(example: dict[str, Any]) -> None:
+    """Only a lowercase ``<name>`` is a placeholder; a missing required field still fails."""
+    schema = {
+        **_GOOD_PARAMS,
+        "properties": {
+            **_GOOD_PARAMS["properties"],
+            "vm": {"type": "string", "pattern": "^vm-[0-9]+$", "description": "VM id."},
+        },
+        "examples": [example],
+    }
+    problems = _only_rule(_good_op(parameter_schema=schema), "examples")
+    assert problems, example
+    assert all(p.startswith("example 0 does not validate") for p in problems)
+
+
+def test_a_placeholder_is_refused_at_runtime() -> None:
+    """The placeholder rule is only for the example check: a real call is still refused."""
+    schema = {
+        **_GOOD_PARAMS,
+        "properties": {
+            **_GOOD_PARAMS["properties"],
+            "vm": {"type": "string", "pattern": "^vm-[0-9]+$", "description": "VM id."},
+        },
+    }
+    assert validate_params(schema, {"vm": "<vm-id>"}) != []
+    assert validate_params(schema, {"vm": "vm-1", "spec": {"cpu": "<cpu-count>"}}) != []
 
 
 def test_ticket_number_in_guidance_fails() -> None:

@@ -47,6 +47,14 @@ _REQUEST_ROW: Final[dict[str, dict[str, Any]]] = {
     ),
     "created_by": _field(["string", "null"], "The user who started the request."),
     "last_updated_on": _field(["integer", "null"], "Last change, epoch milliseconds."),
+    "environment_id": _field(
+        ["string", "null"],
+        "The environment id from the request inputs; null when the request has none.",
+    ),
+    "product_id": _field(
+        ["string", "null"],
+        "The product id from the request inputs; null when the request has none.",
+    ),
 }
 
 _ERROR_CAUSE: Final[dict[str, Any]] = {
@@ -126,8 +134,11 @@ _REQUEST_LIST = FleetTypedOp(
         ),
         "output_shape": (
             "{requests: [{request_id, name, type, reason, state, outcome, execution_status, "
-            "error_cause, created_by, last_updated_on}], more_rows}. A long list is behind a "
-            "result handle; read it with result_query. The vendor gives no progress number."
+            "error_cause, created_by, last_updated_on, environment_id, product_id}], "
+            "more_rows}. A long list is behind a result handle; read it with result_query. "
+            "The vendor gives no progress number. environment_id and product_id come from "
+            "the request inputs: after a lost reply to a start, they tell which request is "
+            "yours."
         ),
         "next_step": (
             "Call fleet.request.get with a request_id for one request and its error causes. "
@@ -181,7 +192,8 @@ _REQUEST_GET = FleetTypedOp(
         ),
         "output_shape": (
             "{request_id, name, type, reason, state, outcome, execution_status, error_cause, "
-            "created_by, last_updated_on, checked_at, error, error_causes: [{event_id, "
+            "created_by, last_updated_on, environment_id, product_id, checked_at, error, "
+            "error_causes: [{event_id, "
             "message_id, message, exception_message, retry, properties}], failed_step}. "
             "outcome is queued, running, succeeded, failed, cancelled, unknown or "
             "not_reachable. Secret input values are replaced."

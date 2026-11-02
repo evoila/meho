@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 import types
 import uuid
 from collections.abc import Awaitable, Callable
@@ -149,6 +150,18 @@ def _fresh_admission() -> Any:
     admission.shutdown_result_read_admission()
     yield
     admission.shutdown_result_read_admission()
+
+
+def _freeze_rate_clock(monkeypatch: pytest.MonkeyPatch, now: float) -> list[float]:
+    """Pin the wall clock the rate check reads; set ``clock[0]`` to move it.
+
+    The rate window is part of the Valkey key, so a test on the real clock
+    lands in two windows when it runs across a minute boundary.
+    """
+    clock = [now]
+    fake_time = types.SimpleNamespace(time=lambda: clock[0], monotonic=time.monotonic)
+    monkeypatch.setattr(admission, "time", fake_time)
+    return clock
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, store: MemoryResultStore, timeout: int = 10) -> None:
@@ -285,6 +298,7 @@ async def test_rate_check_is_shared_by_paging_and_query(
     admission.configure_result_read_admission(_settings(result_query_rate_per_minute=2))
     valkey = _FakeValkey()
     monkeypatch.setattr(admission, "get_broadcast_client", lambda: valkey)
+    _freeze_rate_clock(monkeypatch, 1_800_000_000.0)
     store = _store()
     _install(monkeypatch, store)
 
@@ -294,13 +308,36 @@ async def test_rate_check_is_shared_by_paging_and_query(
         await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
 
     assert excinfo.value.reason == "rate_limited"
-    assert 0 < excinfo.value.retry_after_seconds <= 60
+    assert excinfo.value.retry_after_seconds == 60
     assert store.client.get_calls == 2
     assert _state().gate.in_use == 0
     # Another principal has its own counter.
     other_handle = uuid.uuid4()
     store.seed(tenant_id=_TENANT, operator_sub="op-b", handle_id=other_handle, rows=_rows())
     await rq.run_result_query(_operator(sub="op-b"), other_handle, ResultQuerySpec())
+
+
+async def test_rate_count_starts_again_in_the_next_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admission.configure_result_read_admission(_settings(result_query_rate_per_minute=2))
+    valkey = _FakeValkey()
+    monkeypatch.setattr(admission, "get_broadcast_client", lambda: valkey)
+    clock = _freeze_rate_clock(monkeypatch, 1_800_000_059.0)
+    _install(monkeypatch, _store())
+
+    await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
+    await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
+    with pytest.raises(rq.ResultReadRateLimitError) as excinfo:
+        await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
+    assert excinfo.value.retry_after_seconds == 1
+
+    # One second later a new window starts, and the count starts at zero.
+    clock[0] += 1
+    await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
+    await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
+    with pytest.raises(rq.ResultReadRateLimitError):
+        await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
 
 
 async def test_rate_check_off_makes_no_valkey_call(monkeypatch: pytest.MonkeyPatch) -> None:

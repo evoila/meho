@@ -269,7 +269,9 @@ async def test_user_path_redacts_response_and_audits_raw(
     serialised = str(result.result)
     assert "Bearer eyJ" not in serialised
     assert "[REDACTED:authorization_header]" in serialised
-    assert "[REDACTED:kubeconfig]" in serialised
+    # The engine redacted the kubeconfig text; the default view of every
+    # answer then hides the whole secret-named field.
+    assert result.result["kubeconfig"] == "[REDACTED:param_name]"
 
     # 2) Audit row holds the raw payload with fingerprints + manifest.
     sessionmaker = get_sessionmaker()

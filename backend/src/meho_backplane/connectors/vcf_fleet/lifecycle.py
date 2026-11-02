@@ -192,6 +192,14 @@ def _vendor_error(exc: Exception) -> str:
 
 
 def _request_row(item: dict[str, Any]) -> dict[str, Any]:
+    """One request as MEHO returns it.
+
+    Of the request inputs only the environment and product ids are returned,
+    as ``environment_id`` and ``product_id``. A caller recovering a lost reply
+    needs them to find its request among others of the same type. The other
+    inputs stay out: they can hold passwords.
+    """
+    inputs = item.get("inputMap")
     return {
         "request_id": item.get("vmid"),
         "name": item.get("requestName"),
@@ -203,6 +211,8 @@ def _request_row(item: dict[str, Any]) -> dict[str, Any]:
         "error_cause": _vendor_text(item.get("errorCause")),
         "created_by": item.get("createdBy"),
         "last_updated_on": item.get("lastUpdatedOn"),
+        "environment_id": _input_of(inputs, "environmentId"),
+        "product_id": _input_of(inputs, "productId"),
     }
 
 

@@ -371,8 +371,8 @@ async def sddc_credential_list_impl(
     The op is additionally credential-read *gated*: its typed registration
     carries ``requires_approval=True`` (so the dispatcher's policy gate
     routes it to the approval queue -- not dispatchable without operator
-    approval) and its op-id ``sddc.credential.list`` is on the
-    ``_CREDENTIAL_READ_OPS`` allowlist so ``classify_op`` collapses its
+    approval) and its op-id ``sddc.credential.list`` is declared
+    ``credential_read`` in ``sddc_manager/op_classes.py`` so ``classify_op`` collapses its
     audit + broadcast payload to aggregate-only. The boundary scrub here
     is the third, belt-and-suspenders layer: even the approved
     ``OperationResult`` the operator receives carries no secret value.

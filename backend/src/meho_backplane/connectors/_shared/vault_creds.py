@@ -183,11 +183,21 @@ class BasicCredentialsTargetLike(Protocol):
     not part of the Protocol because most target-like stubs (a secret ref
     taken from op params, for example) must not have one; the loaders read
     it with :func:`secret_field_map_of`.
+
+    The loaders only read these fields, so the Protocol declares them as
+    read-only properties. A plain attribute satisfies a read-only property,
+    so the concrete models and the test stubs keep working, and so does the
+    read-only ``Target`` of the connector kit (``meho_connector_kit``).
     """
 
-    name: str
-    host: str
-    secret_ref: str | None
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def host(self) -> str: ...
+
+    @property
+    def secret_ref(self) -> str | None: ...
 
 
 class VaultCredentialsReadError(CredentialsReadError):
@@ -783,8 +793,8 @@ def check_param_secret_ref(
     * **Vault** (``vault:`` or a schemeless ref on a Vault install): the
       ``<mount>/<path>`` must pass the tenant path check
       (:func:`~meho_backplane.connectors.vault.tenant_scope.enforce_tenant_scope`):
-      inside the caller's tenant prefix, with no ``.`` / ``..`` segment, no
-      ``%`` and no backslash.
+      no ``.`` / ``..`` segment, no ``%`` and no backslash, with any prefix
+      setting; and inside the caller's tenant prefix when one is set.
     * **Google Secret Manager** (``gsm:`` or a schemeless ref on a
       ``credentialBackend=gsm`` install): the project must be listed in
       ``GSM_PARAM_ALLOWED_PROJECTS``. An empty list refuses every one,
@@ -811,11 +821,7 @@ def check_param_secret_ref(
         try:
             _enforce_vault_tenant_scope(operator, mount=mount, path=store_ref)
         except VaultTenantScopeError as exc:
-            raise SecretRefScopeError(
-                param=param,
-                secret_ref=ref,
-                reason="the path is outside the caller's tenant",
-            ) from exc
+            raise SecretRefScopeError(param=param, secret_ref=ref, reason=exc.reason) from exc
         return
     if kind == "gsm":
         project = store_ref.partition("#")[0].partition("/")[0].strip()

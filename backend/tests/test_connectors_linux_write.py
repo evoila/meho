@@ -44,7 +44,7 @@ import pytest
 
 import meho_backplane.connectors.linux  # noqa: F401 -- import for registry side-effects
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast.events import _CREDENTIAL_WRITE_OPS, classify_op
+from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors.linux import LinuxSshConnector
 from meho_backplane.connectors.linux._sudo import build_sudo_bash_remote_cmd
 from meho_backplane.connectors.linux.ops import PathConfinementError
@@ -567,13 +567,11 @@ async def test_firewall_load_validate_failure_leaves_firewall_unchanged() -> Non
 
 def test_credential_bearing_writes_are_pinned_credential_write() -> None:
     for op_id in ("linux.file.write", "linux.script.run"):
-        assert op_id in _CREDENTIAL_WRITE_OPS, op_id
         assert classify_op(op_id) == "credential_write", op_id
 
 
 def test_non_secret_writes_are_not_credential_class() -> None:
     for op_id in ("linux.sysctl.write", "linux.firewall.load", "linux.service.control"):
-        assert op_id not in _CREDENTIAL_WRITE_OPS, op_id
         assert classify_op(op_id) != "credential_write", op_id
 
 

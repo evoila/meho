@@ -165,6 +165,15 @@ def test_vsan_read_paths_are_the_reconciled_keys() -> None:
         "POST:/vsan/VsanVcClusterHealthSystem/{moId}/VsanVcClusterRunVmdkLoadTest",
         "POST:/vsan/VsanVcClusterHealthSystem/{moId}/VsanHealthRepairClusterObjectsImmediate",
         "POST:/vsan/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary",
+        # The vSAN reads vmware.vsan.* (#4444).
+        "POST:/vsan/VsanVcClusterConfigSystem/{moId}/VsanClusterGetConfig",
+        "POST:/vsan/VimClusterVsanVcStretchedClusterSystem/{moId}/VSANVcGetWitnessHosts",
+        "POST:/vsan/VsanSpaceReportSystem/{moId}/VsanQuerySpaceUsage",
+        "POST:/vsan/VsanPerformanceManager/{moId}/VsanPerfQueryPerf",
+        "POST:/vsan/VsanObjectSystem/{moId}/QuerySyncingVsanObjectsSummary",
+        "POST:/vsan/VsanObjectSystem/{moId}/VsanQueryObjectIdentities",
+        "POST:/vsan/VsanResourceCheckSystem/{moId}/VsanPerformResourceCheck",
+        "POST:/vsan/VsanResourceCheckSystem/{moId}/VsanGetResourceCheckStatus",
     }
 
 

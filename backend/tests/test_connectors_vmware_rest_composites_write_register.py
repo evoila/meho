@@ -505,6 +505,7 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
         "vmware.composite.vm.device.cdrom": {
             "removed",
             "updated",
+            "connected",
             "disconnected",
             "invalid_request",
             "result_unknown",

@@ -27,7 +27,7 @@ __all__ = [
     "DEPLOY_RESPONSE_SCHEMA",
 ]
 
-_EXAMPLE_ITEM_ID: Final = "00000000-0000-4000-8000-000000000001"
+_EXAMPLE_ITEM_ID: Final = "<library-item-id>"
 
 _MOID: Final[dict[str, Any]] = {"type": "string", "minLength": 1, "maxLength": 128}
 _NULLABLE_TEXT: Final[dict[str, Any]] = {"type": ["string", "null"]}
@@ -167,7 +167,7 @@ CHECK_IN_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "examples": [
         {
             "template_library_item": _EXAMPLE_ITEM_ID,
-            "vm": "vm-42",
+            "vm": "<vm-id>",
             "message": "<what changed>",
         }
     ],

@@ -92,6 +92,7 @@ __all__ = [
     "K8S_SERVICE_LIST_PARAMETER_SCHEMA",
     "K8S_SERVICE_LIST_RESPONSE_SCHEMA",
     "NETWORK_OPS",
+    "OPS",
     "ingress_path_row",
     "ingress_row",
     "ingress_rule_row",
@@ -525,3 +526,6 @@ NETWORK_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=K8S_INGRESS_LIST_LLM_INSTRUCTIONS,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = NETWORK_OPS

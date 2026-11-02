@@ -155,10 +155,29 @@ mode (#4923): it returns the verdict and writes nothing — no audit row, no
 approval request, and no standing-grant use. A service principal whose
 standing grant would clear the call sees `auto-execute`, but the grant is
 not used until the real call. In sandbox mode a delete grant is consulted
-without building its evidence (that may read the target); a `destructive`
-delete therefore previews as `needs-approval` even when a delete grant
-would later clear the real call, because the preview presents no hash of
-its own. Both surfaces stay `OPERATOR`-gated at the route / tool layer.
+without building its evidence (that may read the target). A live delete
+grant on a `destructive` delete previews as `auto-execute` too (#5492);
+the reason names the grant and says that the call must send the
+`preview_hash` of this preview, because the real call checks the hash and
+the blast radius before it uses the grant. Without a live grant, the
+reason says that no delete grant covers the call and that it waits for
+approval.
+
+**Steps (#5492).** A multi-step operation checks MEHO policy again before
+each write step, so a grant on the operation alone does not let it run.
+When the gate says `auto-execute`, the preview also checks the steps the
+connector lists for the operation (`governed_subops_for`, the list behind
+`GET /api/v1/operations/governed-subops`), in `_preview_steps.py`. It
+skips plain `GET` / `HEAD` reads and runs the same decide-only gate on
+each other step, with the step gate's facts (`dangerous`, no
+`requires_approval`). A denied step makes the verdict `deny`; a step that
+would wait makes it `needs-approval`, and the reason names those steps.
+The list has every step the operation may run, also reads sent as `POST`
+and the steps of every way the connector can do the work. The preview
+cannot tell which ones the call will run, because it never contacts the
+target. So it can say "waits" for a call that then does not need a step,
+but it never says "runs at once" for a call whose step would wait. Both
+surfaces stay `OPERATOR`-gated at the route / tool layer.
 
 ## Envelope shape
 

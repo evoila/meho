@@ -3364,7 +3364,10 @@ forbidden.
   waits for a person again.
 - With the mode on, the park reasons add that a delete grant made in the
   web console may cover the delete; with it off every reason text is
-  unchanged.
+  unchanged. The preview has already looked for the grant, so its reason
+  says either that a named delete grant covers the call (with the
+  preview hash) or that none does and the call waits (#5492, see
+  [`dispatch-request-preview.md`](dispatch-request-preview.md)).
 
 Details: [`service-principal-grants.md`](service-principal-grants.md#sandbox-mode-4622).
 

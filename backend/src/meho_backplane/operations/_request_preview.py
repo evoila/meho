@@ -70,7 +70,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors import resolve_connector_or_label
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._branches import resolve_ingested_request
 from meho_backplane.operations._catalog_guard import (
     CatalogRefusal,
@@ -87,6 +87,7 @@ from meho_backplane.operations._lookup import (
 )
 from meho_backplane.operations._op_miss import op_miss_result
 from meho_backplane.operations._preview import _SENSITIVE_CLASSES
+from meho_backplane.operations._preview_steps import preview_step_verdict
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
     params_check_errors,
@@ -397,8 +398,11 @@ async def _governance_fields(
     runs (Step 4), called with ``decide_only=True`` so it writes nothing: no
     audit row, no approval request, no standing-grant use. ``policy_reason``
     is the gate's reason string, or ``None`` when the gate gives none (a
-    person's call that runs at once). All four are advisory: none is in
-    :data:`_PREVIEW_HASH_KEYS`, so the hash does not change.
+    person's call that runs at once). A call that would run at once is
+    also checked step by step (:func:`preview_step_verdict`, #5492): a
+    multi-step operation reads as covered only when its write steps are
+    too. All four are advisory: none is in :data:`_PREVIEW_HASH_KEYS`, so
+    the hash does not change.
     """
     verdict, reason = await policy_gate(
         operator=operator,
@@ -407,6 +411,13 @@ async def _governance_fields(
         connector_id=connector_id,
         decide_only=True,
     )
+    if verdict is PermissionVerdict.AUTO_EXECUTE:
+        steps = await preview_step_verdict(
+            operator=operator, op_id=descriptor.op_id, connector_id=connector_id, target=target
+        )
+        if steps is not None:
+            verdict, step_reason = steps
+            reason = f"{reason}; {step_reason}" if reason else step_reason
     return {
         "safety_level": descriptor.safety_level,
         "requires_approval": descriptor.requires_approval,

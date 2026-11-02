@@ -19,6 +19,7 @@ machine that runs them:
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -255,6 +256,10 @@ class FakeAppliance:
             "MEHO_FAKE": str(self.fake),
             "LC_ALL": "C",
         }
+        # actions/setup-python's CPython finds libpython through this variable
+        # when its RUNPATH does not exist, as on a self-hosted runner.
+        if "LD_LIBRARY_PATH" in os.environ:
+            env["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
         return subprocess.run(
             [str(script)], capture_output=True, text=True, env=env, check=False, timeout=60
         )

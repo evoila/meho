@@ -44,7 +44,7 @@ from meho_backplane.settings import get_settings
 # JWT shape) -- so a green assertion proves the redaction is *structural*,
 # not a lucky Tier-1 pattern hit.
 _TLS_KEY_B64 = "TFMwdExTMUNSVWRKVGlCUVVrbFdRVlJGSUV0RldRPT0="
-_APP_TOKEN_B64 = "cGxhaW4tYXBwLXRva2VuLXdpdGgtbm8tbGFiZWw="
+_APP_TOKEN_B64 = "cGxhaW4tYXBwLXRva2VuLXdpdGgtbm8tbGFiZWw="  # gitleaks:allow
 _STRINGDATA_PLAINTEXT = "hunter2-no-pattern-here"
 
 

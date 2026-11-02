@@ -14,11 +14,13 @@
 # Runner: the lab's self-hosted pool, which must reach the lab's vCenter
 # and the build VM's address. The lab's test place is an internal ticket.
 # The vCenter login is in repository secrets
-# GOVC_URL, GOVC_USERNAME and GOVC_PASSWORD; where the build VM goes and
-# its network are repository variables (below). The job log of a public
-# repository is public, so the build step masks the variables, and there is
-# no build log file: a mask does not reach a file. The build SSH key is
-# made new for every run and never stored.
+# GOVC_URL, GOVC_USERNAME and GOVC_PASSWORD. Where the build VM goes and
+# its network are repository secrets too (below), not variables: the job
+# log of a public repository is public, and the runner prints a step's
+# env: block before the step runs, with variables in clear text. The build
+# step masks the parts it takes from them, and there is no build log file:
+# a mask does not reach a file. The build SSH key is made new for every run
+# and never stored.
 #
 # Permissions: read-only. The job runs no pull-request code.
 
@@ -28,7 +30,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: The release tag whose form-2 download to build from, for example v0.38.0.
+        description: The release tag whose form-2 download to build from, for example v0.40.0.
         required: true
         type: string
 
@@ -117,22 +119,20 @@ jobs:
           GOVC_USERNAME: ${{ secrets.GOVC_USERNAME }}
           GOVC_PASSWORD: ${{ secrets.GOVC_PASSWORD }}
           MEHO_LAB_GOVC_INSECURE: ${{ vars.MEHO_LAB_GOVC_INSECURE }}
-          GOVC_DATASTORE: ${{ vars.MEHO_LAB_DATASTORE }}
-          GOVC_FOLDER: ${{ vars.MEHO_LAB_FOLDER }}
-          GOVC_RESOURCE_POOL: ${{ vars.MEHO_LAB_RESOURCE_POOL }}
-          GOVC_NETWORK: ${{ vars.MEHO_LAB_NETWORK }}
-          MEHO_BUILD_HOSTNAME: ${{ vars.MEHO_BUILD_HOSTNAME }}
-          MEHO_BUILD_ADDRESS: ${{ vars.MEHO_BUILD_ADDRESS }}
-          MEHO_BUILD_GATEWAY: ${{ vars.MEHO_BUILD_GATEWAY }}
-          MEHO_BUILD_DNS: ${{ vars.MEHO_BUILD_DNS }}
+          GOVC_DATASTORE: ${{ secrets.MEHO_LAB_DATASTORE }}
+          GOVC_FOLDER: ${{ secrets.MEHO_LAB_FOLDER }}
+          GOVC_RESOURCE_POOL: ${{ secrets.MEHO_LAB_RESOURCE_POOL }}
+          GOVC_NETWORK: ${{ secrets.MEHO_LAB_NETWORK }}
+          MEHO_BUILD_HOSTNAME: ${{ secrets.MEHO_BUILD_HOSTNAME }}
+          MEHO_BUILD_ADDRESS: ${{ secrets.MEHO_BUILD_ADDRESS }}
+          MEHO_BUILD_GATEWAY: ${{ secrets.MEHO_BUILD_GATEWAY }}
+          MEHO_BUILD_DNS: ${{ secrets.MEHO_BUILD_DNS }}
         run: |
           set -euo pipefail
-          # The lab's names and addresses stay out of the job log. The
-          # secrets are masked already.
+          # The lab's names and addresses stay out of the job log. A secret
+          # is masked only as a whole, so mask the parts the build prints.
           IFS=, read -ra dns <<<"${MEHO_BUILD_DNS}"
-          for value in "${GOVC_DATASTORE}" "${GOVC_FOLDER}" "${GOVC_RESOURCE_POOL}" "${GOVC_NETWORK}" \
-            "${MEHO_BUILD_HOSTNAME}" "${MEHO_BUILD_HOSTNAME%%.*}" "${MEHO_BUILD_ADDRESS%/*}" \
-            "${MEHO_BUILD_GATEWAY}" "${dns[@]// /}"; do
+          for value in "${MEHO_BUILD_HOSTNAME%%.*}" "${MEHO_BUILD_ADDRESS%/*}" "${dns[@]// /}"; do
             [[ -z "${value}" ]] || echo "::add-mask::${value}"
           done
           # A lab vCenter with its own certificate: set the variable to 1.

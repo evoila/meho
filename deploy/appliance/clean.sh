@@ -80,6 +80,10 @@ readonly KUBELET_DIR=/var/lib/kubelet
 # cluster) and its address state. Canal writes them again at every start;
 # RKE2's own uninstall removes both folders.
 readonly CNI_DIRS=(/etc/cni /var/lib/cni)
+# The pods' log folders and links. A static pod's name ends with the node
+# name, which is the build's host name. RKE2's own uninstall removes them;
+# kubelet makes them again at first start.
+readonly POD_LOG_DIRS=(/var/log/pods /var/log/containers)
 readonly RKE2_SERVER_STATE=(server/db server/tls server/cred server/token server/agent-token server/node-token)
 readonly RKE2_KEEP=(server/manifests agent/images)
 readonly APPLIANCE_DIR=/opt/meho/appliance
@@ -221,7 +225,7 @@ remove_rke2_state() {
     find "${HOST_ROOT}${RKE2_DIR}/agent" -mindepth 1 -maxdepth 1 ! -name images -exec rm -rf {} +
     rm -f "${HOST_ROOT}${RKE2_NODE_PASSWORD}" "${HOST_ROOT}${RKE2_KUBECONFIG}"
     rm -rf --one-file-system "${HOST_ROOT}${KUBELET_DIR}"
-    for item in "${CNI_DIRS[@]}"; do
+    for item in "${CNI_DIRS[@]}" "${POD_LOG_DIRS[@]}"; do
         rm -rf "${HOST_ROOT}${item:?}"
     done
     ok "RKE2 and its pods are stopped, RKE2 does not start at boot (also not at the first boot), and its state is gone; its images and manifests stay"
@@ -332,7 +336,7 @@ check_clean() {
     done
     found=$(find "${HOST_ROOT}${RKE2_DIR}/agent" -mindepth 1 -maxdepth 1 ! -name images 2>/dev/null | head -n 1)
     [[ -z $found ]] || left "RKE2 state under $RKE2_DIR/agent/ other than images/"
-    check_none "$RKE2_NODE_PASSWORD" "$RKE2_KUBECONFIG" "$KUBELET_DIR" "${CNI_DIRS[@]}" "$MEHO_PLACE_VALUES" "$MEHO_INSTALL_RECORD" \
+    check_none "$RKE2_NODE_PASSWORD" "$RKE2_KUBECONFIG" "$KUBELET_DIR" "${CNI_DIRS[@]}" "${POD_LOG_DIRS[@]}" "$MEHO_PLACE_VALUES" "$MEHO_INSTALL_RECORD" \
         "$BUILD_NETPLAN" "$SUDOERS_CLOUD_INIT" "$ROOT_AUTHORIZED_KEYS"
     if [[ $(systemctl is-enabled rke2-server 2>/dev/null || true) == enabled ]]; then
         left "rke2-server starts at boot"
@@ -357,7 +361,8 @@ check_clean() {
     fi
     [[ $(cat "${HOST_ROOT}${ETC_HOSTNAME}" 2>/dev/null) == "$NEUTRAL_HOSTNAME" ]] ||
         left "$ETC_HOSTNAME does not say $NEUTRAL_HOSTNAME"
-    # Under /etc only: the logs are empty, and the rest holds no host name.
+    # Under /etc only: the logs are empty, the pod log folders (named after
+    # the host) are gone, and the rest holds no host name.
     found=$(grep -rlisF -- "$BUILD_HOSTNAME" "${HOST_ROOT}/etc" || true)
     found=${found//"$HOST_ROOT"/}
     [[ -z $found ]] || left "the build's host name $BUILD_HOSTNAME in ${found//$'\n'/, }"

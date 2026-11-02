@@ -42,8 +42,10 @@ registers at start-up, of every connector, against twelve rules:
     :mod:`tests.operation_contract_values`.
 12. ``named_operations_exist`` -- every operation id the guidance names in
     backticks is registered. A name counts as an operation id when it starts
-    with the first part of a registered id (``k8s.``, ``vmware.``). Other
-    names of that shape are in :data:`NAMES_THAT_ARE_NOT_OPERATIONS`.
+    with the first part of a registered id (``k8s.``, ``vmware.``), or when
+    it has three or more dotted parts (``kubernetes.node.list``). A call
+    suffix such as ``(vm)`` or ``()`` does not change that. Other names of
+    that shape are in :data:`NAMES_THAT_ARE_NOT_OPERATIONS`.
 
 Today's gaps live in ``tests/data/operation_contract_gaps.yaml``. The test
 fails on a gap that is not in that list (a new gap) and on a listed gap that
@@ -109,6 +111,10 @@ READS_WITH_A_WRITE_WORD: Final[Mapping[str, str]] = {
 #: Names in backticks that look like an operation id but are not one, with
 #: the reason. The live test fails when an entry becomes a registered id.
 NAMES_THAT_ARE_NOT_OPERATIONS: Final[Mapping[str, str]] = {
+    "apiregistration.k8s.io": "a Kubernetes API group",
+    "config.yaml.d": "the RKE2 folder of extra config files",
+    "named.conf.local": "a BIND config file",
+    "named.conf.options": "a BIND config file",
     "net.ipv4.ip_forward": "a Linux kernel setting (sysctl key)",
     "rke2.yaml": "the name of the RKE2 kubeconfig file",
 }
@@ -351,19 +357,36 @@ def check_example_placeholders(op: OperationContract) -> list[str]:
 
 
 _BACKTICKED: Final = re.compile(r"`([^`\n]+)`")
-_OP_ID_SHAPE: Final = re.compile(r"[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9_-]+)+")
+#: An operation id starts with a letter (``2.7.2`` is a version number) and
+#: may carry a call suffix such as ``(vm)``.
+_OP_ID_SHAPE: Final = re.compile(r"([a-z][a-z0-9_-]*(?:\.[a-z0-9_-]+)+)(?:\([^()]*\))?")
+
+
+def _named_operations(text: str, prefixes: Set[str]) -> Iterator[str]:
+    """Every name in backticks in *text* that is meant as an operation id.
+
+    A name with a registered first part (``k8s.``) is one, and so is a name
+    with three or more dotted parts. A two-part name with another first part
+    (``config.xml``, ``graph_node.name``) is a file or a field.
+    """
+    for backticked in _BACKTICKED.findall(text):
+        match = _OP_ID_SHAPE.fullmatch(backticked)
+        if match is None:
+            continue
+        name = match.group(1)
+        if name.split(".", 1)[0] in prefixes or name.count(".") >= 2:
+            yield name
 
 
 def check_named_operations_exist(op: OperationContract, op_ids: Set[str]) -> list[str]:
+    if not op_ids:
+        return []
     prefixes = {op_id.split(".", 1)[0] for op_id in op_ids}
     missing = {
         name
         for text in _texts(op.llm_instructions)
-        for name in _BACKTICKED.findall(text)
-        if _OP_ID_SHAPE.fullmatch(name)
-        and name.split(".", 1)[0] in prefixes
-        and name not in op_ids
-        and name not in NAMES_THAT_ARE_NOT_OPERATIONS
+        for name in _named_operations(text, prefixes)
+        if name not in op_ids and name not in NAMES_THAT_ARE_NOT_OPERATIONS
     }
     return [
         f"guidance names {name!r}, which is not a registered operation" for name in sorted(missing)

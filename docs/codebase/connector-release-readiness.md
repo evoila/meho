@@ -296,23 +296,29 @@ The twelve rules (the rule name is in brackets):
     into real calls. A value fails when it holds an IP address outside
     the documentation ranges (`192.0.2.0/24`, `198.51.100.0/24`,
     `203.0.113.0/24`, `2001:db8::/32`), a host name with a real top-level
-    domain (`.com`, `.net`, `.local`, `.lan`, ...; `example.com`,
-    `example.org`, `.test`, `.example` and `.invalid` are fine), a
-    vSphere-style object id (`vm-42`, `host-12`, `domain-c8`,
-    `datastore-15`, `resgroup-8`, `group-v3`) or a UUID other than the
-    all-zero one. A placeholder in angle brackets, such as `<vm-id>`,
-    always passes. A few public vendor names (for example
-    `management.azure.com` or `vsphere.local`, the default sign-on
-    domain) are in `PUBLIC_EXAMPLE_NAMES` in
-    `backend/tests/operation_contract_values.py`, each with a reason.
-    (`example_placeholders`)
+    domain (`.com`, `.net`, `.local`, `.lan`, ..., and every two-letter
+    country code such as `.fr`; `example.com`, `example.org`, `.test`,
+    `.example` and `.invalid` are fine), a vSphere-style object id
+    (`vm-42`, `host-12`, `domain-c8`, `datastore-15`, `resgroup-8`,
+    `group-v3`) or a UUID other than the all-zero one. A trailing dot
+    (`host.corp.local.`) does not hide a name. A placeholder in angle
+    brackets, such as `<vm-id>`, always passes. Two short lists in
+    `backend/tests/operation_contract_values.py` name what passes on
+    purpose: `PUBLIC_EXAMPLE_NAMES` holds a few public vendor names (for
+    example `management.azure.com` or `vsphere.local`, the default
+    sign-on domain), each with a reason, and `FILE_ENDINGS` holds the
+    two-letter file endings that are also country codes (`notes.md`,
+    `setup.sh`). (`example_placeholders`)
 12. Every operation id that the guidance (`llm_instructions`) names in
     backticks is a registered operation. A name in backticks counts as an
     operation id when it has the shape `a.b` and its first part is the
-    first part of a registered id (`k8s.`, `vmware.`, `net.`). A name of
-    that shape that is not an operation (for example the Linux setting
-    `net.ipv4.ip_forward`) goes into `NAMES_THAT_ARE_NOT_OPERATIONS` at
-    the top of the test, with a reason. (`named_operations_exist`)
+    first part of a registered id (`k8s.`, `vmware.`, `net.`), or when it
+    has three or more parts (`kubernetes.node.list`). A call suffix such
+    as `(vm)` or `()` does not change that. A name of that shape that is
+    not an operation (for example the Linux setting `net.ipv4.ip_forward`
+    or the BIND file `named.conf.options`) goes into
+    `NAMES_THAT_ARE_NOT_OPERATIONS` at the top of the test, with a
+    reason. (`named_operations_exist`)
 
 Ingested (generic) operations are not checked here. Their safety level
 comes from the HTTP method and the connector's safety floor, for example

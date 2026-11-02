@@ -307,6 +307,13 @@ def test_a_vendor_id_in_an_example_fails_and_a_placeholder_passes() -> None:
         "node-01.office.local",
         "nas.home.lan",
         "Admin@Example.NET.local",
+        "nas.office.fr",
+        "vcenter.site.au",
+        "Gateway.Site.CA",
+        "server.somewhere.com.",
+        "node-01.office.local.",
+        "https://nas.office.fr./share",
+        "10.0.0.1.",
         "3f2b8c1e-6a4d-4e2f-9b7a-1c5d8e9f0a21",
         "00000000-0000-4000-8000-000000000001",
         "<vm-id> on host-12",
@@ -341,10 +348,23 @@ def test_a_real_looking_value_fails(value: str) -> None:
         "my-vm-42",
         "administrator@vsphere.local",
         "https://kubernetes.default.svc.cluster.local",
+        "kubernetes.default.svc.cluster.local.",
+        "ntp.example.org.",
+        "docs/release-notes.md",
+        "main.tf",
+        "1.2.3.4.5",
     ],
 )
 def test_a_placeholder_or_documentation_value_passes(value: str) -> None:
     assert check_operation(_with_example(value)) == {}
+
+
+def test_a_name_with_a_trailing_dot_is_reported_without_it() -> None:
+    problems = _only_rule(_with_example("node-01.office.local."), "example_placeholders")
+    assert problems == [
+        "example 0 field 'vm' has the real-looking value 'node-01.office.local'; "
+        "use a placeholder such as <vm-id>"
+    ]
 
 
 def test_a_real_looking_value_deep_in_an_example_names_its_field() -> None:
@@ -386,6 +406,23 @@ def test_guidance_that_names_an_unregistered_operation_fails() -> None:
 
 
 @pytest.mark.parametrize(
+    ("next_step", "name"),
+    [
+        ("Then call `other.vm.get`.", "other.vm.get"),
+        ("Then call `fake.vm.remove()`.", "fake.vm.remove"),
+        ("Then call `fake.vm.remove(vm)`.", "fake.vm.remove"),
+        ("Then call `other.vm.get(vm, force=True)`.", "other.vm.get"),
+    ],
+)
+def test_an_unknown_prefix_or_a_call_suffix_does_not_hide_a_missing_operation(
+    next_step: str, name: str
+) -> None:
+    assert check_operation(_good_op(llm_instructions=_guidance(next_step)), _OP_IDS) == {
+        "named_operations_exist": [f"guidance names {name!r}, which is not a registered operation"]
+    }
+
+
+@pytest.mark.parametrize(
     "next_step",
     [
         "Read the VM back with `fake.vm.get`.",
@@ -393,6 +430,9 @@ def test_guidance_that_names_an_unregistered_operation_fails() -> None:
         "Look at `fake.vm.get(vm)` output.",
         f"The setting `{next(iter(NAMES_THAT_ARE_NOT_OPERATIONS))}` is a kernel key.",
         "Then call fake.vm.remove, named without backticks.",
+        "The file `config.xml` and the field `graph_node.name` are not operations.",
+        "Version `2.7.2` or build `10.0.20348` is a number, not an operation.",
+        "The API group `metallb.io` has two parts and another first part.",
     ],
 )
 def test_guidance_that_names_only_registered_operations_passes(next_step: str) -> None:

@@ -231,6 +231,19 @@ _PASSWORD_HASH = re.compile(
     r"[./A-Za-z0-9+=]{8,4096}",
 )
 
+# Ceph keys, as in a keyring file (``key = AQ...==``) and in the output
+# of ``ceph auth ls`` / ``ceph auth get`` (``key: AQ...==``). A Ceph key
+# is base64 of a fixed binary layout whose first bytes always encode to
+# ``AQ``; the value is 40 characters long and ends in ``==``. The ``AQ``
+# start and the length floor keep ``key = <path>`` and other short
+# ``key`` settings out. The label may not follow ``_`` or ``-``
+# (``ssl_certificate_key = ...`` is a path, not a key). The whole
+# ``key = value`` pair is the match, like ``api_key``.
+_CEPH_KEY = re.compile(
+    r"(?<![A-Za-z0-9_-])(?i:key)\s*[=:]\s*['\"]?"
+    r"AQ[A-Za-z0-9+/]{30,}={0,2}['\"]?(?![A-Za-z0-9+/=])",
+)
+
 # BIND key secrets (#4617) are not a regex. A ``secret`` word inside a
 # comment or a quoted key name looks like the keyword, and a regex
 # cannot tell the two apart; one review found a comment that let the
@@ -303,6 +316,7 @@ NAMED_PATTERNS: Final[dict[str, re.Pattern[str] | SecretFinder]] = {
     "kubeconfig": _KUBECONFIG,
     "pem_private_key": _PEM_PRIVATE_KEY,
     "password_hash": _PASSWORD_HASH,
+    "ceph_key": _CEPH_KEY,
     "bind_key_secret": BIND_KEY_SECRET,
     "uuid": _UUID,
     "ipv4": _IPV4,

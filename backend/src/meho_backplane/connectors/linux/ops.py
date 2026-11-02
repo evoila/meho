@@ -134,15 +134,16 @@ LINUX_READ_FILES: frozenset[str] = frozenset(
 )
 
 #: Files the read ops never return, even under an allowed root: password
-#: hashes, private keys, cluster tokens and kubeconfigs with client keys.
-#: Each entry is an :func:`fnmatch.fnmatchcase` pattern on the full path
-#: (``*`` also matches ``/``). The check runs on the typed path and on the
-#: real path.
+#: hashes, private keys, cluster tokens, kubeconfigs with client keys,
+#: keyrings and any file whose name says it holds a secret or a
+#: credential. Each entry is an :func:`fnmatch.fnmatchcase` pattern on the
+#: full path in lower case (``*`` also matches ``/``), so the case of the
+#: name on the host does not matter. The check runs on the typed path and
+#: on the real path.
 LINUX_READ_DENY: tuple[str, ...] = (
-    "/etc/shadow",
-    "/etc/shadow-",
-    "/etc/gshadow",
-    "/etc/gshadow-",
+    # /etc/shadow, /etc/gshadow and every backup of them (shadow-, shadow.bak, shadow~).
+    "*/shadow*",
+    "*/gshadow*",
     "/etc/security/opasswd",
     "/etc/krb5.keytab",
     "/etc/ssh/ssh_host_*_key",
@@ -181,6 +182,15 @@ LINUX_READ_DENY: tuple[str, ...] = (
     "*/id_dsa",
     "*/id_ecdsa",
     "*/id_ed25519",
+    # PostgreSQL password file.
+    "*/.pgpass",
+    # Ceph keyrings: ceph.client.admin.keyring, and the bare ``keyring`` file
+    # in each monitor and OSD directory.
+    "*.keyring",
+    "*/keyring",
+    # Any file or directory whose name says what it holds.
+    "*secret*",
+    "*credential*",
 )
 
 
@@ -231,8 +241,13 @@ def ensure_path_under_root(requested: str, allowed_root: str) -> str:
 
 
 def _is_denied(path: str) -> bool:
-    """Return ``True`` when *path* matches an entry of :data:`LINUX_READ_DENY`."""
-    return any(fnmatch.fnmatchcase(path, pattern) for pattern in LINUX_READ_DENY)
+    """Return ``True`` when *path* matches an entry of :data:`LINUX_READ_DENY`.
+
+    The match ignores the case of *path*: every pattern is lower case, and
+    ``/etc/SHADOW.bak`` is as sensitive as ``/etc/shadow.bak``.
+    """
+    lowered = path.lower()
+    return any(fnmatch.fnmatchcase(lowered, pattern) for pattern in LINUX_READ_DENY)
 
 
 def confine_read_path(requested: str, roots: tuple[str, ...] = LINUX_READ_ROOTS) -> str:

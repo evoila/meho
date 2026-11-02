@@ -509,6 +509,8 @@ async def test_file_read_reads_a_symlink_whose_target_passes_the_check() -> None
         "/proc/1/environ",
         "/etc/shadow",
         "/etc/ssh/ssh_host_ed25519_key",
+        "/etc/ceph/ceph.client.admin.keyring",
+        "/var/lib/app/credentials.json",
     ],
 )
 async def test_file_read_refuses_a_real_path_that_fails_the_check(real_path: str) -> None:
@@ -1189,10 +1191,36 @@ def test_confine_read_path_refuses_key_and_password_files(path: str) -> None:
         confine_read_path(path)
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param("/var/lib/postgresql/.pgpass", id="pgpass"),
+        pytest.param("/etc/ceph/ceph.client.admin.keyring", id="keyring-suffix"),
+        pytest.param("/var/lib/ceph/osd/ceph-0/keyring", id="keyring-bare"),
+        pytest.param("/etc/shadow.bak", id="shadow-backup"),
+        pytest.param("/var/lib/backup/shadow~", id="shadow-backup-tilde"),
+        pytest.param("/etc/gshadow.old", id="gshadow-backup"),
+        pytest.param("/etc/app/secrets.yaml", id="secret-in-name"),
+        pytest.param("/var/lib/app/db-credentials.json", id="credential-in-name"),
+        pytest.param("/etc/app/secret/config.ini", id="secret-in-directory"),
+        pytest.param("/etc/SHADOW.BAK", id="upper-case"),
+        pytest.param("/var/lib/app/Credential_Store", id="mixed-case"),
+    ],
+)
+def test_confine_read_path_refuses_secret_files_by_name(path: str) -> None:
+    with pytest.raises(PathConfinementError, match="keys, tokens or password hashes"):
+        confine_read_path(path)
+
+
 def test_confine_read_path_keeps_public_files_near_the_refused_ones() -> None:
     for path in (
         "/etc/passwd",
         "/etc/group",
+        "/etc/ceph/ceph.conf",
+        "/var/lib/postgresql/data/pg_hba.conf",
+        "/var/log/secure",
+        "/etc/security/limits.conf",
+        "/etc/pam.d/common-password",
         "/etc/ssh/ssh_host_ed25519_key.pub",
         "/etc/ssh/sshd_config",
         "/etc/ssl/certs/ca-certificates.crt",

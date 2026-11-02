@@ -59,7 +59,8 @@ The rules of ``pick``. Any doubt means the full suite:
   ``parametrize`` list that is written out or named at module level
   (also one in ``pytestmark``), times the ``params`` of every fixture
   with ``params`` in the file and in the ``conftest.py`` files above it,
-  as if every test used every such fixture. When that count is
+  as if every test used every such fixture. An empty list counts as one
+  item, as pytest collects one skipped test for it. When that count is
   uncertain, the full suite runs: a parametrize or params list built by
   code, a ``pytestmark`` that is not one plain assignment at module
   level, ``pytest_generate_tests``, a ``conftest.py`` that names
@@ -453,14 +454,19 @@ def _parametrize_cases(mark: ast.Call, constants: dict[str, ast.expr]) -> int:
 
 
 def _items(values: ast.expr | None, constants: dict[str, ast.expr], what: str) -> int:
-    """Return the length of a list or tuple written out, or named at module level."""
+    """Return how many items a list or tuple written out, or named at module level, makes.
+
+    An empty list makes one item, not none: pytest collects one skipped
+    test for it. So the count of a file never falls to zero because of a
+    fixture or mark that no test uses.
+    """
     if isinstance(values, ast.Name):
         values = constants.get(values.id)
     if not isinstance(values, (ast.List, ast.Tuple)) or any(
         isinstance(item, ast.Starred) for item in values.elts
     ):
         raise ValueError(f"{what} that is not written out")
-    return len(values.elts)
+    return max(len(values.elts), 1)
 
 
 def _pytestmark_cases(tree: ast.Module, constants: dict[str, ast.expr]) -> int:

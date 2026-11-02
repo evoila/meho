@@ -601,6 +601,53 @@ def test_fixture_with_params_multiplies_the_count(repo: Path) -> None:
     assert _pick(repo, ["backend/tests/sub/test_deep.py"]).line.endswith(": 7 of 10 tests")
 
 
+def test_empty_list_counts_as_one_item(repo: Path) -> None:
+    """pytest collects one skipped test for an empty params or parametrize list.
+
+    The count of a file must not fall to zero because of a fixture that no
+    test uses: that would hide a file with thousands of tests from the limit.
+    """
+    core = repo / "backend/tests/test_core.py"
+    core.write_text(
+        "import pytest\n\n\n@pytest.fixture(params=[])\ndef unused(request):\n"
+        "    return request.param\n\n\n@pytest.mark.parametrize('n', [])\ndef test_core(n):\n"
+        "    pass\n\n\ndef test_a():\n    pass\n\n\ndef test_b():\n    pass\n\n\n"
+        "def test_c():\n    pass\n",
+        encoding="utf-8",
+    )
+    # 4 tests x 1 (more than the 3 the map says), plus the contract test.
+    assert _pick(repo, ["backend/tests/test_core.py"]).line.endswith(": 5 of 10 tests")
+
+    # The unused fixture does not hide 2,500 cases from the limit.
+    cases = ", ".join(str(n) for n in range(2500))
+    core.write_text(
+        "import pytest\n\n\n@pytest.fixture(params=[])\ndef unused(request):\n"
+        f"    return request.param\n\n\n@pytest.mark.parametrize('n', [{cases}])\n"
+        "def test_core(n):\n    pass\n",
+        encoding="utf-8",
+    )
+    picked = _pick(repo, ["backend/tests/test_core.py"])
+
+    assert picked.tests == []
+    assert picked.line == "full suite: the test map picked 2,501 tests, the limit is 1,999"
+
+    # The same for such a fixture in a conftest.py above the file.
+    _write_tree(
+        repo,
+        {
+            "backend/tests/conftest.py": (
+                "import pytest\n\n\n@pytest.fixture(params=[])\ndef unused(request):\n"
+                "    return request.param\n"
+            ),
+            "backend/tests/test_core.py": (
+                "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n\n\n"
+                "def test_c():\n    pass\n\n\ndef test_d():\n    pass\n"
+            ),
+        },
+    )
+    assert _pick(repo, ["backend/tests/test_core.py"]).line.endswith(": 5 of 10 tests")
+
+
 @pytest.mark.parametrize(
     ("conftest", "reason"),
     [

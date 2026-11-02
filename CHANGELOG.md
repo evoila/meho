@@ -256,6 +256,10 @@ requests. Read "Breaking changes" and "Steps after the upgrade" first.
   of the install turns both on with the Secrets that the install makes,
   and an update turns them on too (#5647).
 
+### Changed
+- CI: the unit tests run in six shards with fresh times per test file,
+  so each shard stays under its limit of 900 seconds (#5625).
+
 ### Documentation
 - The 0.40.0 Keycloak step no longer asks for PKCE `S256` on the
   `meho login` clients. The same fix is in the 0.40.0 upgrade note, in

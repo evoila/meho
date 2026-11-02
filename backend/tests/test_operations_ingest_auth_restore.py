@@ -120,6 +120,7 @@ def _operator(tenant_id: uuid.UUID | None = None) -> Operator:
         raw_jwt="header.payload.signature",
         tenant_id=tenant_id if tenant_id is not None else uuid.uuid4(),
         tenant_role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
     )
 
 

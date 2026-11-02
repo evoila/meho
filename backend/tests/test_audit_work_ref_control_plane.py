@@ -115,12 +115,17 @@ def _clean_registries() -> Iterator[None]:
 
 
 def _admin_headers(key: Any, *, extra: dict[str, str] | None = None) -> dict[str, str]:
-    """Bearer header for a human ``tenant_admin`` of ``_TENANT``, plus *extra*."""
+    """Bearer header for a human admin of ``_TENANT``, plus *extra*.
+
+    The admin holds ``platform_admin``: the ingest tests below write the
+    built-in scope, which needs it.
+    """
     token = mint_token(
         key,
         sub="op-work-ref",
         tenant_role=TenantRole.TENANT_ADMIN.value,
         tenant_id=str(_TENANT),
+        platform_admin=True,
     )
     return {"Authorization": f"Bearer {token}", **(extra or {})}
 

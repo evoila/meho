@@ -41,9 +41,10 @@ registers at start-up, of every connector, against twelve rules:
     checks are in :mod:`tests._operation_contract_placeholders`.
 12. ``named_operations_exist`` -- every operation id that ``llm_instructions``
     names in backticks is registered. A backticked word counts as an
-    operation id when it has the shape of one (``k8s.pod.list``) and starts
-    with the first part of a registered id (``k8s``). Names that only look
-    like an operation id are in :data:`NOT_OPERATION_IDS`, each with a reason.
+    operation id when it has the shape of one (``k8s.pod.list``), whatever
+    its first part, so a wrong first part (``kubernetes.node.list``) is
+    caught. File names, field paths and API groups that only look like an
+    operation id are in :data:`NOT_OPERATION_IDS`, each with a reason.
 
 Today's gaps live in ``tests/data/operation_contract_gaps.yaml``. The test
 fails on a gap that is not in that list (a new gap) and on a listed gap that
@@ -108,10 +109,24 @@ READS_WITH_A_WRITE_WORD: Final[Mapping[str, str]] = {
 }
 
 #: Words in backticks that have the shape of an operation id but are none.
-#: The live test fails when an entry becomes a registered operation id.
+#: The live test fails when an entry becomes a registered operation id, and
+#: when no guidance names it any more, so the list only holds what is needed.
 NOT_OPERATION_IDS: Final[Mapping[str, str]] = {
+    "apiregistration.k8s.io": "a Kubernetes API group",
+    "config.xml": "the file name of the pfSense configuration",
+    "config.yaml": "the file name of the RKE2 configuration",
+    "config.yaml.d": "the folder name of the RKE2 configuration snippets",
+    "existing.descr": "a field in the answer of the pfSense static route write",
+    "extras.named_conf_path": "a field of the bind9 target extras",
+    "graph_node.name": "a field of a topology graph node",
+    "metallb.io": "the API group of the MetalLB Kubernetes add-on",
+    "named.conf": "the file name of the bind9 main configuration",
+    "named.conf.local": "the file name of the bind9 zone list",
+    "named.conf.options": "the file name of the bind9 options",
     "net.ipv4.ip_forward": "a Linux kernel setting (sysctl)",
     "rke2.yaml": "the file name of the RKE2 kubeconfig",
+    "rndc.key": "the file name of the bind9 control key",
+    "token.redacted": "a field in the answer of the RKE2 posture read",
 }
 
 #: Writes that are ``safe`` on purpose: they need no approval. Each names the
@@ -358,19 +373,22 @@ _BACKTICKED: Final = re.compile(r"`([^`\s]+)`")
 _OPERATION_ID_SHAPE: Final = re.compile(r"^[a-z][a-z0-9_-]*(?:\.[a-z0-9_-]+)+$")
 
 
-def check_named_operations_exist(op: OperationContract, registered: Collection[str]) -> list[str]:
-    """The backticked operation ids in the guidance that are not in *registered*."""
-    known = {*registered, op.op_id}
-    prefixes = {op_id.split(".", 1)[0] for op_id in known}
-    named = {
+def named_operation_ids(op: OperationContract) -> set[str]:
+    """The backticked words in the guidance of *op* that have the shape of an operation id."""
+    return {
         word
         for text in _texts(op.llm_instructions)
         for word in _BACKTICKED.findall(text)
-        if _OPERATION_ID_SHAPE.match(word) and word.split(".", 1)[0] in prefixes
+        if _OPERATION_ID_SHAPE.match(word)
     }
+
+
+def check_named_operations_exist(op: OperationContract, registered: Collection[str]) -> list[str]:
+    """The backticked operation ids in the guidance that are not in *registered*."""
+    known = {*registered, op.op_id, *NOT_OPERATION_IDS}
     return [
         f"guidance names {word!r}, which is no registered operation"
-        for word in sorted(named - known - set(NOT_OPERATION_IDS))
+        for word in sorted(named_operation_ids(op) - known)
     ]
 
 
@@ -543,11 +561,19 @@ async def test_reads_with_a_write_word_are_registered_and_safe() -> None:
 
 
 @pytest.mark.asyncio
-async def test_not_operation_ids_are_not_registered() -> None:
-    """An entry that became a real operation id must leave the list, so rule 12 checks it."""
-    registered = {op.op_id for op in await _registered_operations()}
+async def test_not_operation_ids_are_named_and_not_registered() -> None:
+    """Each entry is still named by some guidance and is no operation id, so the list stays short.
+
+    An entry that became a real operation id must leave the list, so that
+    rule 12 checks it. An entry that no guidance names any more is dead.
+    """
+    ops = await _registered_operations()
+    registered = {op.op_id for op in ops}
     stale = sorted(set(NOT_OPERATION_IDS) & registered)
     assert not stale, f"now a registered operation; remove from NOT_OPERATION_IDS: {stale}"
+    named = set().union(*(named_operation_ids(op) for op in ops))
+    unused = sorted(set(NOT_OPERATION_IDS) - named)
+    assert not unused, f"no guidance names these any more; remove from NOT_OPERATION_IDS: {unused}"
 
 
 @pytest.mark.asyncio

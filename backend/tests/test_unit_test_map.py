@@ -474,8 +474,19 @@ def test_changed_test_file_counts_its_new_cases_and_keeps_the_map_count_otherwis
             "a parametrize list that is not written out",
         ),
         (
-            "pytestmark = pytest.mark.parametrize('n', [1, 2])\n\n\ndef test_n(n):\n    pass\n",
-            "a parametrize mark in pytestmark",
+            "from tests._helpers import CASES\n\npytestmark = CASES\n\n\ndef test_n(n):\n"
+            "    pass\n",
+            "the decorator CASES comes from another file",
+        ),
+        (
+            "pytestmark = []\npytestmark.append(pytest.mark.parametrize('n', [1, 2]))\n\n\n"
+            "def test_n(n):\n    pass\n",
+            "pytestmark is not one plain assignment at module level",
+        ),
+        (
+            "class TestN:\n    pytestmark = pytest.mark.parametrize('n', [1, 2])\n\n"
+            "    def test_n(self, n):\n        pass\n",
+            "pytestmark is not one plain assignment at module level",
         ),
         (
             "from tests._helpers import CASES\n\n\n@CASES\ndef test_n(n):\n    pass\n",
@@ -487,9 +498,9 @@ def test_changed_test_file_counts_its_new_cases_and_keeps_the_map_count_otherwis
             "a decorator that may hold a parametrize mark",
         ),
         (
-            "@pytest.fixture(params=[1, 2])\ndef n(request):\n    return request.param\n\n\n"
+            "@pytest.fixture(params=range(2))\ndef n(request):\n    return request.param\n\n\n"
             "def test_n(n):\n    pass\n",
-            "a fixture with params",
+            "a fixture params list that is not written out",
         ),
         (
             "def pytest_generate_tests(metafunc):\n    pass\n\n\ndef test_n():\n    pass\n",
@@ -510,6 +521,115 @@ def test_uncertain_count_of_a_changed_test_file_means_the_full_suite(
 
     assert picked.tests == []
     assert picked.line == f"full suite: cannot count the tests of tests/test_core.py ({reason})"
+
+
+def test_pytestmark_with_parametrize_counts_its_cases(repo: Path) -> None:
+    """A parametrize mark in ``pytestmark`` applies to every test of the file."""
+    core = repo / "backend/tests/test_core.py"
+    core.write_text(
+        "import pytest\n\npytestmark = [pytest.mark.usefixtures('x'), "
+        "pytest.mark.parametrize('n', [1, 2])]\n\n\n"
+        "def test_core(n):\n    pass\n\n\n"
+        "@pytest.mark.parametrize('m', [0, 1, 2])\ndef test_more(n, m):\n    pass\n",
+        encoding="utf-8",
+    )
+    # 2 cases of test_core, 2 x 3 of test_more, plus the contract test.
+    assert _pick(repo, ["backend/tests/test_core.py"]).line.endswith(": 9 of 10 tests")
+
+    # The mark stored in a module-level name: 2,500 cases, counted in full.
+    cases = ", ".join(str(n) for n in range(test_map.MAX_TESTS + 500))
+    core.write_text(
+        f"import pytest\n\nCASES = pytest.mark.parametrize('n', [{cases}])\npytestmark = CASES\n"
+        "\n\ndef test_core(n):\n    pass\n",
+        encoding="utf-8",
+    )
+    picked = _pick(repo, ["backend/tests/test_core.py"])
+
+    assert picked.tests == []
+    assert picked.line == "full suite: the test map picked 2,501 tests, the limit is 1,999"
+
+
+def test_fixture_with_params_multiplies_the_count(repo: Path) -> None:
+    """A fixture with ``params`` counts as if every test of the file used it."""
+    core = repo / "backend/tests/test_core.py"
+    core.write_text(
+        "import pytest\n\n\n@pytest.fixture(params=[1, 2])\ndef n(request):\n"
+        "    return request.param\n\n\ndef test_core(n):\n    pass\n\n\n"
+        "def test_other():\n    pass\n",
+        encoding="utf-8",
+    )
+    # 2 tests x 2 params, plus the contract test.
+    assert _pick(repo, ["backend/tests/test_core.py"]).line.endswith(": 5 of 10 tests")
+
+    # The map says 3 items; a parametrized fixture in a conftest.py above the
+    # file multiplies the file's own count: 1 test x 3 params here.
+    cases = ", ".join(str(n) for n in range(1000))
+    _write_tree(
+        repo,
+        {
+            "backend/tests/conftest.py": (
+                "import pytest\n\nPARAMS = [1, 2, 3]\n\n\n@pytest.fixture(params=PARAMS)\n"
+                "def shared(request):\n    return request.param\n"
+            ),
+            "backend/tests/test_core.py": "def test_core(shared):\n    pass\n",
+        },
+    )
+    assert _pick(repo, ["backend/tests/test_core.py"]).line.endswith(": 4 of 10 tests")
+
+    # The test grows to 1,000 cases: pytest collects 3,000, so the full suite runs.
+    core.write_text(
+        f"import pytest\n\n\n@pytest.mark.parametrize('n', [{cases}])\n"
+        "def test_core(shared, n):\n    pass\n",
+        encoding="utf-8",
+    )
+    picked = _pick(repo, ["backend/tests/test_core.py"])
+
+    assert picked.tests == []
+    assert picked.line == "full suite: the test map picked 3,001 tests, the limit is 1,999"
+
+    # Every conftest.py above the file counts: 3 x 2 params for a file in a subfolder.
+    _write_tree(
+        repo,
+        {
+            "backend/tests/sub/conftest.py": (
+                "import pytest\n\n\n@pytest.fixture(params=(True, False))\ndef flag(request):\n"
+                "    return request.param\n"
+            ),
+            "backend/tests/sub/test_deep.py": "def test_deep(shared, flag):\n    pass\n",
+        },
+    )
+    assert _pick(repo, ["backend/tests/sub/test_deep.py"]).line.endswith(": 7 of 10 tests")
+
+
+@pytest.mark.parametrize(
+    ("conftest", "reason"),
+    [
+        (
+            "@pytest.fixture(params=range(3))\ndef shared(request):\n    return request.param\n",
+            "a fixture params list that is not written out in tests/conftest.py",
+        ),
+        (
+            "def pytest_generate_tests(metafunc):\n    pass\n",
+            "pytest_generate_tests in tests/conftest.py",
+        ),
+        (
+            "pytest_plugins = ['tests._helpers']\n",
+            "pytest_plugins in tests/conftest.py",
+        ),
+    ],
+)
+def test_uncertain_conftest_means_the_full_suite_for_a_changed_test_file(
+    repo: Path, conftest: str, reason: str
+) -> None:
+    _write_tree(repo, {"backend/tests/conftest.py": "import pytest\n\n\n" + conftest})
+
+    picked = _pick(repo, ["backend/tests/test_core.py"])
+
+    assert picked.tests == []
+    assert picked.line == f"full suite: cannot count the tests of tests/test_core.py ({reason})"
+
+    # A test id from the map keeps the map's count: the conftest is not read.
+    assert _pick(repo, [f"{SRC}/core.py"]).line.endswith(": 4 of 10 tests")
 
 
 def test_other_suites_and_deleted_test_files_pick_nothing(repo: Path) -> None:

@@ -56,12 +56,15 @@ The rules of ``pick``. Any doubt means the full suite:
   A test file the pull request changed, or that the map does not know,
   is counted from its source instead (the larger of that count and the
   map's count): its test functions, times the cases of each
-  ``parametrize`` list that is written out or named at module level.
-  When that count is uncertain, the full suite runs: a parametrize list
-  built by code, a ``pytestmark`` with parametrize, a fixture with
-  ``params``, ``pytest_generate_tests``, a test class with a base from
-  another file, or a bare decorator name from another file (it may hold
-  a parametrize mark).
+  ``parametrize`` list that is written out or named at module level
+  (also one in ``pytestmark``), times the ``params`` of every fixture
+  with ``params`` in the file and in the ``conftest.py`` files above it,
+  as if every test used every such fixture. When that count is
+  uncertain, the full suite runs: a parametrize or params list built by
+  code, a ``pytestmark`` that is not one plain assignment at module
+  level, ``pytest_generate_tests``, a ``conftest.py`` that names
+  ``pytest_plugins``, a test class with a base from another file, or a
+  bare decorator name from another file (it may hold a parametrize mark).
 
 A test id from the map can be out of date: the map may be days old, and
 the pull request may rename a test. A test id whose file is gone is
@@ -446,13 +449,80 @@ def _parametrize_cases(mark: ast.Call, constants: dict[str, ast.expr]) -> int:
     """Return the number of items in the list of one ``parametrize`` mark."""
     keywords = {keyword.arg: keyword.value for keyword in mark.keywords}
     values = mark.args[1] if len(mark.args) > 1 else keywords.get("argvalues")
+    return _items(values, constants, "a parametrize list")
+
+
+def _items(values: ast.expr | None, constants: dict[str, ast.expr], what: str) -> int:
+    """Return the length of a list or tuple written out, or named at module level."""
     if isinstance(values, ast.Name):
         values = constants.get(values.id)
     if not isinstance(values, (ast.List, ast.Tuple)) or any(
         isinstance(item, ast.Starred) for item in values.elts
     ):
-        raise ValueError("a parametrize list that is not written out")
+        raise ValueError(f"{what} that is not written out")
     return len(values.elts)
+
+
+def _pytestmark_cases(tree: ast.Module, constants: dict[str, ast.expr]) -> int:
+    """Return how many items a ``parametrize`` mark in ``pytestmark`` makes of each test.
+
+    ``pytestmark`` holds one mark or a list of marks, and applies to every
+    test of the module. A mark can be a module-level name, like a
+    decorator.
+    """
+    if not any(isinstance(node, ast.Name) and node.id == "pytestmark" for node in ast.walk(tree)):
+        return 1
+    marks = constants.get("pytestmark")
+    if marks is None:
+        raise ValueError("pytestmark is not one plain assignment at module level")
+    return _cases(marks.elts if isinstance(marks, (ast.List, ast.Tuple)) else [marks], constants)
+
+
+def _fixture_factor(tree: ast.Module, constants: dict[str, ast.expr]) -> int:
+    """Return what the fixtures with ``params`` of a file multiply the tests by, at most.
+
+    A fixture with ``params`` runs each test that uses it once per item.
+    Which tests use it is not known here (a fixture can be ``autouse``, or
+    used through another fixture), so every test counts as if it used
+    every such fixture.
+    """
+    factor = 1
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name == "pytest_generate_tests":
+            raise ValueError("pytest_generate_tests")
+        for decorator in node.decorator_list:
+            if _is_mark(decorator, "fixture"):
+                for keyword in decorator.keywords:
+                    if keyword.arg == "params":
+                        factor *= _items(keyword.value, constants, "a fixture params list")
+    return factor
+
+
+def _conftest_factor(backend: Path, test_file: str, cache: dict[Path, int]) -> int:
+    """Return what the ``conftest.py`` files above ``test_file`` multiply its tests by.
+
+    A fixture with ``params`` in a ``conftest.py`` applies to every test
+    file below it. The count is uncertain when a ``conftest.py`` names
+    ``pytest_plugins``: a plugin can hold such fixtures too.
+    """
+    factor = 1
+    for parent in PurePosixPath(test_file).parents:
+        conftest = backend / parent / "conftest.py"
+        if conftest not in cache and conftest.is_file():
+            tree = ast.parse(conftest.read_text(encoding="utf-8"))
+            try:
+                if any(
+                    isinstance(node, ast.Name) and node.id == "pytest_plugins"
+                    for node in ast.walk(tree)
+                ):
+                    raise ValueError("pytest_plugins")
+                cache[conftest] = _fixture_factor(tree, _constants(tree))
+            except ValueError as reason:
+                raise ValueError(f"{reason} in {parent / 'conftest.py'}") from None
+        factor *= cache.get(conftest, 1)
+    return factor
 
 
 def _class_count(
@@ -482,31 +552,20 @@ def _class_count(
 
 
 def _file_test_count(tree: ast.Module) -> int:
-    """Count the test items pytest collects from a test file.
+    """Count the test items pytest collects from a test file, without its conftests.
 
     Follows pytest's default names (``test*`` functions, ``Test*`` classes)
     and ``@pytest.mark.parametrize`` with a list or tuple written out, or
-    named at module level. Raises ``ValueError`` when the count is
-    uncertain: a parametrize list built by code, a ``pytestmark`` with
-    parametrize, a fixture with ``params``, ``pytest_generate_tests``, a
-    test class with a base from another file, or a bare decorator name
-    from another file.
+    named at module level, also in ``pytestmark``. A fixture with
+    ``params`` in the file multiplies every test (:func:`_fixture_factor`).
+    Raises ``ValueError`` when the count is uncertain: a parametrize or
+    params list built by code, a ``pytestmark`` that is not one plain
+    assignment at module level, ``pytest_generate_tests``, a test class
+    with a base from another file, or a bare decorator name from another
+    file.
     """
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if node.name == "pytest_generate_tests":
-                raise ValueError("pytest_generate_tests")
-            for decorator in node.decorator_list:
-                if _is_mark(decorator, "fixture") and any(
-                    keyword.arg == "params" for keyword in decorator.keywords
-                ):
-                    raise ValueError("a fixture with params")
-        elif isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == "pytestmark" for target in node.targets
-        ):
-            if any(_is_mark(call, "parametrize") for call in ast.walk(node.value)):
-                raise ValueError("a parametrize mark in pytestmark")
     constants = _constants(tree)
+    factor = _fixture_factor(tree, constants) * _pytestmark_cases(tree, constants)
     classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
     count = 0
     for node in tree.body:
@@ -514,7 +573,7 @@ def _file_test_count(tree: ast.Module) -> int:
             count += _cases(node.decorator_list, constants)
         elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
             count += _class_count(node, classes, constants)
-    return count
+    return count * factor
 
 
 @dataclass
@@ -569,15 +628,16 @@ def _count(test_map: TestMap, selected: list[str], changed: set[str], backend: P
 
     A test id, or a test file the pull request did not change, counts what
     the map says. A test file the pull request changed, or that the map
-    does not know, is counted from its source (:func:`_file_test_count`),
-    and the larger of that and the map's count is used: the map cannot
-    see the new tests, and the source cannot see what a fixture from
-    ``conftest.py`` multiplies.
+    does not know, is counted from its source (:func:`_file_test_count`,
+    times what the ``conftest.py`` files above it multiply), and the
+    larger of that and the map's count is used: the map cannot see the
+    new tests.
     """
     per_test = dict(test_map.tests)
     per_file: dict[str, int] = defaultdict(int)
     for test_id, count in test_map.tests:
         per_file[test_id.split("::", 1)[0]] += count
+    conftests: dict[Path, int] = {}
     total = 0
     for entry in selected:
         if "::" in entry:
@@ -587,9 +647,10 @@ def _count(test_map: TestMap, selected: list[str], changed: set[str], backend: P
         else:
             tree = ast.parse((backend / entry).read_text(encoding="utf-8"))
             try:
-                total += max(per_file.get(entry, 0), _file_test_count(tree))
+                count = _file_test_count(tree) * _conftest_factor(backend, entry, conftests)
             except ValueError as reason:
                 raise FullSuiteError(f"cannot count the tests of {entry} ({reason})") from None
+            total += max(per_file.get(entry, 0), count)
     return total
 
 

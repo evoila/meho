@@ -2155,15 +2155,19 @@ run, not a broken `main`.
   pull request did not change. A test file the pull request changed, or
   that the map does not know, is counted from its source: its test
   functions and `Test*` classes, times the cases of each `parametrize`
-  list that is written out or named at module level. The larger of that
-  count and the map's count is used, so a new or expanded test counts
-  fully and a fixture from `conftest.py` that multiplies tests still
-  counts. When the file's count is uncertain (a parametrize list built by
-  code, a `pytestmark` with parametrize, a fixture with `params`,
-  `pytest_generate_tests`, a test class with a base from another file, or
-  a bare decorator name from another file), all the shards run. On
-  2026-11-02 the count was certain, and right, for 1,074 of the 1,235
-  unit test files.
+  list that is written out or named at module level (also one in
+  `pytestmark`), times the `params` of every fixture with `params` in the
+  file and in the `conftest.py` files above it, as if every test used
+  every such fixture. The larger of that count and the map's count is
+  used, so a new or expanded test counts fully, also when a shared
+  fixture multiplies it. When the file's count is uncertain (a
+  parametrize or params list built by code, a `pytestmark` that is not
+  one plain assignment at module level, `pytest_generate_tests`, a
+  `conftest.py` that names `pytest_plugins`, a test class with a base
+  from another file, or a bare decorator name from another file), all
+  the shards run. On 2026-11-02 the count was certain for 1,078 of the
+  1,235 unit test files: right for 1,074, and higher than pytest collects
+  for 4 files whose parametrized fixture only some tests use.
 - **Old test ids.** The map can be a few days old. A test id whose file is
   gone is dropped. A test id that its file no longer defines picks the
   whole file, so pytest never gets an id it cannot find.

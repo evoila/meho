@@ -39,7 +39,7 @@ the end, then return to the trail.
 | `MEHO-Platform-Admins` | Top-level group with one attribute | Rights across all tenants, for the people who run MEHO |
 | A user in `MEHO-Admins` and `MEHO-Platform-Admins` | Realm user | The first admin: approves device-code logins and operates MEHO |
 | A user in `MEHO-SA-Operators` | Realm user | A second person, so a change the first admin asks for can be approved |
-| A user of realm `master` with every role of the client `meho-realm` | `master` user (not in realm `meho`) | The console admin: administers realm `meho` in the Keycloak admin console. MEHO refuses its tokens. |
+| A user of realm `master` with every role of the client `meho-realm` except `impersonation` | `master` user (not in realm `meho`) | The console admin: administers realm `meho` in the Keycloak admin console. MEHO refuses its tokens. |
 
 !!! tip "There is an automation for this"
 
@@ -365,9 +365,13 @@ admin, default name `console-admin` (values key
 [Company login](login/index.md) recipes.
 
 The console admin is a user of realm `master`, not of realm `meho`. It
-holds every role of the client `meho-realm`: the client Keycloak makes in
-`master` to administer realm `meho`. That gives it the same powers over
-realm `meho` as `realm-admin`. It lives in `master` for a reason:
+holds every role of the client `meho-realm` except `impersonation`:
+the client Keycloak makes in `master` to administer realm `meho`. That
+gives it the powers of `realm-admin` over realm `meho`, but it cannot log
+in as a person of realm `meho`. So it cannot approve a change in someone
+else's name. At its first login it sets a new password and an
+authenticator code, because realm `master` does not ask for a code by
+default. It lives in `master` for a reason:
 `meho-admin` has `manage-users` in realm `meho`, so it can reset the
 password of any user there and take the account over. It cannot see
 users of realm `master`. MEHO refuses the console admin's tokens, because
@@ -439,9 +443,12 @@ console admin and points here. Make one once by hand
    `console-admin` (any name that does not start with
    `service-account-`), **Create**.
 4. **Credentials → Set password**. Turn **Temporary** on, so the user
-   picks a new password at the first login.
+   picks a new password at the first login. On **Details → Required user
+   actions**, add **Configure OTP**, so the user also sets up an
+   authenticator code. **Save**.
 5. **Role mapping → Assign role → Filter by clients**, search for
-   `meho-realm`, select all of its roles, **Assign**.
+   `meho-realm`, select all of its roles except `impersonation`,
+   **Assign**.
 6. Optional: keep the login in a Secret, as a new install does:
 
     ```bash

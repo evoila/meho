@@ -142,7 +142,12 @@ class FakeKeycloak:
             "clientId": "meho-realm",
             "roles": {
                 name: {"id": str(uuid.uuid4()), "name": name, "clientRole": True}
-                for name in ("manage-realm", "manage-users", "manage-identity-providers")
+                for name in (
+                    "manage-realm",
+                    "manage-users",
+                    "manage-identity-providers",
+                    "impersonation",
+                )
             },
         }
         self.calls: list[tuple[str, str]] = []
@@ -1076,8 +1081,12 @@ async def test_fresh_install_makes_the_console_admin_in_realm_master(
     assert user["credentials"] == [
         {"type": "password", "value": secret["password"], "temporary": True}
     ]
-    assert user["requiredActions"] == ["UPDATE_PASSWORD"]
-    assert sorted(kc.console_roles("console-admin")) == sorted(kc.meho_realm_client["roles"])
+    assert user["requiredActions"] == ["UPDATE_PASSWORD", "CONFIGURE_TOTP"]
+    assert sorted(kc.console_roles("console-admin")) == [
+        "manage-identity-providers",
+        "manage-realm",
+        "manage-users",
+    ], "every role but impersonation"
     assert kc.master_clients == {}, "made before the first-start account goes"
     out = capfd.readouterr().out
     assert "secret rel-core-console-admin: created" in out
@@ -1159,7 +1168,9 @@ async def test_a_role_held_through_a_group_counts_and_only_missing_roles_are_gra
     kc.master_clients["boot-client"] = {"id": "b2", "secret": _ENV[BOOTSTRAP_SECRET_ENV]}
     await finish_realm(_plan(realm_file), _ENV, kc, store)
     assert kc.console_roles("console-admin") == []
-    assert "user console-admin: has every meho-realm role" in capfd.readouterr().out
+    assert (
+        "user console-admin: has every meho-realm role but impersonation" in capfd.readouterr().out
+    )
 
 
 async def test_a_master_user_this_install_did_not_make_is_never_adopted(

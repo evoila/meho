@@ -517,9 +517,10 @@ async def test_console_admin_administers_realm_meho_from_realm_master(
         == []
     ), "not a user of realm meho"
     (user,) = _master_users(keycloak, "console-admin")
-    assert user["requiredActions"] == ["UPDATE_PASSWORD"]
+    assert sorted(user["requiredActions"]) == ["CONFIGURE_TOTP", "UPDATE_PASSWORD"]
     every, held = _meho_realm_roles(keycloak, user["id"])
-    assert every and held == every
+    assert "impersonation" in every
+    assert held == every - {"impersonation"}
 
     # What the person does at the first console login: a new password (set
     # here through the Admin API) and nothing else pending.
@@ -598,6 +599,13 @@ async def test_console_admin_administers_realm_meho_from_realm_master(
         },
     )
     assert ldap.status_code == 201, ldap.text
+
+    # No impersonation: it cannot log in as a person of realm meho.
+    (person,) = httpx.get(
+        f"{admin}/users", headers=as_console, params={"username": "admin", "exact": "true"}
+    ).json()
+    impersonate = httpx.post(f"{admin}/users/{person['id']}/impersonation", headers=as_console)
+    assert impersonate.status_code == 403, impersonate.text
     components = httpx.get(f"{admin}/components", headers=as_console)
     assert components.status_code == 200
     assert "company-ldap" in {c["name"] for c in components.json()}

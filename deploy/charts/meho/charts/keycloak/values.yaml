@@ -122,7 +122,7 @@ existingSecrets:
 # first admin and a second person who can approve (temporary passwords in
 # `<release>-core-first-login`), and the console admin, a user of realm
 # `master` who administers realm `meho` (every role of the master client
-# `meho-realm`; temporary password in `<release>-core-console-admin`). The parent chart's
+# `meho-realm` except `impersonation`; temporary password in `<release>-core-console-admin`). The parent chart's
 # bootstrap Job makes them after Keycloak is up. The subchart only carries
 # these values; set them under the parent's `coreKeycloak:` block.
 firstLogin:

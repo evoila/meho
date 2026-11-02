@@ -31,8 +31,9 @@ running realm up to date through the Admin REST API:
   leaves other attributes alone;
 * it makes the console admin, a user of realm ``master`` who administers
   realm ``meho`` in the Keycloak admin console (every role of the master
-  client ``meho-realm``), with a temporary password stored in
-  ``<release>-core-console-admin``. It lives in ``master`` so that
+  client ``meho-realm`` except ``impersonation``), with a temporary password
+  stored in ``<release>-core-console-admin`` and an authenticator code to set
+  up at the first login. It lives in ``master`` so that
   ``meho-admin``, whose ``manage-users`` reaches every user of realm
   ``meho``, cannot reset its password and take it over. Only the first-start
   account can make it; a run as ``meho-admin`` says how to add it by hand;
@@ -143,12 +144,19 @@ _RESERVED_TENANT_NAMES = frozenset({"sa", "platform", "ci"})
 # the client does not have them yet. A value that is there stays.
 ADDED_CLIENT_ATTRIBUTES = ("client.offline.session.idle.timeout",)
 # The console admin is a user of realm ``master`` with every role of this
-# master client: full rights over realm ``meho`` in the Keycloak admin
-# console (identity providers, user federation, mappers). Realm ``meho``
-# does not know it, so MEHO refuses its tokens and ``meho-admin`` cannot
-# reach it.
+# master client but the ones below: full rights over realm ``meho`` in the
+# Keycloak admin console (identity providers, user federation, mappers).
+# Realm ``meho`` does not know it, so MEHO refuses its tokens and
+# ``meho-admin`` cannot reach it.
 MASTER_REALM = "master"
 MEHO_REALM_CLIENT = f"{REALM}-realm"
+# ``impersonation`` logs the admin in as any person of realm ``meho`` with no
+# password and no code, so it could approve in the web console in an
+# approver's name, and the audit would name the approver.
+CONSOLE_ADMIN_LEFT_OUT_ROLES = frozenset({"impersonation"})
+# The console admin sets a new password and an authenticator code at its first
+# login: realm ``master`` asks for no code by default.
+CONSOLE_ADMIN_ACTIONS = ("UPDATE_PASSWORD", "CONFIGURE_TOTP")
 # Keycloak keeps this prefix for the users behind service clients
 # (``service-account-meho-admin``); a person must not get one of those names.
 SERVICE_ACCOUNT_PREFIX = "service-account-"
@@ -516,7 +524,11 @@ class _Realm:
         return str(found.data[0]["id"]) if found.data else None
 
     async def ensure_user(
-        self, username: str, password: str, groups: tuple[str, ...]
+        self,
+        username: str,
+        password: str,
+        groups: tuple[str, ...],
+        actions: tuple[str, ...] = ("UPDATE_PASSWORD",),
     ) -> tuple[str, bool]:
         """Make the user when missing: ``(id, created)``."""
         found = await self.user_id(username)
@@ -533,7 +545,7 @@ class _Realm:
             "username": username,
             "enabled": True,
             "credentials": [{"type": "password", "value": password, "temporary": True}],
-            "requiredActions": ["UPDATE_PASSWORD"],
+            "requiredActions": list(actions),
             "groups": [f"/{group}" for group in groups],
         }
         reply = expect(
@@ -662,7 +674,10 @@ async def _ensure_first_login(realm: _Realm, plan: Plan, store: SecretStore) -> 
 async def _ensure_console_admin(
     admin: Admin, plan: Plan, store: SecretStore, session: Session
 ) -> None:
-    """Make the console admin in realm ``master`` with every ``meho-realm`` role.
+    """Make the console admin in realm ``master`` with the ``meho-realm`` roles.
+
+    It gets every role but :data:`CONSOLE_ADMIN_LEFT_OUT_ROLES`. A left-out
+    role that someone granted by hand stays: the stage only adds.
 
     Only the first-start account (a master admin) can make users in realm
     ``master``; ``meho-admin`` cannot even read them. As ``meho-admin`` the
@@ -698,12 +713,16 @@ async def _ensure_console_admin(
     username = data["username"]
     _require_plain_user(username, f'Secret "{plan.console_admin_secret}"')
     _note_kept_name(plan.console_admin_secret, username, plan.console_admin_username)
-    user_id, _ = await master.ensure_user(username, data["password"], ())
+    user_id, _ = await master.ensure_user(username, data["password"], (), CONSOLE_ADMIN_ACTIONS)
     client_uuid, roles = await master.client_roles(MEHO_REALM_CLIENT)
     held = await master.held_client_roles(user_id, client_uuid)
-    missing = [role for role in roles if role["name"] not in held]
+    missing = [
+        role
+        for role in roles
+        if role["name"] not in held and role["name"] not in CONSOLE_ADMIN_LEFT_OUT_ROLES
+    ]
     if not missing:
-        _say(f"user {username}: has every {MEHO_REALM_CLIENT} role")
+        _say(f"user {username}: has every {MEHO_REALM_CLIENT} role but impersonation")
         return
     await master.grant_client_roles(user_id, client_uuid, missing)
     _say(f"user {username}: {len(missing)} {MEHO_REALM_CLIENT} roles granted")

@@ -19,8 +19,9 @@ today, the realm stage, finishes the Keycloak realm `meho`:
   `<release>-core-first-login`.
 - On the first run it makes the console admin: a user of realm `master`
   who administers realm `meho` in the Keycloak admin console (every role
-  of the `master` client `meho-realm`). Its name and temporary password go
-  into the Secret `<release>-core-console-admin`.
+  of the `master` client `meho-realm` except `impersonation`). Its name and
+  temporary password go into the Secret `<release>-core-console-admin`. At
+  its first login it sets a new password and an authenticator code.
 - On the first run it logs in with Keycloak's temporary first-start account,
   checks that `meho-admin` can log in, and then removes the first-start
   account. Every later run logs in as `meho-admin`.
@@ -81,7 +82,7 @@ pair never leaves one person with a stored password that does not work.
 
 | User | Values key (user name) | Realm | Rights |
 |---|---|---|---|
-| Console admin | `coreKeycloak.firstLogin.consoleAdminUsername` (default `console-admin`) | `master` | every role of the `master` client `meho-realm` |
+| Console admin | `coreKeycloak.firstLogin.consoleAdminUsername` (default `console-admin`) | `master` | every role of the `master` client `meho-realm` except `impersonation` |
 
 Without it nobody could administer realm `meho`: the first-start account
 is removed on the first run, `meho-admin` has only `manage-clients` and
@@ -92,6 +93,18 @@ provider or a user federation, which only a realm admin can add.
 `meho-realm` is the client Keycloak makes in realm `master` to administer
 realm `meho`. Its roles give the same powers over realm `meho` as
 `realm-management` → `realm-admin`.
+
+Two limits on the console admin:
+
+- **No `impersonation`.** With it, the console admin could log in as any
+  person of realm `meho` with no password and no code. It could then
+  approve in the web console in an approver's name, and the audit would
+  name the approver. The Job never grants it. A role granted by hand
+  stays: the Job only adds roles.
+- **An authenticator code.** Realm `master` asks for no code by default.
+  The user is made with the required actions `UPDATE_PASSWORD` and
+  `CONFIGURE_TOTP`, so the first login sets both a new password and a
+  code.
 
 It lives in realm `master` on purpose. `manage-users` lets `meho-admin`
 reset the password of any user of realm `meho`, so a realm admin there
@@ -109,7 +122,8 @@ Only a `master` admin can make users in realm `master`. So:
 
 - **Fresh install** (the run logs in with the first-start account, a
   `master` admin): the Job makes the Secret and the user and grants the
-  `meho-realm` roles it lacks, before it removes the first-start account.
+  `meho-realm` roles it lacks (all but `impersonation`), before it removes
+  the first-start account.
 - **Upgrade** (the first-start account is gone, the run logs in as
   `meho-admin`): the Job makes nothing. With the Secret it prints
   `console admin: kept`. Without it it prints one line that points to
@@ -360,8 +374,9 @@ Steps of the realm stage, in order:
    again.
 6. **Console admin.** Only with the first-start account: read
    `<release>-core-console-admin`; make it when missing. Make the user in
-   realm `master` when missing and grant every `meho-realm` role it
-   lacks. As `meho-admin`, make nothing; without the Secret, print how to
+   realm `master` when missing (new password and authenticator code at the
+   first login) and grant every `meho-realm` role it lacks, except
+   `impersonation`. As `meho-admin`, make nothing; without the Secret, print how to
    add the console admin by hand.
 7. **Swap.** Only when step 2 used the first-start account: check that
    `meho-admin` logs in with its secret, then delete the first-start

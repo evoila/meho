@@ -115,6 +115,7 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_KUBECONFIG_DATA_KEY",
     "DEFAULT_STAGE_FIELD",
+    "OPS",
     "SECRET_READ_OPS",
     "KubernetesSecretDataError",
     "k8s_secret_read_to_ref",
@@ -363,3 +364,6 @@ SECRET_READ_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=_LLM_INSTRUCTIONS,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = SECRET_READ_OPS

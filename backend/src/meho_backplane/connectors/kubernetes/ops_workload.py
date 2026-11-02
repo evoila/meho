@@ -123,6 +123,7 @@ __all__ = [
     "K8S_POD_INFO_PARAMETER_SCHEMA",
     "K8S_POD_LIST_LLM_INSTRUCTIONS",
     "K8S_POD_LIST_PARAMETER_SCHEMA",
+    "OPS",
     "WORKLOAD_OPS",
     "AmbiguousPrefixError",
     "WorkloadNotFoundError",
@@ -1373,3 +1374,6 @@ WORKLOAD_OPS: tuple[KubernetesOp, ...] = (
 # ``image_pull_secrets`` lists the names of the pull secrets, never their content.
 for _op_id in ("k8s.pod.info", "k8s.deployment.info"):
     register_plain_fields(_op_id, ("image_pull_secrets",))
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = WORKLOAD_OPS

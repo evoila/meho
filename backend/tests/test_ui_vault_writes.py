@@ -95,6 +95,7 @@ from tests._vault_fakes import install_fake_client
 _BACKPLANE_URL = "https://meho.test"
 _TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
 _OP_OPERATOR = "op-operator"
+_OP_READ_ONLY = "op-read-only"
 
 #: A secret-value sentinel: no write render may carry it, and a move's
 #: value-free response must never echo it.
@@ -695,6 +696,43 @@ def test_vault_put_parked_alone_keeps_per_request_link(
 # ---------------------------------------------------------------------------
 # CSRF gate + route ordering (acceptance criterion)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("path", "form"),
+    [
+        ("/ui/vault/put", {"target": "vault-prod", "path": "app/db", "data": '{"k": "v"}'}),
+        ("/ui/vault/delete", {"target": "vault-prod", "path": "app/db", "versions": "1"}),
+        (
+            "/ui/vault/move",
+            {"from": "vault-prod:secret/app/db", "to": "vault-prod:secret/app/db2"},
+        ),
+    ],
+)
+def test_vault_write_posts_read_only_forbidden_403_no_dispatch(
+    monkeypatch: pytest.MonkeyPatch, path: str, form: dict[str, str]
+) -> None:
+    """A ``read_only`` session gets 403 on put / delete / move; nothing is dispatched.
+
+    The POST clears the CSRF gate (valid token) but the real JWT carries
+    ``read_only``, so ``require_ui_operator`` refuses it before the handler
+    body runs -- the same ``operator`` floor REST ``/api/v1/operations/call``
+    has. The patched ``call_operation`` records no call, so no secret write
+    and no approval request can land.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_vault_descriptor()
+    _seed_secret_broker_descriptor()
+    received = _patch_call_operation(monkeypatch, _awaiting_envelope("vault.kv.put"))
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_READ_ONLY, role=TenantRole.READ_ONLY
+    )
+    with mock:
+        response = client.post(path, headers=_csrf_headers(csrf), data=form)
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "operator_required"}
+    assert "x-csrf-rejection-reason" not in response.headers
+    assert received == []
 
 
 def test_vault_delete_post_without_csrf_token_is_403(

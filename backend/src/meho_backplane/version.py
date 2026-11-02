@@ -30,6 +30,7 @@ runtime layer. Missing env vars fall back to ``"unknown"`` so local
 arguments.
 """
 
+import hashlib
 import os
 
 from fastapi import APIRouter
@@ -108,23 +109,37 @@ def deployed_version_label() -> str:
     return _UNKNOWN
 
 
+def _connector_packages_digest(packages: tuple[ConnectorPackage, ...]) -> str:
+    """Return a short digest of the name, version and wheel digest of *packages*.
+
+    The order of the allowlist does not matter: the same packages give the
+    same digest. Twelve hex chars, like the short commit hash in the UI.
+    """
+    lines = sorted(f"{p.name} {p.version} {p.wheel_digest}" for p in packages)
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()[:_SHA_LABEL_LEN]
+
+
 def running_release_id() -> str | None:
     """Return the identity of the running release, or ``None`` when unknown.
 
     An approval request is bound to this value (#5030): a person approves
-    one exact release of MEHO. The value is the full ``GIT_SHA`` plus the
-    ``CHART_VERSION`` when it is set, the same values ``GET /version``
-    shows. ``None`` when ``GIT_SHA`` is unset or ``unknown``: only a local
-    development run has no release identity, and then MEHO does not bind
-    or check a release.
+    one exact release of MEHO. The value is the full ``GIT_SHA``, plus the
+    ``CHART_VERSION`` when it is set, plus a digest of the installed
+    connector packages when the image carries any. These are the same
+    values ``GET /version`` shows, so a new chart or a new package in an
+    image with the same commit is another release. ``None`` when
+    ``GIT_SHA`` is unset or ``unknown``: only a local development run has
+    no release identity, and then MEHO does not bind or check a release.
     """
     git_sha = os.environ.get("GIT_SHA")
     if not git_sha or git_sha == _UNKNOWN:
         return None
     chart_version = os.environ.get("CHART_VERSION")
-    if chart_version:
-        return f"{git_sha} (chart {chart_version})"
-    return git_sha
+    release = f"{git_sha} (chart {chart_version})" if chart_version else git_sha
+    packages = installed_connector_packages()
+    if packages:
+        release = f"{release} (packages {_connector_packages_digest(packages)})"
+    return release
 
 
 @router.get("/version", response_model=VersionResponse)

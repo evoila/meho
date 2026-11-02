@@ -135,7 +135,12 @@ def client() -> Iterator[TestClient]:
     yield TestClient(_build_app())
 
 
-def _token(*, tenant_id: uuid.UUID, role: str = "tenant_admin") -> tuple[Any, str]:
+def _token(
+    *,
+    tenant_id: uuid.UUID,
+    role: str = "tenant_admin",
+    platform_admin: bool = False,
+) -> tuple[Any, str]:
     """Mint a (private_key, JWT) pair for *tenant_id* with *role*."""
     key = _make_rsa_keypair("kid-delete")
     token = _mint_token(
@@ -143,6 +148,7 @@ def _token(*, tenant_id: uuid.UUID, role: str = "tenant_admin") -> tuple[Any, st
         sub=f"op-{role}",
         tenant_id=str(tenant_id),
         tenant_role=role,
+        platform_admin=platform_admin,
     )
     return key, token
 
@@ -408,7 +414,8 @@ async def test_e2e_zero_op_ingest_then_delete_clears_catalog(client: TestClient)
     actually invoked.
     """
     tenant = uuid.uuid4()
-    key, token = _token(tenant_id=tenant)
+    # The ingest below writes the built-in scope, which needs platform_admin.
+    key, token = _token(tenant_id=tenant, platform_admin=True)
 
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))

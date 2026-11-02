@@ -346,9 +346,14 @@ def _admin_token(
     tenant_id: UUID | None = None,
     sub: str = "op-admin",
     kid: str = "kid-admin",
-    platform_admin: bool = False,
+    platform_admin: bool = True,
 ) -> tuple[Any, str]:
     """Mint a JWT for a ``tenant_admin`` operator.
+
+    The operator holds ``platform_admin`` by default: most tests here
+    write the built-in scope (an ingest without ``tenant_id``), which
+    needs it. A test about a plain tenant_admin passes
+    ``platform_admin=False``.
 
     ``kid`` defaults to ``"kid-admin"``; pass a distinct value when a
     single test mints multiple tokens for distinct tenants and pins
@@ -2327,7 +2332,7 @@ async def test_enable_builtin_only_forbidden_for_tenant_admin(client: TestClient
     """
     operator_tenant = uuid.uuid4()
     await _seed_connector(tenant_id=None)  # built-in / global rows only
-    key, token = _admin_token(tenant_id=operator_tenant)  # no platform_admin
+    key, token = _admin_token(tenant_id=operator_tenant, platform_admin=False)
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.post(
@@ -2371,7 +2376,7 @@ async def test_edit_op_builtin_only_forbidden_for_tenant_admin(client: TestClien
     """``PATCH /operations/{op_id}`` on a built-in-only row → 403 for tenant_admin."""
     operator_tenant = uuid.uuid4()
     await _seed_connector(tenant_id=None)
-    key, token = _admin_token(tenant_id=operator_tenant)
+    key, token = _admin_token(tenant_id=operator_tenant, platform_admin=False)
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.patch(
@@ -2388,7 +2393,7 @@ async def test_edit_group_builtin_only_forbidden_for_tenant_admin(client: TestCl
     """``PATCH /groups/{group_key}`` on a built-in-only row → 403 for tenant_admin."""
     operator_tenant = uuid.uuid4()
     await _seed_connector(tenant_id=None)
-    key, token = _admin_token(tenant_id=operator_tenant)
+    key, token = _admin_token(tenant_id=operator_tenant, platform_admin=False)
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.patch(
@@ -2847,7 +2852,7 @@ paths:
         # (the handler reads the stub LLM factory installed above via
         # ``get_llm_client_factory``).
         mcp_payload = await ci_mod._ingest_handler(
-            build_operator(TenantRole.TENANT_ADMIN),
+            build_operator(TenantRole.TENANT_ADMIN, platform_admin=True),
             {**triple, "specs": [{"uri": spec_url}]},
         )
 
@@ -3035,7 +3040,7 @@ def test_ingest_cross_tenant_tenant_id_rejected_403(client: TestClient) -> None:
     """
     tenant_a = uuid.uuid4()
     other_tenant = uuid.uuid4()
-    key, token = _admin_token(tenant_id=tenant_a)
+    key, token = _admin_token(tenant_id=tenant_a, platform_admin=False)
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.post(
@@ -3093,6 +3098,46 @@ def test_ingest_platform_admin_foreign_tenant_id_passes_scope_gate(
     assert response.json()["ingestion"]["inserted_count"] == 1
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("run_async", [False, True], ids=["sync", "async"])
+async def test_ingest_builtin_scope_rejected_403_for_tenant_admin(
+    client: TestClient,
+    run_async: bool,
+) -> None:
+    """An omitted ``tenant_id`` is the built-in scope, which needs ``platform_admin``.
+
+    The rows of a built-in connector are shared by every tenant, so a
+    tenant_admin without ``platform_admin`` gets a 403 on both branches,
+    before any spec fetch, job row or row write. An existing built-in
+    connector keeps its rows as they are.
+    """
+    from meho_backplane.api.v1.connectors_ingest import _background_tasks
+    from meho_backplane.operations.ingest import get_job_registry
+
+    await _seed_connector(tenant_id=None, product="scopedenied", impl_id="scopedenied-rest")
+    before = await _group_statuses(tenant_id=None)
+    key, token = _admin_token(platform_admin=False)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "scopedenied",
+                "version": "9.0",
+                "impl_id": "scopedenied-rest",
+                "specs": [{"uri": "https://specs.test/never-fetched.yaml"}],
+                "async": run_async,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail.startswith("built-in connector ingest requires platform_admin")
+    assert await _group_statuses(tenant_id=None) == before
+    assert get_job_registry()._jobs == {}
+    assert not _background_tasks
+
+
 def test_ingest_async_cross_tenant_tenant_id_rejected_403_no_job(
     client: TestClient,
 ) -> None:
@@ -3112,7 +3157,7 @@ def test_ingest_async_cross_tenant_tenant_id_rejected_403_no_job(
 
     tenant_a = uuid.uuid4()
     other_tenant = uuid.uuid4()
-    key, token = _admin_token(tenant_id=tenant_a)
+    key, token = _admin_token(tenant_id=tenant_a, platform_admin=False)
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.post(
@@ -5411,7 +5456,9 @@ paths:
     tenant_a_id = uuid.uuid4()
     tenant_b_id = uuid.uuid4()
     key_a, token_a = _admin_token(tenant_id=tenant_a_id, sub="op-admin-a", kid="kid-admin-a")
-    key_b, token_b = _admin_token(tenant_id=tenant_b_id, sub="op-admin-b", kid="kid-admin-b")
+    key_b, token_b = _admin_token(
+        tenant_id=tenant_b_id, sub="op-admin-b", kid="kid-admin-b", platform_admin=False
+    )
     with (
         respx.mock as mock_router,
         patch(

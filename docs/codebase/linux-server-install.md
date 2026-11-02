@@ -498,6 +498,20 @@ derives them from its built-in parts (#4047), the file also names the
 PostgreSQL Secret the install makes (`postgres.credentialsSecret`) and the
 built-in OpenBao's address (`vault.address`, `config.vaultAddr`).
 
+It also turns on the web console (`uiConsole`) and the approval hand-off
+key (`approvalHandoff`), with the Secrets that the chart's secrets Job
+makes: `meho-core-ui-auth` and `meho-core-approval-handoff`. The Job makes
+a Secret when its values key is empty or holds the Job's own name, so
+naming them changes nothing on a fresh install. The schema requires a
+console client when `uiConsole` is on, so the file sets
+`config.uiKeycloakClientId: meho-web`, the client the chart uses with the
+built-in Keycloak. Without these keys, `/ui/auth/login` answered 503
+(`ui_oauth_not_configured`) after the week-4 install, and MEHO refused
+every credential write that must wait for an approval (#5630). When #4766
+lets the chart fill in the names for the built-in Keycloak, only the two
+`enabled: true` lines stay. The update passes the new download's file to
+the same Helm call (`install_core`), so an update turns both on too.
+
 `/etc/meho/values-place.yaml` is written by step 4 (above). The download
 build renders the chart with `packaging/render-values.yaml`, which holds
 the same keys with placeholder values, and then `values-single-node.yaml`;
@@ -988,7 +1002,9 @@ CI job sets `MEHO_REQUIRE_APT_CHECK=1`, which turns that skip into a
 failure.
 
 `tests/test_core_install.py` also renders the chart with
-`values-single-node.yaml` and the place values the script wrote. It skips
+`values-single-node.yaml` and the place values the script wrote. It checks
+that the backplane reads the console and approval hand-off keys from the
+two Secrets, and that the secrets Job makes both of them. It skips
 when `helm` is not on `PATH`, unless `MEHO_REQUIRE_HELM=1` is set; CI sets
 it, with the Helm version the download ships.
 

@@ -86,6 +86,7 @@ from meho_backplane.redaction.resolver import get_default_policy
 __all__ = [
     "BroadcastEvent",
     "classify_op",
+    "holds_hidden_param_values",
     "is_secret_param_name",
     "redact_payload",
     "resolve_op_class",
@@ -1171,6 +1172,21 @@ def scrub_secret_named_values(
     fields the operation declared as plain; they keep their value.
     """
     return _scrub_secret_named_keys(node, hide_numbers=hide_numbers, plain_names=plain_names)
+
+
+def holds_hidden_param_values(node: Any) -> bool:
+    """True when a value in *node* is the marker :func:`scrub_secret_named_values` writes.
+
+    The approval queue uses it to tell stored params whose secret-named
+    values were already replaced from params it can still run with.
+    """
+    if isinstance(node, str):
+        return node == _REDACTED_PARAM
+    if isinstance(node, Mapping):
+        return any(holds_hidden_param_values(value) for value in node.values())
+    if isinstance(node, Sequence) and not isinstance(node, (bytes, bytearray)):
+        return any(holds_hidden_param_values(item) for item in node)
+    return False
 
 
 def scrub_broadcast_params(params: dict[str, Any]) -> tuple[dict[str, Any], bool]:

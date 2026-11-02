@@ -264,7 +264,11 @@ _VAULT_KV_READ_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "data": {
             "type": "object",
-            "description": "KV v2 secret data dict — the actual key/value payload.",
+            "description": (
+                "KV v2 secret data dict. By default it holds the key names and "
+                "every value is [REDACTED:secret_value]; the values show only "
+                "when a person passed reveal_secret: true."
+            ),
         },
         "version": {
             "type": ["integer", "null"],
@@ -282,8 +286,10 @@ _VAULT_KV_READ_RESPONSE_SCHEMA: dict[str, Any] = {
 _VAULT_KV_READ_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_use": (
         "Read a single KV v2 secret from HashiCorp Vault. Use when the "
-        "operator's question names a specific secret path (e.g. "
-        "'what's the value of meho/test/federation?'). Read-only — never "
+        "operator's question names a specific secret path and needs the "
+        "key names or the version of that secret. The default answer holds "
+        "the key names and hides every value; only a person can pass "
+        "reveal_secret: true to see the values. Read-only — never "
         "mutates the secret store. Operator identity is forwarded to "
         "Vault via OIDC, so every read shows up in Vault's audit log "
         "attributed to the calling operator."
@@ -301,7 +307,9 @@ _VAULT_KV_READ_LLM_INSTRUCTIONS: dict[str, Any] = {
         ),
     },
     "output_shape": (
-        "On success: {'data': <secret key/values>, 'version': <int|null>}. "
+        "On success: {'data': {<key name>: '[REDACTED:secret_value]', ...}, "
+        "'version': <int|null>}. The values are hidden unless a person "
+        "passed reveal_secret: true. "
         "On failure: the dispatcher wraps the raised exception into a "
         "connector_error OperationResult with extras.exception_class set "
         "to the Vault-side error type ('VaultUnreachableError', "
@@ -1427,8 +1435,10 @@ _KV_OP_SPECS: tuple[dict[str, Any], ...] = (
         "summary": "Read a single KV v2 secret from HashiCorp Vault.",
         "description": (
             "Reads the secret at the supplied KV v2 path via the operator's "
-            "OIDC-forwarded JWT. Returns the secret data dict plus the "
-            "KV v2 metadata version. Read-only — never mutates the "
+            "OIDC-forwarded JWT. Returns the key names of the secret plus "
+            "the KV v2 metadata version; every value is hidden as "
+            "[REDACTED:secret_value] unless a person passes reveal_secret: "
+            "true. Read-only — never mutates the "
             "secret store. Login-side failures (Vault unreachable, role "
             "denied) raise VaultClientError subclasses; read-side "
             "failures (KV miss, malformed payload, hvac raise) raise "

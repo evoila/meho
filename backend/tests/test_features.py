@@ -310,9 +310,10 @@ def test_ready_delegated_decision_posture_reports_lab_class() -> None:
 
 
 def test_ready_shows_the_approval_sign_in_settings() -> None:
-    """#3979: ``/ready`` shows how fresh a sign-in must be to approve."""
+    """#3979, #5515: ``/ready`` shows how fresh a sign-in must be to approve."""
     block = build_features_block(_settings_with())
-    assert block["approval_queue"]["fresh_sign_in_max_age_seconds"] == 300
+    assert block["approval_queue"]["fresh_sign_in_max_age_seconds"] == 900
+    assert block["approval_queue"]["per_action_sign_in_max_age_seconds"] == 300
     assert block["approval_queue"]["one_time_code_acr_values"] == []
 
     block = build_features_block(

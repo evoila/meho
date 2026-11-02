@@ -1002,7 +1002,10 @@ def test_console_shows_the_expiry_error(monkeypatch: pytest.MonkeyPatch, expires
 def test_console_refuses_a_machine_session(
     monkeypatch: pytest.MonkeyPatch, kind: str, route: str
 ) -> None:
-    """A tenant-admin role on a machine token does not make or renew a grant."""
+    """A machine token that says tenant_admin does not make or renew a grant.
+
+    An agent acts with operator rights, so the role check refuses it first.
+    """
     turn_sandbox_mode_on(monkeypatch)
     _seed_tenant(_TENANT_A, "tenant-a")
     asyncio.run(_seed_renewal_set())
@@ -1018,7 +1021,8 @@ def test_console_refuses_a_machine_session(
     finally:
         mock.stop()
     assert response.status_code == 403, response.text
-    assert "human_principal_required" in response.text
+    refusal = "grants_require_tenant_admin" if kind == "agent" else "human_principal_required"
+    assert refusal in response.text
     assert asyncio.run(rows_in(SandboxDeleteGrant)) == before
     assert asyncio.run(rows_in(ServicePrincipalGrant)) == 0
     rows = asyncio.run(_all_delete_grants())

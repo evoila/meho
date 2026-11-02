@@ -87,6 +87,7 @@ from tests._vcfa_provisioning_support import (
     OPERATOR,
     ORG,
     PASSWORD,
+    TENANT_ID,
     by_filter,
     mount_logins,
     page,
@@ -104,13 +105,13 @@ _VC_PARAMS = {
     "name": "vc-example",
     "url": "https://vc-example.test.invalid",
     "username": "svc-example",
-    "password_secret_ref": "vcfa/vc-example",
+    "password_secret_ref": f"tenants/{TENANT_ID}/vcfa-vc-example",
 }
 _NSX_PARAMS = {
     "name": "nsx-example",
     "url": "https://nsx-example.test.invalid",
     "username": "svc-example",
-    "password_secret_ref": "vcfa/nsx-example",
+    "password_secret_ref": f"tenants/{TENANT_ID}/vcfa-nsx-example",
 }
 _REGION_PARAMS = {
     "name": "region-a",

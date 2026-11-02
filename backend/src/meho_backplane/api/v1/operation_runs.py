@@ -19,7 +19,8 @@ Route inventory
 * ``GET /api/v1/operations/runs`` — list the tenant's runs, newest first;
   optional ``?status=`` filter. Role: ``operator``.
 * ``GET /api/v1/operations/runs/{handle}`` — poll one run's durable state;
-  the persisted result envelope is present once ``status='succeeded'``. 404
+  the persisted result envelope is present once ``status='succeeded'``, and
+  only for the person who started the run. 404
   for an unknown / cross-tenant handle. Optional ``?wait_seconds=N`` waits
   up to N seconds for the run to end (#5264). Role: ``operator``.
 * ``POST /api/v1/operations/runs/{handle}/cancel`` — cancel a non-terminal
@@ -53,6 +54,7 @@ from meho_backplane.operations.operation_run import (
 from meho_backplane.operations.operation_run_service import (
     MAX_RUN_WAIT_SECONDS,
     get_operation_run_service,
+    run_result_visible_to,
 )
 
 __all__ = ["router"]
@@ -78,7 +80,9 @@ class OperationRunStatusResponse(BaseModel):
     ``result`` carries the full persisted ``OperationResult`` envelope once
     the run reaches ``succeeded`` (the dropped-response-class fix); ``error``
     carries the run-crash / reaper reason on a ``failed`` run. Both are
-    ``None`` while the run is still ``pending`` / ``running``.
+    ``None`` while the run is still ``pending`` / ``running``. ``result`` is
+    also ``None`` for anyone but the person who started the run
+    (:func:`~meho_backplane.operations.operation_run_service.run_result_visible_to`).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -119,8 +123,11 @@ class OperationRunSummaryResponse(BaseModel):
     ended_at: datetime | None
 
 
-def _status_response(row: OperationRun) -> OperationRunStatusResponse:
-    """Project an :class:`OperationRun` onto the full poll wire model."""
+def _status_response(row: OperationRun, operator: Operator) -> OperationRunStatusResponse:
+    """Project an :class:`OperationRun` onto the full poll wire model.
+
+    The stored result is shown only to the person who started the run.
+    """
     return OperationRunStatusResponse(
         run_id=row.id,
         status=OperationRunStatus(row.status),
@@ -129,7 +136,7 @@ def _status_response(row: OperationRun) -> OperationRunStatusResponse:
         op_id=row.op_id,
         target_name=row.target_name,
         approval_request_id=row.approval_request_id,
-        result=row.result,
+        result=row.result if run_result_visible_to(row, operator) else None,
         error=row.error,
         created_at=row.created_at,
         started_at=row.started_at,
@@ -220,7 +227,7 @@ async def get_operation_run_status(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="operation_run_not_found",
         ) from exc
-    return _status_response(row)
+    return _status_response(row, operator)
 
 
 @router.post("/runs/{handle}/cancel", response_model=OperationRunSummaryResponse)

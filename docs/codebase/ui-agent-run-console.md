@@ -62,7 +62,7 @@ operator presses Run
        │     ├─ AgentNotFoundError  → inline 404 alert
        │     ├─ AgentDisabledError  → inline 409 alert
        │     └─ BudgetExceededError → inline 429 alert (reason shown)
-       ├─ mint_run_token(session_id, name, input, work_ref)   [HMAC, 120 s TTL]
+       ├─ mint_run_token(session_id, name, input, work_ref)   [Fernet, 120 s TTL]
        └─ return _run_transcript.html  (sse-connect → the bridge, token in query)
 
 browser EventSource opens GET /ui/agents/{name}/run/stream?token=…
@@ -95,23 +95,29 @@ safe-method GETs — and `EventSource` can only GET. A bare
 bypassing CSRF (the residual same-site vector the chassis CSRF design
 closes).
 
-`run_token.py` mints a signed, short-lived token binding
-`(session_id, agent_name, input, work_ref, exp)`. Shape mirrors the CSRF
-helper exactly (zero new deps):
+`run_token.py` mints an encrypted, short-lived token binding
+`(session, agent_name, input, work_ref)`. It is a Fernet token (zero new
+deps; the same primitive the session store uses):
 
 ```
-token = b64url(payload_json) + "." + hmac_sha256_hex(secret, b64url(payload_json))
+token = fernet.encrypt_at_time(json({"sd", "name", "input", "work_ref"}), now)
 ```
 
-The HMAC secret reuses `Settings.ui_session_encryption_key` (the same key
-the CSRF tokens and the session-store Fernet use). The bridge re-derives
-the session id from the cookie and rejects a token whose embedded `sid`,
-agent `name`, signature, or `exp` does not check out — so a leaked /
-replayed / tampered token yields no stream. The token is **not** a
-capability that widens access: the bridge still re-lifts the operator and
-re-runs the same tenant-scoped invoker call. The run prompt comes from the
-*token* (authorised by the CSRF-gated POST), not the query string, so a
-tampered query cannot change what runs.
+- The Fernet key is `Settings.ui_session_encryption_key` (the same key
+  the CSRF tokens and the session store use).
+- The token is opaque. The run prompt cannot be read from the stream URL.
+- `sd` is a keyed HMAC-SHA256 digest of the console session id. The
+  session id itself is never in the token, so the stream URL holds no
+  value that works as a session cookie.
+- The bridge decrypts with a 120 s TTL, recomputes the digest from the
+  cookie session, and checks the agent `name`. A token from another
+  session, another agent, or older than the TTL yields no stream (403).
+
+The token is **not** a capability that widens access: the bridge still
+re-lifts the operator from the cookie session and re-runs the same
+tenant-scoped invoker call. The run prompt comes from the *token*
+(authorised by the CSRF-gated POST), not the query string, so a tampered
+query cannot change what runs.
 
 ## Live streaming
 

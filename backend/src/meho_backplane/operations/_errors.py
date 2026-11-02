@@ -85,9 +85,11 @@ __all__ = [
     "result_invalid_params",
     "result_no_connector",
     "result_no_target",
+    "result_preview_changed_since_approval",
     "result_rate_limited",
     "result_receipt_too_large",
     "result_release_changed_while_waiting",
+    "result_target_changed_since_approval",
     "result_target_invalid_type",
     "result_target_required",
     "result_unknown_connector",
@@ -1180,6 +1182,67 @@ def result_release_changed_while_waiting(
             "approval_request_id": str(approval_request_id),
             "request_release": request_release,
             "running_release": running_release,
+        },
+    )
+
+
+def result_target_changed_since_approval(
+    op_id: str,
+    *,
+    approval_request_id: uuid.UUID,
+    target_id: uuid.UUID | None,
+) -> OperationResult:
+    """An approved request did not run: its target's connection settings changed.
+
+    The person approved the call against the target as it was when the
+    request was made. Someone changed a connection field of that target
+    (host, port, credentials path, TLS settings or extras) since then, so
+    the approval does not cover the run. Nothing was sent. The requester
+    asks again.
+    """
+    reason = (
+        "The connection settings of the target changed after this request was "
+        "made, so the approval does not cover the run. The operation did not run. "
+        "Ask again."
+    )
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=f"target_changed_since_approval: {reason}",
+        duration_ms=0.0,
+        extras={
+            "error_code": "target_changed_since_approval",
+            "reason": reason,
+            "approval_request_id": str(approval_request_id),
+            "target_id": str(target_id) if target_id is not None else None,
+        },
+    )
+
+
+def result_preview_changed_since_approval(
+    op_id: str,
+    *,
+    approval_request_id: uuid.UUID,
+) -> OperationResult:
+    """An approved request did not run: its preview differs from the approved one.
+
+    MEHO built the preview of the call again right before the run, and its
+    hash is not the one the person approved (or the preview no longer
+    builds). Nothing was sent. The requester asks again.
+    """
+    reason = (
+        "The preview of this call is not the one that was approved. "
+        "The operation did not run. Ask again."
+    )
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=f"preview_changed_since_approval: {reason}",
+        duration_ms=0.0,
+        extras={
+            "error_code": "preview_changed_since_approval",
+            "reason": reason,
+            "approval_request_id": str(approval_request_id),
         },
     )
 

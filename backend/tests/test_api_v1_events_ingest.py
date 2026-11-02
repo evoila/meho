@@ -36,11 +36,14 @@ from sqlalchemy import func, select
 
 from meho_backplane.api.v1.events_ingest import _read_capped_body, router
 from meho_backplane.audit import AuditMiddleware
+from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.vault import _resolve_login_role
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EventOutbox, Tenant
 from meho_backplane.events.ingest.rate_limit import IngestRateLimitError
 from meho_backplane.events.ingest.service import IngestPayloadError, _parse_json_or_fail
 from meho_backplane.middleware import RequestContextMiddleware
+from meho_backplane.settings import get_settings
 
 from ._event_source_helpers import (
     _insert_event_source,
@@ -321,3 +324,71 @@ def test_deeply_nested_body_fails_closed_not_500(
         _parse_json_or_fail(b"[]")
     # It is specifically the recursion path that was caught and re-raised.
     assert isinstance(exc.value.__cause__, RecursionError)
+
+
+# --------------------------------------------------------------------------
+# Vault login role of the secret read
+# --------------------------------------------------------------------------
+
+
+def _capture_ingest_operator(monkeypatch: pytest.MonkeyPatch) -> list[Operator]:
+    """Re-patch the Vault read seam so the test sees the operator it logs in with."""
+    seen: list[Operator] = []
+
+    async def _runner_jwt() -> str:
+        return "runner-jwt"
+
+    async def _read_secret(operator: Operator, _ref: str) -> SecretStr:
+        seen.append(operator)
+        return SecretStr(_SECRET_VALUE)
+
+    monkeypatch.setattr("meho_backplane.events.ingest.service.check_runner_jwt", _runner_jwt)
+    monkeypatch.setattr(
+        "meho_backplane.events.ingest.service.read_event_source_secret", _read_secret
+    )
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_secret_read_logs_in_under_the_check_runner_role(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Event intake presents the check runner's token, so it uses the runner's role.
+
+    The Vault recipe gives the runner client its own audience. After that
+    the shared ``VAULT_OIDC_ROLE`` no longer accepts the runner's token, so a
+    login under it would refuse every signed event. The read must resolve
+    ``VAULT_CHECK_RUNNER_ROLE`` instead, like a Sensor check does.
+    """
+    monkeypatch.setenv("VAULT_CHECK_RUNNER_ROLE", "meho-check-runner")
+    get_settings.cache_clear()
+    seen = _capture_ingest_operator(monkeypatch)
+    await _seed_source()
+    body = b'{"alert":"firing"}'
+
+    resp = client.post("/api/v1/events/ingest/prod-am", content=body, headers=_signed(body))
+
+    assert resp.status_code == 202
+    (operator,) = seen
+    assert operator.raw_jwt == "runner-jwt"
+    assert operator.check_runner_dispatch is True
+    assert str(operator.tenant_id) == DEFAULT_TENANT_ID
+    assert _resolve_login_role(operator, get_settings(), None) == "meho-check-runner"
+
+
+@pytest.mark.asyncio
+async def test_secret_read_keeps_the_shared_role_when_no_runner_role_is_set(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without ``VAULT_CHECK_RUNNER_ROLE`` the read stays on ``VAULT_OIDC_ROLE``, as before."""
+    monkeypatch.delenv("VAULT_CHECK_RUNNER_ROLE", raising=False)
+    get_settings.cache_clear()
+    seen = _capture_ingest_operator(monkeypatch)
+    await _seed_source()
+    body = b'{"alert":"firing"}'
+
+    resp = client.post("/api/v1/events/ingest/prod-am", content=body, headers=_signed(body))
+
+    assert resp.status_code == 202
+    (operator,) = seen
+    assert _resolve_login_role(operator, get_settings(), None) == get_settings().vault_oidc_role

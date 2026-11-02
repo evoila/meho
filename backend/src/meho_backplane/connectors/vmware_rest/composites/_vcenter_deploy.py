@@ -76,7 +76,6 @@ from meho_backplane.connectors.vmware_rest.vcenter_deployment import (
     hide_secrets,
     read_secret_param,
 )
-from meho_backplane.operations._preview import register_preview_builder
 from meho_backplane.operations.composite import composite_resume_state
 
 if TYPE_CHECKING:
@@ -387,6 +386,3 @@ async def vcenter_appliance_deploy_preview(ctx: PreviewContext) -> dict[str, Any
         "root_password_secret_ref": params.get("root_password_secret_ref"),
         "power_on": bool(params.get("power_on", True)),
     }
-
-
-register_preview_builder(APPLIANCE_DEPLOY_OP_ID, vcenter_appliance_deploy_preview)

@@ -159,6 +159,10 @@ requests, commit messages, code comments and docs.
   reader must do.
 - Describe the outcome: what will be true when the work is done.
 - Use short lists instead of long paragraphs.
+- Do not write how many operations exist, and do not list every operation
+  name, in docs or code comments. Such text goes stale, and every new
+  operation then edits the same line. Readers get the list from
+  `list_operation_groups` and `search_operations`.
 
 ## Developer Certificate of Origin
 

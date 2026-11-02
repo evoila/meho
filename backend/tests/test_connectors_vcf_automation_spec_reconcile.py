@@ -99,6 +99,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from meho_backplane.connectors.vcf_automation import _day2_paths as _day2_paths_module
 from meho_backplane.connectors.vcf_automation import _infra_paths as _infra_paths_module
 from meho_backplane.connectors.vcf_automation import _paths as _paths_module
 from meho_backplane.connectors.vcf_automation import _routing as _routing_module
@@ -108,6 +109,7 @@ from meho_backplane.connectors.vcf_automation._infra_paths import (
     provider_vcf_path,
 )
 from meho_backplane.connectors.vcf_automation._routing import plane_for_path
+from meho_backplane.connectors.vcf_automation.day2_ops import VCFA_DAY2_OPS
 from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
 from meho_backplane.connectors.vcf_automation.feature_flag_ops import VCFA_FEATURE_FLAG_OPS
 from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
@@ -182,7 +184,7 @@ _PATHS_METHODS: dict[str, frozenset[str]] = {
     # A project's own network and its first deployment (tenant plane).
     "TENANT_BLUEPRINT_REQUESTS_PATH": frozenset({"POST"}),
     "TENANT_BLUEPRINT_REQUEST_PATH": frozenset({"GET"}),
-    "TENANT_DEPLOYMENT_API_DEPLOYMENT_PATH": frozenset({"DELETE"}),
+    "TENANT_DEPLOYMENT_API_DEPLOYMENT_PATH": frozenset({"GET", "DELETE"}),
     "TENANT_FABRIC_COMPUTES_PATH": frozenset({"GET"}),
     "TENANT_FABRIC_NETWORKS_PATH": frozenset({"GET"}),
     "TENANT_FABRIC_NETWORK_PATH": frozenset({"GET", "PATCH"}),
@@ -212,6 +214,18 @@ _INFRA_PATHS_METHODS: dict[str, frozenset[str]] = {
     "INFRA_VDC_VM_CLASSES_PATH": frozenset({"GET", "PUT"}),
     "INFRA_VM_CLASSES_PATH": frozenset({"GET"}),
     "INFRA_ZONES_PATH": frozenset({"GET"}),
+}
+
+#: HTTP method(s) per ``_day2_paths`` constant: the day-2 ops shared with
+#: Aria Automation 8 (the vRA 8 lane checks the same constants).
+_DAY2_PATHS_METHODS: dict[str, frozenset[str]] = {
+    "BLOCK_DEVICES_PATH": frozenset({"GET", "POST"}),
+    "DEPLOYMENT_ACTIONS_PATH": frozenset({"GET"}),
+    "DEPLOYMENT_REQUESTS_PATH": frozenset({"POST"}),
+    "MACHINES_PATH": frozenset({"GET", "POST"}),
+    "MACHINE_DISKS_PATH": frozenset({"POST"}),
+    "RESOURCE_ACTIONS_PATH": frozenset({"GET"}),
+    "RESOURCE_REQUESTS_PATH": frozenset({"POST"}),
 }
 
 #: ``typed_ops`` read-path constants the provisioning writes also ``POST``
@@ -260,6 +274,7 @@ def _declared_op_ids() -> set[str]:
         declared.update(f"{method}:{typed_paths[name]}" for method in methods)
     declared |= _mapped_op_ids(_paths_module, _PATHS_METHODS)
     declared |= _mapped_op_ids(_infra_paths_module, _INFRA_PATHS_METHODS)
+    declared |= _mapped_op_ids(_day2_paths_module, _DAY2_PATHS_METHODS)
     for name, path in _path_constants(_routing_module).items():
         for suffix, method in _ROUTING_METHOD_BY_SUFFIX.items():
             if name.endswith(suffix):
@@ -292,6 +307,7 @@ def test_path_constant_names_are_pinned() -> None:
         "TENANT_PROJECTS_PATH",
     ]
     assert sorted(_path_constants(_paths_module)) == sorted(_PATHS_METHODS)
+    assert sorted(_path_constants(_day2_paths_module)) == sorted(_DAY2_PATHS_METHODS)
     assert sorted(_path_constants(_infra_paths_module)) == sorted(_INFRA_PATHS_METHODS)
     assert sorted(_path_constants(_routing_module)) == [
         "PROVIDER_SESSION_PATH",
@@ -313,6 +329,7 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
     swept = {
         *_path_constants(_typed_ops_module).values(),
         *_path_constants(_paths_module).values(),
+        *_path_constants(_day2_paths_module).values(),
         *_path_constants(_routing_module).values(),
         *_path_constants(_infra_paths_module).values(),
     }
@@ -325,6 +342,7 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
             *VCFA_NETWORK_OPS,
             *VCFA_DEPLOY_OPS,
             *VCFA_FEATURE_FLAG_OPS,
+            *VCFA_DAY2_OPS,
             *VCFA_INFRA_OPS,
         )
         if op.path not in swept
@@ -402,6 +420,17 @@ def test_vcfa_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/cloudapi/1.0.0/featureFlags",
         "GET:/cloudapi/1.0.0/featureFlags/{id}",
         "PUT:/cloudapi/1.0.0/featureFlags/{id}",
+        # Day-2 ops, shared with Aria Automation 8.
+        "GET:/deployment/api/deployments/{deploymentId}",
+        "GET:/deployment/api/deployments/{deploymentId}/actions",
+        "GET:/deployment/api/resources/{resourceId}/actions",
+        "GET:/iaas/api/block-devices",
+        "GET:/iaas/api/machines",
+        "POST:/deployment/api/deployments/{deploymentId}/requests",
+        "POST:/deployment/api/resources/{resourceId}/requests",
+        "POST:/iaas/api/block-devices",
+        "POST:/iaas/api/machines",
+        "POST:/iaas/api/machines/{id}/disks",
         # Regions and organization quotas (provider plane, 9.0 path form).
         "GET:/api/task/{id}",
         "GET:/cloudapi/1.0.0/virtualCenters",

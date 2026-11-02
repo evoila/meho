@@ -86,6 +86,135 @@ checkout counts as built in. The start log line then says
 `source_checkout=True`. The MEHO image installs MEHO from a wheel, not as an
 editable install, so the full check applies there.
 
+## Writing the connector
+
+A connector package is normal MEHO connector code in its own folder. It
+works the same way as a built-in typed connector (one with hand-written
+operations). The phpIPAM connector is a small, complete example:
+`backend/src/meho_backplane/connectors/phpipam/`.
+
+The folder's `__init__.py` does three things when MEHO imports it:
+
+1. **Register the connector class** with `register_connector_v2` from
+   `meho_backplane/connectors/registry.py`. The class is a subclass of
+   `Connector` (`connectors/base.py`), or of `HttpConnector`
+   (`connectors/adapters/http.py`) for an HTTP API. It sets `product`,
+   `version` and `impl_id`, and has `fingerprint`, `probe` and `execute`.
+2. **Queue the registering function** with `register_typed_op_registrar`
+   from `meho_backplane/operations/typed_register.py`. Do not register the
+   operations at import: the import must stay quick and must not touch the
+   database.
+3. **Register the approval previews**, if a change shows a person what it
+   will do while it waits for approval. phpIPAM does this by importing its
+   `writes` module.
+4. **Declare the op classes**, if an operation needs an exact class for
+   the broadcast feed, the approval queue and the flight recorder: a read
+   whose answer holds a secret (`credential_read`), a change that returns
+   a new secret (`credential_mint`), a change whose request carries or
+   sends a secret (`credential_write`), or a change whose op id does not
+   end in a write word (`write`). The package does this in its own
+   `op_classes.py`, imported from `__init__.py`:
+
+   ```python
+   # meho_backplane/connectors/example_widget/op_classes.py
+   from meho_backplane.op_classes import declare_op_classes
+
+   declare_op_classes(credential_write=("example.widget.set_password",))
+   ```
+
+   `classify_op` in `broadcast/events.py` reads these declarations
+   first. Core code lists no operation of a connector package. See
+   [broadcast.md](broadcast.md), "Where an exact class comes from".
+
+Nothing else runs at import. Other code that runs at import is a reason to
+refuse the package in the review (see "The review checklist").
+
+At start, after every folder is imported, MEHO runs each queued function.
+It calls `register_typed_operation` (same module) once per operation. That
+call stores the operation as a row, with its input and answer schemas, its
+risk level (`safety_level`), whether it waits for approval
+(`requires_approval`), its group and its texts for agents. It is safe to
+run twice: MEHO runs it at every start.
+
+```python
+# meho_backplane/connectors/example_widget/__init__.py
+from meho_backplane.connectors.example_widget.connector import ExampleWidgetConnector
+from meho_backplane.connectors.example_widget.operations import register_widget_operations
+from meho_backplane.connectors.registry import register_connector_v2
+from meho_backplane.operations.typed_register import register_typed_op_registrar
+
+register_connector_v2(
+    product="example",
+    version="1.x",
+    impl_id="example-widget",
+    cls=ExampleWidgetConnector,
+)
+register_typed_op_registrar(register_widget_operations)
+```
+
+```python
+# meho_backplane/connectors/example_widget/operations.py
+async def register_widget_operations(*, embedding_service=None) -> None:
+    from meho_backplane.connectors.example_widget.connector import ExampleWidgetConnector
+    from meho_backplane.operations.typed_register import register_typed_operation
+
+    await register_typed_operation(
+        product=ExampleWidgetConnector.product,
+        version=ExampleWidgetConnector.version,
+        impl_id=ExampleWidgetConnector.impl_id,
+        op_id="example.widget.list",
+        handler=ExampleWidgetConnector.widget_list,
+        summary="List the widgets.",
+        description="...",
+        parameter_schema={"type": "object", "properties": {}},
+        response_schema={"type": "object"},
+        group_key="widgets",
+        when_to_use="...",
+        safety_level="safe",
+        embedding_service=embedding_service,
+    )
+```
+
+Rules the code checks at start:
+
+- `product` must be the first part of `impl_id` (`example` in
+  `example-widget`). Otherwise the start stops. The connector id is
+  `<impl_id>-<version>`, here `example-widget-1.x`.
+- A handler is an async method of the connector class (passed as
+  `ExampleWidgetConnector.widget_list`) or a module-level async function.
+  It takes `operator`, `target` and `params` and returns a dict. A lambda
+  or a nested function is refused.
+- Keep every handler inside the package's own folder. MEHO records the
+  package of an operation from the place of its handler (see "When a
+  package is removed").
+
+MEHO does the rest for every operation: policy, approvals, audit, removal
+of secrets from results, and a result handle (a link to the stored result)
+for a long list. The handler returns plain data.
+
+Before you build, run MEHO's operation contract check
+(`backend/tests/test_operation_contracts.py`) with the package's folder in
+a MEHO checkout. The review for tier 2 asks for it too.
+
+**Which MEHO modules a package may import.** Today no MEHO module is a
+promise to a package: any of them can change in any release. Modules whose
+path has a part that starts with an underscore, such as
+`connectors/_shared/vault_creds.py`, are private by name. The connector
+kit (one module with the names a package may use, #5278) will be the
+promise. Its design is in
+[`docs/decisions/2026-11-01-connector-kit.md`](../decisions/2026-11-01-connector-kit.md).
+Until it ships, test your package against the exact MEHO release you build
+for.
+
+More to read:
+
+- [`docs/architecture/operations-substrate.md`](../architecture/operations-substrate.md):
+  the operation table, the registry and how a call runs.
+- [`docs/architecture/connectors.md`](../architecture/connectors.md): the
+  `Connector` base class, fingerprint and probe.
+- [`connectors-shared-vault-creds.md`](connectors-shared-vault-creds.md):
+  how a connector reads the target's secret.
+
 ## Building an overlay image
 
 An overlay image is the public MEHO image plus one or more connector
@@ -189,6 +318,45 @@ sign it, and the appliance does not accept it.
 4. Deploy it with the chart: set `image.repository`, `image.tag` and
    `image.digest` to your image.
 
+### Try your image on a local kind cluster
+
+To test before you push anywhere, load the image into a
+[kind](https://kind.sigs.k8s.io/) cluster:
+
+1. Build without `--push`, with a tag that is not `latest`. The image goes
+   into the local Docker.
+2. Copy it into the cluster's nodes:
+
+   ```bash
+   kind load docker-image meho-overlay:dev-1 --name <cluster>
+   ```
+
+3. Put these chart values into your values file, in place of the release
+   tag. Do not pass a tag on the `helm` command line: it would win over
+   the file.
+
+   ```yaml
+   image:
+     repository: meho-overlay
+     tag: dev-1
+     digest: ""         # the image is in no registry, so it has no digest
+     pullPolicy: Never  # use the loaded image; never try to pull it
+   ```
+
+4. Install MEHO with real login, policy and Vault. The kind example file
+   (`deploy/values-examples/values-kind.yaml`) uses mocks only. Use the
+   recipe with MEHO's built-in parts in
+   [`docs/deploying.md`, "A throwaway install with the built-in parts"](../deploying.md#a-throwaway-install-with-the-built-in-parts).
+5. Check that `GET /version` lists your package under `connector_packages`.
+
+A test vendor often has no TLS and sits on a private address:
+
+- A vendor that answers on plain HTTP needs `extras.scheme: http` on its
+  target. The default is `https`.
+- A vendor on a private address needs that address or range in
+  `config.targetSsrfAllowlist`. MEHO refuses private addresses by default
+  ([`target-ssrf-guard.md`](target-ssrf-guard.md)).
+
 ### Tier 2: an image evoila signs
 
 Only evoila's own connector packages go into an image that evoila signs.
@@ -234,7 +402,7 @@ brackets is the name of the point in the record.
   (`licences`)
 - The package has no start-up hooks: no `.pth` file, no `sitecustomize`
   or `usercustomize`, and no code that runs at import beyond registering
-  its operations. (`no_startup_hooks`)
+  its operations, its previews and its op classes. (`no_startup_hooks`)
 
 #### The review record
 
@@ -331,10 +499,28 @@ MEHO (ingested ops are `NULL` too).
   lookup do not see it. A group that holds only such rows is hidden too.
 - A call or a preview of such an op answers
   `connector_package_not_installed`, with the package name in
-  `extras.package`.
+  `extras.package`. This holds only for an op that is on for the
+  caller's tenant. An op that an operator turned off answers
+  `unknown_op`, as it does with the package installed.
+- The connector list (`GET /api/v1/connectors`, the MCP tool
+  `meho_connector_list` and `meho connector list`) does not count such
+  rows, and does not count a group that holds only such rows. When no
+  row of a connector is left, the connector stays in the list with
+  `state="package_not_installed"`, zero counts and
+  `dispatchable=false`. Its `next_step` names the package. The MCP
+  short row shows `status="package_not_installed"`, and the CLI table
+  shows `no-package`.
+- When search finds no enabled op and all rows of the connector come
+  from such a package, the result has `outcome="package_not_installed"`,
+  also when the operator had turned every op off before. The advisory
+  names the package and says to install it again. A connector with a
+  built-in row left gets `zero_enabled_operations` as before.
 - Nothing is deleted or changed. When the package is installed again,
-  the rows are visible again with the operator's settings on them, for
-  example an op the operator turned off stays off.
+  the rows are visible again. An op the operator turned off stays off.
+  But the start writes the texts from code again: an operator's own
+  description (`custom_description`) and agent instructions
+  (`llm_instructions`) do not come back (#5321). The same happens to
+  every typed op at every start.
 - When the package registers its ops again, it can raise an op's risk
   level or turn on its approval requirement, but never lower them. A
   stricter value saved on the row, for example one an operator set,
@@ -344,9 +530,137 @@ MEHO (ingested ops are `NULL` too).
 share one database: each one hides only the rows of the packages it does
 not have.
 
+### Rows with no package name
+
+A row written by an image that had a connector built in has no package
+name (`owner_package` is `NULL`). When a later image does not have that
+code, the package rule above lets the row pass. So MEHO also checks the
+code itself (`operations/_code_presence.py`, #5585). The code of a
+connector is missing when all of these are true:
+
+- it has a visible typed or composite row with no package name;
+- it has no visible row of an installed package;
+- none of the handlers (`handler_ref`) of those rows imports;
+- no connector class resolves for its product and version.
+
+Then:
+
+- The connector list shows it with `state="code_not_installed"`, zero
+  counts and `dispatchable=false`. Its `next_step` says that the code of
+  the connector is not in this MEHO. The row has no package name, so the
+  text names no package. The MCP short row shows
+  `status="code_not_installed"`, and the CLI table shows `no-code`.
+- `search_operations` (also its exact-op mode) returns no hits and
+  `outcome="code_not_installed"`. `list_operation_groups` returns no
+  group.
+- A call or a preview answers `connector_code_not_installed`, with the
+  connector id in `extras.connector_id`, in place of
+  `handler_unreachable`. The descriptor lookup does not find the rows.
+- Nothing is deleted or written. When the code is back, the same rows
+  work again, with the operator's settings.
+
+Not hit: a family with no class whose handlers import (`net.*`,
+`secret.*`), a connector with a class, and a connector where at least
+one handler imports. In the last case only the op whose handler is
+missing fails, with `handler_unreachable`: during an upgrade, two
+releases can share one database (`operations/dead_handler_sweep.py`).
+
+Like "installed", this is worked out per MEHO process and never stored
+on a row. Whether a handler imports is kept for the life of the process
+(`handler_imports`), so a check does not import every handler on every
+call. The usual check reads one row: a handler that imports ends it.
+
 Limit: an op of a package whose handler lives outside the package's own
 folders (for example in a built-in shared module) is recorded as built
 in.
+
+## The connector kit
+
+A connector package imports MEHO only through one module:
+`meho_connector_kit`, from the package `meho-connector-kit`. The names in
+its `__all__` are the promise to package authors. Every other MEHO module is
+private to the core and can change in any release. The design is in
+[the decision record](../decisions/2026-11-01-connector-kit.md).
+
+Where it lives and how it ships:
+
+- The code is in `backend/connector-kit/`: `pyproject.toml` and the module
+  `meho_connector_kit/__init__.py`. The module imports the names from the
+  core modules and adds one of its own: `Target`, a typed class with the six
+  target fields a connector may read (`name`, `host`, `extras`,
+  `auth_model`, `verify_tls`, `secret_ref`). The fields are read-only. A
+  `Target` fits every kit function that takes a target. The kit's
+  `target_cache_key` takes a `Target` and makes the key from the target's
+  tenant and row id inside the core, so those two fields stay private.
+- The image build makes the kit's wheel next to MEHO's own
+  (`backend/Dockerfile`, stage `wheelbuilder`), installs both, and checks
+  that every kit name imports.
+- In a checkout, `uv sync` installs the kit as an editable package (it is in
+  the `dev` group of `backend/pyproject.toml`).
+- The kit is never published on a public package index. It has no
+  dependencies of its own: it only works next to MEHO.
+
+The kit has its own version, starting at 1.0. It is not the MEHO release
+number. A package states the kit versions it fits in its `pyproject.toml`,
+for example `dependencies = ["meho-connector-kit>=1.0,<2"]`.
+
+- The **first** number goes up when a name is removed or its inputs change.
+  A package may break.
+- The **second** number goes up when names are only added, or a name is
+  marked as old.
+
+For three classes, the kit also promises some of their insides:
+`HttpConnector` (`__init__`, `auth_headers`, `aclose`,
+`trace_response_body`, `_get_json`, `_post_json`), `PreviewContext`
+(`target`, `operator`, `params`, `connector_instance`, `connector_id`) and
+`Target` (its six fields). The list is `_PROMISED_PARTS` in the kit module.
+For every other class the kit promises only the name.
+
+### How a kit change is noticed
+
+1. **The list file.** `backend/connector-kit/kit-names.json` lists every
+   kit name: whether it is a class or a function, its inputs with their
+   types and defaults, its answer type, and the promised parts of a class.
+   It also holds the kit version.
+2. **The test.** `backend/tests/test_connector_kit.py` builds the same list
+   from the code and fails when the two differ. The message names each
+   change, says which number of the kit version must go up, and names the
+   command. The test also checks that the kit version is the same in the
+   list file, the kit's `pyproject.toml` and `backend/uv.lock`, and that
+   both kinds of target MEHO hands a connector (the database row in
+   `db/models.py` and the read model in `targets/schemas.py`) still have
+   every field of `Target`. It also runs mypy on a small connector written
+   only with the kit's types, so the kit's types keep fitting each other,
+   and checks that reading a private target field is a type error.
+3. **The command.** In `backend/`, run
+   `uv run python -m scripts.write_connector_kit_names`, then `uv lock`.
+   The command writes the list file again, raises the right number of the
+   kit version, and writes the version into the kit's `pyproject.toml`.
+4. **The owner.** `.github/CODEOWNERS` names the kit owner for
+   `backend/connector-kit/`, so the pull request asks the kit owner to
+   review the changed list file. It is a required review only when the
+   rules of `main` ask for a code owner's review.
+5. **The release.** Step 2 of [RELEASING.md](../RELEASING.md) runs
+   `scripts/release/check_connector_kit_release.py`. When the kit changed
+   since the last release tag, the release notes need a `### Connector kit`
+   section that names the new kit version, and the kit version must have
+   gone up far enough. Pull requests add no CHANGELOG lines; the release
+   pull request writes this section.
+
+### Old names
+
+A name is not removed at once. First it is marked as old: add it to
+`_OLD_NAMES` in the kit module, with what to use instead, and run the
+command. The list file then says `"old"` for that name, and the second
+number goes up. In a later kit version the name may go: the command and
+the test refuse to remove a name that the list file did not mark as old.
+
+### `Connector.execute`
+
+MEHO never calls `Connector.execute`. The dispatcher runs the handler that
+`register_typed_operation` recorded. So `execute` has a default that raises
+`NotImplementedError` with a message to use a registered operation, and a
+connector package does not write its own.
 
 ## Key types
 
@@ -364,6 +678,25 @@ in.
   rows and groups.
 - `CONNECTOR_PACKAGES_FILE`, `BUILTIN_DISTRIBUTION` — the file path and
   the built-in distribution name.
+
+## Secrets in an operation's answer
+
+MEHO hides the value of every secret-named field (`password`, `token`,
+`api_key`, `client_secret`, ...) in the answer of every operation, in the
+sample rows and in the rows stored behind a result handle. This holds for
+a package's operations as for the built-in ones; a package needs no code
+of its own for it. A person or a service principal gets the values with
+`reveal_secret: true`; an agent is refused. The audit row stores a keyed
+fingerprint in place of each hidden value.
+
+A field whose name looks like a secret but whose value is not one, for
+example the date `password_expires_at` or the count `secret_id_ttl`, is
+hidden too unless the package declares it. The registrar calls
+`register_plain_fields(op_id, names)` from `meho_backplane.operations`,
+once per operation, next to the operation's registration. A field that is
+not declared stays hidden, so a forgotten declaration never shows a secret.
+Details: `docs/codebase/redaction.md`, "Secret-named fields in every
+answer".
 
 ## Known limits
 
@@ -385,8 +718,13 @@ in.
 
 - `backend/src/meho_backplane/connector_packages.py`
 - `backend/src/meho_backplane/connectors/registry.py`
+- `backend/src/meho_backplane/operations/typed_register.py`
+- `backend/src/meho_backplane/connectors/phpipam/` — a small typed connector to copy from
 - `backend/tests/test_connector_packages.py`
 - `backend/tests/test_connector_package_owner.py`
+- `backend/connector-kit/`, `backend/scripts/write_connector_kit_names.py`,
+  `backend/tests/test_connector_kit.py` and
+  `scripts/release/check_connector_kit_release.py` — the connector kit
 - `deploy/connector-overlay/` and `backend/tests/test_connector_overlay_build.py`
 - `backend/tests/test_connector_overlay_review.py` — the review record
   check and `build.sh --sign`

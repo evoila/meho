@@ -249,7 +249,10 @@ fine on every backend, with zero extra configuration.
     The check-runner principal is not a GSM-only knob. On a Vault
     deploy it gives *all* background dispatch a token the documented
     default Vault role will accept — which can read every target
-    credential in the policy's subtree. Bound the role before
+    credential in the policy's subtree. So on a Vault deploy the check
+    runner does not start until `VAULT_CHECK_RUNNER_ROLE` names a Vault
+    role of its own (not `VAULT_OIDC_ROLE`). Each read it makes must also
+    stay inside the sensor's tenant path. Set up the role before
     enabling it:
     [`docs/deploying.md`](https://github.com/evoila/meho/blob/main/docs/deploying.md)
     and
@@ -271,6 +274,7 @@ is also the sensors feature's road-to-GA tracker.
 | A plain 422 validation error *before* any of the codes above | Schema validation runs first: the comparator `type` must be one of `threshold` / `equals` / `in` / `bool` / `freshness` (not `gt`/`lt` — those are the threshold's `op`), the cadence must be exactly one of interval (5–86400 s) XOR cron, the assertion is capped at 8 KiB, and a `status` field in the body is rejected. | Fix the spec shape; the error names the field. |
 | Sensor stuck `unknown`, evidence says *"selection is not a scalar, found array"* | Your `select.path` points at a list (e.g. `$.rows`), not a scalar. | Select a scalar — `$.total` for list-shaped Kubernetes results — or add an `aggregate` (`count`, `max`, …) to the select. |
 | Target-bound sensor `unknown` forever, dispatch error names a credential read | No background credential identity on this deploy — the table above. | Work [Sensors and your credential backend](#sensors-and-your-credential-backend). |
+| No sensor is evaluated; the backplane log shows `sensor_runner_refused` | `checkRunner.*` is on, Vault is in use, and `VAULT_CHECK_RUNNER_ROLE` is unset or the same as `VAULT_OIDC_ROLE`. | Give the runner a Vault role of its own and set `VAULT_CHECK_RUNNER_ROLE` (see the warning above), or turn `checkRunner.enabled` off. |
 | Sensor `unknown` though it was green a minute ago | Staleness: no fresh evaluation past `next_fire_at` + 60 s grace — the runner is down, or the previous evaluation is still in flight and the overlap guard skipped this tick. | Check the runner's health. A *parked* sensor is a different symptom: it shows `paused` and rolls up `skip`, never `unknown`. |
 | Dashboard `unknown` with all members green | The dashboard has zero members — an empty member set rolls up `unknown` by rule. | Add members (delete + recreate the dashboard). |
 | A sensor keeps auto-running an op that is no longer harmless | The safe-only guard is **create-time only**. If a connector re-ingest changes a pinned op's safety class, existing sensors keep firing; the ingest result surfaces exactly which sensors are affected (`safety_changes`, warning `ingest_safety_class_changed`). | Re-audit the named sensors after any re-ingest that touches safety classes; delete the ones that no longer qualify. |

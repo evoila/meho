@@ -380,6 +380,27 @@ sensor check-runner's service principal) on a `credentialBackend: vault`
 install. **Do this first — enabling `checkRunner.*` without it widens what
 background dispatch can read.**
 
+**The backplane enforces it.** With a runner principal
+(`CHECK_RUNNER_CLIENT_ID` / `CHECK_RUNNER_CLIENT_SECRET`) and `VAULT_ADDR`
+set, the check runner does not start unless `VAULT_CHECK_RUNNER_ROLE`
+names a role of its own (not the same as `VAULT_OIDC_ROLE`). It logs
+`sensor_runner_refused` and no Sensor is evaluated. So use Option A below
+and set `VAULT_CHECK_RUNNER_ROLE` (for example through the chart's
+`extraEnv`), or turn `checkRunner.enabled` off. Each Vault read the runner
+makes is also checked against the sensor's tenant subtree
+(`VAULT_KV_TENANT_SCOPE_PREFIX`), so give each tenant's Sensor secrets a
+path under that tenant.
+
+**Event intake uses the same role.** The inbound event endpoint
+(`POST /api/v1/events/ingest/{source_slug}`) reads each event source's
+secret with the runner's token too, so it logs in under
+`VAULT_CHECK_RUNNER_ROLE` as well. The runner's policy must therefore
+cover the event source secrets. MEHO stores them at
+`tenants/<tenant_id>/event-sources/<slug>` under the `secret` mount, so
+the policy needs `read` on `secret/data/tenants/+/event-sources/*` (and
+the matching `secret/metadata/...` path). Without it, every event source
+with a secret answers 503 and the sender keeps retrying.
+
 Role `meho-mcp` above is deliberately loose: `user_claim=sub` with
 `bound_audiences` as its *only* binding and no `bound_subject` /
 `bound_claims`, paired with a policy that grants read on the whole
@@ -417,6 +438,14 @@ path "secret/data/meho/sensors/*" {
 path "secret/metadata/meho/sensors/*" {
   capabilities = ["read"]
 }
+# Event source secrets: the inbound event intake reads them under this
+# role too (see "Event intake uses the same role" above).
+path "secret/data/tenants/+/event-sources/*" {
+  capabilities = ["read"]
+}
+path "secret/metadata/tenants/+/event-sources/*" {
+  capabilities = ["read"]
+}
 EOF
 
 vault write auth/jwt/role/meho-check-runner \
@@ -428,12 +457,15 @@ vault write auth/jwt/role/meho-check-runner \
   token_ttl=1h
 ```
 
-Substitute the subtree your Sensors' `secret_ref`s actually live under. Then
+Substitute the subtree your Sensors' `secret_ref`s actually live under and
+keep the event source paths. Then
 set `VAULT_CHECK_RUNNER_ROLE=meho-check-runner` on the backplane (the runner
 already stores its service-account `sub` next to its secret, ready for the
 `bound_subject` line above). The backplane resolves this role **only** for
-the in-process check-runner's background dispatch (#2757); interactive and
-operator logins keep `VAULT_OIDC_ROLE` (`meho-mcp`) untouched. That removes
+the logins that present the runner's token: the in-process check-runner's
+background dispatch (#2757) and the inbound event intake's secret read.
+Interactive and operator logins keep `VAULT_OIDC_ROLE` (`meho-mcp`)
+untouched. That removes
 the old single-role tradeoff — the shared role never sees the runner, and the
 interactive path never sees the narrow role, so neither has to be widened for
 the other. Every mis-wiring fails closed: the runner token is rejected by
@@ -461,6 +493,10 @@ vault write auth/jwt/login role=meho-mcp jwt="$OPERATOR_TOKEN"
 #    read; expect a 403 permission-denied:
 vault write auth/jwt/login role=meho-check-runner jwt="$RUNNER_TOKEN"
 VAULT_TOKEN=<issued-runner-token> vault kv get secret/meho/targets/<a-target>
+
+# 4. Event intake still works under the scoped role. Send a signed event to
+#    an event source that has a secret and expect 202. A 503 means the
+#    policy does not cover `secret/data/tenants/+/event-sources/*`.
 ```
 
 **Option B — tighten `meho-mcp` so it does not accept the runner.** Vault's

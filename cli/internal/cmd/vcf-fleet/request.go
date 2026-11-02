@@ -4,6 +4,7 @@
 package vcffleet
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 
@@ -15,8 +16,8 @@ import (
 )
 
 const (
-	requestListOpID = "GET:/lcm/request/api/v2/requests"
-	requestGetOpID  = "GET:/lcm/request/api/v2/requests/{requestId}"
+	requestListOpID = "fleet.request.list"
+	requestGetOpID  = "fleet.request.get"
 )
 
 // newRequestCmd returns the `meho vcf-fleet request` sub-tree.
@@ -40,14 +41,14 @@ func newRequestListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List Fleet lifecycle requests (deploy / patch / upgrade workflows)",
-		Long: "list dispatches GET:/lcm/request/api/v2/requests against\n" +
+		Long: "list dispatches fleet.request.list against\n" +
 			"connector_id=\"fleet-rest-9.0\". Returns the most recent requests\n" +
-			"by createdOn; operators on busy appliances may see a JSONFlux\n" +
-			"result handle — page it with result_query(handle_id, offset,\n" +
-			"limit) and scan the rows for a given state or requestType.\n\n" +
+			"first, each with its state and a plain outcome; operators on busy\n" +
+			"appliances may see a JSONFlux result handle — page it with\n" +
+			"result_query(handle_id, offset, limit).\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
 		Example: "  meho vcf-fleet request list --target rdc-fleet\n" +
-			"  meho vcf-fleet request list --target rdc-fleet --json | jq '.result[] | select(.state==\"INPROGRESS\")'",
+			"  meho vcf-fleet request list --target rdc-fleet --json | jq '.result.requests[] | select(.outcome==\"running\")'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -80,22 +81,24 @@ func printRequestList(w io.Writer, r *CallResult) {
 		printErrorTrailer(w, r)
 		return
 	}
-	entries, err := decodeListResult(r.Result)
-	if err != nil {
+	var page struct {
+		Requests []fleetEntry `json:"requests"`
+	}
+	if err := json.Unmarshal(r.Result, &page); err != nil || page.Requests == nil {
 		conn.PrintGeneric(w, requestListOpID, r)
 		return
 	}
-	if len(entries) == 0 {
+	if len(page.Requests) == 0 {
 		fmt.Fprintln(w, "  (0 requests)")
 		return
 	}
-	fmt.Fprintf(w, "%-38s %-24s %-14s %s\n", "vmid", "requestType", "state", "requestName")
-	for _, e := range entries {
+	fmt.Fprintf(w, "%-38s %-24s %-14s %s\n", "request_id", "type", "state", "name")
+	for _, e := range page.Requests {
 		fmt.Fprintf(w, "%-38s %-24s %-14s %s\n",
-			truncate(fleetStringField(e, "vmid"), 38),
-			truncate(fleetStringField(e, "requestType"), 24),
+			truncate(fleetStringField(e, "request_id"), 38),
+			truncate(fleetStringField(e, "type"), 24),
 			truncate(fleetStringField(e, "state"), 14),
-			truncate(fleetStringField(e, "requestName"), 40),
+			truncate(fleetStringField(e, "name"), 40),
 		)
 	}
 }
@@ -109,11 +112,10 @@ func newRequestInfoCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "info <request-id>",
 		Short: "Show the full detail of one Fleet lifecycle request",
-		Long: "info dispatches GET:/lcm/request/api/v2/requests/{requestId}\n" +
-			"against connector_id=\"fleet-rest-9.0\". Returns inputMap, outputMap,\n" +
-			"executionPath[] (stage list with per-stage status + timestamps),\n" +
-			"and errorCause on FAILED. Requires a requestId from\n" +
-			"`vcf-fleet request list`.\n\n" +
+		Long: "info dispatches fleet.request.get against\n" +
+			"connector_id=\"fleet-rest-9.0\". Returns the state, a plain outcome\n" +
+			"and, for a failed request, its error causes (the first one is the\n" +
+			"failed step). Requires a request id from `vcf-fleet request list`.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
 		Example:       "  meho vcf-fleet request info req-vmid-001 --target rdc-fleet",
 		Args:          cobra.ExactArgs(1),
@@ -135,7 +137,7 @@ func runRequestInfo(cmd *cobra.Command, requestID, targetName string, jsonOut bo
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	params := map[string]any{"requestId": requestID}
+	params := map[string]any{"request_id": requestID}
 	r, err := conn.Call(cmd.Context(), backplaneURL, requestGetOpID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
@@ -153,17 +155,20 @@ func printRequestInfo(w io.Writer, r *CallResult) {
 		return
 	}
 	var req struct {
-		VMID            string `json:"vmid"`
-		TransactionID   string `json:"transactionId"`
-		RequestName     string `json:"requestName"`
-		RequestType     string `json:"requestType"`
-		State           string `json:"state"`
-		ExecutionStatus string `json:"executionStatus"`
-		ErrorCause      string `json:"errorCause"`
-		CreatedBy       string `json:"createdBy"`
-		LastUpdatedOn   string `json:"lastUpdatedOn"`
+		RequestID       string      `json:"request_id"`
+		RequestName     string      `json:"name"`
+		RequestType     string      `json:"type"`
+		State           string      `json:"state"`
+		Outcome         string      `json:"outcome"`
+		ExecutionStatus string      `json:"execution_status"`
+		ErrorCause      string      `json:"error_cause"`
+		CreatedBy       string      `json:"created_by"`
+		LastUpdatedOn   json.Number `json:"last_updated_on"`
+		FailedStep      *struct {
+			Message string `json:"message"`
+		} `json:"failed_step"`
 	}
-	if err := jsonUnmarshalStrict(r.Result, &req); err != nil || req.VMID == "" {
+	if err := jsonUnmarshalStrict(r.Result, &req); err != nil || req.RequestID == "" {
 		if pretty, perr := dispatch.PrettyJSON(r.Result); perr == nil {
 			fmt.Fprintln(w, pretty)
 		} else {
@@ -171,15 +176,12 @@ func printRequestInfo(w io.Writer, r *CallResult) {
 		}
 		return
 	}
-	fmt.Fprintf(w, "request:       %s (%s) — state=%s\n", req.RequestName, req.VMID, req.State)
+	fmt.Fprintf(w, "request:       %s (%s) — state=%s outcome=%s\n", req.RequestName, req.RequestID, req.State, req.Outcome)
 	if req.RequestType != "" {
 		fmt.Fprintf(w, "type:          %s\n", req.RequestType)
 	}
 	if req.ExecutionStatus != "" {
 		fmt.Fprintf(w, "execution:     %s\n", req.ExecutionStatus)
-	}
-	if req.TransactionID != "" {
-		fmt.Fprintf(w, "transaction:   %s\n", req.TransactionID)
 	}
 	if req.CreatedBy != "" {
 		fmt.Fprintf(w, "created_by:    %s\n", req.CreatedBy)
@@ -189,5 +191,8 @@ func printRequestInfo(w io.Writer, r *CallResult) {
 	}
 	if req.ErrorCause != "" {
 		fmt.Fprintf(w, "error_cause:   %s\n", req.ErrorCause)
+	}
+	if req.FailedStep != nil && req.FailedStep.Message != "" {
+		fmt.Fprintf(w, "failed_step:   %s\n", req.FailedStep.Message)
 	}
 }

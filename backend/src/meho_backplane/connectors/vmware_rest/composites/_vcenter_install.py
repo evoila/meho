@@ -11,7 +11,10 @@ see :mod:`..vcenter_deployment`). ``dangerous`` with ``requires_approval=True``.
    the answer is ``already_running``. Any other state stops with that state.
 2. The SSO admin password is read from Vault (``sso_admin_password_secret_ref``).
 3. ``POST /vcenter/deployment/install?action=check``: a failed check returns
-   the check messages and starts nothing.
+   the check messages and starts nothing. When the check call itself fails,
+   ``check.errors`` holds the vendor's text (never the password). The check
+   and the start send the ``InstallSpec`` in a ``{"spec": ...}`` body (see
+   :func:`~meho_backplane.connectors.vmware_rest.vcenter_deployment.setup_body`).
 4. ``POST /vcenter/deployment/install?action=start`` after the governed write
    gate. The vendor answers at once and runs the setup by itself. The answer
    is ``accepted`` with the status read that follows the setup.
@@ -60,11 +63,11 @@ from meho_backplane.connectors.vmware_rest.vcenter_deployment import (
     mounted,
     read_deployment,
     read_secret_param,
+    setup_body,
     status_read_ref,
     unreachable_reason,
     vendor_detail,
 )
-from meho_backplane.operations._preview import register_preview_builder
 from meho_backplane.operations.composite import enforce_subop_policy
 
 if TYPE_CHECKING:
@@ -121,7 +124,7 @@ def _sso_domain_name(params: dict[str, Any]) -> str | None:
 
 
 def _install_spec(params: dict[str, Any], password: str) -> dict[str, Any]:
-    """The vendor ``InstallSpec`` (the flat body of the check and the start)."""
+    """The vendor ``InstallSpec`` of the check and the start (sent in :func:`setup_body`)."""
     embedded: dict[str, Any] = {"ceip_enabled": bool(params.get("ceip_enabled", False))}
     replicated = params.get("replicated")
     if isinstance(replicated, dict):
@@ -277,6 +280,9 @@ async def _post_check(
     if relogin is not None:
         # Raised outside the except block, so the error keeps no request body.
         raise relogin
+    if failure is not None and not run.check["errors"]:
+        # The check call failed: the caller finds the reason in check.errors too.
+        run.check["errors"] = [failure]
     return failure
 
 
@@ -337,7 +343,7 @@ async def vcenter_install_composite(
     password = await read_secret_param(operator, target, params, prefix="sso_admin_password")
     run.steps.done("read_sso_password")
     secrets = (password,)
-    body = _install_spec(params, password)
+    body = setup_body(_install_spec(params, password))
 
     failure = await _post_check(connector, operator, run, body, secrets)
     if failure is not None:
@@ -376,6 +382,3 @@ async def vcenter_install_preview(ctx: PreviewContext) -> dict[str, Any] | None:
             "passes. It cannot be undone."
         ),
     }
-
-
-register_preview_builder(INSTALL_OP_ID, vcenter_install_preview)

@@ -516,9 +516,13 @@ set them once (see [A realm that already runs](#a-realm-that-already-runs)).
 | Realm settings → **Login** | Remember me | On |
 | Realm settings → **Sessions** | SSO Session Idle Remember Me | 30 days |
 | Realm settings → **Sessions** | SSO Session Max Remember Me | 30 days |
-| Authentication → Policies → **Webauthn Passwordless Policy** | Enable Passkeys | On |
+| Realm settings → **Login** → Login screen customization | Enable Passkeys | On |
 | Authentication → Policies → **Webauthn Passwordless Policy** | User verification requirement | Required (the device asks for a PIN or a fingerprint) |
-| Authentication → Policies → **Webauthn Passwordless Policy** | Require discoverable credential | Yes |
+| Authentication → Policies → **Webauthn Passwordless Policy** | Discoverable credential | Required |
+
+Keycloak 26.7 replaced the old setting **Require discoverable credential**
+(Yes or No) with **Discoverable credential**. Leave the old one at
+**Not specified**.
 
 ### What stays strict
 
@@ -594,7 +598,7 @@ already runs gets these settings once, in one of two ways:
       "ssoSessionMaxLifespanRememberMe": 2592000,
       "webAuthnPolicyPasswordlessPasskeysEnabled": true,
       "webAuthnPolicyPasswordlessUserVerificationRequirement": "required",
-      "webAuthnPolicyPasswordlessRequireResidentKey": "Yes"
+      "webAuthnPolicyPasswordlessResidentKey": "required"
     }
     ```
 
@@ -605,15 +609,42 @@ already runs gets these settings once, in one of two ways:
 - **By hand**, in the Keycloak admin console, with the table above.
 
 **A realm made before Keycloak 26.4.** Keycloak 26.4 added a step to the
-browser flow of new realms: **Condition - credential**, in the sub-flow
-**Browser - Conditional 2FA**. It skips the one-time code after a passkey
-login. An upgrade does not add it to an older realm. Without it, a passkey
-login still asks for the code. Check the browser flow under
-**Authentication**. If the step is missing, add it as Keycloak's
-[passkeys guide](https://www.keycloak.org/docs/latest/server_admin/index.html#passkeys_server_administration_guide)
-shows: a **Condition - credential** step, **Required**, for the credential
-type `webauthn-passwordless`. The built-in Keycloak of the chart started
-with a newer version, so its realm has the step.
+browser flow of new realms: **Condition - credential**. It skips the
+one-time code after a passkey login. An upgrade does not add it to an older
+realm. The built-in Keycloak of the chart started with a newer version, so
+its realm has the step. Without the step, a passkey replaces the password,
+but a person with a one-time code still types the code.
+
+Until MEHO has an operation for this
+([#5663](https://github.com/evoila/meho/issues/5663)), these steps run in the
+Keycloak admin console:
+
+1. **Check.** Open **Authentication → Flows** and the flow that is bound
+   as the browser flow (usually `browser`). In the sub-flow whose name
+   starts with **Browser - Conditional**, look for **Condition -
+   credential**. When it is there, you are done.
+2. **Copy the flow.** Keycloak does not let you add a step to its built-in
+   `browser` flow. So open `browser`, choose **Duplicate**, and give the
+   copy a name, for example `browser with passkeys`. When the realm already
+   uses its own copy of the flow, change that copy and skip this step.
+3. **Add the step.** In the copy's **Browser - Conditional ...** sub-flow,
+   add the condition **Condition - credential**. Set it to **Required**
+   and move it right after **Condition - user configured**. Open its
+   settings (the **Settings** icon) and set:
+    - **Credentials**: `webauthn-passwordless`
+    - **Included**: off
+
+    With **Included** off, the condition is true only when no passkey was
+    used. So the one-time code runs after a password login, and not after
+    a passkey login.
+
+4. **Use the copy.** In the copy's menu, choose **Bind flow** and pick
+   **Browser Flow**.
+5. **Test.** Log in with a passkey: Keycloak asks no one-time code. Log in
+   with the password: Keycloak still asks for the code.
+
+**The way back:** bind `browser` as the **Browser Flow** again. The copy
+then has no effect, and you can delete it.
 
 ## Wire it into Helm
 

@@ -363,7 +363,7 @@ def test_imported_realm_remembers_the_browser_and_offers_passkeys(keycloak: _Key
     assert realm["ssoSessionMaxLifespanRememberMe"] == 30 * 24 * 3600
     assert realm["webAuthnPolicyPasswordlessPasskeysEnabled"] is True
     assert realm["webAuthnPolicyPasswordlessUserVerificationRequirement"] == "required"
-    assert realm["webAuthnPolicyPasswordlessRequireResidentKey"] == "Yes"
+    assert realm["webAuthnPolicyPasswordlessResidentKey"] == "required"
 
     executions = httpx.get(
         f"{admin}/authentication/flows/browser/executions", headers=headers

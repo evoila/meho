@@ -350,7 +350,8 @@ when nothing is missing. The Secrets it makes carry only the label
   `ssoSessionIdleTimeoutRememberMe` and `ssoSessionMaxLifespanRememberMe`
   at 30 days) and the passkey policy
   (`webAuthnPolicyPasswordlessPasskeysEnabled`, user verification
-  `required`, discoverable credential `Yes`). The stage cannot set them:
+  `required`, discoverable credential `required` through
+  `webAuthnPolicyPasswordlessResidentKey`). The stage cannot set them:
   `meho-admin` has no `manage-realm` right (unless the company login is on).
   A running realm gets them once with `keycloak.realm.update` or by hand;
   see `docs-site/install/keycloak-realm.md`, "Remember the browser, and

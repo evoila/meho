@@ -15,7 +15,7 @@
   "offlineSessionMaxLifespan": 604800,
   "webAuthnPolicyPasswordlessPasskeysEnabled": true,
   "webAuthnPolicyPasswordlessUserVerificationRequirement": "required",
-  "webAuthnPolicyPasswordlessRequireResidentKey": "Yes",
+  "webAuthnPolicyPasswordlessResidentKey": "required",
   "attributes": {
     "CreateDefaultClientScopes": "true"
   },

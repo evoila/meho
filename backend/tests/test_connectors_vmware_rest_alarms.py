@@ -51,10 +51,8 @@ from meho_backplane.connectors.vmware_rest.composites._alarm_schemas import (
     ALARM_ACKNOWLEDGE_PARAMETER_SCHEMA,
     ALARM_RESET_PARAMETER_SCHEMA,
 )
-from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
-    _GOVERNED_SUBOP_MANIFEST,
-)
 from meho_backplane.connectors.vmware_rest.composites._register import (
+    _GOVERNED_SUBOP_MANIFEST,
     register_vmware_composite_operations,
     register_vmware_composite_operations_8_0,
 )

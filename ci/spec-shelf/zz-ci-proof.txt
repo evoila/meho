@@ -1,2 +1,0 @@
-# Temporary: proves that a missing shelf file fails both jobs. Reverted in the next commit.
-argocd-3.3/missing-file-for-ci-proof.json

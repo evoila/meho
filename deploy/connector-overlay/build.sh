@@ -7,7 +7,7 @@
 #
 #   build.sh --base ghcr.io/evoila/meho@sha256:<digest> \
 #            --connectors DIR [--deps DIR] --tag IMAGE:TAG \
-#            [--platform LIST] [--push] [--sign --reviews DIR]
+#            [--platform LIST] [--push] [--sign | --sign-key KEY] [--reviews DIR]
 #
 #   --base        the public image, pinned by its digest. A tag alone is refused.
 #   --connectors  folder with the connector package wheels (*.whl).
@@ -18,7 +18,11 @@
 #   --sign        sign the pushed image with cosign (needs --push). evoila
 #                 uses this for its own images (tier 2). A user's own image
 #                 (tier 1) is built without it.
-#   --reviews     folder with the review records (*.json). Needed with --sign:
+#   --sign-key    sign the pushed image with this key (needs --push). KEY is a
+#                 key file or another key reference that cosign accepts. cosign
+#                 reads the password of a key file from COSIGN_PASSWORD. The
+#                 signature goes to the registry, not to a transparency log.
+#   --reviews     folder with the review records (*.json). Needed to sign:
 #                 each connector wheel needs a record by a person for its
 #                 exact name, version and wheel digest. Checked before the
 #                 build starts.
@@ -27,7 +31,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-base="" connectors="" deps="" tag="" platform="" reviews="" push=0 sign=0
+base="" connectors="" deps="" tag="" platform="" reviews="" sign_key="" push=0 sign=0
 
 die() { echo "build.sh: $*" >&2; exit 1; }
 
@@ -41,7 +45,10 @@ while [ $# -gt 0 ]; do
     --reviews) reviews="${2:-}"; shift 2 ;;
     --push) push=1; shift ;;
     --sign) sign=1; shift ;;
-    -h|--help) sed -n '5,26p' "$0"; exit 0 ;;
+    --sign-key)
+      case "${2:-}" in ""|-*) die "--sign-key needs a key reference" ;; esac
+      sign=1; sign_key="$2"; shift 2 ;;
+    -h|--help) sed -n '5,30p' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -52,9 +59,13 @@ done
 [[ "$base" =~ @sha256:[0-9a-f]{64}$ ]] || die "--base must be pinned by digest (name@sha256:<64 hex>), got: $base"
 [ -d "$connectors" ] || die "--connectors is not a folder: $connectors"
 [ -z "$deps" ] || [ -d "$deps" ] || die "--deps is not a folder: $deps"
-[ "$sign" -eq 0 ] || [ "$push" -eq 1 ] || die "--sign needs --push: only a pushed image can be signed"
-[ "$sign" -eq 0 ] || [ -n "$reviews" ] || die "--sign needs --reviews: a person must review each connector package before it is signed"
+sign_option="--sign"
+[ -z "$sign_key" ] || sign_option="--sign-key"
+[ "$sign" -eq 0 ] || [ "$push" -eq 1 ] || die "$sign_option needs --push: only a pushed image can be signed"
+[ "$sign" -eq 0 ] || [ -n "$reviews" ] || die "$sign_option needs --reviews: a person must review each connector package before it is signed"
 [ -z "$reviews" ] || [ -d "$reviews" ] || die "--reviews is not a folder: $reviews"
+# Stop before the push when a key file is missing. Other key references have a colon.
+[ -z "$sign_key" ] || [[ "$sign_key" == *:* ]] || [ -f "$sign_key" ] || die "--sign-key: no key file at $sign_key"
 
 ctx="$(mktemp -d)"
 trap 'rm -rf "$ctx"' EXIT
@@ -86,7 +97,12 @@ if [ "$push" -eq 1 ]; then
   case "${tag##*/}" in *:*) ;; *) repo="$tag" ;; esac
   echo "pushed: ${repo}@${digest}"
   if [ "$sign" -eq 1 ]; then
-    cosign sign --yes "${repo}@${digest}"
+    if [ -n "$sign_key" ]; then
+      # cosign 3 stops on --tlog-upload=false unless --use-signing-config=false is also set.
+      cosign sign --yes --key "$sign_key" --tlog-upload=false --use-signing-config=false "${repo}@${digest}"
+    else
+      cosign sign --yes "${repo}@${digest}"
+    fi
     echo "signed: ${repo}@${digest}"
   fi
 fi

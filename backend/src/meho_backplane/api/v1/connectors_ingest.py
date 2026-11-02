@@ -61,11 +61,13 @@ impossible. No read or edit surface accepts a tenant id from
 the body or query string — cross-tenant probes are impossible by
 construction. The one nuance: the ``operator`` role sees only their
 own tenant's connectors **and** built-ins (``tenant_id IS NULL``);
-the ``tenant_admin`` role additionally ingests into the built-in scope,
-but mutating an *existing* built-in row (enable / disable / enable-reads
-/ edit-group / edit-op) is a platform action gated on ``platform_admin``
-(a tenant_admin without it gets a 403 ``builtin_connector_write_forbidden``,
-mirroring the doc-collection global-row seat #3616). The service layer
+writing the built-in scope — ingesting into it, or mutating an existing
+built-in row (enable / disable / enable-reads / edit-group / edit-op /
+delete) — is a platform action gated on ``platform_admin`` because the
+rows are shared by every tenant (a tenant_admin without it gets a 403:
+``builtin_connector_write_forbidden`` on the row routes, the plain
+``PermissionError`` text on ``POST /ingest``, mirroring the
+doc-collection global-row seat #3616). The service layer
 (:class:`ReviewService`, :class:`IngestionPipelineService`) carries
 matching tenant guards as defence-in-depth for sibling consumers
 (CLI verbs T5, admin MCP tools T7) that hit the service layer
@@ -416,11 +418,11 @@ def get_llm_client_factory() -> LlmClientFactory:
         # returned for the service-layer PermissionError mapping.
         403: {
             "description": (
-                "The body's ``tenant_id`` is neither omitted/null "
-                "(built-in / global scope) nor the caller's own tenant "
-                "UUID, and the caller does not hold platform_admin. "
-                "Rejected synchronously on both the sync and "
-                "async branches; no job row is created."
+                "The body's ``tenant_id`` is omitted/null (built-in / "
+                "global scope, whose rows every tenant shares) or names "
+                "another tenant, and the caller does not hold "
+                "platform_admin. Rejected synchronously on both the sync "
+                "and async branches; no job row is created."
             ),
             "content": {
                 "application/json": {
@@ -1755,7 +1757,7 @@ async def enable_reads_endpoint(
     Tenant scoping (#1699 contract): no ``tenant_id`` parameter — the
     scope is always the calling operator's tenant from the JWT. The
     MCP sibling ``meho_connector_enable_reads`` accepts an optional
-    ``tenant_id`` for the built-in / global scope (tenant_admin only).
+    ``tenant_id`` for the built-in / global scope (platform_admin only).
 
     The optional ``prefer=tenant|builtin`` query param (G0.26-T? #2029)
     resolves the ambiguous-scope 409 directly: ``prefer=tenant`` applies
@@ -1867,8 +1869,9 @@ async def delete_endpoint(
     ``tenant_id`` parameter — the delete scope is always the calling
     operator's tenant from the JWT. Built-in / global connectors
     (``tenant_id IS NULL`` rows) are deleted via the MCP sibling
-    ``meho_connector_delete`` with ``tenant_id`` omitted
-    (tenant_admin only). Unknown ids, cross-tenant probes, and rows
+    ``meho_connector_delete`` with ``tenant_id`` omitted, which needs
+    ``platform_admin`` because every tenant shares those rows. Unknown
+    ids, cross-tenant probes, and rows
     visible only under a scope this route cannot name all collapse
     into the same 404 the other connector routes use; a repeat
     DELETE therefore returns 404 once the first one landed.

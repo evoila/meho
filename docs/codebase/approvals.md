@@ -107,7 +107,11 @@ It is the simple and strict choice.
 release on the new column `approval_request.release_id` (migration
 `0126`). The value comes from `version.running_release_id()`: the full
 commit hash (`GIT_SHA`), plus the chart version (`CHART_VERSION`) when it
-is set. These are the same values `GET /version` shows.
+is set, plus a short digest of the installed connector packages (name,
+version and wheel digest of each) when the image carries any. These are
+the same values `GET /version` shows. So an image with the same commit but
+a new chart, or a new, updated or removed connector package, is another
+release, and the waiting requests end at its start.
 
 **At start-up.** `main._run_lifespan_startup` calls
 `approval_expiry.expire_approvals_from_older_release()`. For each tenant
@@ -135,7 +139,9 @@ the vendor gets no call:
    never run later. If another resumer took it first, the usual
    `already_resumed` result comes back. The claim winner then deletes the
    request's stored run input (`approval_handoff.discard`), the same as
-   every other way a request ends.
+   every other way a request ends. The claim itself already replaced the
+   secret fields of the stored params with a marker (see "The params hash
+   on requests and audit rows").
 2. One audit row records the refusal: `path = "approval.resume"`,
    `status_code = 409`, `result_status = "release_changed_while_waiting"`,
    both releases in the payload.
@@ -227,8 +233,18 @@ Two kinds of rows carry a keyed hash of a call's params:
   call that changed any value, a password too, does not match.
   The request also keeps the params themselves, because MEHO runs the
   approved call with them:
-  - For most operations they are stored in plain form in
-    `approval_request.params`.
+  - For most operations they are stored in `approval_request.params`,
+    in plain form only while the request waits. As soon as the run claim
+    is won (`claim_resume`), or the request is rejected, withdrawn or
+    expires (`end_run_input`), each secret-named value in that column (a
+    password or a licence key inside a deployment spec; the name rule of
+    the broadcast scrub) is replaced by the marker `[REDACTED:param_name]`.
+    The other fields keep their value. A row without such a field is not
+    rewritten. Migration `0132` did the same, once, for every row that was
+    already decided. A re-run of a failed run
+    (`POST /api/v1/approvals/{id}/rerun`) then needs the params sent
+    again, as for a credential write; the stored copy with markers never
+    runs (`_stored_call` treats it as not stored).
   - For a `credential_write` operation they are not on the request row.
     They are encrypted in `approval_execution_payload` instead (see
     "Credential-write execution custody" below).

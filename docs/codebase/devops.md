@@ -2120,8 +2120,8 @@ run, not a broken `main`.
 - **Who decides.** The `changes` job, step `map`. It runs only on a pull
   request that is not docs-only, has a backend change and is not a
   one-connector run. It downloads the newest `unit-test-map` artifact of a
-  run on `main` (the job has `actions: read` for that) and pipes the
-  changed files into `python3 backend/tests/_unit_test_map.py pick`
+  run of this repo on `main` (the job has `actions: read` for that). It
+  pipes the changed files into `python3 backend/tests/_unit_test_map.py pick`
   (standard library only). The step `upload-selection` stores the picked
   list as the artifact `unit-test-selection`. The output `test_map` is
   `true` only when both worked.

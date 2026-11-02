@@ -373,8 +373,9 @@ jobs:
       - name: Pick unit tests with the test map
         # #5642. Only on a pull request that would otherwise run all the unit
         # shards. Every failure below gives test_map=false (the full run);
-        # the step itself never fails. The artifact must come from a run on
-        # `main`: only the nightly run makes it (python-coverage-combine).
+        # the step itself never fails. The artifact must come from a run of
+        # this repo on `main`: only the nightly run makes it
+        # (python-coverage-combine).
         id: map
         if: >-
           github.event_name == 'pull_request' &&
@@ -391,10 +392,10 @@ jobs:
           mkdir -p "${dir}"
           if [ "${EVENT_NAME}" != "pull_request" ]; then
             line="full suite: not a pull request (${EVENT_NAME})"
-          elif ! artifact="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=unit-test-map&per_page=20" --jq '[.artifacts[] | select(.expired == false and .workflow_run.head_branch == "main")][0].id // empty')"; then
+          elif ! artifact="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=unit-test-map&per_page=20" --jq '[.artifacts[] | select(.expired == false and .workflow_run.head_branch == "main" and .workflow_run.head_repository_id == .workflow_run.repository_id)][0].id // empty')"; then
             line="full suite: could not list the test map artifacts"
           elif [ -z "${artifact}" ]; then
-            line="full suite: no test map from a nightly run on main"
+            line="full suite: no test map from a nightly run of this repo on main"
           elif ! gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact}/zip" > "${dir}/map.zip"; then
             line="full suite: could not download the test map"
           elif ! line="$(git -c core.quotePath=false diff --name-only --no-renames HEAD^1 HEAD | python3 backend/tests/_unit_test_map.py pick --map "${dir}/map.zip" --out "${dir}/selection.txt")"; then

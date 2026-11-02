@@ -478,12 +478,33 @@ def _git(repo: Path, *args: str) -> None:
     )
 
 
-def _run_map_step(tmp_path: Path, event: str, changed: dict[str, str]) -> tuple[str, str, Path]:
+def _artifact(artifact_id: int, *, branch: str = "main", head_repo: int = 1) -> dict[str, Any]:
+    """One entry of the GitHub "list artifacts" answer (repo id 1 is this repo)."""
+    return {
+        "id": artifact_id,
+        "name": "unit-test-map",
+        "expired": False,
+        "workflow_run": {
+            "head_branch": branch,
+            "head_repository_id": head_repo,
+            "repository_id": 1,
+        },
+    }
+
+
+def _run_map_step(
+    tmp_path: Path,
+    event: str,
+    changed: dict[str, str],
+    artifacts: list[dict[str, Any]] | None = None,
+) -> tuple[str, str, Path, list[str]]:
     """Run the real step ``map`` of the ``changes`` job.
 
-    A fake ``gh`` answers with one artifact: the zip of the fake map.
-    Returns the step's stdout, the value of ``test_map`` and the folder of
-    the picked list.
+    A fake ``gh`` lists ``artifacts`` (default: one from a run of this repo
+    on main) and applies the step's own ``--jq`` filter with the real ``jq``.
+    Any download gives the zip of the fake map. Returns the step's stdout,
+    the value of ``test_map``, the folder of the picked list and the ``gh``
+    calls.
     """
     repo = tmp_path / "repo"
     _write_tree(repo, TREE)
@@ -504,13 +525,18 @@ def _run_map_step(tmp_path: Path, event: str, changed: dict[str, str]) -> tuple[
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     calls = tmp_path / "gh-calls"
+    listing = tmp_path / "artifacts.json"
+    listing.write_text(
+        json.dumps({"artifacts": [_artifact(4242)] if artifacts is None else artifacts}),
+        encoding="utf-8",
+    )
     gh = bin_dir / "gh"
     gh.write_text(
         "#!/bin/sh\n"
-        f'echo "$*" >> "{calls}"\n'
+        f'echo "$2" >> "{calls}"\n'
         'case "$2" in\n'
         f'  */zip) cat "{archive}" ;;\n'
-        "  *) echo 4242 ;;\n"
+        f'  *) [ "$3" = "--jq" ] && jq -r "$4" "{listing}" ;;\n'
         "esac\n",
         encoding="utf-8",
     )
@@ -539,17 +565,20 @@ def _run_map_step(tmp_path: Path, event: str, changed: dict[str, str]) -> tuple[
     )
     assert run.returncode == 0, run.stdout + run.stderr
     outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    gh_calls = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
     if event != "pull_request":
-        assert not calls.exists(), "no artifact lookup outside a pull request"
-    return run.stdout, outputs["test_map"], runner_temp / "unit-test-map"
+        assert not gh_calls, "no artifact lookup outside a pull request"
+    return run.stdout, outputs["test_map"], runner_temp / "unit-test-map", gh_calls
 
 
-needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+needs_git = pytest.mark.skipif(
+    shutil.which("git") is None or shutil.which("jq") is None, reason="git or jq not installed"
+)
 
 
 @needs_git
 def test_ci_pull_request_with_a_schema_change_runs_the_picked_tests(tmp_path: Path) -> None:
-    stdout, selected, folder = _run_map_step(
+    stdout, selected, folder, _calls = _run_map_step(
         tmp_path, "pull_request", {f"{SRC}/schemas.py": "class S:\n    x = 1\n"}
     )
 
@@ -564,7 +593,7 @@ def test_ci_pull_request_with_a_schema_change_runs_the_picked_tests(tmp_path: Pa
 
 @needs_git
 def test_ci_pull_request_with_a_migration_runs_the_full_suite(tmp_path: Path) -> None:
-    stdout, selected, _folder = _run_map_step(
+    stdout, selected, _folder, _calls = _run_map_step(
         tmp_path, "pull_request", {"backend/alembic/versions/0002_y.py": "x = 1\n"}
     )
 
@@ -575,12 +604,41 @@ def test_ci_pull_request_with_a_migration_runs_the_full_suite(tmp_path: Path) ->
 @needs_git
 @pytest.mark.parametrize("event", ["push", "merge_group", "schedule"])
 def test_ci_push_and_merge_group_never_use_the_map(tmp_path: Path, event: str) -> None:
-    stdout, selected, _folder = _run_map_step(
+    stdout, selected, _folder, _calls = _run_map_step(
         tmp_path, event, {f"{SRC}/schemas.py": "class S:\n    x = 1\n"}
     )
 
     assert selected == "false"
     assert f"full suite: not a pull request ({event})" in stdout
+
+
+@needs_git
+def test_ci_map_comes_only_from_a_run_of_this_repo_on_main(tmp_path: Path) -> None:
+    newest_first = [
+        _artifact(9001, head_repo=2),
+        _artifact(9002, branch="feature"),
+        _artifact(4242),
+    ]
+    _stdout, selected, _folder, calls = _run_map_step(
+        tmp_path, "pull_request", {f"{SRC}/schemas.py": "class S:\n    x = 1\n"}, newest_first
+    )
+
+    assert selected == "true"
+    assert calls[-1] == "repos/example/repo/actions/artifacts/4242/zip"
+
+
+@needs_git
+def test_ci_no_map_from_a_run_of_this_repo_on_main_means_the_full_suite(tmp_path: Path) -> None:
+    stdout, selected, _folder, calls = _run_map_step(
+        tmp_path,
+        "pull_request",
+        {f"{SRC}/schemas.py": "class S:\n    x = 1\n"},
+        [_artifact(9001, head_repo=2)],
+    )
+
+    assert selected == "false"
+    assert "full suite: no test map from a nightly run of this repo on main" in stdout
+    assert not any(call.endswith("/zip") for call in calls)
 
 
 def test_ci_map_step_runs_only_on_a_pull_request_that_needs_the_shards() -> None:

@@ -88,6 +88,8 @@ nav:
       - Satellite gateway: guides/satellite-gateway.md
       - Windows estate and in-guest execution: guides/windows-and-guest-execution.md
       - Add-ons: guides/add-ons.md
+  - Extend MEHO:
+      - Write a connector package: extend/connector-kit.md
   - Reference:
       - reference/index.md
       - What's new: reference/whats-new.md

@@ -18,8 +18,9 @@ badge, an alert or a dialog should come from a template macro. If you are
 typing `class="btn btn-sm btn-ghost"` from memory, look for the macro
 first.
 
-`_icons.html` is the example that worked: 60 templates import its
-`icon()` macro and exactly one hand-written `<svg>` is left in the tree.
+`_icons.html` is the example that worked: **61 templates import its
+`icon()` macro, and the only `<svg>` anywhere in the template tree is the
+one inside that macro.** No template hand-rolls an icon.
 The rest of the set is being assembled in a shared UI package that the
 three MEHO web interfaces will install. Until a piece exists there, copy
 the closest existing template
@@ -97,9 +98,10 @@ earlier migration rounds is:
 
 Two details that are easy to get wrong:
 
-- Controls need `w-full`. DaisyUI 5 no longer stretches them to fill
-  their container, so without it a field collapses to its intrinsic
-  width.
+- Put `w-full` on the control. Every form migrated so far does — see
+  `agents/_agent_form_fields.html`, `agents/grants/_grant_form_fields.html`
+  and `connectors/_target_form_fields.html` — and a field without it does
+  not fill its column.
 - A checkbox row stays inline. `.label` is **still live** in v5 — it sets
   `display:inline-flex` and puts the box beside its text — so do not wrap
   one in the column layout above.

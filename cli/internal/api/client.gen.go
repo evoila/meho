@@ -7866,7 +7866,7 @@ type ReplayNode struct {
 
 // RerunRequestBody POST body for “…/rerun“ (#5417).
 type RerunRequestBody struct {
-	// Params The original params, unchanged. Leave out to use the params MEHO stored with the request. Required for a credential write, whose params MEHO keeps only until the first run. Params that do not match the approved ones are refused (409).
+	// Params The original params, unchanged. Leave out to use the params MEHO stored with the request. Required for a credential write, and for a call whose params hold a password or a licence key: MEHO keeps those params only until the first run. Params that do not match the approved ones are refused (409).
 	Params *map[string]interface{} `json:"params"`
 }
 

@@ -27,7 +27,7 @@ the closest existing template
 rather than inventing a new shape — and prefer extending a macro over
 adding a seventh spelling of the same thing.
 
-Measured on `main`, 2026-10-28: `btn` appears 1145 times across 153
+Measured on `main`, 2026-11-02: `btn` appears 1219 times across 156
 templates in 15 variants, `badge` 900 times in 15 variants. Four of those
 variants (`btn-accent`, `btn-secondary`, `btn-active`, `btn-circle`)
 appear once or twice each. That is what drift looks like.
@@ -83,14 +83,18 @@ DaisyUI 5 removed these. They produce **zero CSS rules** — verified
 against the built `static/dist/tailwind.css`, where each yields no rule
 at all while a live class such as `btn-ghost` yields four:
 
-| Class | Uses on `main` (2026-10-28) |
+| Class | Uses on `main` (2026-11-02) |
 |---|---|
-| `input-bordered` | 137 across 56 templates |
-| `label-text` | 111 across 39 |
-| `form-control` | 95 across 38 |
+| `input-bordered` | 138 across 56 templates |
+| `form-control` | 96 across 39 |
+| `label-text` | 98 across 39 |
 | `select-bordered` | 47 across 32 |
-| `textarea-bordered` | 33 across 27 |
+| `textarea-bordered` | 34 across 28 |
 | `label-text-alt` | 14 across 4 |
+| **Total** | **427 across 65 distinct templates** |
+
+Count `label-text` and `label-text-alt` separately — a naive
+`grep label-text` matches both and overstates the first by the second.
 
 They spread by copying an existing template, which is why they are listed
 here rather than left to be discovered.

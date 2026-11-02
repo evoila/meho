@@ -290,52 +290,70 @@ jobs:
             echo "quoted path in the diff -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python} (fail-safe full run)"
           else
             printf 'changed files (HEAD^1..HEAD):\n%s\n' "${changed}"
-            # --- migration classification (#2140, unchanged) ---
-            # Files that make the migration suite meaningful to run: the
-            # alembic tree, the relocated migration test suite, the db
-            # migrate/migrations modules under test, the compat script, and
-            # the workflows that define this gate.
+            # Each classifier reads the exit code of its `grep` on its
+            # own: 0 and 1 are answers, any other code is an error. On an
+            # error `classify` returns 1 and the caller keeps every
+            # fail-safe default, so a broken classifier can never skip a
+            # job (a plain `if grep ...; then ... else ...` would read an
+            # error as "no match" and could take the fast path).
             # The classifiers read the list from a here-string, not from a
             # pipe: `grep -q` stops at its first match, a `printf` into the
             # pipe then fails on a list longer than the pipe buffer, and with
             # `pipefail` that failure would read as "no match" and skip jobs.
-            if grep -qE '^(backend/alembic/|backend/tests/migrations/|backend/src/meho_backplane/db/(migrations|migrate)\.py$|scripts/ci/(check_migration_(compat|heads)|recheck_migration_prs)\.py$|\.github/workflows/(ci|migration-compat|migration-heads)\.yml$)' <<<"${changed}"; then
+            classify() {
+              local rc non_md
+              # --- migration classification (#2140, unchanged) ---
+              # Files that make the migration suite meaningful to run: the
+              # alembic tree, the relocated migration test suite, the db
+              # migrate/migrations modules under test, the compat script, and
+              # the workflows that define this gate.
+              rc=0
+              grep -qE '^(backend/alembic/|backend/tests/migrations/|backend/src/meho_backplane/db/(migrations|migrate)\.py$|scripts/ci/(check_migration_(compat|heads)|recheck_migration_prs)\.py$|\.github/workflows/(ci|migration-compat|migration-heads)\.yml$)' <<<"${changed}" || rc=$?
+              case "${rc}" in
+                0) migrations=true; echo "migration-related change detected -> migrations=true" ;;
+                1) migrations=false; echo "no migration-related change -> migrations=false" ;;
+                *) echo "migration check failed (grep exit ${rc})"; return 1 ;;
+              esac
+              # --- docs-only classification (allow-list; #3252) ---
+              # docs-only IFF every changed path matches the allow-list:
+              #   ^docs/   any file under docs/
+              #   \.md$    any Markdown file anywhere (covers CHANGELOG.md,
+              #            README.md, docs/**/*.md, backend/README.md, ...)
+              # `grep -qvE` exits 0 iff SOME line does NOT match the allow-list
+              # — that line is a non-docs path (code / tests / workflows /
+              # configs / cli/ / deploy/ ...) and forces the full run. Only when
+              # grep finds no such line (exit 1) is the diff proven docs-only.
+              rc=0
+              grep -qvE '(^docs/|\.md$)' <<<"${changed}" || rc=$?
+              case "${rc}" in
+                0) docs_only=false; echo "non-docs file(s) present -> docs_only=false (full run)" ;;
+                1) docs_only=true; echo "all changed files are docs/*.md -> docs_only=true (fast path)" ;;
+                *) echo "docs-only check failed (grep exit ${rc})"; return 1 ;;
+              esac
+              # --- backend Python classification (#5296) ---
+              # backend_python=false only when no changed path, apart from
+              # `.md` files, is under backend/ or is this workflow file.
+              # The first grep exits 1 when it selects no line (every file
+              # is `.md`); that is an answer, not an error.
+              rc=0
+              non_md="$(grep -vE '\.md$' <<<"${changed}")" || rc=$?
+              if [ "${rc}" -gt 1 ]; then
+                echo "could not filter the changed files (grep exit ${rc})"
+                return 1
+              fi
+              rc=0
+              grep -qE '^(backend/|\.github/workflows/ci\.yml$)' <<<"${non_md}" || rc=$?
+              case "${rc}" in
+                0) backend_python=true; echo "backend/ or ci.yml change detected -> backend_python=true (full run)" ;;
+                1) backend_python=false; echo "no backend/ change -> backend_python=false (only the tests that read outside backend/)" ;;
+                *) echo "backend check failed (grep exit ${rc})"; return 1 ;;
+              esac
+            }
+            if ! classify; then
               migrations=true
-              echo "migration-related change detected -> migrations=true"
-            else
-              migrations=false
-              echo "no migration-related change -> migrations=false"
-            fi
-            # --- docs-only classification (allow-list; #3252) ---
-            # docs-only IFF every changed path matches the allow-list:
-            #   ^docs/   any file under docs/
-            #   \.md$    any Markdown file anywhere (covers CHANGELOG.md,
-            #            README.md, docs/**/*.md, backend/README.md, ...)
-            # `grep -qvE` exits 0 iff SOME line does NOT match the allow-list
-            # — that line is a non-docs path (code / tests / workflows /
-            # configs / cli/ / deploy/ ...) and forces the full run. Only when
-            # grep finds no such line (exit 1) is the diff proven docs-only.
-            if grep -qvE '(^docs/|\.md$)' <<<"${changed}"; then
               docs_only=false
-              echo "non-docs file(s) present -> docs_only=false (full run)"
-            else
-              docs_only=true
-              echo "all changed files are docs/*.md -> docs_only=true (fast path)"
-            fi
-            # --- backend Python classification (#5296) ---
-            # backend_python=false only when no changed path, apart from
-            # `.md` files, is under backend/ or is this workflow file.
-            # grep exits 1 when it selects no line (every file is `.md`);
-            # any other non-zero exit is an error and keeps the full run.
-            rc=0
-            non_md="$(grep -vE '\.md$' <<<"${changed}")" || rc=$?
-            if [ "${rc}" -gt 1 ]; then
-              echo "could not filter the changed files -> backend_python=true (fail-safe full run)"
-            elif grep -qE '^(backend/|\.github/workflows/ci\.yml$)' <<<"${non_md}"; then
-              echo "backend/ or ci.yml change detected -> backend_python=true (full run)"
-            else
-              backend_python=false
-              echo "no backend/ change -> backend_python=false (only the tests that read outside backend/)"
+              backend_python=true
+              echo "classification failed -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python} (fail-safe full run)"
             fi
             # --- one-connector classification (#5297) ---
             # An error in the tool leaves single_connector empty (full run).

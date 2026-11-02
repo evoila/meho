@@ -69,11 +69,14 @@ def _git(repo: Path, *args: str) -> None:
     )
 
 
-def _detect(tmp_path: Path, event: str, changed: list[str] | None) -> dict[str, str]:
+def _detect(
+    tmp_path: Path, event: str, changed: list[str] | None, *, tool_dir: Path | None = None
+) -> dict[str, str]:
     """Run the detect step and return its outputs.
 
     ``changed`` lists the files the pull request changes. ``None`` builds a
     repository with one commit only, so ``git diff HEAD^1 HEAD`` fails.
+    ``tool_dir`` goes first on ``PATH``, so a test can replace a tool.
     """
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -92,7 +95,10 @@ def _detect(tmp_path: Path, event: str, changed: list[str] | None) -> dict[str, 
     script = _step_script("changes", step_id="detect").replace("${{ github.event_name }}", event)
     output = tmp_path / "github_output"
     output.write_text("")
-    env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "GITHUB_OUTPUT": str(output)}
+    search_path = "/usr/bin:/bin:/usr/local/bin"
+    if tool_dir is not None:
+        search_path = f"{tool_dir}:{search_path}"
+    env = {"PATH": search_path, "GITHUB_OUTPUT": str(output)}
     result = _bash(script, repo, env)
     assert result.returncode == 0, result.stdout + result.stderr
     return dict(line.split("=", 1) for line in output.read_text().splitlines())
@@ -168,6 +174,26 @@ def test_large_diff_with_a_backend_change_runs_everything(tmp_path: Path) -> Non
     assert outputs["migrations"] == "true"
     assert outputs["docs_only"] == "false"
     assert outputs["backend_python"] == "true"
+
+
+def test_failing_classifier_runs_everything(tmp_path: Path) -> None:
+    # A classifier `grep` that fails (exit code 2, not the "no match" exit
+    # code 1) is an error, not an answer. The detector must then keep every
+    # fail-safe default, also for a change that is not docs-only.
+    tool_dir = tmp_path / "bin"
+    tool_dir.mkdir()
+    fake_grep = tool_dir / "grep"
+    fake_grep.write_text("#!/bin/sh\nexit 2\n")
+    fake_grep.chmod(0o755)
+    outputs = _detect(
+        tmp_path, "pull_request", ["backend/src/meho_backplane/app.py"], tool_dir=tool_dir
+    )
+    assert outputs == {
+        "migrations": "true",
+        "docs_only": "false",
+        "backend_python": "true",
+        "single_connector": "",
+    }
 
 
 def test_non_ascii_backend_path_runs_everything(tmp_path: Path) -> None:

@@ -65,6 +65,13 @@ _SPEC_PARAMS: dict[str, Any] = {
     }
 }
 _PLAIN_PARAMS: dict[str, Any] = {"vm": "vm-42", "state": "off"}
+_NUMERIC_PW = 12345678
+_NUMERIC_PARAMS: dict[str, Any] = {
+    "spec": {"sddcId": "lab-1", "rootPassword": _NUMERIC_PW, "hostCount": 4}
+}
+_HIDDEN_NUMERIC_PARAMS: dict[str, Any] = {
+    "spec": {"sddcId": "lab-1", "rootPassword": _MARKER, "hostCount": 4}
+}
 
 
 @pytest.fixture(autouse=True)
@@ -240,6 +247,49 @@ async def test_params_without_secret_fields_stay_as_they_are(
 
     assert result.status == "ok"
     assert await _stored_params(request_id) == _PLAIN_PARAMS
+
+
+@pytest.mark.asyncio
+async def test_password_sent_as_a_number_is_hidden_after_the_run(
+    fake_dispatch: _FakeDispatch,
+) -> None:
+    request_id = await _park(_NUMERIC_PARAMS, approved=True)
+
+    result = await resume_dispatch_after_approval(
+        operator=_requester(), request=await _load(request_id)
+    )
+
+    assert result.status == "ok"
+    assert fake_dispatch.calls[0]["params"] == _NUMERIC_PARAMS
+    assert await _stored_params(request_id) == _HIDDEN_NUMERIC_PARAMS
+
+
+@pytest.mark.asyncio
+async def test_rerun_with_a_hidden_numeric_password_needs_the_params_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeDispatch(status="error")
+    monkeypatch.setattr(dispatcher_module, "dispatch", fake)
+    request_id = await _park(_NUMERIC_PARAMS, approved=True)
+    first = await resume_dispatch_after_approval(
+        operator=_requester(), request=await _load(request_id)
+    )
+    assert first.status == "error"
+
+    with pytest.raises(RerunParamsRequiredError):
+        await rerun_failed_request(operator=_requester(), request_id=request_id)
+    assert len(fake.calls) == 1, "nothing ran with the hidden values"
+
+
+@pytest.mark.asyncio
+async def test_rejected_request_keeps_no_numeric_password() -> None:
+    request_id = await _park(_NUMERIC_PARAMS)
+
+    async with get_sessionmaker()() as s:
+        await reject_request(s, request_id, operator=_reviewer(), reason="wrong spec")
+        await s.commit()
+
+    assert await _stored_params(request_id) == _HIDDEN_NUMERIC_PARAMS
 
 
 @pytest.mark.asyncio

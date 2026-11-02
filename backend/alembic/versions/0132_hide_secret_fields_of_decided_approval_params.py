@@ -19,8 +19,8 @@ run still needs the values, and the queue hides them when it ends.
 
 The name rule is the one the queue uses
 (:func:`meho_backplane.broadcast.events.scrub_secret_named_values`:
-``password``, ``licenseKey``, ``client_secret``, ...). It is imported
-inside ``upgrade()`` on purpose: the rule is a pure function, not an ORM
+``password``, ``licenseKey``, ``client_secret``, ...; a number under such
+a name is hidden too). It is imported inside ``upgrade()`` on purpose: the rule is a pure function, not an ORM
 model, and one copy of it keeps this step and the running code in
 agreement. The other fields of the params keep their value.
 
@@ -65,7 +65,7 @@ def upgrade() -> None:
         )
     ).fetchall()
     for row_id, params in rows:
-        hidden, found = scrub_secret_named_values(params)
+        hidden, found = scrub_secret_named_values(params, hide_numbers=True)
         if not found:
             continue
         bind.execute(sa.update(requests).where(requests.c.id == row_id).values(params=hidden))

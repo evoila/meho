@@ -1886,12 +1886,13 @@ def params_with_secret_fields_hidden(params: dict[str, Any] | None) -> dict[str,
     ``None`` when *params* is ``None`` or holds no secret-named value
     (``password``, ``licenseKey``, ``client_secret``, ...; the name rule of
     :func:`~meho_backplane.broadcast.events.scrub_secret_named_values`), so
-    a row without such a field is never rewritten. The other fields keep
-    their value, as in the audit row's raw copy.
+    a row without such a field is never rewritten. A number under such a
+    name (a PIN, a password sent as a number) is hidden too. The other
+    fields keep their value, as in the audit row's raw copy.
     """
     if params is None:
         return None
-    hidden, found = scrub_secret_named_values(params)
+    hidden, found = scrub_secret_named_values(params, hide_numbers=True)
     if not found:
         return None
     return cast(dict[str, Any], hidden)

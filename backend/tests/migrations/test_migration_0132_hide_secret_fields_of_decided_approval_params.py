@@ -6,8 +6,9 @@
 The migration rewrites ``approval_request.params`` of every row that is no
 longer ``pending``: each secret-named value (``rootPassword``,
 ``licenseKey``, ``credentials``, ...) becomes the marker, the other fields
-keep their value. A pending row, a row without such a field and a row
-without params are left as they are.
+keep their value, a password sent as a number is hidden too. A pending
+row, a row without such a field and a row without params are left as they
+are.
 
 Every step targets this migration's own revision (``0132``) and its
 ``down_revision`` (``0131``), never ``head``, so a later migration cannot
@@ -46,6 +47,8 @@ _SPEC_PARAMS: dict[str, Any] = {
     }
 }
 _PLAIN_PARAMS: dict[str, Any] = {"vm": "vm-42", "state": "off"}
+_NUMERIC_PARAMS: dict[str, Any] = {"spec": {"sddcId": "lab-1", "rootPassword": 12345678}}
+_HIDDEN_NUMERIC_PARAMS: dict[str, Any] = {"spec": {"sddcId": "lab-1", "rootPassword": _MARKER}}
 
 
 @pytest.fixture
@@ -126,6 +129,7 @@ def test_decided_rows_keep_no_secret_values_and_the_rest_stay(
             pending = _insert(conn, status="pending", params=_SPEC_PARAMS)
             plain = _insert(conn, status="approved", params=_PLAIN_PARAMS)
             no_params = _insert(conn, status="approved", params=None)
+            numeric = _insert(conn, status="rejected", params=_NUMERIC_PARAMS)
     finally:
         sync_eng.dispose()
 
@@ -135,6 +139,7 @@ def test_decided_rows_keep_no_secret_values_and_the_rest_stay(
     for row_id in (approved, rejected, expired):
         assert params[row_id] == _hidden_spec()
         assert _PW_SENTINEL not in json.dumps(params[row_id])
+    assert params[numeric] == _HIDDEN_NUMERIC_PARAMS, "a password sent as a number is hidden"
     assert params[pending] == _SPEC_PARAMS, "a waiting request still needs its values"
     assert params[plain] == _PLAIN_PARAMS
     assert params[no_params] is None

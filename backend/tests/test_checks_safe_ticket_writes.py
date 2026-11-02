@@ -35,11 +35,14 @@ from meho_backplane.checks.service import (
 from meho_backplane.connectors.github.op_classes import TICKET_WRITE_OP_IDS
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, Tenant
+from meho_backplane.op_classes import declared_op_class
 from meho_backplane.settings import get_settings
 
 _TENANT = UUID("abababab-abab-abab-abab-abababababab")
 _CONNECTOR_ID = "gh-rest-3"
 _READ_OP = "gh.composite.issue_view"
+_VMWARE_CONNECTOR_ID = "vmware-rest-9.0"
+_VMWARE_READ_OP = "vmware.composite.vm.guest.process.list"
 _ASSERTION: dict[str, Any] = {
     "select": {"path": "$.count"},
     "compare": {"type": "threshold", "op": "lt", "critical": 10},
@@ -56,16 +59,18 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
-async def _seed(op_id: str) -> None:
+async def _seed(
+    op_id: str, *, product: str = "gh", version: str = "3", impl_id: str = "gh-rest"
+) -> None:
     """A tenant and a global, enabled, ``safe`` composite row for *op_id*."""
     async with get_sessionmaker()() as session:
         if (await session.execute(select(Tenant).where(Tenant.id == _TENANT))).scalar() is None:
             session.add(Tenant(id=_TENANT, slug="tenant-gh", name="Tenant gh"))
         session.add(
             EndpointDescriptor(
-                product="gh",
-                version="3",
-                impl_id="gh-rest",
+                product=product,
+                version=version,
+                impl_id=impl_id,
                 op_id=op_id,
                 source_kind="composite",
                 handler_ref=f"tests.fake:{op_id}",
@@ -77,11 +82,11 @@ async def _seed(op_id: str) -> None:
         await session.commit()
 
 
-def _payload(op_id: str) -> SensorCreate:
+def _payload(op_id: str, connector_id: str = _CONNECTOR_ID) -> SensorCreate:
     return SensorCreate.model_validate(
         {
             "name": f"sensor-{op_id}",
-            "connector_id": _CONNECTOR_ID,
+            "connector_id": connector_id,
             "op_id": op_id,
             "assertion": _ASSERTION,
             "cadence_kind": "interval",
@@ -90,12 +95,12 @@ def _payload(op_id: str) -> SensorCreate:
     )
 
 
-def _snapshot(op_id: str) -> _SensorSnapshot:
+def _snapshot(op_id: str, connector_id: str = _CONNECTOR_ID) -> _SensorSnapshot:
     return _SensorSnapshot(
         id=uuid.uuid4(),
         tenant_id=_TENANT,
         name="s",
-        connector_id=_CONNECTOR_ID,
+        connector_id=connector_id,
         op_id=op_id,
         target=None,
         params={},
@@ -141,3 +146,20 @@ async def test_the_runner_floor_never_dispatches_a_ticket_write(op_id: str) -> N
 async def test_the_runner_floor_lets_a_safe_read_through() -> None:
     await _seed(_READ_OP)
     assert await _safe_tier_floor(_snapshot(_READ_OP)) is None
+
+
+@pytest.mark.asyncio
+async def test_a_safe_op_of_another_connector_declared_write_is_still_a_sensor_op() -> None:
+    # vSphere's guest process list is declared ``credential_write`` for the feed, but it
+    # is not a safe write, so a Sensor may still use it and the runner runs it.
+    import meho_backplane.connectors.vmware_rest.op_classes  # noqa: F401
+
+    assert declared_op_class(_VMWARE_READ_OP) == "credential_write"
+    await _seed(_VMWARE_READ_OP, product="vmware", version="9.0", impl_id="vmware-rest")
+    entry = await SensorAdminService().create(
+        tenant_id=_TENANT,
+        created_by_sub="op-admin",
+        payload=_payload(_VMWARE_READ_OP, _VMWARE_CONNECTOR_ID),
+    )
+    assert entry.name == f"sensor-{_VMWARE_READ_OP}"
+    assert await _safe_tier_floor(_snapshot(_VMWARE_READ_OP, _VMWARE_CONNECTOR_ID)) is None

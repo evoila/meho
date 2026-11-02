@@ -164,8 +164,8 @@ value, so it needs no migration:
 | `caution` | `REMOTE_WRITE` | mints **only** through the composed write-path gate; fail-closed today |
 | `dangerous`, `destructive` (or unknown) | `EXCLUDED` | **never** minted to a satellite |
 
-One exception: a `safe` operation that its connector declares as a change
-(`declared_as_change` in `meho_backplane.op_classes`, for example the GitHub
+One exception: a `safe` operation that its connector marks as a safe write
+(`declare_safe_writes` / `is_safe_write` in `meho_backplane.op_classes`, for example the GitHub
 ticket writes that need no approval,
 [`docs/decisions/2026-11-02-github-ticket-writes-are-safe.md`](../decisions/2026-11-02-github-ticket-writes-are-safe.md))
 is `EXCLUDED`, never the read path. So `classify_satellite_tier` takes the

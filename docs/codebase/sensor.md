@@ -106,8 +106,8 @@ See `docs/codebase/audit_query.md` § *Loose rows: the standing check*.
    `_run_evaluation`, "Dispatch identity"): a descriptor re-ingested
    above `safe` after create records `unknown`
    (`reason: op_not_safe_at_dispatch`) instead of auto-executing on
-   schedule. A `safe` operation that its connector declares as a change
-   (`declared_as_change` in `meho_backplane.op_classes`, for example the
+   schedule. A `safe` operation that its connector marks as a safe write
+   (`declare_safe_writes` / `is_safe_write` in `meho_backplane.op_classes`, for example the
    GitHub ticket writes, which need no approval) is refused the same way:
    422 `sensor_requires_safe_operation` at create
    (`SensorRequiresReadOperationError`) and `unknown`

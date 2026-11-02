@@ -62,7 +62,7 @@ from sqlalchemy import select
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.delete_names import write_word_in_op_id
-from meho_backplane.op_classes import declared_as_change
+from meho_backplane.op_classes import is_safe_write
 from meho_backplane.operations._param_errors import describe_violation
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS
 from meho_backplane.operations.typed_register import run_typed_op_registrars
@@ -95,10 +95,10 @@ READS_WITH_A_WRITE_WORD: Final[Mapping[str, str]] = {
 }
 
 #: Writes that are ``safe`` on purpose: they need no approval. Each names the
-#: decision record that says why. Their connector declares them as a change
+#: decision record that says why. Their connector marks them as safe writes
 #: (``meho_backplane.op_classes``), so no health check and no satellite runner
 #: takes them as reads. The live test fails when an entry is no longer a
-#: registered ``safe`` operation or is not declared as a change.
+#: registered ``safe`` operation or is not marked as a safe write.
 _TICKET_WRITES_DECISION: Final[str] = (
     "a GitHub ticket write inside the target's repository and board; "
     "docs/decisions/2026-11-02-github-ticket-writes-are-safe.md"
@@ -483,13 +483,15 @@ async def test_reads_with_a_write_word_are_registered_and_safe() -> None:
 
 
 @pytest.mark.asyncio
-async def test_safe_writes_on_purpose_are_registered_safe_and_declared_as_changes() -> None:
-    """Each safe write is a registered 'safe' operation that its connector declares a change."""
+async def test_safe_writes_on_purpose_are_registered_safe_and_marked() -> None:
+    """Each safe write is a registered 'safe' operation that its connector marks as a safe write."""
     safe_ops = {op.op_id for op in await _registered_operations() if op.safety_level == "safe"}
     stale = sorted(set(SAFE_WRITES_ON_PURPOSE) - safe_ops)
     assert not stale, f"not registered as a 'safe' operation; remove from the list: {stale}"
-    undeclared = sorted(op_id for op_id in SAFE_WRITES_ON_PURPOSE if not declared_as_change(op_id))
-    assert not undeclared, f"declare these as a change in the connector's op_classes: {undeclared}"
+    undeclared = sorted(op_id for op_id in SAFE_WRITES_ON_PURPOSE if not is_safe_write(op_id))
+    assert not undeclared, (
+        f"mark these with declare_safe_writes in the connector's op_classes: {undeclared}"
+    )
 
 
 def test_gap_list_names_only_known_rules() -> None:

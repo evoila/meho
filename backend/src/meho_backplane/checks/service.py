@@ -75,7 +75,7 @@ from meho_backplane.checks.schemas import (
 from meho_backplane.db.connector_usage_lock import lock_connector_usage_shared
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, Sensor, SensorResult
-from meho_backplane.op_classes import declared_as_change
+from meho_backplane.op_classes import is_safe_write
 from meho_backplane.operations._lookup import (
     lookup_descriptor,
     parse_connector_id,
@@ -171,8 +171,8 @@ class SensorRequiresReadOperationError(SensorRequiresSafeOperationError):
 
     A few writes are ``safe`` because they need no approval, for example the
     GitHub ticket writes (``docs/decisions/2026-11-02-github-ticket-writes-are-safe.md``).
-    Their connector declares them as a change
-    (:func:`meho_backplane.op_classes.declared_as_change`). A Sensor would run
+    Their connector marks them as safe writes
+    (:func:`meho_backplane.op_classes.is_safe_write`). A Sensor would run
     such a write on every tick with no person, so it is refused like any other
     non-read. Same error code and status as the parent class.
     """
@@ -389,13 +389,13 @@ def _require_read(payload: SensorCreate, descriptor: EndpointDescriptor) -> None
 
     Raises :class:`SensorRequiresSafeOperationError` for a non-safe op and
     :class:`SensorRequiresReadOperationError` for a safe op its connector
-    declares as a change (:func:`~meho_backplane.op_classes.declared_as_change`).
+    marks as a safe write (:func:`~meho_backplane.op_classes.is_safe_write`).
     """
     if descriptor.safety_level != "safe":
         raise SensorRequiresSafeOperationError(
             payload.connector_id, payload.op_id, descriptor.safety_level
         )
-    if declared_as_change(payload.op_id):
+    if is_safe_write(payload.op_id):
         raise SensorRequiresReadOperationError(
             payload.connector_id, payload.op_id, descriptor.safety_level
         )

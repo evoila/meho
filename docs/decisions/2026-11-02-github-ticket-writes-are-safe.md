@@ -70,7 +70,8 @@ is not part of this decision.
 - A ticket write never starts a run, a check, an approval or an operation
   in MEHO.
 - "Safe" does not mean "read" for these five. The GitHub connector declares
-  them as writes (`connectors/github/op_classes.py`). So:
+  them as writes and marks them as safe writes
+  (`connectors/github/op_classes.py`). Only these five are on that list. So:
   - a health check (Sensor) cannot be made with one of them, and the check
     runner never runs one;
   - a satellite runner never takes one on its read path;

@@ -217,8 +217,10 @@ Two guards make "safe" true:
    - MEHO never reads a ticket's state, label or comment as an
      instruction, and a ticket write never starts a run, a check, an
      approval or an operation in MEHO.
-   - `connectors/github/op_classes.py` declares the five as `write`
-     (`meho_backplane.op_classes`). So "safe" does not mean "read" for
+   - `connectors/github/op_classes.py` declares the five as `write` and
+     marks them as safe writes (`declare_safe_writes` in
+     `meho_backplane.op_classes`; no other connector's op is on that
+     list). So "safe" does not mean "read" for
      them: a health check (Sensor) refuses them at create and the check
      runner never runs them (`checks/service.py`, `_safe_tier_floor` in
      `checks/runner.py`); a satellite runner never takes them on its read

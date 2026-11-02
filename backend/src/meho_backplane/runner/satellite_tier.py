@@ -27,7 +27,7 @@ The ladder (``safety_level`` → tier), composing with the destructive tier
 
 * ``safe`` → :attr:`SatelliteMintTier.SAFE` — mints on ``AUTO_EXECUTE``, the
   Stage-0 read path, semantics **unchanged**. One exception: a ``safe`` op its
-  connector declares as a change (:func:`meho_backplane.op_classes.declared_as_change`,
+  connector marks as a safe write (:func:`meho_backplane.op_classes.is_safe_write`,
   for example a GitHub ticket write that needs no approval) is a write, not a
   read, so it is :attr:`SatelliteMintTier.EXCLUDED`.
 * ``caution`` → :attr:`SatelliteMintTier.REMOTE_WRITE` — the additive,
@@ -55,7 +55,7 @@ from enum import StrEnum
 from fnmatch import fnmatchcase
 
 # ``op_classes`` imports nothing from MEHO, so the edge stays DB-free.
-from meho_backplane.op_classes import declared_as_change
+from meho_backplane.op_classes import is_safe_write
 
 __all__ = [
     "REMOTE_WRITE_SAFETY_LEVELS",
@@ -113,11 +113,11 @@ def classify_satellite_tier(safety_level: str, *, op_id: str) -> SatelliteMintTi
     from riding a runner until this ladder is deliberately updated.
 
     ``op_id`` is required so no caller forgets it: a ``safe`` op that its
-    connector declares as a change is :attr:`SatelliteMintTier.EXCLUDED`, never
+    connector marks as a safe write is :attr:`SatelliteMintTier.EXCLUDED`, never
     the read path.
     """
     if safety_level == "safe":
-        if declared_as_change(op_id):
+        if is_safe_write(op_id):
             return SatelliteMintTier.EXCLUDED
         return SatelliteMintTier.SAFE
     if safety_level == "caution":

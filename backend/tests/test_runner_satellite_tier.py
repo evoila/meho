@@ -59,6 +59,17 @@ def test_a_safe_op_with_no_declared_change_stays_on_the_read_path() -> None:
     )
 
 
+def test_a_safe_op_of_another_connector_declared_write_stays_on_the_read_path() -> None:
+    # vSphere's guest process list is declared ``credential_write`` for the feed, but it
+    # is not a safe write, so a satellite still takes it as a read.
+    import meho_backplane.connectors.vmware_rest.op_classes  # noqa: F401
+    from meho_backplane.op_classes import declared_op_class
+
+    op_id = "vmware.composite.vm.guest.process.list"
+    assert declared_op_class(op_id) == "credential_write"
+    assert classify_satellite_tier("safe", op_id=op_id) is SatelliteMintTier.SAFE
+
+
 def test_remote_write_gate_is_fail_closed() -> None:
     # The composed gate (allowlist + approval/policy) is unprovisioned until
     # the sibling tasks wire it, so it refuses every remote-write op.

@@ -35,12 +35,12 @@ from collections.abc import Iterable
 from typing import Final
 
 __all__ = [
-    "CHANGE_OP_CLASSES",
     "DECLARABLE_OP_CLASSES",
     "declare_op_classes",
-    "declared_as_change",
+    "declare_safe_writes",
     "declared_op_class",
     "declared_op_ids",
+    "is_safe_write",
 ]
 
 #: The classes a connector may declare. ``credential_read``: the answer
@@ -52,17 +52,8 @@ DECLARABLE_OP_CLASSES: Final[frozenset[str]] = frozenset(
     {"credential_read", "credential_mint", "credential_write", "write"}
 )
 
-#: The declared classes of an operation that changes something. A ``safe``
-#: operation with one of these classes is a write that needs no approval
-#: (for example a GitHub ticket write, see
-#: ``docs/decisions/2026-11-02-github-ticket-writes-are-safe.md``). It is
-#: never a read: a health check may not run it, and it never rides the
-#: read path of a satellite runner.
-CHANGE_OP_CLASSES: Final[frozenset[str]] = frozenset(
-    {"credential_mint", "credential_write", "write"}
-)
-
 _DECLARED: dict[str, str] = {}
+_SAFE_WRITES: set[str] = set()
 
 
 def declare_op_classes(
@@ -100,9 +91,20 @@ def declared_op_class(op_id: str) -> str | None:
     return _DECLARED.get(op_id)
 
 
-def declared_as_change(op_id: str) -> bool:
-    """Return ``True`` when *op_id* is declared with a class in :data:`CHANGE_OP_CLASSES`."""
-    return _DECLARED.get(op_id) in CHANGE_OP_CLASSES
+def declare_safe_writes(op_ids: Iterable[str]) -> None:
+    """Mark *op_ids* as ``safe`` writes: they need no approval, but they change things.
+
+    Only a connector that registers such a write calls this, for example the
+    GitHub ticket writes (``docs/decisions/2026-11-02-github-ticket-writes-are-safe.md``).
+    A health check never runs a safe write, and a satellite runner never takes
+    one as a read. Safe to call twice with the same ids.
+    """
+    _SAFE_WRITES.update(op_ids)
+
+
+def is_safe_write(op_id: str) -> bool:
+    """Return ``True`` when a connector marked *op_id* with :func:`declare_safe_writes`."""
+    return op_id in _SAFE_WRITES
 
 
 def declared_op_ids(op_class: str) -> frozenset[str]:
@@ -113,3 +115,4 @@ def declared_op_ids(op_class: str) -> frozenset[str]:
 def _reset_declared_op_classes_for_testing() -> None:
     """Forget every declaration. Test-only."""
     _DECLARED.clear()
+    _SAFE_WRITES.clear()

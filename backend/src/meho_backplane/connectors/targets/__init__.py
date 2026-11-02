@@ -3,7 +3,9 @@
 
 """meho_backplane.connectors.targets — targetless target-registry write ops.
 
-``targets.register`` (#2861) and its opposite ``targets.remove`` (#4623).
+``targets.register`` (#2861) and its opposite ``targets.remove`` (#4623),
+plus ``targets.probe``, which detects a target's product and version
+(``probe.py``).
 
 The third **synthetic** connector subpackage (after ``secret`` and
 ``topology``): no vendor connector backs it. Importing the package (the
@@ -40,15 +42,19 @@ from meho_backplane.connectors.targets.ops import (
     build_targets_remove_preview,
     register_targets_registry_operations,
 )
+from meho_backplane.connectors.targets.probe import register_targets_probe_operation
 from meho_backplane.operations._preview import register_preview_builder
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 
 # Queue the targets.* typed-op upserts onto the lifespan-driven registrar
 # list (run after the connector eager-import pass).
 register_typed_op_registrar(register_targets_registry_operations)
+# targets.probe lives in its own module, with its own registrar.
+register_typed_op_registrar(register_targets_probe_operation)
 # The preview of targets.remove names the target and its topology count.
 register_preview_builder(TARGETS_REMOVE_OP_ID, build_targets_remove_preview)
 
 __all__ = [
+    "register_targets_probe_operation",
     "register_targets_registry_operations",
 ]

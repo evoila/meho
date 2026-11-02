@@ -187,7 +187,7 @@ from meho_backplane.targets.secret_field_map import (
 )
 from meho_backplane.targets.vault_login_extras import enforce_vault_login_extras_platform_admin
 
-__all__ = ["count_graph_node_refs", "router", "soft_delete_target"]
+__all__ = ["count_graph_node_refs", "probe_and_store_fingerprint", "router", "soft_delete_target"]
 
 _log = structlog.get_logger(__name__)
 
@@ -1327,6 +1327,24 @@ async def probe_target(
     No error branch writes to the DB row, so the column always
     reflects the *last successful* probe. The path value is a name,
     an alias or an id (:func:`_resolve_route_target`); no match is 404.
+    The work is done by :func:`probe_and_store_fingerprint`, which the
+    ``targets.probe`` operation calls too.
+    """
+    _, fp = await probe_and_store_fingerprint(session, name, operator=operator)
+    return fp
+
+
+async def probe_and_store_fingerprint(
+    session: AsyncSession, name: str, *, operator: Operator
+) -> tuple[TargetORM, FingerprintResult]:
+    """Detect a target's product and version and store it on the target row.
+
+    The one code path behind ``POST /api/v1/targets/{name}/probe`` and the
+    ``targets.probe`` operation. *name* is a name, an alias or an id of a
+    target in the operator's tenant. Returns the target row and the
+    detected fingerprint. Raises :class:`HTTPException` with the status
+    codes :func:`probe_target` lists. The caller owns the transaction:
+    this function only ``flush``-es.
     """
     t = await _resolve_route_target(session, operator.tenant_id, name)
     cls, label, exception_message = resolve_connector_or_label(t)
@@ -1377,7 +1395,7 @@ async def probe_target(
     # follow-up SELECT in this request without forcing an explicit
     # commit (which would close the outer transaction mid-handler).
     await session.flush()
-    return fp
+    return t, fp
 
 
 def _resolve_create_secret_ref(body: TargetCreate, operator: Operator) -> str | None:

@@ -50,7 +50,13 @@ from meho_backplane.agent.run import PydanticAgentRun
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentDefinition, AgentRunStatus, AgentRunTrigger, Tenant
+from meho_backplane.db.models import (
+    AgentDefinition,
+    AgentRun,
+    AgentRunStatus,
+    AgentRunTrigger,
+    Tenant,
+)
 from meho_backplane.main import app
 from meho_backplane.operations.agent_run import create_run
 from meho_backplane.settings import get_settings
@@ -405,6 +411,70 @@ async def test_run_events_streams_sse(client: TestClient) -> None:
     assert "event: turn" in body
     assert "event: final" in body
     assert "streamed answer" in body
+
+
+def _agent_token(key: Any, *, client_id: str) -> str:
+    """An agent login whose token names *client_id* as the authorized party."""
+    return mint_token(
+        key,
+        sub=f"{client_id}-sub",
+        tenant_role=TenantRole.OPERATOR.value,
+        tenant_id=str(_TENANT_A),
+        principal_kind="agent",
+        extra_claims={"azp": client_id},
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_token_runs_only_its_own_definition(client: TestClient) -> None:
+    """An agent starts its own definition; another agent's definition is 403."""
+    await _seed_definition(name="triage")
+    await _seed_definition(name="other-bot")
+    _install_invoker("triaged: ok")
+    key = make_rsa_keypair("kid-agent-owner")
+    headers = {"Authorization": f"Bearer {_agent_token(key, client_id='agent:triage')}"}
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        own = client.post("/api/v1/agents/triage/run", json={"input": "go"}, headers=headers)
+        other = client.post("/api/v1/agents/other-bot/run", json={"input": "go"}, headers=headers)
+        other_events = client.post(
+            "/api/v1/agents/other-bot/run/events", json={"input": "go"}, headers=headers
+        )
+    assert own.status_code == 200, own.text
+    assert other.status_code == 403, other.text
+    assert other.json()["detail"] == "agent_not_owned"
+    assert other_events.status_code == 403, other_events.text
+    assert other_events.json()["detail"] == "agent_not_owned"
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        names = (
+            (
+                await session.execute(
+                    select(AgentDefinition.name)
+                    .join(AgentRun, AgentRun.agent_definition_id == AgentDefinition.id)
+                    .where(AgentRun.tenant_id == _TENANT_A)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert names == ["triage"]
+
+
+@pytest.mark.asyncio
+async def test_person_starts_any_definition(client: TestClient) -> None:
+    """A person with the operator role starts a definition of any agent."""
+    await _seed_definition(name="other-bot")
+    _install_invoker("done")
+    key = make_rsa_keypair("kid-person-any")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/agents/other-bot/run",
+            json={"input": "go"},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+    assert resp.status_code == 200, resp.text
 
 
 @pytest.mark.asyncio

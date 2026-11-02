@@ -59,16 +59,9 @@ copy this pattern in G3.x).
 
 * `KUBERNETES_OPS` (`backend/src/meho_backplane/connectors/kubernetes/ops.py`)
   -- the tuple of `KubernetesOp` entries the connector registers at
-  lifespan startup. Currently carries:
-
-  | op_id        | handler            | scope                  |
-  |--------------|--------------------|------------------------|
-  | `k8s.about`  | `about`            | cluster identity       |
-  | `k8s.logs`   | `logs` (→ `ops_logs.k8s_logs`) | pod log fetch  |
-
-  G3.2-T2 / T3 / T4 add the rest of the 13-op v0.2 read surface
-  against this same tuple. The full, current op list is in
-  [`connectors-kubernetes.md`](connectors-kubernetes.md#shipped-op-surface).
+  lifespan startup. `ops.py` collects it from the `OPS` of every
+  `ops_*` module; see
+  [`connectors-kubernetes.md`](connectors-kubernetes.md#module-layout-where-an-op-lives).
 
 * `ops_secret_list.py` (`k8s.secret.list` / `k8s.secret.info`)
   -- two safe reads that list Secrets and describe one Secret by

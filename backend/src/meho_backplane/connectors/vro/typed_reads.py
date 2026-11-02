@@ -19,15 +19,19 @@ and returns ``{"items": [...]}``, so MEHO can store a long list behind a
 result handle and the agent can filter it with ``result_query``.
 
 **Secrets.** A workflow run's inputs and outputs can hold passwords. A
-parameter whose type is ``SecureString``, whose ``encrypt-value`` flag is
-set, or whose name is a secret name comes back with its value replaced by
+parameter whose type holds a secret (``SecureString`` or
+``EncryptedString``, in any letter case, anywhere in the type name), whose
+``encrypt-value`` flag is set, whose name is a secret name, or whose value
+comes in a secret wrapper (``secure-string`` or ``encrypted-string``,
+whatever type is declared) comes back with its value replaced by
 :data:`REDACTED`. A name is secret when MEHO's shared rule
 (:func:`~meho_backplane.broadcast.events.is_secret_param_name`: password,
 passphrase, secret, token, API key, private key, ...) says so, or when it
 is one of the names listed here that the shared rule leaves out (bare
 ``license``, ``authorization``). Any field with such a name, at any depth,
-is replaced too. The connector masks the same fields before the flight
-recorder records a vendor answer.
+is replaced too. A secret wrapper at any depth (for example one element of
+a list) is replaced as well. The connector masks the same fields, with the
+same function, before the flight recorder records a vendor answer.
 
 **Checksum.** ``vro.workflow.get`` returns ``content_sha256``: the SHA-256
 of the workflow content in a fixed form (JSON with sorted keys and no
@@ -83,9 +87,14 @@ __all__ = [
     "LOG_TEXT_MAX",
     "OUTCOME_BY_STATE",
     "REDACTED",
+    "SECRET_VALUE_WRAPPERS",
     "VENDOR_CALLS",
     "content_sha256",
     "flat_rows",
+    "holds_secret_wrapper",
+    "is_secret_name",
+    "is_secret_parameter",
+    "path_segment",
     "redact_secrets",
     "vro_about_impl",
     "vro_execution_get_impl",
@@ -169,8 +178,14 @@ _SECRET_KEYS: Final[frozenset[str]] = frozenset(
         "licencekey",
         "license",
         "licence",
+        # The vendor's value wrappers that hold a secret (``secure-string``,
+        # ``encrypted-string``), so a wrapper at any depth is replaced.
+        "securestring",
+        "encryptedstring",
     }
 )
+#: The vendor's value wrapper keys that hold a secret, whatever type is declared.
+SECRET_VALUE_WRAPPERS: Final[frozenset[str]] = frozenset({"secure-string", "encrypted-string"})
 #: A key that ends with one of these (``adminPassword``, ``apiToken``) is secret too.
 _SECRET_SUFFIXES: Final[tuple[str, ...]] = (
     "password",
@@ -185,7 +200,7 @@ _SECRET_SUFFIXES: Final[tuple[str, ...]] = (
 )
 
 
-def _is_secret_name(key: object) -> bool:
+def is_secret_name(key: object) -> bool:
     """True when *key* names a secret: by the shared rule or by the lists above."""
     if not isinstance(key, str):
         return False
@@ -195,14 +210,25 @@ def _is_secret_name(key: object) -> bool:
     return name in _SECRET_KEYS or name.endswith(_SECRET_SUFFIXES)
 
 
-def _is_secret_parameter(param: dict[str, Any]) -> bool:
-    """A workflow parameter whose value must not come back."""
+def holds_secret_wrapper(value: Any) -> bool:
+    """True when *value* is a vendor value wrapper that holds a secret."""
+    return isinstance(value, dict) and not SECRET_VALUE_WRAPPERS.isdisjoint(value)
+
+
+def is_secret_parameter(param: dict[str, Any]) -> bool:
+    """A workflow parameter or attribute whose value must not come back.
+
+    True for a secret type, the ``encrypt-value`` flag, a secret name, or a
+    value in a secret wrapper (an attribute of type ``Any`` can hold one).
+    """
     kind = param.get("type")
-    if isinstance(kind, str) and "securestring" in kind.lower():
+    if isinstance(kind, str) and any(
+        word in kind.lower() for word in ("securestring", "encryptedstring")
+    ):
         return True
     if param.get("encrypt-value") is True:
         return True
-    return _is_secret_name(param.get("name"))
+    return is_secret_name(param.get("name")) or holds_secret_wrapper(param.get("value"))
 
 
 def _redact_object(value: dict[str, Any]) -> dict[str, Any]:
@@ -219,19 +245,21 @@ def redact_secrets(value: Any) -> Any:
         return value
     # Parameters are ``{name, type, value}``; Properties entries are ``{key, value}``.
     secret_param = "value" in value and (
-        ("name" in value and _is_secret_parameter(value)) or _is_secret_name(value.get("key"))
+        ("name" in value and is_secret_parameter(value))
+        or is_secret_name(value.get("key"))
+        or holds_secret_wrapper(value.get("value"))
     )
     return {
         key: (
             REDACTED
-            if _is_secret_name(key) or (secret_param and key == "value")
+            if is_secret_name(key) or (secret_param and key == "value")
             else redact_secrets(item)
         )
         for key, item in value.items()
     }
 
 
-def _segment(kind: str, value: Any) -> str:
+def path_segment(kind: str, value: Any) -> str:
     """Return *value* as one URL path segment, or raise ``ValueError``."""
     if not isinstance(value, str) or not value:
         raise ValueError(f"the {kind} id must be a non-empty string, got {value!r}")
@@ -425,7 +453,7 @@ async def vro_workflow_get_impl(
     Default values are not returned: they can hold secrets and are not
     needed to call the workflow.
     """
-    workflow_id = _segment("workflow", params.get("workflow_id"))
+    workflow_id = path_segment("workflow", params.get("workflow_id"))
     workflow = await connector._vro_get(
         target, _WORKFLOW_PATH.format(workflowId=workflow_id), operator=operator
     )
@@ -456,7 +484,7 @@ async def vro_execution_list_impl(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     """``vro.execution.list`` -- ``GET .../executions``, one flat row per run."""
-    workflow_id = _segment("workflow", params.get("workflow_id"))
+    workflow_id = path_segment("workflow", params.get("workflow_id"))
     payload = await connector._vro_get(
         target,
         _EXECUTIONS_PATH.format(workflowId=workflow_id),
@@ -474,7 +502,7 @@ def _run_parameters(params: Any) -> list[dict[str, Any]]:
         {
             "name": p.get("name"),
             "type": p.get("type"),
-            "value": REDACTED if _is_secret_parameter(p) else p.get("value"),
+            "value": REDACTED if is_secret_parameter(p) else p.get("value"),
         }
         for p in params
         if isinstance(p, dict)
@@ -530,8 +558,8 @@ async def vro_execution_get_impl(
     private address (the dispatcher returns ``connector_error`` with the
     guard's message).
     """
-    workflow_id = _segment("workflow", params.get("workflow_id"))
-    execution_id = _segment("execution", params.get("execution_id"))
+    workflow_id = path_segment("workflow", params.get("workflow_id"))
+    execution_id = path_segment("execution", params.get("execution_id"))
     checked_at = datetime.now(UTC).isoformat()
     try:
         payload = await connector._vro_get(
@@ -610,8 +638,8 @@ async def vro_execution_logs_impl(
     Each text is cut at :data:`LOG_TEXT_MAX` characters, after the shared
     secret rules ran on the whole text; a cut row has ``cut: true``.
     """
-    workflow_id = _segment("workflow", params.get("workflow_id"))
-    execution_id = _segment("execution", params.get("execution_id"))
+    workflow_id = path_segment("workflow", params.get("workflow_id"))
+    execution_id = path_segment("execution", params.get("execution_id"))
     max_lines = int(params.get("max_lines", _DEFAULT_LOG_LINES))
     payload = await connector._vro_get(
         target,

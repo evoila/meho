@@ -342,7 +342,8 @@
     "GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}",
     "PATCH:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}",
     "DELETE:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}",
-    "POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=disconnect"
+    "POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=disconnect",
+    "POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=connect"
   ],
   "vmware.composite.vm.disk.attach": [
     "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",

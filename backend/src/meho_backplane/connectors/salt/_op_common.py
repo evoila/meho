@@ -9,17 +9,22 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 __all__ = [
+    "ENDED_JOB_STATUSES",
     "GROUP_JOBS",
     "GROUP_MINIONS",
     "GROUP_SERVER",
     "JOB_STATES",
+    "JOB_STATUSES",
+    "JOB_STATUS_BY_STATE",
     "KEY_ROW_PROPERTIES",
     "KEY_STATES",
     "KEY_STATE_SCHEMA",
     "MASTER_ID_SCHEMA",
     "MINION_ID_SCHEMA",
     "PAGE_SCHEMA",
+    "RUNNING_JOB_STATES",
     "TAGS",
+    "WRITE_TAGS",
     "SaltTypedOp",
 ]
 
@@ -48,6 +53,51 @@ JOB_STATES: tuple[str, ...] = (
 )
 
 
+#: The plain job status MEHO reports for each vendor job state. ``completed``
+#: (no minion returned) and ``completed_missing_returns`` are ``incomplete``.
+JOB_STATUS_BY_STATE: dict[str, str] = {
+    "new": "queued",
+    "retrieved": "running",
+    "resuming": "running",
+    "resumed": "running",
+    "pausing": "paused",
+    "paused": "paused",
+    "stopping": "stopping",
+    "stopped": "stopped",
+    "skipped": "skipped",
+    "disabled": "skipped",
+    "completed_all_successful": "succeeded",
+    "completed_failures": "failed",
+    "completed_missing_returns": "incomplete",
+    "completed": "incomplete",
+}
+
+#: Every value ``job_status`` can have.
+JOB_STATUSES: tuple[str, ...] = (
+    "queued",
+    "running",
+    "paused",
+    "stopping",
+    "stopped",
+    "skipped",
+    "succeeded",
+    "failed",
+    "incomplete",
+    "unknown",
+    "not reachable",
+)
+
+#: Statuses of a job that has ended.
+ENDED_JOB_STATUSES: frozenset[str] = frozenset(
+    {"stopped", "skipped", "succeeded", "failed", "incomplete"}
+)
+
+#: Vendor states of a job that has not ended.
+RUNNING_JOB_STATES: tuple[str, ...] = tuple(
+    state for state, status in JOB_STATUS_BY_STATE.items() if status not in ENDED_JOB_STATUSES
+)
+
+
 @dataclass(frozen=True)
 class SaltTypedOp:
     """Metadata for one Salt typed op registered at lifespan startup."""
@@ -67,6 +117,9 @@ class SaltTypedOp:
 
 #: Tags every Salt read carries.
 TAGS = ("read-only", "salt", "aria-automation-config")
+
+#: Tags every Salt change carries.
+WRITE_TAGS = ("write", "salt", "aria-automation-config")
 
 
 def _text(description: str) -> dict[str, Any]:

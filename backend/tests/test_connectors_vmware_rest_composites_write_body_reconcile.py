@@ -64,6 +64,7 @@ _EXPECTED_REST_WRITE_OP_IDS = {
     "POST:/content/library/item/download-session/{downloadSessionId}?action=cancel",
     "POST:/esx/settings/hosts/{host}/software?action=apply&vmw-task=true",
     "POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=disconnect",
+    "POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=connect",
     "PATCH:/vcenter/vm/{vm}/hardware/cpu",
     "PATCH:/vcenter/vm/{vm}/hardware/memory",
     "PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}",

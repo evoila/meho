@@ -40,6 +40,16 @@ declare_op_classes(
         # BODY. Same posture as ``vcfa.provider.user.create``. The vRA 8
         # connector declares its ``vcfa.vra8.cloud_account.create`` twin.
         "vcfa.tenant.cloud_account.create",
+        # The sign-in changes. Their params carry only a Vault path
+        # (``password_secret_ref`` for the LDAP bind password,
+        # ``client_secret_ref`` for the OIDC client secret); the value is read
+        # in-process and sent only in the classic ``/api`` settings ``PUT``
+        # body. The class keeps those bodies out of the flight recorder, the
+        # params out of the broadcast and the vendor text out of a raised
+        # error's result.
+        "vcfa.provider.ldap.set",
+        "vcfa.provider.org.ldap.set",
+        "vcfa.provider.org.oidc.set",
     ),
     # A hand-written ``safe`` operation that is not a plain read: it makes
     # the target reload its image list. Without this class it would get

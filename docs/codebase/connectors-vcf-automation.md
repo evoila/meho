@@ -440,8 +440,12 @@ and is not covered.
   IaaS lists (`$top` and `$skip`, until `totalElements` rows are in) and of
   the content API lists (`page` and `size`, until `page.totalPages`), so the
   integration list, the Git sources with their last sync, and the "what uses
-  it" check of the remove see every row. A page that repeats the one before
-  it, or the 200th page, ends the read.
+  it" check of the remove see every row. A list MEHO cannot read to its end
+  (a page that repeats the one before it, or a list that has not ended after
+  200 pages) ends the op with an error (`IncompleteListError`) and returns
+  no row: a partial list would look complete, and the remove would miss a
+  user. The preview of the remove ends the same way, so the remove is not
+  queued.
 - **IPAM shape.** Learned on a real system; the public API file does not say
   it. The running environment is `faasProviderEndpointId` (the id of the
   `abx.endpoint` integration), the login goes at the top level

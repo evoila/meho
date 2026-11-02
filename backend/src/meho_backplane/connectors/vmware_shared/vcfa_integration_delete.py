@@ -6,9 +6,10 @@
 MEHO first lists what uses the integration: the external IP ranges an IPAM
 integration brought in, the network profiles whose networks carry those
 ranges, and the content sources that read through it. Each list is read to
-its last page. When something uses it,
-MEHO stops and removes nothing, unless the call sets ``confirm_in_use``. Then
-it sends ``DELETE /iaas/api/integrations/{id}`` and reads the vendor's request
+its last page; a list that cannot be read to its end ends the remove, and its
+preview, with an error (nothing is removed). When something uses it, MEHO
+stops and removes nothing, unless the call sets ``confirm_in_use``. Then it
+sends ``DELETE /iaas/api/integrations/{id}`` and reads the vendor's request
 tracker until it ends.
 
 The remove is ``destructive``: this module registers its preview builder for
@@ -70,7 +71,9 @@ async def integration_users(calls: Calls, integration_id: str) -> list[dict[str,
     """What uses the integration: its external IP ranges, their network profiles, sources.
 
     Each list is read to its last page: a user on a later page must stop the
-    remove too.
+    remove too. A list that cannot be read to its end raises
+    :class:`~.vcfa_integration_calls.IncompleteListError`, so the remove and
+    its preview stop instead of missing a user.
     """
     users: list[dict[str, Any]] = []
     ranges = [

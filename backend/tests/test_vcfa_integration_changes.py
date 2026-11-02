@@ -20,6 +20,7 @@ import respx
 from sqlalchemy import select
 
 from meho_backplane.connectors.vcf_automation import VcfAutomationConnector
+from meho_backplane.connectors.vmware_shared import vcfa_integration_calls as _calls
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS
@@ -184,16 +185,50 @@ async def test_remove_sees_the_users_on_a_later_page(vcfa: VcfAutomationConnecto
 
 
 async def test_remove_stops_when_a_list_repeats_its_page(vcfa: VcfAutomationConnector) -> None:
-    """An endpoint that ignores ``$skip`` answers the same full page again; the read ends."""
+    """An endpoint that ignores ``$skip`` answers the same full page again: the remove stops.
+
+    The vendor reports 900 rows and MEHO read 500, so a user may be on an
+    unread row. Nothing is removed.
+    """
     same = [{"id": f"r-{n}", "integrationId": "int-other"} for n in range(500)]
     with respx.mock(assert_all_called=False) as mock:
         mount_logins_full(mock)
         mock.get(f"{INTEGRATIONS}/int-ipam").respond(200, json=_IPAM)
         ranges = mock.get(RANGES).respond(200, json={"content": same, "totalElements": 900})
         mock.get(SOURCES).respond(200, json={"content": []})
-        mock.delete(f"{INTEGRATIONS}/int-ipam").respond(204)
+        delete = mock.delete(f"{INTEGRATIONS}/int-ipam").respond(204)
         result = await run("vcfa.tenant.integration.delete", {"id": "int-ipam"})
-    assert result["result"]["status"] == "removed", result
+    assert result["status"] == "error", result
+    assert result["extras"]["exception_class"] == "IncompleteListError"
+    assert "500 of 900" in result["extras"]["exception_message"]
+    assert "Call again" in result["extras"]["remediation"]
+    assert not delete.called
+    assert ranges.call_count == 2
+
+
+async def test_remove_stops_when_a_list_has_too_many_pages(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three rows, one a page, two pages at most: the remove stops, nothing is removed."""
+    monkeypatch.setattr(_calls, "LIST_TOP", 1)
+    monkeypatch.setattr(_calls, "MAX_PAGES", 2)
+
+    def page(request: httpx.Request) -> httpx.Response:
+        skip = request.url.params["$skip"]
+        row = {"id": f"r-{skip}", "integrationId": "int-other"}
+        return httpx.Response(200, json={"content": [row], "totalElements": 3})
+
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        mock.get(f"{INTEGRATIONS}/int-ipam").respond(200, json=_IPAM)
+        ranges = mock.get(RANGES).mock(side_effect=page)
+        mock.get(SOURCES).respond(200, json={"content": []})
+        delete = mock.delete(f"{INTEGRATIONS}/int-ipam").respond(204)
+        result = await run("vcfa.tenant.integration.delete", {"id": "int-ipam"})
+    assert result["status"] == "error", result
+    assert result["extras"]["exception_class"] == "IncompleteListError"
+    assert "2 of 3" in result["extras"]["exception_message"]
+    assert not delete.called
     assert ranges.call_count == 2
 
 
@@ -275,6 +310,20 @@ async def test_remove_preview_refuses_an_unknown_integration(
             await builder(_ctx(vcfa, await resolved_target(), {"id": "int-ipam"}))
 
 
+async def test_remove_preview_refuses_a_list_that_repeats_its_page(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    """The preview reads the users too; a list it cannot read to its end refuses the preview."""
+    builder = _PREVIEW_BUILDERS["vcfa.tenant.integration.delete"]
+    same = [{"id": f"r-{n}", "integrationId": "int-other"} for n in range(500)]
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        mock.get(f"{INTEGRATIONS}/int-ipam").respond(200, json=_IPAM)
+        mock.get(RANGES).respond(200, json={"content": same, "totalElements": 900})
+        with pytest.raises(_calls.IncompleteListError, match="repeated"):
+            await builder(_ctx(vcfa, await resolved_target(), {"id": "int-ipam"}))
+
+
 def _call_args() -> dict[str, Any]:
     return {
         "connector_id": "vcfa-rest-9.0",
@@ -292,6 +341,28 @@ async def test_remove_is_refused_without_a_preview_hash(vcfa: VcfAutomationConne
     assert result["status"] == "denied", result
     assert result["extras"]["error_code"] == "preview_binding_required"
     assert not delete.called
+
+
+async def test_remove_is_not_queued_when_a_list_repeats_its_page(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    """The approved path refuses to queue a remove whose preview could not read every user."""
+    same = [{"id": f"r-{n}", "integrationId": "int-other"} for n in range(500)]
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        mock.get(f"{INTEGRATIONS}/int-ipam").respond(200, json=_IPAM)
+        mock.get(RANGES).respond(200, json={"content": same, "totalElements": 900})
+        mock.get(SOURCES).respond(200, json={"content": []})
+        delete = mock.delete(f"{INTEGRATIONS}/int-ipam").respond(204)
+        preview = await preview_operation(OPERATOR, _call_args())
+        call = await call_operation(
+            OPERATOR, {**_call_args(), "preview_hash": preview["preview_hash"]}
+        )
+    assert call["status"] != "awaiting_approval", call
+    assert "preview builder failed" in str(call["extras"])
+    assert not delete.called
+    async with get_sessionmaker()() as session:
+        assert (await session.execute(select(ApprovalRequest))).scalar_one_or_none() is None
 
 
 async def test_remove_waits_with_the_blast_radius(vcfa: VcfAutomationConnector) -> None:

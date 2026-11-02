@@ -60,6 +60,7 @@ __all__ = [
     "UNREACHABLE_STATUS",
     "Calls",
     "IaasNotServedError",
+    "IncompleteListError",
     "IntegrationTransport",
     "Steps",
     "content_api_rows",
@@ -107,7 +108,7 @@ UNREACHABLE_STATUS: Final[frozenset[int]] = frozenset({502, 503, 504})
 
 #: A list read asks for this many rows per page (``$top``, or ``size``).
 LIST_TOP: Final[int] = 500
-#: A list read stops after this many pages, so a page that never ends cannot loop forever.
+#: A list read gives up after this many pages, so a list that never ends cannot loop forever.
 MAX_PAGES: Final[int] = 200
 
 #: How long a change waits for a request tracker unless the call says otherwise.
@@ -135,6 +136,30 @@ class IntegrationTransport(Protocol):
 
 class IaasNotServedError(RuntimeError):
     """The organization answers ``404`` on the IaaS integration list."""
+
+
+class IncompleteListError(RuntimeError):
+    """A vendor list could not be read to its end.
+
+    Either a page repeated the one before it (an endpoint that ignores
+    ``$skip`` or ``page``), or the list had not ended after :data:`MAX_PAGES`
+    pages. The rows read so far are not returned: a list that stops without
+    a word looks complete, and the "what uses it" check of a remove would
+    miss a user on an unread page. The op that reads the list ends with this
+    error, and so does the preview of a remove. ``remediation`` reaches the
+    answer as ``extras.remediation``.
+    """
+
+    def __init__(self, path: str, why: str, rows: int, total: Any) -> None:
+        of_total = f" of {total}" if isinstance(total, int) else ""
+        super().__init__(
+            f"the list {path} could not be read to its end: {why} ({rows}{of_total} rows read); "
+            "the list would be incomplete, so none of it is returned and nothing was changed"
+        )
+        self.remediation = (
+            "Call again. When the read ends the same way, the system does not page this list "
+            "as the vendor documents; ask the person to check it in the vendor's web app."
+        )
 
 
 @dataclass(frozen=True)
@@ -220,26 +245,31 @@ def content_rows(page: Any) -> list[dict[str, Any]]:
 async def iaas_rows(calls: Calls, path: str, **query: Any) -> list[dict[str, Any]]:
     """Every row of an IaaS list, read page by page (``$top`` rows, ``$skip`` apart).
 
-    The read ends at an empty page, when ``totalElements`` rows are in, when
-    the vendor gives no total and a page is short, or when a page repeats the
-    one before it (an endpoint that ignores ``$skip``).
+    The read ends at an empty page, when ``totalElements`` rows are in, or
+    when the vendor gives no total and a page is short. A page that repeats
+    the one before it (an endpoint that ignores ``$skip``) or a list that
+    has not ended after :data:`MAX_PAGES` pages raises
+    :class:`IncompleteListError`: no row is returned then.
     """
     rows: list[dict[str, Any]] = []
     previous: dict[str, Any] | None = None
+    total: Any = None
     for _ in range(MAX_PAGES):
         page = await calls.iaas("GET", path, **{"$top": LIST_TOP, "$skip": len(rows), **query})
         batch = content_rows(page)
-        if not batch or batch[0] == previous:
-            break
+        if not batch:
+            return rows
+        if batch[0] == previous:
+            raise IncompleteListError(path, "a page repeated the one before it", len(rows), total)
         previous = batch[0]
         rows.extend(batch)
         total = page.get("totalElements") if isinstance(page, Mapping) else None
         if isinstance(total, int):
             if len(rows) >= total:
-                break
+                return rows
         elif len(batch) < LIST_TOP:
-            break
-    return rows
+            return rows
+    raise IncompleteListError(path, f"it had not ended after {MAX_PAGES} pages", len(rows), total)
 
 
 async def content_api_rows(
@@ -248,25 +278,33 @@ async def content_api_rows(
     """Every row of a content API list, read page by page (``page`` and ``size``).
 
     The read ends at an empty page, after the last page (``page.totalPages``),
-    or, when the vendor gives no page count, at a short page.
+    or, when the vendor gives no page count, at a short page. A page that
+    repeats the one before it (an endpoint that ignores ``page``) or a list
+    that has not ended after :data:`MAX_PAGES` pages raises
+    :class:`IncompleteListError`: no row is returned then.
     """
     rows: list[dict[str, Any]] = []
+    previous: dict[str, Any] | None = None
+    total_pages: Any = None
     for number in range(MAX_PAGES):
         page = await calls.json(
             "GET", path, params={**(params or {}), "page": number, "size": LIST_TOP}
         )
         batch = content_rows(page)
+        if not batch:
+            return rows
+        if batch[0] == previous:
+            raise IncompleteListError(path, "a page repeated the one before it", len(rows), None)
+        previous = batch[0]
         rows.extend(batch)
         meta = page.get("page") if isinstance(page, Mapping) else None
         total_pages = meta.get("totalPages") if isinstance(meta, Mapping) else None
-        if not batch:
-            break
         if isinstance(total_pages, int):
             if number + 1 >= total_pages:
-                break
+                return rows
         elif len(batch) < LIST_TOP:
-            break
-    return rows
+            return rows
+    raise IncompleteListError(path, f"it had not ended after {MAX_PAGES} pages", len(rows), None)
 
 
 def now_iso() -> str:

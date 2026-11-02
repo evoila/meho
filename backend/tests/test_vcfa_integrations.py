@@ -20,6 +20,7 @@ from sqlalchemy import select
 
 from meho_backplane.connectors.vcf_automation import VcfAutomationConnector
 from meho_backplane.connectors.vcf_automation._routing import plane_for_path
+from meho_backplane.connectors.vmware_shared import vcfa_integration_calls as _calls
 from meho_backplane.connectors.vmware_shared.vcfa_integration_ops import INTEGRATION_OPS
 from meho_backplane.connectors.vmware_shared.vcfa_integrations import TRACKER_TEXT_HIDDEN
 from meho_backplane.connectors.vra8 import register_vra8_integration_operations
@@ -236,6 +237,55 @@ async def test_list_git_sources_reads_every_page(vcfa: VcfAutomationConnector) -
         result = await run("vcfa.tenant.integration.list", {"view": "git_sources"})
     assert [row["id"] for row in result["result"]["rows"]] == ["src-git"]
     assert [c.request.url.params["page"] for c in route.calls] == ["0", "1"]
+
+
+async def test_list_stops_when_a_page_repeats(vcfa: VcfAutomationConnector) -> None:
+    """An endpoint that ignores ``$skip``: no partial list, an error instead."""
+    same = [{"id": f"int-{n}", "integrationType": "vro"} for n in range(500)]
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        route = mock.get(INTEGRATIONS).respond(200, json={"content": same, "totalElements": 900})
+        result = await run("vcfa.tenant.integration.list", {})
+    assert result["status"] == "error", result
+    assert result["extras"]["exception_class"] == "IncompleteListError"
+    assert "500 of 900" in result["extras"]["exception_message"]
+    assert route.call_count == 2
+
+
+async def test_list_git_sources_stops_when_the_pages_do_not_end(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three pages of sources, two pages at most: an error, not two rows."""
+    monkeypatch.setattr(_calls, "LIST_TOP", 1)
+    monkeypatch.setattr(_calls, "MAX_PAGES", 2)
+
+    def page(request: httpx.Request) -> httpx.Response:
+        number = int(request.url.params["page"])
+        row = {"id": f"src-{number}", "typeId": "com.github", "config": {}}
+        meta = {"number": number, "size": 1, "totalPages": 3}
+        return httpx.Response(200, json={"content": [row], "page": meta})
+
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        route = mock.get(SOURCES).mock(side_effect=page)
+        result = await run("vcfa.tenant.integration.list", {"view": "git_sources"})
+    assert result["status"] == "error", result
+    assert result["extras"]["exception_class"] == "IncompleteListError"
+    assert "after 2 pages" in result["extras"]["exception_message"]
+    assert route.call_count == 2
+
+
+async def test_list_git_sources_stops_when_a_page_repeats(vcfa: VcfAutomationConnector) -> None:
+    """An endpoint that ignores ``page`` answers the first page again: an error, not a list."""
+    same = [{"id": f"src-{n}", "typeId": "com.github", "config": {}} for n in range(500)]
+    meta = {"number": 0, "size": 500, "totalPages": 3}
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        route = mock.get(SOURCES).respond(200, json={"content": same, "page": meta})
+        result = await run("vcfa.tenant.integration.list", {"view": "git_sources"})
+    assert result["status"] == "error", result
+    assert result["extras"]["exception_class"] == "IncompleteListError"
+    assert route.call_count == 2
 
 
 async def test_status_read_of_a_failed_sync(vcfa: VcfAutomationConnector) -> None:

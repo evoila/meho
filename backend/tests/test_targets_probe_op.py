@@ -13,6 +13,8 @@
   last stored fingerprint.
 * **Unknown target, other tenant** -- both give an error and store nothing.
 * **Role** -- a ``read_only`` login is refused, as on the REST route.
+* **Policy on the named target** -- a deny grant for the target stops the
+  probe before the system is contacted; another target is still probed.
 * **No extras** -- the connector's ``extras`` never reach the result.
 * **Audit** -- every call writes a row with op id ``targets.probe``.
 """
@@ -42,7 +44,12 @@ from meho_backplane.connectors.targets.probe import (
     register_targets_probe_operation,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor
+from meho_backplane.db.models import (
+    AgentPermission,
+    AuditLog,
+    EndpointDescriptor,
+    PermissionVerdict,
+)
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.meta_tools import call_operation
@@ -102,8 +109,12 @@ def _fingerprint(*, reachable: bool = True) -> FingerprintResult:
     )
 
 
-def _use_connector(answer: FingerprintResult | Exception) -> None:
-    """Register a fake connector for ``_PRODUCT`` whose fingerprint gives *answer*."""
+def _use_connector(answer: FingerprintResult | Exception) -> list[str]:
+    """Register a fake connector for ``_PRODUCT`` whose fingerprint gives *answer*.
+
+    Returns the list of target names the fake connector was asked about.
+    """
+    asked: list[str] = []
 
     class _FakeConnector(Connector):
         product = _PRODUCT
@@ -112,6 +123,7 @@ def _use_connector(answer: FingerprintResult | Exception) -> None:
             raise NotImplementedError
 
         async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+            asked.append(str(target.name))
             if isinstance(answer, Exception):
                 raise answer
             return answer
@@ -122,6 +134,7 @@ def _use_connector(answer: FingerprintResult | Exception) -> None:
     register_connector_v2(
         product=_PRODUCT, version="2.0", impl_id=f"{_PRODUCT}-rest", cls=_FakeConnector
     )
+    return asked
 
 
 def _operator(
@@ -372,3 +385,46 @@ async def test_operator_and_tenant_admin_may_probe(role: TenantRole) -> None:
         f"role-{role.value}", _operator("person-1", kind=PrincipalKind.USER, role=role)
     )
     assert result["status"] == "ok", result
+
+
+# ---------------------------------------------------------------------------
+# Policy on the named target
+# ---------------------------------------------------------------------------
+
+
+async def _deny_on_target(agent_sub: str, target_id: uuid.UUID) -> None:
+    async with get_sessionmaker()() as session:
+        session.add(
+            AgentPermission(
+                tenant_id=_TENANT_ID,
+                principal_sub=agent_sub,
+                op_pattern=TARGETS_PROBE_OP_ID,
+                target_scope=str(target_id),
+                verdict=PermissionVerdict.DENY,
+                created_by_sub="op-admin",
+            )
+        )
+        await session.commit()
+
+
+@pytest.mark.parametrize("by", ["name", "id"])
+async def test_a_deny_grant_for_the_target_stops_the_probe(by: str) -> None:
+    """The dispatcher checks policy with no target; the handler checks it on the found target."""
+    asked = _use_connector(_fingerprint())
+    denied = await _seed("denied-system")
+    other = await _seed("other-system")
+    agent = _operator("agent-denied")
+    await _deny_on_target(agent.sub, denied.id)
+
+    result = await _probe("denied-system" if by == "name" else str(denied.id), agent)
+
+    assert result["status"] == "error", result
+    assert "policy_denied" in _error_text(result)
+    assert "denied-system" in _error_text(result)
+    assert await _stored_fingerprint(denied.id) is None
+    assert asked == []
+
+    allowed = await _probe("other-system", agent)
+    assert allowed["status"] == "ok", allowed
+    assert asked == ["other-system"]
+    assert await _stored_fingerprint(other.id) is not None

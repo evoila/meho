@@ -436,10 +436,17 @@ params={"name": "<target-name>"})`. So a target the agent registered with
 `targets.register` gets its detected product and version without a person.
 
 - **One code path.** The op and `POST /api/v1/targets/{name}/probe` both
-  call `probe_and_store_fingerprint` in `api/v1/targets.py`. It finds the
-  target by name, alias or id in the caller's tenant, picks the connector,
-  asks the system, and stores the answer in `targets.fingerprint`. When
-  something fails, nothing is stored and the last answer stays.
+  find the target with `resolve_route_target` (name, alias or id, in the
+  caller's tenant) and then call `probe_and_store_fingerprint`, both in
+  `api/v1/targets.py`. It picks the connector, asks the system, and stores
+  the answer in `targets.fingerprint`. When something fails, nothing is
+  stored and the last answer stays.
+- **Policy on the named target.** The op is targetless: the dispatcher's
+  policy gate runs with no target, so a grant that names one target does
+  not match there. The handler checks MEHO's policy for `targets.probe` on
+  the found target (`secondary_target_refusal`) before the system is
+  contacted. A deny grant for that target refuses the call, and nothing is
+  stored. Another target of the same agent is still probed.
 - **Result.** `{target_id, name, vendor, product, version, build, edition,
   reachable, probed_at, probe_method}`. The connector's `extras` are not in
   the result. An unreachable system that the connector reports as

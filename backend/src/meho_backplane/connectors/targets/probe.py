@@ -17,6 +17,14 @@ fields of MEHO's own target row. Role: like the REST route, it needs the
 ``operator`` or ``tenant_admin`` role; a ``read_only`` login is refused
 before the target is looked up. The result holds the detected fields only,
 not the connector's ``extras``.
+
+Policy for the named target: the op is targetless, so the dispatcher's
+policy gate runs with no target and a grant that names one target does not
+match there. The handler finds the target and then checks MEHO's policy for
+``targets.probe`` on that target
+(:func:`~meho_backplane.operations.secondary_target_policy.secondary_target_refusal`),
+before the system is contacted and before anything is stored. A deny for
+that target refuses the call.
 """
 
 from __future__ import annotations
@@ -25,14 +33,19 @@ from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import HTTPException
 
-from meho_backplane.api.v1.targets import probe_and_store_fingerprint
+from meho_backplane.api.v1.targets import probe_and_store_fingerprint, resolve_route_target
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.connectors.targets.ops import (
     _GROUP_KEY,
     _GROUP_WHEN_TO_USE,
+    TARGETS_REGISTRY_CONNECTOR_ID,
     _http_exception_message,
 )
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.operations.secondary_target_policy import (
+    SecondaryTargetWrite,
+    secondary_target_refusal,
+)
 from meho_backplane.operations.typed_register import register_typed_operation
 
 if TYPE_CHECKING:
@@ -48,6 +61,15 @@ __all__ = [
 ]
 
 TARGETS_PROBE_OP_ID: Final[str] = "targets.probe"
+
+#: The policy check for the target named in the params. The dispatcher
+#: checks ``targets.probe`` with no target; this checks it on the found
+#: target, so a grant that names the target counts.
+_PROBE_ON_TARGET: Final[SecondaryTargetWrite] = SecondaryTargetWrite(
+    connector_id=TARGETS_REGISTRY_CONNECTOR_ID,
+    op_ids=(TARGETS_PROBE_OP_ID,),
+    target_label="target",
+)
 
 _NULLABLE_STRING: Final[list[str]] = ["string", "null"]
 
@@ -145,8 +167,10 @@ async def targets_probe(operator: Operator, target: Any, params: dict[str, Any])
     Op-id: ``targets.probe``. Targetless typed op; the target is named in
     *params*. Refuses a ``read_only`` login, as the REST route does. The
     target is looked up in the operator's tenant only, so a target of
-    another tenant is not found. Service exceptions (unknown target, no
-    connector, a connector that fails) are re-raised as
+    another tenant is not found. MEHO's policy for ``targets.probe`` on
+    the found target is checked next; a refusal is a :class:`ValueError`
+    and the system is not contacted. Service exceptions (unknown target,
+    no connector, a connector that fails) are re-raised as
     :class:`ValueError`, like the other ``targets.*`` ops; nothing is
     stored then.
     """
@@ -158,9 +182,11 @@ async def targets_probe(operator: Operator, target: Any, params: dict[str, Any])
     sessionmaker = get_sessionmaker()
     try:
         async with sessionmaker() as session, session.begin():
-            row, fp = await probe_and_store_fingerprint(
-                session, str(params["name"]), operator=operator
-            )
+            row = await resolve_route_target(session, operator.tenant_id, str(params["name"]))
+            refusal = await secondary_target_refusal(operator, _PROBE_ON_TARGET, row)
+            if refusal is not None:
+                raise ValueError(f"{refusal}. Nothing was probed or stored.")
+            fp = await probe_and_store_fingerprint(session, row, operator=operator)
             target_id, name = str(row.id), row.name
     except HTTPException as exc:
         raise ValueError(_http_exception_message(exc)) from exc

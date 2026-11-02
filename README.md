@@ -405,6 +405,8 @@ Codebase walkthroughs:
 - **Backend** — [`docs/codebase/backend.md`](./docs/codebase/backend.md)
 - **CLI** — [`docs/codebase/cli.md`](./docs/codebase/cli.md)
 - **Chart + deploy** — [`docs/codebase/devops.md`](./docs/codebase/devops.md)
+- **Operator console — conventions** — [`docs/codebase/ui-conventions.md`](./docs/codebase/ui-conventions.md)
+  (read before touching `/ui/*`; the chassis reference is [`docs/codebase/ui.md`](./docs/codebase/ui.md))
 
 Architecture references live under
 [`docs/architecture/`](./docs/architecture/) — topology, the operations

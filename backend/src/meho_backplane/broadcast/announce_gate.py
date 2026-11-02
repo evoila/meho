@@ -48,7 +48,6 @@ import structlog
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.broadcast.events import classify_op
 from meho_backplane.broadcast.history import (
     WRITE_OP_CLASSES,
     caller_has_active_announce_claim,
@@ -128,7 +127,7 @@ async def announce_gate_enabled(tenant_id: UUID) -> bool:
 async def announce_gate_blocks(
     operator: Operator,
     *,
-    op_id: str,
+    op_class: str,
     safety_level: str,
     target_name: str | None,
 ) -> str | None:
@@ -136,9 +135,11 @@ async def announce_gate_blocks(
 
     Short-circuits (returns ``None`` -- no block) in order, cheapest first:
 
-    * the op is not write-class (:func:`classify_op` not in
+    * the op is not write-class (*op_class* not in
       :data:`~meho_backplane.broadcast.history.WRITE_OP_CLASSES`) -- no
-      policy read;
+      policy read. *op_class* is the class the dispatcher stores on the
+      op's audit row
+      (:func:`~meho_backplane.operations._audit.descriptor_op_class`);
     * the op's ``safety_level`` is below ``caution`` -- no policy read;
     * the tenant has not enabled the gate (:func:`announce_gate_enabled`);
     * the caller holds an active covering claim
@@ -150,13 +151,15 @@ async def announce_gate_blocks(
     ``announce_gate_check_failed``.
     """
     try:
-        if classify_op(op_id) not in WRITE_OP_CLASSES:
+        if op_class not in WRITE_OP_CLASSES:
             return None
         if _SAFETY_RANK.get(safety_level, 0) < _SAFETY_GATE_THRESHOLD:
             return None
         if not await announce_gate_enabled(operator.tenant_id):
             return None
-        if await caller_has_active_announce_claim(operator, op_id=op_id, target_name=target_name):
+        if await caller_has_active_announce_claim(
+            operator, op_class=op_class, target_name=target_name
+        ):
             return None
         return _ANNOUNCE_REQUIRED_REMEDIATION
     except Exception:

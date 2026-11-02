@@ -58,6 +58,10 @@ _EXPECTED_OP_IDS: tuple[str, ...] = (
     "gh.composite.git_ref_view",
     "gh.composite.git_tree_view",
     "gh.composite.branch_commit_files",
+    "gh.composite.issue_search",
+    "gh.composite.issue_view",
+    "gh.composite.issue_create",
+    "gh.composite.issue_comment",
 )
 
 _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
@@ -90,6 +94,18 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     ),
     "gh.composite.branch_commit_files": (
         "meho_backplane.connectors.github.composites._git.branch_commit_files_composite"
+    ),
+    "gh.composite.issue_search": (
+        "meho_backplane.connectors.github.composites._issues.issue_search_composite"
+    ),
+    "gh.composite.issue_view": (
+        "meho_backplane.connectors.github.composites._issues.issue_view_composite"
+    ),
+    "gh.composite.issue_create": (
+        "meho_backplane.connectors.github.composites._issues.issue_create_composite"
+    ),
+    "gh.composite.issue_comment": (
+        "meho_backplane.connectors.github.composites._issues.issue_comment_composite"
     ),
 }
 

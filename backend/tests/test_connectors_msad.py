@@ -160,7 +160,7 @@ def test_connector_id_triple_round_trips() -> None:
 
 def test_op_surface_ids_and_safety_tiers() -> None:
     by_id = {op.op_id: op for op in MSAD_OPS}
-    assert len(by_id) == 34
+    assert len(by_id) == 35
     dangerous = {k for k, v in by_id.items() if v.safety_level == "dangerous"}
     assert dangerous == {
         "msad.user.delete",
@@ -175,6 +175,7 @@ def test_op_surface_ids_and_safety_tiers() -> None:
         "msad.ou.revoke-create-child",
         "msad.domain.password-policy.set",
         "msad.domain.machine-account-quota.set",
+        "msad.user.set-password",
     }
     assert {k for k, v in by_id.items() if v.requires_approval} == dangerous | build_writes
     caution = {k for k, v in by_id.items() if v.safety_level == "caution"}
@@ -210,9 +211,8 @@ def test_every_handler_attr_resolves_on_the_class() -> None:
 def test_no_op_exposes_a_secret_value_field() -> None:
     """The secret-leak guard at the schema level: no op accepts a plaintext
     secret-value parameter, so a secret can never reach the ``-EncodedCommand``
-    argv. Password-reset / password-set is deliberately not shipped — a
-    plaintext AD password cannot ride the pwsh transport (see the connector
-    doc); it is a Vault-brokered follow-up."""
+    argv. ``msad.user.set-password`` takes only a secret-store reference
+    (``password_ref``), never the password."""
     secret_fields = {
         "password",
         "account_password",
@@ -227,18 +227,19 @@ def test_no_op_exposes_a_secret_value_field() -> None:
         assert not leaked, (op.op_id, sorted(leaked))
 
 
-def test_no_op_id_is_password_reset() -> None:
-    """Password-reset / password-set is deferred by design (secret-hygiene
-    contract). The op ids that mention a password are the read that reports
-    when it was last set and when it expires, and the op that sets the
-    domain's password rules (it takes and returns no password)."""
+def test_password_op_ids() -> None:
+    """The op ids that mention a password: the expiry read, the domain's
+    password rules (no password), and the password set, which takes only a
+    secret-store reference."""
     ids = {op.op_id for op in MSAD_OPS}
-    assert "msad.user.password-reset" not in ids
-    assert not any(op_id.endswith(("password-reset", "password-set")) for op_id in ids)
     assert {op_id for op_id in ids if "password" in op_id} == {
         "msad.user.password-expiry",
         "msad.domain.password-policy.set",
+        "msad.user.set-password",
     }
+    by_id = {op.op_id: op for op in MSAD_OPS}
+    props = by_id["msad.user.set-password"].parameter_schema["properties"]
+    assert set(props) == {"identity", "password_ref", "enable"}
 
 
 # ---------------------------------------------------------------------------
@@ -589,8 +590,7 @@ def test_password_expiry_fields_tolerates_missing_values() -> None:
 
 
 def test_password_expiry_op_is_a_safe_users_read_without_secrets() -> None:
-    (op,) = PASSWORD_OPS
-    assert op.op_id == "msad.user.password-expiry"
+    op = next(o for o in PASSWORD_OPS if o.op_id == "msad.user.password-expiry")
     assert op.group_key == "users"
     assert op.safety_level == "safe"
     assert op.requires_approval is False

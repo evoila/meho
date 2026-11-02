@@ -52,6 +52,8 @@
     has_more          -- bool: whether a further page exists
     order             -- str: the order in use, "oldest" or "newest" (#3596)
     order_choice      -- str: the operator's explicit choice, "" when none
+    in_order_work_ref -- str | None: the change ticket the "Approve group in
+                         order" button runs (#3597); None hides the button
 -#}
 {%- set order_q = "&order=" ~ order_choice if order_choice else "" -%}
 <div
@@ -121,6 +123,25 @@
       </button>
     {% endfor %}
   </div>
+
+  {# ---------- Approve group in order (#3597) ---------- #}
+  {% if in_order_work_ref %}
+    <div class="flex flex-wrap items-center gap-3">
+      <button
+        type="button"
+        class="btn btn-sm btn-primary"
+        data-approval-in-order-open
+        hx-get="/ui/approvals/in-order?work_ref={{ in_order_work_ref | urlencode }}"
+        hx-target="#meho-approvals-modal-container"
+        hx-swap="innerHTML"
+      >
+        Approve group in order
+      </button>
+      <span class="text-xs text-base-content/60">
+        Approves the steps oldest first and stops at the first failure.
+      </span>
+    </div>
+  {% endif %}
 
   {# ---------- Rows ---------- #}
   {% if requests %}

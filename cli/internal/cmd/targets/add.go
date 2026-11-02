@@ -25,7 +25,8 @@ import (
 //	  [--secret-ref <ref> | --no-secret-ref] [--auth-model <m>] \
 //	  [--verify-tls=false] [--tls-ca-pin <pin>] [--tls-server-name <sni>] \
 //	  [--vpn-required] [--preferred-impl <id>] [--note <n>] \
-//	  [--extra key=value ...] [--json] [--backplane <url>]
+//	  [--extra key=value ...] [--secret-field <connector_field>=<source_field> ...] \
+//	  [--json] [--backplane <url>]
 //
 // It POSTs a single TargetCreate to POST /api/v1/targets — the same
 // route `meho targets import` drives for each new row — reusing this
@@ -78,6 +79,7 @@ func newAddCmd() *cobra.Command {
 		preferredImpl     string
 		note              string
 		extras            []string
+		secretFields      []string
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -100,6 +102,12 @@ func newAddCmd() *cobra.Command {
 			"`--extra key=value` (repeatable) seeds the target's `extras` " +
 			"map; values are sent as strings. For example, a plain-HTTP " +
 			"Prometheus needs `--no-secret-ref --extra scheme=http`.\n\n" +
+			"`--secret-field <connector_field>=<source_field>` (repeatable) " +
+			"lets a secret with different key names back the target. When " +
+			"the connector reads `<connector_field>`, MEHO reads " +
+			"`<source_field>` from the secret instead. For example, " +
+			"`--secret-field ssh_private_key=private_key`. Only field names " +
+			"are stored, never a value.\n\n" +
 			"All validation is server-side: an unknown `--product`, a " +
 			"`--secret-ref` outside the operator's tenant subtree, or an " +
 			"SSRF-guarded `--host` come back as a 422 whose body the CLI " +
@@ -170,6 +178,13 @@ func newAddCmd() *cobra.Command {
 				}
 				body["extras"] = parsed
 			}
+			if fs.Changed("secret-field") {
+				parsed, perr := parseSecretFieldFlags(secretFields, false)
+				if perr != nil {
+					return output.RenderError(cmd.ErrOrStderr(), perr, jsonOut)
+				}
+				body["secret_field_map"] = parsed
+			}
 			return runAdd(cmd, addOptions{
 				Body:              body,
 				JSONOut:           jsonOut,
@@ -209,6 +224,8 @@ func newAddCmd() *cobra.Command {
 		"free-form operator note stored on the target")
 	cmd.Flags().StringArrayVar(&extras, "extra", nil,
 		"key=value to store in the target's extras map, e.g. scheme=http (repeatable)")
+	cmd.Flags().StringArrayVar(&secretFields, "secret-field", nil,
+		"connector_field=source_field: read source_field from the secret when the connector asks for connector_field (repeatable)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit the created target as JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -230,6 +247,30 @@ func parseExtraFlags(pairs []string) (map[string]any, *output.StructuredError) {
 		if !ok || key == "" {
 			return nil, output.Unexpected(fmt.Sprintf(
 				"invalid --extra %q: expected key=value", pair))
+		}
+		out[key] = value
+	}
+	return out, nil
+}
+
+// parseSecretFieldFlags folds repeatable `--secret-field
+// connector_field=source_field` flags into the `secret_field_map` body.
+// A later flag with the same connector field wins. A flag without `=`
+// or with an empty connector field is an error (exit code 4). An empty
+// source field is an error too, unless allowRemove is set: then it
+// sends null, which removes that entry on `meho targets update`.
+func parseSecretFieldFlags(pairs []string, allowRemove bool) (map[string]any, *output.StructuredError) {
+	out := make(map[string]any, len(pairs))
+	for _, pair := range pairs {
+		key, value, ok := strings.Cut(pair, "=")
+		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		if !ok || key == "" || (value == "" && !allowRemove) {
+			return nil, output.Unexpected(fmt.Sprintf(
+				"invalid --secret-field %q: expected connector_field=source_field", pair))
+		}
+		if value == "" {
+			out[key] = nil
+			continue
 		}
 		out[key] = value
 	}

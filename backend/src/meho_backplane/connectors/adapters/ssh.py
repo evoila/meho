@@ -31,19 +31,35 @@ system-initiated calls cannot read per-target vendor credentials
 
 * **Key auth (preferred):** the secret carries a ``ssh_private_key``
   field (PEM-encoded text) plus ``username``; the key is parsed via
-  ``asyncssh.import_private_key`` and passed as ``client_keys``.
+  ``asyncssh.import_private_key`` and passed as ``client_keys``. When
+  ``ssh_private_key`` is absent, a ``private_key`` field is used instead
+  (#3711), so a secret written by an automation pack under that name works
+  with no ``secret_field_map`` on the target.
 * **Password auth (fallback):** the secret carries ``username`` and
   ``password``; used when ``ssh_private_key`` is absent.
 * **Missing credentials:** raises :exc:`ValueError` immediately so callers
   fail fast rather than hitting an opaque asyncssh auth error.
 
-**Per-target connection pool.** Each :class:`SshConnector` instance
-maintains a per-target pool of live ``asyncssh.SSHClientConnection``
-objects. Connections are cached on first use and reused until closed or
-idle past ``_POOL_TTL_S`` (default 5 min). A per-target lock lets
-concurrent requests to distinct targets proceed in parallel; only requests
-to the *same* target serialize during the SSH handshake. SSH key exchange
-is expensive — pooling matters more here than for HTTP.
+**Connection pool, one login per caller and target.** Each
+:class:`SshConnector` instance keeps a pool of live
+``asyncssh.SSHClientConnection`` objects keyed on
+:func:`_pool_key`: the tenant-unique target key, the caller's kind
+(:func:`_caller_kind`: a person or machine login, a call without a
+token, the check runner, or the system caller for ``operator=None``) and
+the caller's ``operator.sub``. So every caller logs in once, after their
+own Vault read of the target's secret, and reuses only the connection
+they opened. Callers of different kinds never share one login, also when
+they carry the same ``sub``: the check runner runs a Sensor under its
+creator's ``sub`` with the runner's own token and Vault role, and a
+runbook verification runs under the assigned person's ``sub`` with no
+token at all, so its Vault read is refused and it must not find that
+person's open connection. A connection is reused until closed or idle
+past ``_POOL_TTL_S`` (default 5 min). A per-key lock
+lets concurrent requests to distinct keys proceed in parallel; only
+requests for the *same* caller and target serialize during the SSH
+handshake. SSH key exchange is expensive — pooling matters more here than
+for HTTP. :meth:`SshConnector.invalidate_credentials` drops every
+connection of a target, whoever opened it.
 
 **Host key checking (fail-closed).** The Vault secret at ``secret_ref`` is
 the key store the v0.2 deferral was waiting on, so host-key verification
@@ -86,7 +102,11 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
-from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
+from meho_backplane.connectors._shared.dial_guard import connect_checked
+from meho_backplane.connectors._shared.system_operator import (
+    SYSTEM_OPERATOR_SUB,
+    synthesise_system_operator,
+)
 from meho_backplane.connectors._shared.vault_creds import (
     load_vault_secret_data,
     strip_credential_value,
@@ -102,6 +122,41 @@ logger = structlog.get_logger()
 type Target = Any
 
 _POOL_TTL_S: float = 300.0  # 5-minute idle eviction window
+
+type PoolKey = tuple[str, str, str, str]
+
+
+def _caller_kind(operator: Operator | None) -> str:
+    """Return the kind of caller the pool files a connection under.
+
+    Each kind logs in to Vault in its own way, so each gets its own slot
+    even for the same ``sub``: ``operator=None`` is the system caller,
+    whose Vault read fails closed on a live Vault; an operator with an
+    empty ``raw_jwt`` (a runbook verification runs under the assigned
+    person's ``sub`` this way) has no token, so Vault refuses its read;
+    the check runner (``check_runner_dispatch``) uses its own token and
+    role but runs a Sensor under its creator's ``sub``; everything else
+    is a person or machine login reading with its own token.
+    """
+    if operator is None:
+        return "system"
+    if not operator.raw_jwt:
+        return "no-token"
+    if operator.check_runner_dispatch:
+        return "check-runner"
+    return "operator"
+
+
+def _pool_key(target: Target, operator: Operator | None) -> PoolKey:
+    """Return the pool key ``(tenant_id, id, caller kind, sub)`` for *target*.
+
+    The first two parts are :func:`target_cache_key`. The caller kind
+    (:func:`_caller_kind`) and the ``sub`` name the caller, so two callers
+    to one target hold two logins, each opened after their own Vault read.
+    """
+    tenant_id, target_id = target_cache_key(target)
+    sub = operator.sub if operator is not None else SYSTEM_OPERATOR_SUB
+    return (tenant_id, target_id, _caller_kind(operator), sub)
 
 
 class SshHostKeyUnpinnedError(ValueError):
@@ -217,6 +272,20 @@ def _record_ssh_span(
         logger.warning("flight_recorder_ssh_span_failed", exc_info=True)
 
 
+class SshTargetChangedError(RuntimeError):
+    """The target changed while MEHO was logging in to it (#3879).
+
+    The login was started with the target's old host or secret. Its result
+    is not kept, so the next call logs in with the new values.
+    """
+
+    def __init__(self, target_name: str) -> None:
+        super().__init__(
+            f"target {target_name!r} changed while MEHO was logging in to it; "
+            "the login was dropped. Retry the call."
+        )
+
+
 class ConnectorUnreachableError(RuntimeError):
     """An ``about``-style op ran against an unreachable target.
 
@@ -232,6 +301,33 @@ class ConnectorUnreachableError(RuntimeError):
     """
 
 
+async def _dial(target: Target, auth_kwargs: dict[str, Any]) -> asyncssh.SSHClientConnection:
+    """Check the target address and open the SSH connection to a checked IP.
+
+    Only checked IP addresses are dialed, the next one when a connection
+    attempt fails
+    (:func:`~meho_backplane.connectors._shared.dial_guard.connect_checked`).
+    When the dialed IP differs from the target's host name, the host key is
+    still matched against the name (``host_key_alias``).
+    """
+
+    async def _open(address: str) -> asyncssh.SSHClientConnection:
+        alias_kwargs: dict[str, Any] = (
+            {"host_key_alias": target.host} if address != target.host else {}
+        )
+        return await asyncssh.connect(
+            address,
+            port=target.port or 22,
+            username=auth_kwargs["username"],
+            client_keys=auth_kwargs.get("client_keys"),
+            password=auth_kwargs.get("password"),
+            known_hosts=auth_kwargs["known_hosts"],
+            **alias_kwargs,
+        )
+
+    return await connect_checked(target.host, _open)
+
+
 class SshConnector(Connector):
     """Abstract SSH-transport connector.
 
@@ -240,20 +336,27 @@ class SshConnector(Connector):
     """
 
     def __init__(self) -> None:
-        # Maps the tenant-unique ``(tenant_id, id)`` cache key
-        # (``target_cache_key``) → (SSHClientConnection, last_used monotonic
-        # timestamp). Keyed on the tuple rather than ``target.name``: two
-        # tenants may legitimately own same-named targets on different
-        # hosts (names are unique only per ``(tenant_id, name)``), and a
-        # name-keyed pool would hand tenant B the live connection tenant A
-        # opened to A's host — a cross-tenant misroute and credential leak
-        # (evoila/meho#1682).
-        self._connections: dict[tuple[str, str], tuple[asyncssh.SSHClientConnection, float]] = {}
+        # Maps the pool key ``(tenant_id, id, caller kind, sub)``
+        # (``_pool_key``) → (SSHClientConnection, last_used monotonic
+        # timestamp). The tenant-unique ``(tenant_id, id)`` part keeps two
+        # tenants' same-named targets apart (evoila/meho#1682). The caller
+        # part keeps one login per caller: a connection is handed back only
+        # to the caller whose own Vault read opened it.
+        self._connections: dict[PoolKey, tuple[asyncssh.SSHClientConnection, float]] = {}
         # Short-lived lock protecting only _connections and _connect_locks dicts.
         self._pool_lock = asyncio.Lock()
-        # Per-target connect locks — SSH handshakes for distinct targets run
-        # in parallel. Keyed on the same tenant-unique tuple as the pool.
-        self._connect_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        # Per-key connect locks — SSH handshakes for distinct callers or
+        # targets run in parallel. Keyed on the same tuple as the pool.
+        self._connect_locks: dict[PoolKey, asyncio.Lock] = {}
+        # Per-target drop counter (#3879), keyed on ``target_cache_key`` so
+        # one drop covers every caller's login to the target.
+        # ``invalidate_credentials`` raises it; ``_connect`` reads it on
+        # entry, checks it again once it holds the connect lock, and keeps
+        # the new connection only when it is still unchanged after the
+        # handshake. So a call that was started with the old target values
+        # never puts a login in the pool, whether it was waiting for the
+        # lock or already logging in during the drop.
+        self._pool_generations: dict[tuple[str, str], int] = {}
 
     async def _resolve_secret(self, target: Target, operator: Operator | None) -> dict[str, Any]:
         """Resolve ``target.secret_ref`` (a Vault KV-v2 path string) to the secret dict.
@@ -291,15 +394,17 @@ class SshConnector(Connector):
         :class:`asyncssh.SSHKnownHosts` pin, or ``None`` for the audited
         per-target opt-out); it is threaded here so :meth:`_connect`
         never has to re-read the secret. Raises :exc:`ValueError` when
-        the resolved secret carries neither ``ssh_private_key`` nor
-        ``password``, and :exc:`SshHostKeyUnpinnedError` when it pins no
+        the resolved secret carries none of ``ssh_private_key``,
+        ``private_key`` or ``password``, and :exc:`SshHostKeyUnpinnedError` when it pins no
         host key and sets no opt-out; Vault resolution failures propagate
         per :meth:`_resolve_secret`'s two-phase error contract.
         """
         secret = await self._resolve_secret(target, operator)
         username: str = strip_credential_value(secret.get("username", "root"))
         known_hosts = _known_hosts_from_secret(target.name, secret)
-        private_key_raw = secret.get("ssh_private_key")
+        # #3711: ``private_key`` is an alias used only when ``ssh_private_key``
+        # is absent.
+        private_key_raw = secret.get("ssh_private_key") or secret.get("private_key")
         if private_key_raw:
             key = asyncssh.import_private_key(strip_credential_value(private_key_raw))
             return {"username": username, "known_hosts": known_hosts, "client_keys": [key]}
@@ -312,19 +417,29 @@ class SshConnector(Connector):
             }
         raise ValueError(
             f"target '{target.name}': the Vault secret at secret_ref must include "
-            "ssh_private_key or password"
+            "ssh_private_key or password (private_key is accepted in place of "
+            "ssh_private_key)"
         )
 
     async def _connect(
         self, target: Target, operator: Operator | None = None
     ) -> asyncssh.SSHClientConnection:
-        """Return a live SSH connection for *target*.
+        """Return a live SSH connection for *target*, opened by this caller.
 
-        Fast path (no lock): returns the cached connection when it is open
-        and within the idle TTL. Slow path: acquires the per-target connect
-        lock, evicts stale/closed entries, and opens a fresh connection.
+        The pool is keyed on the caller too (:func:`_pool_key`), so a hit
+        is always a connection the same caller opened after their own
+        Vault read. Fast path (no lock): returns the cached connection when
+        it is open and within the idle TTL. Slow path: acquires the per-key
+        connect lock, evicts stale/closed entries, and opens a fresh
+        connection.
         """
-        cache_key = target_cache_key(target)
+        target_key = target_cache_key(target)
+        cache_key = _pool_key(target, operator)
+        # Read the drop counter first (#3879). A call that waits for the
+        # connect lock keeps the target values it was given. When a drop
+        # runs while it waits, those values are old, and the call must not
+        # log in with them after it gets the lock.
+        generation = self._pool_generations.get(target_key, 0)
         # Fast path: check without acquiring any lock.
         entry = self._connections.get(cache_key)
         if entry is not None:
@@ -355,6 +470,12 @@ class SshConnector(Connector):
                     await conn.wait_closed()
                 del self._connections[cache_key]
 
+            if self._pool_generations.get(target_key, 0) != generation:
+                # The target changed while this call waited for the lock.
+                # The connection the lock holder made with the old values
+                # was already dropped; this call must not make another one.
+                logger.info("ssh_login_dropped_target_changed", target=target.name)
+                raise SshTargetChangedError(target.name)
             auth_kwargs = await self._auth_config(target, operator)
             # ``known_hosts`` is fail-closed: the base ``_auth_config`` (and
             # every subclass override) resolves it via
@@ -363,14 +484,16 @@ class SshConnector(Connector):
             # silently disable verification.
             if "known_hosts" not in auth_kwargs:
                 raise SshHostKeyUnpinnedError(getattr(target, "name", "?"))
-            conn = await asyncssh.connect(
-                target.host,
-                port=target.port or 22,
-                username=auth_kwargs["username"],
-                client_keys=auth_kwargs.get("client_keys"),
-                password=auth_kwargs.get("password"),
-                known_hosts=auth_kwargs["known_hosts"],
-            )
+
+            conn = await _dial(target, auth_kwargs)
+            if self._pool_generations.get(target_key, 0) != generation:
+                # The target was changed while this login ran: the secret
+                # read above, and maybe the host, are the old ones. Keeping
+                # the connection would serve later calls with the old login.
+                conn.close()
+                await conn.wait_closed()
+                logger.info("ssh_login_dropped_target_changed", target=target.name)
+                raise SshTargetChangedError(target.name)
             self._connections[cache_key] = (conn, time.monotonic())
             logger.info("ssh_connected", target=target.name, host=target.host)
             return conn
@@ -382,6 +505,7 @@ class SshConnector(Connector):
         *,
         operator: Operator | None = None,
         timeout: float = 30.0,
+        stdin: str | None = None,
     ) -> asyncssh.SSHCompletedProcess:
         """Run *cmd* on *target* via the pooled SSH connection.
 
@@ -389,6 +513,11 @@ class SshConnector(Connector):
         for the operator-context Vault credential read on a pool miss;
         ``None`` fails closed at Vault per :meth:`_resolve_secret`.
         Raises :exc:`asyncio.TimeoutError` when *timeout* is exceeded.
+
+        ``stdin``, when set, is written to the command's standard input,
+        followed by end-of-file. Use it for a value that must not appear on
+        the remote command line, such as a password. It is never logged and
+        never reaches the flight-recorder span (only *cmd* and the result do).
         """
         conn = await self._connect(target, operator)
         # Flight-recorder typed span (#3217, F8) -- the shared SSH-transport
@@ -401,7 +530,12 @@ class SshConnector(Connector):
         # omits both and degrades the trace to operator-only (F5) -- an SSH
         # command / its output never reaches a span un-redacted.
         _fr_start = flight_recorder_typed.typed_span_start(f"ssh {getattr(target, 'name', '?')}")
-        result = await asyncio.wait_for(conn.run(cmd, check=False), timeout=timeout)
+        if stdin is None:
+            result = await asyncio.wait_for(conn.run(cmd, check=False), timeout=timeout)
+        else:
+            result = await asyncio.wait_for(
+                conn.run(cmd, input=stdin, check=False), timeout=timeout
+            )
         _record_ssh_span(_fr_start, cmd=cmd, result=result)
         logger.info(
             "ssh_command_executed",
@@ -433,12 +567,36 @@ class SshConnector(Connector):
             f"target unreachable for {result.product!r} via {result.probe_method!r}{detail}"
         )
 
+    async def invalidate_credentials(self, target: Target) -> None:
+        """Close and drop every pooled connection of *target* (#2396, #3879).
+
+        The pool holds one connection per caller, so a target may have
+        several. All of them were opened with the old host and secret, and
+        all are dropped, so the next command of each caller opens a new one
+        with the current values. Called after a failed login and after a
+        target change. A login that is still running is not waited for: the
+        drop counter tells :meth:`_connect` to discard its result instead.
+        """
+        target_key = target_cache_key(target)
+        async with self._pool_lock:
+            dropped = [
+                self._connections.pop(key)
+                for key in list(self._connections)
+                if key[:2] == target_key
+            ]
+            self._pool_generations[target_key] = self._pool_generations.get(target_key, 0) + 1
+        for conn, _ in dropped:
+            if not conn.is_closed():
+                conn.close()
+                await conn.wait_closed()
+
     async def aclose(self) -> None:
         """Close all pooled connections. Called by lifespan or cleanup."""
         async with self._pool_lock:
             to_close = list(self._connections.values())
             self._connections.clear()
             self._connect_locks.clear()
+            self._pool_generations.clear()
         for conn, _ in to_close:
             if not conn.is_closed():
                 conn.close()

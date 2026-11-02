@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import difflib
 import re
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -366,7 +367,10 @@ async def lookup_descriptor(
     written back.
 
     A row of a connector package that is not installed is not found
-    (:func:`installed_owner_clause`).
+    (:func:`installed_owner_clause`). Nor is a row of a connector whose
+    code is not in this MEHO
+    (:func:`~meho_backplane.operations._code_presence.row_code_missing`,
+    #5585).
     "Enabled" is :func:`enabled_for_tenant_clause`: for a built-in row the
     tenant's own on/off setting wins over the install default (#5029).
     """
@@ -391,6 +395,11 @@ async def lookup_descriptor(
         )
         row = result.scalar_one_or_none()
         if row is None:
+            return None
+        # Imported here: the module imports this one.
+        from meho_backplane.operations._code_presence import row_code_missing
+
+        if await row_code_missing(session, tenant_id=tenant_id, row=row):
             return None
         return await apply_effective_policy(session, tenant_id=tenant_id, row=row)
 
@@ -506,6 +515,7 @@ async def find_connectors_with_op(
     tenant_id: UUID | None,
     op_id: str,
     exclude: tuple[str, str, str],
+    skip: Callable[[EndpointDescriptor], bool] | None = None,
 ) -> list[str]:
     """Return the ids of other caller-visible connectors that have *op_id* enabled.
 
@@ -523,17 +533,14 @@ async def find_connectors_with_op(
     Each id is rendered as ``<impl_id>-<version>`` (``<product>`` for a
     v1-style row with no version) and kept only when it parses back to
     the same triple, so every named id can be passed to dispatch as is.
-    The list is sorted and capped at :data:`_CONNECTORS_WITH_OP_CAP`.
+    A row for which *skip* returns true is left out, before the cap
+    (#5069: a connector that refuses the caller's target). The list is
+    sorted and capped at :data:`_CONNECTORS_WITH_OP_CAP`.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         result = await session.execute(
-            select(
-                EndpointDescriptor.product,
-                EndpointDescriptor.version,
-                EndpointDescriptor.impl_id,
-            )
-            .where(
+            select(EndpointDescriptor).where(
                 visible_scope_clause(
                     EndpointDescriptor,
                     tenant_id=tenant_id,
@@ -545,9 +552,12 @@ async def find_connectors_with_op(
                 enabled_for_tenant_clause(tenant_id=tenant_id),
                 installed_owner_clause(),
             )
-            .distinct()
         )
-        triples = {(row.product, row.version, row.impl_id) for row in result}
+        triples = {
+            (row.product, row.version, row.impl_id)
+            for row in result.scalars()
+            if skip is None or not skip(row)
+        }
     triples.discard(exclude)
     rendered = {_render_connector_id(*triple) for triple in triples}
     return sorted(cid for cid in rendered if cid is not None)[:_CONNECTORS_WITH_OP_CAP]

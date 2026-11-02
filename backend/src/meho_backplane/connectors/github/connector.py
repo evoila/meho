@@ -101,6 +101,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import (
     CredentialsReadError,
@@ -201,6 +202,8 @@ class GitHubRestConnector(HttpConnector):
         # token never expires from MEHO's side (the PAT carries its own
         # GitHub-set TTL). Caching keeps the Vault read off the hot path.
         self._pat_tokens: dict[tuple[str, str], str] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._token_lock = asyncio.Lock()
         # The injected http client is reserved for a future bring-your-
         # own-client test path; production uses the inherited per-target
@@ -303,12 +306,15 @@ class GitHubRestConnector(HttpConnector):
             now = time.monotonic()
             cached_app = self._installation_tokens.get(cache_key)
             if cached_app is not None and cached_app.expires_at_monotonic > now:
+                await self._ensure_read(target, operator)
                 return cached_app.token
             cached_pat = self._pat_tokens.get(cache_key)
             if cached_pat is not None:
+                await self._ensure_read(target, operator)
                 return cached_pat
 
             creds = await self._credentials_loader(target, operator)
+            self._readers.record(target, operator)
             if isinstance(creds, GitHubAppCredentials):
                 return await self._mint_and_cache_installation_token(target, creds)
             if isinstance(creds, GitHubPATCredentials):
@@ -326,6 +332,12 @@ class GitHubRestConnector(HttpConnector):
                 f"This is a loader-configuration bug. See "
                 f"docs/codebase/connectors-github.md."
             )
+
+    async def _ensure_read(self, target: GitHubTargetLike, operator: Operator) -> None:
+        """Run the caller's own Vault read of *target*'s secret, once per caller."""
+        await self._readers.ensure_read(
+            target, operator, lambda: self._credentials_loader(target, operator)
+        )
 
     async def _mint_and_cache_installation_token(
         self,
@@ -492,11 +504,26 @@ class GitHubRestConnector(HttpConnector):
         """
         return None
 
+    async def invalidate_credentials(self, target: GitHubTargetLike) -> None:
+        """Drop the kept installation token and PAT for *target* (#2396, #3879).
+
+        The next call reads the secret from Vault again. The dispatcher calls
+        this after a failed login, and the target update route calls it after
+        a target change, so a new or narrower credential is used at once
+        instead of after the kept token expires.
+        """
+        cache_key = target_cache_key(target)
+        async with self._token_lock:
+            self._installation_tokens.pop(cache_key, None)
+            self._pat_tokens.pop(cache_key, None)
+            self._readers.forget(target)
+
     async def aclose(self) -> None:
         """Drop cached tokens + close the inherited httpx pool."""
         async with self._token_lock:
             self._installation_tokens.clear()
             self._pat_tokens.clear()
+            self._readers.clear()
         await super().aclose()
 
 

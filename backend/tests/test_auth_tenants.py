@@ -5,9 +5,8 @@
 
 The ``meho_tenants`` claim lists every tenant the person is in, as
 ``<tenant-uuid>:<tenant>:<RoleGroup>`` entries. MEHO keeps the list on the
-:class:`~meho_backplane.auth.operator.Operator` but does not use it yet:
-the current tenant and role still come from the flat ``tenant_id`` /
-``tenant_role`` claims.
+:class:`~meho_backplane.auth.operator.Operator`. How the current tenant is
+picked from it (#5239) is tested in ``test_auth_current_tenant.py``.
 """
 
 from __future__ import annotations
@@ -30,7 +29,12 @@ with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     from authlib.jose import JsonWebKey, JsonWebToken
 
-from meho_backplane.auth.jwt import _operator_from_claims, clear_jwks_cache, verify_jwt
+from meho_backplane.auth.jwt import (
+    _extract_tenants,
+    _operator_from_claims,
+    clear_jwks_cache,
+    verify_jwt,
+)
 from meho_backplane.auth.operator import (
     GroupGrant,
     Operator,
@@ -187,8 +191,9 @@ def test_string_instead_of_list_gives_empty_tenants() -> None:
 
 
 def test_two_entries_for_one_tenant_are_both_kept() -> None:
-    """The one-group-per-tenant rule is not checked here (a later step does it)."""
-    tenants = _tenants([f"{_TENANT_A}:lab-a:Readers", f"{_TENANT_A}:lab-a:Admins"])
+    """The reader keeps both; the one-group-per-tenant rule is a later step."""
+    claims = _claims(meho_tenants=[f"{_TENANT_A}:lab-a:Readers", f"{_TENANT_A}:lab-a:Admins"])
+    tenants = _extract_tenants(claims, get_settings(), PrincipalKind.USER)
     assert [t.group for t in tenants] == [RoleGroup.READERS, RoleGroup.ADMINS]
 
 
@@ -230,16 +235,17 @@ def test_machine_login_gets_no_tenants(kind: PrincipalKind, extra: dict[str, Any
 # ---------------------------------------------------------------------------
 
 
-def test_list_does_not_change_current_tenant_or_role() -> None:
-    """The current tenant, role and approver flag still come from the flat claims."""
-    without_list = _operator(_claims())
+def test_list_replaces_the_flat_claims() -> None:
+    """With a list, the start tenant, role and approver flag come from its first entry (#5239)."""
     with_list = _operator(
-        _claims(meho_tenants=[f"{_TENANT_B}:lab-b:Admins", f"{_TENANT_C}:team3:Approvers"])
+        _claims(
+            approver=True,
+            meho_tenants=[f"{_TENANT_B}:lab-b:Admins", f"{_TENANT_C}:team3:Approvers"],
+        )
     )
-    assert with_list.tenant_id == without_list.tenant_id == _TENANT_A
-    assert with_list.tenant_role == without_list.tenant_role == TenantRole.OPERATOR
-    assert with_list.approver is without_list.approver is False
-    assert with_list.model_dump(exclude={"tenants"}) == without_list.model_dump(exclude={"tenants"})
+    assert with_list.tenant_id == _TENANT_B
+    assert with_list.tenant_role == TenantRole.TENANT_ADMIN
+    assert with_list.approver is False
 
 
 def test_operator_stays_frozen_and_hides_raw_jwt() -> None:
@@ -304,10 +310,12 @@ def test_verify_jwt_reads_tenants_from_a_signed_token() -> None:
             return_value=httpx.Response(200, json={"keys": [key.as_dict(is_private=False)]})
         )
         with TestClient(app) as client:
-            resp = client.get("/whoami", headers={"Authorization": f"Bearer {token}"})
+            resp = client.get(
+                "/whoami", headers={"Authorization": f"Bearer {token}", "Meho-Tenant": "lab-b"}
+            )
     assert resp.status_code == 200, resp.text
     assert resp.json() == {
-        "tenant_id": str(_TENANT_A),
+        "tenant_id": str(_TENANT_B),
         "tenants": [
             [str(_TENANT_A), "lab-a", "Operators"],
             [str(_TENANT_B), "lab-b", "Readers"],

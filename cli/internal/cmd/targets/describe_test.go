@@ -281,3 +281,16 @@ func TestRunDescribe404RendersNearMisses(t *testing.T) {
 		}
 	}
 }
+
+// TestFormatSecretFieldMapSortsEntries pins the describe rendering of
+// the secret field map: sorted `connector_field=source_field` pairs.
+func TestFormatSecretFieldMapSortsEntries(t *testing.T) {
+	t.Parallel()
+	got := formatSecretFieldMap(map[string]string{
+		"username": "login", "ssh_private_key": "private_key",
+	})
+	want := "ssh_private_key=private_key, username=login"
+	if got != want {
+		t.Errorf("got %q; want %q", got, want)
+	}
+}

@@ -1035,7 +1035,17 @@ async def test_registered_ops_are_typed_safe_and_documented(
         .all()
     )
     assert {r.op_id for r in rows} == {op.op_id for op in SRM_TYPED_OPS}
-    assert {r.op_id for r in rows} == {"srm.about", "srm.api_file.get"}
+    assert {r.op_id for r in rows} == {
+        "srm.about",
+        "srm.api_file.get",
+        "srm.pairing.list",
+        "srm.remote_login",
+        "srm.plan.list",
+        "srm.plan.get",
+        "srm.group.list",
+        "srm.issue.list",
+        "srm.history.list",
+    }
     for row in rows:
         assert row.source_kind == "typed"
         assert row.handler_ref is not None

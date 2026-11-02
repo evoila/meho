@@ -23,7 +23,7 @@ satellite table — reads ``safe``, recoverable writes ``caution``, destructive
 * ``hyperv.host.info``          [safe]   Get-VMHost (CPUs, memory, NUMA spanning, default paths).
 * ``hyperv.host.numa``          [safe]   Get-VMHostNumaNode (host NUMA topology; list).
 * ``hyperv.host.vswitch.list``  [safe]   Get-VMSwitch (virtual switch inventory; list).
-* ``hyperv.vms.list``           [safe]   Get-VM (VM inventory; the migration-assessment surface).
+* ``hyperv.vms.list``           [safe]   Get-VM (VM inventory; the migration assessment surface).
 * ``hyperv.vms.get``            [safe]   Get-VM -Name (one VM's identity + state + generation).
 * ``hyperv.vms.config``         [safe]   deep config: memory / processors / generation / firmware.
 * ``hyperv.vms.state``          [safe]   runtime state: State / Status / Uptime / Heartbeat.

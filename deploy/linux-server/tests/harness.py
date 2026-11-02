@@ -92,6 +92,19 @@ REAL_TOOLS = (
     "tar",
 )
 
+# What "nft list chain inet meho prerouting" prints for the file install.sh
+# writes (nft 1.0.9). test_firewall_nft.py checks the real output.
+PREROUTING_CHAIN = """\
+table inet meho {
+\tchain prerouting {
+\t\ttype filter hook prerouting priority mangle; policy drop;
+\t\tiifname "lo" accept
+\t\tct state established,related accept
+\t\tcounter packets 0 bytes 0
+\t}
+}
+"""
+
 STUBS = {
     "id": 'case "$1" in -u) cat "$MEHO_FAKE/uid" ;; *) exit 1 ;; esac',
     "uname": 'case "$1" in -m) cat "$MEHO_FAKE/arch" ;; *) echo Linux ;; esac',
@@ -160,6 +173,9 @@ STUBS = {
         case "$*" in
           "list tables") exit 0 ;;
           "list table inet meho") exit "$(cat "$MEHO_FAKE/nft_table_rc")" ;;
+          "list chain inet meho prerouting")
+            cat "$MEHO_FAKE/nft_chain_out"
+            exit "$(cat "$MEHO_FAKE/nft_chain_rc")" ;;
           "-c -f "*) cat "$MEHO_FAKE/nft_check_out"; exit "$(cat "$MEHO_FAKE/nft_check_rc")" ;;
           *) exit 1 ;;
         esac
@@ -286,6 +302,8 @@ DEFAULT_ANSWERS = {
     "systemctl_restart_rc": "0",
     "systemctl_disable_rc": "0",
     "nft_table_rc": "0",
+    "nft_chain_rc": "0",
+    "nft_chain_out": PREROUTING_CHAIN,
     "nft_check_rc": "0",
     "nft_check_out": "",
 }

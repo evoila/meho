@@ -21,7 +21,9 @@ G3.2-T3 ships its production-grade resolver.
 Multi-container pods without ``--container`` short-circuit to a
 structured error carrying the available container names so the caller
 can retry with an explicit container. Single-container pods auto-pick
-the only container.
+the only container. Init containers can be named too (for example to
+read the logs of a failed migration step); they are listed in the error
+but never auto-picked.
 
 The 1MB body cap is applied client-side. The k8s API exposes
 ``limit_bytes`` for a server-side cap, but it terminates the response
@@ -142,7 +144,7 @@ K8S_LOGS_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Container name within the pod. Required when the pod "
                 "has more than one container; auto-selected when there "
-                "is only one."
+                "is only one. An init container name is accepted too."
             ),
         },
         "tail": {
@@ -247,8 +249,10 @@ K8S_LOGS_LLM_INSTRUCTIONS: dict[str, Any] = {
         "namespace": "Required.",
         "container": (
             "Required for multi-container pods. The handler returns a "
-            "structured error listing the pod's containers when this "
-            "is omitted and the pod has more than one."
+            "structured error listing the pod's containers (app "
+            "containers first, then init containers) when this is "
+            "omitted and the pod has more than one. Pass an init "
+            "container name to read its logs, e.g. a failed migration."
         ),
         "tail": (
             f"Defaults to 100; capped at {MAX_TAIL_LINES}. Prefer "
@@ -409,6 +413,8 @@ async def resolve_pod_and_container(
     namespace: str,
     pod_name: str,
     container: str | None,
+    *,
+    include_init_containers: bool = False,
 ) -> tuple[str, str]:
     """Resolve ``pod_name`` prefix + ``container`` against the cluster.
 
@@ -419,8 +425,15 @@ async def resolve_pod_and_container(
       prefix. ``candidates`` carries the matched names so the caller
       can surface a "did-you-mean".
     * :class:`MultiContainerAmbiguityError` -- pod has multiple
-      containers and ``container`` is ``None``. ``containers`` carries
-      the candidate list.
+      containers and ``container`` is ``None``, or ``container`` names
+      no container of the pod. ``containers`` carries the candidate
+      list.
+
+    With ``include_init_containers=True`` the pod's init containers are
+    valid ``container`` values and appear after the app containers in
+    the candidate list. Auto-pick still looks only at the app
+    containers, so a pod with one app container and some init
+    containers keeps resolving to the app container.
     * :class:`kubernetes_asyncio.client.ApiException` -- API-side
       errors (RBAC denial, namespace missing). Propagated unchanged.
 
@@ -450,14 +463,17 @@ async def resolve_pod_and_container(
 
     pod = matches[0]
     container_names: list[str] = [c.name for c in (pod.spec.containers or [])]
+    valid_names = list(container_names)
+    if include_init_containers:
+        valid_names += [c.name for c in (pod.spec.init_containers or [])]
     if container is not None:
-        if container not in container_names:
-            raise MultiContainerAmbiguityError(pod.metadata.name, container_names)
+        if container not in valid_names:
+            raise MultiContainerAmbiguityError(pod.metadata.name, valid_names)
         return pod.metadata.name, container
 
     if len(container_names) == 1:
         return pod.metadata.name, container_names[0]
-    raise MultiContainerAmbiguityError(pod.metadata.name, container_names)
+    raise MultiContainerAmbiguityError(pod.metadata.name, valid_names)
 
 
 def truncate_lines_to_byte_cap(lines: list[str], cap_bytes: int) -> tuple[list[str], int]:
@@ -549,7 +565,7 @@ async def k8s_logs(
     v1 = client.CoreV1Api(api_client)
 
     exact_name, container_name = await resolve_pod_and_container(
-        v1, namespace, pod_name, container_param
+        v1, namespace, pod_name, container_param, include_init_containers=True
     )
 
     if window is not None:

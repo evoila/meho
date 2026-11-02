@@ -9,6 +9,85 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.42.0](https://github.com/evoila/meho/releases/tag/v0.42.0) — 2026-11-02
+
+- **Secret fields stay hidden everywhere.** Every operation hides
+  secret-named fields in its answer. A person can still ask for a value.
+- **Approvals need a recent sign-in, also in the web interface.** On the
+  command line, one sign-in covers 15 minutes of approvals. It uses the
+  new login client `meho-cli-approve`.
+- **Logins last longer.** `meho login` renews itself, and the Claude
+  clients keep their login through a short network problem.
+- **The connector kit.** Connector packages import MEHO through one
+  module and name the kit versions they fit.
+- **New operations.** vSphere hosts, VMs, vApps, templates and vSAN,
+  HCX, fleet management, VCF Automation, VCF Operations 9.1,
+  Orchestrator, Salt, and a new Identity Broker connector.
+- **Read first.** One database migration, a new Keycloak client for
+  approvals on the command line, and a few scripts must change. See
+  "Breaking changes" and "Steps after the upgrade" in the release notes.
+
+## [v0.41.0](https://github.com/evoila/meho/releases/tag/v0.41.0) — 2026-11-01
+
+- **More vCenter 8.0 reads are guarded.** The reads of content
+  libraries and Supervisor image registries hide their secrets and wait
+  for approval, the same as on vCenter 9.0.
+- **The SA-Operators group is read from the login.** Approvals do not
+  use it yet.
+- **Small upgrade.** No database migration. After the upgrade, load the
+  vCenter 8.0 connector again with the same API files, and update the
+  Claude Desktop bundle and the Claude Code plugin, which ship a fixed
+  `qs` library.
+
+## [v0.40.0](https://github.com/evoila/meho/releases/tag/v0.40.0) — 2026-11-01
+
+- **Secret values stay hidden.** Secret reads show names, not values. A
+  person can still ask for a value, and the audit keeps a fingerprint in
+  its place.
+- **Approvals run as approved.** An approved request runs only on the
+  target and preview the person approved. Approving on the command line
+  needs a fresh sign-in. A failed approved run can run again, and a
+  change ticket can be approved step by step.
+- **Agents work with operator rights.** Tenant admin work is for people.
+- **One tenant at a time.** A person in several tenants picks one with
+  `meho tenants use`. The MCP clients send it too.
+- **New operations.** HCX, Site Recovery Manager, vSphere Replication,
+  Cloud Director, the VCF Installer, Cloud Builder for VCF 5.x, fleet
+  management, Azure networks, Google keyless access, GitHub issues, and
+  many vSphere tasks.
+- **Read first.** Three database migrations, a Vault role for the check
+  runner, and a few scripts must change. See "Breaking changes" and
+  "Steps after the upgrade" in the release notes.
+
+## [v0.39.0](https://github.com/evoila/meho/releases/tag/v0.39.0) — 2026-10-30
+
+- **Safer approvals.** The sender of a change that waits for approval
+  can withdraw it. An approval now covers one exact MEHO release, so an
+  upgrade ends the requests that still wait, and the requester asks
+  again.
+- **First steps for several tenants.** The login can list every tenant
+  of a person, the audit views and the approvals page show the tenant,
+  and a tenant admin can turn built-in operations on or off for their
+  own tenant only.
+- **Connector packages.** A MEHO image can carry connector packages from
+  other repositories. The status and version pages list them, and a
+  satellite runner gets only the work its packages can run.
+- **New connector and operations.** The phpIPAM connector reads subnets
+  and books addresses. New operations cover Azure VMware Solution and
+  Azure Arc, the steps that build a Windows domain controller,
+  Kubernetes access checks, vSphere datastore and vSAN folder lists,
+  Vault folder deletes with one approval, and Holodeck lab removal.
+- **Fewer secrets in errors and traces.** Error results, HTTP
+  diagnostics and traces hide secret fields before the audit row is
+  written.
+- **Admin edits stay, and only make things stricter.** A change to an
+  operation's risk level or approval flag now stays after a restart. An
+  edit can only make an operation stricter; turning approval off needs
+  a platform admin, a reason and a fresh sign-in.
+- **Before you upgrade.** There are nine database migrations, and a few
+  scripts and grants must change. Read "Breaking changes" and "Steps
+  after the upgrade" in the release notes.
+
 ## [v0.38.0](https://github.com/evoila/meho/releases/tag/v0.38.0) — 2026-10-28
 
 - **Azure, read end to end.** MEHO logs in to Azure with a service

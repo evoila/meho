@@ -37,8 +37,14 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vm_question import (
     vm_question_get_impl,
 )
 from meho_backplane.jsonflux.query.json_pointer import parse_json_pointer, resolve_json_pointer
+from meho_backplane.operations._errors import result_composite_terminal_error
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
 from meho_backplane.operations._validate import validate_params
+from meho_backplane.operations._vendor_text import redact_error_result
+from meho_backplane.operations.approval_outcome import (
+    resume_outcome_from_envelope,
+    with_approval_guidance,
+)
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.settings import get_settings
 
@@ -681,6 +687,48 @@ async def test_cdrom_timeout_still_says_unknown_when_the_follow_up_read_fails() 
     assert out["vm_question"] is None
     assert "ConnectError" in out["tasks_error"]
     assert "unknown" in out["guidance"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_no_gate")
+async def test_approved_cdrom_timeout_run_summary_names_the_question() -> None:
+    """The approval run summary carries the result word and the guidance (#5377).
+
+    The composite's answer goes the way the dispatcher sends it: it becomes the
+    error result of the run (#3809), passes the secret cleanup, and is stored
+    on the approval request with the guidance stamp. The run summary then
+    names the question id.
+    """
+    conn = _FakeConnector(tasks={"task-7": _RUNNING}, write_error=httpx.ReadTimeout("timed out"))
+    out = await vm_device_cdrom_composite(
+        operator=_operator(),
+        target=_Target(),
+        params={"vm": "vm-42", "cdrom": "16000", "action": "disconnect"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    result = redact_error_result(
+        result_composite_terminal_error(
+            "vmware.composite.vm.device.cdrom",
+            error_code=out["status"],
+            envelope=out,
+            error_summary="result_unknown: the device change timed out",
+            duration_ms=30175.0,
+        )
+    )
+
+    stored = with_approval_guidance(
+        result.model_dump(mode="json"), parked_op_id="vmware.composite.vm.device.cdrom"
+    )
+    outcome = resume_outcome_from_envelope(stored)
+
+    assert outcome.result_status == "error"
+    assert outcome.error_code == "result_unknown"
+    assert outcome.guidance is not None
+    assert "The VM waits on question _vmx1" in outcome.guidance
+    assert "task-7" in outcome.guidance
+    assert "vmware.vm.question.answer" in outcome.guidance
+    # MEHO's own words only: the question text from vCenter is not in it.
+    assert "locked the CD-ROM door" not in outcome.guidance
 
 
 def test_both_ops_are_registered_with_the_right_safety() -> None:

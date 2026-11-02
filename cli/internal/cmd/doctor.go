@@ -24,10 +24,12 @@ const (
 	doctorSkip = "skip"
 )
 
-// The two layers the doctor checks.
+// The layers the doctor checks. The server layer appears only on a
+// Linux server of install form 2, where meho-host is installed.
 const (
 	layerOffline = "offline"
 	layerAuthed  = "authenticated"
+	layerServer  = "server"
 )
 
 // Failure classes for the authenticated layer. The network classes
@@ -95,7 +97,7 @@ func newDoctorCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check this machine's MEHO client setup and say which layer is broken",
-		Long: "doctor checks the MEHO client setup on this machine in two layers " +
+		Long: "doctor checks the MEHO client setup on this machine in layers " +
 			"and tells you which layer fails. It only reports. It never logs you in " +
 			"again, re-installs anything, or changes a file.\n\n" +
 			"Offline layer (no network): the meho binary path, the Claude Code " +
@@ -115,9 +117,15 @@ func newDoctorCmd() *cobra.Command {
 			"logs in on its own (through mcp-remote) and can hold other scopes; " +
 			"call meho_status from that client to see them. For a deeper look at " +
 			"a Claude client login, run mcp-remote with --debug.\n\n" +
+			"Server layer (only on a Linux server of install form 2, where " +
+			mehoHostPath + " exists): as root, doctor runs `meho-host check --json` " +
+			"with a 60-second limit and shows its lines after its own: the node, the " +
+			"pods, the disk and the certificates of the built-in Kubernetes (RKE2). " +
+			"As another user it shows one warning and runs nothing; run " +
+			"`sudo meho doctor`. With --no-network this layer is skipped.\n\n" +
 			"The output never contains a token, an OAuth code, a cookie, or a " +
 			"redirect URL. Guides: https://evoila.github.io/meho/clients/troubleshooting/\n\n" +
-			"Exit codes: 0 no failure, 1 an offline check failed, 2 login problem " +
+			"Exit codes: 0 no failure, 1 an offline or server check failed, 2 login problem " +
 			"(not logged in, refresh rejected, token refused), 3 network problem " +
 			"(dns, tls, unreachable), 4 unexpected answer or a surface gap.",
 		Args:          cobra.NoArgs,
@@ -139,21 +147,22 @@ func newDoctorCmd() *cobra.Command {
 	return cmd
 }
 
-// runDoctor runs both layers and returns the report.
+// runDoctor runs the layers and returns the report. The server layer
+// comes last, after the doctor's own checks.
 func runDoctor(cmd *cobra.Command, opts doctorOptions, deps doctorDeps) *doctorReport {
 	report := &doctorReport{}
 	backplaneURL := runOfflineChecks(report, opts, deps)
-	if opts.noNetwork {
+	switch {
+	case opts.noNetwork:
 		report.add(doctorCheck{Layer: layerAuthed, Name: "authenticated layer", Status: doctorSkip,
 			Detail: "skipped (--no-network)"})
-		return report
-	}
-	if backplaneURL == "" {
+	case backplaneURL == "":
 		report.add(doctorCheck{Layer: layerAuthed, Name: "authenticated layer", Status: doctorSkip,
 			Detail: "skipped: no usable backplane URL", Hint: "run `meho login <url>` or pass --backplane <url>"})
-		return report
+	default:
+		runAuthenticatedChecks(cmd.Context(), report, backplaneURL, deps)
 	}
-	runAuthenticatedChecks(cmd.Context(), report, backplaneURL, deps)
+	runServerChecks(cmd.Context(), report, opts, deps)
 	return report
 }
 
@@ -174,22 +183,45 @@ func renderDoctor(w io.Writer, report *doctorReport, jsonOut bool) error {
 	return nil
 }
 
+// printDoctorHuman prints the checks layer by layer. The server lines
+// come last, after the summary of the authenticated layer, so the
+// doctor's own output comes first.
 func printDoctorHuman(w io.Writer, r *doctorReport) {
+	var serverLines []doctorCheck
 	layer := ""
 	for _, c := range r.Checks {
-		if c.Layer != layer {
-			layer = c.Layer
-			fmt.Fprintf(w, "%s layer\n", strings.ToUpper(layer[:1])+layer[1:])
+		if c.Layer == layerServer {
+			serverLines = append(serverLines, c)
+			continue
 		}
-		line := fmt.Sprintf("  [%-4s] %-18s %s", c.Status, c.Name, c.Detail)
-		if c.Class != "" {
-			line += " (" + c.Class + ")"
-		}
-		fmt.Fprintln(w, line)
-		if c.Hint != "" {
-			fmt.Fprintf(w, "         -> %s\n", c.Hint)
-		}
+		layer = printDoctorLine(w, c, layer)
 	}
+	printDoctorSummary(w, r)
+	for _, c := range serverLines {
+		layer = printDoctorLine(w, c, layer)
+	}
+}
+
+// printDoctorLine prints one check, with a layer heading first when the
+// layer changes, and returns the layer of the check.
+func printDoctorLine(w io.Writer, c doctorCheck, layer string) string {
+	if c.Layer != layer {
+		fmt.Fprintf(w, "%s layer\n", strings.ToUpper(c.Layer[:1])+c.Layer[1:])
+	}
+	line := fmt.Sprintf("  [%-4s] %-18s %s", c.Status, c.Name, c.Detail)
+	if c.Class != "" {
+		line += " (" + c.Class + ")"
+	}
+	fmt.Fprintln(w, line)
+	if c.Hint != "" {
+		fmt.Fprintf(w, "         -> %s\n", c.Hint)
+	}
+	return c.Layer
+}
+
+// printDoctorSummary prints the scopes, the working surface and the MCP
+// session id of the authenticated layer.
+func printDoctorSummary(w io.Writer, r *doctorReport) {
 	if len(r.GrantedScopes) > 0 {
 		fmt.Fprintf(w, "Granted scopes (CLI session): %s\n", strings.Join(r.GrantedScopes, " "))
 	}

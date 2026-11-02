@@ -17,7 +17,11 @@ Every command accepts the global flags below.
 
 - `--config` — path to the meho config file (default: `$XDG_CONFIG_HOME/meho/config.json`).
 - `--verbose`, `-v` — enable verbose output.
-- `--work-ref` — external change-ticket reference (`gh:<owner>/<repo>#<n>`, default: `$MEHO_WORK_REF`). The CLI sends it as the `Meho-Work-Ref` header on every backplane request, so the audit rows carry it. Some commands have their own `--work-ref` flag (for example `operation call`, or the filter on `audit query`). On those commands the flag means what that command says, and only `$MEHO_WORK_REF` is sent as the header.
+- `--work-ref` — external change-ticket reference (`gh:<owner>/<repo>#<n>`, default: `$MEHO_WORK_REF`). The CLI sends it as the `Meho-Work-Ref` header on every backplane request, so the audit rows carry it. Five commands have their own `--work-ref` flag that tags the run with the reference: `operation call`, `scheduler create`, `runbook start`, `agent run`, and `broadcast announce`. On those commands only `$MEHO_WORK_REF` is sent as the header. List commands filter by reference with `--filter-work-ref`.
+
+## Current tenant
+
+One login can be in several tenants. MEHO then works in one current tenant, and every command sends it in the `Meho-Tenant` header. Choose it with `meho tenants use <name>`; without a name, `meho tenants use` lists your tenants and marks the current one. No new login is needed. `$MEHO_TENANT` (a tenant name or ID) wins over the stored choice for one shell. A login in one tenant needs none of this.
 
 ## `meho addon`
 
@@ -104,8 +108,9 @@ meho admin keycloak bootstrap-clients [flags]
 - `--admin-user-username` — username of the admin user to provision in MEHO-Admins and MEHO-Platform-Admins (required unless --skip-user-provisioning)
 - `--admin-username` — master-realm admin username (or set KEYCLOAK_ADMIN_USER)
 - `--backplane-audience` — audience claim the `audience-meho-backplane` mapper emits (matches chart's `config.keycloakAudience`)
+- `--cli-approve-client-id` — public client_id for the fresh browser sign-in of `meho approvals approve` (matches chart's `config.keycloakCliApproveClientId`)
 - `--cli-client-id` — public client_id for the device-code flow (matches chart's `config.keycloakCliClientId`)
-- `--cli-offline-access` — opt the device-code CLI client into the long-lived offline-token path: assign `offline_access` as an optional client scope and bound its per-client offline-session idle timeout to the given number of seconds. Off by default. A bare `--cli-offline-access` uses 172800 seconds (48h); to pass a custom value use the equals form, e.g. `--cli-offline-access=86400`. Pairs with `meho login --offline`. Security: this enables a long-lived refresh token on the operator's disk — keep the bound tight and prefer the OS keyring for storage
+- `--cli-offline-access` — how many seconds an unused CLI login stays valid: assigns `offline_access` as an optional client scope on the device-code CLI client and sets its `client.offline.session.idle.timeout` attribute, so `meho login` gets a login that renews itself. Default 172800 seconds (48h). Use the equals form for another value, e.g. `--cli-offline-access=86400`. `--cli-offline-access=0` turns the long CLI login off and removes it from a client an earlier run set up. The refresh token is a long-lived secret on the operator's disk (OS keyring first)
 - `--dry-run` — print what would be provisioned without making any API calls
 - `--insecure-skip-tls-verify` — escape hatch: skip TLS certificate AND hostname verification for every Keycloak request (sends the admin password + token over an unverified connection; prints a loud warning). Prefer --keycloak-ca-bundle
 - `--keycloak-base-url` — Keycloak base URL, e.g. https://keycloak.example.com
@@ -281,7 +286,7 @@ meho agent run <name> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--input` — the user prompt to run the agent on (required; at most 65536 characters)
 - `--json` — emit the raw run response JSON instead of the human summary
-- `--work-ref` — external change-ticket reference to bind the run to; filterable via `meho agent run-list --work-ref`
+- `--work-ref` — external change-ticket reference to bind the run to; filterable via `meho agent run-list --filter-work-ref`
 
 ### `meho agent run-cancel`
 
@@ -308,7 +313,7 @@ meho agent run-events <name> [flags]
 
 ### `meho agent run-list`
 
-List agent runs (filter by --work-ref / --status)
+List agent runs (filter by --filter-work-ref / --status)
 
 ```
 meho agent run-list [flags]
@@ -316,11 +321,11 @@ meho agent run-list [flags]
 
 - `--agent-name` — filter by agent definition name (exact match); an unknown name returns an empty list
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--filter-work-ref` — filter by external change-ticket reference
 - `--json` — emit the raw []AgentRunSummaryResponse JSON instead of the table
 - `--limit` — max runs per page (1..500, server default 100 when omitted)
 - `--offset` — rows to skip for paging into the result set (default 0)
 - `--status` — filter by lifecycle status: pending, running, awaiting_approval, succeeded, failed, or cancelled
-- `--work-ref` — filter by external change-ticket reference
 
 ### `meho agent run-status`
 
@@ -389,7 +394,7 @@ meho agent-principal revoke <name> [flags]
 
 ## `meho approvals`
 
-Manage approval requests (list / show / approve / reject / withdraw)
+Manage approval requests (list / show / result / approve / reject / withdraw)
 
 ```
 meho approvals
@@ -397,13 +402,15 @@ meho approvals
 
 ### `meho approvals approve`
 
-Approve a pending approval request
+Approve pending approval requests
 
 ```
-meho approvals approve <id> [flags]
+meho approvals approve <id> [<id>...] | --filter-work-ref REF --in-order [flags]
 ```
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--filter-work-ref` — with --in-order: the change ticket whose pending requests to approve, oldest first
+- `--in-order` — approve every pending request of --filter-work-ref oldest first; stop at the first failure
 - `--json` — emit raw JSON response instead of summary
 - `--reason` — optional rationale for the approval; the command help explains the Instructed-by: layout
 
@@ -416,12 +423,12 @@ meho approvals list [flags]
 ```
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--filter-work-ref` — filter by external change-ticket reference, exact match
 - `--json` — emit raw JSON array instead of the human table
 - `--limit` — max requests to return (1..500; no limit when omitted)
 - `--offset` — skip this many requests first (default 0)
-- `--order` — sort order: oldest or newest (default: newest; oldest when --work-ref is set)
+- `--order` — sort order: oldest or newest (default: newest; oldest when --filter-work-ref is set)
 - `--status` — filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)
-- `--work-ref` — filter by external change-ticket reference, exact match
 
 ### `meho approvals reject`
 
@@ -434,6 +441,17 @@ meho approvals reject <id> [flags]
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw JSON response instead of summary
 - `--reason` — optional rationale for the rejection; the command help explains the Instructed-by: layout
+
+### `meho approvals result`
+
+Show the output of an approved operation
+
+```
+meho approvals result <id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit the raw JSON answer instead of the human-readable view
 
 ### `meho approvals show`
 
@@ -729,6 +747,7 @@ meho audit query [flags]
 - `--audit-id` — exact audit-id lookup (UUID)
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--cursor` — opaque forward-pagination cursor from a prior page's NEXT line
+- `--filter-work-ref` — narrow to one external change-ticket reference — "show every write authorised by ticket X"
 - `--json` — emit raw AuditQueryResult JSON instead of the human table
 - `--limit` — max rows per page (1..1000, server default 100 when omitted)
 - `--op-class` — narrow to one op-class (read|write|credential_read|audit_query|other)
@@ -740,7 +759,6 @@ meho audit query [flags]
 - `--since` — earliest occurred_at; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601
 - `--target` — narrow to one target (name or alias; server-side resolution)
 - `--until` — latest occurred_at; accepts the same shorthand as --since
-- `--work-ref` — narrow to one external change-ticket reference — "show every write authorised by ticket X"
 
 ### `meho audit recent`
 
@@ -1119,12 +1137,12 @@ meho broadcast recent [flags]
 - `--actor-sub` — exact delegated-agent filter
 - `--backplane` — backplane URL
 - `--cursor` — ISO-8601 window start, or next_cursor from a previous page
+- `--filter-work-ref` — exact work-reference filter
 - `--json` — emit JSON
 - `--limit` — maximum events (1-1000)
 - `--op-class` — exact op class filter
 - `--principal` — exact principal filter
 - `--target` — exact target filter
-- `--work-ref` — exact work-reference filter
 
 ### `meho broadcast watch`
 
@@ -3374,7 +3392,7 @@ meho login <backplane-url> [flags]
 - `--client-id` — OAuth client_id to use for the device-code flow (auto-discovered when blank)
 - `--insecure-allow-http` — permit a plaintext http:// backplane URL for a localhost backplane only (local-dev convenience; the bearer token is sent in the clear — never use against a remote host)
 - `--issuer` — Keycloak realm issuer URL (auto-discovered from the backplane when blank)
-- `--offline` — request a long-lived offline refresh token (adds the OIDC `offline_access` scope) so you stay logged in across SSO idle timeouts instead of re-running the device dance. Requires the backplane's meho-cli client to allow offline_access (provision via `meho admin keycloak bootstrap-clients --cli-offline-access`). The refresh token is stored like any credential (OS keyring first, 0600 file fallback) — treat it as a long-lived secret
+- `--offline` — ask for a long login that renews itself (adds the OIDC `offline_access` scope). On by default; --offline=false asks for a short login that ends at the realm's SSO idle timeout. When the login server refuses the scope, login retries without it. The refresh token is stored like any credential (OS keyring first, 0600 file fallback) — treat it as a long-lived secret
 - `--print-token` — after a successful login, print ONLY the access token to stdout (every other line — the device-code prompt, the success message, warnings — goes to stderr) so it can be captured with 'TOKEN=$(meho login --print-token <backplane-url>)'. WARNING: the value is a live bearer credential — never log it or paste it into shared channels
 - `--resolve` — pin a host to an IP for the flow, mirroring `curl --resolve <host>:<port>:<ip>` (split-DNS escape hatch when the Keycloak host doesn't resolve). Repeat for multiple hosts. TLS SNI/Host use the real hostname, so certificate validation is unaffected
 - `--scope` — OAuth scopes to request (default: openid). Repeat or comma-separate for multiple.
@@ -4129,11 +4147,11 @@ meho runbook runs [flags]
 
 - `--assignee` — filter by assignee subject (tenant_admin only; operators see own regardless)
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--filter-work-ref` — filter by external change-ticket reference
 - `--json` — emit raw RunbookListRunsResponse JSON instead of the human table
 - `--limit` — max runs per page (1..500, server default 100 when omitted)
 - `--status` — filter by run state: in_progress, completed, or abandoned
 - `--template-slug` — filter by template slug
-- `--work-ref` — filter by external change-ticket reference
 
 ### `meho runbook show-template`
 
@@ -4266,13 +4284,13 @@ meho scheduler list [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--filter-work-ref` — filter by external change-ticket reference
 - `--json` — emit raw ListResponse JSON instead of the human table
 - `--kind` — filter by trigger kind: cron | one_off | event
 - `--limit` — max triggers per page (1..500, server default 100 when omitted)
 - `--offset` — offset into the result set (default 0)
 - `--status` — filter by trigger status: active | paused | cancelled | fired
 - `--tenant` — target tenant UUID (tenant_admin only; operator role is locked to its own tenant)
-- `--work-ref` — filter by external change-ticket reference
 
 ## `meho sddc-manager`
 
@@ -4772,6 +4790,7 @@ meho targets add <name> [flags]
 - `--port` — connection port (default: the connector's product default)
 - `--preferred-impl` — connector impl_id override for the resolver's tie-break
 - `--product` — connector product slug (required; must match a registered connector — see `meho connector list`)
+- `--secret-field` — connector_field=source_field: read source_field from the secret when the connector asks for connector_field (repeatable)
 - `--secret-ref` — Vault path of the target's credential (omit to derive the per-tenant default)
 - `--tls-ca-pin` — PEM CA bundle to pin for this target (mutually exclusive with --verify-tls=false)
 - `--tls-server-name` — TLS SNI / certificate-verification hostname, decoupled from --host
@@ -4794,10 +4813,10 @@ meho targets delete <name|alias> [flags]
 
 ### `meho targets describe`
 
-Describe a single target (alias-aware)
+Describe a single target by name, alias or id
 
 ```
-meho targets describe <name-or-alias> [flags]
+meho targets describe <name, alias or id> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
@@ -4827,6 +4846,7 @@ meho targets import <file> [flags]
 - `--backplane` — backplane URL to import into (defaults to the URL recorded by `meho login`)
 - `--dry-run` — print the plan (read-only: one GET, no writes); does not apply
 - `--json` — output the plan as JSON (use with --dry-run)
+- `--secret-field` — connector_field=source_field to add to every target's secret field map (repeatable)
 - `--update` — PATCH existing targets instead of erroring on duplicate names
 
 ### `meho targets list`
@@ -4848,7 +4868,7 @@ meho targets list [flags]
 Probe a target's connector and refresh its fingerprint
 
 ```
-meho targets probe <name-or-alias> [flags]
+meho targets probe <name, alias or id> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
@@ -4859,13 +4879,13 @@ meho targets probe <name-or-alias> [flags]
 Change fields on an existing target
 
 ```
-meho targets update <name|alias> [flags]
+meho targets update <name, alias or id> [flags]
 ```
 
 - `--alias` — alias the target resolves by (repeatable; replaces the whole alias list)
 - `--auth-model` — per-target identity model
 - `--backplane` — backplane URL the target lives in (defaults to the URL recorded by `meho login`)
-- `--clear` — field to remove (repeatable; sends null, or an empty list for alias and an empty map for extra): alias, extra, fqdn, note, port, preferred-impl, secret-ref, tls-ca-pin, tls-server-name, version
+- `--clear` — field to remove (repeatable; sends null, or an empty list for alias and an empty map for extra): alias, extra, fqdn, note, port, preferred-impl, secret-field, secret-ref, tls-ca-pin, tls-server-name, version
 - `--extra` — key=value for the target's extras map, e.g. scheme=http (repeatable; replaces the whole map)
 - `--fqdn` — fully-qualified domain name, when distinct from --host
 - `--host` — new host or IP the connector dials
@@ -4874,6 +4894,7 @@ meho targets update <name|alias> [flags]
 - `--port` — connection port
 - `--preferred-impl` — connector impl_id override for the resolver's tie-break
 - `--product` — new connector product slug
+- `--secret-field` — connector_field=source_field to add or replace in the secret field map; connector_field= removes it (repeatable)
 - `--secret-ref` — Vault path of the target's credential
 - `--tls-ca-pin` — PEM CA bundle to pin for this target
 - `--tls-server-name` — TLS SNI / certificate-verification hostname, decoupled from --host
@@ -4883,7 +4904,7 @@ meho targets update <name|alias> [flags]
 
 ## `meho tenants`
 
-Operate per-tenant policy (flight-recorder capture, mail-recipient allowlist)
+Choose the current tenant and operate per-tenant policy (flight-recorder capture, mail-recipient allowlist)
 
 ```
 meho tenants
@@ -4943,6 +4964,17 @@ meho tenants mail-recipient-policy set [flags]
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
 - `--clear` — clear the per-tenant override back to inheriting the instance floor
 - `--json` — emit the resolved policy as JSON instead of the human summary
+
+### `meho tenants use`
+
+Choose the tenant every command works in; without a name, list your tenants
+
+```
+meho tenants use [<name|id>] [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit the tenants (or the chosen tenant) as JSON instead of the human summary
 
 ## `meho topology`
 
@@ -5545,7 +5577,7 @@ meho vcf-fleet datacenter
 
 #### `meho vcf-fleet datacenter list`
 
-List Fleet-managed datacenters (wrapper-verified reachability probe)
+List Fleet-managed datacenters and the vCenters in each
 
 ```
 meho vcf-fleet datacenter list [flags]
@@ -6237,11 +6269,47 @@ meho vmware operation search <query> [flags]
 
 ### `meho vmware vm`
 
-vSphere VM verbs (list / info / create)
+vSphere VM verbs (list / info / create / cdrom)
 
 ```
 meho vmware vm
 ```
+
+#### `meho vmware vm cdrom`
+
+VM CD drive verbs (mount-library-iso / unmount-library-iso)
+
+```
+meho vmware vm cdrom
+```
+
+##### `meho vmware vm cdrom mount-library-iso`
+
+Mount an ISO from a content library on a VM, as a new CD drive
+
+```
+meho vmware vm cdrom mount-library-iso <vm-name-or-id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--library-item` — id of the content-library item that holds the ISO file
+- `--library-item-name` — name of the library item, looked up on the backend; refused when it fits 0 or >1 items
+- `--library-name` — library to look --library-item-name up in (optional)
+- `--target` — target slug to dispatch against
+
+##### `meho vmware vm cdrom unmount-library-iso`
+
+Unmount a content-library ISO from a VM and remove its CD drive
+
+```
+meho vmware vm cdrom unmount-library-iso <vm-name-or-id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--cdrom` — id of the CD drive, as mount-library-iso returned it; required
+- `--json` — emit the full OperationResult envelope as JSON
+- `--target` — target slug to dispatch against
 
 #### `meho vmware vm create`
 

@@ -137,8 +137,13 @@ Each language has a fixed toolchain. CI runs the same tools — no
   and excluded from lint.
 - **YAML, Markdown, JSON:** trailing-whitespace, end-of-file-fixer,
   and `check-yaml` / `check-json` from the pre-commit hooks repo
-  catch the common formatting traps. CI also runs `gitleaks` for
-  secret detection on every PR.
+  catch the common formatting traps.
+- **Secrets:** the pre-commit hook runs `gitleaks` on the lines a
+  commit adds. CI also runs `gitleaks` on the whole tree for every
+  pull request. A test needs a made-up secret? Put a
+  `# gitleaks:allow` comment on the line of the value. Do not add
+  lines to a `.gitleaksignore` file: those lines name a line number,
+  so they break when the value moves.
 
 The full pre-commit config lives at
 [`.pre-commit-config.yaml`](./.pre-commit-config.yaml). Install hooks
@@ -159,6 +164,10 @@ requests, commit messages, code comments and docs.
   reader must do.
 - Describe the outcome: what will be true when the work is done.
 - Use short lists instead of long paragraphs.
+- Do not write how many operations exist, and do not list every operation
+  name, in docs or code comments. Such text goes stale, and every new
+  operation then edits the same line. Readers get the list from
+  `list_operation_groups` and `search_operations`.
 
 ## Developer Certificate of Origin
 

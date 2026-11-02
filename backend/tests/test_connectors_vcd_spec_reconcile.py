@@ -1,47 +1,74 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""vcd (VMware Cloud Director) hand-coded-surface reconcile lane (#3057) — #2980 harness.
+"""Spec path check of the vcd (VMware Cloud Director) connector — #2980 harness.
 
-Pins the exact ``METHOD:/path`` surface the ``vcd`` connector hand-codes, swept
-from the connector's **live** module constants (the #2944 introspect-live-
-constants pattern — never a hardcoded mirror that can drift). Parse-only, no DB
-/ embeddings / containers, so it lives in the required unit sweep per the
-lane-placement rule in ``docs/decisions/spec-reconcile-guards-standard.md``.
+Every path the connector calls is a ``*_PATH`` constant in
+:mod:`meho_backplane.connectors.vcd._paths`. This module reads those **live**
+constants (never a copied list that can drift) and checks them in two ways:
 
-**Evidenced exclusion — no served-op-id compare.** Unlike the ``fleet-lcm`` lane
-(which reconciles against a pinned Apache-2.0 OpenAPI on the shelf), vCD is a
-*typed* connector precisely because Broadcom publishes **no committable spec**
-for its REST surface: the classic ``/api/*`` query service is bundled into the
-UI JS at build time, and the appliance serves no ``/cloudapi/1.0.0/openapi*``
-(the same evidence recorded for the ``vcf-automation`` provider plane, which
-speaks the same vCloud-Director-derived surface). So there is no artifact to
-reconcile against; this lane is the **manifest pin** half of the standard —
-runs unconditionally, proves the enumeration on every sweep, and a new
-hand-coded path / renamed constant / method change must update the manifest
-consciously. Dispatch-fidelity of each path is proven live-mocked in
-:mod:`tests.test_connectors_vcd_typed_reads` / :mod:`tests.test_connectors_vcd_auth`.
+* **Manifest pin (always runs).** The exact ``METHOD:/path`` set is pinned, so
+  a new path, a renamed constant or a changed method must update the pin on
+  purpose. Parse-only: no DB, no embeddings, no containers.
+* **CloudAPI check (runs when the spec shelf is set up).** Every
+  ``/cloudapi/...`` path is checked against the CloudAPI file a Cloud Director
+  10.6 cell serves (``vmware-cloud-director-10.6/cloudapi-39.2.json`` on the
+  spec shelf: API 39.2, Swagger 2.0, ``basePath`` ``/cloudapi``). MEHO's spec
+  ingest reads OpenAPI 3 only, so this module reads the Swagger 2.0 file itself
+  (:func:`_cloudapi_served`). Parameter names are ignored: ``{org_urn}`` and
+  ``{orgUrn}`` both compare as ``{}``. Without the shelf the check skips, like
+  every spec check (``tests/_spec_shelf.py``); CI sets the shelf up and fails
+  when the file is missing.
 
-The full evidence + activation trigger (if Broadcom ever ships a vCD OpenAPI)
-live in the ``vcd`` entry of the standard doc's Evidenced-exclusions section.
+The older ``/api`` paths (``/api/versions``, ``/api/query``) are in no API file:
+the vendor publishes none for ``/api``. They stay in the manifest pin only. The
+reference for them is the Cloud Director API reference, version 39.0:
+https://developer.broadcom.com/xapis/vmware-cloud-director-api/39.0/
+(``GET /versions``, operation ``GET-SupportedVersions``; ``GET /query``,
+operation ``GET-ExecuteQuery``).
+
+Dispatch of each path is proven with mocked HTTP in
+:mod:`tests.test_connectors_vcd_typed_reads`, :mod:`tests.test_connectors_vcd_org_ops`
+and :mod:`tests.test_connectors_vcd_auth`. A red run is the check finding a real
+problem; see ``docs/decisions/spec-reconcile-guards-standard.md``.
 """
 
 from __future__ import annotations
 
+import json
+import re
+from pathlib import Path
+
 from meho_backplane.connectors.vcd import _paths as _paths_module
 from meho_backplane.connectors.vcd import connector as _connector
+from tests._spec_shelf import assert_op_ids_served, require_shelf_spec
 
-#: HTTP method per hand-coded path constant. The provider session-create
-#: endpoint is POSTed (``._auth.vcd_provider_login``); every other constant —
-#: the ``/api/versions`` fingerprint probe and the two read paths — is GET.
-#: A new ``*_PATH`` constant not listed here fails the sweep loudly so its
-#: method is mapped consciously.
-_METHOD_BY_CONSTANT = {
-    "_SESSIONS_PROVIDER_PATH": "POST",
-    "_VERSIONS_PATH": "GET",
-    "_ORGS_PATH": "GET",
-    "_QUERY_PATH": "GET",
+_SPEC_DIR = "vmware-cloud-director-10.6"
+_SPEC_FILE = "cloudapi-39.2.json"
+
+#: HTTP methods per path constant. The provider session-create endpoint is
+#: POSTed (``._auth.vcd_provider_login``); the org collection is listed (GET)
+#: and created into (POST); one org is read, changed and deleted. A new
+#: ``*_PATH`` constant not listed here fails the sweep, so its methods are
+#: mapped on purpose.
+_METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
+    "_SESSIONS_PROVIDER_PATH": ("POST",),
+    "_VERSIONS_PATH": ("GET",),
+    "_ORGS_PATH": ("GET", "POST"),
+    "_ORG_PATH": ("GET", "PUT", "DELETE"),
+    "_QUERY_PATH": ("GET",),
 }
+
+#: The HTTP verbs of a Swagger 2.0 path item. Other keys (``parameters``,
+#: ``x-vcloud-...``) are not operations.
+_SWAGGER2_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch"})
+
+_PARAM = re.compile(r"\{[^}]*\}")
+
+
+def _normalise(op_id: str) -> str:
+    """``METHOD:/path`` with every ``{...}`` path parameter written as ``{}``."""
+    return _PARAM.sub("{}", op_id)
 
 
 def _path_constants() -> dict[str, str]:
@@ -54,23 +81,36 @@ def _path_constants() -> dict[str, str]:
 
 
 def _declared_op_ids() -> set[str]:
-    """Every hand-coded ``METHOD:/path`` the vcd connector dispatches.
+    """Every hand-coded ``METHOD:/path`` the vcd connector calls.
 
-    Swept from the live ``_paths`` constants (never a hardcoded mirror); the
-    method for each is taken from :data:`_METHOD_BY_CONSTANT`. A constant with
-    no method mapping fails loudly so the reconcile keeps covering it.
+    Swept from the live ``_paths`` constants; the methods for each come from
+    :data:`_METHODS_BY_CONSTANT`. A constant with no entry fails loudly.
     """
     declared: set[str] = set()
     for name, path in _path_constants().items():
-        method = _METHOD_BY_CONSTANT.get(name)
-        if method is None:
+        methods = _METHODS_BY_CONSTANT.get(name)
+        if methods is None:
             raise AssertionError(
-                f"vcd._paths.{name} has no entry in _METHOD_BY_CONSTANT — map the "
-                "new constant's HTTP method there consciously so the reconcile "
-                "keeps covering it."
+                f"vcd._paths.{name} has no entry in _METHODS_BY_CONSTANT — map the "
+                "new constant's HTTP methods there on purpose so the check keeps "
+                "covering it."
             )
-        declared.add(f"{method}:{path}")
+        declared.update(f"{method}:{path}" for method in methods)
     return declared
+
+
+def _cloudapi_served(spec_path: Path) -> set[str]:
+    """Read a Swagger 2.0 file into normalised ``METHOD:<basePath><path>`` entries."""
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    base = str(spec.get("basePath") or "").rstrip("/")
+    served: set[str] = set()
+    for path, item in spec.get("paths", {}).items():
+        if not isinstance(item, dict):
+            continue
+        for method in item:
+            if method in _SWAGGER2_METHODS:
+                served.add(_normalise(f"{method.upper()}:{base}{path}"))
+    return served
 
 
 def test_path_constant_names_are_pinned() -> None:
@@ -78,10 +118,11 @@ def test_path_constant_names_are_pinned() -> None:
 
     Pinning the exact ``_*_PATH`` constant-name set (the #2944 guard shape) means
     a renamed or dropped constant — or a new one that skips the ``_PATH``
-    convention — can't silently shrink the reconciled surface to a vacuous pass.
+    convention — can't silently shrink the checked surface to a vacuous pass.
     """
     assert sorted(_path_constants()) == [
         "_ORGS_PATH",
+        "_ORG_PATH",
         "_QUERY_PATH",
         "_SESSIONS_PROVIDER_PATH",
         "_VERSIONS_PATH",
@@ -91,18 +132,32 @@ def test_path_constant_names_are_pinned() -> None:
 def test_vcd_hand_coded_op_id_manifest_is_pinned() -> None:
     """Pin the swept ``METHOD:/path`` manifest so drift can't silently change the surface.
 
-    Runs unconditionally (no shelf / spec needed), so the enumeration is proven
-    on every sweep. Because vCD publishes no committable spec (evidenced
-    exclusion — see the module docstring), this manifest pin is the whole
-    reconcile: a new hand-coded path, a renamed constant, or a method change must
-    update it consciously.
+    Runs without the shelf, so the list is proven on every run. A new path, a
+    renamed constant or a method change must update it on purpose.
     """
     assert _declared_op_ids() == {
         "GET:/api/query",
         "GET:/api/versions",
         "GET:/cloudapi/1.0.0/orgs",
+        "POST:/cloudapi/1.0.0/orgs",
+        "GET:/cloudapi/1.0.0/orgs/{org_urn}",
+        "PUT:/cloudapi/1.0.0/orgs/{org_urn}",
+        "DELETE:/cloudapi/1.0.0/orgs/{org_urn}",
         "POST:/cloudapi/1.0.0/sessions/provider",
     }
+
+
+def test_cloudapi_paths_are_in_the_cell_served_cloudapi_file() -> None:
+    """Every ``/cloudapi`` path the connector calls is in the 10.6 CloudAPI file."""
+    spec_path = require_shelf_spec(_SPEC_DIR, _SPEC_FILE)
+    declared = {
+        _normalise(op_id)
+        for op_id in _declared_op_ids()
+        if op_id.split(":", 1)[1].startswith("/cloudapi/")
+    }
+    assert_op_ids_served(
+        declared, _cloudapi_served(spec_path), spec_label=f"{_SPEC_DIR}/{_SPEC_FILE}"
+    )
 
 
 def test_probe_constant_links_to_versions_path() -> None:

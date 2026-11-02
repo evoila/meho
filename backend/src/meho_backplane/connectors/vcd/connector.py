@@ -21,10 +21,11 @@ the appliance serves no ``/cloudapi/1.0.0/openapi*`` (evidenced 404 on the same
 vCloud-Director-derived surface via the VCFA 9.0.2 Holodeck probe — no
 vCD-specific appliance probe was run; live-verify is the deferred tail). This is the
 CLAUDE.md postulate-1 "no usable spec → typed" case, the same posture the
-``fleet-lcm`` (#3047) and ``vcf-automation`` provider-plane cores ship with. The
-spec-reconcile lane is therefore a **manifest pin + evidenced exclusion** (see
-``docs/decisions/spec-reconcile-guards-standard.md``), not a served-op-id
-compare.
+``fleet-lcm`` (#3047) and ``vcf-automation`` provider-plane cores ship with. A
+running cell does serve its own ``/cloudapi`` Swagger 2.0 file; it is pinned on
+the spec shelf and the spec-reconcile lane checks every ``/cloudapi`` path
+against it. The ``/api`` paths stay in the lane's manifest pin (see
+``docs/decisions/spec-reconcile-guards-standard.md``).
 
 Auth — provider session mint
 ----------------------------
@@ -79,12 +80,14 @@ provider/System-scoped so one session sees the whole estate:
 * ``vcd.edge-gateway.list`` — ``GET /api/query?type=edgeGateway``.
 * ``vcd.task.list`` — ``GET /api/query?type=adminTask``.
 
-All read-only, ``safety_level=safe``, ungated; registered as
-``source_kind="typed"`` (:mod:`.typed_ops` / :mod:`.typed_reads`, per-op
-``llm_instructions`` in :mod:`._llm_instructions`) so they dispatch on a fresh
-boot with **zero catalog ingest**. Set-shaped results are reduced to a JSONFlux
-handle by the dispatcher. By-id detail reads, non-``System`` provider identities,
-and any write surface are deliberately out of scope for this read core.
+The reads are ``safety_level=safe`` and ungated. The organisation ops
+(``vcd.org.get`` / ``.create`` / ``.update`` / ``.delete``, :mod:`.org_ops` /
+:mod:`.org_handlers`) add one read and three changes on the CloudAPI org paths;
+each change waits for approval, and the delete needs a preview. All are
+registered as ``source_kind="typed"`` (:mod:`.typed_ops`, per-op
+``llm_instructions`` in :mod:`._llm_instructions` and :mod:`.org_ops`) so they
+dispatch on a fresh boot with **zero catalog ingest**. Set-shaped results are
+reduced to a JSONFlux handle by the dispatcher.
 """
 
 from __future__ import annotations
@@ -99,6 +102,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import is_acceptable_auth_model
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -169,6 +173,8 @@ class VcloudDirectorConnector(HttpConnector):
         # serialises concurrent first-use callers so they don't double-POST
         # the login endpoint.
         self._session_tokens: dict[tuple[str, ...], str] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._session_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
@@ -245,8 +251,13 @@ class VcloudDirectorConnector(HttpConnector):
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
+                # The caller's own Vault read, once per caller and target.
+                await self._readers.ensure_read(
+                    target, operator, lambda: self._credentials_loader(target, operator)
+                )
                 return cached
             creds = await self._credentials_loader(target, operator)
+            self._readers.record(target, operator)
             client = await self._http_client(target)
             # Lazy import so pure fingerprint/probe unit tests don't pay the
             # _auth module's import; the login helper owns the wire POST.
@@ -405,8 +416,7 @@ class VcloudDirectorConnector(HttpConnector):
     # import so pure fingerprint/probe unit tests don't pay the operations
     # package's embedding-pipeline import). The dispatcher resolves each
     # persisted ``module.ClassName.method`` handler_ref back to the bound
-    # method and threads ``operator`` / ``target`` / ``params`` by name. All
-    # read-only — no write op ships here.
+    # method and threads ``operator`` / ``target`` / ``params`` by name.
     # ------------------------------------------------------------------
 
     async def org_list(
@@ -465,6 +475,40 @@ class VcloudDirectorConnector(HttpConnector):
 
         return await vcd_task_list_impl(self, operator, target, params)
 
+    # Organisation ops (read one, create, change, delete). Bodies in ``.org_handlers``.
+
+    async def org_get(
+        self, operator: Operator, target: VcloudDirectorTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcd.org.get`` shim."""
+        from meho_backplane.connectors.vcd.org_handlers import vcd_org_get_impl
+
+        return await vcd_org_get_impl(self, operator, target, params)
+
+    async def org_create(
+        self, operator: Operator, target: VcloudDirectorTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcd.org.create`` shim."""
+        from meho_backplane.connectors.vcd.org_handlers import vcd_org_create_impl
+
+        return await vcd_org_create_impl(self, operator, target, params)
+
+    async def org_update(
+        self, operator: Operator, target: VcloudDirectorTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcd.org.update`` shim."""
+        from meho_backplane.connectors.vcd.org_handlers import vcd_org_update_impl
+
+        return await vcd_org_update_impl(self, operator, target, params)
+
+    async def org_delete(
+        self, operator: Operator, target: VcloudDirectorTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcd.org.delete`` shim."""
+        from meho_backplane.connectors.vcd.org_handlers import vcd_org_delete_impl
+
+        return await vcd_org_delete_impl(self, operator, target, params)
+
     async def invalidate_session(
         self, target: VcloudDirectorTargetLike, *, rejected: httpx.Request | None = None
     ) -> None:
@@ -495,9 +539,13 @@ class VcloudDirectorConnector(HttpConnector):
         no separate credential-bytes cache to evict (contrast SDDC Manager); the
         only per-target state is the JWT, so this also drops it — a no-op when
         the establish already failed before caching, harmless otherwise. Kept so
-        the connector advertises both dispatch-path recovery hooks.
+        the connector advertises both dispatch-path recovery hooks. It also
+        forgets who has read the target's secret, so the next call of every
+        caller reads it again.
         """
         await self._evict_session_token(target)
+        async with self._session_lock:
+            self._readers.forget(target)
 
     async def _evict_session_token(
         self, target: VcloudDirectorTargetLike, *, rejected: httpx.Request | None = None
@@ -524,4 +572,5 @@ class VcloudDirectorConnector(HttpConnector):
         """
         async with self._session_lock:
             self._session_tokens.clear()
+            self._readers.clear()
         await super().aclose()

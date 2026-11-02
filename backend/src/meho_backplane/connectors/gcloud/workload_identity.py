@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 import httpx
 
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
-from meho_backplane.connectors.gcloud.session import GcloudTargetLike
+from meho_backplane.connectors.gcloud.session import GcloudTargetLike, gcp_project
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -142,11 +142,11 @@ def _service_account(params: dict[str, Any]) -> str:
 
 
 def _pools_name(target: GcloudTargetLike) -> str:
-    return f"projects/{target.gcp_project}/locations/global/workloadIdentityPools"
+    return f"projects/{gcp_project(target)}/locations/global/workloadIdentityPools"
 
 
 def _service_account_name(target: GcloudTargetLike, account: str) -> str:
-    return f"projects/{target.gcp_project}/serviceAccounts/{account}"
+    return f"projects/{gcp_project(target)}/serviceAccounts/{account}"
 
 
 def _connector(ops: WorkloadIdentityOps) -> GcloudConnector:
@@ -159,16 +159,29 @@ def _connector(ops: WorkloadIdentityOps) -> GcloudConnector:
 # ---------------------------------------------------------------------------
 
 
-async def _delete_json_abs(
-    connector: GcloudConnector, target: GcloudTargetLike, abs_url: str, *, operator: Operator
+async def _send_json_abs(
+    connector: GcloudConnector,
+    target: GcloudTargetLike,
+    method: str,
+    abs_url: str,
+    *,
+    operator: Operator,
+    json_body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """DELETE an absolute GCP API URL; on a 401 refresh the token once and send again."""
+    """Send *method* (DELETE, PATCH) to an absolute GCP API URL.
+
+    On a 401 the token is refreshed once and the request sent again.
+    """
     token = await connector._ensure_token(target, operator)
     client = await connector._http_client(target)
-    resp = await client.delete(abs_url, headers={"Authorization": f"Bearer {token}"})
+    resp = await client.request(
+        method, abs_url, json=json_body, headers={"Authorization": f"Bearer {token}"}
+    )
     if resp.status_code == 401:
         token = await connector.refresh_token(target)
-        resp = await client.delete(abs_url, headers={"Authorization": f"Bearer {token}"})
+        resp = await client.request(
+            method, abs_url, json=json_body, headers={"Authorization": f"Bearer {token}"}
+        )
     resp.raise_for_status()
     return resp.json() if resp.content else {}
 
@@ -377,9 +390,9 @@ async def pool_delete(
     }
     if result["already_deleted"]:
         return result
-    operation = await _delete_json_abs(connector, target, url, operator=operator)
+    operation = await _send_json_abs(connector, target, "DELETE", url, operator=operator)
     operation = await _wait_for_operation(connector, target, operation, operator=operator)
-    _raise_if_operation_failed(operation, pool_id)
+    _raise_if_operation_failed(operation, f"delete workload identity pool {pool_id!r}")
     result["operation_name"] = operation.get("name")
     result["operation_done"] = operation.get("done") is True
     if not result["operation_done"]:
@@ -410,14 +423,15 @@ async def _wait_for_operation(
     return operation
 
 
-def _raise_if_operation_failed(operation: dict[str, Any], pool_id: str) -> None:
+def _raise_if_operation_failed(operation: dict[str, Any], what: str) -> None:
+    """Raise when a Google operation ended with an error; *what* names the change."""
     error = operation.get("error")
     if not error:
         return
     message = error.get("message") if isinstance(error, dict) else str(error)
     raise ConnectorUpstreamError(
-        f"Google could not delete workload identity pool {pool_id!r}.",
-        # The DELETE itself succeeded; the operation it started failed.
+        f"Google could not {what}.",
+        # The request itself succeeded; the operation it started failed.
         http_status=502,
         upstream_message=message if isinstance(message, str) else str(message),
     )
@@ -452,12 +466,7 @@ async def sa_binding_remove(
     member = _checked(params, "member", MEMBER_PATTERN, "an IAM member as written in the policy")
 
     policy = await _get_sa_policy(connector, target, account, operator=operator)
-    if any(_HIDDEN_CONDITION_MARK in str(b.get("role", "")) for b in policy.get("bindings") or []):
-        raise ValueError(
-            "Google returned this policy in an older format that hides the conditions of some "
-            "bindings (a role name contains '_withcond_'). MEHO cannot change such a policy "
-            "safely; nothing was changed."
-        )
+    _refuse_hidden_conditions(policy)
     etag = policy.get("etag")
     new_bindings, removed, only_conditional, members_left = _without_member(
         list(policy.get("bindings") or []), role, member
@@ -477,15 +486,46 @@ async def sa_binding_remove(
         )
     if not removed:
         return result
-    if not etag:
+    written = await _set_sa_policy(
+        connector, target, account, policy, new_bindings, operator=operator
+    )
+    result["etag"] = written.get("etag")
+    return result
+
+
+def _refuse_hidden_conditions(policy: dict[str, Any]) -> None:
+    """Refuse a policy in the older format, where Google hides binding conditions."""
+    if any(_HIDDEN_CONDITION_MARK in str(b.get("role", "")) for b in policy.get("bindings") or []):
+        raise ValueError(
+            "Google returned this policy in an older format that hides the conditions of some "
+            "bindings (a role name contains '_withcond_'). MEHO cannot change such a policy "
+            "safely; nothing was changed."
+        )
+
+
+async def _set_sa_policy(
+    connector: GcloudConnector,
+    target: GcloudTargetLike,
+    account: str,
+    policy: dict[str, Any],
+    new_bindings: list[dict[str, Any]],
+    *,
+    operator: Operator,
+) -> dict[str, Any]:
+    """Write *policy* with *new_bindings* back, with the ``etag`` it was read with.
+
+    Refuses a policy without an etag. When Google answers that the etag no
+    longer matches, raises :class:`GcloudPolicyChangedError` and does not
+    retry.
+    """
+    if not policy.get("etag"):
         raise ValueError(
             "Google returned the policy without an etag, so MEHO cannot make a safe change. "
             "Nothing was changed."
         )
-
     url = f"{_IAM_API}/{_service_account_name(target, account)}:setIamPolicy"
     try:
-        written = await connector._post_json_abs(
+        return await connector._post_json_abs(
             target,
             url,
             operator=operator,
@@ -497,14 +537,11 @@ async def sa_binding_remove(
                 f"The policy of service account {account!r} changed after MEHO read it, so "
                 "Google refused the change (the etag no longer matches). MEHO changed nothing "
                 "and did not retry. Read the policy again with "
-                "gcloud.iam.service_accounts.policy.read and call again if the member is "
-                "still there.",
+                "gcloud.iam.service_accounts.policy.read and call again.",
                 http_status=exc.response.status_code,
                 upstream_message=None,
             ) from exc
         raise
-    result["etag"] = written.get("etag")
-    return result
 
 
 class WorkloadIdentityOps:

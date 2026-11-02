@@ -59,7 +59,7 @@ dedupe where a dedupe applies.
 dispatcher._reduce_and_audit_success(...)   # after audit + broadcast
   → build_target_activity_advisory(...)     # #2550 fragment (write-gated)
   → build_checks_alert_advisory(...)        # #2718 fragment (all classes)
-  → build_reflex_advisory(operator, op_id, target_name)   # this fragment
+  → build_reflex_advisory(operator, op_class, target_name)   # this fragment
       [gate — returns {} without any I/O when:]
         · settings.reflex_advisory_window_minutes == 0
         · resolve_agent_session_id() is None   # no MCP session (CLI etc.)
@@ -68,7 +68,7 @@ dispatcher._reduce_and_audit_success(...)   # after audit + broadcast
             agent_session_id == session AND
             path == "/mcp/tools/call/meho_broadcast_recent"
           → claim (session, "read_before_act") via SET NX EX → _READ_NUDGE
-        · announce-before-mutate:  classify_op(op_id) is write-class AND
+        · announce-before-mutate:  op_class is write-class AND
             gap = announce_claim_gap(...) is not None
           → claim (session, "announce_before_mutate") → _ANNOUNCE_NUDGES[gap]
   → wrap_ok_result(..., extras={**activity, **checks, **reflex})
@@ -84,9 +84,9 @@ response falls through to announce on the next.
 
 ```text
 dispatch(...)   # Step 4, verdict == AUTO_EXECUTE, not the _approved resume
-  → announce_gate_blocks(operator, op_id, safety_level, target_name)
+  → announce_gate_blocks(operator, op_class, safety_level, target_name)
       [returns None — no block — in order, cheapest first:]
-        · classify_op(op_id) not in WRITE_OP_CLASSES
+        · op_class not in WRITE_OP_CLASSES
         · _SAFETY_RANK[safety_level] < _SAFETY_RANK["caution"]
         · not announce_gate_enabled(tenant_id)        # cached, fail-open
         · caller_has_active_announce_claim(...)         # active claim covers it
@@ -188,9 +188,10 @@ administration, and a management verb is a clean follow-up.
   issue names). A session that only tailed the feed via
   `meho_broadcast_watch` still gets the read nudge.
 - **Coarse claim coverage (v1).** A claim covers an op when its declared
-  `planned_op_class` matches the op's `classify_op` class (or the claim
-  declared no class) and its target attribution covers the op (or either
-  is target-agnostic). A claim declared for a different write-class (e.g.
+  `planned_op_class` matches the op's class (or the claim declared no
+  class) and its target attribution covers the op (or either is
+  target-agnostic). The op's class is the class its audit row stores
+  (`descriptor_op_class`, see [broadcast.md](broadcast.md)). A claim declared for a different write-class (e.g.
   `write` vs `credential_write`) does not cover — a deliberate, documented
   v1 strictness.
 - **Bounded claim lookup.** `announce_claim_gap` reads at most the

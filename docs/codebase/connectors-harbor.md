@@ -181,7 +181,8 @@ and `harbor.health` expose these same two reads as operator-callable typed ops.
 
 `robot_create` (op `harbor.robot.create`) is classified `credential_mint` by
 `classify_op` in `broadcast/events.py` — the broadcast collapses to
-aggregate-only so the minted secret never appears in the SSE stream — and is
+aggregate-only so the minted secret never appears in the SSE stream, and the
+audit row's raw copy has the `secret` value replaced — and is
 registered `requires_approval=True` (#147): minting a robot credential is
 privilege issuance, so a human `tenant_admin` dispatch **parks** at
 `awaiting_approval` and a second operator must approve it before the mint

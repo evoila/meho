@@ -1,0 +1,544 @@
+{
+  "$defs": {
+    "Assumption": {
+      "additionalProperties": false,
+      "description": "One named value a calculation assumed, for example an hours-per-month figure.",
+      "properties": {
+        "name": {
+          "description": "The name a figure cites.",
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Where the value comes from, for example a link.",
+          "title": "Source"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Unit of the value, if it has one.",
+          "title": "Unit"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "description": "The assumed value.",
+          "title": "Value"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "title": "Assumption",
+      "type": "object"
+    },
+    "CalculationInputs": {
+      "additionalProperties": false,
+      "description": "What a calculation read, and when it ran.",
+      "properties": {
+        "generated_at": {
+          "format": "date-time",
+          "title": "Generated At",
+          "type": "string"
+        },
+        "inventories": {
+          "items": {
+            "$ref": "#/$defs/InventoryInput"
+          },
+          "title": "Inventories",
+          "type": "array"
+        },
+        "targets": {
+          "description": "Other targets it read.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Targets",
+          "type": "array"
+        }
+      },
+      "required": [
+        "inventories",
+        "generated_at"
+      ],
+      "title": "CalculationInputs",
+      "type": "object"
+    },
+    "Figure": {
+      "additionalProperties": false,
+      "description": "One number of a calculation result, with everything needed to check it.",
+      "else": {
+        "properties": {
+          "unknown_reason": {
+            "type": "null"
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "value": {
+            "type": "null"
+          }
+        }
+      },
+      "properties": {
+        "assumptions": {
+          "description": "Names of the assumptions it used.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Assumptions",
+          "type": "array"
+        },
+        "basis": {
+          "anyOf": [
+            {
+              "enum": [
+                "measured",
+                "allocated"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "'measured' when sized from utilization, 'allocated' when sized from configured values. Never 'right-sized' without measurements.",
+          "title": "Basis"
+        },
+        "calculation_version": {
+          "minLength": 1,
+          "title": "Calculation Version",
+          "type": "string"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": "The input values the number was made from.",
+          "title": "Inputs",
+          "type": "object"
+        },
+        "unit": {
+          "description": "For example 'EUR/month' or 'cores'.",
+          "minLength": 1,
+          "title": "Unit",
+          "type": "string"
+        },
+        "unknown_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why the value is null.",
+          "title": "Unknown Reason"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The number; null when it is unknown.",
+          "title": "Value"
+        }
+      },
+      "required": [
+        "value",
+        "unit",
+        "calculation_version"
+      ],
+      "then": {
+        "properties": {
+          "unknown_reason": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "unknown_reason"
+        ]
+      },
+      "title": "Figure",
+      "type": "object"
+    },
+    "Finding": {
+      "additionalProperties": false,
+      "description": "One checked statement about one record, and the source the check follows.",
+      "else": {
+        "properties": {
+          "state": {
+            "const": "unknown"
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "inputs": {
+            "additionalProperties": {
+              "not": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      },
+      "properties": {
+        "check": {
+          "description": "What was checked, in plain words.",
+          "minLength": 1,
+          "title": "Check",
+          "type": "string"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": "The input values the check read. A null input means the data is missing.",
+          "title": "Inputs",
+          "type": "object"
+        },
+        "reason": {
+          "description": "Why the check has this state.",
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "source": {
+          "description": "Link to the rule or document the check follows.",
+          "minLength": 1,
+          "title": "Source",
+          "type": "string"
+        },
+        "source_checked_on": {
+          "description": "The day the source was last read.",
+          "format": "date",
+          "title": "Source Checked On",
+          "type": "string"
+        },
+        "state": {
+          "description": "The outcome. Missing data gives 'unknown', never 'pass'.",
+          "enum": [
+            "pass",
+            "fail",
+            "unknown"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "check",
+        "state",
+        "reason",
+        "source",
+        "source_checked_on"
+      ],
+      "title": "Finding",
+      "type": "object"
+    },
+    "InventoryInput": {
+      "additionalProperties": false,
+      "description": "One inventory a calculation read.",
+      "properties": {
+        "collected_at": {
+          "format": "date-time",
+          "title": "Collected At",
+          "type": "string"
+        },
+        "connector_id": {
+          "minLength": 1,
+          "title": "Connector Id",
+          "type": "string"
+        },
+        "handle_id": {
+          "minLength": 1,
+          "title": "Handle Id",
+          "type": "string"
+        },
+        "target": {
+          "minLength": 1,
+          "title": "Target",
+          "type": "string"
+        }
+      },
+      "required": [
+        "handle_id",
+        "connector_id",
+        "target",
+        "collected_at"
+      ],
+      "title": "InventoryInput",
+      "type": "object"
+    },
+    "Omission": {
+      "additionalProperties": false,
+      "description": "A part of the estate that was not collected, and why.",
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "More detail, if any.",
+          "title": "Detail"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "server",
+                "application",
+                "kubernetes_workload"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Set when this omission stands for one item of the source that has no record (one VM left out). Such omissions count in the reconciliation.",
+          "title": "Kind"
+        },
+        "reason": {
+          "enum": [
+            "not_reported_by_source",
+            "no_permission",
+            "powered_off",
+            "not_measured",
+            "collection_failed",
+            "not_supported"
+          ],
+          "title": "Reason",
+          "type": "string"
+        },
+        "source_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Id of the left-out item.",
+          "title": "Source Id"
+        },
+        "what": {
+          "description": "What was not collected.",
+          "minLength": 1,
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "reason"
+      ],
+      "title": "Omission",
+      "type": "object"
+    },
+    "ResultItem": {
+      "additionalProperties": false,
+      "description": "The numbers and the findings for one record.",
+      "properties": {
+        "figures": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Figure"
+          },
+          "title": "Figures",
+          "type": "object"
+        },
+        "findings": {
+          "items": {
+            "$ref": "#/$defs/Finding"
+          },
+          "title": "Findings",
+          "type": "array"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "name"
+      ],
+      "title": "ResultItem",
+      "type": "object"
+    },
+    "Unknown": {
+      "additionalProperties": false,
+      "description": "Something the calculation could not decide, and why.",
+      "properties": {
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "source_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Id"
+        },
+        "what": {
+          "minLength": 1,
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "reason"
+      ],
+      "title": "Unknown",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The result of one calculation over inventories.",
+  "properties": {
+    "assumptions": {
+      "description": "Every value the calculation assumed, by name.",
+      "items": {
+        "$ref": "#/$defs/Assumption"
+      },
+      "title": "Assumptions",
+      "type": "array"
+    },
+    "calculation_version": {
+      "minLength": 1,
+      "title": "Calculation Version",
+      "type": "string"
+    },
+    "inputs": {
+      "$ref": "#/$defs/CalculationInputs"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/ResultItem"
+      },
+      "title": "Items",
+      "type": "array"
+    },
+    "omissions": {
+      "items": {
+        "$ref": "#/$defs/Omission"
+      },
+      "title": "Omissions",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "unknowns": {
+      "items": {
+        "$ref": "#/$defs/Unknown"
+      },
+      "title": "Unknowns",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "calculation_version",
+    "inputs",
+    "items"
+  ],
+  "title": "CalculationResult",
+  "type": "object"
+}

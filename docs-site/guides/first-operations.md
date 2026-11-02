@@ -254,6 +254,12 @@ call `call_operation` again with the same `connector_id`, `op_id` and that
 `run_id` to check it. While it runs you see `running` and the start time;
 when it is done you get the normal result.
 
+A check can also wait. Add `wait_seconds` (up to 50) to the check, or
+`?wait_seconds=N` to `GET /api/v1/operations/runs/{handle}`. MEHO then
+answers as soon as the run ends, or after that many seconds with the run
+still `running`. This helps an agent that has no shell and cannot sleep
+between checks.
+
 Synchronous mode stays the default and is byte-for-byte identical to
 the path without `async` — nothing changes unless you ask for it.
 

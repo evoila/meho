@@ -35,15 +35,54 @@ enumerates every org's resources — exactly what a migration discovery needs.
 | `vcd-inventory` | `vcd.org.list`, `.vdc.list`, `.vapp.list`, `.vm.list`, `.catalog.list` |
 | `vcd-networking` | `vcd.edge-gateway.list` |
 | `vcd-tasks` | `vcd.task.list` |
+| `vcd-organizations` | `vcd.org.get`, `.create`, `.update`, `.delete` (see below) |
+
+## Organisation ops: read one, create, change, delete
+
+Four typed ops work with one organization (a tenant). They are the first step
+of tenant onboarding. They use the CloudAPI organization paths, which exist on
+Cloud Director 10.6. All four register on `vcd-rest-10.6`, the only generation
+of this connector, so no version check is needed.
+
+| Op | What it does | Vendor call | Returns | Risk | Versions |
+|---|---|---|---|---|---|
+| `vcd.org.get` | Reads one organization: names, enabled state, and how many VDCs, catalogs, vApps, running VMs, users and disks it has. | `GET /cloudapi/1.0.0/orgs/{orgUrn}` | The `Org` object. | `safe` | 10.6 |
+| `vcd.org.create` | Creates an organization (tenant onboarding, step 1). Enabled by default. | `POST /cloudapi/1.0.0/orgs` | The new `Org`, with its `urn:vcloud:org:` id. | `caution`, waits for approval | 10.6 |
+| `vcd.org.update` | Changes the display name, the description or the enabled state. MEHO reads the org and sends it back whole, with only those fields changed (the vendor `PUT` replaces the whole object). | `GET`, then `PUT /cloudapi/1.0.0/orgs/{orgUrn}` | The changed `Org`; plus `task_href` when Cloud Director runs it as a task. | `dangerous`, waits for approval | 10.6 |
+| `vcd.org.delete` | Deletes a disabled, empty organization (no VDCs, catalogs or vApps). Its users go with it. No `force` or `recursive`. | `GET`, then `DELETE /cloudapi/1.0.0/orgs/{orgUrn}` | `{org_id, name, delete_started, already_absent, task_href}` | `destructive`, needs a preview, waits for approval | 10.6 |
+
+How the changes are guarded:
+
+- Every change has `requires_approval: true`. A person's call waits until a
+  second person approves it. An agent's `dangerous` call needs a grant, and an
+  agent's `destructive` call is always refused.
+- The org id goes into the URL path. `org_path()` (`_paths.py`) checks it is
+  `urn:vcloud:org:<uuid>` and percent-encodes it before any call.
+- The delete has a preview builder (`_org_delete_preview` in
+  `org_handlers.py`). It reads the org and fills the `blast_radius` block:
+  `object` (id, name, display name, enabled), `children` (the users and
+  independent disks that go with it) and `irreversibility` (`permanent`). It
+  refuses when the org does not exist, is enabled, or still has VDCs, catalogs
+  or vApps, so such a request never waits for approval.
+- After approval the delete handler reads the org again. It refuses when the
+  org is enabled or not empty now, or when its name is not the one the
+  approver saw. An org that is already gone gives `already_absent: true`.
+- The writes are sent once and never retried. A vendor error (for example a
+  duplicate name) reaches the answer as `upstream_message`.
+- No answer holds a secret: the `Org` object has no password or token field,
+  and no op takes a secret as input.
 
 **Why typed, not ingested.** Broadcom publishes **no committable OpenAPI** for
 vCD's full REST surface: the classic `/api/*` query service is bundled into the
 UI JS at build time, and the appliance serves no `/cloudapi/1.0.0/openapi*`
 (the same evidence recorded for the VCFA provider plane, which speaks the same
 surface). This is the CLAUDE.md postulate-1 "no usable spec → typed" case — the
-`fleet-lcm` (#3047) / harbor (#2856) pattern. There is therefore no wider
-`source_kind="ingested"` breadth to follow up: the typed read core **is** the
-connector's surface.
+`fleet-lcm` (#3047) / harbor (#2856) pattern. Later it turned out that a
+running cell serves its own `/cloudapi` file (Swagger 2.0) at
+`/api-explorer/provider/cloudapi.json`. It is pinned on the spec shelf and
+used only to check paths (see "Spec reconcile lane"). The `/api` surface still
+has no file, and VMware products use typed ops for the usual work (decision of
+2026-10-18), so no ingested surface is planned.
 
 **Dual REST surface, one token.** vCD exposes two co-existing surfaces the read
 core reads, both authenticated by the one minted provider Bearer JWT:
@@ -169,13 +208,25 @@ The read core follows the `fleet-lcm` / harbor layout:
   (`when_to_call` / `output_shape` / `next_step`), keyed by op id; the prose is
   framed around inventorying a migration-source estate.
 - **`_paths.py`** — the request-path constants (`_VERSIONS_PATH`,
-  `_SESSIONS_PROVIDER_PATH`, `_ORGS_PATH`, `_QUERY_PATH`), the query-type
+  `_SESSIONS_PROVIDER_PATH`, `_ORGS_PATH`, `_ORG_PATH`, `_QUERY_PATH`), the
+  `org_path()` helper, the query-type
   selectors, the `VCD_TOKEN_HEADER`, and the `Accept`-media-type helpers. The
   reconcile lane introspects the `_*_PATH` constants.
 - **`_auth.py`** — `vcd_provider_login` (the wire-level Basic→Bearer POST) +
   `compose_provider_basic_user` (`<user>@System`).
-- **`connector.py`** — 7 thin bound-method shims (`org_list`, `vdc_list`, …) that
-  lazily import and delegate to their `_impl` body.
+- **`connector.py`** — thin bound-method shims (`org_list`, `vdc_list`, …,
+  `org_get`, `org_create`, `org_update`, `org_delete`) that lazily import and
+  delegate to their `_impl` body.
+- **`op_types.py`** — the `VcloudDirectorTypedOp` dataclass, shared by
+  `typed_ops.py` and `org_ops.py`.
+- **`org_ops.py`** — the metadata of the four organisation ops (schemas,
+  `llm_instructions`, risk levels) and the `vcd-organizations` group text.
+  `typed_ops.py` appends `VCD_ORG_OPS` to `VCD_TYPED_OPS`.
+- **`org_handlers.py`** — the organisation op bodies, the one-shot write
+  helper `_vcd_send` (POST / PUT / DELETE with the CloudAPI `Accept`, never
+  retried, recorded as a flight-recorder vendor span), and the delete preview
+  builder. Importing the package imports this module, which registers the
+  builder.
 
 `register_typed_operation` creates each `OperationGroup` (`review_status=
 "enabled"`) and inserts each descriptor `source_kind="typed"`, `is_enabled=True`,
@@ -186,15 +237,26 @@ loads.
 ## Spec reconcile lane
 
 [`backend/tests/test_connectors_vcd_spec_reconcile.py`](../../backend/tests/test_connectors_vcd_spec_reconcile.py)
-is a **manifest pin + evidenced exclusion** (not a served-op-id compare): vCD
-publishes no committable spec, so there is no artifact to reconcile against. The
-lane sweeps the connector's live `_*_PATH` constants (the #2944 introspect-live-
-constants pattern) and pins the exact hand-coded surface —
-`GET:/api/query`, `GET:/api/versions`, `GET:/cloudapi/1.0.0/orgs`,
-`POST:/cloudapi/1.0.0/sessions/provider` — unconditionally, so a new hand-coded
-path / renamed constant / method change must update the manifest consciously.
-Dispatch-fidelity of each path is proven live-mocked in the auth + typed-reads
-tests. The full evidence + activation trigger live in the `vcd` entry of
+sweeps the connector's live `_*_PATH` constants and does two checks:
+
+- **Manifest pin (always runs).** The exact `METHOD:/path` set is pinned:
+  `GET:/api/query`, `GET:/api/versions`, `GET` and `POST`
+  `/cloudapi/1.0.0/orgs`, `GET`, `PUT` and `DELETE`
+  `/cloudapi/1.0.0/orgs/{org_urn}`, and `POST:/cloudapi/1.0.0/sessions/provider`.
+  A new path, a renamed constant or a method change must update it on purpose.
+- **CloudAPI check (armed).** Every `/cloudapi` path is checked against the
+  CloudAPI file a Cloud Director 10.6 cell serves at
+  `GET /api-explorer/provider/cloudapi.json`. It is pinned on the spec shelf as
+  `vmware-cloud-director-10.6/cloudapi-39.2.json` (API 39.2, Swagger 2.0,
+  `basePath` `/cloudapi`). MEHO's spec ingest reads OpenAPI 3 only, so the
+  test reads the Swagger 2.0 file itself; path parameter names are ignored.
+  CI checks the file out and fails when it is missing.
+
+The older `/api` paths (`/api/versions`, `/api/query`) are in no API file: the
+vendor publishes none for `/api`. They stay in the manifest pin, with a link
+to the Cloud Director API 39.0 reference in the test. Dispatch of each path is
+proven with mocked HTTP in the auth, typed-reads and org-ops tests. The record
+is the `vcd` entry of
 [`spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
 ## Dependencies
@@ -222,9 +284,11 @@ tests. The full evidence + activation trigger live in the `vcd` entry of
   version from `GET /api/versions` (the way `go-vcloud-director` negotiates) is
   the robustness follow-up; a target on a version outside 10.5/10.6 needs the
   override until then.
-- **List-only read core.** By-id detail reads (org / vApp / VM by URN or href),
-  non-`System` / SSO provider identities, and any write surface are out of scope
-  — a list-focused inventory core for migration discovery.
+- **Mostly list reads.** Apart from the organisation ops, by-id detail reads
+  (vApp / VM by URN or href), non-`System` / SSO provider identities and other
+  writes are not built yet. VDCs and registrations are the next tasks.
+- **Live proof pending for the organisation ops.** They are tested with mocked
+  HTTP only. A separate lab proof runs them on Cloud Director 10.6.
 - **Operator-side product-token alignment.** The operator `vcloud-director` skill
   (rdc-hetzner-dc) emits `product: vcloud-director` on `--probe`; a target must
   use the connector's canonical `product: vcd` token to resolve here. Realigning
@@ -242,9 +306,11 @@ tests. The full evidence + activation trigger live in the `vcd` entry of
   [`test_connectors_vcd_auth.py`](../../backend/tests/test_connectors_vcd_auth.py)
   (session mint + fingerprint),
   [`test_connectors_vcd_typed_reads.py`](../../backend/tests/test_connectors_vcd_typed_reads.py)
-  (dispatch + registration), and
+  (dispatch + registration),
+  [`test_connectors_vcd_org_ops.py`](../../backend/tests/test_connectors_vcd_org_ops.py)
+  (organisation ops: approval, preview, vendor errors), and
   [`test_connectors_vcd_spec_reconcile.py`](../../backend/tests/test_connectors_vcd_spec_reconcile.py)
-  (manifest pin).
+  (manifest pin + CloudAPI check).
 - Auth-family sibling (shares the vCloud-Director provider flow):
   [`connectors-vcf-automation.md`](connectors-vcf-automation.md)
 - Typed read-core exemplar: [`connectors-fleet-lcm.md`](connectors-fleet-lcm.md)

@@ -450,8 +450,7 @@ async def submit_op_edit(
 
     The console counts as a person (#4711): it calls the shared edit with
     ``person_present=True``, so a platform admin can turn approval off here
-    with a reason, without a fresh sign-in. That is the same rule approvals
-    follow: in the web session, the click is the proof.
+    with a reason, without a fresh sign-in.
 
     Builds an :class:`EditOpBody` from the submitted controls and calls
     :func:`apply_op_edit` in-process (TENANT_ADMIN -- the route gates

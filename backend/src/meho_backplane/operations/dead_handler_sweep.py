@@ -67,6 +67,9 @@ RETIRED_OPS: frozenset[RetiredOp] = frozenset(
         # vmware.host.vsan_health; the composite handlers were removed.
         RetiredOp("vmware", "9.0", "vmware-rest", "vmware.composite.host.network_uplinks"),
         RetiredOp("vmware", "9.0", "vmware-rest", "vmware.composite.host.vsan_health"),
+        # Shipped in v0.38.0; replaced by inventory.export on the inventory-1.x
+        # connector, which takes the file format as a parameter.
+        RetiredOp("migration", "1.x", "migration-assess", "migration.inventory.csv"),
     }
 )
 """Built-in typed/composite ops the sweep deletes at boot.

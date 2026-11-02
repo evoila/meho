@@ -17,8 +17,9 @@ has walked every ``connectors/<product>/`` subpackage, so the
 any dispatch can fire.
 
 Layout mirrors the :mod:`meho_backplane.connectors.vault` pattern: the
-``__init__`` wires the registrar; ``_register.py`` carries the
-per-composite registration metadata; ``_read.py`` and ``_write.py``
+``__init__`` wires the registrar; each composite module carries its
+registration rows as ``COMPOSITES`` and ``_register.py`` collects them
+at start-up (``_spec.py`` defines the row); ``_read.py`` and ``_write.py``
 carry the handler implementations; ``schemas.py`` carries the JSON
 Schema 2020-12 parameter + response contracts.
 
@@ -88,9 +89,15 @@ Scope:
   ``govc library.deploy``) (#2909).
 * the destructive DRS rule delete ``cluster.drs_rule.delete``
   (``_drs_rule_delete``): removes one DRS rule from a cluster, by name.
+* the DRS group writes: ``cluster.drs_group.members.set`` (caution, waits for
+  approval; ``_drs_group``) changes the members of a VM group or host group,
+  and the destructive ``cluster.drs_group.delete`` (``_drs_group_delete``)
+  removes a group no rule uses.
 * the VM snapshot writes (``_snapshot``): ``vm.snapshot.create`` (caution,
   waits for approval) and the destructive ``vm.snapshot.delete``. The list is
   the typed read ``vmware.snapshot.list``; the revert lives in ``_write``.
+* the VM snapshot and disk clean-up (``_snapshot_cleanup``): the destructive
+  ``vm.snapshot.delete_all`` and ``vm.disks.consolidate`` (caution).
 * the two alarm changes ``alarm.acknowledge`` and ``alarm.reset``
   (``_alarm``, #4383): both ``caution`` with ``requires_approval=True``.
 """
@@ -106,8 +113,17 @@ from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
 from meho_backplane.connectors.vmware_rest.composites._datastore_list import (
     datastore_file_list_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._datastore_orphans import (
+    datastore_orphan_dirs_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._datastore_vsan import (
     datastore_vsan_folder_list_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_group import (
+    cluster_drs_group_members_set_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_group_delete import (
+    cluster_drs_group_delete_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
     cluster_drs_rule_delete_composite,
@@ -156,6 +172,10 @@ from meho_backplane.connectors.vmware_rest.composites._register import (
 from meho_backplane.connectors.vmware_rest.composites._snapshot import (
     vm_snapshot_create_composite,
     vm_snapshot_delete_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._snapshot_cleanup import (
+    vm_disks_consolidate_composite,
+    vm_snapshot_delete_all_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
     storage_policy_create_composite,
@@ -214,21 +234,11 @@ register_typed_op_registrar(register_vmware_composite_operations)
 # catalog the resolver picks for an 8.0.x target carries them too.
 register_typed_op_registrar(register_vmware_composite_operations_8_0)
 
-# Side-effect import: registers the 24 write composites' park-time
-# ``proposed_effect`` preview builders (#1608, destructive-tier
-# blast-radius #3198) onto the per-op hook in
-# :mod:`meho_backplane.operations._preview` — mirrors how
-# ``connectors/argocd/__init__`` wires ``ops_write_preview``.
-# Same for the guest file read (#4850): a caution read, so an agent's call
-# waits for approval.
-from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402,F401
-    _guest_file_read_preview,
-    _write_preview,
-)
-
 __all__ = [
     "alarm_acknowledge_composite",
     "alarm_reset_composite",
+    "cluster_drs_group_delete_composite",
+    "cluster_drs_group_members_set_composite",
     "cluster_drs_recommendations_composite",
     "cluster_drs_rule_create_composite",
     "cluster_drs_rule_delete_composite",
@@ -243,6 +253,7 @@ __all__ = [
     "datastore_file_delete_composite",
     "datastore_file_list_composite",
     "datastore_mount_nfs_composite",
+    "datastore_orphan_dirs_composite",
     "datastore_refresh_composite",
     "datastore_usage_composite",
     "datastore_vsan_folder_list_composite",
@@ -289,6 +300,7 @@ __all__ = [
     "vm_device_cdrom_composite",
     "vm_disk_attach_composite",
     "vm_disk_grow_composite",
+    "vm_disks_consolidate_composite",
     "vm_migrate_composite",
     "vm_nic_repoint_composite",
     "vm_power_bulk_composite",
@@ -297,6 +309,7 @@ __all__ = [
     "vm_resource_allocation_set_composite",
     "vm_resource_allocation_show_composite",
     "vm_snapshot_create_composite",
+    "vm_snapshot_delete_all_composite",
     "vm_snapshot_delete_composite",
     "vm_snapshot_revert_composite",
 ]

@@ -67,11 +67,15 @@ from kubernetes_asyncio.stream.ws_client import WsApiClient
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
+from meho_backplane.connectors._shared.pinned_transport import build_pinned_async_transport
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
 )
 from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.kubernetes._dial_check import check_api_client_dials
 from meho_backplane.connectors.kubernetes._wire_span import instrument_api_client
 from meho_backplane.connectors.kubernetes.kubeconfig import (
     CredentialLoader,
@@ -96,6 +100,7 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
     TopologyHints,
 )
+from meho_backplane.targets.ssrf_guard import TargetDestinationBlockedError
 
 __all__ = ["KubernetesConnector", "product_from_git_version"]
 
@@ -175,8 +180,10 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "password), ``k8s.secret.delete`` removes one after a preview "
         "that lists the workloads using it, and ``k8s.secret.read_to_ref`` "
         "copies a Secret value into the credential store and returns only "
-        "a reference; these four wait for approval. No Secret op ever "
-        "shows a value."
+        "a reference; these four wait for approval. "
+        "``k8s.secret.compare_to_ref`` checks that a Secret key holds the "
+        "same value as its Vault copy and answers only same or different; "
+        "it is a safe read. No Secret op ever shows a value."
     ),
     "events": (
         "Use for cluster-event observability and troubleshooting: "
@@ -476,6 +483,8 @@ class KubernetesConnector(Connector):
         # ``ApiClient`` cannot speak. Built lazily from the same
         # operator-identity kubeconfig and closed in :meth:`aclose`.
         self._ws_api_clients: dict[tuple[str, str], WsApiClient] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._lock = asyncio.Lock()
 
     async def fingerprint(
@@ -557,16 +566,20 @@ class KubernetesConnector(Connector):
         start = time.monotonic()
         probed_at = datetime.now(UTC)
         endpoint = "/readyz"
+        # The pinned transport checks the address and dials only the checked IP.
+        transport = build_pinned_async_transport(
+            screen_dial_addresses,
+            verify=False,  # NOSONAR S4830 — kubeconfig-free reachability probe; see docstring
+        )
         try:
             async with httpx.AsyncClient(
-                verify=False,  # NOSONAR S4830 — kubeconfig-free reachability probe; see docstring
-                timeout=_PROBE_TIMEOUT_SECONDS,
+                transport=transport, timeout=_PROBE_TIMEOUT_SECONDS
             ) as http:
                 resp = await http.get(f"{base_url}{endpoint}")
                 if resp.status_code == 404:
                     endpoint = "/healthz"
                     resp = await http.get(f"{base_url}{endpoint}")
-        except (httpx.HTTPError, OSError) as exc:
+        except (httpx.HTTPError, OSError, TargetDestinationBlockedError) as exc:
             return ProbeResult(
                 ok=False,
                 reason=f"{type(exc).__name__}: {exc}",
@@ -1712,6 +1725,19 @@ class KubernetesConnector(Connector):
 
         return await k8s_secret_info(self, target, operator, params)
 
+    async def k8s_secret_compare_to_ref(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.secret.compare_to_ref``."""
+        from meho_backplane.connectors.kubernetes.ops_secret_compare import (
+            k8s_secret_compare_to_ref,
+        )
+
+        return await k8s_secret_compare_to_ref(self, target, operator, params)
+
     async def k8s_secret_update(
         self,
         operator: Operator,
@@ -2026,6 +2052,7 @@ class KubernetesConnector(Connector):
             for ws_client in self._ws_api_clients.values():
                 await ws_client.close()
             self._ws_api_clients.clear()
+            self._readers.clear()
 
     @staticmethod
     def _cache_key(target: KubernetesTargetLike) -> tuple[str, str]:
@@ -2101,8 +2128,13 @@ class KubernetesConnector(Connector):
         async with self._lock:
             cached = self._api_clients.get(key)
             if cached is not None and not is_system_operator(operator):
+                # The caller's own Vault read, once per caller and target.
+                await self._readers.ensure_read(
+                    target, operator, lambda: self._credential_loader(target, operator)
+                )
                 return cached
             credential = await self._credential_loader(target, operator)
+            self._readers.record(target, operator)
             if isinstance(credential, WcpSsoCredential):
                 api_client = client.ApiClient(
                     configuration=await self._wcp_configuration(target, credential)
@@ -2111,6 +2143,11 @@ class KubernetesConnector(Connector):
                 api_client = await config.new_client_from_config_dict(
                     _kubeconfig_dialing_target(credential.config, target)
                 )
+            try:
+                await check_api_client_dials(api_client)
+            except BaseException:
+                await api_client.close()
+                raise
             instrument_api_client(api_client)
             self._api_clients[key] = api_client
             _log.info(
@@ -2192,8 +2229,13 @@ class KubernetesConnector(Connector):
         async with self._lock:
             cached = self._ws_api_clients.get(key)
             if cached is not None and not is_system_operator(operator):
+                # The caller's own Vault read, once per caller and target.
+                await self._readers.ensure_read(
+                    target, operator, lambda: self._credential_loader(target, operator)
+                )
                 return cached
             credential = await self._credential_loader(target, operator)
+            self._readers.record(target, operator)
             if isinstance(credential, WcpSsoCredential):
                 ws_config = await self._wcp_configuration(target, credential)
             else:
@@ -2203,6 +2245,11 @@ class KubernetesConnector(Connector):
                     client_configuration=ws_config,
                 )
             ws_client = WsApiClient(configuration=ws_config)
+            try:
+                await check_api_client_dials(ws_client)
+            except BaseException:
+                await ws_client.close()
+                raise
             self._ws_api_clients[key] = ws_client
             _log.info(
                 "kubernetes_ws_api_client_built",
@@ -2243,6 +2290,7 @@ class KubernetesConnector(Connector):
             ws_client = self._ws_api_clients.pop(key, None)
             if ws_client is not None:
                 await ws_client.close()
+            self._readers.forget(target)
             if api_client is not None or ws_client is not None:
                 _log.info(
                     "kubernetes_client_cache_invalidated",

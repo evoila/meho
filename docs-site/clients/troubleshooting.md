@@ -29,6 +29,15 @@ meho doctor
 - The **authenticated layer** checks DNS, TLS, and your token, then runs
   the MCP handshake. It shows your scopes and any working-surface tool
   your session should see but does not.
+- The **server layer** appears only on a Linux server where MEHO was
+  installed with its own install script (the file
+  `/usr/local/sbin/meho-host` exists). Run `sudo meho doctor` there. As
+  root, the doctor runs `meho-host check` and shows its lines last: the
+  node, the pods, the disk and the certificates of the built-in
+  Kubernetes. Without `sudo` it shows one warning and runs nothing. A
+  red server line gives exit code 1. With `sudo`, the offline and
+  authenticated lines check root's settings and login, not yours: run
+  `meho doctor` without `sudo` to check your own login.
 
 Use the failure class it prints (`dns`, `tls`, `refresh_rejected`,
 `surface_gap`, ...) to pick the section below. See also the
@@ -148,8 +157,8 @@ gave the call no answer at all.
 
 **Fix.** In Claude Desktop, open **Settings > Extensions** and turn the
 MEHO extension off and on. Finish the login in the browser tab that opens;
-it may open behind the Claude Desktop window. If a MEHO login tab opened
-when the call failed, you can close it.
+it may open behind the Claude Desktop window. Older bundles also opened a
+login tab when the call failed; you can close that one.
 
 ## The extension stops with "MEHO did not connect" (Claude Desktop)
 
@@ -172,14 +181,34 @@ expired. Run /mcp, pick meho, and reconnect to log in again." After that,
 `/mcp` shows `meho` as failed.
 
 **Wall.** The saved login can no longer be renewed: it was not used for
-the offline idle limit, or the session was ended in Keycloak. A new
-browser login is needed. The plugin does not wait for that login in the
-middle of a call, so the call fails fast instead of hanging.
+the offline idle limit, or the session was ended in Keycloak. The plugin
+checked this before it gave up: it asked the login server again, and it
+looked for a newer login that another session saved. A new browser login
+is needed. The plugin does not wait for that login in the middle of a
+call, so the call fails fast instead of hanging. The saved login file
+stays; the new login replaces it.
 
 **Fix.** Run `/mcp`, pick `meho`, and reconnect. Finish the login in the
-browser tab that opens. If Claude Code stops waiting before you finish,
-finish the login anyway and reconnect once more. If a MEHO login tab
-opened when the call failed, you can close it.
+browser tab that opens. Other Claude Code sessions that need a login at
+the same time wait for this one, then use it. If Claude Code stops
+waiting before you finish, finish the login anyway and reconnect once
+more. Older plugin versions also opened a login tab when the call failed;
+you can close that one.
+
+## A MEHO call says "The MEHO login server did not answer"
+
+**Symptom.** A MEHO tool call fails with "The MEHO login server did not
+answer, so the login could not be renewed. Your login is kept. Try again
+in a moment." The Claude Code plugin or the Claude Desktop extension keeps
+running.
+
+**Wall.** The login needed a renewal, and the login server (Keycloak) did
+not answer for about 30 seconds, or it answered with a server error
+(HTTP 5xx). The plugin tried again after 1, 2, 4 and 8 seconds. It did
+not open a browser login, and it kept the saved login.
+
+**Fix.** Check that you are on the VPN and that Keycloak is up. Then run
+the call again. No reconnect is needed.
 
 ## The plugin stops with "MEHO did not connect" (Claude Code plugin)
 
@@ -191,9 +220,10 @@ stopped.`
 seconds (default 300). Two common reasons:
 
 - A browser login started, but nobody finished it in time.
-- Another Claude Code session was running a login at the same time. This
-  session then waits, and it does not pick up the other session's login
-  even when that login is done.
+- Another Claude Code session was running a browser login at the same
+  time, and nobody finished it. This session waits for that login, and the
+  time limit counts the wait. When the other login is done in time, this
+  session uses it and opens no browser.
 
 Stopping frees the local callback port, so the next attempt can log in.
 Older plugin versions waited forever instead, and every later session
@@ -220,6 +250,7 @@ first, then match the row:
 | `missing_sub` | The token has no `sub` claim. Keycloak 25+ moved `sub` into a mapper inside the `basic` client scope, and clients created via the admin REST API do not auto-inherit realm default scopes. RFC 9068 makes `sub` required, so rejection is correct — the opacity is the problem. | Assign `basic` (and `roles`, `web-origins`, `acr`) as **default** client scopes, then log out and back in (**W3** — the deepest wall). |
 | `missing_tenant_claim` / `missing_tenant_role_claim` | The person is in none of the five MEHO groups, or the `tenant-id` / `tenant-role` mapper is absent, so the backplane cannot place the caller in a tenant. | Put the person in one group ([Keycloak realm setup § groups](../install/keycloak-realm.md#step-5-create-the-five-groups), or [Add a tenant](../guides/tenant-bootstrap.md) for a new tenant), or add the tenant mappers (**W2**, [§ mappers](../install/keycloak-realm.md#step-3-add-the-protocol-mappers)). |
 | `multiple_role_groups: …` | The person is in two or more of the five MEHO groups. Keycloak then copies the role from whichever group it finds first, so the role would be unpredictable. The message names the groups it found. | Keep the person in exactly one group ([Keycloak realm setup § groups](../install/keycloak-realm.md#step-5-create-the-five-groups)), then log out and back in. A site that renamed the groups sets `JWT_ROLE_GROUPS` on the backplane to the new names (comma-separated). |
+| `multiple_role_groups: … of the same tenant …` | The login lists tenants, and the person is in two role groups of one tenant. The role in that tenant would not be clear. Groups of two different tenants are fine. | Keep the person in one role group of that tenant, then log out and back in. |
 | `invalid_issuer` | The token's `iss` does not match the configured realm. | Point the client at the same realm `KEYCLOAK_ISSUER_URL` names; a stale OAuth state from a previous realm can survive across config changes. |
 | `token_expired` / `token_not_yet_valid` | `exp` is in the past, or `nbf` in the future beyond leeway (clock skew). | Refresh the token; for `nbf`, sync the clock on the issuing or calling host. |
 | `signature_verification_failed` | The JWS does not verify against the issuer's published keys. | Confirm the token comes from the realm the backplane validates against. |
@@ -229,6 +260,18 @@ The diagnostic detail (expected audience, claim name, exception class)
 is in the backplane's **server log**, not the 401 body — that
 body-vs-log split is the deliberate info-leak boundary an
 unauthenticated 401 honours.
+
+## Calls answer `tenant_not_chosen` or `tenant_not_member`
+
+One login can be in several tenants. MEHO then works in one tenant at a
+time: the request names it in the `Meho-Tenant` header (a tenant name or
+ID). These answers come after a valid login:
+
+| `detail` code | What it means | Fix |
+|---|---|---|
+| `tenant_not_chosen: …` (HTTP 400) | The login is in several tenants and the request named none. The message lists your tenants. `meho status` and the MCP tool `meho_status` still answer and list your tenants with the role in each. | Choose a tenant with `meho tenants use <name>`, or send the `Meho-Tenant` header. For MCP, set the tenant in the connection settings and start a new session. |
+| `tenant_not_member: …` (HTTP 403) | The `Meho-Tenant` header names a tenant you are not in. Agent, service and runner logins always stay in their own tenant. | Pick one of the tenants the message lists. If you need another tenant, ask your admin to put you in one role group of that tenant, then log in again. |
+| `tenant_not_found: …` (HTTP 403) | You are a platform admin and the header names a tenant that does not exist. MEHO never creates a tenant from this header. | Check the tenant name or ID. |
 
 ## `meho login` times out before you can approve (W4)
 

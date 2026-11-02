@@ -91,6 +91,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
@@ -1528,6 +1529,7 @@ async def _record_grant_use(
     if isinstance(grant, SandboxDeleteGrant):
         payload["delete_grant"] = True
         payload.update(evidence or {})
+    payload.update(tenant_role_source_payload(operator))
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         row = AuditLog(

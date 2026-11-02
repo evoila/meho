@@ -11,6 +11,9 @@
 //   - `meho approvals show <id> [--json]` — inspect one request via
 //     GET /api/v1/approvals/{id}. Role: operator. Renders proposed_effect
 //     and elicitation_url; --json for the raw envelope.
+//   - `meho approvals result <id> [--json]` — the sender reads the output
+//     of its approved run via GET /api/v1/approvals/{id}/result (#5313).
+//     Any principal kind, but only for a request it sent.
 //   - `meho approvals approve <id> [--reason TEXT] [--json]` — approve via
 //     POST /api/v1/approvals/{id}/decide. Role: operator. Resumes the
 //     paused agent run via the T4 path.
@@ -43,6 +46,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -93,7 +97,7 @@ func routeRequestError(
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "approvals",
-		Short: "Manage approval requests (list / show / approve / reject / withdraw)",
+		Short: "Manage approval requests (list / show / result / approve / reject / withdraw)",
 		Long: "Manage pending approval requests wired by G11.2-T5. An " +
 			"approval request is created when the policy gate issues a " +
 			"needs-approval verdict on a connector operation. Use list " +
@@ -102,12 +106,14 @@ func NewRootCmd() *cobra.Command {
 			"paused agent run resumes. On reject, the run aborts. Both " +
 			"read and write verbs require the operator role. The " +
 			"sender of a pending request can take it back with " +
-			"withdraw; that needs no role, only that you sent it. Tenant " +
+			"withdraw, and read the output of its approved run with result; " +
+			"both need no role, only that you sent the request. Tenant " +
 			"scoping is enforced server-side via the JWT.",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newShowCmd())
+	cmd.AddCommand(newResultCmd())
 	cmd.AddCommand(newApproveCmd())
 	cmd.AddCommand(newRejectCmd())
 	cmd.AddCommand(newWithdrawCmd())
@@ -217,6 +223,11 @@ func renderHTTPStatus(
 	bodyStr := trimmedBody(body)
 	switch statusCode {
 	case http.StatusUnauthorized:
+		if strings.Contains(bodyStr, "fresh_sign_in_") {
+			// The approval still found no fresh sign-in (#3979). Show
+			// the server's text: it names the web interface.
+			return output.RenderError(cmd.ErrOrStderr(), output.AuthExpired(bodyStr), jsonOut)
+		}
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
 				"backplane rejected the stored token; run `meho login %s`",

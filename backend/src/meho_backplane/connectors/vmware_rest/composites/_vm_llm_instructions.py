@@ -236,6 +236,51 @@ VM_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
             "finish: check the task with vmware.tasks.recent, then list the snapshots."
         ),
     },
+    _P + "vm.snapshot.delete_all": {
+        "when_to_call": (
+            "Call to delete every snapshot of one VM, for example old snapshots that fill "
+            "the datastore. To keep some, delete them one by one with vm.snapshot.delete."
+        ),
+        "preconditions": (
+            "Give the VM moid (vmware.vm.info finds it). The VM keeps its present state; "
+            "every restore point goes, for good. Run preview_operation first and pass its "
+            "preview_hash. A second person must always approve; an AI agent cannot run it "
+            "alone. vCenter merges all snapshot data into the disks, which can take long "
+            "and needs free datastore space."
+        ),
+        "output_shape": (
+            "{status: deleted|unchanged|invalid_request|still_present|timeout, object: "
+            "{kind, vm, vm_name, snapshot_count, snapshots_left}, blockers, task, "
+            "task_state, guidance}."
+        ),
+        "next_step": (
+            "On deleted, check with vmware.snapshot.list. On timeout, the delete may still "
+            "finish: check the task with vmware.tasks.recent. If vmware.vm.list or vCenter "
+            "then says the VM needs consolidation, call vm.disks.consolidate."
+        ),
+    },
+    _P + "vm.disks.consolidate": {
+        "when_to_call": (
+            "Call when vCenter warns that a VM needs disk consolidation, usually after a "
+            "snapshot delete that did not merge all files."
+        ),
+        "preconditions": (
+            "Give the VM moid. The call waits for approval before it runs. It runs only "
+            "when vCenter reports that the VM needs it; when vCenter does not report the "
+            "flag, nothing is written. It needs free datastore space and can slow the VM "
+            "while it runs."
+        ),
+        "output_shape": (
+            "{status: consolidated|unchanged|unknown|still_needed|unverified|not_found|"
+            "invalid_request|timeout, vm, vm_name, consolidation_needed, task, "
+            "task_state, guidance, issues}."
+        ),
+        "next_step": (
+            "On still_needed, check the datastore space and the task with "
+            "vmware.tasks.recent. On unknown or unverified, check the VM in vCenter. On "
+            "timeout, check the task, then call vmware.vm.info."
+        ),
+    },
     _P + "vm.destroy": {
         "when_to_call": (
             "Call only to delete a VM and all its disks for good, for example to "
@@ -438,16 +483,17 @@ VM_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
     _P + "vm.device.cdrom": {
         "when_to_call": (
             "Call to remove a VM's CD-ROM drive, change what it is backed by, or "
-            "disconnect it. Typical use: a host-local ISO ties the VM to one host and "
-            "blocks vMotion; switch it to CLIENT_DEVICE."
+            "connect or disconnect it. Typical use: a host-local ISO ties the VM to one "
+            "host and blocks vMotion; switch it to CLIENT_DEVICE."
         ),
         "preconditions": (
-            "action 'update' needs backing. 'remove' deletes the device; the guest loses the drive."
+            "action 'update' needs backing. 'remove' deletes the device; the guest loses "
+            "the drive. 'connect' and 'disconnect' need the VM powered on."
         ),
         "parameter_hints": {"cdrom": "CD-ROM device id, e.g. '16000'."},
         "output_shape": (
-            "{status: removed|updated|disconnected|invalid_request|result_unknown, vm, "
-            "cdrom, action, current_backing: {type, iso_file, ...}, state, "
+            "{status: removed|updated|connected|disconnected|invalid_request|result_unknown, "
+            "vm, cdrom, action, current_backing: {type, iso_file, ...}, state, "
             "requested_backing, guidance}. On result_unknown also running_tasks, "
             "tasks_error and vm_question."
         ),

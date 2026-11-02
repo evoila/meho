@@ -18,8 +18,10 @@ migration-inventory read end-to-end on a fresh boot. Coverage:
 * **Registration-shape invariants.** All 7 reads persist as
   ``source_kind="typed"``, ``is_enabled=True`` (enabled at register time — the
   "merge = fix" property), ``safe`` / ungated / ``read-only``, with a
-  canonical-key ``llm_instructions`` blob; their 3 groups land
-  ``review_status="enabled"``; no write op is registered.
+  canonical-key ``llm_instructions`` blob; the groups land
+  ``review_status="enabled"``; the only changes in the table are the
+  organisation ops (tested in :mod:`tests.test_connectors_vcd_org_ops`), and
+  each of them needs approval.
 
 Mirrors :mod:`tests.test_connectors_fleet_lcm_typed_reads`; the credential seam
 replaces the resolved instance's ``_credentials_loader`` (vCD mints a token from
@@ -77,7 +79,10 @@ _EXPECTED_OP_IDS = {
     "vcd.task.list",
 }
 
-_EXPECTED_GROUPS = {"vcd-inventory", "vcd-networking", "vcd-tasks"}
+#: The organisation ops (read one, create, change, delete) — see test_connectors_vcd_org_ops.
+_ORG_OP_IDS = {"vcd.org.get", "vcd.org.create", "vcd.org.update", "vcd.org.delete"}
+
+_EXPECTED_GROUPS = {"vcd-inventory", "vcd-networking", "vcd-tasks", "vcd-organizations"}
 
 
 @pytest.fixture(autouse=True)
@@ -328,7 +333,7 @@ async def test_registered_groups_are_enabled(
     _stub_embedding: AsyncMock,
     session: AsyncSession,
 ) -> None:
-    """The 3 read-core groups land review_status='enabled' with a curated when_to_use."""
+    """The groups land review_status='enabled' with a curated when_to_use."""
     await register_vcd_typed_operations()
 
     rows = (
@@ -373,9 +378,9 @@ async def test_registered_ops_are_visible_to_search_operations(
 # ---------------------------------------------------------------------------
 
 
-def test_typed_ops_table_is_exactly_the_read_core() -> None:
-    assert {op.op_id for op in VCD_TYPED_OPS} == _EXPECTED_OP_IDS
-    assert len(VCD_TYPED_OPS) == 7
+def test_typed_ops_table_is_the_read_core_plus_the_org_ops() -> None:
+    assert {op.op_id for op in VCD_TYPED_OPS} == _EXPECTED_OP_IDS | _ORG_OP_IDS
+    assert len(VCD_TYPED_OPS) == 11
 
 
 def test_every_group_key_has_a_when_to_use() -> None:
@@ -407,10 +412,15 @@ def test_each_op_parameter_schema_disallows_additional_properties(op_id: str) ->
     assert op.parameter_schema.get("additionalProperties") is False
 
 
-def test_no_write_or_mutating_op_is_registered() -> None:
-    """Read-only core: no create/write op ships here."""
+def test_only_the_org_ops_change_anything_and_they_need_approval() -> None:
+    """Outside the org ops no create/write op ships; every org change needs approval."""
     for op in VCD_TYPED_OPS:
-        assert not any(
+        is_change = any(
             token in op.op_id for token in (".create", ".delete", ".update", ".set", ".put")
         )
-        assert "write" not in op.tags
+        if op.op_id not in _ORG_OP_IDS:
+            assert not is_change
+            assert "write" not in op.tags
+        elif is_change:
+            assert op.requires_approval is True
+            assert "write" in op.tags

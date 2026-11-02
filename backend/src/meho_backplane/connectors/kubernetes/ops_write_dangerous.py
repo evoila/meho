@@ -56,9 +56,8 @@ References
   ``\\`` are the only escapes. See ``NewWarningHeader`` /
   ``ParseWarningHeaders`` in ``k8s.io/apimachinery/pkg/util/net/http.go``
   and https://kubernetes.io/blog/2020/09/03/warnings/ (#3842).
-* Redaction op-class (reused, not reinvented):
-  :data:`meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS`
-  (shipped by #1401).
+* Redaction op-class (reused, not reinvented): ``credential_write``,
+  declared in ``kubernetes/op_classes.py`` (shipped by #1401).
 """
 
 from __future__ import annotations
@@ -74,6 +73,7 @@ from kubernetes_asyncio.dynamic import DynamicClient
 
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
+    check_param_secret_ref,
     load_vault_secret_data,
     strip_credential_value,
 )
@@ -455,6 +455,7 @@ async def _resolve_secret_refs(
     refs: dict[str, str],
     *,
     mount: str,
+    param: str,
     op_id: str = "k8s.secret.create",
 ) -> dict[str, str]:
     """Resolve a ``{secret-key: ref}`` map to ``{secret-key: value}``.
@@ -476,13 +477,15 @@ async def _resolve_secret_refs(
     (``{key: "<scheme>:<path>#<field>"}``) spans.
 
     *op_id* names the calling op in the error message (``k8s.secret.update``
-    reuses this helper).
+    reuses this helper). *param* names the op param the refs came from;
+    each ref passes :func:`check_param_secret_ref` before it is read.
     """
     resolved: dict[str, str] = {}
     for secret_key, raw_ref in refs.items():
         body, sep, fragment = str(raw_ref).rpartition("#")
         store_ref = body.strip() if sep else str(raw_ref).strip()
         field = fragment.strip() if (sep and fragment.strip()) else secret_key
+        check_param_secret_ref(operator, store_ref, param=param, mount=mount)
         payload = await load_vault_secret_data(
             _SecretRefTarget(name=target.name, host=target.host, secret_ref=store_ref),
             operator,
@@ -562,6 +565,7 @@ async def k8s_secret_create(
                 target,
                 dict(string_ref),
                 mount=str(params.get("string_data_secret_mount") or DEFAULT_KV_MOUNT).strip(),
+                param="string_data_secret_ref",
             )
         )
     data_ref = params.get("data_secret_ref")
@@ -572,6 +576,7 @@ async def k8s_secret_create(
                 target,
                 dict(data_ref),
                 mount=str(params.get("data_secret_mount") or DEFAULT_KV_MOUNT).strip(),
+                param="data_secret_ref",
             )
         )
 

@@ -44,14 +44,16 @@ server summary.
 Operations
 ----------
 
-``srm.about`` and ``srm.api_file.get``. The entry methods are defined on
-this class and call the shared code (``server_about`` on the base class
-and :func:`~meho_backplane.connectors.vmware_shared.dr_api_file.dr_api_file_get`).
-Defining them here, not on the base class, is what keeps an ``srm.*``
-operation from running on a ``vr`` target: the stored handler names this
-class, and the dispatcher binds it only to an ``SrmConnector``. Both
-operations exist on 8.8, 9.0 and 9.1, so no operation needs a version
-check yet.
+``srm.about`` and ``srm.api_file.get`` call the shared code
+(``server_about`` on the base class and
+:func:`~meho_backplane.connectors.vmware_shared.dr_api_file.dr_api_file_get`).
+The pairing, remote login, recovery plan, protection group, issue and
+history reads call :mod:`meho_backplane.connectors.srm.recovery_reads`.
+The entry methods are defined on this class, not on the base class: that
+keeps an ``srm.*`` operation from running on a ``vr`` target, because the
+stored handler names this class and the dispatcher binds it only to an
+``SrmConnector``. Every operation exists on 8.8, 9.0 and 9.1, so no
+operation needs a version check yet.
 """
 
 from __future__ import annotations
@@ -59,6 +61,7 @@ from __future__ import annotations
 from typing import Any
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.srm import recovery_reads
 from meho_backplane.connectors.srm.api_file import API_FILES
 from meho_backplane.connectors.srm.session import (
     SrmSessionLoader,
@@ -109,3 +112,46 @@ class SrmConnector(DrRestConnector):
     ) -> dict[str, Any]:
         """``srm.api_file.get``; the body is ``vmware_shared.dr_api_file.dr_api_file_get``."""
         return await dr_api_file_get(self, operator, target, params)
+
+    async def pairing_list(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``srm.pairing.list`` -- ``GET /pairings``, one row per pairing."""
+        del params  # the schema declares no parameters
+        return await recovery_reads.pairing_list(self, operator, target)
+
+    async def remote_login(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``srm.remote_login`` -- ``POST /pairings/{pairing_id}/remote-session``."""
+        return await recovery_reads.remote_login(self, operator, target, params)
+
+    async def plan_list(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``srm.plan.list`` -- the recovery plans of a pairing."""
+        return await recovery_reads.plan_list(self, operator, target, params)
+
+    async def plan_get(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``srm.plan.get`` -- one plan with its groups, steps and VMs."""
+        return await recovery_reads.plan_get(self, operator, target, params)
+
+    async def group_list(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``srm.group.list`` -- the protection groups, or the VMs of one group."""
+        return await recovery_reads.group_list(self, operator, target, params)
+
+    async def issue_list(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``srm.issue.list`` -- the issues of a pairing, plan, group or SRM server."""
+        return await recovery_reads.issue_list(self, operator, target, params)
+
+    async def history_list(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``srm.history.list`` -- the run history of a plan, or one report."""
+        return await recovery_reads.history_list(self, operator, target, params)

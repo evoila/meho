@@ -53,7 +53,7 @@ The session id is the `Mcp-Session-Id` header the MCP client established on its 
 
 There is one exception for plain HTTP. When a **client-credential service principal** (a service account, for example an automation add-on) calls `call_operation` over REST with a `work_ref`, MEHO gives that run a session id. The first call for a `work_ref` writes one start row (`method=ORCHESTRATION`). Every call for the same `work_ref` carries the same session id and sits under that start row. So the run replays as one tree. To replay it:
 
-1. Find the session id: `meho audit query --work-ref <ref> --json` (or `GET /api/v1/audit/by-work-ref/{ref}`). The rows show `agent_session_id`. Use `--json`: the default table does not print that column.
+1. Find the session id: `meho audit query --filter-work-ref <ref> --json` (or `GET /api/v1/audit/by-work-ref/{ref}`). The rows show `agent_session_id`. Use `--json`: the default table does not print that column.
 2. Replay it: `meho audit replay <session-id>`.
 
 A service principal call **without** a `work_ref` still has no session id. Send a `work_ref` (the `work_ref` field on `call_operation`, or the `Meho-Work-Ref` header on REST or MCP) on every call of a run you want to replay. See [`docs/codebase/audit_query.md`](../codebase/audit_query.md#client-credential-runs-3446).

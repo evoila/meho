@@ -74,6 +74,7 @@ to point it at a tenant:
 | `MEHO_CA_CERT` | Path to an internal-CA bundle; exported as `NODE_EXTRA_CA_CERTS` for the Node-based shim. Only needed on internal-CA deploys. |
 | `MEHO_MCP_CLIENT_ID` | Pre-registered public OAuth client id the shim presents to Keycloak (default `meho-mcp`). Override only if the realm registers the client under a different name. |
 | `MEHO_MCP_SCOPES` | Space-separated OAuth scopes the shim requests (default `mcp:read mcp:execute offline_access`: the working surface plus a [login that lasts](#how-long-the-login-lasts)). It replaces the whole list. Set it to opt into [elevated operator mode](#elevated-operator-mode-opt-in). Empty or whitespace-only falls back to the default. |
+| `MEHO_TENANT` | The MEHO tenant this session works in: a tenant name or ID, sent as the `Meho-Tenant` header. Leave it unset if your login has one tenant. See [Work in one tenant](#work-in-one-tenant). Empty or whitespace-only sends no header. |
 | `MEHO_MCP_LOGIN_TIMEOUT` | Seconds the shim waits for the connection, including a browser login, before it stops (default `300`, at most `86400`). See [When the login expires or is not finished](#when-the-login-expires-or-is-not-finished). |
 | `MEHO_PLUGIN_CONFIG` | Override the config-file location (default `${XDG_CONFIG_HOME:-~/.config}/meho/plugin.env`). |
 
@@ -87,6 +88,24 @@ MEHO_INSTANCE="https://meho.example.internal"
 
 With either configured, the `meho` MCP server connects on the next Claude
 Code session — zero edits inside the installed plugin.
+
+### Work in one tenant
+
+One login can belong to several tenants. MEHO works in one tenant per
+request, the one the `Meho-Tenant` header names. The shim sends
+`MEHO_TENANT` as that header on every request, so a session works in one
+tenant from start to end.
+
+- One tenant: leave `MEHO_TENANT` unset. Nothing changes.
+- Several tenants: set it, for example `MEHO_TENANT="tenant-b"` in
+  `plugin.env`. Without it, the session may only call `meho_status`, which
+  lists your tenants and your role in each.
+- To switch: change `MEHO_TENANT` and start a new Claude Code session.
+  `mcp-remote` keeps one saved login per header value, so the first session
+  in a tenant opens a browser login once more.
+
+There is no tool to switch tenant inside a session. So an agent cannot move
+to another tenant on its own.
 
 ### Elevated operator mode (opt-in)
 
@@ -209,20 +228,24 @@ of a login:
   "Your MEHO login has expired. Run /mcp, pick meho, and reconnect to log in
   again." Then the shim stops, and `/mcp` shows `meho` as failed. Do what the
   message says; the reconnect opens the browser login. If Claude Code stops
-  waiting before you finish it, finish it anyway and reconnect once more. A
-  browser tab with the MEHO login may also open when the call fails. You can
-  close it.
+  waiting before you finish it, finish it anyway and reconnect once more.
+- **A renewal fails, but the login has not ended.** All sessions on the
+  computer share one saved login, and the shim keeps it
+  (`lib/token-renewal.mjs`). A network error or a server error is tried
+  again for about 30 seconds; if the login server still does not answer,
+  the call fails with "The MEHO login server did not answer" and the shim
+  keeps running. When the login server refuses a renewal, the shim first
+  uses a newer login that another session saved, and otherwise asks the
+  login server once more. A failed renewal never deletes the saved login.
 - **Nobody finishes a browser login.** The shim stops after
   `MEHO_MCP_LOGIN_TIMEOUT` seconds (default 300, so 5 minutes) without a
   connection. This frees the local callback port, so the next session can log
   in. The MCP log then has a line starting with `meho plugin:` that says what
   happened.
-- **Two sessions need a login at the same time.** The second session does not
-  crash. But it does not pick up the other session's login either, even when
-  that login is done: it keeps waiting until the shim stops it with the same
-  `meho plugin:` message. So finish the login in the first session's browser
-  tab, then reconnect the second session with `/mcp`. You do not need to wait
-  for the 5 minutes.
+- **Two sessions need a login at the same time.** Only one browser login runs
+  at a time on the computer (`lib/signin-lock.mjs`, shared with the Claude
+  Desktop bundle). The second session waits, then uses the new login and
+  opens no browser. The wait counts toward `MEHO_MCP_LOGIN_TIMEOUT`.
 - **Several MEHO login tabs are open.** Only one of them can finish. Close
   them all, then reconnect once.
 - **Another session is already logged in.** A session frees the local

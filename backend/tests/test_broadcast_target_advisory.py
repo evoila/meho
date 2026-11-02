@@ -167,7 +167,7 @@ async def test_peer_operation_and_announcement_surface() -> None:
     with _seed_xrevrange(entries):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
-            op_id="vsphere.vm.create",
+            op_class="write",
             target_name=_TARGET,
         )
     peers = advisory[ADVISORY_EXTRAS_KEY]
@@ -186,7 +186,7 @@ async def test_different_target_carries_no_advisory() -> None:
     with _seed_xrevrange(entries):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
-            op_id="vsphere.vm.create",
+            op_class="write",
             target_name="cluster-y",
         )
     assert advisory == {}
@@ -203,7 +203,7 @@ async def test_advisory_carries_no_prose_fields() -> None:
     with _seed_xrevrange(entries):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
-            op_id="vsphere.vm.create",
+            op_class="write",
             target_name=_TARGET,
         )
     for entry in advisory[ADVISORY_EXTRAS_KEY]:
@@ -220,7 +220,7 @@ async def test_excludes_caller_own_principal_and_actor() -> None:
     with _seed_xrevrange(entries):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
-            op_id="vsphere.vm.create",
+            op_class="write",
             target_name=_TARGET,
         )
     peers = advisory[ADVISORY_EXTRAS_KEY]
@@ -244,7 +244,7 @@ async def test_peer_agent_under_same_human_is_not_self() -> None:
     with _seed_xrevrange(entries), actor_delegation("agent:me"):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
-            op_id="vsphere.vm.create",
+            op_class="write",
             target_name=_TARGET,
         )
     peers = advisory[ADVISORY_EXTRAS_KEY]
@@ -259,7 +259,7 @@ async def test_advisory_capped_at_five_most_recent() -> None:
     with _seed_xrevrange(entries):
         advisory = await build_target_activity_advisory(
             _operator("caller"),
-            op_id="vsphere.vm.create",
+            op_class="write",
             target_name=_TARGET,
         )
     peers = advisory[ADVISORY_EXTRAS_KEY]
@@ -286,7 +286,7 @@ async def test_newest_peer_surfaces_beyond_scan_cap() -> None:
     with _seed_xrevrange(own + peers):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
-            op_id="vsphere.vm.create",
+            op_class="write",
             target_name=_TARGET,
         )
     surfaced = advisory[ADVISORY_EXTRAS_KEY]
@@ -323,7 +323,7 @@ async def test_fail_open_on_valkey_teardown() -> None:
     ):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
-            op_id="vsphere.vm.create",
+            op_class="write",
             target_name=_TARGET,
         )
     assert advisory == {}
@@ -334,17 +334,17 @@ async def test_fail_open_on_valkey_teardown() -> None:
 
 
 @pytest.mark.parametrize(
-    "op_id",
-    ["vsphere.vm.list", "vault.kv.read", "audit.query"],
+    "op_class",
+    ["read", "credential_read", "audit_query", "other"],
 )
-async def test_read_class_dispatch_performs_no_lookup(op_id: str) -> None:
+async def test_read_class_dispatch_performs_no_lookup(op_class: str) -> None:
     """Read-class ops short-circuit before any stream read."""
     bc = get_broadcast_client()
     xr = AsyncMock(return_value=[])
     with patch.object(bc, "xrevrange", new=xr):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
-            op_id=op_id,
+            op_class=op_class,
             target_name=_TARGET,
         )
     assert advisory == {}
@@ -362,7 +362,7 @@ async def test_window_zero_disables_and_skips_lookup(
     with patch.object(bc, "xrevrange", new=xr):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
-            op_id="vsphere.vm.create",
+            op_class="write",
             target_name=_TARGET,
         )
     assert advisory == {}
@@ -376,7 +376,7 @@ async def test_no_target_skips_lookup() -> None:
     with patch.object(bc, "xrevrange", new=xr):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
-            op_id="vsphere.vm.create",
+            op_class="write",
             target_name=None,
         )
     assert advisory == {}

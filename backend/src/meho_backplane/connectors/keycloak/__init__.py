@@ -37,8 +37,12 @@ directly, keeping the resolver tie-break ladder unambiguous.
 # ``.member.add`` / ``.member.remove`` (#3280) onto the #1437 dispatcher hook,
 # so the reviewer sees the resource identity -- realm / username / granted
 # roles / group name + attribute keys -- secrets scrubbed -- in the approval
-# queue before approving.
-from meho_backplane.connectors.keycloak import ops_write_preview  # noqa: F401
+# queue before approving. ``ops_login_check`` wires the same kind of card for
+# ``keycloak.user.check_login`` (which user, where the password comes from).
+from meho_backplane.connectors.keycloak import (
+    ops_login_check,  # noqa: F401
+    ops_write_preview,  # noqa: F401
+)
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.operations.typed_register import register_typed_op_registrar

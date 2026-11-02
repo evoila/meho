@@ -44,7 +44,7 @@ from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
 from meho_backplane.broadcast.client import get_broadcast_client
-from meho_backplane.broadcast.events import BroadcastEvent, classify_op
+from meho_backplane.broadcast.events import BroadcastEvent
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentAnnouncement
 from meho_backplane.settings import get_settings
@@ -571,7 +571,7 @@ async def _recent_target_events_newest_first(
 async def build_target_activity_advisory(
     operator: Operator,
     *,
-    op_id: str,
+    op_class: str,
     target_name: str | None,
 ) -> dict[str, Any]:
     """Build the ``extras`` fragment advising of recent peer activity.
@@ -590,8 +590,9 @@ async def build_target_activity_advisory(
 
     * the feature is disabled (``dispatch_activity_advisory_window_minutes
       == 0``);
-    * the op is not write-class (read-class dispatches perform no stream
-      read -- the frozenset check returns before any Valkey call);
+    * *op_class* is not write-class (read-class dispatches perform no
+      stream read -- the frozenset check returns before any Valkey call).
+      The dispatcher passes the class it stores on the op's audit row;
     * the dispatch has no target;
     * no peer activity was found in the window.
 
@@ -607,7 +608,7 @@ async def build_target_activity_advisory(
     window_minutes = get_settings().dispatch_activity_advisory_window_minutes
     if window_minutes <= 0:
         return {}
-    if classify_op(op_id) not in _ADVISORY_WRITE_OP_CLASSES:
+    if op_class not in _ADVISORY_WRITE_OP_CLASSES:
         return {}
     if not target_name:
         return {}
@@ -715,7 +716,7 @@ def _claim_gap(
 async def announce_claim_gap(
     operator: Operator,
     *,
-    op_id: str,
+    op_class: str,
     target_name: str | None,
 ) -> ClaimGap | None:
     """Return ``None`` when the caller holds an active claim covering this op.
@@ -738,8 +739,8 @@ async def announce_claim_gap(
       operator.sub``, so a delegated agent's claim rides its human
       principal's ``sub``);
     * it has not expired (a claim with no ``ttl_minutes`` never expires);
-    * its declared ``planned_op_class`` matches the op's
-      :func:`classify_op` class, or the claim declared no class (a
+    * its declared ``planned_op_class`` matches *op_class* (the class the
+      dispatcher stores on the op's audit row), or the claim declared no class (a
       class-agnostic claim covers any op); and
     * its target attribution covers the op (see :func:`_claim_covers_target`),
       matched on the stored values, never on the read tools' untrusted wrap.
@@ -761,7 +762,6 @@ async def announce_claim_gap(
     async with get_sessionmaker()() as session:
         rows = (await session.execute(stmt)).scalars().all()
     now = datetime.now(UTC)
-    op_class = classify_op(op_id)
     gap: ClaimGap = "no_claim"
     for row in rows:
         row_gap = _claim_gap(
@@ -777,11 +777,11 @@ async def announce_claim_gap(
 async def caller_has_active_announce_claim(
     operator: Operator,
     *,
-    op_id: str,
+    op_class: str,
     target_name: str | None,
 ) -> bool:
     """Return ``True`` iff the caller holds an active claim covering this op.
 
     The yes/no form of :func:`announce_claim_gap`, for the announce gate.
     """
-    return await announce_claim_gap(operator, op_id=op_id, target_name=target_name) is None
+    return await announce_claim_gap(operator, op_class=op_class, target_name=target_name) is None

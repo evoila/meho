@@ -10,7 +10,9 @@ they describe the answer, they do not check it.
 Vendor field names come from the pinned ``vcf-installer-9.1`` OpenAPI file
 (``components.schemas``: ``Validation``, ``SddcTask``, ``PageOfSddcTask``,
 ``DepotSettings``, ``DepotSyncInfo``, ``PageOfTrustedCertificate``,
-``PageOfBundle``, ``PageOfBundleDownloadStatusInfo``). The envelope fields of
+``PageOfBundle``, ``PageOfBundleDownloadStatusInfo``, ``VcenterDiscoveryResult``,
+``SddcManagerDiscoveryResult``, ``VcfOperationsDiscoveryResult``,
+``ApplianceInfo``, ``PageOfRelease``, ``SddcSpec``). The envelope fields of
 the writes and of the multi-step bring-up (``status``, ``settings``,
 ``results``, ``sddc_task`` and so on) are the keys MEHO's own handlers build.
 """
@@ -20,6 +22,7 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
+    "APPLIANCE_INFO_RESPONSE",
     "BRINGUP_COMPOSITE_RESPONSE",
     "BUNDLES_DOWNLOAD_RESPONSE",
     "BUNDLES_DOWNLOAD_STATUS_RESPONSE",
@@ -27,10 +30,22 @@ __all__ = [
     "DEPOT_GET_RESPONSE",
     "DEPOT_SET_RESPONSE",
     "DEPOT_SYNC_STATUS_RESPONSE",
+    "DISCOVERY_SDDC_MANAGER_RESPONSE",
+    "DISCOVERY_VCENTER_RESPONSE",
+    "DISCOVERY_VCF_OPERATIONS_RESPONSE",
+    "PROXY_GET_RESPONSE",
+    "PROXY_SET_RESPONSE",
+    "RELEASE_LIST_RESPONSE",
+    "RESOURCES_CALCULATE_RESPONSE",
+    "SDDC_CANCEL_RESPONSE",
     "SDDC_LIST_RESPONSE",
+    "SDDC_SPEC_RESPONSE",
     "SDDC_TASK_RESPONSE",
+    "SETTINGS_GET_RESPONSE",
+    "SETTINGS_SET_RESPONSE",
     "TRUSTED_CERTIFICATES_LIST_RESPONSE",
     "TRUSTED_CERTIFICATE_ADD_RESPONSE",
+    "TRUSTED_CERTIFICATE_REMOVE_RESPONSE",
     "VALIDATION_RESPONSE",
 ]
 
@@ -48,6 +63,13 @@ def _object(description: str, properties: dict[str, Any]) -> dict[str, Any]:
         "properties": properties,
         "additionalProperties": True,
     }
+
+
+def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
+    """The same schema, with ``null`` allowed as well."""
+    type_ = schema["type"]
+    types = type_ if isinstance(type_, list) else [type_]
+    return {**schema, "type": [*types, "null"]}
 
 
 def _list_of(description: str, item_properties: dict[str, Any]) -> dict[str, Any]:
@@ -373,5 +395,397 @@ BUNDLES_DOWNLOAD_RESPONSE: dict[str, Any] = _object(
                 "message": _field("string", "On failed: the vendor error message."),
             },
         ),
+    },
+)
+
+# --- Reuse checks, cancel, appliance info, releases, spec read ---------------
+
+_NODE_ADDRESSES = _list_of(
+    "The node addresses.",
+    {
+        "type": _field("string", "fqdn or ipv4."),
+        "value": _field("string", "The address."),
+    },
+)
+
+DISCOVERY_VCENTER_RESPONSE: dict[str, Any] = _object(
+    "What the Installer found on the vCenter (vendor VcenterDiscoveryResult).",
+    {
+        "vcenterVersion": _field("string", "The vCenter version."),
+        "vcenterBuildNumber": _field("string", "The vCenter build number."),
+        "nsxInfo": _object(
+            "The NSX instance tied to this vCenter, if any.",
+            {"address": _field("string", "The NSX address.")},
+        ),
+    },
+)
+
+_COMPONENT_STATE = {
+    "fqdn": _field("string", "The component FQDN."),
+    "deploymentStatus": _field(
+        "string", "NOT_FOUND, NOT_STARTED, IN_PROGRESS, FAILED or SUCCEEDED."
+    ),
+    "deploymentType": _field("string", "NEW or EXISTING."),
+}
+
+DISCOVERY_SDDC_MANAGER_RESPONSE: dict[str, Any] = _object(
+    "What the Installer found on the SDDC Manager (vendor SddcManagerDiscoveryResult).",
+    {
+        "sddcManager": _object(
+            "The SDDC Manager itself.",
+            {
+                "fqdn": _field("string", "The SDDC Manager FQDN."),
+                "version": _field("string", "The SDDC Manager version."),
+                "vcfInstanceName": _field("string", "The VCF instance name."),
+            },
+        ),
+        "managementVcenter": _object(
+            "The management vCenter of this SDDC Manager.",
+            {
+                "fqdn": _field("string", "The vCenter FQDN."),
+                "version": _field("string", "The vCenter version."),
+                "status": _field("string", "The vCenter status."),
+            },
+        ),
+        "vcfManagementComponents": _object(
+            "Each VCF management component (vcfOperations, vcfAutomation, fleetLcm, "
+            "vcfOperationsLogs and others), each with fqdn, deploymentStatus and "
+            "deploymentType.",
+            {
+                "vcfOperations": _object("VCF Operations.", _COMPONENT_STATE),
+                "vcfAutomation": _object("VCF Automation.", _COMPONENT_STATE),
+                "vcfOperationsFleetManagement": _object(
+                    "VCF Operations fleet management.", _COMPONENT_STATE
+                ),
+            },
+        ),
+    },
+)
+
+DISCOVERY_VCF_OPERATIONS_RESPONSE: dict[str, Any] = _object(
+    "What the Installer found on VCF Operations (vendor VcfOperationsDiscoveryResult).",
+    {
+        "vcfOperationsVersion": _field("string", "The VCF Operations version."),
+        "vcfOperationsBuildNumber": _field("string", "The VCF Operations build number."),
+        "vcfOperationsNodes": _list_of(
+            "The cluster nodes.",
+            {
+                "address": _field("string", "The node address."),
+                "name": _field("string", "The node name."),
+                "type": _field("string", "master, replica, data, witness or cloudproxy."),
+            },
+        ),
+        "vcfOperationsManagementNode": _object(
+            "The management node.",
+            {"name": _field("string", "The node name."), "addresses": _NODE_ADDRESSES},
+        ),
+        "vcfAutomationNodes": _list_of(
+            "The VCF Automation nodes.",
+            {"name": _field("string", "The node name."), "addresses": _NODE_ADDRESSES},
+        ),
+        "vcenterAdapters": _list_of(
+            "The vCenters VCF Operations watches.",
+            {
+                "id": _field("string", "The adapter id."),
+                "name": _field("string", "The adapter name."),
+                "address": _field("string", "The vCenter address."),
+            },
+        ),
+        "nsxAdapters": _list_of(
+            "The NSX instances VCF Operations watches.",
+            {
+                "id": _field("string", "The adapter id."),
+                "name": _field("string", "The adapter name."),
+                "address": _field("string", "The NSX address."),
+                "vcenterAddress": _field("string", "The vCenter address."),
+            },
+        ),
+    },
+)
+
+SDDC_CANCEL_RESPONSE: dict[str, Any] = _object(
+    "The Installer took the cancel.",
+    {
+        "id": _field("string", "The task id that was cancelled."),
+        "status": _field("string", "Always cancel_requested."),
+    },
+)
+
+APPLIANCE_INFO_RESPONSE: dict[str, Any] = _object(
+    "The Installer appliance (vendor ApplianceInfo).",
+    {
+        "version": _field("string", "The Installer version, for example 9.1.0.0."),
+        "role": _field("string", "The appliance role."),
+        "dnsDomain": _field("string", "The DNS domain (9.1 only)."),
+        "dnsServers": {"type": "array", "description": "The DNS servers (9.1 only)."},
+        "ntpServers": {"type": "array", "description": "The NTP servers (9.1 only)."},
+        "ipAddresses": _list_of(
+            "The appliance IP addresses (9.1 only).",
+            {
+                "ipAddress": _field("string", "The IP address."),
+                "ipAddressVersion": _field("string", "The IP version."),
+            },
+        ),
+    },
+)
+
+RELEASE_LIST_RESPONSE: dict[str, Any] = _object(
+    "The releases this Installer knows (vendor PageOfRelease), one flat row each.",
+    {
+        "elements": _list_of(
+            "One row per release.",
+            {
+                "product": _field("string", "The product, for example VCF."),
+                "version": _field("string", "The release version."),
+                "releaseDate": _field("string", "The release date (ISO 8601)."),
+                "minInstallerVersion": _field(
+                    "string", "The oldest Installer version that can deploy it."
+                ),
+                "minCompatibleVcfVersion": _field("string", "The oldest compatible VCF version."),
+                "eol": _field("string", "The end-of-life date (ISO 8601)."),
+                "bom": {
+                    "type": "object",
+                    "description": "Component name to version, for example ESX or VCENTER.",
+                    "additionalProperties": {"type": ["string", "null"]},
+                },
+            },
+        ),
+        "pageMetadata": _PAGE_METADATA,
+    },
+)
+
+SDDC_SPEC_RESPONSE: dict[str, Any] = _object(
+    "The SddcSpec a bring-up used. Every secret field holds [REDACTED:param_name].",
+    {
+        "sddcId": _field("string", "The SDDC id (the management domain name)."),
+        "vcfInstanceName": _field("string", "The VCF instance name."),
+        "workflowType": _field("string", "The workflow type."),
+        "version": _field("string", "The VCF version of the spec."),
+        "vcenterSpec": _object(
+            "The vCenter part (vcenterHostname, vmSize, useExistingDeployment, ...).", {}
+        ),
+        "hostSpecs": {"type": "array", "description": "The ESX hosts (hostname, ...)."},
+        "networkSpecs": {"type": "array", "description": "The networks (networkType, vlanId)."},
+        "dnsSpec": _object("The DNS part (subdomain, nameservers).", {}),
+        "nsxtSpec": _object("The NSX part (vipFqdn, nsxtManagers, ...).", {}),
+    },
+)
+
+# --- Installer settings: proxy, CEIP, system, certificate remove (9.0 and 9.1) ---
+
+_TASK_STATE = _object(
+    "The state of the vendor job, when the call passed task_id.",
+    {
+        "id": _field("string", "The vendor job (task) id."),
+        "name": _field(["string", "null"], "The vendor job name."),
+        "type": _field(["string", "null"], "The vendor job type."),
+        "state": _field(["string", "null"], "The vendor state, for example IN_PROGRESS or FAILED."),
+        "outcome": {
+            "type": "string",
+            "enum": ["queued", "running", "succeeded", "failed", "unknown", "not_reachable"],
+            "description": (
+                "MEHO's plain reading of the state. not_reachable: the appliance did not "
+                "answer; this is not a failure."
+            ),
+        },
+        "progress": _object(
+            "Sub-tasks done of all, when the vendor gives sub-tasks.",
+            {
+                "sub_tasks_done": _field("integer", "Sub-tasks that ended well."),
+                "sub_tasks_total": _field("integer", "All sub-tasks."),
+            },
+        ),
+        "errors": {"type": "array", "description": "The vendor error texts, when it failed."},
+        "completion_timestamp": _field(["string", "null"], "When the job ended."),
+        "checked_at": _field("string", "When MEHO read the job (UTC)."),
+    },
+)
+
+_STATUS_READ = _object(
+    "The operation that reads the job state, and its params.",
+    {
+        "op_id": _field("string", "The status read to call."),
+        "params": _object(
+            "The params of the status read.", {"task_id": _field("string", "Job id.")}
+        ),
+    },
+)
+
+_REJECTION_FIELDS: dict[str, Any] = {
+    "http_status": _field("integer", "On rejected: the HTTP status of the refusal."),
+    "error_code": _field(["string", "null"], "On rejected: the vendor error code."),
+    "message": _field(["string", "null"], "On rejected: the vendor error text."),
+}
+
+_PROXY_FIELDS: dict[str, Any] = {
+    "isConfigured": _field("boolean", "A proxy is configured."),
+    "isEnabled": _field("boolean", "The proxy is in use."),
+    "host": _field("string", "The proxy host name or IP address."),
+    "port": _field("integer", "The proxy port."),
+    "transferProtocol": _field("string", "HTTP or HTTPS."),
+    "username": _field("string", "The proxy user, when the proxy needs a login."),
+    "isAuthenticated": _field("boolean", "The proxy needs a login."),
+}
+
+PROXY_GET_RESPONSE: dict[str, Any] = _object(
+    "The installer proxy settings (vendor ProxyConfiguration, password removed).",
+    {
+        "proxy": _nullable(
+            _object("The proxy settings; null when the appliance did not answer.", _PROXY_FIELDS)
+        ),
+        "task": _TASK_STATE,
+        "message": _field(
+            "string", "Set when the settings could not be read after the job: why proxy is null."
+        ),
+    },
+)
+
+PROXY_SET_RESPONSE: dict[str, Any] = _object(
+    "The result of the proxy change.",
+    {
+        "status": {
+            "type": "string",
+            "enum": ["accepted", "already_running", "rejected", "unknown"],
+            "description": (
+                "accepted: the appliance took the job (not done yet). already_running: a "
+                "proxy job runs; nothing was started. rejected: the vendor refused. unknown: "
+                "the reply was lost."
+            ),
+        },
+        "task_id": _field(["string", "null"], "The vendor job id to follow."),
+        "vendor_status": _field(["string", "null"], "The vendor state of the job."),
+        "status_read": _STATUS_READ,
+        "proxy": _object("On accepted: the settings sent, password removed.", _PROXY_FIELDS),
+        **_REJECTION_FIELDS,
+    },
+)
+
+SETTINGS_GET_RESPONSE: dict[str, Any] = _object(
+    "The CEIP state and the system settings.",
+    {
+        "ceip": _nullable(
+            _object(
+                "Vendor Ceip; null when the appliance did not answer.",
+                {
+                    "status": _field(
+                        "string",
+                        "ENABLED, DISABLED, ENABLING, DISABLING, ENABLING_FAILED or "
+                        "DISABLING_FAILED.",
+                    ),
+                    "instanceId": _field("string", "The VCF instance id."),
+                },
+            )
+        ),
+        "system": _nullable(
+            _object(
+                "Vendor System; null when the appliance did not answer.",
+                {
+                    "id": _field("string", "The system id."),
+                    "maxAllowedDomainsInSubscription": _field(
+                        "integer", "The most domains allowed in subscription mode."
+                    ),
+                    "vcfInstanceName": _field("string", "The instance name (9.1 and newer)."),
+                },
+            )
+        ),
+        "task": _TASK_STATE,
+        "message": _field(
+            "string",
+            "Set when a setting could not be read after the job: why ceip or system is null.",
+        ),
+    },
+)
+
+SETTINGS_SET_RESPONSE: dict[str, Any] = _object(
+    "The result of the settings change, step by step.",
+    {
+        "status": {
+            "type": "string",
+            "enum": ["accepted", "done", "already_running", "partial", "failed"],
+            "description": (
+                "accepted: the CEIP job was taken (not done yet). done: every step is done. "
+                "already_running: a CEIP change runs; nothing was started. partial: a step "
+                "failed after another ran. failed: the first step failed."
+            ),
+        },
+        "steps": _list_of(
+            "One row per step, in order.",
+            {
+                "step": _field("string", "ceip or system."),
+                "result": _field("string", "accepted, done, failed, unknown or not_run."),
+                "task_id": _field(["string", "null"], "On accepted: the vendor job id."),
+                "error": _object("On failed or unknown: the vendor error.", _REJECTION_FIELDS),
+            },
+        ),
+        "task_id": _field(["string", "null"], "The CEIP job id to follow."),
+        "vendor_status": _field(["string", "null"], "On already_running: the vendor state."),
+        "status_read": _STATUS_READ,
+    },
+)
+
+TRUSTED_CERTIFICATE_REMOVE_RESPONSE: dict[str, Any] = _object(
+    "The result of the certificate removal.",
+    {
+        "status": _field("string", "removed."),
+        "alias": _field("string", "The alias of the removed certificate."),
+        "warning": _field("string", "Set when the certificate belongs to the depot that is set."),
+    },
+)
+
+_CAPACITY_FIELDS: dict[str, Any] = {
+    "numberOfCores": _field("integer", "CPU cores."),
+    "memory": _object("Memory, with value and unit.", {}),
+    "storage": _object("Storage, with value and unit.", {}),
+    "numberOfEsxiHosts": _field("integer", "ESX hosts."),
+    "componentsVmRequirements": {
+        "type": "array",
+        "description": "Per VCF component: the VM resources it needs.",
+    },
+}
+
+RESOURCES_CALCULATE_RESPONSE: dict[str, Any] = _object(
+    "The resource calculation (vendor CapacityValidation), checks as flat rows.",
+    {
+        "status": {
+            "type": "string",
+            "enum": ["done", "timed_out", "read_failed", "rejected"],
+            "description": (
+                "done: the calculation ended. timed_out: timeout_seconds passed first. "
+                "read_failed: a read failed part-way. rejected: the vendor refused the spec."
+            ),
+        },
+        "id": _field(["string", "null"], "The vendor calculation id."),
+        "execution_status": _field(["string", "null"], "For example COMPLETED or FAILED."),
+        "result_status": _field(["string", "null"], "SUCCEEDED, WARNING or FAILED."),
+        **{
+            f"{side}_{name}": _field(
+                kind, f"{text} ({'needed' if side == 'required' else 'on the hosts'})."
+            )
+            for side in ("required", "available")
+            for name, kind, text in (
+                ("cores", ["integer", "null"], "CPU cores"),
+                ("memory", ["string", "null"], "Memory, for example '512.0 GB'"),
+                ("storage", ["string", "null"], "Storage, for example '8.0 TB'"),
+                ("esx_hosts", ["integer", "null"], "ESX hosts"),
+            )
+        },
+        "required": _nullable(
+            _object("What the spec needs; null until the calculation ended.", _CAPACITY_FIELDS)
+        ),
+        "available": _nullable(
+            _object("What the hosts have; null until the calculation ended.", _CAPACITY_FIELDS)
+        ),
+        "checks": _list_of(
+            "One row per check, nested checks included.",
+            {
+                "description": _field(["string", "null"], "What the check tests."),
+                "severity": _field(["string", "null"], "WARNING, ERROR or INFO."),
+                "result_status": _field(["string", "null"], "The result of the check."),
+                "error": _field(["string", "null"], "The vendor error text of the check."),
+                "parent": _field(["string", "null"], "The check this one belongs to."),
+            },
+        ),
+        "error": _field("string", "On read_failed: what failed."),
+        **_REJECTION_FIELDS,
     },
 )

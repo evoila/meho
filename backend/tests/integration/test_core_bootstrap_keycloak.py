@@ -19,7 +19,8 @@ Job runs it, with a fake Secret store in place of the Kubernetes API:
 3. With the two logins, the first admin asks for a credential write through
    the backplane's REST API. It waits for approval, the first admin cannot
    approve it alone, and the second person approves it through the
-   approvals API, which runs the write.
+   approvals API, which runs the write. The second person's password-grant
+   token alone is refused: it shows no sign-in time (#3979).
 4. The plan names one extra tenant. Its five groups carry only
    ``meho_tenant``: a person in ``MEHO-Readers`` and
    ``MEHO-lab-b-Operators`` gets both tenants in ``meho_tenants`` and the
@@ -27,6 +28,10 @@ Job runs it, with a fake Secret store in place of the Kubernetes API:
    tenant's groups gets no ``tenant_id``.
 5. The second run logs in as ``meho-admin`` and changes nothing: the realm
    and the Secrets are the same, and the output holds no secret.
+6. On a realm whose ``meho-cli`` has no long login (as before #5516), the
+   next run adds ``offline_access`` and the 48-hour idle limit, and a login
+   that asks for ``offline_access`` then gets an offline token. When an
+   admin revokes it (the person's Consents tab), its renewal is refused.
 
 Set ``MEHO_TEST_CORE_KEYCLOAK_IMAGE`` to use a mirror of the subchart's
 image. Skips when Docker is missing or the container cannot start.
@@ -52,6 +57,7 @@ import yaml
 from cryptography.fernet import Fernet
 from httpx import ASGITransport
 
+from meho_backplane.auth.approval_sign_in import ApprovalAuth
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import reset_broadcast_client_for_testing
@@ -495,6 +501,7 @@ async def test_the_second_person_approves_the_first_admins_credential_write(
     keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The acceptance path with the two people the Job made, over the REST API."""
+    from meho_backplane.api.v1 import approvals as approvals_module
     from meho_backplane.main import app
 
     first_login = keycloak.first_login
@@ -540,6 +547,32 @@ async def test_the_second_person_approves_the_first_admins_credential_write(
             assert asked.json()["status"] == "awaiting_approval", asked.json()
             request_id = asked.json()["extras"]["approval_request_id"]
             assert _WRITES == []
+
+            # A password-grant token is a plain API token: it shows no sign-in
+            # time, so it never approves over REST (#3979).
+            plain = await api.post(
+                f"/api/v1/approvals/{request_id}/decide",
+                headers=as_approver,
+                json={"decision": "approved"},
+            )
+            assert plain.status_code == 401, plain.text
+            assert plain.json()["detail"].startswith("fresh_sign_in_required:")
+            assert "insufficient_user_authentication" in plain.headers["www-authenticate"]
+            assert _WRITES == []
+
+            # From here on the people sign in fresh in the browser, which a
+            # test cannot do. Stand in for that proof; the group rules below
+            # are the real Keycloak tokens.
+            monkeypatch.setattr(
+                approvals_module,
+                "check_fresh_approval_sign_in",
+                lambda operator, settings: ApprovalAuth(
+                    channel="rest",
+                    method="fresh_sign_in",
+                    auth_time=int(time.time()),
+                    sid=secrets.token_hex(8),
+                ),
+            )
 
             # The first admin cannot approve their own request.
             own = await api.post(
@@ -632,3 +665,61 @@ async def test_second_run_logs_in_as_meho_admin_and_changes_nothing(
             data={"token": "x", "client_id": client_id, "client_secret": keycloak.env[key]},
         ).status_code
         assert status == 200, client_id
+
+
+async def test_the_stage_gives_an_older_cli_client_a_long_login(
+    keycloak: _Keycloak, store: _FakeStore, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A realm from before the long CLI login gets it from the next run of the stage."""
+    admin = f"{keycloak.base_url}/admin/realms/meho"
+    headers = _admin_headers(keycloak)
+    idle = "client.offline.session.idle.timeout"
+    cli = httpx.get(f"{admin}/clients", headers=headers, params={"clientId": "meho-cli"}).json()[0]
+    scopes = httpx.get(f"{admin}/client-scopes", headers=headers).json()
+    offline_id = next(s["id"] for s in scopes if s["name"] == "offline_access")
+    httpx.delete(
+        f"{admin}/clients/{cli['id']}/optional-client-scopes/{offline_id}", headers=headers
+    ).raise_for_status()
+    cli["attributes"][idle] = ""
+    httpx.put(f"{admin}/clients/{cli['id']}", headers=headers, json=cli).raise_for_status()
+    password = _person_in(keycloak, "long-login", ["MEHO-Readers"])
+    long_login = {
+        "grant_type": "password",
+        "client_id": "meho-cli",
+        "username": "long-login",
+        "password": password,
+        "scope": "openid offline_access",
+    }
+    refused = _token(keycloak, "meho", long_login)
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["error"] == "invalid_scope"
+    capfd.readouterr()
+
+    await _run_stage(keycloak, store)
+
+    assert "client meho-cli: kept (optional scope offline_access added" in capfd.readouterr().out
+    cli = httpx.get(f"{admin}/clients/{cli['id']}", headers=headers).json()
+    assert cli["attributes"][idle] == "172800"
+    granted = _token(keycloak, "meho", long_login)
+    assert granted.status_code == 200, granted.text
+    payload = granted.json()["refresh_token"].split(".")[1]
+    refresh = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    assert refresh["typ"] == "Offline"
+
+    # An admin ends the long login (the Consents tab of the person); the
+    # next renewal is refused, so the CLI asks for a new login.
+    person = _user(keycloak, "long-login")
+    httpx.delete(
+        f"{admin}/users/{person['id']}/consents/meho-cli", headers=headers
+    ).raise_for_status()
+    renewal = _token(
+        keycloak,
+        "meho",
+        {
+            "grant_type": "refresh_token",
+            "client_id": "meho-cli",
+            "refresh_token": granted.json()["refresh_token"],
+        },
+    )
+    assert renewal.status_code == 400, renewal.text
+    assert renewal.json()["error"] == "invalid_grant"

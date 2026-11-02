@@ -90,7 +90,9 @@ def client() -> Iterator[TestClient]:
 
 
 def _token(key: Any, *, role: TenantRole, sub: str = "op-test") -> str:
-    return mint_token(key, sub=sub, tenant_role=role.value, tenant_id=str(_TENANT_A))
+    return mint_token(
+        key, sub=sub, tenant_role=role.value, tenant_id=str(_TENANT_A), fresh_sign_in=True
+    )
 
 
 # Every approval route+method gated by ``_require_operator``.
@@ -186,7 +188,7 @@ async def test_resume_refuses_when_pinned_target_no_longer_resolves(
         principal_kind=PrincipalKind.USER,
     )
     # Minimal stand-in for the ApprovalRequest ORM row: the resume helper
-    # reads id / target_id / op_id / connector_id / params / work_ref /
+    # reads id / target_id / op_id / connector_id / params / reveal_secret / work_ref /
     # agent_session_id / request_audit_id (#2086 lineage re-binds) off it.
     request = SimpleNamespace(
         id=uuid.uuid4(),
@@ -194,6 +196,7 @@ async def test_resume_refuses_when_pinned_target_no_longer_resolves(
         op_id="vault.kv.put",
         connector_id="vault-1.x",
         params={"path": "secret/x", "value": "s3cr3t"},
+        reveal_secret=False,
         work_ref=None,
         agent_session_id=None,
         request_audit_id=None,
@@ -473,6 +476,7 @@ def _approve_only_token(key: Any, *, sub: str = "approve-only") -> str:
         tenant_role=TenantRole.READ_ONLY.value,
         tenant_id=str(_TENANT_A),
         approver=True,
+        fresh_sign_in=True,
     )
 
 

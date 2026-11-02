@@ -54,6 +54,10 @@
             <dt class="opacity-70">Error code</dt>
             <dd class="font-mono [overflow-wrap:anywhere]">{{ run.outcome.error_code }}</dd>
           {% endif %}
+          {% if run.outcome.guidance %}
+            <dt class="opacity-70">Next step</dt>
+            <dd class="[overflow-wrap:anywhere]" data-testid="approval-guidance">{{ run.outcome.guidance }}</dd>
+          {% endif %}
           {% if run.outcome.audit_href %}
             <dt class="opacity-70">Audit</dt>
             <dd><a class="link font-mono text-xs" href="{{ run.outcome.audit_href }}">{{ run.outcome.audit_id }}</a></dd>

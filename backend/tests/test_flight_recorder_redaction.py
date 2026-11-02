@@ -46,7 +46,7 @@ from meho_backplane.settings import get_settings
 _BEARER = "Bearer PLACEHOLDER-TOKEN-abcdef0123456789"
 _JWT = "eyJPLACEHOLDER0aaa.PLACEHOLDER0bbbbb.PLACEHOLDER0ccccc"
 _AUTH_HEADER = "Authorization: Bearer PLACEHOLDER-abcdef012345"
-_API_KEY = "api_key=PLACEHOLDER-KEY-abcdef012345"
+_API_KEY = "api_key=PLACEHOLDER-KEY-abcdef012345"  # gitleaks:allow
 _SENTINEL = "PLACEHOLDER"
 
 
@@ -469,7 +469,7 @@ def test_non_utf8_json_typed_body_is_uncertain() -> None:
     ["text/plain", "application/x-www-form-urlencoded", "text/html"],
 )
 def test_known_non_json_content_type_is_uncertain(content_type: str) -> None:
-    out = redact_body("password=PLACEHOLDER-pw123456", content_type=content_type)
+    out = redact_body("password=PLACEHOLDER-pw123456", content_type=content_type)  # gitleaks:allow
     assert out.uncertain is True
     assert out.value == BODY_OMITTED_MARKER
     _assert_no_secret(out.value, _SENTINEL)
@@ -689,6 +689,69 @@ def test_vendor_delete_lookalike_records_body() -> None:
         classify_body_exclusion("POST:/VirtualMachine/{moId}/Reset_Task", method="POST").excluded
         is False
     )
+
+
+#: The ingested (``METHOD:/path``) copies of the VCF calls that send a
+#: deployment spec, a login or a depot account.
+_VCF_SPEC_GENERIC_OPS = [
+    ("POST:/v1/domains", "POST"),
+    ("POST:/v1/domains/validations", "POST"),
+    ("POST:/v1/sddcs", "POST"),
+    ("POST:/v1/sddcs/validations", "POST"),
+    ("PATCH:/v1/sddcs/{id}", "PATCH"),
+    ("POST:/v1/sddcs/resources-calculation", "POST"),
+    ("POST:/v1/sddcs/vcenter-discovery", "POST"),
+    ("GET:/v1/sddcs/{id}/spec", "GET"),
+    ("PUT:/v1/system/settings/depot", "PUT"),
+    ("PATCH:/v1/system/proxy-configuration", "PATCH"),
+]
+
+_SPEC_PASSWORD = "PLACEHOLDER-spec-pw-value"
+_SPEC_LICENCE = "PLACEHOLDER-AAAAA-BBBBB-CCCCC"
+
+
+def _vcf_spec_body() -> dict[str, Any]:
+    """A short spec with a made-up password and licence keys in vendor field names."""
+    return {
+        "sddcId": "sddc-1",
+        "esxLicense": _SPEC_LICENCE,
+        "vcenterSpec": {"rootVcenterPassword": _SPEC_PASSWORD, "licenseFile": _SPEC_LICENCE},
+        "nsxtSpec": {"nsxtLicense": _SPEC_LICENCE, "nsxtAdminPassword": _SPEC_PASSWORD},
+        "hostSpecs": [{"hostname": "esx-1", "credentials": {"password": _SPEC_PASSWORD}}],
+        "offlineAccount": {"username": "depot-user", "password": _SPEC_PASSWORD},
+    }
+
+
+@pytest.mark.parametrize(("op_id", "method"), _VCF_SPEC_GENERIC_OPS)
+def test_vcf_spec_generic_ops_never_record_body(op_id: str, method: str) -> None:
+    """The ingested copies get the same result as their typed twins with the credential tag."""
+    result = classify_body_exclusion(op_id, method=method)
+    assert result.excluded is True
+    assert result.family == "secret-bearing"
+    assert result.uncertain is False
+
+    body = _vcf_spec_body()
+    red = redact_span(
+        op_id=op_id,
+        method=method,
+        request_body=body,
+        response_body=body,
+        request_content_type="application/json",
+        response_content_type="application/json",
+    )
+    assert red.body_recorded is False
+    assert red.request_body == SECRET_FAMILY_OMITTED_MARKER
+    assert red.response_body == SECRET_FAMILY_OMITTED_MARKER
+    _assert_no_secret((red.request_body, red.response_body), _SPEC_PASSWORD, _SPEC_LICENCE)
+
+
+@pytest.mark.parametrize(
+    "op_id",
+    ["GET:/v1/sddcs/{id}", "GET:/v1/sddcs/validations/{id}", "GET:/v1/domains/{id}"],
+)
+def test_vcf_status_reads_still_record_body(op_id: str) -> None:
+    """Status reads of the same appliances keep their bodies for debugging."""
+    assert classify_body_exclusion(op_id, method="GET").excluded is False
 
 
 def test_delete_method_excludes_body() -> None:

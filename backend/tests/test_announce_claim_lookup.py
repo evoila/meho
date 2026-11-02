@@ -54,7 +54,7 @@ _SESSION = UUID("40914091-4091-4091-4091-409140914091")
 _ME = "agent-op"
 _VC = "vc-lab-1"
 #: A generic vCenter op the issue saw the wrong advisory on; ``write`` class.
-_OP = "POST:/content/library/item"
+_OP_CLASS = "write"
 
 
 @pytest.fixture(autouse=True)
@@ -105,8 +105,8 @@ async def _claim(*, minutes_ago: float = 1, **fields: Any) -> None:
     await seed_announcement(_TENANT, **values)
 
 
-async def _gap(target_name: str | None = _VC, *, op_id: str = _OP) -> str | None:
-    return await announce_claim_gap(_operator(), op_id=op_id, target_name=target_name)
+async def _gap(target_name: str | None = _VC, *, op_class: str = _OP_CLASS) -> str | None:
+    return await announce_claim_gap(_operator(), op_class=op_class, target_name=target_name)
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +142,7 @@ async def test_issue_claims_cover_the_target(rows: str) -> None:
             work_ref="gh:evoila/meho#1",
         )
     assert await _gap() is None
-    assert await caller_has_active_announce_claim(_operator(), op_id=_OP, target_name=_VC)
+    assert await caller_has_active_announce_claim(_operator(), op_class=_OP_CLASS, target_name=_VC)
 
 
 async def test_peer_announcements_do_not_hide_the_callers_claim(
@@ -168,7 +168,9 @@ async def test_peer_announcements_do_not_hide_the_callers_claim(
 
 async def test_no_claim_at_all() -> None:
     assert await _gap() == "no_claim"
-    assert not await caller_has_active_announce_claim(_operator(), op_id=_OP, target_name=_VC)
+    assert not await caller_has_active_announce_claim(
+        _operator(), op_class=_OP_CLASS, target_name=_VC
+    )
 
 
 async def test_claims_of_other_principals_and_tenants_do_not_count() -> None:
@@ -275,7 +277,7 @@ async def test_reflex_advisory_is_silent_when_the_archive_holds_the_claim() -> N
     await _read_the_feed()
     await _claim(minutes_ago=24, targets=[_VC, "nsx-1"], ttl_minutes=600)
     with _agent_session() as client, patch("meho_backplane.broadcast.reflex._log") as log:
-        advisory = await build_reflex_advisory(_operator(), op_id=_OP, target_name=_VC)
+        advisory = await build_reflex_advisory(_operator(), op_class=_OP_CLASS, target_name=_VC)
     assert advisory == {}
     client.set.assert_not_called()
     # Silent because the claim was found, not because the lookup failed open.
@@ -286,7 +288,7 @@ async def test_reflex_advisory_says_the_claim_expired() -> None:
     await _read_the_feed()
     await _claim(minutes_ago=30, target=_VC, ttl_minutes=10)
     with _agent_session():
-        advisory = await build_reflex_advisory(_operator(), op_id=_OP, target_name=_VC)
+        advisory = await build_reflex_advisory(_operator(), op_class=_OP_CLASS, target_name=_VC)
     assert advisory == {REFLEX_ADVISORY_EXTRAS_KEY: _ANNOUNCE_NUDGES["expired"]}
 
 
@@ -299,11 +301,15 @@ async def _enable_gate() -> None:
 async def test_announce_gate_passes_with_an_archived_claim() -> None:
     await _enable_gate()
     assert (
-        await announce_gate_blocks(_operator(), op_id=_OP, safety_level="caution", target_name=_VC)
+        await announce_gate_blocks(
+            _operator(), op_class=_OP_CLASS, safety_level="caution", target_name=_VC
+        )
         is not None
     )
     await _claim(target=_VC)
     assert (
-        await announce_gate_blocks(_operator(), op_id=_OP, safety_level="caution", target_name=_VC)
+        await announce_gate_blocks(
+            _operator(), op_class=_OP_CLASS, safety_level="caution", target_name=_VC
+        )
         is None
     )

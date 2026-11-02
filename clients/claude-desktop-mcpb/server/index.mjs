@@ -27,7 +27,7 @@
 // guard and reads `process.argv.slice(2)` at module top level, so importing
 // it runs its `main` against the argv set below.
 //
-// It adds four things over invoking mcp-remote directly:
+// It adds five things over invoking mcp-remote directly:
 //
 //  1. Internal-CA trust. The optional `ca_cert` user_config (a PEM file
 //     path) arrives as argv[3], and the launcher appends its certificates to
@@ -49,14 +49,20 @@
 //     through the optional `client_id` user_config (delivered as
 //     MEHO_MCP_CLIENT_ID) without editing the installed bundle.
 //  3. One sign-in at a time (#3857). Claude Desktop can start the extension
-//     twice at once; signin-lock.mjs makes the second copy wait until the
-//     first one is connected, so only one browser tab opens.
+//     twice at once. The login guard (item 4) takes the sign-in lock
+//     (signin-lock.mjs) before it loads mcp-remote, so the second copy waits
+//     until the first one is connected, and only one browser tab opens.
+//     Claude Code sessions use the same lock.
 //  4. The login guard (#4003). mcp-remote runs through the Claude Code
 //     plugin's login guard (clients/claude-code-plugin/lib/login-guard.mjs;
-//     build.sh copies it into server/). It stops a connect that is not done
-//     within MEHO_MCP_LOGIN_TIMEOUT seconds (default 300), which frees the
-//     login port, and it answers a call whose login has expired with a
-//     clear message instead of no answer.
+//     build.sh copies it and its helper files into server/). It stops a
+//     connect that is not done within MEHO_MCP_LOGIN_TIMEOUT seconds
+//     (default 300), which frees the login port, and it answers a call whose
+//     login has expired with a clear message instead of no answer. It also
+//     keeps the shared login through a failed renewal (#5514).
+//  5. The current tenant (#5242). The optional `tenant` user_config
+//     (delivered as MEHO_TENANT) is sent as the Meho-Tenant header on every
+//     request, so the session works in that tenant.
 
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -64,8 +70,6 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import tls from "node:tls";
 import { fileURLToPath, pathToFileURL } from "node:url";
-
-import { acquireSignInLock } from "./signin-lock.mjs";
 
 const rawUrl = process.argv[2];
 
@@ -154,6 +158,19 @@ const scopes =
   "mcp:read mcp:execute offline_access";
 delete process.env.MEHO_MCP_SCOPES;
 
+// The current tenant (#5242). A login can list several tenants, and MEHO
+// works in one of them per request: the one the Meho-Tenant header names (a
+// tenant name or ID). The optional `tenant` user_config (delivered as
+// MEHO_TENANT) sets it for every request of this session. Empty, whitespace,
+// or an unsubstituted `${user_config.tenant}` placeholder sends no header, so
+// a person with one tenant needs no setting. mcp-remote keeps a separate saved
+// login per header value, so the first session in a new tenant asks for a
+// browser login. Scrubbed from process.env like the client id.
+const tenantValue = (process.env.MEHO_TENANT ?? "").trim();
+const tenant = /^\$\{[^}]*\}$/.test(tenantValue) ? "" : tenantValue;
+delete process.env.MEHO_TENANT;
+const tenantArgs = tenant ? ["--header", `Meho-Tenant: ${tenant}`] : [];
+
 // Resolve the vendored mcp-remote CLI entry from the bundle's node_modules
 // (populated by `npm ci --omit=dev` at pack time). Read the package's own
 // `bin` mapping rather than hardcoding a path, so a future pinned version
@@ -174,7 +191,8 @@ const loginGuard = fileURLToPath(new URL("./login-guard.mjs", import.meta.url));
 // reads process.argv.slice(2): the mcp-remote entry first, then the
 // arguments for mcp-remote. It sets process.argv to [node, entry, ...args]
 // before it imports mcp-remote, which reads process.argv.slice(2), so
-// mcp-remote gets the URL and the static-OAuth contract. Present the static
+// mcp-remote gets the URL, the static-OAuth contract, and the Meho-Tenant
+// header when a tenant is set. Present the static
 // `meho-mcp` client via --static-oauth-client-info so the shim skips the
 // DCR the realm blocks; the scope metadata matches what the backplane's
 // token audience mappers expect.
@@ -187,23 +205,8 @@ process.argv = [
   JSON.stringify({ client_id: clientId }),
   "--static-oauth-client-metadata",
   JSON.stringify({ scope: scopes }),
+  ...tenantArgs,
 ];
-
-// One sign-in at a time (#3857): Claude Desktop can start this extension
-// twice at once, and both copies would open a browser sign-in. Wait until no
-// other copy is signing in, and release the lock once mcp-remote is
-// connected. mcp-remote writes nothing to stdout before its connection to
-// MEHO works, so its first stdout message is the "connected" signal. Details
-// in signin-lock.mjs.
-// The wrapper stays in place for every write: the login guard wraps
-// process.stdout.write on top of it, so this wrapper must not swap itself
-// out. Calling the release again is cheap; it does nothing once released.
-const releaseSignInLock = await acquireSignInLock(url.href);
-const stdoutWrite = process.stdout.write;
-process.stdout.write = function writeAndRelease(...args) {
-  releaseSignInLock();
-  return stdoutWrite.apply(this, args);
-};
 
 // The guard's messages name this bundle and say how to reconnect in Claude
 // Desktop. The guard removes both variables before mcp-remote loads.

@@ -62,6 +62,7 @@ import structlog
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.runner_write_allowlist import load_runner_allowlist
 from meho_backplane.db.models import (
@@ -347,7 +348,7 @@ async def _write_gateway_audit_row(
         status_code=status_code,
         request_id=None,
         duration_ms=Decimal(str(round(duration_ms, 2))),
-        payload=payload,
+        payload={**payload, **tenant_role_source_payload(operator)},
     )
     session.add(row)
     await session.flush()

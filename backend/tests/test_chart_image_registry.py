@@ -31,6 +31,7 @@ Skips where ``helm`` is absent unless ``MEHO_REQUIRE_HELM=1``.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -124,6 +125,7 @@ _EXPECTED_PODS = {
     "Deployment/test-meho",
     "Job/test-core-secrets",
     "Job/test-core-bootstrap",
+    "Job/test-vault-init-<hash>",
     "StatefulSet/test-postgres",
     "StatefulSet/test-keycloak",
     "StatefulSet/test-vault",
@@ -158,6 +160,8 @@ def _pods(*extra: str) -> dict[str, dict[str, Any]]:
         if not doc:
             continue
         key = f"{doc['kind']}/{doc['metadata']['name']}"
+        # The OpenBao setup Job's name ends with a hash of its pod (#4044).
+        key = re.sub(r"^(Job/test-vault-init)-[0-9a-f]{8}$", r"\1-<hash>", key)
         if doc["kind"] == "Pod":
             pods[key] = doc["spec"]
         elif doc["kind"] in {"Deployment", "StatefulSet", "Job"}:

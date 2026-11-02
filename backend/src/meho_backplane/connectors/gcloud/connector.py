@@ -53,8 +53,11 @@ Target conventions
 
 ``target.host`` is unused — the connector reaches GCP via the well-known
 public API hostnames (``cloudresourcemanager.googleapis.com``,
-``compute.googleapis.com``, etc.). ``target.gcp_project`` and
-``target.gcp_impersonate_sa`` drive the auth and fingerprint flows.
+``compute.googleapis.com``, etc.). The target settings ``gcp_project`` and
+``gcp_impersonate_sa`` drive the auth and fingerprint flows. A registered
+target keeps them in ``extras``; :func:`~meho_backplane.connectors.gcloud.session.gcp_project`
+and :func:`~meho_backplane.connectors.gcloud.session.gcp_impersonate_sa`
+read them.
 
 Fingerprint
 -----------
@@ -102,9 +105,12 @@ from meho_backplane.connectors.gcloud.session import (
     GcloudCredentialsLoader,
     GcloudTargetLike,
     _contains_sa_key_fields,
+    gcp_impersonate_sa,
+    gcp_project,
     load_credentials_from_vault,
 )
 from meho_backplane.connectors.gcloud.workload_identity import WorkloadIdentityOps
+from meho_backplane.connectors.gcloud.workload_identity_write import WorkloadIdentityWriteOps
 from meho_backplane.connectors.schemas import (
     AuthModel,
     FingerprintResult,
@@ -170,9 +176,10 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Which principals have which roles? ``gcloud.iam.service_accounts.list`` "
         "enumerates SAs; ``gcloud.iam.policy.read`` returns the full project-level "
         "policy with all role bindings; ``gcloud.iam.service_accounts.policy.read`` "
-        "shows who may use or act as one service account, and "
-        "``gcloud.iam.service_accounts.binding.remove`` takes one member out of one "
-        "role there (a person must approve). The right group when the agent needs to "
+        "shows who may use or act as one service account; "
+        "``gcloud.iam.service_accounts.binding.add`` adds one member to one role there "
+        "and ``gcloud.iam.service_accounts.binding.remove`` takes one member out of one "
+        "role (both need a person's approval). The right group when the agent needs to "
         "verify a permission, pick an impersonation SA, or produce an access-review "
         "report. Pair with the 'identity' group when onboarding a new target."
     ),
@@ -184,8 +191,13 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "issuer a pool trusts (issuerUri) and on which condition "
         "(attributeCondition); ``gcloud.iam.workload_identity_pools.delete`` marks an "
         "old pool deleted (a person must approve; Google keeps it 30 days and it can "
-        "be restored). Pair with the 'iam' group to remove the service-account "
-        "binding that lets the pool act as an account."
+        "be restored). To set up keyless access: "
+        "``gcloud.iam.workload_identity_pools.create`` makes a pool, "
+        "``gcloud.iam.workload_identity_pools.providers.create`` makes an OIDC provider "
+        "(issuer, optional uploaded public keys, condition), and "
+        "``gcloud.iam.workload_identity_pools.providers.update_keys`` replaces the "
+        "uploaded keys; each needs a person's approval. Pair with the 'iam' group to add "
+        "or remove the service-account binding that lets the pool act as an account."
     ),
     "compute": (
         "Use for Compute Engine resource inventory: VMs, VPC networks, and subnets. "
@@ -238,7 +250,7 @@ def _subnet_row(sn: dict[str, Any], *, region: str) -> dict[str, Any]:
     }
 
 
-class GcloudConnector(WorkloadIdentityOps, HttpConnector):
+class GcloudConnector(WorkloadIdentityOps, WorkloadIdentityWriteOps, HttpConnector):
     """GCP REST connector with ADC + service-account impersonation.
 
     Auth: ``google.auth.default()`` for ADC source credentials, wrapped
@@ -276,9 +288,10 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
         ----------
         credentials_loader:
             Async callable resolving a target to its Vault secret dict. Used
-            for the SA-JSON-key-refusal gate. Defaults to the stub that raises
-            :exc:`NotImplementedError` until G0.3/Goal #214 wires the live
-            Vault read.
+            for the SA-JSON-key-refusal gate. Defaults to
+            :func:`~meho_backplane.connectors.gcloud.session.load_credentials_from_vault`,
+            which answers ``{}`` for a target without a ``secret_ref`` and
+            otherwise reads the record under the operator's identity.
         adc_loader:
             Synchronous callable returning ``(source_credentials, project)``
             — the same shape as ``google.auth.default()``. Injected by unit
@@ -313,7 +326,7 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
         base_url set here is a placeholder so ``HttpConnector._http_client``
         can create the per-target client without a real host.
         """
-        return f"https://{target.gcp_project}.gcp.invalid"
+        return f"https://{gcp_project(target)}.gcp.invalid"
 
     async def auth_headers(
         self,
@@ -462,7 +475,7 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
         _log.info(
             "gcloud_token_fetched",
             target=target.name,
-            sa=target.gcp_impersonate_sa,
+            sa=gcp_impersonate_sa(target),
         )
         return token
 
@@ -485,7 +498,7 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
 
         creds = google.auth.impersonated_credentials.Credentials(  # type: ignore[no-untyped-call]
             source_credentials=source_credentials,
-            target_principal=target.gcp_impersonate_sa,
+            target_principal=gcp_impersonate_sa(target),
             target_scopes=[_GCP_CLOUD_PLATFORM_SCOPE],
             lifetime=_IMPERSONATION_LIFETIME,
         )
@@ -523,7 +536,7 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
             _log.info(
                 "gcloud_token_refreshed",
                 target=target.name,
-                sa=target.gcp_impersonate_sa,
+                sa=gcp_impersonate_sa(target),
             )
             return new_token
 
@@ -607,7 +620,7 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
         """
         probed_at = datetime.now(UTC)
         eff_operator = operator if operator is not None else synthesise_system_operator()
-        url = f"{_CRM_API_BASE}/v1/projects/{target.gcp_project}"
+        url = f"{_CRM_API_BASE}/v1/projects/{gcp_project(target)}"
         try:
             payload = await self._get_json_abs(target, url, operator=eff_operator)
         except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
@@ -666,7 +679,7 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
         SA-JSON-key refusal).
         """
         probed_at = datetime.now(UTC)
-        url = f"{_CRM_API_BASE}/v1/projects/{target.gcp_project}"
+        url = f"{_CRM_API_BASE}/v1/projects/{gcp_project(target)}"
         try:
             payload = await self._get_json_abs(target, url, operator=synthesise_system_operator())
         except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
@@ -676,11 +689,11 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
                 probed_at=probed_at,
             )
 
-        if payload.get("projectId") != target.gcp_project:
+        if payload.get("projectId") != gcp_project(target):
             return ProbeResult(
                 ok=False,
                 reason=(
-                    f"project_id mismatch: expected {target.gcp_project!r}, "
+                    f"project_id mismatch: expected {gcp_project(target)!r}, "
                     f"got {payload.get('projectId')!r}"
                 ),
                 probed_at=probed_at,
@@ -868,7 +881,7 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
         losing the operation's identity context.
         """
         del params
-        url = f"{_CRM_API_BASE}/v1/projects/{target.gcp_project}"
+        url = f"{_CRM_API_BASE}/v1/projects/{gcp_project(target)}"
         payload = await self._get_json_abs(target, url, operator=operator)
         organization: str | None = None
         parent = payload.get("parent") or {}
@@ -893,7 +906,7 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
         ``GET cloudresourcemanager.googleapis.com/v1/projects/<id>``.
         """
         del params
-        url = f"{_CRM_API_BASE}/v1/projects/{target.gcp_project}"
+        url = f"{_CRM_API_BASE}/v1/projects/{gcp_project(target)}"
         return await self._get_json_abs(target, url, operator=operator)
 
     async def gcloud_services_list(
@@ -913,7 +926,7 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
         if enabled_only:
             query_params["filter"] = "state:ENABLED"
 
-        base_url = f"https://serviceusage.googleapis.com/v1/projects/{target.gcp_project}/services"
+        base_url = f"https://serviceusage.googleapis.com/v1/projects/{gcp_project(target)}/services"
         rows: list[dict[str, Any]] = []
         page_token: str | None = None
 
@@ -950,7 +963,7 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
         pagination against the IAM v1 serviceAccounts.list API.
         """
         del params
-        base_url = f"https://iam.googleapis.com/v1/projects/{target.gcp_project}/serviceAccounts"
+        base_url = f"https://iam.googleapis.com/v1/projects/{gcp_project(target)}/serviceAccounts"
         rows: list[dict[str, Any]] = []
         page_token: str | None = None
 
@@ -1016,7 +1029,7 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
             query_params["keyTypes"] = key_types
 
         base_url = (
-            f"https://iam.googleapis.com/v1/projects/{target.gcp_project}"
+            f"https://iam.googleapis.com/v1/projects/{gcp_project(target)}"
             f"/serviceAccounts/{email}/keys"
         )
         payload = await self._get_json_abs(
@@ -1060,7 +1073,7 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
         if zone:
             base_url = (
                 f"https://compute.googleapis.com/compute/v1/projects/"
-                f"{target.gcp_project}/zones/{zone}/instances"
+                f"{gcp_project(target)}/zones/{zone}/instances"
             )
             while True:
                 query_params: dict[str, Any] = {}
@@ -1077,7 +1090,7 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
         else:
             base_url = (
                 f"https://compute.googleapis.com/compute/v1/projects/"
-                f"{target.gcp_project}/aggregated/instances"
+                f"{gcp_project(target)}/aggregated/instances"
             )
             while True:
                 query_params = {}
@@ -1110,7 +1123,7 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
         del params
         base_url = (
             f"https://compute.googleapis.com/compute/v1/projects/"
-            f"{target.gcp_project}/global/networks"
+            f"{gcp_project(target)}/global/networks"
         )
         rows: list[dict[str, Any]] = []
         page_token: str | None = None
@@ -1162,7 +1175,7 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
         if region:
             base_url = (
                 f"https://compute.googleapis.com/compute/v1/projects/"
-                f"{target.gcp_project}/regions/{region}/subnetworks"
+                f"{gcp_project(target)}/regions/{region}/subnetworks"
             )
             while True:
                 query_params: dict[str, Any] = {}
@@ -1179,7 +1192,7 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
         else:
             base_url = (
                 f"https://compute.googleapis.com/compute/v1/projects/"
-                f"{target.gcp_project}/aggregated/subnetworks"
+                f"{gcp_project(target)}/aggregated/subnetworks"
             )
             while True:
                 query_params = {}
@@ -1211,7 +1224,7 @@ class GcloudConnector(WorkloadIdentityOps, HttpConnector):
         and returns the full policy (version, etag, bindings).
         """
         del params
-        url = f"{_CRM_API_BASE}/v1/projects/{target.gcp_project}:getIamPolicy"
+        url = f"{_CRM_API_BASE}/v1/projects/{gcp_project(target)}:getIamPolicy"
         payload = await self._post_json_abs(target, url, operator=operator)
         return {
             "version": payload.get("version"),

@@ -151,6 +151,7 @@ class AuditEntry(BaseModel):
       ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain
       None pending a separate fix to bind ``name`` to contextvars in
       ``verify_jwt_and_bind``.
+    * ``sandbox_mode`` ← ``audit_log.sandbox_mode`` (the sandbox mark; #4622)
     * ``broadcast_event_id`` — v0.2 placeholder, always None (FK direction
       is reversed: ``BroadcastEvent.audit_id`` points at the audit row).
     """
@@ -188,6 +189,10 @@ class AuditEntry(BaseModel):
     # ``audit_log.event_class`` column. Rows written before the column
     # existed read as ``legacy_request``.
     event_class: str
+    # Whether the instance ran in sandbox mode when it wrote the row
+    # (#4622), from the real ``audit_log.sandbox_mode`` column. Rows
+    # written before the column existed read as ``False``.
+    sandbox_mode: bool
     broadcast_event_id: uuid.UUID | None
 
 

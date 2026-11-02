@@ -21,7 +21,8 @@ that pre-create + sync + status/items read surface.
 Delivery shape -- **thin typed composites**, not the generic-ingested row.
 The subscribe body carries a ``subscription_info.password`` (BASIC auth) plus
 an ``ssl_thumbprint``, so the op needs credential hygiene (broadcast
-aggregate-only via the ``_CREDENTIAL_WRITE_OPS`` pin, a park-time preview that
+aggregate-only via the ``credential_write`` declaration in
+``vmware_rest/op_classes.py``, a park-time preview that
 never echoes the secret, ``params_hash``-only audit) that a raw ingested row
 cannot carry; and the connector's governed ops must dispatch on a fresh boot
 with **zero catalog ingest** (a generic row requires a runtime spec-ingest +
@@ -78,8 +79,8 @@ if TYPE_CHECKING:
 # Every op_id is a well-formed ``METHOD:/path`` the pinned vcenter.yaml
 # ingest emits -- the reconcile lane sweeps these and fails on any path the
 # real spec does not serve (the "no fictional-path drift" AC). The two write
-# composites' manifests are also the grant-discovery source fed into
-# ``_GOVERNED_SUBOP_MANIFEST`` (#3349); the read composites need no grant.
+# composites' manifests are also the grant-discovery source on their
+# composite rows (#3349); the read composites need no grant.
 # ---------------------------------------------------------------------------
 
 #: ``content_library.subscribed.create`` -- resolve the datastore backing by

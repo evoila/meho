@@ -273,8 +273,16 @@ async def test_write_preflight_runs_under_target_role(
 
 
 # ---------------------------------------------------------------------------
-# Identity + token groups log in under the target's role (#4970)
+# Policy, identity and token groups log in under the target's role (#4970)
 # ---------------------------------------------------------------------------
+
+
+async def _run_policy_write(operator: Operator, target: Target | None) -> dict[str, Any]:
+    from meho_backplane.connectors.vault.ops_sys_policy import vault_sys_policy_write
+
+    return await vault_sys_policy_write(
+        operator, target, {"name": "meho-token-issuer", "policy": 'path "x" {}'}
+    )
 
 
 async def _run_identity_group_write(operator: Operator, target: Target | None) -> dict[str, Any]:
@@ -291,14 +299,14 @@ async def _run_token_lookup_accessor(operator: Operator, target: Target | None) 
 
 _TARGET_ROLE_HANDLERS = pytest.mark.parametrize(
     "run_handler",
-    [_run_identity_group_write, _run_token_lookup_accessor],
-    ids=["vault.identity.group.write", "vault.token.lookup_accessor"],
+    [_run_policy_write, _run_identity_group_write, _run_token_lookup_accessor],
+    ids=["vault.sys.policy.write", "vault.identity.group.write", "vault.token.lookup_accessor"],
 )
 
 
 @_TARGET_ROLE_HANDLERS
 @pytest.mark.asyncio
-async def test_identity_token_ops_log_in_under_target_role(
+async def test_target_role_ops_log_in_under_target_role(
     monkeypatch: pytest.MonkeyPatch,
     run_handler: Any,
 ) -> None:
@@ -320,7 +328,7 @@ async def test_identity_token_ops_log_in_under_target_role(
 @_TARGET_ROLE_HANDLERS
 @pytest.mark.parametrize("with_target", [True, False], ids=["target-without-role", "no-target"])
 @pytest.mark.asyncio
-async def test_identity_token_ops_without_target_role_use_settings_role(
+async def test_target_role_ops_without_target_role_use_settings_role(
     monkeypatch: pytest.MonkeyPatch,
     run_handler: Any,
     with_target: bool,
@@ -340,7 +348,7 @@ async def test_identity_token_ops_without_target_role_use_settings_role(
 
 @_TARGET_ROLE_HANDLERS
 @pytest.mark.asyncio
-async def test_identity_token_ops_refused_target_role_fails_without_fallback(
+async def test_target_role_ops_refused_target_role_fails_without_fallback(
     monkeypatch: pytest.MonkeyPatch,
     run_handler: Any,
 ) -> None:

@@ -28,7 +28,8 @@ The handler is a **module-level** function (not a connector-bound
 method), so the dispatcher resolves it with ``connector_instance=None``
 and ``target=None`` — the synthetic product has no connector instance to
 bind to. Adapters are resolved per move from
-:data:`~.endpoints.SECRET_ENDPOINT_REGISTRY`.
+:data:`~.endpoints.SECRET_ENDPOINT_REGISTRY`
+(:func:`~.endpoints.resolve_secret_endpoint`).
 """
 
 from __future__ import annotations
@@ -38,22 +39,18 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from meho_backplane.connectors.secret.endpoints import (
-    SECRET_ENDPOINT_REGISTRY,
-    UnknownSecretKindError,
     parse_secret_ref,
+    resolve_secret_endpoint,
 )
 from meho_backplane.operations.typed_register import register_typed_operation
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
-    from meho_backplane.connectors.secret.endpoints import (
-        SecretEndpoint,
-        SecretRef,
-    )
     from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
     "SECRET_MOVE_PARAMETER_SCHEMA",
+    "SECRET_REF_PROPERTY",
     "register_secret_broker_operations",
     "secret_move",
 ]
@@ -67,7 +64,7 @@ _log = structlog.get_logger(__name__)
 #: ``pattern`` requires at least one non-whitespace char on each side of
 #: a colon so an obviously malformed intent (``":x"``, ``"x:"``, no
 #: colon) fails at param validation rather than inside the handler.
-_SECRET_REF_PROPERTY: dict[str, Any] = {
+SECRET_REF_PROPERTY: dict[str, Any] = {
     "type": "string",
     "minLength": 3,
     "pattern": r"^\S+:\S+$",
@@ -87,8 +84,8 @@ _SECRET_REF_PROPERTY: dict[str, Any] = {
 SECRET_MOVE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "from": _SECRET_REF_PROPERTY,
-        "to": _SECRET_REF_PROPERTY,
+        "from": SECRET_REF_PROPERTY,
+        "to": SECRET_REF_PROPERTY,
         "reason": {
             "type": "string",
             "minLength": 1,
@@ -151,23 +148,6 @@ _SECRET_MOVE_WHEN_TO_USE = (
 )
 
 
-def _resolve_endpoint(spec: SecretRef) -> SecretEndpoint:
-    """Resolve a parsed ``<kind>:<ref>`` to a constructed endpoint.
-
-    Raises :class:`UnknownSecretKindError` when no adapter is registered
-    for the kind — the dispatcher maps it to a ``connector_error`` with
-    the class name in ``extras['exception_class']``. The error names the
-    unknown kind and the registered kinds, never the ref's value side.
-    """
-    factory = SECRET_ENDPOINT_REGISTRY.get(spec.kind)
-    if factory is None:
-        known = ", ".join(sorted(SECRET_ENDPOINT_REGISTRY)) or "(none)"
-        raise UnknownSecretKindError(
-            f"no secret endpoint adapter for kind {spec.kind!r}; registered kinds: {known}"
-        )
-    return factory(spec.ref)
-
-
 async def secret_move(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Move a credential field from a source store to a sink store.
 
@@ -193,8 +173,8 @@ async def secret_move(operator: Operator, target: Any, params: dict[str, Any]) -
     """
     source_ref = parse_secret_ref(str(params["from"]))
     sink_ref = parse_secret_ref(str(params["to"]))
-    source = _resolve_endpoint(source_ref)
-    sink = _resolve_endpoint(sink_ref)
+    source = resolve_secret_endpoint(source_ref)
+    sink = resolve_secret_endpoint(sink_ref)
 
     # Server-side read → write. The value lives only inside ``material``
     # for the duration of this call; it never crosses back to the caller.

@@ -2,7 +2,9 @@
 // Copyright (c) 2026 evoila Group
 
 // Package tenants hosts the cobra commands under `meho tenants ...` for the
-// operator-plane per-tenant policy surface (#3272).
+// operator-plane per-tenant policy surface (#3272), and `meho tenants use`
+// (#5241), which picks the current tenant for a login in several tenants
+// (see use.go).
 //
 // Two policy families ship here, each tenant-scoped (the caller's own tenant,
 // from the JWT — no tenant id is accepted, so there is no cross-tenant write)
@@ -53,13 +55,14 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "tenants",
-		Short: "Operate per-tenant policy (flight-recorder capture, mail-recipient allowlist)",
-		Long: "Manage the operator's own tenant policy — the flight-recorder capture policy " +
-			"and the mail-recipient allowlist.",
+		Short: "Choose the current tenant and operate per-tenant policy (flight-recorder capture, mail-recipient allowlist)",
+		Long: "Choose the tenant you work in (`meho tenants use`), and manage the policy of " +
+			"that tenant — the flight-recorder capture policy and the mail-recipient allowlist.",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newFlightRecorderPolicyCmd())
 	cmd.AddCommand(newMailRecipientPolicyCmd())
+	cmd.AddCommand(newUseCmd())
 	return cmd
 }
 

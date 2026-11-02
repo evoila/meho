@@ -27,6 +27,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.nsx import (
+    Nsx4Connector,
     NsxConnector,
     NsxTargetLike,
 )
@@ -86,6 +87,13 @@ def _clean_nsx_registry() -> Iterator[None]:
         impl_id=NsxConnector.impl_id,
         cls=NsxConnector,
     )
+    register_connector_v2(
+        product=Nsx4Connector.product,
+        version=Nsx4Connector.version,
+        impl_id=Nsx4Connector.impl_id,
+        cls=Nsx4Connector,
+    )
+    register_connector_v2(product="nsx", version="", impl_id="", cls=NsxConnector)
     yield
     clear_registry()
 
@@ -143,32 +151,36 @@ def test_nsx_connector_subclasses_http_connector() -> None:
     """Sanity check: the connector inherits from HttpConnector with the right metadata."""
     assert issubclass(NsxConnector, HttpConnector)
     assert NsxConnector.product == "nsx"
-    # #1530: VCF-9 renumber — class pin tracks the "9.0" line, range
-    # keeps the standalone NSX-T 4.x line dispatchable.
+    # #1530: VCF-9 renumber — class pin tracks the "9.0" line. NSX 4.x
+    # targets resolve to the Nsx4Connector subclass instead.
     assert NsxConnector.version == "9.0"
     assert NsxConnector.impl_id == "nsx-rest"
-    assert NsxConnector.supported_version_range == ">=4.0,<10.0"
+    assert NsxConnector.supported_version_range == ">=9.0,<10.0"
     # Outranks a future GenericRestConnector auto-shim defensively.
     assert NsxConnector.priority == 1
 
 
-def test_nsx_supported_range_covers_both_4x_and_vcf9_9x() -> None:
-    """The widened range covers standalone NSX-T 4.x and VCF-9-aligned 9.x.
+def test_nsx_supported_ranges_split_4x_and_vcf9_9x() -> None:
+    """The 9.x class covers only 9.x; the 4.x class covers 4.0 up to 9.0.
 
-    #1530: a VCF-9 appliance reports NSX 9.0.x and its spec carries
-    ``info.version`` in the 9.x scheme (e.g. 9.1.0.0). The widened
-    ``>=4.0,<10.0`` advertisement is what lets the ingest version-range
-    pre-flight and the runtime resolver accept a 9.x label against this
-    one class; 10.0 and above stay out of band.
+    The two bands do not overlap, so a target with a detected version
+    resolves to exactly one class. 3.x and 10.0 and above stay out of
+    band for both.
     """
     from packaging.specifiers import SpecifierSet
     from packaging.version import Version
 
-    spec = SpecifierSet(NsxConnector.supported_version_range)
-    for covered in ("4.0", "4.2", "9.0", "9.0.2", "9.1.0.0", "9.9"):
-        assert Version(covered) in spec, f"{covered} should be covered by {spec}"
+    spec_9x = SpecifierSet(NsxConnector.supported_version_range)
+    spec_4x = SpecifierSet(Nsx4Connector.supported_version_range)
+    for covered in ("9.0", "9.0.2", "9.1.0.0", "9.9"):
+        assert Version(covered) in spec_9x, f"{covered} should be covered by {spec_9x}"
+        assert Version(covered) not in spec_4x, f"{covered} should be out of {spec_4x}"
+    for covered in ("4.0", "4.1.2", "4.2", "4.2.1.0.0.24304122"):
+        assert Version(covered) in spec_4x, f"{covered} should be covered by {spec_4x}"
+        assert Version(covered) not in spec_9x, f"{covered} should be out of {spec_9x}"
     for excluded in ("3.9", "10.0", "10.1"):
-        assert Version(excluded) not in spec, f"{excluded} should be out of band for {spec}"
+        assert Version(excluded) not in spec_9x
+        assert Version(excluded) not in spec_4x
 
 
 def test_importing_package_registers_against_v2_registry() -> None:
@@ -179,6 +191,8 @@ def test_importing_package_registers_against_v2_registry() -> None:
     key = ("nsx", "9.0", "nsx-rest")
     assert key in registry
     assert registry[key] is NsxConnector
+    assert registry[("nsx", "4.2", "nsx-rest")] is Nsx4Connector
+    assert registry[("nsx", "", "")] is NsxConnector
 
 
 def test_default_session_loader_delegates_to_shared_basic_loader() -> None:

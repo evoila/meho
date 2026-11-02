@@ -8,7 +8,7 @@ chart under ``deploy/``, the Go CLI under ``cli/``, the workflows under
 ``.github/``, the docs, the examples. A pull request that changes no file
 under ``backend/`` can still break them.
 
-CI skips the four unit shards on such a pull request (#5296). It runs only
+CI skips the five unit shards on such a pull request (#5296). It runs only
 the files in ``OUTSIDE_BACKEND_TESTS``, in the job
 ``python-outside-backend`` of ``.github/workflows/ci.yml``. The merge queue
 always runs every test.
@@ -70,6 +70,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_chart_vault_addr_optional.py",
     "tests/test_ci_backend_python_skip.py",
     "tests/test_ci_check_chart_namespace_scope.py",
+    "tests/test_ci_check_connector_kit_release.py",
     "tests/test_ci_check_plugin_version.py",
     "tests/test_ci_check_release_body_paths.py",
     "tests/test_ci_coverage_shards.py",
@@ -78,19 +79,22 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_ci_merge_queue_cleanup.py",
     "tests/test_ci_merge_queue_watchdog.py",
     "tests/test_ci_run_eval_gate.py",
+    "tests/test_connector_kit.py",
     "tests/test_connector_overlay_build.py",
+    "tests/test_connector_overlay_review.py",
     "tests/test_connectors_linux_day0_recipe.py",
     "tests/test_connectors_no_phantom_readback_tool.py",
-    "tests/test_connectors_vmware_rest_doc_composite_counts.py",
     "tests/test_consumer_doc_tool_names.py",
     "tests/test_consumer_routing_render.py",
     "tests/test_core_keycloak_realm.py",
     "tests/test_core_keycloak_stage.py",
+    "tests/test_core_vault_init.py",
     "tests/test_db_engine.py",
     "tests/test_examples_r1_tiered_triage.py",
     "tests/test_examples_r2_approval_gate.py",
     "tests/test_examples_r4_local_claude.py",
     "tests/test_features_doc_consistency.py",
+    "tests/test_inventory_shapes.py",
     "tests/test_maturity_surface_drift.py",
     "tests/test_mcp_surface_conformance.py",
     "tests/test_operations_connector_auth_failed.py",

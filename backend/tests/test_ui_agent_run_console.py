@@ -462,6 +462,10 @@ def test_run_post_returns_transcript_with_stream_token() -> None:
     # bridge with a run token (not the raw prompt) in the query string.
     assert "/ui/agents/a1/run/stream?token=" in body
     assert "summarise the topology" not in body  # prompt rides in the token, not the URL.
+    # The console session id appears nowhere in the fragment (not in the
+    # stream URL, not in the token).
+    assert str(session_id) not in body
+    assert session_id.hex not in body
 
 
 def test_run_transcript_stop_dialog_opts_out_of_autopen() -> None:

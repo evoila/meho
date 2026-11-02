@@ -85,6 +85,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ValidationError
 
+from meho_backplane.auth.current_tenant import tenant_not_chosen_detail
 from meho_backplane.auth.operator import Operator
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.maturity import FEATURE_MATURITY_BAND
@@ -109,6 +110,7 @@ from meho_backplane.mcp.session_limit import (
     check_mcp_session_cap,
     resolve_mcp_session_cap,
 )
+from meho_backplane.mcp.tenant_gate import allowed_without_tenant
 from meho_backplane.operations.caller_gone import watch_caller
 from meho_backplane.request_usage.collector import (
     note_request_fallback_status,
@@ -488,6 +490,19 @@ async def _session_instructions(operator: Operator) -> str | None:
     return joined or None
 
 
+def _no_tenant_instructions(operator: Operator) -> str:
+    """The ``initialize.instructions`` for a session with no current tenant (#5239).
+
+    No tenant preamble is loaded: there is no tenant to load it for. The
+    text names the person's tenants and how to pick one.
+    """
+    return (
+        f"{tenant_not_chosen_detail(operator)} Call meho_status to see your role "
+        "in each tenant. Then set the Meho-Tenant header and start a new session; "
+        "every other tool is refused until then."
+    )
+
+
 async def _enforce_mcp_session_cap(operator: Operator) -> None:
     """Refuse ``initialize`` when the tenant is over its session cap (#3500).
 
@@ -543,8 +558,13 @@ async def _initialize(
     #3500: a per-tenant session cap is enforced first, so a tenant over its
     new-sessions-per-minute limit is refused with a ``-32000`` rate-limited
     error before a new session is negotiated.
+
+    #5239: a session with no current tenant skips the cap and the tenant
+    preamble. Both are per tenant, and the operator's tenant fields hold
+    only a placeholder; see :func:`_no_tenant_instructions`.
     """
-    await _enforce_mcp_session_cap(operator)
+    if operator.tenant_chosen:
+        await _enforce_mcp_session_cap(operator)
 
     # ``params or {}`` deliberately collapses ``None`` and ``{}``. Spec-
     # aligned: a missing ``params`` field on the JSON-RPC request and an
@@ -583,7 +603,11 @@ async def _initialize(
         # tracks a release, so the Step-4 upgrade-verify guidance in
         # docs/cross-repo/mcp-client-setup.md could not work off it (#2746).
         serverInfo={"name": _SERVER_NAME, "version": deployed_version_label()},
-        instructions=await _session_instructions(operator),
+        instructions=(
+            await _session_instructions(operator)
+            if operator.tenant_chosen
+            else _no_tenant_instructions(operator)
+        ),
     )
 
 
@@ -1343,6 +1367,12 @@ async def _dispatch_mcp_request(request: Request, operator: Operator) -> Respons
     # are spec-defined as notification-only, so the server treats it
     # as such regardless of the envelope's id field.
     is_notification = "id" not in payload or jrpc.method.startswith("notifications/")
+    # #5239: a session with no current tenant may only start the
+    # connection and call meho_status.
+    if not allowed_without_tenant(operator, jrpc.method, jrpc.params):
+        if is_notification:
+            return Response(status_code=202)
+        return _error_response(jrpc.id, INVALID_REQUEST, tenant_not_chosen_detail(operator))
     # Request usage (#3734): label this request with its JSON-RPC method.
     # ``tools/call`` / ``resources/read`` narrow it to the tool or the
     # resource template once the handler has matched one. An unregistered

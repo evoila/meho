@@ -53,6 +53,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
 from meho_backplane.connectors._shared.vcf_auth import (
@@ -206,6 +207,8 @@ class DrRestConnector(HttpConnector):
     def __init__(self, *, session_loader: DrSessionLoader | None = None) -> None:
         super().__init__()
         self._session_ids: dict[tuple[str, ...], str] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._session_lock = asyncio.Lock()
         self._session_loader: DrSessionLoader = (
             session_loader if session_loader is not None else load_basic_credentials
@@ -238,8 +241,13 @@ class DrRestConnector(HttpConnector):
         async with self._session_lock:
             cached = self._session_ids.get(cache_key)
             if cached is not None:
+                # The caller's own Vault read, once per caller and target.
+                await self._readers.ensure_read(
+                    target, operator, lambda: self._session_loader(target, operator)
+                )
                 return cached
             session_id = await self._login(target, operator)
+            self._readers.record(target, operator)
             self._session_ids[cache_key] = session_id
             _log.info(
                 "dr_rest_session_established",
@@ -310,6 +318,17 @@ class DrRestConnector(HttpConnector):
                 rejected,
                 lambda session_id: {SESSION_HEADER: session_id},
             )
+
+    async def invalidate_credentials(self, target: DrTargetLike) -> None:
+        """Drop the session of *target* and forget who has read its secret.
+
+        Called after a failed login and after a target change. The next call
+        of every caller reads the secret from Vault again, under their own
+        login, and logs in with what it finds.
+        """
+        await self.invalidate_session(target)
+        async with self._session_lock:
+            self._readers.forget(target)
 
     async def server_version(self, target: DrTargetLike, operator: Operator) -> DrServerVersion:
         """Read the server version and build. Never raises: a failure is named in ``error``.
@@ -421,4 +440,5 @@ class DrRestConnector(HttpConnector):
         """Clear cached sessions, then tear down the httpx pool."""
         async with self._session_lock:
             self._session_ids.clear()
+            self._readers.clear()
         await super().aclose()

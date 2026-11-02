@@ -1174,7 +1174,7 @@ class ReviewService:
             reason=reason,
             person_present=person_present,
             tighten_only=tighten_only,
-            max_age_seconds=get_settings().fresh_sign_in_max_age_seconds,
+            max_age_seconds=get_settings().per_action_sign_in_max_age_seconds,
         )
 
     async def remove_op_override(
@@ -1219,7 +1219,7 @@ class ReviewService:
                 operator=self._operator,
                 reason=reason,
                 person_present=person_present,
-                max_age_seconds=get_settings().fresh_sign_in_max_age_seconds,
+                max_age_seconds=get_settings().per_action_sign_in_max_age_seconds,
             )
             await write_audit_row(
                 session,

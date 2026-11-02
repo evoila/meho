@@ -61,6 +61,7 @@ __all__ = [
     "UnknownSecretKindError",
     "parse_secret_ref",
     "register_secret_endpoint",
+    "resolve_secret_endpoint",
 ]
 
 
@@ -252,3 +253,21 @@ def register_secret_endpoint(kind: str, factory: SecretEndpointFactory) -> None:
             f"(by {SECRET_ENDPOINT_REGISTRY[kind]!r}); kinds must be unique"
         )
     SECRET_ENDPOINT_REGISTRY[kind] = factory
+
+
+def resolve_secret_endpoint(spec: SecretRef) -> SecretEndpoint:
+    """Resolve a parsed ``<kind>:<ref>`` to a constructed endpoint.
+
+    Raises :class:`UnknownSecretKindError` when no adapter is registered
+    for the kind — the dispatcher maps it to a ``connector_error`` with
+    the class name in ``extras['exception_class']``. The error names the
+    unknown kind and the registered kinds, never the ref's value side.
+    Shared by ``secret.move`` and the two handoff steps.
+    """
+    factory = SECRET_ENDPOINT_REGISTRY.get(spec.kind)
+    if factory is None:
+        known = ", ".join(sorted(SECRET_ENDPOINT_REGISTRY)) or "(none)"
+        raise UnknownSecretKindError(
+            f"no secret endpoint adapter for kind {spec.kind!r}; registered kinds: {known}"
+        )
+    return factory(spec.ref)

@@ -15,6 +15,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/cmd/workref"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -35,7 +36,7 @@ import (
 //	  [--audit-id ID]              # exact-id lookup
 //	  [--parent-audit-id ID]       # rows whose parent is this audit-id
 //	  [--session-id ID]            # narrow to one agent session (UUID)
-//	  [--work-ref REF]             # exact change-ticket ref: gh:evoila/meho#1
+//	  [--filter-work-ref REF]      # exact change-ticket ref: gh:evoila/meho#1
 //	  [--json]                     # raw AuditQueryResult JSON
 //	  [--backplane <url>]          # override the configured backplane
 //
@@ -92,7 +93,7 @@ func newQueryCmd() *cobra.Command {
 				AuditID:           auditID,
 				ParentAuditID:     parentAuditID,
 				SessionID:         sessionID,
-				WorkRef:           workRef,
+				WorkRef:           workref.Filter(cmd, workRef),
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -125,7 +126,7 @@ func newQueryCmd() *cobra.Command {
 			"e.g. the decision and run rows of one approval request")
 	cmd.Flags().StringVar(&sessionID, "session-id", "",
 		"narrow to one agent session (UUID); the flat companion to `meho audit replay`")
-	cmd.Flags().StringVar(&workRef, "work-ref", "",
+	cmd.Flags().StringVar(&workRef, workref.FilterFlag, "",
 		"narrow to one external change-ticket reference (exact match; "+
 			"e.g. gh:evoila/meho#1) — \"show every write authorised by ticket X\"")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,

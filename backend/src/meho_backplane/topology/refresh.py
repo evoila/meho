@@ -59,6 +59,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, false, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import all_connectors_v2
@@ -1035,6 +1036,7 @@ async def _write_audit(
                 "op_class": _REFRESH_OP_CLASS,
                 "target_id": str(target_id),
                 **counts,
+                **tenant_role_source_payload(operator),
             },
         )
     )

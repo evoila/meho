@@ -7,12 +7,12 @@ Proves an agent can file a board-complete ticket through MEHO's own
 dispatch surface -- **without a ``gh`` CLI fallback** -- by composing the
 four #2081 composites in the documented order:
 
-    create issue -> add to Projects-v2 board -> set Status field
+    file issue -> add to Projects-v2 board -> set Status field
                  -> link a sub-issue
 
 Every step runs against **one shared connector session stub** (the
-#2255 direct-session substrate): the create is the connector's live REST
-POST, the board reads/writes are the GraphQL composites, and the
+#2255 direct-session substrate): the create is ``gh.composite.issue_create``,
+the board reads/writes are the GraphQL composites, and the
 sub-issue link is the REST composite. Nothing shells out to ``gh`` -- the
 whole flow is connector-session calls, which is the point of the Task.
 
@@ -39,6 +39,7 @@ from meho_backplane.connectors.github.composites._board import (
     project_item_set_field_composite,
     project_view_composite,
 )
+from meho_backplane.connectors.github.composites._issues import issue_create_composite
 from meho_backplane.connectors.github.composites._sub_issues import sub_issue_add_composite
 
 _OWNER = "evoila"
@@ -148,12 +149,18 @@ async def test_file_board_complete_ticket_without_gh_cli() -> None:
     target = object()
     connector = _BoardFlowConnector()
 
-    # ----- Step 1: create the main ticket + a child issue (live REST op) -----
-    main = await connector._post_json(
-        target, f"/repos/{_OWNER}/{_REPO}/issues", operator=operator, json={"title": "Main ticket"}
+    # ----- Step 1: file the main ticket + a child issue (issue_create) -----
+    main = await issue_create_composite(
+        operator=operator,
+        target=target,
+        params={"owner": _OWNER, "repo": _REPO, "title": "Main ticket"},
+        connector=connector,  # type: ignore[arg-type]
     )
-    child = await connector._post_json(
-        target, f"/repos/{_OWNER}/{_REPO}/issues", operator=operator, json={"title": "Child task"}
+    child = await issue_create_composite(
+        operator=operator,
+        target=target,
+        params={"owner": _OWNER, "repo": _REPO, "title": "Child task"},
+        connector=connector,  # type: ignore[arg-type]
     )
     assert main["node_id"] == "I_kwMAIN"
     assert child["id"] == 555  # the DATABASE id -- distinct from its number (200)

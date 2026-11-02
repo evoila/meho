@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Code owners. GitHub asks these people to review a pull request that
+# changes their files. Their review is required only when the rules of
+# `main` ask for a code owner's review.
+
+# The connector kit: the MEHO names a connector package may import. A change
+# to backend/connector-kit/kit-names.json is a change to what connector
+# packages may use, so the kit owner must approve it. The kit owner is the
+# program owner until the program owner names someone else. GitHub does not
+# count an approval by the person who opened the pull request, so a kit
+# change opened by the kit owner needs another code owner to approve it.
+# See docs/decisions/2026-11-01-connector-kit.md (decision 3).
+/backend/connector-kit/ @damir-topic

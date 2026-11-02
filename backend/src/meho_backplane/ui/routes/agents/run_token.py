@@ -42,37 +42,44 @@ from the cookie session and re-runs the same tenant-scoped invoker call,
 so tenant isolation comes from the lifted operator (identical to the
 REST surface), not from the token.
 
-Design: signed payload, mirroring the chassis CSRF HMAC
-=======================================================
+Design: encrypted payload with a keyed session digest
+=====================================================
 
-The chassis policy keeps the FE stack to hand-rolled, zero-new-dep
-crypto (no ``itsdangerous`` / ``starlette-csrf``); this module follows
-:mod:`meho_backplane.ui.csrf` exactly:
+The chassis policy keeps the FE stack to zero-new-dep crypto (no
+``itsdangerous`` / ``starlette-csrf``). The token is a
+:class:`cryptography.fernet.Fernet` token -- the same primitive the
+session store uses:
 
-    token = b64url(payload_json) + "." + hex(hmac_sha256(secret, b64url(payload_json)))
+    token = fernet.encrypt_at_time(payload_json, now)
 
-where ``payload_json`` is ``{"sid", "name", "input", "work_ref",
-"exp"}``. Verification recomputes the MAC with
-:func:`hmac.compare_digest` (constant-time), checks the embedded
-``session_id`` matches the cookie session, and rejects an expired
-``exp``. The HMAC secret reuses
-:attr:`Settings.ui_session_encryption_key` -- the same keying material
-the CSRF tokens and the session-store Fernet use, rotation-managed by
-the same Vault plumbing.
+where ``payload_json`` is ``{"sd", "name", "input", "work_ref"}``.
+Fernet encrypts (AES-128-CBC) and authenticates (HMAC-SHA256) the
+payload and stamps the issue time, so:
+
+* the token is opaque: the run prompt and the session binding cannot be
+  read from the stream URL;
+* ``sd`` is a keyed HMAC-SHA256 digest of the console session id, never
+  the session id itself, so even the decrypted payload holds no value
+  that works as a session cookie;
+* verification decrypts with ``ttl=RUN_TOKEN_TTL_SECONDS`` (Fernet's own
+  timestamp check), recomputes the session digest from the cookie
+  session, and compares it with :func:`hmac.compare_digest`.
+
+The Fernet key is :attr:`Settings.ui_session_encryption_key` -- the same
+keying material the CSRF tokens and the session-store Fernet use,
+rotation-managed by the same Vault plumbing.
 """
 
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
 import hmac
 import json
-import time
 from dataclasses import dataclass
 from typing import Final
 
 import structlog
+from cryptography.fernet import Fernet, InvalidToken
 
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.session_store import EncryptionKeyMissingError
@@ -93,8 +100,9 @@ _log = structlog.get_logger(__name__)
 #: risking a slow connection failing to start its own run.
 RUN_TOKEN_TTL_SECONDS: Final[int] = 120
 
-#: HMAC algorithm -- SHA-256, matching the CSRF token's floor.
-_HMAC_ALG = hashlib.sha256
+#: Domain label for the keyed session digest, so the digest cannot be
+#: confused with any other HMAC the console derives from the same key.
+_SESSION_DIGEST_LABEL: Final[bytes] = b"meho-agent-run-token-session:"
 
 
 @dataclass(frozen=True)
@@ -107,41 +115,37 @@ class DecodedRunToken:
     redirect the run).
     """
 
-    session_id: str
     name: str
     input: str
     work_ref: str | None
 
 
-def _run_token_secret() -> bytes:
-    """Return the HMAC secret bytes, reusing the session-encryption key.
+def _run_token_key() -> str:
+    """Return the configured session-encryption key.
 
     Empty key is a deployment-time misconfiguration; raise the same
     :class:`EncryptionKeyMissingError` the CSRF helper and session store
-    raise so the failure surfaces with one remediation pointer rather
-    than silently minting forgeable tokens off a zero-byte key.
+    raise so the failure surfaces with one remediation pointer.
     """
     key = get_settings().ui_session_encryption_key
     if not key:
         raise EncryptionKeyMissingError(
             "UI_SESSION_ENCRYPTION_KEY is not set; the agent run console "
-            "cannot derive the HMAC keying material for its run-handoff "
+            "cannot derive the keying material for its run-handoff "
             "token. Generate a key with `python -c 'from cryptography."
             "fernet import Fernet; print(Fernet.generate_key().decode())'` "
             "and surface it as the UI_SESSION_ENCRYPTION_KEY env var."
         )
-    return key.encode("utf-8")
+    return key
 
 
-def _b64url_encode(raw: bytes) -> str:
-    """URL-safe, unpadded base64 -- keeps the token query-string-clean."""
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-
-
-def _b64url_decode(encoded: str) -> bytes:
-    """Inverse of :func:`_b64url_encode` -- re-pad before decoding."""
-    padding = "=" * (-len(encoded) % 4)
-    return base64.urlsafe_b64decode(encoded + padding)
+def _session_digest(key: str, session_id: str) -> str:
+    """Keyed HMAC-SHA256 digest of *session_id* -- the token's session binding."""
+    return hmac.new(
+        key.encode("utf-8"),
+        _SESSION_DIGEST_LABEL + session_id.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def mint_run_token(
@@ -152,27 +156,25 @@ def mint_run_token(
     work_ref: str | None,
     now: float | None = None,
 ) -> str:
-    """Mint a signed run token binding the run to *session_id*.
+    """Mint an encrypted run token bound to *session_id*.
 
-    The payload is JSON-encoded, base64url-encoded, then HMAC-signed; the
-    token is ``"<payload_b64>.<mac_hex>"``. The ``exp`` is ``now +
-    RUN_TOKEN_TTL_SECONDS`` so the bridge can reject a stale token without
-    server-side state. Stateless minting -- nothing persists; the token's
-    only valid recipient is the bridge on the same backplane.
+    The payload carries a keyed digest of the session id (not the id),
+    the agent name, the prompt and the work reference. It is
+    JSON-encoded and Fernet-encrypted with the issue time *now*, so the
+    bridge can reject a stale token without server-side state.
     """
-    issued = time.time() if now is None else now
+    key = _run_token_key()
     payload = {
-        "sid": session_id,
+        "sd": _session_digest(key, session_id),
         "name": name,
         "input": input_,
         "work_ref": work_ref,
-        "exp": int(issued + RUN_TOKEN_TTL_SECONDS),
     }
-    payload_b64 = _b64url_encode(
-        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    )
-    mac = hmac.new(_run_token_secret(), payload_b64.encode("ascii"), _HMAC_ALG).hexdigest()
-    return f"{payload_b64}.{mac}"
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    fernet = Fernet(key.encode("ascii"))
+    if now is None:
+        return fernet.encrypt(raw).decode("ascii")
+    return fernet.encrypt_at_time(raw, int(now)).decode("ascii")
 
 
 def verify_run_token(
@@ -185,46 +187,45 @@ def verify_run_token(
 
     Stateless verification, in order:
 
-    1. Structural: exactly one ``.`` separating two non-empty halves.
-    2. Signature: constant-time HMAC compare over the payload half.
-    3. Decode: the payload is valid base64url + JSON with the expected
-       keys.
-    4. Binding: the embedded ``sid`` equals the cookie *session_id* (so a
-       token minted for one session cannot be replayed under another).
-    5. Freshness: ``exp`` is in the future.
+    1. Decrypt + authenticate + freshness: Fernet checks the MAC and
+       that the token is no older than ``RUN_TOKEN_TTL_SECONDS``.
+    2. Decode: the plaintext is JSON with the expected keys.
+    3. Binding: the embedded ``sd`` equals the digest of the cookie
+       *session_id* (so a token minted for one session cannot be used
+       under another).
 
     Any failure returns ``None`` -- the bridge maps that to a 403 / closed
     stream. The failure class is logged for forensics but not telegraphed
     to the client (remediation is identical: re-submit the run form).
     """
-    if not token or token.count(".") != 1:
+    # Fernet's base64 decoder raises ValueError (not InvalidToken) on
+    # non-ASCII input, so screen it out first.
+    if not token or not token.isascii():
         return None
-    payload_b64, mac_hex = token.split(".")
-    if not payload_b64 or not mac_hex:
-        return None
-
-    expected_mac = hmac.new(_run_token_secret(), payload_b64.encode("ascii"), _HMAC_ALG).hexdigest()
-    if not hmac.compare_digest(expected_mac, mac_hex):
-        _log.info("ui_agent_run_token_rejected", reason="signature_invalid")
+    key = _run_token_key()
+    fernet = Fernet(key.encode("ascii"))
+    try:
+        if now is None:
+            raw = fernet.decrypt(token, ttl=RUN_TOKEN_TTL_SECONDS)
+        else:
+            raw = fernet.decrypt_at_time(token, ttl=RUN_TOKEN_TTL_SECONDS, current_time=int(now))
+    except InvalidToken:
+        _log.info("ui_agent_run_token_rejected", reason="invalid_or_expired")
         return None
 
     try:
-        payload = json.loads(_b64url_decode(payload_b64))
-    except (ValueError, binascii.Error, UnicodeDecodeError):
+        payload = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
         _log.info("ui_agent_run_token_rejected", reason="decode_failed")
         return None
     if not isinstance(payload, dict):
         return None
 
-    token_sid = payload.get("sid")
-    if not isinstance(token_sid, str) or not hmac.compare_digest(token_sid, session_id):
+    token_digest = payload.get("sd")
+    if not isinstance(token_digest, str) or not hmac.compare_digest(
+        token_digest, _session_digest(key, session_id)
+    ):
         _log.info("ui_agent_run_token_rejected", reason="session_mismatch")
-        return None
-
-    exp = payload.get("exp")
-    current = time.time() if now is None else now
-    if not isinstance(exp, int) or exp < current:
-        _log.info("ui_agent_run_token_rejected", reason="expired")
         return None
 
     name = payload.get("name")
@@ -234,9 +235,4 @@ def verify_run_token(
         return None
     if work_ref is not None and not isinstance(work_ref, str):
         return None
-    return DecodedRunToken(
-        session_id=token_sid,
-        name=name,
-        input=input_,
-        work_ref=work_ref,
-    )
+    return DecodedRunToken(name=name, input=input_, work_ref=work_ref)

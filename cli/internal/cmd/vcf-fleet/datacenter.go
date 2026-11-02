@@ -4,6 +4,7 @@
 package vcffleet
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 
@@ -13,7 +14,7 @@ import (
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-const datacenterListOpID = "GET:/lcm/lcops/api/v2/datacenters"
+const datacenterListOpID = "fleet.datacenter.list"
 
 // newDatacenterCmd returns the `meho vcf-fleet datacenter` sub-tree.
 func newDatacenterCmd() *cobra.Command {
@@ -34,15 +35,14 @@ func newDatacenterListCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List Fleet-managed datacenters (wrapper-verified reachability probe)",
-		Long: "list dispatches GET:/lcm/lcops/api/v2/datacenters against\n" +
-			"connector_id=\"fleet-rest-9.0\". This is the wrapper-verified\n" +
-			"reachability probe — guaranteed to respond in VCF 9.0 even when\n" +
-			"/about returns HTTP 500. The vmid in each entry is the\n" +
-			"load-bearing identifier for `vcf-fleet vcenter list <vmid>`.\n\n" +
+		Short: "List Fleet-managed datacenters and the vCenters in each",
+		Long: "list dispatches fleet.datacenter.list against\n" +
+			"connector_id=\"fleet-rest-9.0\". One row per vCenter, with its\n" +
+			"datacenter; a datacenter with no vCenter has one row of its own.\n" +
+			"The datacenter_id is the identifier for `vcf-fleet vcenter list <id>`.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
 		Example: "  meho vcf-fleet datacenter list --target rdc-fleet\n" +
-			"  meho vcf-fleet datacenter list --target rdc-fleet --json | jq '.result[].vmid'",
+			"  meho vcf-fleet datacenter list --target rdc-fleet --json | jq '.result.rows[].datacenter_id'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -75,22 +75,24 @@ func printDatacenterList(w io.Writer, r *CallResult) {
 		printErrorTrailer(w, r)
 		return
 	}
-	entries, err := decodeListResult(r.Result)
-	if err != nil {
+	var page struct {
+		Rows []fleetEntry `json:"rows"`
+	}
+	if err := json.Unmarshal(r.Result, &page); err != nil || page.Rows == nil {
 		conn.PrintGeneric(w, datacenterListOpID, r)
 		return
 	}
-	if len(entries) == 0 {
+	if len(page.Rows) == 0 {
 		fmt.Fprintln(w, "  (0 datacenters)")
 		return
 	}
-	fmt.Fprintf(w, "%-38s %-32s %-16s %s\n", "vmid", "name", "type", "city")
-	for _, e := range entries {
-		fmt.Fprintf(w, "%-38s %-32s %-16s %s\n",
-			truncate(fleetStringField(e, "vmid"), 38),
-			truncate(fleetStringField(e, "name"), 32),
-			truncate(fleetStringField(e, "type"), 16),
-			truncate(fleetStringField(e, "city"), 32),
+	fmt.Fprintf(w, "%-38s %-24s %-24s %s\n", "datacenter_id", "datacenter_name", "vcenter_name", "vcenter_host")
+	for _, e := range page.Rows {
+		fmt.Fprintf(w, "%-38s %-24s %-24s %s\n",
+			truncate(fleetStringField(e, "datacenter_id"), 38),
+			truncate(fleetStringField(e, "datacenter_name"), 24),
+			truncate(fleetStringField(e, "vcenter_name"), 24),
+			truncate(fleetStringField(e, "vcenter_host"), 40),
 		)
 	}
 }

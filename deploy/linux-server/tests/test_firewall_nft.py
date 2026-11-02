@@ -8,7 +8,9 @@ checks it ("nft -c", check only) and loads it, in a new user and network
 namespace (unshare --map-root-user --net). The namespace has its own empty
 firewall, so the machine that runs the tests keeps its own rules. One test
 then changes the SSH rule with meho-host admin-network, which checks and
-loads the new file with the real nft too.
+loads the new file with the real nft too. Another reads the loaded table
+with firewall_state, so its check of the chain prerouting matches the real
+output of nft.
 
 One test also loads the variant of the MEHO appliance, where the chains
 input, forward and output have policy drop, and opens a TCP connection over
@@ -175,6 +177,43 @@ class NftCheckTests(InstallTestCase):
                     self.assertNotIn("elements", result.stdout)
                 else:
                     self.assertIn(elements, result.stdout)
+
+    def test_firewall_state_reads_the_real_nft_output(self) -> None:
+        # firewall_state runs with the real nft in the namespace. A stub
+        # systemctl says that meho-firewall.service is enabled.
+        rules = self.rules_file("--admin-network", "10.0.0.0/24")
+        installed = rules.read_text()
+        stubs = self.machine.home / "state-stubs"
+        stubs.mkdir()
+        systemctl = stubs / "systemctl"
+        systemctl.write_text('#!/bin/sh\n[ "$1 $3" = "is-enabled meho-firewall.service" ]\n')
+        systemctl.chmod(0o755)
+        snippet = (
+            f'source "{LINUX_SERVER}/lib/common.sh"; source "{LINUX_SERVER}/lib/net.sh"; '
+            f'source "{LINUX_SERVER}/lib/firewall.sh"; firewall_state'
+        )
+        no_drop = "off: the table inet meho has no chain prerouting with policy drop"
+        cases = {
+            "the installed file": (installed, 0, "on\n"),
+            "policy accept": (installed.replace("policy drop;", "policy accept;"), 1, no_drop),
+            "not loaded": (None, 1, "off: the table inet meho is not loaded\n"),
+        }
+        for case, (content, returncode, expected) in cases.items():
+            with self.subTest(case=case):
+                load = ""
+                if content is not None:
+                    rules.write_text(content)
+                    load = f'nft -f "{rules}" && '
+                result = in_namespace(
+                    "env",
+                    f"PATH={stubs}:{os.environ.get('PATH', '')}",
+                    "bash",
+                    "-c",
+                    load + snippet,
+                )
+
+                self.assertEqual(returncode, result.returncode, result.stdout + result.stderr)
+                self.assertTrue(result.stdout.startswith(expected), result.stdout)
 
     def test_loading_twice_replaces_only_the_meho_table(self) -> None:
         rules = self.rules_file("--admin-network", "10.0.0.0/24")

@@ -847,11 +847,16 @@ def test_folder_create_vi_json_sub_op_manifest_is_the_expected_single() -> None:
     }
 
 
-def test_cluster_drs_vm_host_rule_create_vi_json_manifest_is_the_expected_pair() -> None:
-    """Pin the #3505 VM-Host rule vi-json manifest — same shape as drs_rule.create."""
+def test_cluster_drs_vm_host_rule_create_vi_json_manifest_is_the_expected_set() -> None:
+    """Pin the #3505 VM-Host rule vi-json manifest — same shape as drs_rule.create.
+
+    The paged name read is for the members of existing groups
+    (``use_existing_groups=true``).
+    """
     assert set(_write._VIM_SUB_OPS_CLUSTER_DRS_VM_HOST_RULE_CREATE) == {
         "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task",
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
     }
 
 
@@ -1321,13 +1326,18 @@ def test_host_vi_json_paths_exist_in_the_pinned_spec() -> None:
 # vi-json.yaml like the #3091 portgroup writes above.
 # ---------------------------------------------------------------------------
 
+from meho_backplane.connectors.vmware_rest import typed_ops_inventory_find  # noqa: E402
 from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
     _datastore_files,
+    _drs_group,
+    _drs_group_delete,
     _drs_rule_delete,
     _library_delete,
     _snapshot,
+    _snapshot_cleanup,
     _teardown,
     _teardown_network,
+    _vapp,
 )
 
 _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
@@ -1389,6 +1399,24 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
             "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task",
         },
     ),
+    # The DRS group ops: the cluster read, the member name read (paged), then
+    # the same reconfigure as the DRS rule ops.
+    "_VIM_SUB_OPS_CLUSTER_DRS_GROUP_MEMBERS_SET": (
+        _drs_group,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+            "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task",
+        },
+    ),
+    "_VIM_SUB_OPS_CLUSTER_DRS_GROUP_DELETE": (
+        _drs_group_delete,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+            "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task",
+        },
+    ),
     # The VM snapshot create and delete: the snapshot-tree read, then one task.
     "_VIM_SUB_OPS_VM_SNAPSHOT_CREATE": (
         _snapshot,
@@ -1402,6 +1430,66 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
         {
             "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
             "POST:/VirtualMachineSnapshot/{moId}/RemoveSnapshot_Task",
+        },
+    ),
+    # --- vApps (#4341): the vApp read (also the task poll) and one write each.
+    "_VIM_SUB_OPS_VAPP_CREATE": (
+        _vapp,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+            "POST:/ResourcePool/{moId}/CreateVApp",
+        },
+    ),
+    "_VIM_SUB_OPS_VAPP_POWER": (
+        _vapp,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualApp/{moId}/PowerOnVApp_Task",
+            "POST:/VirtualApp/{moId}/PowerOffVApp_Task",
+        },
+    ),
+    "_VIM_SUB_OPS_VAPP_START_ORDER": (
+        _vapp,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualApp/{moId}/UpdateVAppConfig",
+        },
+    ),
+    "_VIM_SUB_OPS_VAPP_DELETE": (
+        _vapp,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualApp/{moId}/Destroy_Task",
+        },
+    ),
+    # --- end vApps (#4341)
+    # Delete all snapshots of a VM, and consolidate its disks.
+    "_VIM_SUB_OPS_VM_SNAPSHOT_DELETE_ALL": (
+        _snapshot_cleanup,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualMachine/{moId}/RemoveAllSnapshots_Task",
+        },
+    ),
+    "_VIM_SUB_OPS_VM_DISKS_CONSOLIDATE": (
+        _snapshot_cleanup,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualMachine/{moId}/ConsolidateVMDisks_Task",
+        },
+    ),
+    # The container-view reads of vm.list, inventory.find and the snapshot list of
+    # every VM, plus the inventory-path search (typed reads, not governed writes).
+    "INVENTORY_FIND_CALLS": (
+        typed_ops_inventory_find,
+        {
+            "POST:/ServiceInstance/{moId}/RetrieveServiceContent",
+            "POST:/ViewManager/{moId}/CreateContainerView",
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+            "POST:/ContainerView/{moId}/DestroyView",
+            "POST:/SearchIndex/{moId}/FindByInventoryPath",
         },
     ),
 }

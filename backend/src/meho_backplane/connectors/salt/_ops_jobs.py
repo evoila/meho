@@ -10,6 +10,7 @@ from typing import Any
 from meho_backplane.connectors.salt._op_common import (
     GROUP_JOBS,
     JOB_STATES,
+    JOB_STATUSES,
     MASTER_ID_SCHEMA,
     MINION_ID_SCHEMA,
     PAGE_SCHEMA,
@@ -155,12 +156,11 @@ _STATE_SCHEMA: dict[str, Any] = {
 JOB_RESULT_OP = SaltTypedOp(
     op_id="salt.job.result",
     handler_attr="job_result",
-    summary="Read the results of one Salt job run, one row per minion, size-capped.",
+    summary="Read the state of one Salt job run and its results, one row per minion.",
     description=(
-        "Calls ret.get_returns for one jid. One row per minion: success, return code, "
-        "errors, the failed states (kind, outcome, timing), and the return itself when "
-        "it is small and its content can be checked (a state run, a number or a boolean). "
-        "Values under a secret name are replaced."
+        "Calls cmd.get_cmds and ret.get_returns for one jid: the job state and progress, "
+        "then one row per minion with success, return code, errors and failed states. "
+        "The status read after salt.job.run_state and salt.job.run_command."
     ),
     parameter_schema={
         "type": "object",
@@ -187,6 +187,45 @@ JOB_RESULT_OP = SaltTypedOp(
         "type": "object",
         "properties": {
             "jid": {"type": "string", "description": "The job id that was read."},
+            "reachable": {
+                "type": "boolean",
+                "description": (
+                    "False when the Salt server did not answer (for example during its own "
+                    "upgrade). Then job_status is not reachable; the job may still run."
+                ),
+            },
+            "checked_at": {"type": "string", "description": "When MEHO read it (ISO 8601)."},
+            "error": _text("Why the server was not reachable; null when it answered."),
+            "job_state": _text(
+                "The vendor's job state (cmd.get_cmds), for example retrieved or "
+                "completed_failures; null when RaaS lists no run with this jid."
+            ),
+            "job_status": {
+                "type": "string",
+                "enum": list(JOB_STATUSES),
+                "description": (
+                    "The job state in plain words: queued, running, paused, stopping, "
+                    "stopped, skipped, succeeded, failed, incomplete (some minions did "
+                    "not return), unknown, or not reachable."
+                ),
+            },
+            "job_ended": {
+                "type": "boolean",
+                "description": "True when the job has ended; read again until it is true.",
+            },
+            "fun": _text("Salt function of the run."),
+            "user": _text("User who started the run."),
+            "start_time": _text("Start time (ISO 8601)."),
+            "expected": {"type": ["integer", "null"], "description": "Minions expected."},
+            "returned": {"type": ["integer", "null"], "description": "Minions that returned."},
+            "returned_good": {
+                "type": ["integer", "null"],
+                "description": "Minions that succeeded.",
+            },
+            "returned_failed": {
+                "type": ["integer", "null"],
+                "description": "Minions that failed.",
+            },
             "count": {"type": "integer", "description": "How many minion results match."},
             "failed_minions": {
                 "type": "integer",
@@ -281,11 +320,14 @@ JOB_RESULT_OP = SaltTypedOp(
     requires_approval=False,
     llm_instructions={
         "when_to_call": (
-            "Call after salt.job.list, with the jid of a run, to see which minions failed "
-            "and why. Pass has_errors true to read only the failed minions."
+            "Call with the jid of a run (from salt.job.list, salt.job.run_state or "
+            "salt.job.run_command) to follow it until it ends, and to see which minions "
+            "failed and why. Pass has_errors true to read only the failed minions."
         ),
         "output_shape": (
-            "{jid, count, failed_minions, results: [{minion_id, master_id, jid, fun, "
+            "{jid, reachable, checked_at, error, job_state, job_status, job_ended, fun, "
+            "user, start_time, expected, returned, returned_good, returned_failed, count, "
+            "failed_minions, results: [{minion_id, master_id, jid, fun, "
             "fun_args, fun_args_withheld, success, retcode, has_errors, alter_time, return, "
             "return_bytes, return_truncated, return_withheld, states_total, states_failed, "
             "failed_states: [{state, name, sls, result, changed, run_num, start_time, "
@@ -307,10 +349,29 @@ JOB_RESULT_OP = SaltTypedOp(
             "name read [REDACTED:param_name]."
         ),
         "next_step": (
-            "Report the failed minions with the state (cmd.run, file.managed) and sls of "
-            "their failed states; the operator reads the comment in Salt with the jid. "
-            "When return_truncated is true, the failed_states list is the summary to use."
+            "While job_ended is false, wait and call again; returned against expected is "
+            "the progress. When reachable is false, the server did not answer: the job is "
+            "not failed, keep the jid and read again later. When the job ended, report the "
+            "failed minions with the state (cmd.run, file.managed) and sls of their failed "
+            "states; the operator reads the comment in Salt with the jid. When "
+            "return_truncated is true, the failed_states list is the summary to use."
         ),
-        "result_scalars": {"keys": ["jid", "count", "failed_minions"]},
+        "result_scalars": {
+            "keys": [
+                "jid",
+                "reachable",
+                "checked_at",
+                "error",
+                "job_state",
+                "job_status",
+                "job_ended",
+                "expected",
+                "returned",
+                "returned_good",
+                "returned_failed",
+                "count",
+                "failed_minions",
+            ]
+        },
     },
 )

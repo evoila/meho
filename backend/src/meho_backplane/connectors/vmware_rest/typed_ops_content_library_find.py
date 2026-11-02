@@ -30,6 +30,11 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from meho_backplane.connectors.vmware_rest._content_library_schemas import (
+    CONTENT_LIBRARY_GROUP_KEY,
+    CONTENT_LIBRARY_WHEN_TO_USE,
+    FIND_LIBRARY_CALL,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp
 
 if TYPE_CHECKING:
@@ -41,36 +46,20 @@ __all__ = [
     "CONTENT_LIBRARY_FIND_REST_CALLS",
     "CONTENT_LIBRARY_GROUP_KEY",
     "CONTENT_LIBRARY_WHEN_TO_USE",
+    "TYPED_OPS",
     "VMWARE_CONTENT_LIBRARY_FIND_OP",
     "VMWARE_CONTENT_LIBRARY_ITEM_FIND_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "content_library_find_impl",
     "content_library_item_find_impl",
 ]
 
 #: The two vCenter REST calls (``Content.Library_find`` /
 #: ``Content.Library.Item_find``), in the ``METHOD:/path`` form the ingest
-#: parser emits. The spec reconcile lane checks both against the pinned
-#: ``vcenter.yaml``.
-FIND_LIBRARY_CALL: Final = "POST:/content/library?action=find"
+#: parser emits. The library find is the shared :data:`FIND_LIBRARY_CALL`.
+#: The spec reconcile lane checks both against the pinned ``vcenter.yaml``.
 FIND_LIBRARY_ITEM_CALL: Final = "POST:/content/library/item?action=find"
 CONTENT_LIBRARY_FIND_REST_CALLS: Final = (FIND_LIBRARY_CALL, FIND_LIBRARY_ITEM_CALL)
-
-#: Shared with the content-library composites: the same key and text.
-CONTENT_LIBRARY_GROUP_KEY: Final = "content_library"
-CONTENT_LIBRARY_WHEN_TO_USE: Final = (
-    "Use for content libraries. Reads: find libraries or library items by name "
-    "and get their ids (vmware.content_library.find, "
-    "vmware.content_library.item.find, safe); read a subscribed library's sync "
-    "state (content_library.subscribed.status, safe) and its items, such as "
-    "Kubernetes releases (content_library.subscribed.items.list, safe). "
-    "Changes: create a subscribed library, for example the Kubernetes release "
-    "library a Supervisor needs (content_library.subscribed.create, caution); "
-    "start a sync (content_library.subscribed.sync, caution); delete a library, "
-    "refused while another library subscribes to it (content_library.delete, "
-    "destructive), or one item of a local library "
-    "(content_library.item.delete, destructive). To deploy a library item as "
-    "a VM, use the 'vm' group (vm.deploy_from_library)."
-)
 
 
 def _log() -> Any:
@@ -296,3 +285,9 @@ VMWARE_CONTENT_LIBRARY_ITEM_FIND_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (
+    VMWARE_CONTENT_LIBRARY_FIND_OP,
+    VMWARE_CONTENT_LIBRARY_ITEM_FIND_OP,
+)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {CONTENT_LIBRARY_GROUP_KEY: CONTENT_LIBRARY_WHEN_TO_USE}

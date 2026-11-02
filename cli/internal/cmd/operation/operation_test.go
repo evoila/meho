@@ -149,11 +149,11 @@ func TestPrintCallResultOkRendersResult(t *testing.T) {
 		DurationMs: 23.4,
 	}
 	var buf bytes.Buffer
-	printCallResult(&buf, "vault-1.x", "vault.kv.read", r)
+	PrintCallResult(&buf, "vault-1.x", "vault.kv.read", r)
 	out := buf.String()
 	for _, want := range []string{"status=ok", "vault.kv.read", `"value"`, `"secret"`} {
 		if !strings.Contains(out, want) {
-			t.Errorf("printCallResult ok missing %q in output:\n%s", want, out)
+			t.Errorf("PrintCallResult ok missing %q in output:\n%s", want, out)
 		}
 	}
 }
@@ -171,11 +171,11 @@ func TestPrintCallResultErrorRendersErrorString(t *testing.T) {
 		DurationMs: 5.0,
 	}
 	var buf bytes.Buffer
-	printCallResult(&buf, "vault-1.x", "vault.bogus", r)
+	PrintCallResult(&buf, "vault-1.x", "vault.bogus", r)
 	out := buf.String()
 	for _, want := range []string{"status=error", "unknown_op: vault.bogus", "extras:", "known_op_count"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("printCallResult error missing %q in output:\n%s", want, out)
+			t.Errorf("PrintCallResult error missing %q in output:\n%s", want, out)
 		}
 	}
 }
@@ -191,7 +191,7 @@ func TestPrintCallResultOkNullResult(t *testing.T) {
 		DurationMs: 12.0,
 	}
 	var buf bytes.Buffer
-	printCallResult(&buf, "k8s-1.x", "k8s.about", r)
+	PrintCallResult(&buf, "k8s-1.x", "k8s.about", r)
 	out := buf.String()
 	if !strings.Contains(out, "status=ok") {
 		t.Errorf("null-result ok render missing status header; got:\n%s", out)

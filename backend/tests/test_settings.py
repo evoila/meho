@@ -1107,3 +1107,26 @@ def test_result_handle_max_record_bytes_rejects_nonpositive_values(value: int) -
             **_settings_kwargs("sqlite+aiosqlite:///:memory:"),
             result_handle_max_record_bytes=value,
         )
+
+
+def test_ui_session_lifetimes_default_to_the_login_server_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset → 1 hour without use, 10 hours at most (#5518).
+
+    The same values as the shipped realm's ``ssoSessionIdleTimeout`` and
+    ``ssoSessionMaxLifespan``, so the console session does not outlive
+    the login server's session. Both the pydantic default and the
+    ``get_settings()`` env default are checked.
+    """
+    _base_env(monkeypatch)
+    monkeypatch.delenv("UI_SESSION_SLIDING_EXTENSION_SECONDS", raising=False)
+    monkeypatch.delenv("UI_SESSION_ABSOLUTE_LIFETIME_SECONDS", raising=False)
+    assert Settings.model_fields["ui_session_absolute_lifetime_seconds"].default == 36000
+    get_settings.cache_clear()
+    try:
+        settings = get_settings()
+        assert settings.ui_session_sliding_extension_seconds == 3600
+        assert settings.ui_session_absolute_lifetime_seconds == 36000
+    finally:
+        get_settings.cache_clear()

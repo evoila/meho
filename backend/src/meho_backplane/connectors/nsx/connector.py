@@ -10,17 +10,18 @@ module-import time via
 :mod:`meho_backplane.connectors.nsx.__init__`; re-ingests against the
 same ``(product="nsx", version="9.0", impl_id="nsx-rest")`` triple no-op.
 
-VCF-9 version renumber (#1530)
-------------------------------
+Two implementations: NSX 9.x here, NSX 4.x in a subclass
+---------------------------------------------------------
 
 NSX-T 4.x was renumbered onto the VCF train at VCF 9.0 -- a live VCF-9
-appliance reports NSX 9.0.x. The :attr:`supported_version_range`
-``>=4.0,<10.0`` keeps one class covering both the standalone NSX-T 4.x
-line and the VCF-9-aligned 9.x line; dispatch and the ingest
-version-range pre-flight key on the
-:class:`packaging.specifiers.SpecifierSet`, not the class-pinned
-:attr:`version`. Same posture :class:`VmwareRestConnector` took for the
-vSphere 8.x -> 9.0 jump.
+appliance reports NSX 9.0.x. The API differs by generation, so this
+class serves only ``>=9.0,<10.0`` and keeps the ``("nsx", "", "")``
+wildcard (a target with no detected version lands here). NSX 4.x
+targets resolve to
+:class:`~meho_backplane.connectors.nsx.connector_4x.Nsx4Connector`
+(``nsx-rest-4.2``, ``>=4.0,<9.0``), a thin subclass with the same auth,
+fingerprint and typed reads. The resolver picks one by the target's
+detected version.
 
 Auth divergence from the vSphere precedent
 ------------------------------------------
@@ -94,6 +95,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vcf_auth import session_establish_auth_error
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -152,13 +154,12 @@ class NsxConnector(HttpConnector):
     # G0.6 v2 registry metadata. The (product, version, impl_id) triple
     # matches the dispatcher's parse_connector_id contract:
     # ``"nsx-rest-9.0"`` -> (``"nsx"``, ``"9.0"``, ``"nsx-rest"``). The
-    # version pin tracks the VCF-9-aligned product line (#1530); the
-    # ``>=4.0,<10.0`` range keeps the standalone NSX-T 4.x line
-    # dispatchable through the same class.
+    # version pin tracks the VCF-9-aligned product line (#1530). NSX 4.x
+    # targets resolve to the ``Nsx4Connector`` subclass instead.
     product = "nsx"
     version = "9.0"
     impl_id = "nsx-rest"
-    supported_version_range = ">=4.0,<10.0"
+    supported_version_range = ">=9.0,<10.0"
     priority = 1
 
     def __init__(
@@ -168,6 +169,8 @@ class NsxConnector(HttpConnector):
     ) -> None:
         super().__init__()
         self._session_tokens: dict[tuple[str, str], str] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._session_lock = asyncio.Lock()
         self._session_loader: NsxSessionLoader = (
             session_loader if session_loader is not None else load_session_credentials_from_vault
@@ -232,8 +235,13 @@ class NsxConnector(HttpConnector):
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
+                # The caller's own Vault read, once per caller and target.
+                await self._readers.ensure_read(
+                    target, operator, lambda: self._session_loader(target, operator)
+                )
                 return cached
             creds = await self._session_loader(target, operator)
+            self._readers.record(target, operator)
             try:
                 username = creds["username"]
                 password = creds["password"]
@@ -309,6 +317,17 @@ class NsxConnector(HttpConnector):
         ``401``) is not needed and not read.
         """
         await self._invalidate_session(target)
+
+    async def invalidate_credentials(self, target: NsxTargetLike) -> None:
+        """Drop the session of *target* and forget who has read its secret.
+
+        Called after a failed login and after a target change. The next call
+        of every caller reads the secret from Vault again, under their own
+        login, and logs in with what it finds.
+        """
+        await self._invalidate_session(target)
+        async with self._session_lock:
+            self._readers.forget(target)
 
     async def _invalidate_session(self, target: NsxTargetLike) -> None:
         """Drop the cached XSRF token + clear the client cookie jar for *target*.
@@ -601,4 +620,5 @@ class NsxConnector(HttpConnector):
         """
         async with self._session_lock:
             self._session_tokens.clear()
+            self._readers.clear()
         await super().aclose()

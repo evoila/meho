@@ -14,7 +14,7 @@ without drowning in false positives.
 ## How analysis runs
 
 ```
-nightly schedule (06:17 UTC) ──► CI workflow on main
+nightly schedule (02:17 UTC) ──► CI workflow on main
                                    │   8 python-coverage shards + python-coverage-combine
                                    │   upload the python-coverage artifact
                                    │   (backend/coverage.xml)          [schedule only]
@@ -252,7 +252,7 @@ analyzed commit SHA — see `quality-gate.yml`'s `SonarCloud Scan` step), which 
 
 **Scan trigger = the nightly run only.** `quality-gate.yml`'s job carries
 `if: … && github.event.workflow_run.event == 'schedule'`. CI runs on `push`,
-`pull_request`, `merge_group` and once a night on `schedule` (`cron: '17 6 * * *'`
+`pull_request`, `merge_group` and once a night on `schedule` (`cron: '17 2 * * *'`
 in `ci.yml`, #4910). SonarCloud stores a single analysis per project keyed by
 branch — so before the event filter, every PR-branch CI completion triggered a
 scan that **overwrote** the main-branch analysis, churning the activity history

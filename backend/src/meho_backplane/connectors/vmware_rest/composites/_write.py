@@ -101,6 +101,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest import library_download, ovf_import_control
+from meho_backplane.connectors.vmware_rest._content_library_schemas import FIND_LIBRARY_CALL
 from meho_backplane.connectors.vmware_rest.composite_issues import issue
 from meho_backplane.connectors.vmware_rest.composites.schemas import CONTENT_LIBRARY_ID_PATTERN
 from meho_backplane.connectors.vmware_rest.ovf_import import (
@@ -273,7 +274,7 @@ _OP_FILTER_OVF_LIBRARY_ITEM = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}
 # and a typed pyvmomi ``HttpNfcLease`` import (#2890) would uncouple completion
 # from a single blocking read entirely.
 _LIBRARY_ITEM_DEPLOY_TIMEOUT = httpx.Timeout(connect=5.0, read=10800.0, write=10800.0, pool=5.0)
-_OP_FIND_LIBRARY = "POST:/content/library?action=find"
+_OP_FIND_LIBRARY = FIND_LIBRARY_CALL
 _OP_FIND_LIBRARY_ITEM = "POST:/content/library/item?action=find"
 # Content-library item type discriminator for OVF/OVA templates — the find
 # filter that keeps a colliding non-OVF item name (ISO, other) from matching.
@@ -800,9 +801,11 @@ _VIM_SUB_OPS_FOLDER_CREATE: tuple[str, ...] = (_OP_CREATE_FOLDER,)
 # rulesSpec delta. The VM / host name→moref resolution reads ride the REST
 # session (``GET:/vcenter/vm`` / ``GET:/vcenter/host``), not manifested here —
 # mirroring drs_rule.create, whose VM-list resolution read is likewise not in
-# a ``_SUB_OPS_*`` tuple.
+# a ``_SUB_OPS_*`` tuple. With ``use_existing_groups=true`` the member names of
+# the two groups are read for the approval card, following continuation pages.
 _VIM_SUB_OPS_CLUSTER_DRS_VM_HOST_RULE_CREATE: tuple[str, ...] = (
     _OP_RETRIEVE_PROPERTIES,
+    _OP_CONTINUE_RETRIEVE_PROPERTIES,
     _OP_RECONFIGURE_COMPUTE_RESOURCE_TASK,
 )
 
@@ -1026,6 +1029,7 @@ _OP_GET_VM_CDROM = "GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"
 _OP_UPDATE_VM_CDROM = "PATCH:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"
 _OP_DELETE_VM_CDROM = "DELETE:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"
 _OP_DISCONNECT_VM_CDROM = "POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=disconnect"
+_OP_CONNECT_VM_CDROM = "POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=connect"
 
 # Guest customization (GOSC) sub-ops (#2892). Create a reusable named
 # customization spec, then apply a saved one to a VM. Both are plain
@@ -1265,6 +1269,7 @@ _SUB_OPS_VM_DEVICE_CDROM: tuple[str, ...] = (
     _OP_UPDATE_VM_CDROM,
     _OP_DELETE_VM_CDROM,
     _OP_DISCONNECT_VM_CDROM,
+    _OP_CONNECT_VM_CDROM,
 )
 _SUB_OPS_GUEST_CUSTOMIZATION_SPEC_CREATE: tuple[str, ...] = (_OP_CREATE_CUSTOMIZATION_SPEC,)
 _SUB_OPS_VM_CUSTOMIZE: tuple[str, ...] = (
@@ -8928,7 +8933,17 @@ async def cluster_drs_vm_host_rule_create_composite(
        governed :func:`_write_vmomi_sub_op` seam (a parked/denied gate returns
        the :class:`OperationResult` verbatim) and poll it to terminal.
        ``safety_level='caution'`` / ``requires_approval=True``.
+
+    With ``use_existing_groups=true`` no group is made: the rule goes on two
+    groups that already exist (:mod:`._drs_vm_host_rule_existing`).
     """
+    if params.get("use_existing_groups"):
+        # Imported here: that module imports from this one.
+        from meho_backplane.connectors.vmware_rest.composites import _drs_vm_host_rule_existing
+
+        return await _drs_vm_host_rule_existing.create_rule_on_existing_groups(
+            connector, target, operator, params
+        )
     cluster_moid = params["cluster"]
     rule_name = params["rule_name"]
     vm_group_name = params["vm_group_name"]
@@ -9422,7 +9437,9 @@ async def vm_resize_composite(
                     **base,
                     "status": "partial",
                     "applied": {"cpu": True, "memory": False},
-                    "guidance": f"CPU applied; memory update failed: {exc}",
+                    # MEHO's words only: an approval shows guidance to every
+                    # approver (#5377). The error text stays in the issue.
+                    "guidance": "CPU applied; memory update failed. See the error issue.",
                     "issues": [
                         issue("connector", "error", f"CPU applied; memory update failed: {exc}")
                     ],
@@ -9607,15 +9624,16 @@ async def vm_device_cdrom_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any] | OperationResult:
-    """Remove / update / disconnect a VM CD-ROM device.
+    """Remove / update / connect / disconnect a VM CD-ROM device.
 
     Op-id: ``vmware.composite.vm.device.cdrom``. Reads the device's
     current backing + state via ``GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}``
     (the host-local ISO path the approver needs to see), then dispatches
     the requested ``action``: ``remove`` (DELETE the device), ``update``
-    (PATCH its backing -- requires ``backing``), or ``disconnect`` (POST
-    ``?action=disconnect``). ``update`` without a ``backing`` object
-    returns ``invalid_request`` with no write issued.
+    (PATCH its backing -- requires ``backing``), ``connect`` (POST
+    ``?action=connect``) or ``disconnect`` (POST ``?action=disconnect``).
+    ``update`` without a ``backing`` object returns ``invalid_request``
+    with no write issued.
     """
     vm_moid = params["vm"]
     cdrom_id = params["cdrom"]
@@ -9640,6 +9658,8 @@ async def vm_device_cdrom_composite(
         sub_op, done = _OP_DELETE_VM_CDROM, {"status": "removed"}
     elif action == "disconnect":
         sub_op, done = _OP_DISCONNECT_VM_CDROM, {"status": "disconnected"}
+    elif action == "connect":
+        sub_op, done = _OP_CONNECT_VM_CDROM, {"status": "connected"}
     else:
         backing = params.get("backing")
         if not isinstance(backing, dict):

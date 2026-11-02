@@ -1,48 +1,44 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""meho_backplane.connectors.nsx -- NsxConnector package.
+"""meho_backplane.connectors.nsx -- the NSX connector package.
 
-Importing this package registers :class:`NsxConnector` against the v2
-connector registry under
-``(product="nsx", version="9.0", impl_id="nsx-rest")``. The chassis
-lifespan calls
+Importing this package registers two implementations of NSX against the
+v2 connector registry. The resolver picks one per target by the
+target's detected version:
+
+* :class:`NsxConnector` under ``(product="nsx", version="9.0",
+  impl_id="nsx-rest")`` -- NSX 9.x (the VCF-9 line), band
+  ``>=9.0,<10.0``. It also owns the ``("nsx", "", "")`` wildcard, so a
+  target with no detected version resolves here.
+* :class:`Nsx4Connector` under ``(product="nsx", version="4.2",
+  impl_id="nsx-rest")`` -- the standalone NSX 4.x line, band
+  ``>=4.0,<9.0``. A thin subclass of :class:`NsxConnector`; see
+  :mod:`meho_backplane.connectors.nsx.connector_4x`.
+
+The chassis lifespan calls
 :func:`~meho_backplane.connectors.registry._eager_import_connectors`
 which walks every ``connectors/<product>/`` subpackage at startup, so
-the registration lands before any dispatch can occur.
-
-The version pin tracks the VCF-9-aligned NSX product line (#1530):
-NSX-T 4.x was renumbered onto the VCF train at VCF 9.0, so a live
-appliance reports NSX 9.0.x. The class's
-``supported_version_range=">=4.0,<10.0"`` keeps the standalone
-NSX-T 4.x line dispatchable through the same class -- the resolver
-keys on the :class:`packaging.specifiers.SpecifierSet`, not the
-class-pinned ``version``.
+the registrations land before any dispatch can occur.
 
 The v1 :func:`~meho_backplane.connectors.registry.register_connector`
-entry point is deliberately **not** called. The connector advertises
-an explicit ``(version="9.0", impl_id="nsx-rest")`` key; the v1 entry
-would land as ``("nsx", "", "")`` and confuse
+entry point is deliberately **not** called. The connectors advertise
+explicit ``(version, impl_id="nsx-rest")`` keys; the v1 entry would
+land as ``("nsx", "", "")`` and confuse
 :func:`~meho_backplane.connectors.resolver.resolve_connector`'s
 tie-break ladder. Same pattern :mod:`meho_backplane.connectors.vmware_rest`
 established.
 
-Once G0.7-T8 (#408) lands its
-:func:`ensure_connector_class_registered` auto-shim in main, the
-idempotency check there will no-op on the
-``(product="nsx", version="9.0", impl_id="nsx-rest")`` triple because
-this module has already registered the hand-rolled class. Until then,
-this module is the only registration path; no behavioural drift
-results from the absence of the auto-shim infrastructure.
-
-Operations for this connector arrive in #614 via G0.7 spec ingestion
-of the NSX ``policy.yaml`` + ``manager.yaml`` corpus against the
-``endpoint_descriptor`` table. This Task ships only the skeleton.
+Both implementations register the same audited typed reads
+(:data:`NSX_TYPED_OPS`, same op ids) under their own triple, so an NSX
+4.x and an NSX 9.x target both dispatch them on a fresh boot with zero
+catalog ingest. The wider NSX surface stays as ingested browse breadth.
 """
 
 from typing import Final
 
 from meho_backplane.connectors.nsx.connector import NsxConnector
+from meho_backplane.connectors.nsx.connector_4x import Nsx4Connector
 from meho_backplane.connectors.nsx.session import (
     NsxSessionLoader,
     NsxTargetLike,
@@ -52,6 +48,7 @@ from meho_backplane.connectors.nsx.session import (
 from meho_backplane.connectors.nsx.typed_ops import (
     NSX_TYPED_OPS,
     NsxTypedOp,
+    register_nsx4_typed_operations,
     register_nsx_typed_operations,
 )
 from meho_backplane.connectors.registry import register_connector_v2
@@ -70,11 +67,28 @@ NSX_VERSION: Final[str] = "9.0"
 NSX_IMPL_ID: Final[str] = "nsx-rest"
 NSX_CONNECTOR_ID: Final[str] = f"{NSX_IMPL_ID}-{NSX_VERSION}"
 
+#: The NSX 4.x implementation's version pin and connector id
+#: (``"nsx-rest-4.2"``). It shares ``product`` and ``impl_id`` with the
+#: 9.x implementation; :class:`Nsx4Connector` pins the same triple.
+NSX4_VERSION: Final[str] = "4.2"
+NSX4_CONNECTOR_ID: Final[str] = f"{NSX_IMPL_ID}-{NSX4_VERSION}"
+
 register_connector_v2(
     product="nsx",
     version="9.0",
     impl_id="nsx-rest",
     cls=NsxConnector,
+)
+
+# The NSX 4.x implementation: the versioned triple only. The
+# ``("nsx", "", "")`` wildcard below stays owned by the 9.x class, so a
+# 4.x target resolves here by its disjoint band and an unversioned
+# target resolves to the 9.x class. Same shape as ``vmware-rest-8.0``.
+register_connector_v2(
+    product="nsx",
+    version=NSX4_VERSION,
+    impl_id="nsx-rest",
+    cls=Nsx4Connector,
 )
 
 # G0.15-T6 (#1215) wildcard fallback -- the K8s sibling pattern fanned
@@ -95,18 +109,23 @@ register_connector_v2(
 # ``_eager_import_connectors`` so the ``source_kind='typed'`` descriptor
 # rows land before the first dispatch -- no catalog ingest required.
 register_typed_op_registrar(register_nsx_typed_operations)
+register_typed_op_registrar(register_nsx4_typed_operations)
 
 __all__ = [
+    "NSX4_CONNECTOR_ID",
+    "NSX4_VERSION",
     "NSX_CONNECTOR_ID",
     "NSX_IMPL_ID",
     "NSX_PRODUCT",
     "NSX_TYPED_OPS",
     "NSX_VERSION",
+    "Nsx4Connector",
     "NsxConnector",
     "NsxSessionLoader",
     "NsxTargetLike",
     "NsxTypedOp",
     "SessionCredentials",
     "load_session_credentials_from_vault",
+    "register_nsx4_typed_operations",
     "register_nsx_typed_operations",
 ]

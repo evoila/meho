@@ -680,7 +680,7 @@ func TestReducedCallResultRendersHandleAndResultQueryAcceptsIt(t *testing.T) {
 		Extras: json.RawMessage(`{"flight_recorder_trace_handle":{"handle_id":"22222222-2222-2222-2222-222222222222"}}`),
 	}
 	var rendered bytes.Buffer
-	printCallResult(&rendered, "vmware-rest-9.0", "vmware.vm.list", result)
+	PrintCallResult(&rendered, "vmware-rest-9.0", "vmware.vm.list", result)
 	if !strings.Contains(rendered.String(), "result handle:") || !strings.Contains(rendered.String(), handleID) {
 		t.Fatalf("human render must expose the result handle id; got %q", rendered.String())
 	}
@@ -849,7 +849,7 @@ func withFakeClient(t *testing.T, f operationsAPI) {
 
 // TestRunCallAwaitingApprovalRealPath — the generic `operation call`
 // verb treats status=awaiting_approval as a parked, non-error,
-// exit-0 outcome on the REAL runCall path (not just printCallResult):
+// exit-0 outcome on the REAL runCall path (not just PrintCallResult):
 // stdout carries the parked hint and stderr never carries the
 // invalid-status diagnostic.
 func TestRunCallAwaitingApprovalRealPath(t *testing.T) {
@@ -881,6 +881,9 @@ func TestRunCallAwaitingApprovalRealPath(t *testing.T) {
 	if !strings.Contains(out.String(), "ar-op-1") ||
 		!strings.Contains(out.String(), "meho approvals show ar-op-1") {
 		t.Errorf("expected approval id + `meho approvals show` hint on stdout; got %q", out.String())
+	}
+	if !strings.Contains(out.String(), "meho approvals result ar-op-1") {
+		t.Errorf("expected the `meho approvals result` hint on stdout; got %q", out.String())
 	}
 	if strings.Contains(errBuf.String(), "invalid OperationResult") {
 		t.Errorf("awaiting_approval was wrongly rejected as invalid status: %s", errBuf.String())
@@ -1056,7 +1059,7 @@ func TestRunCallAwaitingApprovalRendersAuditReceipt(t *testing.T) {
 // dispatch responses (status=ok). These two tests pin what each operator
 // output mode actually does with it, because the two disagree and
 // docs/codebase/checks-advisory.md § "Operator reach" documents the gap:
-// --json passes the envelope through verbatim, while printCallResult
+// --json passes the envelope through verbatim, while PrintCallResult
 // returns inside its status=="ok" branch before reaching the extras
 // block, so the default human render drops it. Teaching the human render
 // to print extras on success is a CLI-wide UX change (it would also start

@@ -142,17 +142,21 @@ def _parent_namespace(store_ref: str) -> str | None:
     return head + "/"
 
 
-def allowed_guest_secret_prefix(target: Any) -> tuple[str, str] | None:
+def allowed_guest_secret_prefix(
+    target: Any, *, extra_key: str = GUEST_SECRET_PREFIX_EXTRA
+) -> tuple[str, str] | None:
     """Return the ``(kind, store prefix)`` a ``guest_secret_ref`` must fall under.
 
-    ``extras["guest_secret_prefix"]`` wins when set to a non-empty string;
-    otherwise the parent namespace of the target's own ``secret_ref``,
-    taken from the secret's identity (no ``#field`` selector, no GSM
-    version pin). ``None`` means no prefix is resolvable -- the caller
-    rejects.
+    ``extras[extra_key]`` (default ``guest_secret_prefix``) wins when set
+    to a non-empty string; otherwise the parent namespace of the target's
+    own ``secret_ref``, taken from the secret's identity (no ``#field``
+    selector, no GSM version pin). ``None`` means no prefix is resolvable
+    -- the caller rejects. Other ops that take a caller-named secret
+    reference (for example ``srm.remote_login``) pass their own
+    *extra_key*.
     """
     extras = getattr(target, "extras", None)
-    setting = extras.get(GUEST_SECRET_PREFIX_EXTRA) if isinstance(extras, dict) else None
+    setting = extras.get(extra_key) if isinstance(extras, dict) else None
     if isinstance(setting, str) and setting.strip():
         kind, store_prefix = _split(setting.strip())
         if not store_prefix:
@@ -167,21 +171,30 @@ def allowed_guest_secret_prefix(target: Any) -> tuple[str, str] | None:
     return None if parent is None else (kind, parent)
 
 
-def check_guest_secret_ref(guest_secret_ref: str, target: Any) -> None:
+def check_guest_secret_ref(
+    guest_secret_ref: str,
+    target: Any,
+    *,
+    param: str = GUEST_SECRET_REF_PARAM,
+    extra_key: str = GUEST_SECRET_PREFIX_EXTRA,
+) -> None:
     """Reject *guest_secret_ref* unless it falls under the target's allowed prefix.
 
     Fail-closed: a missing prefix, a backend-kind mismatch, a ``.`` / ``..``
     / empty path segment, or a path outside the prefix all raise
     :class:`GuestSecretRefScopeError`. Nothing is read from any store.
+    *param* names the op parameter in the error; *extra_key* is the
+    per-target ``extras`` key that replaces the default prefix.
     """
     shown = secret_ref_prefix(guest_secret_ref)
-    allowed = allowed_guest_secret_prefix(target)
+    allowed = allowed_guest_secret_prefix(target, extra_key=extra_key)
     target_name = getattr(target, "name", "?")
+    label = param.removesuffix("_ref").replace("_", "-")
     if allowed is None:
         raise GuestSecretRefScopeError(
-            f"guest_secret_ref {shown!r} rejected: target {target_name!r} has no "
-            f"allowed guest-secret prefix (its secret_ref has no parent namespace "
-            f"and extras.{GUEST_SECRET_PREFIX_EXTRA} is unset)"
+            f"{param} {shown!r} rejected: target {target_name!r} has no "
+            f"allowed {label} prefix (its secret_ref has no parent namespace "
+            f"and extras.{extra_key} is unset)"
         )
     kind, store_ref = _split(guest_secret_ref)
     allowed_kind, prefix = allowed
@@ -193,8 +206,8 @@ def check_guest_secret_ref(guest_secret_ref: str, target: Any) -> None:
     )
     if not in_scope:
         raise GuestSecretRefScopeError(
-            f"guest_secret_ref {shown!r} rejected: it is outside the allowed "
-            f"guest-secret prefix {allowed_kind}:{prefix!r} of target {target_name!r}"
+            f"{param} {shown!r} rejected: it is outside the allowed "
+            f"{label} prefix {allowed_kind}:{prefix!r} of target {target_name!r}"
         )
 
 

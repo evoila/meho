@@ -22,8 +22,8 @@ them after the suite changed a lot, or when one shard is much slower
 than the others again. Take them from CI, not from a laptop: tests that
 need Docker or the spec shelf skip locally but run in CI. Every unit
 shard uploads its per-test times as the artifact
-``python-unit-shard-junit-<N>``. Download the four files of one green
-run and pass them all to ``--measure``::
+``python-unit-shard-junit-<N>``. Download the files of one green run
+(one per shard) and pass them all to ``--measure``::
 
     gh run download <run-id> --repo evoila/meho \\
         --pattern 'python-unit-shard-junit-*' --dir /tmp/unit-junit
@@ -34,7 +34,7 @@ run and pass them all to ``--measure``::
 CI usage (see the ``python-unit-shard`` job in ``.github/workflows/ci.yml``)::
 
     find tests -name 'test_*.py' ... | sort \\
-        | uv run python tests/_unit_shard_split.py --shard 2 --total 4
+        | uv run python tests/_unit_shard_split.py --shard 2 --total 5
 
 Integration tests: the ``python-integration-shard`` job passes
 ``--durations tests/_integration_shard_durations.json``. Its shards

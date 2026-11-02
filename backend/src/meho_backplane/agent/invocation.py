@@ -104,9 +104,13 @@ from meho_backplane.agent.toolset import toolset_admits_runbook_execution
 from meho_backplane.agents.schemas import AgentDefinitionRead
 from meho_backplane.agents.service import AgentDefinitionService
 from meho_backplane.auth.agent_token import get_client_credentials_token
-from meho_backplane.auth.delegation import actor_delegation, resolve_actor_sub
+from meho_backplane.auth.delegation import (
+    actor_delegation,
+    delegated_operator,
+    resolve_actor_sub,
+)
 from meho_backplane.auth.jwt import verify_jwt_for_audience
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentRun as AgentRunRow
 from meho_backplane.db.models import AgentRunStatus, AgentRunTrigger
@@ -133,6 +137,7 @@ __all__ = [
     "AgentInvocationError",
     "AgentInvoker",
     "AgentNotFoundError",
+    "AgentNotOwnedError",
     "AgentRunNotFoundError",
     "AgentRunOutcome",
     "AgentRunStatusView",
@@ -182,6 +187,23 @@ class AgentDisabledError(AgentInvocationError):
     def __init__(self, name: str) -> None:
         self.name = name
         super().__init__(f"agent definition {name!r} is disabled")
+
+
+class AgentNotOwnedError(AgentInvocationError):
+    """An agent login asked to run a definition that is not its own.
+
+    An agent starts only the definitions whose ``identity_ref`` names its
+    own Keycloak client. A person may start any definition of the tenant.
+    The boundary maps this to 403 (``agent_not_owned``); the scheduled path
+    refuses the same case before it creates a run.
+    """
+
+    def __init__(self, name: str, *, client_id: str | None, identity_ref: str) -> None:
+        self.name = name
+        super().__init__(
+            f"run rejected: agent credentials for {client_id!r} "
+            f"do not own definition {name!r} (identity_ref={identity_ref!r})"
+        )
 
 
 class AgentRunNotFoundError(AgentInvocationError):
@@ -502,13 +524,27 @@ class AgentInvoker:
         operator: Operator,
         name: str,
     ) -> AgentDefinitionRead:
-        """Load an enabled definition for the operator's tenant or raise."""
+        """Load an enabled definition for the operator's tenant or raise.
+
+        An agent login gets only its own definition: the one whose
+        ``identity_ref`` is the agent's client id (``agent:<name>``, the
+        ``azp`` claim of its token). Every direct path (run, the event
+        stream) and the scheduled path load through here, so the owner
+        check is the same on all of them.
+        """
         service = AgentDefinitionService()
         entry = await service.get(operator.tenant_id, name)
         if entry is None:
             raise AgentNotFoundError(name)
         if not entry.enabled:
             raise AgentDisabledError(name)
+        if (
+            operator.principal_kind is PrincipalKind.AGENT
+            and entry.identity_ref != operator.client_id
+        ):
+            raise AgentNotOwnedError(
+                name, client_id=operator.client_id, identity_ref=entry.identity_ref
+            )
         return entry
 
     async def ensure_runnable(self, operator: Operator, name: str) -> None:
@@ -923,6 +959,8 @@ class AgentInvoker:
         # whole life; every audit row its in-process tool calls produce records
         # operator_sub=human + actor_sub=agent. Keycloak has no delegation
         # token exchange, so MEHO synthesises the sub+act binding here.
+        # The loop's tool calls get the person narrowed to the agent's own
+        # limits (delegated_operator), so the stricter identity applies.
         #
         # Persist the durable run row *inside* the binding so a fail-closed
         # actor_delegation (empty identity_ref) raises before the row is
@@ -944,7 +982,7 @@ class AgentInvoker:
             task = self._launch_run(
                 run_id,
                 definition,
-                operator,
+                delegated_operator(operator),
                 inputs,
                 meta=AgentRunAuditMeta(model=model, provider=provider),
                 lease_owner=lease_owner,
@@ -1587,7 +1625,9 @@ class AgentInvoker:
             name=f"agent-heartbeat-{run_id}",
         )
         try:
-            async for event in self._runtime.stream_events(definition, operator, inputs, run_id):
+            async for event in self._runtime.stream_events(
+                definition, delegated_operator(operator), inputs, run_id
+            ):
                 if event.kind is AgentRunEventKind.FINAL:
                     terminal_output = _project_output(event.data.get("output"))
                 elif event.kind is AgentRunEventKind.ERROR:

@@ -40,6 +40,16 @@ the reconcile only.
 Evidence + activation record: the ``nsx-9.0`` entry of
 ``docs/decisions/spec-reconcile-guards-standard.md``.
 
+**NSX 4.x lane (#4396).** NSX has two implementations: ``nsx-rest-9.0``
+for NSX 9.x and ``nsx-rest-4.2`` for NSX 4.x. The 4.x class inherits
+every hand-coded path from the 9.x class, so the same declared set is
+checked a second time against the NSX 4.2 and 4.1 manager specs
+(``nsx-4.2/`` and ``nsx-4.1/`` on the shelf, same file names and the
+same OpenAPI 3.0 conversion as ``nsx-9.0/``). Those files are not on
+the shelf yet, so the 4.x lane skips with the harness's uniform reason
+until they are pinned; CI's spec-shelf checkout and required-file list
+gain them in the same change that pins them.
+
 The manifest-pin test below runs unconditionally, so the enumeration
 wiring stays proven even where the shelf is not provisioned: a renamed
 constant, a dropped path, or a new hand-coded path shows up as a loud
@@ -47,6 +57,8 @@ diff there, never as a silently shrunk (or vacuously green) reconcile.
 """
 
 from __future__ import annotations
+
+import pytest
 
 from meho_backplane.connectors.nsx import connector as _connector_module
 from meho_backplane.connectors.nsx import typed_reads as _typed_reads_module
@@ -57,6 +69,8 @@ from tests._spec_shelf import (
 )
 
 _SPEC_DIR = "nsx-9.0"
+#: Shelf folders for the NSX 4.x implementation's lane (not pinned yet).
+_SPEC_DIRS_4X = ("nsx-4.2", "nsx-4.1")
 #: Both manager-served specs, converted to OpenAPI 3.0 on the shelf
 #: (see the module docstring); the lane unions their served sets.
 _SPEC_FILES = ("nsx_api.openapi3.json", "nsx_policy_api.openapi3.json")
@@ -114,6 +128,20 @@ def test_nsx_hand_coded_op_id_manifest_is_pinned() -> None:
     }
 
 
+def _assert_served_by(spec_dir: str) -> None:
+    """Assert the declared set against both specs in *spec_dir* (skip if absent)."""
+    served: set[str] = set()
+    for spec_file in _SPEC_FILES:
+        spec_path = require_shelf_spec(spec_dir, spec_file)
+        served |= openapi_served_op_ids(spec_path)
+    declared = {_SPEC_MODELED_OP_IDS.get(op_id, op_id) for op_id in _declared_op_ids()}
+    assert_op_ids_served(
+        declared,
+        served,
+        spec_label=f"{spec_dir}/{{{' + '.join(_SPEC_FILES)}}}",
+    )
+
+
 def test_nsx_hand_coded_paths_are_served_by_the_pinned_specs() -> None:
     """Every hand-coded nsx op_id is served by the pinned nsx-9.0 specs.
 
@@ -123,13 +151,14 @@ def test_nsx_hand_coded_paths_are_served_by_the_pinned_specs() -> None:
     applied — against the union. A red run here is the guard surfacing
     a finding; triage per docs/decisions/spec-reconcile-guards-standard.md.
     """
-    served: set[str] = set()
-    for spec_file in _SPEC_FILES:
-        spec_path = require_shelf_spec(_SPEC_DIR, spec_file)
-        served |= openapi_served_op_ids(spec_path)
-    declared = {_SPEC_MODELED_OP_IDS.get(op_id, op_id) for op_id in _declared_op_ids()}
-    assert_op_ids_served(
-        declared,
-        served,
-        spec_label=f"{_SPEC_DIR}/{{{' + '.join(_SPEC_FILES)}}}",
-    )
+    _assert_served_by(_SPEC_DIR)
+
+
+@pytest.mark.parametrize("spec_dir", _SPEC_DIRS_4X)
+def test_nsx4_hand_coded_paths_are_served_by_the_4x_specs(spec_dir: str) -> None:
+    """The NSX 4.x lane: the same declared set against the NSX 4.2 and 4.1 specs.
+
+    ``nsx-rest-4.2`` inherits every hand-coded path, so each must be
+    served by the 4.x manager specs too. Skips until the shelf has them.
+    """
+    _assert_served_by(spec_dir)

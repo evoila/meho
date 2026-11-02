@@ -6,7 +6,7 @@
 Importing this package registers :class:`VrConnector` against the v2
 connector registry under ``(product="vr", version="9.1",
 impl_id="vr-rest")`` plus the product wildcard, and queues the typed-op
-registrar so ``vr.about`` and ``vr.api_file.get`` land in
+registrar so every ``vr.*`` operation (:data:`VR_TYPED_OPS`) lands in
 ``endpoint_descriptor`` before the first dispatch. The ``>=8.8,<10.0``
 range keeps vSphere Replication 8.8 and 9.0 on the same class: all three
 versions serve the vSphere Replication REST API v2.

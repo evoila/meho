@@ -392,6 +392,44 @@ func TestAddExtraWithoutEqualsFails(t *testing.T) {
 	}
 }
 
+// TestAddSecretFieldSeedsSecretFieldMap pins that repeatable
+// --secret-field connector_field=source_field flags land as one
+// secret_field_map object (#3711).
+func TestAddSecretFieldSeedsSecretFieldMap(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
+	gotBody, stderr, err := captureAddBody(t,
+		"ssh-01", "--product", "ssh", "--host", "ssh-01.example.com",
+		"--secret-field", "ssh_private_key=private_key", "--secret-field", "username=login")
+	if err != nil {
+		t.Fatalf("add --secret-field: %v\nstderr=%s", err, stderr.String())
+	}
+	m, ok := gotBody["secret_field_map"].(map[string]any)
+	if !ok {
+		t.Fatalf("secret_field_map should be a JSON object; got %#v", gotBody["secret_field_map"])
+	}
+	if m["ssh_private_key"] != "private_key" || m["username"] != "login" || len(m) != 2 {
+		t.Errorf("secret_field_map: got %v", m)
+	}
+}
+
+// TestAddSecretFieldMalformedFails pins that a --secret-field without
+// `=`, or with an empty side, is a local exit-4 error.
+func TestAddSecretFieldMalformedFails(t *testing.T) {
+	t.Parallel()
+	for _, bad := range []string{"ssh_private_key", "=private_key", "ssh_private_key="} {
+		_, stderr, err := runAddCmd(t, "",
+			"ssh-01", "--product", "ssh", "--host", "ssh-01.example.com",
+			"--secret-field", bad)
+		type ec interface{ ExitCode() int }
+		if x, ok := err.(ec); !ok || x.ExitCode() != 4 {
+			t.Fatalf("--secret-field %q should exit 4; got %v", bad, err)
+		}
+		if !strings.Contains(stderr.String(), "connector_field=source_field") {
+			t.Errorf("stderr should explain the expected shape; got:\n%s", stderr.String())
+		}
+	}
+}
+
 // TestAddVPNRequiredSendsTrue pins that --vpn-required sends
 // "vpn_required": true. Without the flag the key is left out, so the
 // server default (false) applies; TestAddSuccessRendersTargetAndOmitsTenantID

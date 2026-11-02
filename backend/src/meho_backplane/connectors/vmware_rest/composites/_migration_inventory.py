@@ -4,9 +4,9 @@
 """``vmware.migration.inventory`` -- one vCenter as a migration inventory.
 
 A read-only multi-step operation. It returns one
-:class:`~meho_backplane.connectors.migration.contracts.InventoryEnvelope`
+:class:`~meho_backplane.connectors.inventory.contracts.InventoryEnvelope`
 with one server record per VM, so the migration operations
-(``migration.inventory.csv`` and the assessment) can load it by its handle.
+(``inventory.export`` and the assessment) can load it by its handle.
 
 Steps, all reads:
 
@@ -52,7 +52,7 @@ import structlog
 from pydantic import ValidationError
 
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
-from meho_backplane.connectors.migration.contracts import (
+from meho_backplane.connectors.inventory.contracts import (
     CountCheck,
     InventoryCounts,
     InventoryEnvelope,

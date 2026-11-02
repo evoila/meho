@@ -63,6 +63,7 @@ from meho_backplane.connectors._shared.cache_key import (
 )
 from meho_backplane.connectors._shared.profile_auth import SESSION_SCHEME_SPECS
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -75,6 +76,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.vcf_installer import typed_lifecycle as _lifecycle
 from meho_backplane.connectors.vcf_installer.profile import INSTALLER_EXECUTION_PROFILE
 from meho_backplane.connectors.vcf_installer.session import (
     InstallerCredentialsLoader,
@@ -151,6 +153,8 @@ class InstallerConnector(HttpConnector):
     ) -> None:
         super().__init__()
         self._creds_cache: dict[tuple[str, str], dict[str, str]] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._creds_lock = asyncio.Lock()
         self._session_tokens: dict[tuple[str, ...], str] = {}
         self._session_lock = asyncio.Lock()
@@ -178,15 +182,19 @@ class InstallerConnector(HttpConnector):
         """Return the cached session token for *target*, establishing on first use.
 
         The lock serialises concurrent first-use callers so two don't both pay
-        the ``POST /v1/tokens`` round-trip. The cache fast-path is closed to the
-        synthesised system operator (``is_system_operator``): a system caller
-        always re-establishes and its token is never written to the shared cache
-        (#1008).
+        the ``POST /v1/tokens`` round-trip. A cached token is used by a caller
+        only after their own Vault read of the target's secret passed once
+        (:meth:`_load_credentials` runs it on a hit). The cache fast-path is
+        closed to the synthesised system operator (``is_system_operator``): a
+        system caller always re-establishes and its token is never written to
+        the shared cache.
         """
         cache_key = credential_cache_key(target)
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None and not is_system_operator(operator):
+                # The caller's own Vault read, once; a hit for a caller who has read.
+                await self._load_credentials(target, operator)
                 return cached
             creds = await self._load_credentials(target, operator)
             client = await self._http_client(target)
@@ -228,6 +236,7 @@ class InstallerConnector(HttpConnector):
         """Public duck-typed credential-eviction hook for the dispatch path (#2396)."""
         async with self._creds_lock:
             self._creds_cache.pop(target_cache_key(target), None)
+            self._readers.forget(target)
 
     async def _get_json_with_session_retry(
         self,
@@ -299,13 +308,20 @@ class InstallerConnector(HttpConnector):
         """Return the cached credentials for *target*, loading from Vault on first use.
 
         The loaded dict must contain ``"username"`` and ``"password"``; a missing
-        key raises :exc:`RuntimeError` naming the target and key. The cache
-        fast-path is closed to the synthesised system operator (#1008).
+        key raises :exc:`RuntimeError` naming the target and key.
+
+        A cached entry is handed to a caller only after that caller's own
+        Vault read of the target's secret passed once in this process
+        (:class:`~meho_backplane.connectors._shared.secret_readers.SecretReaders`).
+        A hit for another caller runs the loader under their login first.
+        The synthesised system operator is never recorded, so it always runs
+        the loader. A caller who has read keeps cold load → cache →
+        reuse.
         """
         cache_key = target_cache_key(target)
         async with self._creds_lock:
             cached = self._creds_cache.get(cache_key)
-            if cached is not None and not is_system_operator(operator):
+            if cached is not None and self._readers.has_read(target, operator):
                 return cached
             raw = await self._credentials_loader(target, operator)
             try:
@@ -318,6 +334,7 @@ class InstallerConnector(HttpConnector):
                     "{'username': str, 'password': str}"
                 ) from exc
             self._creds_cache[cache_key] = raw
+            self._readers.record(target, operator)
             _log.info("installer_credentials_loaded", target=target.name, host=target.host)
             return raw
 
@@ -545,10 +562,109 @@ class InstallerConnector(HttpConnector):
 
         return await installer_bundles_download_impl(self, operator, target, params)
 
+    async def discovery_vcenter(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.discovery.vcenter`` shim — reuse check of a running vCenter."""
+        return await _lifecycle.installer_discovery_vcenter_impl(self, operator, target, params)
+
+    async def discovery_sddc_manager(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.discovery.sddc_manager`` shim — reuse check of an SDDC Manager."""
+        return await _lifecycle.installer_discovery_sddcm_impl(self, operator, target, params)
+
+    async def discovery_vcf_operations(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.discovery.vcf_operations`` shim — reuse check of VCF Operations."""
+        return await _lifecycle.installer_discovery_vcfops_impl(self, operator, target, params)
+
+    async def sddc_cancel(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.sddc.cancel`` shim — cancel a running bring-up task."""
+        return await _lifecycle.installer_sddc_cancel_impl(self, operator, target, params)
+
+    async def sddc_spec_get(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.sddc.spec.get`` shim — bring-up spec read, secrets replaced."""
+        return await _lifecycle.installer_sddc_spec_get_impl(self, operator, target, params)
+
+    async def appliance_info(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.appliance.info`` shim — appliance info read."""
+        return await _lifecycle.installer_appliance_info_impl(self, operator, target, params)
+
+    async def release_list(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.release.list`` shim — release list read."""
+        return await _lifecycle.installer_release_list_impl(self, operator, target, params)
+
+    async def system_proxy_get(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.proxy.get`` shim — proxy settings read (and job state)."""
+        from meho_backplane.connectors.vcf_installer.system_settings import installer_proxy_get_impl
+
+        return await installer_proxy_get_impl(self, operator, target, params)
+
+    async def system_proxy_set(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.proxy.set`` shim — proxy change."""
+        from meho_backplane.connectors.vcf_installer.system_settings import installer_proxy_set_impl
+
+        return await installer_proxy_set_impl(self, operator, target, params)
+
+    async def system_settings_get(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.settings.get`` shim — CEIP and system settings read."""
+        from meho_backplane.connectors.vcf_installer.system_settings import (
+            installer_settings_get_impl,
+        )
+
+        return await installer_settings_get_impl(self, operator, target, params)
+
+    async def system_settings_set(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.settings.set`` shim — CEIP and system settings change."""
+        from meho_backplane.connectors.vcf_installer.system_settings import (
+            installer_settings_set_impl,
+        )
+
+        return await installer_settings_set_impl(self, operator, target, params)
+
+    async def system_trusted_certificate_remove(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.trusted-certificates.remove`` shim — trust store remove."""
+        from meho_backplane.connectors.vcf_installer.system_settings import (
+            installer_trusted_certificate_remove_impl,
+        )
+
+        return await installer_trusted_certificate_remove_impl(self, operator, target, params)
+
+    async def sddc_resources_calculate(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.sddc.resources.calculate`` shim — resource calculation (9.1+)."""
+        from meho_backplane.connectors.vcf_installer.resources_calc import (
+            installer_resources_calculate_impl,
+        )
+
+        return await installer_resources_calculate_impl(self, operator, target, params)
+
     async def aclose(self) -> None:
         """Clear cached session tokens + credentials, then tear down the httpx pool."""
         async with self._session_lock:
             self._session_tokens.clear()
         async with self._creds_lock:
             self._creds_cache.clear()
+            self._readers.clear()
         await super().aclose()

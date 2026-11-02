@@ -10006,6 +10006,9 @@ async def test_vm_resize_memory_failure_after_cpu_is_partial(gate: _GateRecorder
     assert out["status"] == "partial"
     assert out["applied"] == {"cpu": True, "memory": False}
     assert "memory update failed" in out["guidance"]
+    # The error text stays in the issue, not in the guidance an approver reads (#5377).
+    assert "https://" not in out["guidance"]
+    assert "hardware/memory" in out["issues"][0]["message"]
 
 
 @pytest.mark.asyncio

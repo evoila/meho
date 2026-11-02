@@ -35,12 +35,14 @@ from typing import TYPE_CHECKING, Any, Literal
 import structlog
 
 if TYPE_CHECKING:
+    from meho_backplane.connectors.nsx.connector import NsxConnector
     from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
     "NSX_TYPED_OPS",
     "NSX_TYPED_WHEN_TO_USE_BY_GROUP",
     "NsxTypedOp",
+    "register_nsx4_typed_operations",
     "register_nsx_typed_operations",
 ]
 
@@ -810,7 +812,7 @@ async def register_nsx_typed_operations(
     *,
     embedding_service: EmbeddingService | None = None,
 ) -> None:
-    """Upsert every op in :data:`NSX_TYPED_OPS` into ``endpoint_descriptor``.
+    """Upsert every op in :data:`NSX_TYPED_OPS` under ``nsx-rest-9.0``.
 
     Queued onto the lifespan-driven registrar list via
     :func:`~meho_backplane.operations.typed_register.register_typed_op_registrar`
@@ -835,13 +837,39 @@ async def register_nsx_typed_operations(
     # (ONNX runtime + model), which pure connector/handler unit tests
     # should not pay. Lifespan callers have it warmed by the time this runs.
     from meho_backplane.connectors.nsx.connector import NsxConnector
+
+    await _register_nsx_typed_operations_for(NsxConnector, embedding_service=embedding_service)
+
+
+async def register_nsx4_typed_operations(
+    *,
+    embedding_service: EmbeddingService | None = None,
+) -> None:
+    """The same typed ops under ``nsx-rest-4.2``, where NSX 4.x targets resolve.
+
+    The op ids are the same on both implementations; rows are keyed by
+    ``(product, version, impl_id, op_id)``, so they never collide. The
+    dispatcher binds the inherited :class:`NsxConnector` handlers to the
+    resolved :class:`Nsx4Connector` instance.
+    """
+    from meho_backplane.connectors.nsx.connector_4x import Nsx4Connector
+
+    await _register_nsx_typed_operations_for(Nsx4Connector, embedding_service=embedding_service)
+
+
+async def _register_nsx_typed_operations_for(
+    connector_cls: type[NsxConnector],
+    *,
+    embedding_service: EmbeddingService | None,
+) -> None:
+    """Upsert every op in :data:`NSX_TYPED_OPS` under *connector_cls*'s triple."""
     from meho_backplane.operations.typed_register import register_typed_operation
 
     for op in NSX_TYPED_OPS:
-        handler = getattr(NsxConnector, op.handler_attr, None)
+        handler = getattr(connector_cls, op.handler_attr, None)
         if handler is None:
             raise AttributeError(
-                f"NsxConnector typed op {op.op_id!r} declares "
+                f"{connector_cls.__name__} typed op {op.op_id!r} declares "
                 f"handler_attr={op.handler_attr!r} but the class has no such attribute"
             )
         when_to_use = (
@@ -849,14 +877,14 @@ async def register_nsx_typed_operations(
         )
         if op.group_key is not None and when_to_use is None:
             raise ValueError(
-                f"NsxConnector typed op {op.op_id!r} declares "
+                f"{connector_cls.__name__} typed op {op.op_id!r} declares "
                 f"group_key={op.group_key!r} but no curated when_to_use exists for "
                 f"that key. Add an entry to NSX_TYPED_WHEN_TO_USE_BY_GROUP."
             )
         await register_typed_operation(
-            product=NsxConnector.product,
-            version=NsxConnector.version,
-            impl_id=NsxConnector.impl_id,
+            product=connector_cls.product,
+            version=connector_cls.version,
+            impl_id=connector_cls.impl_id,
             op_id=op.op_id,
             handler=handler,
             summary=op.summary,
@@ -874,7 +902,7 @@ async def register_nsx_typed_operations(
     _log.info(
         "nsx_typed_operations_registered",
         count=len(NSX_TYPED_OPS),
-        product=NsxConnector.product,
-        version=NsxConnector.version,
-        impl_id=NsxConnector.impl_id,
+        product=connector_cls.product,
+        version=connector_cls.version,
+        impl_id=connector_cls.impl_id,
     )

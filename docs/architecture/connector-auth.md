@@ -177,8 +177,14 @@ For a target tagged `shared_service_account`:
   — caching it once is the right shape, not a leak.
 - Per-operator attribution still lands in MEHO's own audit log (the
   `dispatch` row) and in Vault's audit log on the **first** read per
-  `(target, connector-instance)` lifetime — every subsequent cache hit
-  skips Vault entirely, which is the cache's whole point.
+  caller, target and connector instance. A cached entry is handed to a
+  caller only after that caller's own Vault read of the target's secret
+  passed once in this process. Later calls of the same caller skip Vault,
+  which is the cache's whole point; a new caller reads once first, so
+  Vault's answer reaches every caller also when the cache is warm. The
+  mechanism is `SecretReaders` in
+  `backend/src/meho_backplane/connectors/_shared/secret_readers.py`
+  (see `docs/codebase/connectors-shared-secret-readers.md`).
 
 ### The cache implementations
 
@@ -191,6 +197,7 @@ For a target tagged `shared_service_account`:
 | vmware-rest | `backend/src/meho_backplane/connectors/vmware_rest/connector.py` | `_session_tokens` (in `_session_token`) | `vmware-api-session-id` cache; the G3.9 precedent every other cache here copied. |
 | harbor | `backend/src/meho_backplane/connectors/harbor/connector.py` | `_creds_cache` (in `_load_credentials`) | Credential dict cache; per-target `{username, password}` consumed via HTTP Basic. |
 | sddc-manager | `backend/src/meho_backplane/connectors/sddc_manager/connector.py` | `_creds_cache` (in `_load_credentials`) | Credential dict cache; per-target `{username, password}` consumed via HTTP Basic (username suffixed with `@sso_realm`). |
+| SSH adapter (every connector built on `SshConnector`) | `backend/src/meho_backplane/connectors/adapters/ssh.py` | `_connections` (in `_connect`) | Open SSH connection pool, keyed on `(tenant_id, id, caller kind, caller sub)`. Not a credential cache: an entry is a logged-in session, so it is handed back only to the caller whose own Vault read opened it. The caller kind keeps the check runner, a call without a token (a runbook verification) and an operator-less probe in their own slots, also when they run under a person's `sub`. `invalidate_credentials` drops every caller's connection to the target. |
 
 Every cache site applies a fail-closed guard before the cache lookup so a
 cache hit can never short-circuit past the loader and return
@@ -200,19 +207,31 @@ credential loader's `_resolve_secret_ref` helper at
 [`vault_creds.py:188`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py#L188);
 the cache guards are the **second** layer — defense-in-depth.
 
-The guards split on *how* they identify a system/operator-less caller:
+The guard has two parts:
 
-- The five session-token / VCF caches reject an **empty** `operator.raw_jwt`
-  at the cache method (`VaultCredentialsReadError` without touching the
-  cache).
-- The two HTTP-Basic credential caches (`harbor`, `sddc-manager`) instead
-  key off the `SYSTEM_OPERATOR_SUB` sentinel via
-  `is_system_operator(operator)` (#1008). Since #980 the synthesised
-  system operator carries a **non-empty placeholder** `raw_jwt`, so an
-  empty-`raw_jwt` check no longer identifies it. On a system-operator call
-  these connectors skip the cache fast-path and run the loader, which fails
-  closed (the placeholder JWT is not a valid Keycloak JWT). A real
-  operator's cold-load → cache → reuse path is unchanged.
+- **Who has read.** Every cache keeps a `SecretReaders` list: the callers
+  (by kind and `operator.sub`) whose own Vault read of the target's secret
+  passed in this process. A cache hit counts only for such a caller. For
+  any other caller the cache method runs the credential loader under that
+  caller's login first; the loader's answer decides, and a refused read
+  raises. A person, the check runner and the system operator are each
+  their own caller: the check runner has its own token and Vault role but
+  may run a Sensor under its creator's `sub`, so its kind
+  (`check_runner_dispatch`) is part of the key and it never counts as
+  that person. The vendor login stays shared: a new
+  caller gets the cached token after their read, without a second login
+  (some vendors allow only one active session per user). A target change
+  (`invalidate_credentials`) forgets the readers of that target together
+  with its entries. The synthesised system operator is never recorded, so
+ it runs the loader every time; on a live Vault that read fails
+ closed, because its placeholder `raw_jwt` is not a valid Keycloak
+  JWT.
+- **The older pre-checks stay.** The session-token and VCF caches reject
+  an **empty** `operator.raw_jwt` at the cache method
+  (`VaultCredentialsReadError` without touching the cache), and the
+  credential caches that keyed the fast path off `is_system_operator`
+  keep the system operator out of the cache write as before. A caller who
+  has read keeps the cold-load → cache → reuse path.
 
 (Each consuming connector's `auth_headers` enforces a separate constraint —
 the `auth_model == "shared_service_account"` boundary — and does not itself
@@ -243,9 +262,12 @@ converges with no restart. Eviction is not paired with an immediate retry: at
 failure time the restage has not happened yet, so a retry would only replay the
 rejected bytes; convergence needs the operator's restage between dispatches.
 
-`nsx` and `vmware-rest` expose no hook by design — they cache only the session
-token and re-read the service-account credential from Vault on every establish,
-so a restage already converges on the next cold-session dispatch.
+`nsx`, `vmware-rest`, `hcx`, `salt`, the SRM / vSphere Replication base, `vro`
+and the profiled connectors cache only the session token and re-read the
+service-account credential from Vault on every establish, so a restage already
+converges on the next cold-session dispatch. Their `invalidate_credentials`
+hook drops the session and forgets who has read the target's secret, so after
+a target change every caller reads the new secret before the next login.
 
 ### Why not key the cache on the operator too
 
@@ -255,6 +277,18 @@ operator who has ever dispatched against the target, all entries holding
 byte-identical credentials. Storage waste, identical wire traffic, no
 extra audit fidelity (Vault still attributes only the first read per
 operator-cache-entry).
+
+The SSH connection pool is the one cache keyed on the caller. It does not
+hold the credential; it holds an open, logged-in session. Serving that
+session to a second caller would skip the Vault read for that caller, so
+the pool keeps one connection per caller and target. A caller is the kind
+of login (a person or machine, a call without a token, the check runner,
+or the system caller) plus the `sub`. A Sensor runs under its creator's
+`sub` with the check runner's own token and Vault role, and a runbook
+verification runs under the assigned person's `sub` with no token, so
+Vault refuses its read. Each gets its own slot and never the person's
+session. The cost is one SSH login per caller per target instead of one
+per target.
 
 ### When this changes — `per_user` / `impersonation`
 

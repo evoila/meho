@@ -72,6 +72,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -170,6 +171,8 @@ class VroConnector(HttpConnector):
         #: Per credential: the ``Authorization`` value, and the session
         #: token when it ends (``vcfa-session``); ``None`` for the other logins.
         self._authorizations: dict[tuple[str, ...], tuple[str, VcfaSessionToken | None]] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._auth_lock = asyncio.Lock()
         self._credentials_loader: VroCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
@@ -208,8 +211,14 @@ class VroConnector(HttpConnector):
             if cached is not None and checked:
                 value, session = cached
                 if session is None or not session.needs_renewal():
+                    # The caller's own Vault read, once per caller and target.
+                    await self._readers.ensure_read(
+                        target, operator, lambda: self._credentials_loader(target, operator)
+                    )
                     return value
             creds = await self._credentials_loader(target, operator)
+            if checked:
+                self._readers.record(target, operator)
             session = None
             if mode == LOGIN_AUTOMATION:
                 from meho_backplane.connectors.vra8._auth import vra8_login
@@ -253,6 +262,17 @@ class VroConnector(HttpConnector):
                 rejected,
                 lambda cached: {"Authorization": cached[0]},
             )
+
+    async def invalidate_credentials(self, target: VroTargetLike) -> None:
+        """Drop the login of *target* and forget who has read its secret.
+
+        Called after a failed login and after a target change. The next call
+        of every caller reads the secret from Vault again, under their own
+        login, and logs in with what it finds.
+        """
+        await self.invalidate_session(target)
+        async with self._auth_lock:
+            self._readers.forget(target)
 
     async def _vro_get(
         self,
@@ -509,4 +529,5 @@ class VroConnector(HttpConnector):
         """Clear cached logins, then tear down the httpx pool."""
         async with self._auth_lock:
             self._authorizations.clear()
+            self._readers.clear()
         await super().aclose()

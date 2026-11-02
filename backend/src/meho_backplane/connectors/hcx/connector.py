@@ -79,6 +79,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vcf_auth import session_establish_auth_error
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -179,6 +180,8 @@ class HcxConnector(HcxManagerSetupOps, HttpConnector):
     def __init__(self, *, session_loader: HcxSessionLoader | None = None) -> None:
         super().__init__()
         self._session_tokens: dict[tuple[str, ...], str] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._session_lock = asyncio.Lock()
         self._session_loader: HcxSessionLoader = (
             session_loader if session_loader is not None else load_session_credentials_from_vault
@@ -206,8 +209,13 @@ class HcxConnector(HcxManagerSetupOps, HttpConnector):
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
+                # The caller's own Vault read, once per caller and target.
+                await self._readers.ensure_read(
+                    target, operator, lambda: self._session_loader(target, operator)
+                )
                 return cached
             creds = await self._session_loader(target, operator)
+            self._readers.record(target, operator)
             try:
                 body = {"username": creds["username"], "password": creds["password"]}
             except KeyError as exc:
@@ -258,6 +266,17 @@ class HcxConnector(HcxManagerSetupOps, HttpConnector):
             drop_rejected_token(
                 self._session_tokens, cache_key, rejected, lambda token: {_AUTH_HEADER: token}
             )
+
+    async def invalidate_credentials(self, target: HcxTargetLike) -> None:
+        """Drop the session of *target* and forget who has read its secret.
+
+        Called after a failed login and after a target change. The next call
+        of every caller reads the secret from Vault again, under their own
+        login, and logs in with what it finds.
+        """
+        async with self._session_lock:
+            self._session_tokens.pop(credential_cache_key(target), None)
+            self._readers.forget(target)
 
     async def manager_version(self, target: HcxTargetLike, operator: Operator) -> HcxManagerVersion:
         """Read the HCX Manager version. Never raises: a failure is named in ``error``."""
@@ -657,4 +676,5 @@ class HcxConnector(HcxManagerSetupOps, HttpConnector):
         """Clear cached session tokens, then tear down the httpx pool."""
         async with self._session_lock:
             self._session_tokens.clear()
+            self._readers.clear()
         await super().aclose()

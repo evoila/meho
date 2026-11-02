@@ -196,7 +196,7 @@ async def _clone_precheck(
             existing_vm=existing,
         )
         return early, name, folder
-    running = await running_task(
+    running, complete = await running_task(
         connector, target, operator, props.get("recentTask"), _CLONE_DESCRIPTION_ID
     )
     if running is not None:
@@ -207,6 +207,14 @@ async def _clone_precheck(
         early = _clone_answer(
             "already_running", params, guidance, source_vm_name=name, folder=folder, task=running
         )
+        return early, name, folder
+    if not complete:
+        guidance = (
+            f"vCenter did not answer for every recent task of VM {source!r}, so MEHO cannot "
+            "tell whether a copy still runs. Nothing was sent. Read vmware.tasks.recent, then "
+            "try again."
+        )
+        early = _clone_answer("check_failed", params, guidance, source_vm_name=name, folder=folder)
         return early, name, folder
     return None, name, folder
 

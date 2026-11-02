@@ -73,12 +73,23 @@ _RELOCATE_VM_PROPS: Final = [
 ]
 
 
-def build_relocate_spec(params: dict[str, Any]) -> dict[str, Any]:
-    """The ``VirtualMachineRelocateSpec`` of the call: only the fields it names."""
+def build_relocate_spec(
+    params: dict[str, Any], *, current_host: str | None = None
+) -> dict[str, Any]:
+    """The ``VirtualMachineRelocateSpec`` of the call.
+
+    Only the fields the call names go in, with one addition: a move that
+    names no ``host`` and no ``resource_pool`` (a storage-only move, or a
+    folder move) sends *current_host* as ``host``, so the VM stays where it
+    runs and vCenter never has to guess. A move to a pool without ``host``
+    leaves the host to vCenter (DRS picks one).
+    """
     spec: dict[str, Any] = {VIM_TYPE_NAME_KEY: _RELOCATE_SPEC_TYPE}
     for name, field, mo_type, _pattern in PLACEMENT_FIELDS:
         if isinstance(params.get(name), str):
             spec[field] = vim_moref(mo_type, params[name])
+    if "host" not in spec and "pool" not in spec and current_host is not None:
+        spec["host"] = vim_moref("HostSystem", current_host)
     disks = params.get("disks") or []
     if disks:
         spec["disk"] = [
@@ -184,7 +195,7 @@ async def _relocate_precheck(
         guidance = f"VM {vm!r} is already where the call asks. Nothing was sent."
         early = _relocate_answer("unchanged", params, guidance, vm_name=name, before=before)
         return early, name, before
-    running = await running_task(
+    running, complete = await running_task(
         connector, target, operator, props.get("recentTask"), _RELOCATE_DESCRIPTION_ID
     )
     if running is not None:
@@ -195,6 +206,14 @@ async def _relocate_precheck(
         early = _relocate_answer(
             "already_running", params, guidance, vm_name=name, before=before, task=running
         )
+        return early, name, before
+    if not complete:
+        guidance = (
+            f"vCenter did not answer for every recent task of VM {vm!r}, so MEHO cannot tell "
+            "whether a move still runs. Nothing was sent. Read vmware.tasks.recent, then try "
+            "again."
+        )
+        early = _relocate_answer("check_failed", params, guidance, vm_name=name, before=before)
         return early, name, before
     return None, name, before
 
@@ -213,16 +232,19 @@ async def vm_relocate_composite(
     1. Check every moid, then read the VM and its recent tasks. An unknown VM
        is ``not_found``; an unknown disk key is ``invalid_request``; a VM that
        already is where the call asks is ``unchanged``; a move that still runs
-       is ``already_running``. Nothing is sent in these cases.
+       is ``already_running``; a task list vCenter did not answer in full is
+       ``check_failed``. Nothing is sent in these cases.
     2. Send ``RelocateVM_Task`` through the governed vim seam (a parked or
-       denied gate is returned as is). Answer ``accepted`` with the task id
-       and the status read; no waiting.
+       denied gate is returned as is). A move that names no host and no
+       resource pool sends the VM's current host. Answer ``accepted`` with
+       the task id and the status read; no waiting.
     """
     early, vm_name, before = await _relocate_precheck(connector, target, operator, params)
     if early is not None:
         return early
     vm = params["vm"]
-    body: dict[str, Any] = {"spec": build_relocate_spec(params)}
+    assert before is not None
+    body: dict[str, Any] = {"spec": build_relocate_spec(params, current_host=before["host"])}
     priority = params.get("priority")
     if isinstance(priority, str):
         body["priority"] = priority

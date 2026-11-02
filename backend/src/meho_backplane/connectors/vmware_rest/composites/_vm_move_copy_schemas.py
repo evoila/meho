@@ -40,6 +40,7 @@ _STATUSES_RELOCATE: Final = [
     "unchanged",
     "not_found",
     "invalid_request",
+    "check_failed",
 ]
 _STATUSES_CLONE: Final = [
     "accepted",
@@ -47,6 +48,7 @@ _STATUSES_CLONE: Final = [
     "already_exists",
     "not_found",
     "invalid_request",
+    "check_failed",
 ]
 
 
@@ -121,8 +123,10 @@ VM_RELOCATE_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
         ),
         "host": _moid(
             HOST_MOID_PATTERN,
-            "Moid of the host the VM runs on after the move, e.g. 'host-21'. Optional: "
-            "without it, vCenter keeps the host or DRS picks one.",
+            "Moid of the host the VM runs on after the move. Optional: without it, a "
+            "move that names no resource_pool keeps the current host (MEHO sends it), and "
+            "a move to a resource pool lets DRS pick a host. A running VM moved to a pool "
+            "of a cluster without DRS needs host.",
         ),
         "priority": {
             "type": "string",
@@ -140,7 +144,9 @@ VM_RELOCATE_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
         {"required": ["host"]},
     ],
     "additionalProperties": False,
-    "examples": [{"vm": "vm-42", "datastore": "datastore-12", "resource_pool": "resgroup-8"}],
+    "examples": [
+        {"vm": "<vm-moid>", "datastore": "<datastore-moid>", "resource_pool": "<pool-moid>"}
+    ],
 }
 
 _PLACEMENT: Final[dict[str, Any]] = {
@@ -169,7 +175,7 @@ VM_RELOCATE_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
                 "accepted: vCenter took the move task; the move is not done yet. "
                 "already_running: a move of this VM still runs; nothing new started. "
                 "unchanged: the VM is already where the call asks; nothing sent. "
-                "not_found / invalid_request: nothing sent; guidance says why."
+                "not_found / invalid_request / check_failed: nothing sent; guidance says why."
             ),
         },
         "vm": {"type": "string", "description": "The VM moid of the call."},
@@ -250,7 +256,7 @@ VM_CLONE_FROM_VM_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
         },
     ],
     "additionalProperties": False,
-    "examples": [{"source_vm": "vm-42", "name": "<new-vm-name>", "folder": "group-v3"}],
+    "examples": [{"source_vm": "<vm-moid>", "name": "<new-vm-name>", "folder": "<folder-moid>"}],
 }
 
 VM_CLONE_FROM_VM_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
@@ -263,7 +269,7 @@ VM_CLONE_FROM_VM_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
                 "accepted: vCenter took the copy task; the new VM is not ready yet. "
                 "already_running: a copy of this VM still runs; nothing new started. "
                 "already_exists: the folder has a VM with this name; nothing sent. "
-                "not_found / invalid_request: nothing sent; guidance says why."
+                "not_found / invalid_request / check_failed: nothing sent; guidance says why."
             ),
         },
         "source_vm": {"type": "string", "description": "The source VM moid of the call."},
@@ -298,7 +304,10 @@ VM_RELOCATE_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     ),
     "parameter_hints": {
         "disks": "Only for disks that go to another datastore than the VM files.",
-        "host": "Leave out to keep the host, or let DRS pick one.",
+        "host": (
+            "Leave out to keep the host (no resource_pool) or to let DRS pick one "
+            "(resource_pool of a DRS cluster)."
+        ),
     },
     "output_shape": (
         "{status: accepted|already_running|unchanged|not_found|invalid_request, vm, vm_name, "

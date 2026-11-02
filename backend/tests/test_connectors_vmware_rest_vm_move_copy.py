@@ -31,7 +31,6 @@ from meho_backplane.connectors.vmware_rest.composites._vm_move_copy_schemas impo
     VM_RELOCATE_RESPONSE_SCHEMA,
 )
 from meho_backplane.connectors.vmware_rest.typed_ops_task_info import task_info_impl
-from meho_backplane.operations._validate import validate_params
 from tests._vmware_move_copy_fake import FOLDER, VM, MoveCopyVimFake, seed_vm
 from tests._vmware_teardown_fake import (
     GateRecorder,
@@ -41,6 +40,7 @@ from tests._vmware_teardown_fake import (
     parked,
     preview_ctx,
 )
+from tests.test_operation_contracts import example_problems
 
 _RELOCATE_SUB_OP = "POST:/VirtualMachine/{moId}/RelocateVM_Task"
 _CLONE_SUB_OP = "POST:/VirtualMachine/{moId}/CloneVM_Task"
@@ -216,6 +216,74 @@ async def test_relocate_is_not_blocked_by_other_or_ended_tasks(gate: GateRecorde
     assert len(conn.starts()) == 1
 
 
+async def test_relocate_sees_a_running_move_on_a_later_page(gate: GateRecorder) -> None:
+    conn = MoveCopyVimFake()
+    conn.page_size = 1
+    seed_vm(conn, recentTask=[moref("Task", "task-7"), moref("Task", "task-8")])
+    conn.task("task-7", state="success", descriptionId="VirtualMachine.relocate")
+    conn.task("task-8", state="running", descriptionId="VirtualMachine.relocate")
+    out = await _relocate(conn, datastore="datastore-12")
+    assert out["status"] == "already_running"
+    assert out["task"] == "task-8"
+    assert len(conn.continue_calls) == 1
+    assert conn.starts() == [] and gate.calls == []
+
+
+@pytest.mark.parametrize("why", ["unreadable", "omitted"])
+async def test_relocate_refuses_when_the_task_check_stays_incomplete(
+    gate: GateRecorder, why: str
+) -> None:
+    conn = MoveCopyVimFake()
+    seed_vm(conn, recentTask=[moref("Task", "task-7"), moref("Task", "task-8")])
+    conn.task("task-7", state="success", descriptionId="VirtualMachine.relocate")
+    conn.task("task-8", state="running", descriptionId="VirtualMachine.relocate")
+    if why == "unreadable":
+        conn.unreadable[("Task", "task-8")] = {"info"}
+    else:
+        conn.omitted.add("task-8")
+    out = await _relocate(conn, datastore="datastore-12")
+    assert out["status"] == "check_failed"
+    assert out["task"] is None
+    assert "cannot tell whether a move still runs" in out["guidance"]
+    assert out["before"]["host"] == "host-21"
+    Draft202012Validator(VM_RELOCATE_RESPONSE_SCHEMA).validate(out)
+    assert conn.starts() == [] and gate.calls == []
+
+
+@pytest.mark.parametrize(
+    ("params", "host"),
+    [
+        # A storage-only move of a running VM: the VM stays on its host.
+        ({"datastore": "datastore-12"}, "host-21"),
+        ({"disks": [{"disk_key": 2000, "datastore": "datastore-12"}]}, "host-21"),
+        ({"folder": "group-v7"}, "host-21"),
+        # A move to a pool without a host: vCenter (DRS) picks the host.
+        ({"resource_pool": "resgroup-9"}, None),
+        # A named host wins.
+        ({"datastore": "datastore-12", "host": "host-22"}, "host-22"),
+    ],
+)
+async def test_relocate_sends_the_current_host_unless_a_pool_or_host_is_named(
+    gate: GateRecorder, params: dict[str, Any], host: str | None
+) -> None:
+    conn = MoveCopyVimFake()
+    seed_vm(conn)
+    out = await _relocate(conn, **params)
+    assert out["status"] == "accepted"
+    [(_path, body)] = conn.calls_to("RelocateVM_Task")
+    assert body["spec"].get("host") == (None if host is None else moref("HostSystem", host))
+    assert out["requested"] == params
+
+
+async def test_relocate_sends_no_host_for_a_vm_without_one(gate: GateRecorder) -> None:
+    conn = MoveCopyVimFake()
+    seed_vm(conn, **{"runtime.host": None, "runtime.powerState": "poweredOff"})
+    out = await _relocate(conn, datastore="datastore-12")
+    assert out["status"] == "accepted"
+    [(_path, body)] = conn.calls_to("RelocateVM_Task")
+    assert "host" not in body["spec"]
+
+
 async def test_relocate_returns_a_parked_gate_as_is() -> None:
     conn = MoveCopyVimFake()
     seed_vm(conn)
@@ -296,7 +364,8 @@ async def test_relocate_preview_without_a_datastore_copies_nothing() -> None:
 
 def test_relocate_schema_needs_a_target_and_takes_the_example() -> None:
     for example in VM_RELOCATE_PARAMETER_SCHEMA["examples"]:
-        validate_params(VM_RELOCATE_PARAMETER_SCHEMA, example)
+        assert example_problems(VM_RELOCATE_PARAMETER_SCHEMA, example) == []
+        assert all(v.startswith("<") for v in example.values()), "placeholders only"
     validator = Draft202012Validator(VM_RELOCATE_PARAMETER_SCHEMA)
     assert not validator.is_valid({"vm": VM})
     assert validator.is_valid({"vm": VM, "disks": [{"disk_key": 2000, "datastore": "datastore-2"}]})
@@ -433,6 +502,38 @@ async def test_copy_returns_a_copy_that_still_runs(gate: GateRecorder) -> None:
     assert conn.starts() == []
 
 
+async def test_copy_sees_a_running_copy_on_a_later_page(gate: GateRecorder) -> None:
+    conn = MoveCopyVimFake()
+    conn.page_size = 1
+    seed_vm(conn, recentTask=[moref("Task", "task-4"), moref("Task", "task-5")])
+    conn.task("task-4", state="error", descriptionId="VirtualMachine.clone")
+    conn.task("task-5", state="queued", descriptionId="VirtualMachine.clone")
+    out = await _clone(conn)
+    assert out["status"] == "already_running"
+    assert out["task"] == "task-5"
+    assert len(conn.continue_calls) == 1
+    assert conn.starts() == []
+
+
+@pytest.mark.parametrize("why", ["unreadable", "omitted"])
+async def test_copy_refuses_when_the_task_check_stays_incomplete(
+    gate: GateRecorder, why: str
+) -> None:
+    conn = MoveCopyVimFake()
+    seed_vm(conn, recentTask=[moref("Task", "task-5")])
+    conn.task("task-5", state="queued", descriptionId="VirtualMachine.clone")
+    if why == "unreadable":
+        conn.unreadable[("Task", "task-5")] = {"info"}
+    else:
+        conn.omitted.add("task-5")
+    out = await _clone(conn)
+    assert out["status"] == "check_failed"
+    assert out["task"] is None
+    assert "cannot tell whether a copy still runs" in out["guidance"]
+    Draft202012Validator(VM_CLONE_FROM_VM_RESPONSE_SCHEMA).validate(out)
+    assert conn.starts() == [] and gate.calls == []
+
+
 async def test_copy_returns_a_parked_gate_as_is() -> None:
     conn = MoveCopyVimFake()
     seed_vm(conn)
@@ -478,7 +579,8 @@ async def test_copy_preview_echoes_the_request() -> None:
 
 def test_copy_schema_needs_a_snapshot_for_a_linked_copy() -> None:
     for example in VM_CLONE_FROM_VM_PARAMETER_SCHEMA["examples"]:
-        validate_params(VM_CLONE_FROM_VM_PARAMETER_SCHEMA, example)
+        assert example_problems(VM_CLONE_FROM_VM_PARAMETER_SCHEMA, example) == []
+        assert all(v.startswith("<") for v in example.values()), "placeholders only"
     validator = Draft202012Validator(VM_CLONE_FROM_VM_PARAMETER_SCHEMA)
     base = {"source_vm": VM, "name": "<new-vm-name>"}
     assert validator.is_valid(base)

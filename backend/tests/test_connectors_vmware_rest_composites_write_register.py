@@ -690,6 +690,7 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "unchanged",
             "not_found",
             "invalid_request",
+            "check_failed",
         },
         "vmware.composite.vm.clone_from_vm": {
             "accepted",
@@ -697,6 +698,7 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "already_exists",
             "not_found",
             "invalid_request",
+            "check_failed",
         },
     }
     for op_id, expected_values in expected_status_values.items():

@@ -5969,8 +5969,8 @@ Each one waits until a second person approves.
 
 | Operation | What it does | What it returns | Risk | Versions |
 |---|---|---|---|---|
-| `vmware.composite.vm.relocate` | Moves one VM to another datastore (Storage vMotion; each disk can go to its own datastore with `disks`), resource pool, folder or host of the same vCenter. | `status` (`accepted`, `already_running`, `unchanged`, `not_found`, `invalid_request`), `task`, `status_read`, `before` (power state, host, pool, folder, datastores), `requested` | `dangerous`, waits for approval | 8.0, 9.x |
-| `vmware.composite.vm.clone_from_vm` | Copies one VM, on or off, to a new VM: a full copy (`clone_type: full`), or a linked copy that shares the disks of a snapshot (`clone_type: linked`, needs `snapshot`). | `status` (`accepted`, `already_running`, `already_exists`, `not_found`, `invalid_request`), `task`, `status_read`, `folder`, `existing_vm` | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.composite.vm.relocate` | Moves one VM to another datastore (Storage vMotion; each disk can go to its own datastore with `disks`), resource pool, folder or host of the same vCenter. | `status` (`accepted`, `already_running`, `unchanged`, `not_found`, `invalid_request`, `check_failed`), `task`, `status_read`, `before` (power state, host, pool, folder, datastores), `requested` | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.composite.vm.clone_from_vm` | Copies one VM, on or off, to a new VM: a full copy (`clone_type: full`), or a linked copy that shares the disks of a snapshot (`clone_type: linked`, needs `snapshot`). | `status` (`accepted`, `already_running`, `already_exists`, `not_found`, `invalid_request`, `check_failed`), `task`, `status_read`, `folder`, `existing_vm` | `dangerous`, waits for approval | 8.0, 9.x |
 | `vmware.task.info` | The status read of both: one vCenter task by its id. | `state` (`queued`, `running`, `success`, `error`, `not_found`, `not_reachable`), progress, the vendor's error type and text, `result` | `safe` | 8.0, 9.x |
 
 Vendor calls: VIM `VirtualMachine.RelocateVM_Task` and
@@ -6003,12 +6003,23 @@ no version check is needed.
 vmware.task.info, params: {task}}`. It never says the move or the copy is
 done.
 
-- Before a start, each op reads the recent tasks of the VM. A move
-  (`VirtualMachine.relocate`) or a copy (`VirtualMachine.clone`) of the same
-  VM that is `queued` or `running` gives `already_running` with that task id,
-  and nothing new starts. This check is a help, not a lock: two callers can
+- Before a start, each op reads the recent tasks of the VM, every page of
+  the answer. A move (`VirtualMachine.relocate`) or a copy
+  (`VirtualMachine.clone`) of the same VM that is `queued` or `running` gives
+  `already_running` with that task id, and nothing new starts. When vCenter
+  leaves a task out or cannot read its `info`, the answer is `check_failed`
+  and nothing is sent: MEHO does not start a job it cannot tell apart from
+  one that may still run. This check is a help, not a lock: two callers can
   both look before either starts, and a task that just ended is no longer in
   the list.
+- A move that names no `host` and no `resource_pool` (a storage-only move,
+  or a folder move) sends the VM's current host as `spec.host`, so the VM
+  stays where it runs. A move to a resource pool without `host` leaves the
+  host to vCenter: DRS picks one. A running VM moved to a pool of a cluster
+  without DRS needs `host`; vCenter refuses it otherwise.
+- The examples in both parameter schemas use placeholders such as
+  `<vm-moid>`, never ids that look real; a real call must pass real ids
+  (the moid patterns refuse a placeholder).
 - After a lost reply, do not start again blindly. Read `vmware.tasks.recent`
   or `vmware.task.info`, or read the VM (`vmware.vm.info`): a move that still
   runs comes back as `already_running`, and a finished copy as

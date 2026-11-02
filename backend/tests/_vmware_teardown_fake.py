@@ -163,13 +163,7 @@ class VimFake(PagedVim):
         moids = [o["obj"]["value"] for o in spec["objectSet"]]
         if mo_type == "Task":
             return self._serve_objects(
-                [
-                    {
-                        "obj": {"type": "Task", "value": m},
-                        "propSet": [{"name": "info", "val": self._tasks[m]}],
-                    }
-                    for m in moids
-                ]
+                [self._task_entry(m) for m in moids if m not in self.omitted]
             )
         objects = []
         for moid in moids:
@@ -205,6 +199,19 @@ class VimFake(PagedVim):
         if self.page_token and mo_type == "VirtualMachine":
             return self._serve([objects, []])
         return self._serve_objects(objects)
+
+    def _task_entry(self, moid: str) -> dict[str, Any]:
+        """One ``Task`` object of a ``RetrievePropertiesEx`` answer, with ``info``."""
+        if "info" in self.unreadable.get(("Task", moid), set()):
+            return {
+                "obj": {"type": "Task", "value": moid},
+                "propSet": [],
+                "missingSet": [{"path": "info", "fault": {"_typeName": "NoPermission"}}],
+            }
+        return {
+            "obj": {"type": "Task", "value": moid},
+            "propSet": [{"name": "info", "val": self._tasks[moid]}],
+        }
 
     # -- tasks -------------------------------------------------------------
     def _task(self, method: str, *, apply: Any, result: Any = None) -> dict[str, str]:

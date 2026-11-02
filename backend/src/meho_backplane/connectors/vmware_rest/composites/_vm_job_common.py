@@ -6,7 +6,8 @@
 Both send one ``VirtualMachine`` task method through the governed VI-JSON seam
 and answer ``accepted`` with the vCenter task id; ``vmware.task.info`` follows
 the task. Before a start both look for a task of the same kind that still
-runs on the VM.
+runs on the VM, and refuse to start when vCenter did not answer for every
+recent task (``check_failed``).
 """
 
 from __future__ import annotations
@@ -93,17 +94,29 @@ async def running_task(
     operator: Operator,
     recent: Any,
     description_id: str,
-) -> str | None:
-    """The id of a task of *description_id* that still runs on the VM, else ``None``.
+) -> tuple[str | None, bool]:
+    """``(task id, complete)``: a task of *description_id* that still runs on the VM.
+
+    The task id is ``None`` when no such task runs. ``complete`` is ``False``
+    when vCenter left a task out of its answer or could not read its
+    ``info``: then the caller does not know whether a job runs, and refuses
+    to start one. The read follows every page of the answer, so a running
+    task on a later page is seen.
 
     A help, not a lock: two callers can both look before either starts, and a
     task that just ended is no longer running.
     """
     task_ids = [moid for kind, moid in moref_values(recent) if kind in ("", TASK_MO_TYPE)]
     if not task_ids:
-        return None
-    infos, _complete = await read_many(
-        connector, target, operator, mo_type=TASK_MO_TYPE, moids=task_ids, props=["info"]
+        return None, True
+    infos, complete = await read_many(
+        connector,
+        target,
+        operator,
+        mo_type=TASK_MO_TYPE,
+        moids=task_ids,
+        props=["info"],
+        all_pages=True,
     )
     for task_id in task_ids:
         info = infos.get(task_id, {}).get("info")
@@ -112,8 +125,8 @@ async def running_task(
             and info.get("descriptionId") == description_id
             and info.get("state") in RUNNING_TASK_STATES
         ):
-            return task_id
-    return None
+            return task_id, complete
+    return None, complete
 
 
 async def send_vm_task(

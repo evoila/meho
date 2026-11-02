@@ -37,7 +37,7 @@ def _ci_integration_files() -> list[str]:
     return sorted(files)
 
 
-UNIT_SHARDS = 5
+UNIT_SHARDS = 6
 
 
 def _integration_shard_job() -> dict[str, Any]:

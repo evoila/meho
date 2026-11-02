@@ -45,12 +45,18 @@
 # the build backend out of the runtime venv (this stage is discarded). hatch's
 # `force-include` (alembic.ini + alembic/) and the `[project].readme` field are
 # read at build time, so the full source, README and migration tree are staged.
+#
+# The same stage builds the wheel of the connector kit (`connector-kit/`, the
+# module `meho_connector_kit` that connector packages import), so every image
+# carries the kit next to MEHO. The builder stage installs every wheel in
+# /wheels/. See docs/codebase/connector-packages.md, "The connector kit".
 FROM --platform=$BUILDPLATFORM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS wheelbuilder
 COPY --from=ghcr.io/astral-sh/uv:0.11.12@sha256:3a59a3cdd5f7c217faa36e32dbc7fddbb0412889c2a0a5229f6d790e5a019dd7 /uv /uvx /bin/
 ENV UV_PYTHON_DOWNLOADS=0 \
     UV_LINK_MODE=copy
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
+COPY connector-kit ./connector-kit
 COPY src ./src
 COPY alembic ./alembic
 COPY alembic.ini ./
@@ -58,9 +64,10 @@ COPY alembic.ini ./
 # resolve), into /app/.venv.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-build --no-install-project --only-group build
-# Build the wheel reusing the installed backend — no fresh PyPI resolution.
+# Build the wheels reusing the installed backend — no fresh PyPI resolution.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    VIRTUAL_ENV=/app/.venv uv build --wheel --no-build-isolation --out-dir /wheels
+    VIRTUAL_ENV=/app/.venv uv build --wheel --no-build-isolation --out-dir /wheels \
+ && VIRTUAL_ENV=/app/.venv uv build --wheel --no-build-isolation --out-dir /wheels connector-kit
 
 # ---------- Builder ----------------------------------------------------------
 # Resolves and installs locked dependencies into /app/.venv. The two-step
@@ -107,7 +114,11 @@ WORKDIR /app
 # Step 1: install locked dependencies only (cacheable). README.md is
 # co-copied so `uv sync` can read `[project].readme = "README.md"` from
 # pyproject without error; it costs ~1 KB on a cache hit.
+# The kit's pyproject.toml is co-copied too: uv.lock names the kit (a dev
+# dependency, read from `connector-kit/`), and `--locked` reads its metadata
+# even though `--no-dev` does not install it.
 COPY pyproject.toml uv.lock README.md ./
+COPY connector-kit/pyproject.toml ./connector-kit/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-build --no-dev --no-install-project
 
@@ -124,6 +135,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY --from=wheelbuilder /wheels /wheels
 RUN --mount=type=cache,target=/root/.cache/uv \
     VIRTUAL_ENV=/app/.venv uv pip install --no-deps --offline /wheels/*.whl
+# Every name of the connector kit must import in the image.
+RUN /app/.venv/bin/python -c "import meho_connector_kit as kit; \
+missing = [n for n in kit.__all__ if not hasattr(kit, n)]; \
+assert not missing, missing; \
+print(f'connector kit: {len(kit.__all__)} names import')"
 
 # ---------- Operator-console CSS (Initiative #337, Task #863) ---------------
 # Build the compiled Tailwind 4 + DaisyUI 5 bundle for the /ui surface using

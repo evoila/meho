@@ -136,6 +136,9 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
 )
 from meho_backplane.connectors.vcf_operations.fleet_iam_handlers import VropsFleetIamHandlers
+from meho_backplane.connectors.vcf_operations.fleet_secrets_handlers import (
+    VropsFleetSecretsHandlers,
+)
 from meho_backplane.connectors.vcf_operations.licensing_handlers import VropsLicensingHandlers
 from meho_backplane.connectors.vcf_operations.session import (
     VcfOperationsCredentialsLoader,
@@ -222,7 +225,9 @@ def _session_cache_key(target: Any) -> tuple[str, ...]:
     return credential_cache_key(target, getattr(target, "auth_source", None) or None)
 
 
-class VcfOperationsConnector(VropsFleetIamHandlers, VropsLicensingHandlers, HttpConnector):
+class VcfOperationsConnector(
+    VropsFleetIamHandlers, VropsLicensingHandlers, VropsFleetSecretsHandlers, HttpConnector
+):
     """vROps 9.0 REST connector with acquired-token (``OpsToken``) auth.
 
     Session token cached in :attr:`_session_tokens` per credential and

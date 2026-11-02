@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
+from meho_backplane.connectors.vmware_rest.composites import _vm_security
 from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._teardown import (
     STATUS_INVALID_REQUEST,
@@ -278,6 +279,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_ENCRYPTION_SET_LLM_INSTRUCTIONS,
         preview=_encryption_preview,
+        governed_subops=_vm_security._VIM_SUB_OPS_VM_SECURITY,
         classifier_other=True,
     ),
 )

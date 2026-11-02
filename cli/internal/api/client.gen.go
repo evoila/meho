@@ -2536,6 +2536,11 @@ type BodyRunbooksRunsStartUiRunbooksRunsPost struct {
 	WorkRef      *string `json:"work_ref,omitempty"`
 }
 
+// BodyUiAccountRevokeSessionUiAccountSessionsRevokePost defines model for Body_ui_account_revoke_session_ui_account_sessions_revoke_post.
+type BodyUiAccountRevokeSessionUiAccountSessionsRevokePost struct {
+	SessionId *string `json:"session_id,omitempty"`
+}
+
 // BodyUiAgentGrantsCreateSubmitUiAgentsGrantsCreatePost defines model for Body_ui_agent_grants_create_submit_ui_agents_grants_create_post.
 type BodyUiAgentGrantsCreateSubmitUiAgentsGrantsCreatePost struct {
 	ExpiresAt    *string `json:"expires_at"`
@@ -12657,6 +12662,9 @@ type AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody = UnderscoreAnnotate
 // BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody defines body for BulkImportEdgesRouteApiV1TopologyEdgesBulkPost for application/json ContentType.
 type BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody = UnderscoreBulkImportRequest
 
+// UiAccountRevokeSessionUiAccountSessionsRevokePostFormdataRequestBody defines body for UiAccountRevokeSessionUiAccountSessionsRevokePost for application/x-www-form-urlencoded ContentType.
+type UiAccountRevokeSessionUiAccountSessionsRevokePostFormdataRequestBody = BodyUiAccountRevokeSessionUiAccountSessionsRevokePost
+
 // UiAgentsListUiAgentsGetJSONRequestBody defines body for UiAgentsListUiAgentsGet for application/json ContentType.
 type UiAgentsListUiAgentsGetJSONRequestBody = UISessionContext
 
@@ -15375,11 +15383,13 @@ type ClientInterface interface {
 	// UiAccountUiAccountGet request
 	UiAccountUiAccountGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// UiAccountRevokeSessionUiAccountSessionsRevokePostWithBody request with any body
+	UiAccountRevokeSessionUiAccountSessionsRevokePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiAccountRevokeSessionUiAccountSessionsRevokePostWithFormdataBody(ctx context.Context, body UiAccountRevokeSessionUiAccountSessionsRevokePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost request
 	UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePost request
-	UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePost(ctx context.Context, sessionId string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAgentsListUiAgentsGetWithBody request with any body
 	UiAgentsListUiAgentsGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -19357,8 +19367,8 @@ func (c *Client) UiAccountUiAccountGet(ctx context.Context, reqEditors ...Reques
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostRequest(c.Server)
+func (c *Client) UiAccountRevokeSessionUiAccountSessionsRevokePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountRevokeSessionUiAccountSessionsRevokePostRequestWithBody(c.Server, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -19369,8 +19379,20 @@ func (c *Client) UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost(ctx cont
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePost(ctx context.Context, sessionId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostRequest(c.Server, sessionId)
+func (c *Client) UiAccountRevokeSessionUiAccountSessionsRevokePostWithFormdataBody(ctx context.Context, body UiAccountRevokeSessionUiAccountSessionsRevokePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountRevokeSessionUiAccountSessionsRevokePostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -36184,6 +36206,46 @@ func NewUiAccountUiAccountGetRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewUiAccountRevokeSessionUiAccountSessionsRevokePostRequestWithFormdataBody calls the generic UiAccountRevokeSessionUiAccountSessionsRevokePost builder with application/x-www-form-urlencoded body
+func NewUiAccountRevokeSessionUiAccountSessionsRevokePostRequestWithFormdataBody(server string, body UiAccountRevokeSessionUiAccountSessionsRevokePostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiAccountRevokeSessionUiAccountSessionsRevokePostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiAccountRevokeSessionUiAccountSessionsRevokePostRequestWithBody generates requests for UiAccountRevokeSessionUiAccountSessionsRevokePost with any type of body
+func NewUiAccountRevokeSessionUiAccountSessionsRevokePostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/account/sessions/revoke")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostRequest generates requests for UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost
 func NewUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostRequest(server string) (*http.Request, error) {
 	var err error
@@ -36194,40 +36256,6 @@ func NewUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostRequest(server str
 	}
 
 	operationPath := fmt.Sprintf("/ui/account/sessions/revoke-others")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostRequest generates requests for UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePost
-func NewUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostRequest(server string, sessionId string) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "session_id", runtime.ParamLocationPath, sessionId)
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/ui/account/sessions/%s/revoke", pathParam0)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -47842,11 +47870,13 @@ type ClientWithResponsesInterface interface {
 	// UiAccountUiAccountGetWithResponse request
 	UiAccountUiAccountGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAccountUiAccountGetResponse, error)
 
+	// UiAccountRevokeSessionUiAccountSessionsRevokePostWithBodyWithResponse request with any body
+	UiAccountRevokeSessionUiAccountSessionsRevokePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAccountRevokeSessionUiAccountSessionsRevokePostResponse, error)
+
+	UiAccountRevokeSessionUiAccountSessionsRevokePostWithFormdataBodyWithResponse(ctx context.Context, body UiAccountRevokeSessionUiAccountSessionsRevokePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAccountRevokeSessionUiAccountSessionsRevokePostResponse, error)
+
 	// UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse request
 	UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse, error)
-
-	// UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostWithResponse request
-	UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostWithResponse(ctx context.Context, sessionId string, reqEditors ...RequestEditorFn) (*UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse, error)
 
 	// UiAgentsListUiAgentsGetWithBodyWithResponse request with any body
 	UiAgentsListUiAgentsGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsListUiAgentsGetResponse, error)
@@ -53150,6 +53180,28 @@ func (r UiAccountUiAccountGetResponse) StatusCode() int {
 	return 0
 }
 
+type UiAccountRevokeSessionUiAccountSessionsRevokePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAccountRevokeSessionUiAccountSessionsRevokePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAccountRevokeSessionUiAccountSessionsRevokePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -53165,28 +53217,6 @@ func (r UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse) Status()
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	JSON422      *HTTPValidationError
-}
-
-// Status returns HTTPResponse.Status
-func (r UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -60140,6 +60170,23 @@ func (c *ClientWithResponses) UiAccountUiAccountGetWithResponse(ctx context.Cont
 	return ParseUiAccountUiAccountGetResponse(rsp)
 }
 
+// UiAccountRevokeSessionUiAccountSessionsRevokePostWithBodyWithResponse request with arbitrary body returning *UiAccountRevokeSessionUiAccountSessionsRevokePostResponse
+func (c *ClientWithResponses) UiAccountRevokeSessionUiAccountSessionsRevokePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAccountRevokeSessionUiAccountSessionsRevokePostResponse, error) {
+	rsp, err := c.UiAccountRevokeSessionUiAccountSessionsRevokePostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountRevokeSessionUiAccountSessionsRevokePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiAccountRevokeSessionUiAccountSessionsRevokePostWithFormdataBodyWithResponse(ctx context.Context, body UiAccountRevokeSessionUiAccountSessionsRevokePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAccountRevokeSessionUiAccountSessionsRevokePostResponse, error) {
+	rsp, err := c.UiAccountRevokeSessionUiAccountSessionsRevokePostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountRevokeSessionUiAccountSessionsRevokePostResponse(rsp)
+}
+
 // UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse request returning *UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse
 func (c *ClientWithResponses) UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse, error) {
 	rsp, err := c.UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost(ctx, reqEditors...)
@@ -60147,15 +60194,6 @@ func (c *ClientWithResponses) UiAccountRevokeOthersUiAccountSessionsRevokeOthers
 		return nil, err
 	}
 	return ParseUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse(rsp)
-}
-
-// UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostWithResponse request returning *UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse
-func (c *ClientWithResponses) UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostWithResponse(ctx context.Context, sessionId string, reqEditors ...RequestEditorFn) (*UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse, error) {
-	rsp, err := c.UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePost(ctx, sessionId, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse(rsp)
 }
 
 // UiAgentsListUiAgentsGetWithBodyWithResponse request with arbitrary body returning *UiAgentsListUiAgentsGetResponse
@@ -69226,31 +69264,15 @@ func ParseUiAccountUiAccountGetResponse(rsp *http.Response) (*UiAccountUiAccount
 	return response, nil
 }
 
-// ParseUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse parses an HTTP response from a UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse call
-func ParseUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse(rsp *http.Response) (*UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse, error) {
+// ParseUiAccountRevokeSessionUiAccountSessionsRevokePostResponse parses an HTTP response from a UiAccountRevokeSessionUiAccountSessionsRevokePostWithResponse call
+func ParseUiAccountRevokeSessionUiAccountSessionsRevokePostResponse(rsp *http.Response) (*UiAccountRevokeSessionUiAccountSessionsRevokePostResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	return response, nil
-}
-
-// ParseUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse parses an HTTP response from a UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostWithResponse call
-func ParseUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse(rsp *http.Response) (*UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse{
+	response := &UiAccountRevokeSessionUiAccountSessionsRevokePostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
@@ -69263,6 +69285,22 @@ func ParseUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse(rsp
 		}
 		response.JSON422 = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse parses an HTTP response from a UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse call
+func ParseUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse(rsp *http.Response) (*UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
 
 	return response, nil

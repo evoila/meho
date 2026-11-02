@@ -51,7 +51,6 @@ from typing import TYPE_CHECKING, Any, Final
 import httpx
 
 from meho_backplane.connectors.vmware_rest.composites._library_checks import id_problem
-from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._library_vm_template_schemas import (
     CHECK_IN_LLM_INSTRUCTIONS,
     CHECK_IN_PARAMETER_SCHEMA,
@@ -63,6 +62,7 @@ from meho_backplane.connectors.vmware_rest.composites._library_vm_template_schem
     DEPLOY_PARAMETER_SCHEMA,
     DEPLOY_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _LIBRARY_ITEM_DEPLOY_TIMEOUT,
     _OP_DEPLOY_LIBRARY_VM,

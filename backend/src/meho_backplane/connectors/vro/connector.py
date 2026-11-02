@@ -46,7 +46,9 @@ Version
 Operations
 ----------
 
-Seven reads, bodies in :mod:`meho_backplane.connectors.vro.typed_reads`.
+Ten reads (bodies in :mod:`meho_backplane.connectors.vro.typed_reads` and
+:mod:`meho_backplane.connectors.vro.library_reads`) and two changes, run a
+workflow and cancel a run (:mod:`meho_backplane.connectors.vro.run_writes`).
 All exist on every covered version, so no operation needs a version check.
 
 Traces
@@ -70,6 +72,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -96,6 +99,7 @@ from meho_backplane.connectors.vro.session import (
     vcfa_org,
 )
 from meho_backplane.connectors.vro.typed_reads import ABOUT_PATH, redact_secrets
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 
 __all__ = ["VroConnector", "VroServerVersion", "parse_server_version"]
 
@@ -167,6 +171,8 @@ class VroConnector(HttpConnector):
         #: Per credential: the ``Authorization`` value, and the session
         #: token when it ends (``vcfa-session``); ``None`` for the other logins.
         self._authorizations: dict[tuple[str, ...], tuple[str, VcfaSessionToken | None]] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._auth_lock = asyncio.Lock()
         self._credentials_loader: VroCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
@@ -205,8 +211,14 @@ class VroConnector(HttpConnector):
             if cached is not None and checked:
                 value, session = cached
                 if session is None or not session.needs_renewal():
+                    # The caller's own Vault read, once per caller and target.
+                    await self._readers.ensure_read(
+                        target, operator, lambda: self._credentials_loader(target, operator)
+                    )
                     return value
             creds = await self._credentials_loader(target, operator)
+            if checked:
+                self._readers.record(target, operator)
             session = None
             if mode == LOGIN_AUTOMATION:
                 from meho_backplane.connectors.vra8._auth import vra8_login
@@ -251,6 +263,17 @@ class VroConnector(HttpConnector):
                 lambda cached: {"Authorization": cached[0]},
             )
 
+    async def invalidate_credentials(self, target: VroTargetLike) -> None:
+        """Drop the login of *target* and forget who has read its secret.
+
+        Called after a failed login and after a target change. The next call
+        of every caller reads the secret from Vault again, under their own
+        login, and logs in with what it finds.
+        """
+        await self.invalidate_session(target)
+        async with self._auth_lock:
+            self._readers.forget(target)
+
     async def _vro_get(
         self,
         target: VroTargetLike,
@@ -268,6 +291,47 @@ class VroConnector(HttpConnector):
             params=params,
             extra_headers={"Accept": _JSON_ACCEPT},
         )
+
+    async def _vro_send(
+        self,
+        target: VroTargetLike,
+        method: str,
+        path: str,
+        *,
+        operator: Operator,
+        json: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        """Send one change (POST or DELETE) once, with no retry, and return the response.
+
+        A non-2xx answer raises :exc:`httpx.HTTPStatusError`. The flight
+        recorder span keeps no request body: a workflow run's body can hold
+        secret input values.
+        """
+        client = await self._http_client(target)
+        headers = {**await self.auth_headers(target, operator), "Accept": _JSON_ACCEPT}
+        fr_start = flight_recorder_capture.span_start()
+        try:
+            resp = await client.request(
+                method,
+                path,
+                json=json,
+                headers=headers,
+                extensions=self._request_extensions(target),
+            )
+        except httpx.TransportError as exc:
+            flight_recorder_capture.record_vendor_call_error(fr_start, method=method, exc=exc)
+            raise
+        flight_recorder_capture.record_vendor_call(
+            fr_start,
+            method=method,
+            request_headers=headers,
+            response=resp,
+            request_body=None,
+            request_content_type=None,
+            response_body=self._trace_response_body(fr_start, resp),
+        )
+        resp.raise_for_status()
+        return resp
 
     async def server_version(self, target: VroTargetLike, operator: Operator) -> VroServerVersion:
         """Read the Orchestrator version and build. Never raises: a failure is named in ``error``.
@@ -413,6 +477,46 @@ class VroConnector(HttpConnector):
 
         return await vro_execution_logs_impl(self, operator, target, params)
 
+    async def action_list(
+        self, operator: Operator, target: VroTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vro.action.list`` shim."""
+        from meho_backplane.connectors.vro.library_reads import vro_action_list_impl
+
+        return await vro_action_list_impl(self, operator, target, params)
+
+    async def config_element_list(
+        self, operator: Operator, target: VroTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vro.config_element.list`` shim."""
+        from meho_backplane.connectors.vro.library_reads import vro_config_element_list_impl
+
+        return await vro_config_element_list_impl(self, operator, target, params)
+
+    async def package_list(
+        self, operator: Operator, target: VroTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vro.package.list`` shim."""
+        from meho_backplane.connectors.vro.library_reads import vro_package_list_impl
+
+        return await vro_package_list_impl(self, operator, target, params)
+
+    async def workflow_run(
+        self, operator: Operator, target: VroTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vro.workflow.run`` shim."""
+        from meho_backplane.connectors.vro.run_writes import vro_workflow_run_impl
+
+        return await vro_workflow_run_impl(self, operator, target, params)
+
+    async def execution_cancel(
+        self, operator: Operator, target: VroTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vro.execution.cancel`` shim."""
+        from meho_backplane.connectors.vro.run_writes import vro_execution_cancel_impl
+
+        return await vro_execution_cancel_impl(self, operator, target, params)
+
     def trace_response_body(self, response: httpx.Response) -> Any:
         """Mask secret fields and secret parameter values before the trace records the answer."""
         try:
@@ -425,4 +529,5 @@ class VroConnector(HttpConnector):
         """Clear cached logins, then tear down the httpx pool."""
         async with self._auth_lock:
             self._authorizations.clear()
+            self._readers.clear()
         await super().aclose()

@@ -8,14 +8,14 @@ app that mounts the real router behind the real JWT chain (respx-mocked
 JWKS) so the runner route cage + ``require_runner`` + ``assert_runner_scope``
 all run for real:
 
-* ``PUT /api/v1/checks/assignment/{runner}`` — operator authoring +
+* ``PUT /api/v1/checks/assignment/{runner}`` — tenant-admin authoring +
   structured-422 validation (non-safe / unknown op, unknown target).
 * ``GET /api/v1/checks/assignment`` — digest-versioned materialisation with
   resolved target descriptors, 304-on-unchanged, drift-changes-digest.
 * ``POST /api/v1/checks/results`` — idempotent batch ingest, central-stamped
   ``received_at``.
 * Runner scoping: a runner reaches only its own assignment/results;
-  operator-only PUT; unauthenticated 401.
+  tenant-admin-only PUT; unauthenticated 401.
 
 The wire shapes are :mod:`meho_backplane.runner.wire`'s — one schema on both
 ends by construction.
@@ -36,6 +36,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
 
+from meho_backplane.auth.operator import TenantRole
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.resolver import resolve_connector
@@ -130,6 +131,11 @@ def _build_app() -> FastAPI:
 @pytest.fixture
 def client() -> Iterator[TestClient]:
     yield TestClient(_build_app())
+
+
+def _admin_token(key: Any) -> str:
+    """A person with the tenant-admin role: the one who authors assignments."""
+    return mint_token(key, sub="admin-1", tenant_role=TenantRole.TENANT_ADMIN.value)
 
 
 def _runner_token(key: Any, *, runner_id: uuid.UUID, sub: str = "runner-sub") -> str:
@@ -261,7 +267,7 @@ async def test_put_rejects_non_safe_op(client: TestClient) -> None:
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
-        headers = {"Authorization": f"Bearer {_operator_token(key)}"}
+        headers = {"Authorization": f"Bearer {_admin_token(key)}"}
 
         # Non-safe op.
         non_safe = {**_safe_item(), "op": _OP_CAUTION}
@@ -304,7 +310,7 @@ async def test_put_stores_safe_assignment(client: TestClient) -> None:
         resp = client.put(
             "/api/v1/checks/assignment/runner-a",
             json=_put_body(_safe_item()),
-            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
         )
 
     assert resp.status_code == 200
@@ -324,7 +330,7 @@ async def _author_via_put(client: TestClient, key: Any) -> None:
         resp = client.put(
             "/api/v1/checks/assignment/runner-a",
             json=_put_body(_safe_item()),
-            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
         )
     assert resp.status_code == 200
 
@@ -554,7 +560,7 @@ async def test_results_batch_idempotent(client: TestClient) -> None:
 
 @pytest.mark.asyncio
 async def test_runner_scoping(client: TestClient) -> None:
-    """A runner reaches only its own assignment/results; PUT is operator-only; 401 unauth."""
+    """A runner reaches only its own assignment/results; PUT is tenant-admin-only; 401 unauth."""
     await _seed_identities()
     key = make_rsa_keypair("kid-A")
 
@@ -568,9 +574,15 @@ async def test_runner_scoping(client: TestClient) -> None:
         cross_post = client.post(
             "/api/v1/checks/results", json=_result_batch("runner-b", "x-1"), headers=a_headers
         )
-        # Runner token on operator-only PUT → 403.
+        # Runner token on tenant-admin-only PUT → 403.
         runner_put = client.put(
             "/api/v1/checks/assignment/runner-a", json=_put_body(), headers=a_headers
+        )
+        # Operator token on tenant-admin-only PUT → 403.
+        operator_put = client.put(
+            "/api/v1/checks/assignment/runner-a",
+            json=_put_body(),
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
         )
         # Unauthenticated GET / POST → 401.
         unauth_get = client.get("/api/v1/checks/assignment?runner=runner-a")
@@ -579,6 +591,8 @@ async def test_runner_scoping(client: TestClient) -> None:
     assert cross_get.status_code == 403
     assert cross_post.status_code == 403
     assert runner_put.status_code == 403
+    assert operator_put.status_code == 403
+    assert operator_put.json()["detail"] == "insufficient_role"
     assert unauth_get.status_code == 401
     assert unauth_post.status_code == 401
 

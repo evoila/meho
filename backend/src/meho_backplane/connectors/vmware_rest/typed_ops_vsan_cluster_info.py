@@ -42,6 +42,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vsan_common import (
     CLUSTER_PARAM_SCHEMA,
     HOST_MO_TYPE,
     VSAN_GROUP_KEY,
+    VSAN_WHEN_TO_USE,
     as_bool,
     as_text,
     cluster_ref,
@@ -56,9 +57,11 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 
 __all__ = [
+    "TYPED_OPS",
     "VMWARE_VSAN_CLUSTER_INFO_OP",
     "VSAN_CLUSTER_GET_CONFIG",
     "VSAN_GET_WITNESS_HOSTS",
+    "WHEN_TO_USE_BY_GROUP",
     "vsan_cluster_info_impl",
     "vsan_hosts",
 ]
@@ -351,3 +354,6 @@ VMWARE_VSAN_CLUSTER_INFO_OP: Final[VmwareTypedOp] = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_VSAN_CLUSTER_INFO_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {VSAN_GROUP_KEY: VSAN_WHEN_TO_USE}

@@ -12,8 +12,10 @@ a custom grain, or a password a job read from a file, is neither. So
 The stored answer keeps only the fields that the read which made the call
 uses, under their vendor names. Every other field is left out, so a value
 a read does not show never reaches the stored trace. Job returns pass the
-rules of ``salt.job.result``. The answer of a method that no read calls
-keeps no ``ret`` at all.
+rules of ``salt.job.result``. A job stop keeps the job id it returned. The
+answer of any other method keeps no ``ret`` at all. (The flight recorder
+stores no body at all for a ``destructive`` operation, such as running a
+state or a command.)
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from meho_backplane.connectors.salt.connector import (
     MINION_KEY_STATE_RPC,
     MINION_PRESENCE_RPC,
     RETURNS_RPC,
+    STOP_JOB_RPC,
     TARGET_GROUP_RPC,
 )
 from meho_backplane.connectors.salt.reads import JOB_FIELDS, _results
@@ -117,6 +120,8 @@ def _trace_ret(call: tuple[Any, Any], ret: Any) -> Any:
         return _minion_cache(ret)
     if call == GET_VERSIONS_RPC:
         return _pick(ret, _VERSION_FIELDS)
+    if call == STOP_JOB_RPC:
+        return ret if isinstance(ret, str) else None
     return None
 
 

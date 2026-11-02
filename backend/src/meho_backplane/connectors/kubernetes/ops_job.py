@@ -63,6 +63,7 @@ __all__ = [
     "K8S_JOB_INFO_PARAMETER_SCHEMA",
     "K8S_JOB_LIST_LLM_INSTRUCTIONS",
     "K8S_JOB_LIST_PARAMETER_SCHEMA",
+    "OPS",
     "job_info",
     "job_pod_selector",
     "job_row",
@@ -592,3 +593,6 @@ JOB_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=K8S_JOB_INFO_LLM_INSTRUCTIONS,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = JOB_OPS

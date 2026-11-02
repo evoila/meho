@@ -143,6 +143,29 @@ Limits:
   pooled HTTP client is not affected: its key already includes the
   host, port, scheme and TLS settings.
 
+## Vault login role keys in `extras`
+
+A vault target may name the Vault login role and auth mount in
+`extras["vault_role"]` and `extras["vault_mount"]`
+([`connectors-vault.md`](connectors-vault.md)). Only a platform admin
+may set or change them. `create_target` and `update_target` call
+`enforce_vault_login_extras_platform_admin` (`targets/vault_login_extras.py`)
+before they store `extras`. The check compares the stored value of each
+key with the value the request would store:
+
+- Nothing changed, or the operator has `platform_admin`: the request
+  passes. A `PATCH` that re-sends the same values (the UI import does
+  that) or touches other fields passes too, so an existing target keeps
+  its role.
+- A key is added, changed or removed, and the operator has no
+  `platform_admin`: HTTP 403 `vault_login_role_requires_platform_admin`,
+  and the row is not changed. Values are compared as stored, so a blank
+  string is a change like any other.
+
+`targets.register` calls `create_target`, so the same rule holds there:
+the operation answers with an invalid-parameters error that names the
+403 detail.
+
 ## Control flow — listing targets
 
 ### REST and CLI: `GET /api/v1/targets`
@@ -394,6 +417,13 @@ params={"target_id": "<target-uuid>"})`. It is the opposite of
   the same rule as the REST route. Any other role gets an error and the
   target stays. A call that waits for approval runs, once approved, under
   the login of the person who approved it, so that person's role counts.
+  One exception (#5480): in sandbox mode a service principal whose call
+  runs at once needs no `tenant_admin`. For this op that happens only under
+  a live delete grant. A service login has the `operator` role on purpose,
+  so without the exception the delete grant could never help. The handler
+  checks `sandbox_mode_active()`, the principal kind and the gate's verdict
+  (`policy_decision_var` is `auto-execute`). A call that ran after approval
+  keeps the role check.
 - **Approval.** `dangerous` with `requires_approval=True`; the name ends in
   `.remove`, so the delete rules apply. A second person must approve every
   call. See [`mcp.md`](mcp.md#admin-registry-writes-route-through-the-dispatcher).

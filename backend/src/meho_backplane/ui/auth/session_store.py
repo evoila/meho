@@ -405,7 +405,18 @@ async def create_session(
     DecryptedSession
         Plaintext view of the inserted row -- the caller uses
         ``str(result.id)`` as the ``meho_session`` cookie value.
+
+    The caller verified the access token through the JWT chain right
+    before this call, so creation also records the validation instant
+    for the read path's drift-gated revalidation
+    (:func:`~meho_backplane.ui.auth.revalidation.mark_session_validated`).
+    Without that record the first read of the new session would check
+    the token again.
     """
+    # Imported here: the revalidation module imports the refresh module,
+    # which imports this module.
+    from meho_backplane.ui.auth.revalidation import mark_session_validated
+
     now = datetime.now(UTC)
     expires_at = now + lifetime
     row = WebSession(
@@ -423,6 +434,7 @@ async def create_session(
     )
     session.add(row)
     await session.flush()
+    mark_session_validated(row.id)
     return DecryptedSession(
         id=row.id,
         operator_sub=row.operator_sub,

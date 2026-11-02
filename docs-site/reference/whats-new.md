@@ -9,6 +9,49 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.43.0](https://github.com/evoila/meho/releases/tag/v0.43.0) — 2026-11-02
+
+- **The last release with the VMware connectors in the public image.**
+  From the next release on, the VMware connectors come as a separate
+  connector package, built on top of the public image. The
+  [decision record](https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-own-connectors-leave-the-public-tree.md)
+  says which connectors move and why.
+- **Cached logins are checked for each caller.** A caller reads a
+  target's secret once before MEHO uses a cached login for them. SSH
+  keeps one login per caller and target.
+- **Only a platform admin changes shared things.** Ingesting or
+  deleting built-in connectors and setting the Vault login role of a
+  target need `platform_admin`.
+- **Approvals keep fewer secrets.** A decided approval request keeps no
+  secret values. A change of the connector packages in the image ends
+  the requests that still wait.
+- **Tighter rules in the console and for mail.** Running an operation
+  in the console needs the `operator` role, as on REST and MCP. Mail
+  goes only to plain addresses.
+- **The appliance build.** A new script builds the MEHO appliance for
+  vSphere. The appliance is not published yet.
+- **Read first.** One database migration, a corrected Keycloak step for
+  `meho login`, and a few scripts must change. See "Breaking changes"
+  and "Steps after the upgrade" in the release notes.
+
+## [v0.42.0](https://github.com/evoila/meho/releases/tag/v0.42.0) — 2026-11-02
+
+- **Secret fields stay hidden everywhere.** Every operation hides
+  secret-named fields in its answer. A person can still ask for a value.
+- **Approvals need a recent sign-in, also in the web interface.** On the
+  command line, one sign-in covers 15 minutes of approvals. It uses the
+  new login client `meho-cli-approve`.
+- **Logins last longer.** `meho login` renews itself, and the Claude
+  clients keep their login through a short network problem.
+- **The connector kit.** Connector packages import MEHO through one
+  module and name the kit versions they fit.
+- **New operations.** vSphere hosts, VMs, vApps, templates and vSAN,
+  HCX, fleet management, VCF Automation, VCF Operations 9.1,
+  Orchestrator, Salt, and a new Identity Broker connector.
+- **Read first.** One database migration, a new Keycloak client for
+  approvals on the command line, and a few scripts must change. See
+  "Breaking changes" and "Steps after the upgrade" in the release notes.
+
 ## [v0.41.0](https://github.com/evoila/meho/releases/tag/v0.41.0) — 2026-11-01
 
 - **More vCenter 8.0 reads are guarded.** The reads of content

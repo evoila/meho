@@ -58,7 +58,9 @@ __all__ = [
     "FOLDER_LIST_GROUP_KEY",
     "FOLDER_LIST_WHEN_TO_USE",
     "FOLDER_TYPES",
+    "TYPED_OPS",
     "VMWARE_FOLDER_LIST_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "folder_list_impl",
 ]
 
@@ -406,3 +408,6 @@ VMWARE_FOLDER_LIST_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_FOLDER_LIST_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {FOLDER_LIST_GROUP_KEY: FOLDER_LIST_WHEN_TO_USE}

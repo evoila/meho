@@ -28,6 +28,10 @@ must be reachable unauthenticated):
    dependency to render operator-scoped views.
 5. On miss, 302-redirect to ``/ui/auth/login?return_to=<original
    path>`` so the operator lands back on the deep link after auth.
+   An htmx request gets ``204`` + ``HX-Redirect`` instead, with
+   ``return_to`` set to the page from ``HX-Current-URL``. When the
+   browser still sent a session cookie, the URL also carries
+   ``reason=session_ended`` and the login page says the session ended.
 
 Static assets bypass
 --------------------
@@ -94,7 +98,6 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, cast
-from urllib.parse import quote
 
 import structlog
 from fastapi import Depends, HTTPException, Request, status
@@ -110,7 +113,11 @@ from meho_backplane.sandbox_mode import (
 )
 from meho_backplane.ui.audit import bind_ui_view_audit
 from meho_backplane.ui.auth.revalidation import revalidate_read_session
-from meho_backplane.ui.auth.routes import LOGIN_PATH, SESSION_COOKIE_NAME
+from meho_backplane.ui.auth.routes import (
+    SESSION_COOKIE_NAME,
+    login_location,
+    page_from_htmx_current_url,
+)
 from meho_backplane.ui.auth.session_store import load_session
 from meho_backplane.ui.auth.tenant import (
     TENANT_PICKER_PATH,
@@ -128,6 +135,7 @@ __all__ = [
     "UISessionContext",
     "UISessionMiddleware",
     "require_ui_admin",
+    "require_ui_operator",
     "require_ui_session",
 ]
 
@@ -241,27 +249,42 @@ def _extract_session_cookie(scope: Scope) -> str | None:
     return None
 
 
-def _request_is_htmx(scope: Scope) -> bool:
-    """True when the request carries htmx's ``HX-Request: true`` header.
+def _request_header(scope: Scope, name: bytes) -> bytes | None:
+    """Return the first value of header *name* (lower-case) from the raw ASGI scope.
 
     Read straight off the raw ASGI headers (ASGI lower-cases header names
-    per spec, so we match ``b"hx-request"``) to keep the redirect path
-    allocation-light -- no :class:`Request` construction needed.
+    per spec) to keep the redirect path allocation-light -- no
+    :class:`Request` construction needed.
     """
     headers = scope.get("headers")
     if not isinstance(headers, list):
-        return False
-    for name, value in headers:
-        if not isinstance(name, (bytes, bytearray)) or name != b"hx-request":
+        return None
+    for header_name, value in headers:
+        if header_name != name or not isinstance(value, (bytes, bytearray)):
             continue
-        if not isinstance(value, (bytes, bytearray)):
-            continue
-        return value.strip().lower() == b"true"
-    return False
+        return bytes(value)
+    return None
+
+
+def _request_is_htmx(scope: Scope) -> bool:
+    """True when the request carries htmx's ``HX-Request: true`` header."""
+    value = _request_header(scope, b"hx-request")
+    return value is not None and value.strip().lower() == b"true"
+
+
+def _htmx_current_page(scope: Scope) -> str | None:
+    """The console page an htmx request came from (``HX-Current-URL``), if any."""
+    value = _request_header(scope, b"hx-current-url")
+    if value is None:
+        return None
+    try:
+        return page_from_htmx_current_url(value.decode("ascii"))
+    except UnicodeDecodeError:
+        return None
 
 
 def _redirect_to_login(
-    original_path_with_query: str, *, is_htmx: bool = False
+    original_path_with_query: str, *, is_htmx: bool = False, session_ended: bool = False
 ) -> tuple[int, list[tuple[bytes, bytes]]]:
     """Build the ASGI ``http.response.start`` shape for the login redirect.
 
@@ -270,9 +293,11 @@ def _redirect_to_login(
     :class:`RedirectResponse`) keeps the middleware single-allocation
     on the redirect path -- the body is empty.
 
-    The ``return_to`` query value is the original path with its query
-    string, URL-encoded so an operator-supplied target with reserved
-    characters round-trips cleanly. The login route's
+    The ``return_to`` query value is the path to come back to (the
+    caller passes the original path with its query string, or for an
+    htmx request the page from ``HX-Current-URL``), URL-encoded so an
+    operator-supplied target with reserved characters round-trips
+    cleanly. The login route's
     :func:`_safe_return_to` validates the decoded value before it
     lands in any subsequent redirect.
 
@@ -287,9 +312,14 @@ def _redirect_to_login(
       bounce. ``HX-Redirect`` makes htmx perform a full-page navigation to
       the same login URL instead, reusing the repo's 204+``HX-Redirect``
       precedent (e.g. ``ui/routes/connectors/forms.py``).
+
+    ``session_ended`` adds ``reason=session_ended``: the browser still
+    held a session cookie, so a session existed and has ended (idle
+    limit, ten-hour limit, revoked, or a failed renewal). The login
+    route then shows "Your session ended. Please sign in again." first.
     """
-    encoded = quote(original_path_with_query, safe="")
-    return _redirect_to(f"{LOGIN_PATH}?return_to={encoded}", is_htmx=is_htmx)
+    location = login_location(original_path_with_query, session_ended=session_ended)
+    return _redirect_to(location, is_htmx=is_htmx)
 
 
 def _redirect_to(location: str, *, is_htmx: bool) -> tuple[int, list[tuple[bytes, bytes]]]:
@@ -536,11 +566,19 @@ class UISessionMiddleware:
             )
             full_path = f"{path}?{query_string}" if query_string else path
             is_htmx = _request_is_htmx(scope)
-            status_code, headers = _redirect_to_login(full_path, is_htmx=is_htmx)
+            # An htmx request loads a part of a page; after the login the
+            # person must land on the page, not on the fragment URL.
+            return_to = (_htmx_current_page(scope) if is_htmx else None) or full_path
+            # A cookie means the browser had a session, so it has ended
+            # (not a first visit): the login page says so first.
+            had_cookie = cookie_value is not None
+            status_code, headers = _redirect_to_login(
+                return_to, is_htmx=is_htmx, session_ended=had_cookie
+            )
             log.info(
                 "ui_session_missing_or_invalid",
                 path=path,
-                had_cookie=cookie_value is not None,
+                had_cookie=had_cookie,
                 is_htmx=is_htmx,
             )
             await send(
@@ -708,6 +746,59 @@ async def require_ui_admin(
     Returns the same ``UISessionContext`` so callers can use it for
     ``tenant_id`` / ``operator_sub`` without a second dependency.
     """
+    from meho_backplane.auth.operator import TenantRole
+
+    return await _require_ui_role(
+        session,
+        minimum=TenantRole.TENANT_ADMIN,
+        detail="tenant_admin_required",
+        log_prefix="ui_admin_gate",
+    )
+
+
+async def require_ui_operator(
+    request: Request,
+    session: UISessionContext = Depends(require_ui_session),
+) -> UISessionContext:
+    """FastAPI dependency: assert at least the ``operator`` role for the BFF session.
+
+    The console twin of the REST ``require_role(TenantRole.OPERATOR)``
+    floor and the MCP ``required_role=OPERATOR`` on ``call_operation``.
+    Every console route that runs or queues an operation, or starts,
+    advances or aborts a runbook run, declares it: ``operator`` and
+    ``tenant_admin`` pass, ``read_only`` gets ``403 operator_required``
+    before the handler body runs.
+
+    Same load + verify + refresh chain as :func:`require_ui_admin` (the
+    role comes from the stored access token, never from the session row),
+    so a same-session role change takes effect on the next request.
+    Returns the same ``UISessionContext`` for ``tenant_id`` /
+    ``operator_sub``.
+    """
+    from meho_backplane.auth.operator import TenantRole
+
+    return await _require_ui_role(
+        session,
+        minimum=TenantRole.OPERATOR,
+        detail="operator_required",
+        log_prefix="ui_operator_gate",
+    )
+
+
+async def _require_ui_role(
+    session: UISessionContext,
+    *,
+    minimum: TenantRole,
+    detail: str,
+    log_prefix: str,
+) -> UISessionContext:
+    """Shared body of the role-gated console dependencies.
+
+    Loads the decrypted session row, re-verifies its access token through
+    the refresh-aware JWT chain, and raises ``403 <detail>`` when the token's
+    role ranks below *minimum*. Binds the operator identity into the audit
+    contextvars on success.
+    """
     # Deferred import avoids a circular dependency: auth.middleware →
     # auth.jwt (ok) but auth.jwt → settings → (no ui module import).
     # The lazy import is inside the async function body (not module-level)
@@ -728,7 +819,7 @@ async def require_ui_admin(
         # Session disappeared between middleware check and here (revoked /
         # expired in the gap). Treat as unauthenticated.
         log.info(
-            "ui_admin_gate_session_gone",
+            f"{log_prefix}_session_gone",
             session_id=str(session.session_id),
         )
         raise HTTPException(
@@ -744,13 +835,19 @@ async def require_ui_admin(
         )
     except HTTPException as exc:
         log.info(
-            "ui_admin_gate_jwt_invalid",
+            f"{log_prefix}_jwt_invalid",
             session_id=str(session.session_id),
             status_code=exc.status_code,
         )
         raise
 
-    _assert_tenant_admin_role(operator.tenant_role, session_id=session.session_id)
+    _assert_min_role(
+        operator.tenant_role,
+        minimum=minimum,
+        detail=detail,
+        log_event=f"{log_prefix}_forbidden",
+        session_id=session.session_id,
+    )
 
     # Bind operator identity into structlog contextvars so AuditMiddleware
     # can attribute the write operation (reads operator_sub + tenant_id from
@@ -763,13 +860,20 @@ async def require_ui_admin(
     return session
 
 
-def _assert_tenant_admin_role(tenant_role: TenantRole, *, session_id: uuid.UUID) -> None:
-    """Raise 403 unless *tenant_role* ranks at least ``tenant_admin``.
+def _assert_min_role(
+    tenant_role: TenantRole,
+    *,
+    minimum: TenantRole,
+    detail: str,
+    log_event: str,
+    session_id: uuid.UUID,
+) -> None:
+    """Raise ``403 <detail>`` unless *tenant_role* ranks at least *minimum*.
 
-    Extracted from :func:`require_ui_admin` (the gate's only caller)
-    purely to keep the dependency under the chassis function-size
-    budget; the rank semantics are unchanged from the T2 upload-RBAC
-    landing.
+    The rank order is the one :mod:`meho_backplane.auth.rbac` uses for the
+    REST ``require_role`` floor: ``read_only`` < ``operator`` <
+    ``tenant_admin``. An unknown role on either side ranks below every
+    known one, so it is refused rather than let through.
     """
     from meho_backplane.auth.operator import TenantRole
 
@@ -780,7 +884,7 @@ def _assert_tenant_admin_role(tenant_role: TenantRole, *, session_id: uuid.UUID)
     )
     try:
         actual_rank = _role_order.index(tenant_role)
-        required_rank = _role_order.index(TenantRole.TENANT_ADMIN)
+        required_rank = _role_order.index(minimum)
     except ValueError:
         actual_rank = -1
         required_rank = len(_role_order)
@@ -788,11 +892,12 @@ def _assert_tenant_admin_role(tenant_role: TenantRole, *, session_id: uuid.UUID)
     if actual_rank < required_rank:
         log = structlog.get_logger(__name__)
         log.info(
-            "ui_admin_gate_forbidden",
+            log_event,
             session_id=str(session_id),
             actual_role=tenant_role.value,
+            required_role=minimum.value,
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="tenant_admin_required",
+            detail=detail,
         )

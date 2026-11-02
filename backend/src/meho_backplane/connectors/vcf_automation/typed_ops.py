@@ -84,6 +84,7 @@ from typing import Any, Final, Literal
 from packaging.version import InvalidVersion, Version
 
 from meho_backplane.connectors.resolver import resolve_target_version
+from meho_backplane.connectors.vcf_automation._infra_text import infra_when_to_use
 from meho_backplane.connectors.vcf_automation._op_schemas import (
     ABOUT_RESPONSE,
     IAAS_DEPLOYMENT_FIELDS,
@@ -257,8 +258,31 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "with a quota and a network rule (vcfa.tenant.project.create), deploy "
         "from a cloud template or only plan it "
         "(vcfa.tenant.blueprint_request.create), and delete a deployment "
-        "(vcfa.tenant.deployment.delete). A person must approve each call. Safe "
-        "to run twice: an object that exists answers 'unchanged'."
+        "(vcfa.tenant.deployment.delete; only a person can run it, after a preview). "
+        "A person must approve each call. Safe to run twice: an object that exists "
+        "answers 'unchanged'."
+    ),
+    "vcfa-tenant-day2": (
+        "Day-2 work on the deployments of a VCF Automation tenant org, on the tenant "
+        "plane. Reads: the actions a deployment or machine offers "
+        "(vcfa.tenant.deployment.actions.list), the machines (vcfa.tenant.machine.list) "
+        "and the disks with their machines (vcfa.tenant.block_device.list). Changes, "
+        "each after a person approves: run a built-in deployment action "
+        "(vcfa.tenant.deployment.action.run) or machine action such as power, resize, "
+        "add disk or snapshot (vcfa.tenant.resource.action.run), change a lease "
+        "(vcfa.tenant.deployment.lease.change), create a machine "
+        "(vcfa.tenant.machine.create) or a disk for a machine "
+        "(vcfa.tenant.block_device.create). To delete a deployment, use "
+        "vcfa.tenant.deployment.delete."
+    ),
+    "vcfa-provider-identity": (
+        "How people sign in to VCF Automation, on the provider plane. Read the "
+        "provider's LDAP and each org's LDAP and OIDC settings "
+        "(vcfa.provider.identity.show). Set the provider's own LDAP "
+        "(vcfa.provider.ldap.set), set or turn off an org's LDAP "
+        "(vcfa.provider.org.ldap.set), and set or remove an org's OIDC sign-in "
+        "(vcfa.provider.org.oidc.set). A bind password or client secret comes from "
+        "Vault; a person must approve each change."
     ),
     "vcfa-tenant-images": (
         "Image names of the tenant org (image profiles), on the tenant plane. A cloud "
@@ -268,6 +292,21 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "(vcfa.tenant.fabric_image.list), make it read new vCenter templates now "
         "(vcfa.tenant.cloud_account.enumerate_images), and add, re-point or remove one "
         "name (vcfa.tenant.image_profile.mapping.update; a person must approve it)."
+    ),
+    "vcfa-provider-infra": (
+        "Regions and organization quotas on the VCF Automation provider plane. Reads: "
+        "the vCenters, NSX managers and Supervisors it knows (vcfa.provider.infra.list), "
+        "one region with its zones, storage policies and VM classes "
+        "(vcfa.provider.region.get), and the quotas of each organization "
+        "(vcfa.provider.org_quota.list). Changes: connect a vCenter "
+        "(vcfa.provider.vcenter.register) or an NSX manager "
+        "(vcfa.provider.nsx_manager.register), create or change a region "
+        "(vcfa.provider.region.set), and give an organization a quota in a region "
+        "(vcfa.provider.org_quota.set). Each change starts a vendor job and returns its id; "
+        "the reads show the job's state."
+    ),
+    "vcfa-tenant-infra": infra_when_to_use(
+        "vcfa.tenant", "a VCF Automation 9 VM Apps org, on the tenant plane", with_vra8_only=False
     ),
 }
 

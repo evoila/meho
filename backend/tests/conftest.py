@@ -551,12 +551,19 @@ def _default_target_ssrf_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
        re-patch the seam with their own resolver and
        ``monkeypatch.delenv`` the allowlist to exercise the real
        behaviour.
+    3. ``dial_guard._unresolved`` lets a name that does not resolve be
+       dialed by name, so the connect-time check does not refuse those
+       synthetic host names. Connect-time check tests
+       (``test_connectors_dial_guard``) restore the refusal.
     """
     monkeypatch.setenv(
         "MEHO_TARGET_SSRF_ALLOWLIST",
         "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,::1/128,fc00::/7,fe80::/10",
     )
     monkeypatch.setattr("meho_backplane.targets.ssrf_guard._resolve_addrs", lambda host: [])
+    monkeypatch.setattr(
+        "meho_backplane.connectors._shared.dial_guard._unresolved", lambda host: None
+    )
 
 
 @pytest.fixture(autouse=True)

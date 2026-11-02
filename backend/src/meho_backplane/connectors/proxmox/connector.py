@@ -55,6 +55,7 @@ from meho_backplane.connectors._shared.cache_key import (
     credential_cache_key,
     target_cache_key,
 )
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -139,6 +140,8 @@ class ProxmoxConnector(HttpConnector):
         self._creds_cache: dict[tuple[str, str], ProxmoxCredentials] = {}
         #: Ticket-auth session cache: ``{"ticket": ..., "csrf": ...}`` per target.
         self._ticket_cache: dict[tuple[str, ...], dict[str, str]] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._creds_lock = asyncio.Lock()
         self._ticket_lock = asyncio.Lock()
         self._credentials_loader: ProxmoxCredentialsLoader = (
@@ -179,19 +182,22 @@ class ProxmoxConnector(HttpConnector):
     ) -> ProxmoxCredentials:
         """Return the cached credential material, loading from Vault on first use.
 
-        The cache fast path is closed to the synthesised system operator
-        (``is_system_operator``) so a background/operator-less caller always
-        re-runs the loader (and its fail-closed Vault guard) and can never be
-        served credentials a real operator primed — the argocd/#1008
-        discipline.
+        A cached entry is handed to a caller only after that caller's own
+        Vault read of the target's secret passed once in this process
+        (:class:`~meho_backplane.connectors._shared.secret_readers.SecretReaders`).
+        A hit for another caller runs the loader under their login first.
+        The synthesised system operator is never recorded, so it always runs
+        the loader. A caller who has read keeps cold load → cache →
+        reuse.
         """
         cache_key = target_cache_key(target)
         async with self._creds_lock:
             cached = self._creds_cache.get(cache_key)
-            if cached is not None and not is_system_operator(operator):
+            if cached is not None and self._readers.has_read(target, operator):
                 return cached
             creds = await self._credentials_loader(target, operator)
             self._creds_cache[cache_key] = creds
+            self._readers.record(target, operator)
             _log.info(
                 "proxmox_credentials_loaded",
                 target=target.name,
@@ -211,8 +217,9 @@ class ProxmoxConnector(HttpConnector):
         POSTs ``username`` + ``password`` (form-encoded) to
         ``/api2/json/access/ticket`` and stores the returned ``ticket`` +
         ``CSRFPreventionToken``. Uses the pooled client directly — the login
-        itself sends no auth header. The system-operator fast-path carve-out
-        mirrors :meth:`_resolve_creds`.
+        itself sends no auth header. The caller's own Vault read happened in
+        :meth:`_resolve_creds` before this method runs. The system-operator
+        fast-path carve-out mirrors :meth:`_resolve_creds`.
         """
         cache_key = credential_cache_key(target)
         async with self._ticket_lock:
@@ -585,6 +592,7 @@ class ProxmoxConnector(HttpConnector):
         """
         async with self._creds_lock:
             self._creds_cache.pop(target_cache_key(target), None)
+            self._readers.forget(target)
         async with self._ticket_lock:
             self._ticket_cache.pop(credential_cache_key(target), None)
 
@@ -592,6 +600,7 @@ class ProxmoxConnector(HttpConnector):
         """Clear cached credentials + tickets, then tear down the httpx pool."""
         async with self._creds_lock:
             self._creds_cache.clear()
+            self._readers.clear()
         async with self._ticket_lock:
             self._ticket_cache.clear()
         await super().aclose()

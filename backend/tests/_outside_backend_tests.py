@@ -8,7 +8,7 @@ chart under ``deploy/``, the Go CLI under ``cli/``, the workflows under
 ``.github/``, the docs, the examples. A pull request that changes no file
 under ``backend/`` can still break them.
 
-CI skips the five unit shards on such a pull request (#5296). It runs only
+CI skips the six unit shards on such a pull request (#5296). It runs only
 the files in ``OUTSIDE_BACKEND_TESTS``, in the job
 ``python-outside-backend`` of ``.github/workflows/ci.yml``. The merge queue
 always runs every test.
@@ -70,6 +70,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_chart_vault_addr_optional.py",
     "tests/test_ci_backend_python_skip.py",
     "tests/test_ci_check_chart_namespace_scope.py",
+    "tests/test_ci_check_connector_kit_release.py",
     "tests/test_ci_check_plugin_version.py",
     "tests/test_ci_check_release_body_paths.py",
     "tests/test_ci_coverage_shards.py",
@@ -78,6 +79,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_ci_merge_queue_cleanup.py",
     "tests/test_ci_merge_queue_watchdog.py",
     "tests/test_ci_run_eval_gate.py",
+    "tests/test_connector_kit.py",
     "tests/test_connector_overlay_build.py",
     "tests/test_connector_overlay_review.py",
     "tests/test_connectors_linux_day0_recipe.py",

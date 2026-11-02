@@ -52,7 +52,11 @@ from meho_backplane.db.models import (
     Sensor,
     Tenant,
 )
-from meho_backplane.operations.ingest import ConnectorInUseError, ReviewService
+from meho_backplane.operations.ingest import (
+    BuiltinConnectorWriteForbiddenError,
+    ConnectorInUseError,
+    ReviewService,
+)
 from meho_backplane.scheduler.repository import create_cron_trigger
 from meho_backplane.settings import get_settings
 
@@ -475,19 +479,23 @@ async def test_other_tenant_users_do_not_block_a_tenant_delete() -> None:
 
 
 @pytest.mark.asyncio
-async def test_builtin_delete_counts_other_tenants_without_names() -> None:
+async def test_builtin_delete_by_tenant_admin_is_refused_before_the_in_use_check() -> None:
+    """A tenant_admin without ``platform_admin`` may not delete built-in rows at all.
+
+    The refusal comes before the in-use check, so the answer names no
+    user of any tenant.
+    """
     mine = await _seed_tenant()
     other = await _seed_tenant()
     await _seed_connector(None)
     await _create_sensor(mine, "mine")
     await _create_sensor(other, "theirs")
 
-    exc = await _refusal_builtin(_operator(mine))
+    with pytest.raises(BuiltinConnectorWriteForbiddenError) as caught:
+        await ReviewService(_operator(mine)).delete_connector(_CONNECTOR_ID, tenant_id=None)
 
-    assert [u.name for u in exc.users] == ["mine"]
-    assert exc.other_tenant_user_count == 1
-    assert "theirs" not in str(exc)
-    assert "1 more in other tenants" in str(exc)
+    assert "mine" not in str(caught.value)
+    assert "theirs" not in str(caught.value)
 
 
 @pytest.mark.asyncio
@@ -512,7 +520,8 @@ async def test_builtin_delete_skips_tenants_with_their_own_copy() -> None:
     await _seed_connector(owner)
     await _create_sensor(owner)
 
-    result = await ReviewService(_operator(mine)).delete_connector(_CONNECTOR_ID, tenant_id=None)
+    service = ReviewService(_operator(mine, platform_admin=True))
+    result = await service.delete_connector(_CONNECTOR_ID, tenant_id=None)
 
     assert result.operations_deleted == 2
 

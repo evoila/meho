@@ -164,10 +164,20 @@ value, so it needs no migration:
 | `caution` | `REMOTE_WRITE` | mints **only** through the composed write-path gate; fail-closed today |
 | `dangerous`, `destructive` (or unknown) | `EXCLUDED` | **never** minted to a satellite |
 
+One exception: a `safe` operation that its connector marks as a safe write
+(`declare_safe_writes` / `is_safe_write` in `meho_backplane.op_classes`, for example the GitHub
+ticket writes that need no approval,
+[`docs/decisions/2026-11-02-github-ticket-writes-are-safe.md`](../decisions/2026-11-02-github-ticket-writes-are-safe.md))
+is `EXCLUDED`, never the read path. So `classify_satellite_tier` takes the
+`op_id` as well as the `safety_level`. `meho_backplane.op_classes` imports
+nothing from MEHO, and the runner imports every connector at start, so the
+edge knows the declarations too.
+
 The single source of truth is `runner/satellite_tier.py`
 (`classify_satellite_tier` + the `evaluate_remote_write_gate` seam). It
 lives beside `runner/wire.py` — the other central+edge shared contract — and
-imports only the standard library, so classifying a tier on the **DB-free**
+imports only the standard library and `meho_backplane.op_classes` (which
+imports nothing from MEHO), so classifying a tier on the **DB-free**
 runner never pulls the central stack.
 
 **The three-layer mirror.** All three fail-closed layers classify against

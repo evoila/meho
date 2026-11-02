@@ -54,6 +54,7 @@ from meho_backplane.connectors.schemas import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
 from meho_backplane.operations.ingest import (
+    BuiltinConnectorWriteForbiddenError,
     ConnectorNotFoundError,
     ReviewService,
     ensure_connector_class_registered,
@@ -117,6 +118,7 @@ def _make_operator(
     *,
     tenant_id: uuid.UUID,
     role: TenantRole = TenantRole.TENANT_ADMIN,
+    platform_admin: bool = False,
 ) -> Operator:
     return Operator(
         sub=f"test-operator-{uuid.uuid4()}",
@@ -125,6 +127,7 @@ def _make_operator(
         raw_jwt=_FAKE_JWT,
         tenant_id=tenant_id,
         tenant_role=role,
+        platform_admin=platform_admin,
     )
 
 
@@ -471,9 +474,34 @@ async def test_delete_built_in_scope_requires_tenant_admin() -> None:
 
 
 @pytest.mark.asyncio
-async def test_delete_built_in_scope_with_tenant_admin_succeeds() -> None:
-    """The MCP-shaped global-scope delete (tenant_id=None) removes built-in rows."""
+async def test_delete_built_in_scope_needs_platform_admin() -> None:
+    """A tenant_admin without ``platform_admin`` may not delete built-in rows.
+
+    The rows of a built-in connector are shared by every tenant, so the
+    delete gets the same refusal as enable, disable and edit. Nothing is
+    deleted, no audit row is written, and the connector class stays
+    registered.
+    """
     operator = _make_operator(tenant_id=uuid.uuid4())
+    _register_shim()
+    await _seed_rows(tenant_id=None)
+
+    with pytest.raises(BuiltinConnectorWriteForbiddenError) as caught:
+        await ReviewService(operator).delete_connector(
+            _CONNECTOR_ID,
+            tenant_id=None,
+        )
+
+    assert caught.value.detail["error"] == "builtin_connector_write_forbidden"
+    assert await _count_rows(None) == (2, 6)
+    assert await _delete_audit_rows() == []
+    assert (_PRODUCT, _VERSION, _IMPL_ID) in all_connectors_v2()
+
+
+@pytest.mark.asyncio
+async def test_delete_built_in_scope_with_platform_admin_succeeds() -> None:
+    """The MCP-shaped global-scope delete (tenant_id=None) removes built-in rows."""
+    operator = _make_operator(tenant_id=uuid.uuid4(), platform_admin=True)
     _register_shim()
     await _seed_rows(tenant_id=None)
 

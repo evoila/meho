@@ -62,8 +62,10 @@ if TYPE_CHECKING:
 __all__ = [
     "FRESH_CHECK_TIMED_OUT",
     "HOST_VSAN_HEALTH_WHEN_TO_USE",
+    "TYPED_OPS",
     "VMWARE_HOST_VSAN_HEALTH_OP",
     "VSAN_QUERY_HEALTH_SUMMARY",
+    "WHEN_TO_USE_BY_GROUP",
     "build_vsan_query_health_params",
     "fresh_check_timeout_text",
     "host_vsan_health_impl",
@@ -529,3 +531,6 @@ VMWARE_HOST_VSAN_HEALTH_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_HOST_VSAN_HEALTH_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {HOST_VSAN_HEALTH_GROUP_KEY: HOST_VSAN_HEALTH_WHEN_TO_USE}

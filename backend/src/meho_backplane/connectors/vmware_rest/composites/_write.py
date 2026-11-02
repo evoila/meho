@@ -1029,6 +1029,7 @@ _OP_GET_VM_CDROM = "GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"
 _OP_UPDATE_VM_CDROM = "PATCH:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"
 _OP_DELETE_VM_CDROM = "DELETE:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"
 _OP_DISCONNECT_VM_CDROM = "POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=disconnect"
+_OP_CONNECT_VM_CDROM = "POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=connect"
 
 # Guest customization (GOSC) sub-ops (#2892). Create a reusable named
 # customization spec, then apply a saved one to a VM. Both are plain
@@ -1268,6 +1269,7 @@ _SUB_OPS_VM_DEVICE_CDROM: tuple[str, ...] = (
     _OP_UPDATE_VM_CDROM,
     _OP_DELETE_VM_CDROM,
     _OP_DISCONNECT_VM_CDROM,
+    _OP_CONNECT_VM_CDROM,
 )
 _SUB_OPS_GUEST_CUSTOMIZATION_SPEC_CREATE: tuple[str, ...] = (_OP_CREATE_CUSTOMIZATION_SPEC,)
 _SUB_OPS_VM_CUSTOMIZE: tuple[str, ...] = (
@@ -9622,15 +9624,16 @@ async def vm_device_cdrom_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any] | OperationResult:
-    """Remove / update / disconnect a VM CD-ROM device.
+    """Remove / update / connect / disconnect a VM CD-ROM device.
 
     Op-id: ``vmware.composite.vm.device.cdrom``. Reads the device's
     current backing + state via ``GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}``
     (the host-local ISO path the approver needs to see), then dispatches
     the requested ``action``: ``remove`` (DELETE the device), ``update``
-    (PATCH its backing -- requires ``backing``), or ``disconnect`` (POST
-    ``?action=disconnect``). ``update`` without a ``backing`` object
-    returns ``invalid_request`` with no write issued.
+    (PATCH its backing -- requires ``backing``), ``connect`` (POST
+    ``?action=connect``) or ``disconnect`` (POST ``?action=disconnect``).
+    ``update`` without a ``backing`` object returns ``invalid_request``
+    with no write issued.
     """
     vm_moid = params["vm"]
     cdrom_id = params["cdrom"]
@@ -9655,6 +9658,8 @@ async def vm_device_cdrom_composite(
         sub_op, done = _OP_DELETE_VM_CDROM, {"status": "removed"}
     elif action == "disconnect":
         sub_op, done = _OP_DISCONNECT_VM_CDROM, {"status": "disconnected"}
+    elif action == "connect":
+        sub_op, done = _OP_CONNECT_VM_CDROM, {"status": "connected"}
     else:
         backing = params.get("backing")
         if not isinstance(backing, dict):

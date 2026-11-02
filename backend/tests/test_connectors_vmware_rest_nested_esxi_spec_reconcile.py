@@ -85,11 +85,11 @@ def test_recipe_ops_match_the_connectors_live_constants() -> None:
     assert {_write._OP_CREATE_VM, _write._OP_UPDATE_VM_CPU} < RECIPE_REST_OP_IDS
 
 
-def test_cdrom_composite_covers_update_remove_disconnect_only() -> None:
+def test_cdrom_composite_covers_existing_devices_only() -> None:
     """``vm.device.cdrom`` has no ADD leg — the recipe's cdrom-add is a raw op.
 
     The recipe claims the existing composite covers update / remove /
-    disconnect of an *existing* CD-ROM device and that attaching a new
+    connect / disconnect of an *existing* CD-ROM device and that attaching a new
     ISO-backed device rides the raw ingested
     ``POST:/vcenter/vm/{vm}/hardware/cdrom``. Pin the composite's sub-op
     manifest so a future ADD leg (which would obsolete the recipe's raw
@@ -100,6 +100,7 @@ def test_cdrom_composite_covers_update_remove_disconnect_only() -> None:
         "PATCH:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}",
         "DELETE:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}",
         "POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=disconnect",
+        "POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=connect",
     }
     assert "POST:/vcenter/vm/{vm}/hardware/cdrom" not in set(_write._SUB_OPS_VM_DEVICE_CDROM)
 

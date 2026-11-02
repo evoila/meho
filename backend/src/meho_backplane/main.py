@@ -1224,7 +1224,7 @@ app.include_router(api_v1_runner_principals_router)
 app.include_router(api_v1_gateway_router)
 # Initiative #2415 (#2499) -- gateway assignment + result-ingest API, mounted
 # under /api/v1/checks/ (inside the runner route cage). PUT /checks/assignment/
-# {runner} authors a runner's checks (operator); GET /checks/assignment (runner,
+# {runner} authors a runner's checks (tenant admin); GET /checks/assignment (runner,
 # own-only) returns the digest-versioned assignment with resolved target
 # descriptors + handler_ref/safety_level; POST /checks/results (runner, own-only)
 # idempotently ingests results with a central-stamped received_at.

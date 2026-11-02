@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.kubernetes.kubeconfig import KubernetesTargetLike
 
 __all__ = [
+    "OPS",
     "SECRET_LIST_OPS",
     "k8s_secret_info",
     "k8s_secret_list",
@@ -391,3 +392,6 @@ SECRET_LIST_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=_INFO_LLM,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = SECRET_LIST_OPS

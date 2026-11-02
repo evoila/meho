@@ -320,10 +320,9 @@ def build_router() -> APIRouter:
     # ``/ui/{slug}``.
     router.include_router(build_audit_router())
     # Account surface (G10.11-T1 #1892): ``/ui/account`` page + the two
-    # session-revoke POSTs. The literal ``/ui/account/sessions/revoke-others``
-    # is registered before the parametrised
-    # ``/ui/account/sessions/{session_id}/revoke`` inside that router so the
-    # literal ``revoke-others`` segment is never bound as a ``session_id``.
+    # session-revoke POSTs (``/ui/account/sessions/revoke-others`` and
+    # ``/ui/account/sessions/revoke``; the single revoke reads the target
+    # session id from the form body, so no path carries a session id).
     # Operator-tier (self-service own identity + own sessions only); no
     # ``{slug}`` route, so no shadowing concern against the stubs aggregate,
     # but registered before it for consistency with the other surfaces.

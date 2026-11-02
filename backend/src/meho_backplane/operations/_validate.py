@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from collections.abc import Callable
 from typing import Any, Final
 
 import structlog
@@ -42,6 +43,7 @@ from meho_backplane.auth.permissions import _more_restrictive, resolve_verdict
 from meho_backplane.broadcast.events import scrub_secret_named_values
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+from meho_backplane.operations._errors import _sanitize_free_text
 from meho_backplane.operations._param_errors import describe_violation
 from meho_backplane.sandbox_mode import sandbox_mode_active
 from meho_backplane.settings import get_settings
@@ -56,15 +58,26 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "InvalidOpSchemaError",
+    "ParamsCheck",
     "compute_audit_digest_hash",
     "compute_audit_params_hash",
     "compute_params_hash",
     "ingested_schema_for_validation",
+    "params_check_errors",
     "params_hash_candidates",
     "params_hash_matches",
+    "params_problem",
     "policy_gate",
+    "register_params_check",
     "validate_params",
 ]
+
+#: A check of one op's params that its JSON schema cannot express. It gets
+#: the params and returns the entry of :func:`params_problem` for the first
+#: problem, or ``None`` when the params pass. It must not do I/O.
+ParamsCheck = Callable[[dict[str, Any]], dict[str, Any] | None]
+
+_PARAMS_CHECKS: dict[str, ParamsCheck] = {}
 
 #: Label for the key derivation in :func:`_params_hash_key`. It keeps this
 #: key different from any other key made from the same secret.
@@ -256,6 +269,41 @@ def validate_params(
     return out
 
 
+def register_params_check(op_id: str, check: ParamsCheck) -> None:
+    """Register *check* for *op_id*.
+
+    The dispatcher runs it right after the schema check, on every call of the
+    op: before the policy gate, so before the call can wait for approval. A
+    problem is refused as ``invalid_params`` and nothing is stored.
+    ``preview_operation`` runs the same check. A connector registers its check
+    at import time, next to its preview builder.
+    """
+    _PARAMS_CHECKS[op_id] = check
+
+
+def params_problem(path: str, expected: str, remediation: str) -> dict[str, Any]:
+    """One ``validation_errors`` entry for a problem a params check found.
+
+    Same keys as :func:`~meho_backplane.operations._param_errors.describe_violation`;
+    the ``validator`` is ``params_check``. No field carries the rejected value.
+    """
+    return {
+        "path": _sanitize_free_text(path),
+        "validator": "params_check",
+        "expected": _sanitize_free_text(expected),
+        "remediation": _sanitize_free_text(remediation),
+    }
+
+
+def params_check_errors(op_id: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+    """The entries of the registered check of *op_id* for *params*; ``[]`` without one."""
+    check = _PARAMS_CHECKS.get(op_id)
+    if check is None:
+        return []
+    problem = check(params)
+    return [] if problem is None else [problem]
+
+
 def ingested_schema_for_validation(parameter_schema: dict[str, Any]) -> dict[str, Any]:
     """Return *parameter_schema* strengthened to reject undeclared params.
 
@@ -309,8 +357,17 @@ def _is_mutating(descriptor: EndpointDescriptor) -> bool:
     return descriptor.safety_level != "safe"
 
 
-def _sandbox_delete_grant_note() -> str:
-    """The sentence a park reason adds in sandbox mode (#4622)."""
+def _sandbox_delete_grant_note(*, decide_only: bool = False) -> str:
+    """The sentence a park reason adds in sandbox mode (#4622).
+
+    The preview (``decide_only``, #5492) has already looked for a delete
+    grant when it shows this reason, so it says that none covers the call.
+    """
+    if decide_only:
+        return (
+            "; this instance is in sandbox mode, but no live delete grant covers "
+            "this call, so it waits for approval"
+        )
     return (
         "; this instance is in sandbox mode, so a delete grant made in the web console may cover it"
     )
@@ -477,6 +534,13 @@ async def _service_grant_verdict(
             target_id=target_id_str,
             grant_id=str(grant_id),
         )
+    if grant_id is not None and decide_only and descriptor.safety_level == "destructive":
+        # #5492: only a delete grant can cover a destructive call, and the
+        # real call uses it only with the hash of this preview.
+        return PermissionVerdict.AUTO_EXECUTE, (
+            f"auto-granted by delete grant {grant_id}, when the call sends the "
+            "preview_hash of this preview"
+        )
     if grant_id is not None:
         return PermissionVerdict.AUTO_EXECUTE, f"auto-granted by standing grant {grant_id}"
 
@@ -491,7 +555,9 @@ async def _service_grant_verdict(
     return None, gate_reason
 
 
-def _non_agent_park_reason(descriptor: EndpointDescriptor, *, is_service: bool) -> str | None:
+def _non_agent_park_reason(
+    descriptor: EndpointDescriptor, *, is_service: bool, decide_only: bool = False
+) -> str | None:
     """Why a non-agent call parks, or ``None`` when it runs at once.
 
     * ``destructive`` (#3198): mandatory human approval for EVERY non-agent
@@ -513,7 +579,7 @@ def _non_agent_park_reason(descriptor: EndpointDescriptor, *, is_service: bool) 
             "auto-executes, and no standing grant can pre-clear it (#3183)"
         )
         if is_service and sandbox_mode_active():
-            reason += _sandbox_delete_grant_note()
+            reason += _sandbox_delete_grant_note(decide_only=decide_only)
         return reason
     if descriptor.requires_approval:
         return "requires_approval is True; routed to the approval queue (G11.7-T1)"
@@ -569,7 +635,7 @@ async def _non_agent_verdict(
     """
     target_id_str = str(getattr(target, "id", None)) if target is not None else None
     is_service = operator.principal_kind is PrincipalKind.SERVICE
-    gate_reason = _non_agent_park_reason(descriptor, is_service=is_service)
+    gate_reason = _non_agent_park_reason(descriptor, is_service=is_service, decide_only=decide_only)
 
     if gate_reason is None and is_service:
         denial = await _service_read_scope_denial(operator=operator, target=target)
@@ -705,10 +771,8 @@ async def policy_gate(
     ``preview_hash`` and ``params`` (#4622) matter only to the
     service-principal grant consult in sandbox mode (a ``destructive``
     delete must present its own preview hash and a valid blast radius
-    first). ``decide_only`` (#4923) returns the verdict and writes nothing:
-    a grant that would clear the call is reported but not used; the
-    preview relies on this.
-    """
+    first). ``decide_only`` (#4923, #5492) returns the verdict and writes
+    nothing: a grant that would clear the call is reported but not used."""
     actor_sub = resolve_actor_sub()
     if actor_sub is not None:
         return await _direct_run_verdict(

@@ -26,8 +26,8 @@ How it works
 
 A copy the caller may not read answers ``found: false, reason:
 "forbidden"`` (Kubernetes 403, Vault 403, or a Vault path outside the
-caller's tenant); the call does not fail. The op id is on
-``broadcast.events._CREDENTIAL_READ_OPS``, so the flight recorder never
+caller's tenant); the call does not fail. The op id is declared
+``credential_read`` in ``kubernetes/op_classes.py``, so the flight recorder never
 stores the Secret body and the broadcast feed shows only the outcome.
 """
 
@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
     from meho_backplane.connectors.kubernetes.kubeconfig import KubernetesTargetLike
 
-__all__ = ["SECRET_COMPARE_OPS", "k8s_secret_compare_to_ref"]
+__all__ = ["OPS", "SECRET_COMPARE_OPS", "k8s_secret_compare_to_ref"]
 
 _OP_ID = "k8s.secret.compare_to_ref"
 
@@ -258,3 +258,6 @@ SECRET_COMPARE_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=_LLM_INSTRUCTIONS,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = SECRET_COMPARE_OPS

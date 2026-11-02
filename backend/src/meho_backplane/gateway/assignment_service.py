@@ -85,7 +85,10 @@ def _is_safe_tier(descriptor: EndpointDescriptor) -> bool:
     Classified against the ladder shared with the central mint and the edge
     executor — the three-layer mirror.
     """
-    return classify_satellite_tier(descriptor.safety_level) is SatelliteMintTier.SAFE
+    return (
+        classify_satellite_tier(descriptor.safety_level, op_id=descriptor.op_id)
+        is SatelliteMintTier.SAFE
+    )
 
 
 def descriptor_from_target(target: TargetORM) -> wire.ResolvedTargetDescriptor:

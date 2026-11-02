@@ -54,6 +54,10 @@ data:
   # actionable public-client error rather than silently misusing
   # `KEYCLOAK_AUDIENCE` (the confidential resource-server id).
   KEYCLOAK_CLI_CLIENT_ID: {{ $kc.cliClientId | quote }}
+  # #5515 -- public client of the fresh browser sign-in of
+  # `meho approvals approve`. Only a token made for this client can
+  # approve on the command line or REST. Empty: no token can approve.
+  KEYCLOAK_CLI_APPROVE_CLIENT_ID: {{ $kc.cliApproveClientId | quote }}
   # #2594 (Goal #336) — public client_id of the confidential `meho-web`
   # client the operator-console browser BFF login runs its OAuth 2.1
   # authorization-code grant against. Unconditionally emitted so the
@@ -200,11 +204,13 @@ data:
   # unconditionally, like the self-approval switch above; the default
   # `"false"` refuses decisions made on someone else's instruction.
   APPROVAL_ALLOW_DELEGATED_DECISION: {{ .Values.config.approvalAllowDelegatedDecision | quote }}
-  # How old a sign-in may be for an action that needs a fresh sign-in:
-  # turning approval off for an operation (#4711), and approving on the
-  # command line or REST (#3979). Then which `acr` values count as a
-  # one-time code step for an approve. The web interface is not affected.
+  # The approval window (#5515): how old a sign-in may be to approve on
+  # the command line or REST. Then the limit for an action that needs a
+  # fresh sign-in each time: turning approval off (#4711) and approving a
+  # destructive operation. Then which `acr` values count as a one-time
+  # code step for an approve. The web interface is not affected.
   FRESH_SIGN_IN_MAX_AGE_SECONDS: {{ .Values.config.freshSignInMaxAgeSeconds | quote }}
+  PER_ACTION_SIGN_IN_MAX_AGE_SECONDS: {{ .Values.config.perActionSignInMaxAgeSeconds | quote }}
   APPROVAL_ONE_TIME_CODE_ACR_VALUES: {{ .Values.config.approvalOneTimeCodeAcrValues | quote }}
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The

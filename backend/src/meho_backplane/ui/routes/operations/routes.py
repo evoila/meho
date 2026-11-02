@@ -205,7 +205,11 @@ from meho_backplane.operations.meta_tools import (
     search_operations,
 )
 from meho_backplane.settings import get_settings
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import (
+    UISessionContext,
+    require_ui_operator,
+    require_ui_session,
+)
 from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
@@ -274,6 +278,9 @@ _MAX_PREVIEW_HASH_LENGTH: Final[int] = 128
 #: Module-level ``Depends`` closures -- built once (rather than inline) to
 #: satisfy ruff B008, matching the approvals / kb / connectors routers.
 _require_session = Depends(require_ui_session)
+#: The ``operator`` role floor of the preview + call POSTs (the same floor
+#: as REST ``/api/v1/operations/call`` and the MCP ``call_operation`` tool).
+_require_operator = Depends(require_ui_operator)
 _role_probe_dep = Depends(resolve_role_probe)
 
 
@@ -448,7 +455,7 @@ def build_operations_router() -> APIRouter:
     @router.post("/ui/operations/preview", response_class=HTMLResponse)
     async def operations_preview(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         connector_id: str = Form(max_length=_MAX_CONNECTOR_ID_LENGTH),
         op_id: str = Form(max_length=_MAX_OP_ID_LENGTH),
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
@@ -457,7 +464,8 @@ def build_operations_router() -> APIRouter:
         """Render the read-only request **preview** fragment (no dispatch).
 
         CSRF-gated by the ``ui/csrf.py`` middleware (a ``POST`` under
-        ``/ui/``) and ``require_ui_session``-gated. Resolves the same op +
+        ``/ui/``) and ``require_ui_operator``-gated (``read_only`` gets 403,
+        like on REST). Resolves the same op +
         target + params a real dispatch would and renders the literal
         would-be HTTP request -- ``method`` / ``resolved_path`` / ``query``
         / ``redacted_body`` -- WITHOUT sending it and WITHOUT writing an
@@ -487,7 +495,7 @@ def build_operations_router() -> APIRouter:
     @router.post("/ui/operations/call", response_class=HTMLResponse)
     async def operations_call(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         connector_id: str = Form(max_length=_MAX_CONNECTOR_ID_LENGTH),
         op_id: str = Form(max_length=_MAX_OP_ID_LENGTH),
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
@@ -499,7 +507,8 @@ def build_operations_router() -> APIRouter:
 
         The highest-blast-radius action the console gains -- it executes a
         real connector op against a live target. CSRF-gated (a ``POST`` under
-        ``/ui/``) and ``require_ui_session``-gated; calls
+        ``/ui/``) and ``require_ui_operator``-gated (``read_only`` gets 403
+        before anything is dispatched or queued, like on REST); calls
         :func:`~meho_backplane.operations.meta_tools.call_operation`
         in-process (the same BFF pattern the approvals decision POSTs use).
         The structured envelope is surfaced verbatim

@@ -646,7 +646,8 @@ class ReviewService:
 
         A built-in connector row is a shared, global-catalogue entry every
         tenant sees, so mutating it (enable / disable / bulk-enable-reads /
-        edit-group / edit-op) affects every tenant and is a platform action.
+        edit-group / edit-op / delete) affects every tenant and is a platform
+        action.
         Mirrors :func:`~meho_backplane.docs_collections.service.update_doc_collection`'s
         global-row seat (#3616): a ``tenant_admin`` without
         ``platform_admin`` is refused with
@@ -1174,7 +1175,7 @@ class ReviewService:
             reason=reason,
             person_present=person_present,
             tighten_only=tighten_only,
-            max_age_seconds=get_settings().fresh_sign_in_max_age_seconds,
+            max_age_seconds=get_settings().per_action_sign_in_max_age_seconds,
         )
 
     async def remove_op_override(
@@ -1219,7 +1220,7 @@ class ReviewService:
                 operator=self._operator,
                 reason=reason,
                 person_present=person_present,
-                max_age_seconds=get_settings().fresh_sign_in_max_age_seconds,
+                max_age_seconds=get_settings().per_action_sign_in_max_age_seconds,
             )
             await write_audit_row(
                 session,
@@ -1587,8 +1588,16 @@ class ReviewService:
         the copy this delete removes. A second delete then removes the
         current tenant copy. The built-in row is untouched either way, so the
         tenant keeps using it for calls.
+
+        Deleting the built-in rows (``tenant_id`` ``None``) needs
+        ``platform_admin``, the same gate as enable, disable and edit
+        (:meth:`_require_platform_admin_for_builtin`): the rows are
+        shared by every tenant. A ``tenant_admin`` without it is refused
+        with :class:`BuiltinConnectorWriteForbiddenError` before any row
+        is read.
         """
         scope = self._resolve_scope(connector_id, tenant_id)
+        self._require_platform_admin_for_builtin(connector_id, scope)
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
             # #5027: the first statement, so no new sensor, runbook template,

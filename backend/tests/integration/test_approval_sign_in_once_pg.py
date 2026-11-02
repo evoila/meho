@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Real-Postgres check: one sign-in gives one approval, also at the same moment (#3979).
+"""Real-Postgres check: a destructive approve needs a sign-in of its own, also at the same moment.
 
-An approve on the command line or REST needs a fresh sign-in, and one
-sign-in allows one approval. The check reads the person's earlier
+Inside the approval window one sign-in may approve several requests, but a
+request whose operation is ``destructive`` needs a sign-in that approved
+nothing else (#3979, #5515). The check reads the person's earlier
 ``approval.decision`` audit rows. Two approves of two different requests
 with the same sign-in can run at the same moment, so each could read the
 audit log before the other writes. The check takes a transaction-level
@@ -94,6 +95,8 @@ async def _park() -> uuid.UUID:
             target=None,
             params=_PARAMS,
             params_hash=compute_params_hash(_PARAMS),
+            proposed_effect={"op_id": "rectest.sign-in-race", "safety_level": "destructive"},
+            preview_hash="preview-hash",
         )
         await session.commit()
         return request.id
@@ -103,7 +106,7 @@ async def _park() -> uuid.UUID:
 async def test_two_approves_with_one_sign_in_at_the_same_moment_only_one_wins(
     pg_engine: None,  # noqa: F811 — fixture
 ) -> None:
-    """Two approves of two requests with one sign-in: one passes, one is refused.
+    """Two destructive approves with one sign-in: one passes, one is refused.
 
     Each approve holds its transaction open for a short time after its
     check and audit write, before it commits. Without the lock, the other

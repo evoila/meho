@@ -6719,7 +6719,11 @@ class ApprovalRequest(Base):
       request id, not the params — can re-dispatch with the stored params
       rather than only recording the decision. Nullable so pre-0036 rows
       remain valid. Internal re-dispatch input; never serialised onto a
-      read view or broadcast frame.
+      read view or broadcast frame. Each secret-named value in it (a
+      password or a licence key inside a deployment spec) is replaced by a
+      marker as soon as the run claim is won or the request ends without a
+      run (``approval_queue.claim_resume`` / ``end_run_input``); migration
+      ``0132`` did the same for the rows that were already decided.
 
     * ``proposed_effect`` -- JSON (JSONB on PG). Human-readable summary of
       what the op would do if approved; populated at queue time; JSONB for
@@ -6851,6 +6855,15 @@ class ApprovalRequest(Base):
       An approved run checks it against the target as it is now and
       refuses to run when it differs. NULL for a request with no target
       and on rows saved before this column. Added by migration ``0130``.
+
+    * ``reveal_secret`` -- Boolean NOT NULL DEFAULT ``false``. The requester
+      asked for the hidden values of the answer (``reveal_secret: true``;
+      an agent is refused before the call waits). It is not a parameter of
+      the operation: it is not in ``params``, not in the encrypted payload
+      of a credential write, and not part of ``params_hash``. Every
+      approved run reads it here, also the re-run of a failed credential
+      write, whose encrypted input the first run deleted. ``false`` on rows
+      saved before this column. Added by migration ``0131``.
 
     Indexes
     -------
@@ -7067,6 +7080,11 @@ class ApprovalRequest(Base):
     # The target's connection settings when the request was made. See the
     # class docstring. Added by migration ``0130``.
     target_hash: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # The requester asked for the hidden values of the answer. See the class
+    # docstring. Added by migration ``0131``.
+    reveal_secret: Mapped[bool] = mapped_column(
+        sa.Boolean(), nullable=False, default=False, server_default=sa.false()
+    )
 
     __table_args__ = (
         Index(

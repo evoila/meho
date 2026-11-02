@@ -752,6 +752,8 @@ Every other result has an `outcome` field:
 | `no_match` | The connector has enabled operations, but none matched. | Do not call anything. Search again with other words. |
 | `unknown_group` | The `group` filter names no visible group. | Retry with a group key from `narrowing`. |
 | `zero_enabled_operations` | The connector is loaded, but no operation is enabled for this caller. | Do not call it. An operator must enable operations. |
+| `package_not_installed` | The connector's operations come from a connector package that is not installed in this MEHO. The advisory names the package. | Do not call it. An operator must install the package again. |
+| `code_not_installed` | The code of the connector is not in this MEHO (its rows have no package name, and no handler imports). Also the answer in exact-op mode. | Do not call it. An operator must run a MEHO image that has this connector. |
 
 `advisory` explains any outcome other than `matched` in one sentence.
 `narrowing` lists next steps, at most `SEARCH_NARROWING_MAX` entries.
@@ -1123,6 +1125,24 @@ tools (working or operator: the four working docs tools plus the three
 operator-surface doc-collection lifecycle tools all stay hidden). The
 gates are independent axes.
 
+**Advertised scopes (#5514).** MEHO tells MCP clients which scopes to ask
+for in two places: `scopes_supported` in `/.well-known/oauth-protected-resource`
+(`api/well_known.py`) and the `scope` parameter of the 401
+`WWW-Authenticate` challenge (`www_authenticate_header` in `mcp/auth.py`).
+Both use `MCP_SCOPES_SUPPORTED` in `mcp/auth.py`:
+`mcp:read mcp:execute offline_access`. MCP 2025-11-25 ("Scope Selection
+Strategy") has a client ask for the challenge `scope` first, then for
+`scopes_supported`. `offline_access` is in the list so a client gets a
+login that renews itself; without it, the login ends at the realm's short
+SSO idle limit. `mcp:admin` is deliberately not advertised: elevation
+stays an explicit request. The `meho-mcp` client in the shipped realm
+offers `offline_access` as an optional scope, so a client that asks for
+it is not refused. The MEHO plugin and the Claude Desktop bundle (both
+`mcp-remote` 0.1.39) still send their own scope list in the browser login
+(`--static-oauth-client-metadata`, which `mcp-remote` puts into the login
+URL after the advertised scopes), so `MEHO_MCP_SCOPES` with `mcp:admin`
+keeps working.
+
 ### Blast radius
 
 The surface filter lives entirely in `all_tools_for` (the only
@@ -1267,7 +1287,8 @@ its name ends in `.remove`, so the rules for deletes apply: a person's call
 waits until a second person approves it, an agent login is refused, a
 service principal waits for a person and cannot get a standing grant for
 it, and only in sandbox mode can a delete grant made in the web console let
-a service principal run it at once. It is reached through
+a service principal run it at once. That call needs no `tenant_admin`: a
+service login has the `operator` role, and the delete grant is enough (#5480). It is reached through
 `call_operation` only; there is no `meho_*` tool for it. See
 [`targets.md`](targets.md#removing-a-target-targetsremove).
 

@@ -103,7 +103,7 @@ unconfigured, or delivery-failed send is the **product**, not an error
 
 | reason | trigger |
 |---|---|
-| `not_in_recipient_allowlist` | a recipient failed the floor (incl. empty allowlist / unparseable address) |
+| `not_in_recipient_allowlist` | a recipient failed the floor (incl. empty allowlist / unparseable address / a local part outside letters, digits and `. _ + -`) |
 | `smtp_unconfigured` | `MAIL_SMTP_HOST` or `MAIL_FROM` unset |
 | `smtp_connect_error` | `SMTPConnectError` or socket-level `OSError` (refused / DNS / timeout) |
 | `smtp_auth_requires_tls` | a username is configured but the channel is still cleartext |
@@ -138,9 +138,24 @@ all in `Settings` (`settings.py`, env-mapped in `get_settings`):
 accepted) naming the **entire** permitted recipient space. Matching is
 case-insensitive on the whole address; a domain entry does **not**
 match subdomains. An address the parser cannot positively read as
-`local@domain` is refused — which also makes SMTP envelope injection
-(CR/LF in a recipient) structurally impossible past the gate. A
-*subject* carrying a line break is rejected one layer earlier, by
+`local@domain` is refused — which also keeps a line break (CR/LF in a
+recipient) out of the envelope.
+
+**Plain local part.** A recipient's local part (the part before the
+`@`) may hold only letters, digits and `. _ + -`. Any other character
+(`%`, `!`, `<`, `>`, `=`, quotes, ...) refuses the recipient in
+`allowlist._normalise_recipient`, so the rule holds for the instance
+floor, the per-tenant list and every caller of `send_email`, including
+the checks notifier. `mail.send`'s parameter schema applies the same
+rule one layer earlier (`ops._PLAIN_RECIPIENT_PATTERN`), so a
+dispatched call gets `invalid_params`. The string the floor checks and
+the string the relay receives in `RCPT TO` are therefore the same plain
+address. Set the relay to the same rule: on Postfix, `allow_percent_hack
+= no` and `swap_bangpath = no` make the relay refuse `%` and `!` in a
+local part too. A listed **full address** must itself be a plain
+address, or it can never match.
+
+A *subject* carrying a line break is rejected one layer earlier, by
 `mail.send`'s parameter schema (`ops._SINGLE_LINE_PATTERN`), so the
 dispatch returns the structured validation error (`status="error"`,
 `extras["error_code"] == "invalid_params"`). The pattern excludes every

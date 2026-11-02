@@ -376,6 +376,18 @@ split.
   on 9.1 and 9.1.1. CI requires the three lists, so a missing list fails
   instead of skipping. The other provider op_ids stay in the exclusion
   above; this change checks only the region path.
+- **Region and quota paths checked per version.** The ops that connect
+  vCenters and NSX managers, build regions and set organization quotas
+  keep their paths in `_infra_paths.py`. The lane checks every one of
+  them against the same three lists, in the form the connector sends for
+  each version (`/cloudapi/vcf/...` on 9.0, `/cloudapi/v1/...` on 9.1
+  and 9.1.1). Path parameter names are compared without braces, because
+  the lists write some of them bare. Two legacy `/api` calls stay
+  excluded with evidence: no 9.x reference lists a legacy call, and the
+  vendor SDK (`go-vcloud-director` v3) uses them on VCF Automation 9 --
+  the vCenter refresh (`/api/admin/extension/vimServer/{id}/action/refresh`,
+  "there is no OpenAPI endpoint for this operation") and the task read
+  (`/api/task/{id}`) behind every `202` task link.
 
 ### vcd — CloudAPI paths ARMED 2026-10-31 (#4519); `/api` paths pinned only
 
@@ -736,6 +748,35 @@ The `installer-cb-5.0` connector (Cloud Builder 5.0 to 5.2, product
   proof).
 - **Activation:** Broadcom publishing a 5.x API file. Then the file goes on
   the shelf next to the lists and the check compares against it.
+
+### idb-wsa-3.3 and idb-rest-9.0 — no API file exists; the check pins the list (#4508)
+
+The `idb` connectors (Workspace ONE Access 3.3 and VCF Identity Broker 9.x)
+call twelve hand-written path constants (twelve `METHOD:/path` pairs).
+
+- **Check file:** `backend/tests/test_connectors_idb_spec_reconcile.py`. It
+  reads the `*_PATH` constants of `connectors/idb/_paths.py` live, gives each
+  one its HTTP method, and pins the full `METHOD:/path` list. It also checks
+  that every path is in the reference list in the docstring of `_paths.py`.
+  All tests run always; there is no compare test.
+- **What was checked (2026-10-31).** Identity Broker documents its API only
+  as web pages (<https://developer.broadcom.com/xapis/vmware-identity-broker/latest/>);
+  no API file is linked. The token, `properties`, OpenID discovery and SCIM
+  search paths were checked against its operation index. For Workspace ONE
+  Access 3.3 no API reference exists. The login and SCIM search paths match
+  the archived Identity Manager swagger file (`apidocs/swagger.json` in
+  `omnissa-archive/idm`, not tied to 3.3). The identity provider and
+  directory list paths come from the VMware PowerCLI example module
+  `VMware.WorkspaceOneAccess`, the health path from the Identity Manager 3.3
+  monitoring docs, and the directory sync path only from community
+  write-ups. The decision record
+  `docs/decisions/2026-10-23-identity-broker-connector.md` lists them.
+- **Residual risk, named.** The Workspace ONE Access directory, identity
+  provider and sync calls are not in any API reference. A wrong path or body
+  shows up only in the lab proof. The pinned list makes sure every path change
+  in MEHO is made on purpose.
+- **Activation:** a vendor API file for either product. Then the file goes on
+  the shelf, the check gets a compare test, and this entry is withdrawn.
 
 ## Red lane = finding (the protocol)
 

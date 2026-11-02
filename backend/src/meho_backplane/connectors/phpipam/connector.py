@@ -42,6 +42,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import is_system_operator
 from meho_backplane.connectors._shared.vcf_auth import (
     basic_auth_header,
@@ -124,6 +125,8 @@ class PhpipamConnector(HttpConnector):
         )
         self._credentials: dict[_CacheKey, PhpipamCredentials] = {}
         self._tokens: dict[_CacheKey, str] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._locks: dict[_CacheKey, asyncio.Lock] = {}
 
     # ------------------------------------------------------------------
@@ -146,6 +149,10 @@ class PhpipamConnector(HttpConnector):
         key = self._key(target)
         use_cache = _may_use_cache(operator)
         async with self._locks.setdefault(key, asyncio.Lock()):
+            if use_cache and not self._readers.has_read(target, operator):
+                # The caller's own Vault read, once per caller and target.
+                self._credentials[key] = await self._credentials_loader(target, operator)
+                self._readers.record(target, operator)
             credentials = self._credentials.get(key) if use_cache else None
             if credentials is None:
                 credentials = await self._credentials_loader(target, operator)
@@ -216,11 +223,13 @@ class PhpipamConnector(HttpConnector):
         for cache in (self._credentials, self._tokens):
             for key in [key for key in cache if key[:2] == prefix]:
                 del cache[key]
+        self._readers.forget(target)
 
     async def aclose(self) -> None:
         """Forget every cached secret and token, then close the HTTP clients."""
         self._credentials.clear()
         self._tokens.clear()
+        self._readers.clear()
         await super().aclose()
 
     def trace_response_body(self, response: httpx.Response) -> Any:

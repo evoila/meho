@@ -84,6 +84,7 @@ __all__ = [
     "K8S_CONFIGMAP_LIST_LLM_INSTRUCTIONS",
     "K8S_CONFIGMAP_LIST_PARAMETER_SCHEMA",
     "K8S_CONFIGMAP_LIST_RESPONSE_SCHEMA",
+    "OPS",
     "configmap_info",
     "configmap_list_row",
 ]
@@ -376,3 +377,6 @@ CONFIG_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=K8S_CONFIGMAP_INFO_LLM_INSTRUCTIONS,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = CONFIG_OPS

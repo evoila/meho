@@ -108,8 +108,9 @@ meho admin keycloak bootstrap-clients [flags]
 - `--admin-user-username` — username of the admin user to provision in MEHO-Admins and MEHO-Platform-Admins (required unless --skip-user-provisioning)
 - `--admin-username` — master-realm admin username (or set KEYCLOAK_ADMIN_USER)
 - `--backplane-audience` — audience claim the `audience-meho-backplane` mapper emits (matches chart's `config.keycloakAudience`)
+- `--cli-approve-client-id` — public client_id for the fresh browser sign-in of `meho approvals approve` (matches chart's `config.keycloakCliApproveClientId`)
 - `--cli-client-id` — public client_id for the device-code flow (matches chart's `config.keycloakCliClientId`)
-- `--cli-offline-access` — opt the device-code CLI client into the long-lived offline-token path: assign `offline_access` as an optional client scope and bound its per-client offline-session idle timeout to the given number of seconds. Off by default. A bare `--cli-offline-access` uses 172800 seconds (48h); to pass a custom value use the equals form, e.g. `--cli-offline-access=86400`. Pairs with `meho login --offline`. Security: this enables a long-lived refresh token on the operator's disk — keep the bound tight and prefer the OS keyring for storage
+- `--cli-offline-access` — how many seconds an unused CLI login stays valid: assigns `offline_access` as an optional client scope on the device-code CLI client and sets its `client.offline.session.idle.timeout` attribute, so `meho login` gets a login that renews itself. Default 172800 seconds (48h). Use the equals form for another value, e.g. `--cli-offline-access=86400`. `--cli-offline-access=0` turns the long CLI login off and removes it from a client an earlier run set up. The refresh token is a long-lived secret on the operator's disk (OS keyring first)
 - `--dry-run` — print what would be provisioned without making any API calls
 - `--insecure-skip-tls-verify` — escape hatch: skip TLS certificate AND hostname verification for every Keycloak request (sends the admin password + token over an unverified connection; prints a loud warning). Prefer --keycloak-ca-bundle
 - `--keycloak-base-url` — Keycloak base URL, e.g. https://keycloak.example.com
@@ -401,10 +402,10 @@ meho approvals
 
 ### `meho approvals approve`
 
-Approve a pending approval request
+Approve pending approval requests
 
 ```
-meho approvals approve <id> | --filter-work-ref REF --in-order [flags]
+meho approvals approve <id> [<id>...] | --filter-work-ref REF --in-order [flags]
 ```
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
@@ -1284,7 +1285,7 @@ meho connector ingest [flags]
 - `--save-converted` — manual mode: when a --spec is a Swagger 2.0 file the CLI converts to OpenAPI 3, also write the converted file here so you can check it and keep it next to the original
 - `--spec` — spec URI; repeat for multi-spec merge under one connector_id; manual mode
 - `--spec-info-versions-compatible` — manual mode: declare that the spec's info.version is compatible with --version even when they differ (e.g. a vendor /api/v2 surface self-versioning as info.version=v2 ingested under --version 9.0). Each entry is a glob (2.x, 9.0.x) or a PEP 440 specifier set (>=2,<3); repeatable or comma-separated. Without it, a spec/label major mismatch is rejected; mutually exclusive with --catalog (the catalog row carries its own band)
-- `--tenant-id` — write scope for the ingested rows (works with both modes): omit for the built-in / global scope (tenant_id left unset — visible to every tenant); pass your own tenant UUID for a tenant-curated ingest (another tenant's UUID is rejected with HTTP 403 unless you hold platform_admin)
+- `--tenant-id` — write scope for the ingested rows (works with both modes): omit for the built-in / global scope (tenant_id left unset — visible to every tenant; needs platform_admin); pass your own tenant UUID for a tenant-curated ingest (another tenant's UUID is rejected with HTTP 403 unless you hold platform_admin)
 - `--version` — product version (e.g. 9.0, 1.x); manual mode
 
 ### `meho connector ingest-status`
@@ -3391,7 +3392,7 @@ meho login <backplane-url> [flags]
 - `--client-id` — OAuth client_id to use for the device-code flow (auto-discovered when blank)
 - `--insecure-allow-http` — permit a plaintext http:// backplane URL for a localhost backplane only (local-dev convenience; the bearer token is sent in the clear — never use against a remote host)
 - `--issuer` — Keycloak realm issuer URL (auto-discovered from the backplane when blank)
-- `--offline` — request a long-lived offline refresh token (adds the OIDC `offline_access` scope) so you stay logged in across SSO idle timeouts instead of re-running the device dance. Requires the backplane's meho-cli client to allow offline_access (provision via `meho admin keycloak bootstrap-clients --cli-offline-access`). The refresh token is stored like any credential (OS keyring first, 0600 file fallback) — treat it as a long-lived secret
+- `--offline` — ask for a long login that renews itself (adds the OIDC `offline_access` scope). On by default; --offline=false asks for a short login that ends at the realm's SSO idle timeout. When the login server refuses the scope, login retries without it. The refresh token is stored like any credential (OS keyring first, 0600 file fallback) — treat it as a long-lived secret
 - `--print-token` — after a successful login, print ONLY the access token to stdout (every other line — the device-code prompt, the success message, warnings — goes to stderr) so it can be captured with 'TOKEN=$(meho login --print-token <backplane-url>)'. WARNING: the value is a live bearer credential — never log it or paste it into shared channels
 - `--resolve` — pin a host to an IP for the flow, mirroring `curl --resolve <host>:<port>:<ip>` (split-DNS escape hatch when the Keycloak host doesn't resolve). Repeat for multiple hosts. TLS SNI/Host use the real hostname, so certificate validation is unaffected
 - `--scope` — OAuth scopes to request (default: openid). Repeat or comma-separate for multiple.

@@ -9,7 +9,7 @@
 #
 #   Python (ruff + mypy + pytest) on backend/ — SHARDED (#3251) into:
 #     python-lint       : ruff check + ruff format --check + mypy (once)
-#     python-unit-shard : the pytest unit sweep as a 5-way matrix; test files
+#     python-unit-shard : the pytest unit sweep as a 6-way matrix; test files
 #                         are split by measured time (#4809)
 #     python-unit-lane  : fan-in carrying the branch-protection required
 #                         context `Python (ruff + mypy + pytest)`
@@ -39,7 +39,7 @@
 #
 # Docs-only fast path (#3252): the `changes` detector also classifies a PR
 # whose diff is PURELY documentation (every path under `docs/` or ending in
-# `.md`). On such a PR the heavy Python lanes — `python-lint`, the five
+# `.md`). On such a PR the heavy Python lanes — `python-lint`, the six
 # `python-unit-shard` legs, and the four `python-integration-shard` legs —
 # skip via their own job-level `if:` (skipped-by-`if:` == Success per
 # #2140), so a changelog roll / guide edit / README fix finishes CI in
@@ -232,7 +232,7 @@ jobs:
     #                connector folder (plus its tests and docs), else empty
     #                (#5297). The `python-unit-shard` matrix then runs ONE
     #                job with that connector's tests and a fixed contract
-    #                set instead of the five shards. Same fail-closed rule as
+    #                set instead of the six shards. Same fail-closed rule as
     #                docs_only: backend/tests/_unit_connector_select.py says
     #                which diffs qualify, and any doubt, any error, and every
     #                merge_group / push run give empty (the full run).
@@ -337,7 +337,7 @@ jobs:
             # An error in the tool leaves single_connector empty (full run).
             if [ "${docs_only}" = "false" ]; then
               single_connector="$(printf '%s\n' "${changed}" | python3 backend/tests/_unit_connector_select.py detect)" || single_connector=
-              echo "single_connector=${single_connector:-<empty>} (empty -> five unit shards)"
+              echo "single_connector=${single_connector:-<empty>} (empty -> six unit shards)"
             fi
           fi
           {
@@ -357,10 +357,10 @@ jobs:
   #   python-lint       — ruff check + ruff format --check + mypy. Whole-tree,
   #                       unshardable-by-file, ~1-2 min; runs ONCE on the light
   #                       pool. Non-required check.
-  #   python-unit-shard — the pytest unit sweep as a 5-way matrix; the test
+  #   python-unit-shard — the pytest unit sweep as a 6-way matrix; the test
   #                       files are split by measured time so every shard
   #                       takes about as long (heavy pool, in parallel).
-  #                       Non-required checks (`Python unit shard N/5`).
+  #                       Non-required checks (`Python unit shard N/6`).
   #   python-unit-lane  — FAN-IN carrying the EXACT branch-protection required
   #                       context `Python (ruff + mypy + pytest)`; fails iff
   #                       python-lint or ANY shard did not pass. Branch
@@ -449,27 +449,28 @@ jobs:
         run: uv run mypy src/
 
   python-unit-shard:
-    name: ${{ needs.changes.outputs.single_connector != '' && format('Python unit tests for connector {0}', needs.changes.outputs.single_connector) || format('Python unit shard {0}/5', matrix.shard) }}
+    name: ${{ needs.changes.outputs.single_connector != '' && format('Python unit tests for connector {0}', needs.changes.outputs.single_connector) || format('Python unit shard {0}/6', matrix.shard) }}
     # One-connector run (#5297): when `changes` sets single_connector, the
     # matrix below has ONE leg, and the pytest step runs that connector's
     # tests plus the contract set (tests/_unit_connector_select.py) instead
     # of a quarter of the suite. Only a pull request can get there; the
-    # merge queue and pushes to `main` always run the five shards.
+    # merge queue and pushes to `main` always run the six shards.
     #
-    # Non-required checks (one per matrix leg: `Python unit shard 1/5`
-    # to `.../5/5`) — the required context is carried by
+    # Non-required checks (one per matrix leg: `Python unit shard 1/6`
+    # to `.../6/6`) — the required context is carried by
     # the python-unit-lane fan-in below. This is the pytest half of the old
-    # required lane, split into a deterministic 5-way file-level matrix
+    # required lane, split into a deterministic 6-way file-level matrix
     # (#3251, 3 shards; #4655 raised it to 4 when the 3 shards reached the
     # 660 s budget; #4809 split by measured file time instead of every
-    # 4th file; #5433 raised it to 5) so its serial wall runs as parallel shards.
+    # 4th file; #5433 raised it to 5; #5623 raised it to 6) so its serial
+    # wall runs as parallel shards.
     #
     # Fork-PR guard: never execute project code from a fork on the self-hosted
     # runner pool. Same stance as the old lane — job-level so no step ever
-    # starts on a fork PR. On a fork PR all five legs skip (→ reported
+    # starts on a fork PR. On a fork PR all six legs skip (→ reported
     # Success), which the fan-in's own fork guard mirrors. Plus the #3252
     # docs-only skip (identical shape to python-lint): a proven docs-only PR
-    # skips all five legs → the fan-in reports success-by-skip. `needs:
+    # skips all six legs → the fan-in reports success-by-skip. `needs:
     # changes` makes `docs_only` readable; a detect-job failure skip-cascades
     # these legs and the fan-in fails the required context CLOSED. The legs
     # also skip when `backend_python` is `false` (#5296); the job
@@ -483,12 +484,24 @@ jobs:
     # The heavy runner pool (#761); its sizes live outside this repo. Only the
     # pytest sweep is CPU/memory-bound enough to want the extra cores;
     # ruff/mypy run once in python-lint on a GitHub-hosted runner.
-    runs-on: meho-runners-ci-heavy
+    # Two heavy runner sets share the same machines. Only merge-queue runs
+    # use `meho-runners-ci-heavy-queue` (6 runners: one per shard of one
+    # merge-queue run, so its size changes with the shard count). Every
+    # other event (pull requests, pushes to `main`, the nightly run) uses
+    # `meho-runners-ci-heavy`.
+    # Before the split, merge-queue shards waited behind pull request shards
+    # that were queued earlier, because GitHub gives jobs out in queue order.
+    # Pushes to `main` stay off the queue set: otherwise every merged commit
+    # would run its shards there twice (queue run, then push run), and the
+    # queue would merge only about half as fast.
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci-heavy-queue' || 'meho-runners-ci-heavy' }}
     strategy:
-      # 5 shards (#3251 started with 3; #4655 raised it to 4 after the
+      # 6 shards (#3251 started with 3; #4655 raised it to 4 after the
       # slowest shard reached the 660 s budget; #5433 raised it to 5 when all
       # four shards took 780-930 s on busy runners, and fresh file times
-      # alone would still leave them near 850 s — measure, then rebalance,
+      # alone would still leave them near 850 s; #5623 raised it to 6 when
+      # the five shards took 600-930 s and fresh file times alone would
+      # still leave the slowest near 850 s — measure, then rebalance,
       # do not raise the budget). fail-fast: false — one shard's red tests must NOT
       # cancel the others, so a broad breakage surfaces every failing shard in
       # one run (the fan-in still fails if ANY leg fails). To change the shard
@@ -497,7 +510,7 @@ jobs:
       # (tests/_unit_shard_durations.json, see tests/_unit_shard_split.py).
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(needs.changes.outputs.single_connector != '' && '[1]' || '[1, 2, 3, 4, 5]') }}
+        shard: ${{ fromJSON(needs.changes.outputs.single_connector != '' && '[1]' || '[1, 2, 3, 4, 5, 6]') }}
     # 20-min cap: hang backstop only. Expected job wall is ~8 min (setup ~2 min
     # + pytest ~6 min); the perf-budget step below is the PR-level early-warning
     # gate that fires well before this cap. The pre-shard lane's 25-min cap
@@ -664,7 +677,8 @@ jobs:
           # vcenter-9.0 + ~3 MB vcf-automation-9.0 + ~0.4 MB each
           # vcf-automation-9.0-reference / -9.1 / -9.1.1 + ~0.4 MB
           # vcf-installer-9.0 + ~0.4 MB vcf-installer-9.1 + ~5 MB
-          # vcf-operations-9.0 + ~0.1 MB vcf-operations-orchestrator-9.0
+          # vcf-operations-9.0 + ~5 MB vcf-operations-9.1 + ~0.1 MB
+          # vcf-operations-orchestrator-9.0
           # / -9.1 + ~1.3 MB vcf-protection-and-recovery-9.1
           # + ~0.4 MB vks-9.0 + ~6 MB vmware-cloud-director-10.6), not the
           # whole consumer repo. No
@@ -700,6 +714,7 @@ jobs:
             docs/vcf-installer-9.0
             docs/vcf-installer-9.1
             docs/vcf-operations-9.0
+            docs/vcf-operations-9.1
             docs/vcf-operations-orchestrator-9.0
             docs/vcf-operations-orchestrator-9.1
             docs/vcf-protection-and-recovery-9.1
@@ -756,25 +771,40 @@ jobs:
             spec-shelf/docs/vcenter-9.0/vcenter.yaml \
             spec-shelf/docs/vcenter-9.0/vi-json.yaml \
             spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json \
+            spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-catalog-deployment.json \
             spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-provider-infrastructure-apis-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-vm-apps-org-abx-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-vm-apps-org-approval-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-vm-apps-org-policies-reference-operations.tsv \
             spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-provider-infrastructure-apis-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-abx-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-approval-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-event-broker-service-api-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-policies-reference-operations.tsv \
             spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-provider-infrastructure-apis-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-vm-apps-org-abx-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-vm-apps-org-approval-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-vm-apps-org-event-broker-service-api-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-vm-apps-org-policies-reference-operations.tsv \
             spec-shelf/docs/vcf-installer-9.0/vcf-installer-openapi.json \
             spec-shelf/docs/vcf-installer-9.1/vcf-installer-openapi.json \
             spec-shelf/docs/vcf-operations-9.0/vcf-operations-for-logs-openapi.json \
             spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json \
+            spec-shelf/docs/vcf-operations-9.1/vcf-operations-openapi-9.1.0.json \
+            spec-shelf/docs/vcf-operations-9.1/vcf-operations-openapi-9.1.1.json \
             spec-shelf/docs/vcf-operations-orchestrator-9.0/vcf-operations-orchestrator-9.0-reference-operations.tsv \
             spec-shelf/docs/vcf-operations-orchestrator-9.1/vcf-operations-orchestrator-9.1-reference-operations.tsv \
             spec-shelf/docs/vcf-protection-and-recovery-9.1/recovery-srm-v2.yaml \
             spec-shelf/docs/vcf-protection-and-recovery-9.1/replication-vr-v2.yaml \
             spec-shelf/docs/vks-9.0/vks-paths-from-vcenter.txt \
-            spec-shelf/docs/vmware-cloud-director-10.6/cloudapi-39.2.json; do
+            spec-shelf/docs/vmware-cloud-director-10.6/cloudapi-39.2.json \
+            spec-shelf/docs/vmware-cloud-director-10.6/api-39.1/vmware-cloud-director-api-39.1-reference-operations.tsv; do
             if [ ! -f "$f" ]; then
               echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
               exit 1
             fi
           done
-          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; the Azure Resource Manager specs (subscriptions.json and the rest) present under spec-shelf/docs/azure-arm-2026.10/; the Cloud Builder reference lists present under spec-shelf/docs/cloud-builder-5.0/ + spec-shelf/docs/cloud-builder-5.1/ + spec-shelf/docs/cloud-builder-5.2/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; salt-raas-8.18-reference-operations.tsv present under spec-shelf/docs/salt-raas-8.18/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis reference list present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/; cloudapi-39.2.json present under spec-shelf/docs/vmware-cloud-director-10.6/"
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; the Azure Resource Manager specs (subscriptions.json and the rest) present under spec-shelf/docs/azure-arm-2026.10/; the Cloud Builder reference lists present under spec-shelf/docs/cloud-builder-5.0/ + spec-shelf/docs/cloud-builder-5.1/ + spec-shelf/docs/cloud-builder-5.2/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; salt-raas-8.18-reference-operations.tsv present under spec-shelf/docs/salt-raas-8.18/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json + vra-catalog-deployment.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis, abx, approval and policies reference lists present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/, and the event-broker-service-api reference list under the 9.1 and 9.1.1 folders; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; vcf-operations-openapi-9.1.0.json + vcf-operations-openapi-9.1.1.json present under spec-shelf/docs/vcf-operations-9.1/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/; cloudapi-39.2.json + api-39.1/vmware-cloud-director-api-39.1-reference-operations.tsv present under spec-shelf/docs/vmware-cloud-director-10.6/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -827,7 +857,7 @@ jobs:
         # locks a uv.lock, not a requirements.txt). enable-cache: true
         # opts into the action's built-in cache for the uv download
         # cache directory, keyed by uv.lock — repeat installs on the
-        # same lockfile are near-instant, so the five shards share one
+        # same lockfile are near-instant, so the six shards share one
         # warm uv cache. `version` pins uv; see the python-lint job for
         # why, and for where the Python version comes from.
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
@@ -851,7 +881,7 @@ jobs:
         # pinned there, so a fastembed bump (which can remap the HF
         # source/filename) misses the cache and the model re-downloads
         # exactly once, then re-saves. restore-keys lets an unrelated
-        # lock change still reuse the prior model blob. All five shards
+        # lock change still reuse the prior model blob. All six shards
         # share this one cache entry (same key), so steady-state only the
         # first cold run pays the download.
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -952,7 +982,7 @@ jobs:
           sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends php-cli
           php --version | head -1
 
-      - name: Pytest (unit shard ${{ matrix.shard }}/5)
+      - name: Pytest (unit shard ${{ matrix.shard }}/6)
         # `shell: bash` for `mapfile` + arrays (and the pipefail/-e the
         # default self-hosted shell does not enable — #2865). Under -e a
         # failing `uv run pytest` exits the step immediately, so the
@@ -1041,13 +1071,13 @@ jobs:
           # the seconds in tests/_unit_shard_durations.json; a file without
           # a measurement counts as the median. File-level split keeps
           # conftest / loadscope semantics identical to a full run, and the
-          # five shards partition the full set exactly (every file lands in
+          # six shards partition the full set exactly (every file lands in
           # one shard; tests/test_unit_shard_split.py pins that).
           # tests/integration stays out (→ python-integration-shard) and
           # tests/migrations stays out (→ python-migration-tests), matching
           # the pre-shard lane's `--ignore` of both. The splitter prints
           # the file count and the predicted seconds per shard on stderr.
-          TOTAL=5
+          TOTAL=6
           SHARD="${{ matrix.shard }}"
           if [ -n "${SINGLE_CONNECTOR}" ]; then
             # One-connector run (#5297): one job, no split. The tool exits
@@ -1081,7 +1111,9 @@ jobs:
           # Add a shard (matrix + TOTAL) only when all shards are near the budget.
           # #5433 did both: on busy runners all four shards took 780-930 s, and
           # fresh file times alone would still leave them near 850 s, so the
-          # matrix went from 4 to 5 shards.
+          # matrix went from 4 to 5 shards. #5623 did both again three days
+          # later: the unit tests grew by about 15%, 132 test files had no
+          # measured time, and the five shards took up to 930 s.
           # 900 s (was 660 s): when every heavy runner is busy (2 jobs per
           # node), shards that pass every test can take 674-710 s, and 660 s
           # dropped good pull requests from the merge queue.
@@ -1184,14 +1216,14 @@ jobs:
           if [ -r "${cg}/cpu.max" ]; then
             echo "- CPU limit: $(awk '{ if ($1 == "max") print "none"; else printf "%.1f CPUs", $1 / $2 }' "${cg}/cpu.max")."
           fi
-          echo "::notice title=Peak memory (unit shard ${{ matrix.shard }}/5)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
+          echo "::notice title=Peak memory (unit shard ${{ matrix.shard }}/6)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
           exit 0
 
   python-outside-backend:
     name: Python tests that read files outside backend
     # #5296. Runs only on a pull request that changes no file under backend/
     # (`backend_python` is `false`) and is not docs-only. On such a pull
-    # request python-lint, the five unit shards and python-integration skip.
+    # request python-lint, the six unit shards and python-integration skip.
     # Some backend tests still read files outside backend/: the Helm chart,
     # the Go CLI, the workflows, the docs and the examples. This job runs
     # exactly those test files, from the list in
@@ -1252,6 +1284,79 @@ jobs:
           fi
           uv run pytest -n 3 --dist loadscope \
             --timeout=180 --timeout-method=signal "${FILES[@]}"
+
+  connector-package-template:
+    name: Connector package template
+    # #5564. Tests the made-up sample connector package in
+    # templates/connector-package/ against this repository's own code, so a
+    # change to the connector kit (backend/connector-kit/) that breaks the
+    # sample fails in the same pull request. No pinned MEHO tag: nothing to
+    # move after a release. The steps are the ones the template's README
+    # tells a connector author to run against the MEHO release they build for.
+    #
+    # Non-required check. Skipped for a docs-only pull request, like the other
+    # Python jobs. It does not skip when backend_python is false: a pull
+    # request that changes only the template must still test it.
+    #
+    # GitHub-hosted runner: it needs public tools only (uv, the PyPI index for
+    # the wheel build backend).
+    needs: changes
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       needs.changes.outputs.docs_only != 'true')
+    runs-on: ubuntu-latest
+    # About 3 minutes; the cap is a hang backstop.
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        # Same pinned uv as the other Python jobs (see python-lint).
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        with:
+          version: "0.13.0"
+          enable-cache: true
+
+      - name: Sync Python environment (locked)
+        run: uv sync --locked --all-groups
+
+      - name: Copy the sample connector and its tests into the checkout
+        # Only this job's checkout changes. Nothing is committed or built
+        # into an image.
+        run: |
+          set -euo pipefail
+          cp -r ../templates/connector-package/meho_backplane/connectors/example_widget \
+            src/meho_backplane/connectors/
+          cp -r ../templates/connector-package/tests tests/example_widget
+
+      - name: Check that MEHO lists the sample's connector
+        run: |
+          uv run python - <<'PY'
+          from meho_backplane.connectors.registry import _eager_import_connectors, list_connector_impls
+
+          _eager_import_connectors()
+          ids = sorted(f"{impl_id}-{version}" for _, version, impl_id in list_connector_impls() if impl_id)
+          assert "example-widget-1.x" in ids, f"example-widget-1.x is not in the connector list: {ids}"
+          print("connector list has example-widget-1.x")
+          PY
+
+      - name: Run the sample's tests and the operation contract check
+        run: >-
+          uv run pytest -o tmp_path_retention_policy=failed
+          --timeout=300 --timeout-method=signal
+          tests/example_widget tests/test_operation_contracts.py
+
+      - name: Build the sample's wheel and run the overlay wheel checks
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/connector-wheels"
+          uv build --wheel --out-dir "$out" ../templates/connector-package
+          python3 -I -S ../deploy/connector-overlay/overlay_check.py check-wheels --connectors "$out"
 
   python-unit-lane:
     name: Python (ruff + mypy + pytest)
@@ -1331,8 +1436,8 @@ jobs:
           outside='${{ needs.python-outside-backend.result }}'
           echo "changes (detect): result=${detect}, docs_only=${docs_only}, backend_python=${backend_python}"
           echo "python-lint (ruff + ruff format + mypy): ${lint}"
-          echo "python-unit-shard (aggregate of all 5 shard legs, or the one connector leg): ${shards}"
-          echo "single_connector='${{ needs.changes.outputs.single_connector }}' (empty = five shards)"
+          echo "python-unit-shard (aggregate of all 6 shard legs, or the one connector leg): ${shards}"
+          echo "single_connector='${{ needs.changes.outputs.single_connector }}' (empty = six shards)"
           echo "python-outside-backend (tests that read outside backend/): ${outside}"
 
           # The detect job MUST have succeeded for its docs_only classification
@@ -1389,16 +1494,16 @@ jobs:
           fi
 
           if [ "${fail}" -ne 0 ]; then
-            echo "::error title=Python unit lane red::ruff / ruff format / mypy, one or more pytest shards, or the tests that read files outside backend did not pass. This fan-in carries the branch-protection required context 'Python (ruff + mypy + pytest)'; open the 'Python lint + typecheck (ruff + mypy)' / 'Python unit shard N/5' / 'Python tests that read files outside backend' jobs above for the failing detail."
+            echo "::error title=Python unit lane red::ruff / ruff format / mypy, one or more pytest shards, or the tests that read files outside backend did not pass. This fan-in carries the branch-protection required context 'Python (ruff + mypy + pytest)'; open the 'Python lint + typecheck (ruff + mypy)' / 'Python unit shard N/6' / 'Python tests that read files outside backend' jobs above for the failing detail."
             exit 1
           fi
 
           if [ "${docs_only}" = "true" ]; then
-            echo "Unit lane GREEN (docs-only fast path #3252) — lint + all 5 pytest shards skipped-by-detect; nothing to test for a pure docs/*.md diff."
+            echo "Unit lane GREEN (docs-only fast path #3252) — lint + all 6 pytest shards skipped-by-detect; nothing to test for a pure docs/*.md diff."
           elif [ "${backend_python}" = "false" ]; then
-            echo "Unit lane GREEN (no backend change, #5296) — lint + all 5 pytest shards skipped; the tests that read files outside backend/ passed."
+            echo "Unit lane GREEN (no backend change, #5296) — lint + all 6 pytest shards skipped; the tests that read files outside backend/ passed."
           else
-            echo "Unit lane GREEN — ruff + ruff format + mypy + all 5 pytest shards passed."
+            echo "Unit lane GREEN — ruff + ruff format + mypy + all 6 pytest shards passed."
           fi
 
   python-coverage:
@@ -1503,6 +1608,8 @@ jobs:
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
        contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate'))
+    # Always `meho-runners-ci-heavy`, not the merge-queue set: this job never
+    # runs in the merge queue.
     runs-on: meho-runners-ci-heavy
     strategy:
       # 8 stride shards (#3172 started with 3) — see the SHARDED paragraph in
@@ -2171,6 +2278,7 @@ jobs:
             docs/vcf-installer-9.0
             docs/vcf-installer-9.1
             docs/vcf-operations-9.0
+            docs/vcf-operations-9.1
             docs/vcf-operations-orchestrator-9.0
             docs/vcf-operations-orchestrator-9.1
             docs/vcf-protection-and-recovery-9.1
@@ -2220,25 +2328,40 @@ jobs:
             spec-shelf/docs/vcenter-9.0/vcenter.yaml \
             spec-shelf/docs/vcenter-9.0/vi-json.yaml \
             spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json \
+            spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-catalog-deployment.json \
             spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-provider-infrastructure-apis-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-vm-apps-org-abx-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-vm-apps-org-approval-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-vm-apps-org-policies-reference-operations.tsv \
             spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-provider-infrastructure-apis-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-abx-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-approval-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-event-broker-service-api-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-policies-reference-operations.tsv \
             spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-provider-infrastructure-apis-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-vm-apps-org-abx-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-vm-apps-org-approval-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-vm-apps-org-event-broker-service-api-reference-operations.tsv \
+            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-vm-apps-org-policies-reference-operations.tsv \
             spec-shelf/docs/vcf-installer-9.0/vcf-installer-openapi.json \
             spec-shelf/docs/vcf-installer-9.1/vcf-installer-openapi.json \
             spec-shelf/docs/vcf-operations-9.0/vcf-operations-for-logs-openapi.json \
             spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json \
+            spec-shelf/docs/vcf-operations-9.1/vcf-operations-openapi-9.1.0.json \
+            spec-shelf/docs/vcf-operations-9.1/vcf-operations-openapi-9.1.1.json \
             spec-shelf/docs/vcf-operations-orchestrator-9.0/vcf-operations-orchestrator-9.0-reference-operations.tsv \
             spec-shelf/docs/vcf-operations-orchestrator-9.1/vcf-operations-orchestrator-9.1-reference-operations.tsv \
             spec-shelf/docs/vcf-protection-and-recovery-9.1/recovery-srm-v2.yaml \
             spec-shelf/docs/vcf-protection-and-recovery-9.1/replication-vr-v2.yaml \
             spec-shelf/docs/vks-9.0/vks-paths-from-vcenter.txt \
-            spec-shelf/docs/vmware-cloud-director-10.6/cloudapi-39.2.json; do
+            spec-shelf/docs/vmware-cloud-director-10.6/cloudapi-39.2.json \
+            spec-shelf/docs/vmware-cloud-director-10.6/api-39.1/vmware-cloud-director-api-39.1-reference-operations.tsv; do
             if [ ! -f "$f" ]; then
               echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
               exit 1
             fi
           done
-          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; the Azure Resource Manager specs (subscriptions.json and the rest) present under spec-shelf/docs/azure-arm-2026.10/; the Cloud Builder reference lists present under spec-shelf/docs/cloud-builder-5.0/ + spec-shelf/docs/cloud-builder-5.1/ + spec-shelf/docs/cloud-builder-5.2/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; salt-raas-8.18-reference-operations.tsv present under spec-shelf/docs/salt-raas-8.18/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis reference list present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/; cloudapi-39.2.json present under spec-shelf/docs/vmware-cloud-director-10.6/"
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; the Azure Resource Manager specs (subscriptions.json and the rest) present under spec-shelf/docs/azure-arm-2026.10/; the Cloud Builder reference lists present under spec-shelf/docs/cloud-builder-5.0/ + spec-shelf/docs/cloud-builder-5.1/ + spec-shelf/docs/cloud-builder-5.2/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; salt-raas-8.18-reference-operations.tsv present under spec-shelf/docs/salt-raas-8.18/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json + vra-catalog-deployment.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis, abx, approval and policies reference lists present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/, and the event-broker-service-api reference list under the 9.1 and 9.1.1 folders; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; vcf-operations-openapi-9.1.0.json + vcf-operations-openapi-9.1.1.json present under spec-shelf/docs/vcf-operations-9.1/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/; cloudapi-39.2.json + api-39.1/vmware-cloud-director-api-39.1-reference-operations.tsv present under spec-shelf/docs/vmware-cloud-director-10.6/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-unit-shard's login step — the

@@ -9,12 +9,13 @@ inside the runner route cage
 ``principal_kind=runner`` token may reach them (and only them + the
 long-poll gateway plane):
 
-* ``PUT /api/v1/checks/assignment/{runner}`` — **operator**-authenticated
-  (:func:`~meho_backplane.auth.rbac.require_role` at ``OPERATOR``, the same
-  tier as scheduled-trigger authoring). Full-document replace of a runner's
-  assignment. Each item is validated at create time (target resolves, op
-  resolves to an enabled ``safety_level == 'safe'`` descriptor); a failing
-  item is a structured 422 and nothing is stored.
+* ``PUT /api/v1/checks/assignment/{runner}`` — **tenant-admin**-authenticated
+  (:func:`~meho_backplane.auth.rbac.require_role` at ``TENANT_ADMIN``: a
+  person decides what a runner checks, the same tier as sensor and dashboard
+  authoring). Full-document replace of a runner's assignment. Each item is
+  validated at create time (target resolves, op resolves to an enabled
+  ``safety_level == 'safe'`` descriptor); a failing item is a structured
+  422 and nothing is stored.
 
 * ``GET /api/v1/checks/assignment?runner=…[&known_version=…]`` —
   **runner**-authenticated (:func:`~meho_backplane.auth.runner_guard.require_runner`
@@ -79,7 +80,7 @@ router = APIRouter(prefix="/api/v1/checks", tags=["checks"])
 #: Module-level Depends closures — required to satisfy ruff B008 (calls in
 #: default argument positions are disallowed). Same shape as
 #: :mod:`meho_backplane.api.v1.scheduler`.
-_require_operator = Depends(require_role(TenantRole.OPERATOR))
+_require_tenant_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 _require_runner = Depends(require_runner())
 _runner_wire_version = Depends(runner_wire_version)
 _runner_package_set = Depends(runner_package_set)
@@ -120,9 +121,9 @@ register_error(
 async def put_assignment(
     runner: Annotated[str, Path(min_length=1)],
     body: AssignmentDocument,
-    operator: Annotated[Operator, _require_operator],
+    operator: Annotated[Operator, _require_tenant_admin],
 ) -> AssignmentDocumentResponse:
-    """Replace runner *runner*'s assignment document (operator-authenticated).
+    """Replace runner *runner*'s assignment document (tenant-admin-authenticated).
 
     Validates every authored item before storing; a failing item is a
     structured 422 (``assignment_target_unknown`` / ``assignment_op_unknown``

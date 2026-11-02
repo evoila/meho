@@ -25,6 +25,11 @@ convention: typed ops own the curated read core. A write surface (create
 deployment / request catalog item) is deliberately out of scope — this is a read
 core for inventorying a migration source.
 
+The day-2 ops (:data:`VRA8_DAY2_OPS`) are the exception: they are written once for
+both Automation generations in
+:mod:`meho_backplane.connectors.vcf_automation.day2_ops` and registered here with
+the ``vcfa.vra8.`` prefix.
+
 Op ids are namespaced ``vcfa.vra8.*`` (distinct from the modern sibling's
 ``vcfa.provider.*`` / ``vcfa.tenant.*``): the two impls of ``product="vcfa"``
 publish different read surfaces (vRA 8's ``/deployment`` + ``/blueprint`` +
@@ -40,6 +45,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
+from meho_backplane.connectors.vcf_automation._infra_text import infra_when_to_use
+from meho_backplane.connectors.vcf_automation.day2_ops import day2_specs
 from meho_backplane.connectors.vra8._llm_instructions import VRA8_READ_LLM_INSTRUCTIONS
 from meho_backplane.connectors.vra8._response_schemas import (
     ABOUT_RESPONSE,
@@ -56,6 +63,7 @@ if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
+    "VRA8_DAY2_OPS",
     "VRA8_TYPED_OPS",
     "VRA8_TYPED_WHEN_TO_USE_BY_GROUP",
     "Vra8TypedOp",
@@ -71,6 +79,9 @@ _log = structlog.get_logger(__name__)
 _GROUP_INVENTORY = "vcfa-vra8-inventory"
 _GROUP_CONTENT = "vcfa-vra8-content"
 _GROUP_API_FILES = "vcfa-vra8-api-files"
+#: The cloud account, cloud zone, profile and project ops (:mod:`.infra_ops`).
+_GROUP_INFRA = "vcfa-vra8-infra"
+_GROUP_DAY2 = "vcfa-vra8-day2"
 
 
 @dataclass(frozen=True)
@@ -125,6 +136,21 @@ VRA8_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Orchestrator inside the appliance), with its size, SHA-256, and the version "
         "and build of the appliance. Use it to get the 8.18 API files, which no "
         "vendor download contains."
+    ),
+    _GROUP_INFRA: infra_when_to_use(
+        "vcfa.vra8", "Aria Automation 8 (vRealize Automation 8)", with_vra8_only=True
+    ),
+    _GROUP_DAY2: (
+        "Day-2 work on the deployments of Aria Automation 8. Reads: the actions a "
+        "deployment or machine offers (vcfa.vra8.deployment.actions.list), the machines "
+        "(vcfa.vra8.machine.list) and the disks with their machines "
+        "(vcfa.vra8.block_device.list). Changes, each after a person approves: run a "
+        "built-in deployment action (vcfa.vra8.deployment.action.run) or machine action "
+        "such as power, resize, add disk or snapshot (vcfa.vra8.resource.action.run), "
+        "change a lease (vcfa.vra8.deployment.lease.change), create a machine "
+        "(vcfa.vra8.machine.create) or a disk for a machine (vcfa.vra8.block_device.create), "
+        "and delete a deployment (vcfa.vra8.deployment.delete; only a person can run it, "
+        "after a preview)."
     ),
 }
 
@@ -421,11 +447,33 @@ VRA8_TYPED_OPS: tuple[Vra8TypedOp, ...] = (
 )
 
 
+#: The day-2 ops, written once for Aria Automation 8 and VCF Automation 9
+#: (:mod:`meho_backplane.connectors.vcf_automation.day2_ops`), here with the
+#: ``vcfa.vra8.`` prefix. Kept apart from the read core above.
+VRA8_DAY2_OPS: tuple[Vra8TypedOp, ...] = tuple(
+    Vra8TypedOp(
+        op_id=f"vcfa.vra8.{spec.name}",
+        handler_attr=spec.handler,
+        summary=spec.summary,
+        description=spec.description,
+        parameter_schema=spec.parameter_schema,
+        response_schema=spec.response_schema,
+        group_key=_GROUP_DAY2,
+        tags=(*spec.tags, "vra8", "vra"),
+        safety_level=spec.safety_level,
+        requires_approval=spec.requires_approval,
+        llm_instructions=spec.llm_instructions,
+    )
+    for spec in day2_specs("vcfa.vra8")
+)
+
+
 async def register_vra8_typed_operations(
     *,
     embedding_service: EmbeddingService | None = None,
 ) -> None:
-    """Upsert every op in :data:`VRA8_TYPED_OPS` into ``endpoint_descriptor``.
+    """Upsert :data:`VRA8_TYPED_OPS`, :data:`VRA8_DAY2_OPS` and the infrastructure ops into
+    ``endpoint_descriptor``.
 
     Queued onto the lifespan-driven registrar list via
     :func:`~meho_backplane.operations.typed_register.register_typed_op_registrar`
@@ -448,9 +496,11 @@ async def register_vra8_typed_operations(
     # runtime + model), which pure connector/handler unit tests should not pay.
     # Lifespan callers have it warmed by the time this runs.
     from meho_backplane.connectors.vra8.connector import Vra8Connector
+    from meho_backplane.connectors.vra8.infra_ops import VRA8_INFRA_OPS
     from meho_backplane.operations.typed_register import register_typed_operation
 
-    for op in VRA8_TYPED_OPS:
+    all_ops = (*VRA8_TYPED_OPS, *VRA8_DAY2_OPS, *VRA8_INFRA_OPS)
+    for op in all_ops:
         handler = getattr(Vra8Connector, op.handler_attr, None)
         if handler is None:
             raise AttributeError(
@@ -484,7 +534,7 @@ async def register_vra8_typed_operations(
         )
     _log.info(
         "vra8_typed_operations_registered",
-        count=len(VRA8_TYPED_OPS),
+        count=len(all_ops),
         product=Vra8Connector.product,
         version=Vra8Connector.version,
         impl_id=Vra8Connector.impl_id,

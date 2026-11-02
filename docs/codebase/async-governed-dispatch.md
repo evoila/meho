@@ -89,6 +89,15 @@ Async submit (`POST /operations/call`, `async: true`):
    unexpected raise (defence-in-depth) transitions `running → failed`.
 4. The caller reads the durable outcome via `GET /operations/runs/{handle}`.
 
+Who may read a run's result: only the person who started the run
+(`operation_run.identity_sub`; for an async approve, the person who
+approved). `run_result_visible_to` in `operation_run_service.py` is the one
+rule. A run result can hold a secret (a new credential, or a value read
+with `reveal_secret`). So for anyone else in the tenant
+`GET /operations/runs/{handle}` answers with `result: null`, and the MCP
+run check answers `unknown_run`. `GET /operations/runs` lists no results
+for anyone.
+
 Async approve (`POST /approvals/{id}/approve`, `async: true`): the decision
 is recorded + audited synchronously (unchanged), then
 `submit_approval_resume` launches `resume_dispatch_after_approval` on the

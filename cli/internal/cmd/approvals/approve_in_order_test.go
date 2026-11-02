@@ -23,6 +23,9 @@ import (
 
 const inOrderRef = "gh:example/repo#7"
 
+// yesAll answers yes to every step of a test run.
+var yesAll = strings.Repeat("yes\n", 10)
+
 // groupRow is one request of the change ticket in a test.
 type groupRow struct {
 	status   string
@@ -81,6 +84,8 @@ type inOrderServer struct {
 	decided []string
 	listQ   string
 	reads   map[string]int // detail reads per id after its decide
+	signIns *int           // approval sign-ins of the run
+	bearers []string       // the token of each decide call
 }
 
 func runInOrderWithMock(t *testing.T, rows []groupRow, stdin string, jsonOut bool) (*inOrderServer, string, string, error) {
@@ -119,9 +124,10 @@ func runInOrderWithMock(t *testing.T, rows []groupRow, stdin string, jsonOut boo
 			rec.mu.Unlock()
 			writeJSON(t, w, http.StatusOK, detail)
 		}
-		routes["POST /api/v1/approvals/"+id+"/decide"] = func(w http.ResponseWriter, _ *http.Request) {
+		routes["POST /api/v1/approvals/"+id+"/decide"] = func(w http.ResponseWriter, r *http.Request) {
 			rec.mu.Lock()
 			rec.decided = append(rec.decided, id)
+			rec.bearers = append(rec.bearers, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 			rec.mu.Unlock()
 			if row.decideHT != 0 && row.decideHT != http.StatusOK {
 				w.Header().Set("Content-Type", "application/json")
@@ -140,6 +146,7 @@ func runInOrderWithMock(t *testing.T, rows []groupRow, stdin string, jsonOut boo
 	}
 	srv := mockBackplane(t, routes)
 	t.Cleanup(srv.Close)
+	rec.signIns = stubSignIn(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	store, err := auth.NewTokenStore()
 	if err != nil {
@@ -162,10 +169,11 @@ func runInOrderWithMock(t *testing.T, rows []groupRow, stdin string, jsonOut boo
 	return rec, stdout.String(), stderr.String(), err
 }
 
-// TestInOrderMixedGroup is the acceptance case: caution steps go on by
-// themselves, the dangerous and destructive steps wait for a yes, the
-// run stops at the step whose run failed, and the later steps stay
-// pending (no decide call).
+// TestInOrderMixedGroup is the acceptance case: every pending step waits
+// for a yes, the run stops at the step whose run failed, and the later
+// steps stay pending (no decide call). One sign-in covers the caution
+// and dangerous steps; the destructive step gets a sign-in of its own,
+// and the step after it a new one (#5515).
 func TestInOrderMixedGroup(t *testing.T) {
 	rows := []groupRow{
 		{status: "pending", level: "caution", dispatch: "ok"},
@@ -175,7 +183,7 @@ func TestInOrderMixedGroup(t *testing.T) {
 		{status: "pending", level: "caution", dispatch: "error"},
 		{status: "pending", level: "caution", dispatch: "ok"},
 	}
-	rec, stdout, stderr, err := runInOrderWithMock(t, rows, "yes\nyes\n", false)
+	rec, stdout, stderr, err := runInOrderWithMock(t, rows, yesAll, false)
 	if err == nil {
 		t.Fatal("want an error after the failed step")
 	}
@@ -187,11 +195,24 @@ func TestInOrderMixedGroup(t *testing.T) {
 	if !strings.Contains(rec.listQ, "order=oldest") || !strings.Contains(rec.listQ, "status=all") {
 		t.Errorf("list query: got %q, want status=all and order=oldest", rec.listQ)
 	}
-	if strings.Count(stderr, "Type yes to approve step") != 2 {
-		t.Errorf("want two yes prompts (dangerous + destructive); stderr:\n%s", stderr)
+	if strings.Count(stderr, "Type yes to approve step") != 4 {
+		t.Errorf("want a yes prompt for each of the four steps; stderr:\n%s", stderr)
 	}
-	if !strings.Contains(stderr, "Step 2 of 5 is dangerous") || !strings.Contains(stderr, "Step 3 of 5 is destructive") {
-		t.Errorf("prompts do not name the steps; stderr:\n%s", stderr)
+	for _, p := range []string{"Step 1 of 5 is caution", "Step 2 of 5 is dangerous", "Step 3 of 5 is destructive", "Step 4 of 5 is caution"} {
+		if !strings.Contains(stderr, p) {
+			t.Errorf("prompts do not name step %q; stderr:\n%s", p, stderr)
+		}
+	}
+	for _, p := range []string{"Operation:    op.step1", "Connector:    linux", "Risk level:   caution", "Parameters and preview:"} {
+		if !strings.Contains(stderr, p) {
+			t.Errorf("prompt does not show %q; stderr:\n%s", p, stderr)
+		}
+	}
+	if *rec.signIns != 3 {
+		t.Errorf("sign-ins = %d, want 3 (shared, destructive, after destructive)", *rec.signIns)
+	}
+	if got := strings.Join(rec.bearers, ","); got != "sign-in-1,sign-in-1,sign-in-2,sign-in-3" {
+		t.Errorf("decide tokens = %s", got)
 	}
 	if !strings.Contains(stderr, "writes a file on the host") {
 		t.Errorf("prompt does not show what the step does; stderr:\n%s", stderr)
@@ -216,7 +237,7 @@ func TestInOrderOtherCallerClaimsThenFails(t *testing.T) {
 			later: []api.ApprovalResultState{api.ApprovalResultStateStarted, api.ApprovalResultStateStarted, api.ApprovalResultStateFailed}},
 		{status: "pending", level: "caution", dispatch: "ok"},
 	}
-	rec, stdout, _, err := runInOrderWithMock(t, rows, "", true)
+	rec, stdout, _, err := runInOrderWithMock(t, rows, yesAll, true)
 	assertExitCode(t, err, 4)
 	if len(rec.decided) != 1 || rec.decided[0] != inOrderID(1) {
 		t.Fatalf("decided: got %v want only step 1", rec.decided)
@@ -245,7 +266,7 @@ func TestInOrderOtherCallerResultUnknownStops(t *testing.T) {
 			later: []api.ApprovalResultState{api.ApprovalResultStateStarted}},
 		{status: "pending", level: "caution", dispatch: "ok"},
 	}
-	rec, stdout, _, err := runInOrderWithMock(t, rows, "", false)
+	rec, stdout, _, err := runInOrderWithMock(t, rows, yesAll, false)
 	assertExitCode(t, err, 4)
 	if len(rec.decided) != 1 {
 		t.Fatalf("decided: got %v want only step 1", rec.decided)
@@ -263,7 +284,7 @@ func TestInOrderRerunStopsAtUnfinishedPredecessor(t *testing.T) {
 		{status: "approved", level: "caution", result: api.ApprovalResultStateStarted},
 		{status: "pending", level: "caution", dispatch: "ok"},
 	}
-	rec, stdout, _, err := runInOrderWithMock(t, rows, "", false)
+	rec, stdout, _, err := runInOrderWithMock(t, rows, yesAll, false)
 	assertExitCode(t, err, 4)
 	if len(rec.decided) != 0 {
 		t.Fatalf("decided: got %v want none", rec.decided)
@@ -274,14 +295,14 @@ func TestInOrderRerunStopsAtUnfinishedPredecessor(t *testing.T) {
 }
 
 // TestInOrderNoYesStopsAtDangerousStep checks that anything but yes at a
-// dangerous step stops the run before that step is approved.
+// step stops the run before that step is approved.
 func TestInOrderNoYesStopsAtDangerousStep(t *testing.T) {
 	rows := []groupRow{
 		{status: "pending", level: "caution", dispatch: "ok"},
 		{status: "pending", level: "dangerous", dispatch: "ok"},
 		{status: "pending", level: "caution", dispatch: "ok"},
 	}
-	rec, stdout, _, err := runInOrderWithMock(t, rows, "no\n", false)
+	rec, stdout, _, err := runInOrderWithMock(t, rows, "yes\nno\n", false)
 	assertExitCode(t, err, 4)
 	if len(rec.decided) != 1 || rec.decided[0] != inOrderID(1) {
 		t.Fatalf("decided: got %v want only step 1", rec.decided)
@@ -300,7 +321,7 @@ func TestInOrderRefusalReturnsSingleIDError(t *testing.T) {
 		{status: "pending", level: "caution", decideHT: http.StatusForbidden},
 		{status: "pending", level: "caution", dispatch: "ok"},
 	}
-	rec, _, stderr, err := runInOrderWithMock(t, rows, "", true)
+	rec, _, stderr, err := runInOrderWithMock(t, rows, yesAll, true)
 	assertExitCode(t, err, 5)
 	if len(rec.decided) != 2 {
 		t.Fatalf("decided: got %v want steps 1 and 2", rec.decided)
@@ -317,7 +338,7 @@ func TestInOrderConflictStops(t *testing.T) {
 		{status: "pending", level: "caution", decideHT: http.StatusConflict},
 		{status: "pending", level: "caution", dispatch: "ok"},
 	}
-	rec, _, _, err := runInOrderWithMock(t, rows, "", false)
+	rec, _, _, err := runInOrderWithMock(t, rows, yesAll, false)
 	assertExitCode(t, err, 4)
 	if len(rec.decided) != 1 {
 		t.Fatalf("decided: got %v want only step 1", rec.decided)
@@ -333,7 +354,7 @@ func TestInOrderRerunSkipsOnlyApprovedOK(t *testing.T) {
 		{status: "approved", level: "caution", result: api.ApprovalResultStateFailed},
 		{status: "pending", level: "caution", dispatch: "ok"},
 	}
-	rec, stdout, _, err := runInOrderWithMock(t, rows, "", true)
+	rec, stdout, _, err := runInOrderWithMock(t, rows, yesAll, true)
 	assertExitCode(t, err, 4)
 	if len(rec.decided) != 0 {
 		t.Fatalf("decided: got %v want none", rec.decided)
@@ -358,7 +379,7 @@ func TestInOrderRerunContinuesAfterSkip(t *testing.T) {
 		{status: "approved", level: "caution", result: api.ApprovalResultStateExecuted},
 		{status: "pending", level: "caution", dispatch: "ok"},
 	}
-	rec, stdout, _, err := runInOrderWithMock(t, rows, "", false)
+	rec, stdout, _, err := runInOrderWithMock(t, rows, yesAll, false)
 	if err != nil {
 		t.Fatalf("runInOrder: %v", err)
 	}
@@ -379,7 +400,7 @@ func TestInOrderStopsAtDecidedPredecessor(t *testing.T) {
 				{status: status, level: "caution"},
 				{status: "pending", level: "caution", dispatch: "ok"},
 			}
-			rec, _, _, err := runInOrderWithMock(t, rows, "", false)
+			rec, _, _, err := runInOrderWithMock(t, rows, yesAll, false)
 			assertExitCode(t, err, 4)
 			if len(rec.decided) != 0 {
 				t.Fatalf("decided: got %v want none", rec.decided)
@@ -395,7 +416,7 @@ func TestInOrderWarnsOnMixedGroup(t *testing.T) {
 		{status: "pending", level: "caution", dispatch: "ok", sub: "alice", created: "2026-10-30T08:00:01Z"},
 		{status: "pending", level: "caution", dispatch: "ok", sub: "bob", created: "2026-10-30T08:00:01Z"},
 	}
-	_, _, stderr, err := runInOrderWithMock(t, rows, "", false)
+	_, _, stderr, err := runInOrderWithMock(t, rows, yesAll, false)
 	if err != nil {
 		t.Fatalf("runInOrder: %v", err)
 	}
@@ -416,7 +437,8 @@ func TestApproveArgs(t *testing.T) {
 		wantErr string
 	}{
 		{"single id", []string{stubID}, ""},
-		{"no id", nil, "one request id"},
+		{"several ids", []string{stubID, inOrderID(2)}, ""},
+		{"no id", nil, "one or more request ids"},
 		{"in-order", []string{"--filter-work-ref", inOrderRef, "--in-order"}, ""},
 		{"in-order without ref", []string{"--in-order"}, "needs --filter-work-ref"},
 		{"in-order with id", []string{"--filter-work-ref", inOrderRef, "--in-order", stubID}, "takes no request id"},

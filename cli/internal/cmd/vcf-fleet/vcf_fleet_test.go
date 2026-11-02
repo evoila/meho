@@ -189,13 +189,13 @@ func TestPrintAboutErrorRendersErrorString(t *testing.T) {
 func TestPrintDatacenterList(t *testing.T) {
 	r := &CallResult{
 		Status:     "ok",
-		Result:     json.RawMessage(`[{"vmid":"dc-001","name":"primary","type":"PRIVATE_CLOUD","city":"Vienna"}]`),
+		Result:     json.RawMessage(`{"rows":[{"datacenter_id":"dc-001","datacenter_name":"primary","vcenter_name":"vc-one","vcenter_host":"vc-one.example.test"}]}`),
 		DurationMs: 8.0,
 	}
 	var buf bytes.Buffer
 	printDatacenterList(&buf, r)
 	out := buf.String()
-	for _, want := range []string{"dc-001", "primary", "PRIVATE_CLOUD", "Vienna"} {
+	for _, want := range []string{"dc-001", "primary", "vc-one", "vc-one.example.test"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printDatacenterList missing %q in:\n%s", want, out)
 		}
@@ -203,7 +203,7 @@ func TestPrintDatacenterList(t *testing.T) {
 }
 
 func TestPrintDatacenterListEmpty(t *testing.T) {
-	r := &CallResult{Status: "ok", Result: json.RawMessage(`[]`)}
+	r := &CallResult{Status: "ok", Result: json.RawMessage(`{"rows":[]}`)}
 	var buf bytes.Buffer
 	printDatacenterList(&buf, r)
 	if !strings.Contains(buf.String(), "(0 datacenters)") {
@@ -278,7 +278,7 @@ func TestPrintProductList(t *testing.T) {
 func TestPrintRequestList(t *testing.T) {
 	r := &CallResult{
 		Status:     "ok",
-		Result:     json.RawMessage(`[{"vmid":"req-001","requestType":"ENVIRONMENT_CREATE","state":"COMPLETED","requestName":"Create vROps Prod"}]`),
+		Result:     json.RawMessage(`{"requests":[{"request_id":"req-001","type":"ENVIRONMENT_CREATE","state":"COMPLETED","name":"Create vROps Prod"}],"more_rows":false}`),
 		DurationMs: 4.0,
 	}
 	var buf bytes.Buffer
@@ -294,13 +294,13 @@ func TestPrintRequestList(t *testing.T) {
 func TestPrintRequestInfo(t *testing.T) {
 	r := &CallResult{
 		Status:     "ok",
-		Result:     json.RawMessage(`{"vmid":"req-001","transactionId":"txn-009","requestName":"Upgrade vROps","requestType":"PRODUCT_UPGRADE","state":"FAILED","executionStatus":"FAILED","errorCause":"node unreachable","createdBy":"admin@local","lastUpdatedOn":"2026-05-10"}`),
+		Result:     json.RawMessage(`{"request_id":"req-001","name":"Upgrade vROps","type":"PRODUCT_UPGRADE","state":"FAILED","outcome":"failed","execution_status":"FAILED","error_cause":"node unreachable","created_by":"admin@local","last_updated_on":1778371200000,"failed_step":{"message":"check the node"}}`),
 		DurationMs: 3.0,
 	}
 	var buf bytes.Buffer
 	printRequestInfo(&buf, r)
 	out := buf.String()
-	for _, want := range []string{"req-001", "Upgrade vROps", "PRODUCT_UPGRADE", "FAILED", "node unreachable", "admin@local", "2026-05-10"} {
+	for _, want := range []string{"req-001", "Upgrade vROps", "PRODUCT_UPGRADE", "FAILED", "outcome=failed", "node unreachable", "admin@local", "1778371200000", "check the node"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printRequestInfo missing %q in:\n%s", want, out)
 		}
@@ -505,9 +505,9 @@ func TestDispatchEnvironmentInfoSendsEnvironmentIDParam(t *testing.T) {
 			if body.OpID != environmentGetOpID {
 				t.Errorf("op_id: got %q want %q", body.OpID, environmentGetOpID)
 			}
-			envID, _ := body.Params["environmentId"].(string)
+			envID, _ := body.Params["environment_id"].(string)
 			if envID != "env-vrops" {
-				t.Errorf("environmentId: got %q want env-vrops", envID)
+				t.Errorf("environment_id: got %q want env-vrops", envID)
 			}
 			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: body.OpID})
 		},
@@ -515,7 +515,7 @@ func TestDispatchEnvironmentInfoSendsEnvironmentIDParam(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	params := map[string]any{"environmentId": "env-vrops"}
+	params := map[string]any{"environment_id": "env-vrops"}
 	if _, err := conn.Call(context.Background(), srv.URL, environmentGetOpID, "rdc-fleet", params); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -531,9 +531,9 @@ func TestDispatchRequestInfoSendsRequestIDParam(t *testing.T) {
 				w.WriteHeader(400)
 				return
 			}
-			reqID, _ := body.Params["requestId"].(string)
+			reqID, _ := body.Params["request_id"].(string)
 			if reqID != "req-001" {
-				t.Errorf("requestId: got %q want req-001", reqID)
+				t.Errorf("request_id: got %q want req-001", reqID)
 			}
 			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: body.OpID})
 		},
@@ -541,7 +541,7 @@ func TestDispatchRequestInfoSendsRequestIDParam(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	params := map[string]any{"requestId": "req-001"}
+	params := map[string]any{"request_id": "req-001"}
 	if _, err := conn.Call(context.Background(), srv.URL, requestGetOpID, "rdc-fleet", params); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}

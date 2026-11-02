@@ -84,7 +84,7 @@ provisioned set:
 | `oidc-audience-mapper` (`included.custom.audience` = `KEYCLOAK_AUDIENCE`) | `aud` | Stock Keycloak does **not** honour the RFC 8707 `audience` request param on a `client_credentials` grant without a configured mapper, so requesting the audience at mint time is not enough. A token with no `aud` is rejected `missing_audience` / `invalid_audience`. |
 | `defaultClientScopes: [basic, roles, web-origins, acr]` | `sub` (via `basic`) | Clients created over the Admin REST API do **not** inherit the realm's default scopes; without `basic` the token has no `sub` (Keycloak 25+ moved `sub` into a `basic`-scope mapper) and is rejected `missing_sub`. |
 | `oidc-hardcoded-claim-mapper` → `tenant_id` | `tenant_id` | The Operator chain resolves the agent's tenant scope from this claim; absent → `missing_tenant_claim`. Value = the registering tenant's UUID. |
-| `oidc-hardcoded-claim-mapper` → `tenant_role` | `tenant_role` | Absent → `missing_tenant_role_claim`. Provisioned as `tenant_admin`; the per-principal permission model (G11.2-T3) is the finer-grained gate. |
+| `oidc-hardcoded-claim-mapper` → `tenant_role` | `tenant_role` | Absent → `missing_tenant_role_claim`. Provisioned as `operator`: an agent acts with operator rights, and MEHO reads an agent token that says `tenant_admin` as `operator`. The per-principal permission model (G11.2-T3) is the finer-grained gate. |
 | `oidc-hardcoded-claim-mapper` → `principal_kind` | `principal_kind` | Sets `Operator.principal_kind = PrincipalKind.AGENT`. Value = `agent`. |
 
 ## Prerequisites

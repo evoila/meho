@@ -104,6 +104,12 @@ Company login (built-in Keycloak):
 
 WARNING: checkRunner.enabled=true on a Vault credential backend (#2642).
 
+  The check runner does not start unless VAULT_CHECK_RUNNER_ROLE (set it
+  through extraEnv) names a Vault role of its own, not
+  {{ .Values.config.vaultOidcRole }}. Until then no Sensor is evaluated and the
+  backplane logs sensor_runner_refused. Each read the runner makes must also
+  stay inside the sensor's tenant path.
+
   The check-runner principal mints its token with aud={{ .Values.config.keycloakAudience }}
   (the KEYCLOAK_AUDIENCE this release renders into the ConfigMap).
   The {{ .Values.config.vaultOidcRole }} JWT role this project documents binds on

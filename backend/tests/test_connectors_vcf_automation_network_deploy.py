@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Iterator
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -39,13 +38,10 @@ from meho_backplane.operations import (
     set_default_reducer,
 )
 from meho_backplane.operations._handler_resolve import reset_handler_cache
-from meho_backplane.operations._preview import _PREVIEW_BUILDERS
 from tests._vcfa_provisioning_support import (
     BASE_URL,
-    OPERATOR,
     TENANT_TOKEN,
     mount_logins,
-    resolved_target,
     run,
     seed_target,
     wire_connector,
@@ -68,7 +64,7 @@ _EXPECTED_TIERS: dict[str, tuple[str, bool]] = {
     "vcfa.tenant.network_profile.create": ("caution", True),
     "vcfa.tenant.blueprint_request.create": ("caution", True),
     "vcfa.tenant.blueprint_request.get": ("safe", False),
-    "vcfa.tenant.deployment.delete": ("dangerous", True),
+    "vcfa.tenant.deployment.delete": ("destructive", True),
 }
 
 
@@ -497,28 +493,3 @@ async def test_deployment_delete_conflict_is_connector_error(vcfa: VcfAutomation
         result = await run("vcfa.tenant.deployment.delete", {"id": "d-1"})
     assert result["status"] == "error"
     assert result["extras"]["http_status"] == 409
-
-
-async def test_deployment_delete_preview_names_the_deployment(
-    vcfa: VcfAutomationConnector,
-) -> None:
-    builder = _PREVIEW_BUILDERS["vcfa.tenant.deployment.delete"]
-    ctx: Any = SimpleNamespace(
-        connector_instance=vcfa,
-        operator=OPERATOR,
-        target=await resolved_target(),
-        params={"id": "d-1"},
-    )
-    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
-        mount_logins(mock)
-        read = mock.get(f"{_DEPLOYMENTS}/d-1").respond(
-            200, json={"id": "d-1", "name": "team-a-first-vm", "projectId": "p-1"}
-        )
-        preview = await builder(ctx)
-    assert preview == {
-        "action": "delete_deployment",
-        "id": "d-1",
-        "name": "team-a-first-vm",
-        "project_id": "p-1",
-    }
-    assert read.calls.last.request.url.params["apiVersion"] == _API_VERSION

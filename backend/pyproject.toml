@@ -158,6 +158,10 @@ dev = [
     "testcontainers>=4.15.0",
     "types-jsonschema>=4.26.0.20260518",
     "pytest-timeout>=2.4.0",
+    # The connector kit (connector-kit/), so tests and connector packages
+    # in a checkout import ``meho_connector_kit``. The image builds its
+    # wheel next to MEHO's own (Dockerfile, wheelbuilder stage).
+    "meho-connector-kit",
 ]
 # Docs-site toolchain (#2670). Lives here — not in a separate docs
 # project — so the pins ride the existing uv.lock + Dependabot `uv`
@@ -193,6 +197,9 @@ build = [
 # 2.3.0 release its parent pinned, so retain its first-fixed-release floor.
 # Revisit / drop the constraint once the parent's own pin moves past it.
 constraint-dependencies = ["httpcore2>=2.10.0"]
+
+[tool.uv.sources]
+meho-connector-kit = { path = "connector-kit", editable = true }
 
 [build-system]
 requires = ["hatchling"]

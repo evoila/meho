@@ -94,7 +94,7 @@ def test_classify_vendor_delete_action_name_ignores_pattern_setting(
 
 def test_vm_destroy_children_flag_the_vim_destroy_step() -> None:
     """vm.destroy's governed steps: the VIM destroy is un-grantable, the read stays grantable."""
-    from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
+    from meho_backplane.connectors.vmware_rest.composites._register import (
         register_vmware_governed_subops,
     )
 
@@ -120,7 +120,7 @@ def test_vmware_wiring_is_derived_from_manifests() -> None:
     ``_SUB_OPS_VM_CREATE`` manifest unchanged and is flagged un-grantable.
     """
     from meho_backplane.connectors.vmware_rest.composites import _write
-    from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
+    from meho_backplane.connectors.vmware_rest.composites._register import (
         register_vmware_governed_subops,
     )
 
@@ -150,7 +150,7 @@ def test_vm_destroy_lists_the_delete_step_for_both_vcenter_apis() -> None:
     is flagged un-grantable like vm.create's rollback leg.
     """
     from meho_backplane.connectors.vmware_rest.composites import _write
-    from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
+    from meho_backplane.connectors.vmware_rest.composites._register import (
         register_vmware_governed_subops,
     )
 

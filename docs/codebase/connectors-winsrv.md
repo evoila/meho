@@ -190,7 +190,8 @@ validated against a bounded enum / `^[A-Za-z]$`; booleans render as fixed
 
 The power `message` is also a `shutdown.exe` argument, so the parameter schema
 and the handler both enforce one rule: at most 512 characters; no double
-quotes, backslashes or control characters; and it must not start with `/` or `-`.
+quotes, backslashes or control characters; and it must not start with whitespace,
+`/` or `-`. The agent hint for `message` states the same rule.
 
 ### No plaintext secret on the wire (deliberate)
 

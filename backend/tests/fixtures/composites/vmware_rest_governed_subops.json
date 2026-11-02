@@ -1,0 +1,420 @@
+{
+  "vmware.composite.alarm.acknowledge": [
+    "POST:/ServiceInstance/{moId}/RetrieveServiceContent",
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+    "POST:/AlarmManager/{moId}/AcknowledgeAlarm"
+  ],
+  "vmware.composite.alarm.reset": [
+    "POST:/ServiceInstance/{moId}/RetrieveServiceContent",
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+    "POST:/AlarmManager/{moId}/ClearTriggeredAlarms"
+  ],
+  "vmware.composite.cluster.drs_group.delete": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+    "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task"
+  ],
+  "vmware.composite.cluster.drs_group.members.set": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+    "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task"
+  ],
+  "vmware.composite.cluster.drs_rule.create": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task"
+  ],
+  "vmware.composite.cluster.drs_rule.delete": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+    "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task"
+  ],
+  "vmware.composite.cluster.drs_vm_host_rule.create": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+    "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task"
+  ],
+  "vmware.composite.cluster.patch": [
+    "GET:/vcenter/host",
+    "POST:/esx/settings/hosts/{host}/software?action=apply&vmw-task=true",
+    "GET:/cis/tasks/{task}",
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/HostSystem/{moId}/EnterMaintenanceMode_Task",
+    "POST:/HostSystem/{moId}/ExitMaintenanceMode_Task"
+  ],
+  "vmware.composite.content_library.create": [
+    "POST:/content/library?action=find",
+    "GET:/content/library/{libraryId}",
+    "GET:/vcenter/datastore",
+    "POST:/content/local-library"
+  ],
+  "vmware.composite.content_library.delete": [
+    "POST:/content/library?action=find",
+    "GET:/content/library/{libraryId}",
+    "POST:/content/library/item?action=find",
+    "GET:/content/library/item/{libraryItemId}",
+    "GET:/content/subscribed-library",
+    "GET:/content/subscribed-library/{libraryId}",
+    "GET:/content/library/{library}/subscriptions",
+    "DELETE:/content/local-library/{libraryId}",
+    "DELETE:/content/subscribed-library/{libraryId}",
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+  ],
+  "vmware.composite.content_library.item.delete": [
+    "POST:/content/library?action=find",
+    "POST:/content/library/item?action=find",
+    "GET:/content/library/item/{libraryItemId}",
+    "GET:/content/library/{libraryId}",
+    "GET:/content/library/item/{libraryItemId}/file",
+    "DELETE:/content/library/item/{libraryItemId}",
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+  ],
+  "vmware.composite.content_library.item.upload": [
+    "POST:/content/library?action=find",
+    "GET:/content/library/{libraryId}",
+    "POST:/content/library/item?action=find",
+    "GET:/content/library/item/{libraryItemId}",
+    "POST:/content/library/item",
+    "POST:/content/library/item/update-session",
+    "POST:/content/library/item/update-session/{updateSessionId}/file",
+    "POST:/content/library/item/update-session/{updateSessionId}?action=complete",
+    "GET:/content/library/item/update-session/{updateSessionId}"
+  ],
+  "vmware.composite.content_library.subscribed.create": [
+    "GET:/vcenter/datastore",
+    "POST:/content/subscribed-library"
+  ],
+  "vmware.composite.content_library.subscribed.sync": [
+    "POST:/content/library?action=find",
+    "POST:/content/subscribed-library/{libraryId}?action=sync"
+  ],
+  "vmware.composite.datastore.dir.create": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/HostDatastoreBrowser/{moId}/SearchDatastore_Task",
+    "POST:/FileManager/{moId}/MakeDirectory"
+  ],
+  "vmware.composite.datastore.file.delete": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/HostDatastoreBrowser/{moId}/SearchDatastore_Task",
+    "POST:/HostDatastoreBrowser/{moId}/SearchDatastoreSubFolders_Task",
+    "POST:/FileManager/{moId}/DeleteDatastoreFile_Task"
+  ],
+  "vmware.composite.folder.create": [
+    "POST:/Folder/{moId}/CreateFolder"
+  ],
+  "vmware.composite.folder.delete": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+    "POST:/Folder/{moId}/Destroy_Task"
+  ],
+  "vmware.composite.guest.customization_spec.create": [
+    "POST:/vcenter/guest/customization-specs"
+  ],
+  "vmware.composite.host.add": [
+    "GET:/vcenter/host",
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+    "POST:/ClusterComputeResource/{moId}/AddHost_Task",
+    "POST:/Folder/{moId}/AddStandaloneHost_Task"
+  ],
+  "vmware.composite.host.connect": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/HostSystem/{moId}/ReconnectHost_Task"
+  ],
+  "vmware.composite.host.datastore_mount_nfs": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+    "POST:/HostDatastoreSystem/{moId}/CreateNasDatastore"
+  ],
+  "vmware.composite.host.detach_from_vds": [
+    "GET:/vcenter/network",
+    "GET:/vcenter/vm",
+    "GET:/vcenter/vm/{vm}/hardware/ethernet",
+    "PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}",
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/DistributedVirtualSwitch/{moId}/ReconfigureDvs_Task"
+  ],
+  "vmware.composite.host.disconnect": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/HostSystem/{moId}/DisconnectHost_Task"
+  ],
+  "vmware.composite.host.disk_mark_flash": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/HostStorageSystem/{moId}/MarkAsSsd_Task",
+    "POST:/HostStorageSystem/{moId}/MarkAsNonSsd_Task"
+  ],
+  "vmware.composite.host.dns.set": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/HostNetworkSystem/{moId}/UpdateDnsConfig"
+  ],
+  "vmware.composite.host.evacuate": [
+    "GET:/vcenter/vm",
+    "vmware.composite.vm.migrate",
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/HostSystem/{moId}/EnterMaintenanceMode_Task"
+  ],
+  "vmware.composite.host.maintenance.exit": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/HostSystem/{moId}/ExitMaintenanceMode_Task"
+  ],
+  "vmware.composite.host.move": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/ClusterComputeResource/{moId}/MoveHostInto_Task"
+  ],
+  "vmware.composite.host.ntp.set": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/HostDateTimeSystem/{moId}/UpdateDateTimeConfig",
+    "POST:/HostServiceSystem/{moId}/UpdateServicePolicy",
+    "POST:/HostServiceSystem/{moId}/StartService",
+    "POST:/HostServiceSystem/{moId}/RestartService"
+  ],
+  "vmware.composite.host.remove": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+    "POST:/HostSystem/{moId}/Destroy_Task",
+    "POST:/ComputeResource/{moId}/Destroy_Task"
+  ],
+  "vmware.composite.host.service_control": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/HostServiceSystem/{moId}/StartService",
+    "POST:/HostServiceSystem/{moId}/StopService",
+    "POST:/HostServiceSystem/{moId}/RestartService",
+    "POST:/HostServiceSystem/{moId}/UpdateServicePolicy"
+  ],
+  "vmware.composite.host.standard_portgroup.delete": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+    "POST:/HostNetworkSystem/{moId}/RemovePortGroup"
+  ],
+  "vmware.composite.host.syslog.set": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/OptionManager/{moId}/QueryOptions",
+    "POST:/OptionManager/{moId}/UpdateOptions"
+  ],
+  "vmware.composite.license.assign": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/LicenseAssignmentManager/{moId}/QueryAssignedLicenses",
+    "POST:/LicenseAssignmentManager/{moId}/UpdateAssignedLicense"
+  ],
+  "vmware.composite.namespace.create": [
+    "POST:/vcenter/namespaces/instances/v2"
+  ],
+  "vmware.composite.namespace.delete": [
+    "DELETE:/vcenter/namespaces/instances/{namespace}"
+  ],
+  "vmware.composite.network.portgroup.create": [
+    "POST:/DistributedVirtualSwitch/{moId}/CreateDVPortgroup_Task",
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+  ],
+  "vmware.composite.network.portgroup.delete": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+    "POST:/DistributedVirtualSwitch/{moId}/FetchDVPorts",
+    "POST:/DistributedVirtualPortgroup/{moId}/Destroy_Task"
+  ],
+  "vmware.composite.network.portgroup.security.set": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/DistributedVirtualPortgroup/{moId}/ReconfigureDVPortgroup_Task"
+  ],
+  "vmware.composite.network.portgroup.vlan.set": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/DistributedVirtualPortgroup/{moId}/ReconfigureDVPortgroup_Task"
+  ],
+  "vmware.composite.resource_pool.create": [
+    "POST:/vcenter/resource-pool",
+    "GET:/vcenter/resource-pool",
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+  ],
+  "vmware.composite.resource_pool.delete": [
+    "GET:/vcenter/resource-pool",
+    "GET:/vcenter/vm",
+    "DELETE:/vcenter/resource-pool/{resourcePool}"
+  ],
+  "vmware.composite.storage_policy.create": [
+    "POST:/cis/tagging/category",
+    "POST:/cis/tagging/tag",
+    "POST:/cis/tagging/tag-association/{tagId}?action=attach",
+    "POST:/pbm/ProfileManager/PbmCreate"
+  ],
+  "vmware.composite.storage_policy.delete": [
+    "POST:/pbm/ProfileManager/PbmDelete"
+  ],
+  "vmware.composite.supervisor.disable": [
+    "POST:/vcenter/namespace-management/clusters/{cluster}?action=disable"
+  ],
+  "vmware.composite.supervisor.enable": [
+    "POST:/vcenter/namespace-management/supervisors/{cluster}?action=enable_on_compute_cluster"
+  ],
+  "vmware.composite.vcenter.appliance.deploy": [
+    "POST:/content/library?action=find",
+    "POST:/content/library/item?action=find",
+    "POST:/content/library/item/download-session",
+    "GET:/content/library/item/download-session/{downloadSessionId}/file",
+    "POST:/content/library/item/download-session/{downloadSessionId}/file?action=prepare",
+    "POST:/content/library/item/download-session/{downloadSessionId}?action=keep-alive",
+    "POST:/content/library/item/download-session/{downloadSessionId}?action=cancel",
+    "POST:/vcenter/vm/{vm}/power?action=start",
+    "POST:/ServiceInstance/{moId}/RetrieveServiceContent",
+    "POST:/OvfManager/{moId}/CreateImportSpec",
+    "POST:/ResourcePool/{moId}/ImportVApp",
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/HttpNfcLease/{moId}/HttpNfcLeaseProgress",
+    "POST:/HttpNfcLease/{moId}/HttpNfcLeaseComplete",
+    "POST:/HttpNfcLease/{moId}/HttpNfcLeaseAbort"
+  ],
+  "vmware.composite.vcenter.deployment.answer": [
+    "GET:/vcenter/deployment",
+    "GET:/vcenter/deployment/question",
+    "POST:/vcenter/deployment/question?action=answer"
+  ],
+  "vmware.composite.vcenter.install": [
+    "GET:/vcenter/deployment",
+    "POST:/vcenter/deployment/install?action=check",
+    "POST:/vcenter/deployment/install?action=start"
+  ],
+  "vmware.composite.vm.cdrom.add": [
+    "GET:/vcenter/vm/{vm}/hardware/cdrom",
+    "GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}",
+    "POST:/vcenter/vm/{vm}/hardware/cdrom"
+  ],
+  "vmware.composite.vm.cdrom.mount_library_iso": [
+    "POST:/content/library?action=find",
+    "POST:/content/library/item?action=find",
+    "POST:/vcenter/iso/image?action=mount",
+    "GET:/vcenter/vm/{vm}/hardware/cdrom",
+    "GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"
+  ],
+  "vmware.composite.vm.cdrom.unmount_library_iso": [
+    "POST:/vcenter/iso/image?action=unmount"
+  ],
+  "vmware.composite.vm.clone": [
+    "GET:/vcenter/vm/{vm}",
+    "POST:/vcenter/vm-template/library-items/{templateLibraryItem}?action=deploy"
+  ],
+  "vmware.composite.vm.clone_from_template": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/CustomizationSpecManager/{moId}/GetCustomizationSpec",
+    "POST:/VirtualMachine/{moId}/CloneVM_Task"
+  ],
+  "vmware.composite.vm.create": [
+    "GET:/vcenter/folder",
+    "POST:/vcenter/vm",
+    "DELETE:/vcenter/vm/{vm}",
+    "POST:/vcenter/vm/{vm}/hardware/ethernet",
+    "POST:/vcenter/vm/{vm}/power?action=start",
+    "GET:/vcenter/datastore/{datastore}",
+    "GET:/vcenter/network",
+    "GET:/vcenter/datacenter",
+    "GET:/vcenter/host",
+    "GET:/vcenter/resource-pool",
+    "GET:/vcenter/datastore",
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/VirtualMachine/{moId}/ReconfigVM_Task",
+    "POST:/Folder/{moId}/CreateVM_Task"
+  ],
+  "vmware.composite.vm.customize": [
+    "GET:/vcenter/vm",
+    "PUT:/vcenter/vm/{vm}/guest/customization",
+    "POST:/vcenter/vm/{vm}/power?action=start"
+  ],
+  "vmware.composite.vm.deploy_from_library": [
+    "POST:/content/library?action=find",
+    "POST:/content/library/item?action=find",
+    "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy",
+    "POST:/vcenter/vm/{vm}/power?action=start",
+    "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=filter",
+    "GET:/vcenter/vm",
+    "DELETE:/vcenter/vm/{vm}",
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+    "POST:/VirtualMachine/{moId}/Rename_Task",
+    "POST:/VirtualApp/{moId}/Rename_Task",
+    "POST:/VirtualApp/{moId}/Destroy_Task"
+  ],
+  "vmware.composite.vm.destroy": [
+    "GET:/vcenter/vm/{vm}",
+    "DELETE:/vcenter/vm/{vm}",
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/VirtualMachine/{moId}/Destroy_Task"
+  ],
+  "vmware.composite.vm.device.cdrom": [
+    "GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}",
+    "PATCH:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}",
+    "DELETE:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}",
+    "POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=disconnect"
+  ],
+  "vmware.composite.vm.disk.attach": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/VirtualMachine/{moId}/ReconfigVM_Task"
+  ],
+  "vmware.composite.vm.disk.grow": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/VirtualMachine/{moId}/ReconfigVM_Task"
+  ],
+  "vmware.composite.vm.import_from_library": [
+    "POST:/content/library?action=find",
+    "POST:/content/library/item?action=find",
+    "POST:/content/library/item/download-session",
+    "GET:/content/library/item/download-session/{downloadSessionId}/file",
+    "POST:/content/library/item/download-session/{downloadSessionId}/file?action=prepare",
+    "POST:/content/library/item/download-session/{downloadSessionId}?action=keep-alive",
+    "POST:/content/library/item/download-session/{downloadSessionId}?action=cancel",
+    "POST:/vcenter/vm/{vm}/power?action=start",
+    "POST:/ServiceInstance/{moId}/RetrieveServiceContent",
+    "POST:/OvfManager/{moId}/CreateImportSpec",
+    "POST:/ResourcePool/{moId}/ImportVApp",
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/HttpNfcLease/{moId}/HttpNfcLeaseProgress",
+    "POST:/HttpNfcLease/{moId}/HttpNfcLeaseComplete",
+    "POST:/HttpNfcLease/{moId}/HttpNfcLeaseAbort"
+  ],
+  "vmware.composite.vm.migrate": [
+    "POST:/vcenter/vm/{vm}?action=relocate",
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+  ],
+  "vmware.composite.vm.nic.repoint": [
+    "GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}",
+    "GET:/vcenter/network",
+    "PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}"
+  ],
+  "vmware.composite.vm.power": [
+    "POST:/vcenter/vm/{vm}/power?action=start",
+    "POST:/vcenter/vm/{vm}/power?action=stop",
+    "POST:/vcenter/vm/{vm}/power?action=reset",
+    "POST:/vcenter/vm/{vm}/guest/power?action=shutdown",
+    "POST:/vcenter/vm/{vm}/guest/power?action=reboot"
+  ],
+  "vmware.composite.vm.power.bulk": [
+    "GET:/vcenter/vm",
+    "POST:/vcenter/vm/{vm}/power?action=start",
+    "POST:/vcenter/vm/{vm}/power?action=stop",
+    "POST:/vcenter/vm/{vm}/power?action=suspend",
+    "POST:/vcenter/vm/{vm}/power?action=reset"
+  ],
+  "vmware.composite.vm.resize": [
+    "GET:/vcenter/vm/{vm}",
+    "PATCH:/vcenter/vm/{vm}/hardware/cpu",
+    "PATCH:/vcenter/vm/{vm}/hardware/memory"
+  ],
+  "vmware.composite.vm.resource_allocation.set": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/VirtualMachine/{moId}/ReconfigVM_Task"
+  ],
+  "vmware.composite.vm.snapshot.create": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/VirtualMachine/{moId}/CreateSnapshotEx_Task"
+  ],
+  "vmware.composite.vm.snapshot.delete": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/VirtualMachineSnapshot/{moId}/RemoveSnapshot_Task"
+  ],
+  "vmware.composite.vm.snapshot.revert": [
+    "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    "POST:/VirtualMachineSnapshot/{moId}/RevertToSnapshot_Task"
+  ],
+  "vmware.composite.vm.tools.installer.unmount": [
+    "GET:/vcenter/vm/{vm}/tools/installer",
+    "POST:/vcenter/vm/{vm}/tools/installer?action=disconnect"
+  ]
+}

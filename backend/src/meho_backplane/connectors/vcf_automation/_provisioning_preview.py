@@ -23,8 +23,8 @@ generic params echo, so the bespoke builder is their only preview;
 ``preview_operation`` still answers ``unavailable`` for them by design
 (``_request_preview._is_previewable``).
 
-``vcfa.tenant.deployment.delete`` also has a builder here: it reads the
-deployment once so the approver sees its name and project, not only an id.
+The deployment delete preview lives in :mod:`._day2` (shared with Aria
+Automation 8).
 ``vcfa.provider.role.delete`` reads the role once, with the same rules as
 the call, so the approver sees ``would: "delete"``, ``"unchanged"`` (no
 such role with exactly that name), ``"refuse_built_in"`` (a ``readOnly``
@@ -46,10 +46,7 @@ from meho_backplane.connectors.vcf_automation._lookups import (
     find_org_user,
     find_project,
     password_ref,
-    quote_segment,
 )
-from meho_backplane.connectors.vcf_automation._paths import TENANT_IAAS_API_VERSION
-from meho_backplane.connectors.vcf_automation.typed_ops import TENANT_DEPLOYMENT_DETAIL_PATH
 from meho_backplane.operations._preview import (
     PreviewContext,
     register_permission_preflight,
@@ -266,33 +263,6 @@ async def _project_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-async def _deployment_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    deployment_id = ctx.params.get("id")
-    if not isinstance(deployment_id, str):
-        return None
-    preview: dict[str, Any] = {
-        "action": "delete_deployment",
-        "id": deployment_id,
-        "name": None,
-        "project_id": None,
-    }
-    connector: Any = ctx.connector_instance
-    if connector is None:
-        return preview
-    path = TENANT_DEPLOYMENT_DETAIL_PATH.format(id=quote_segment(deployment_id))
-    try:
-        row = await connector._request_json(
-            ctx.target,
-            "GET",
-            path,
-            operator=ctx.operator,
-            params={"apiVersion": TENANT_IAAS_API_VERSION},
-        )
-    except (httpx.HTTPError, RuntimeError, ValueError):
-        return preview
-    return {**preview, "name": row.get("name"), "project_id": row.get("projectId")}
-
-
 _BUILDERS = {
     "vcfa.provider.org.create": _org_create_preview,
     "vcfa.provider.role.create": _role_create_preview,
@@ -301,7 +271,6 @@ _BUILDERS = {
     "vcfa.provider.api_token.create": _api_token_create_preview,
     "vcfa.provider.api_token.revoke": _api_token_revoke_preview,
     "vcfa.tenant.project.create": _project_create_preview,
-    "vcfa.tenant.deployment.delete": _deployment_delete_preview,
 }
 
 for _op_id, _builder in _BUILDERS.items():

@@ -204,7 +204,7 @@ How the password travels:
 
 1. The call waits for a person to approve it. The approval row, the audit row
    and the broadcast hold only `password_ref`. The op is pinned as a
-   credential write (`_CREDENTIAL_WRITE_OPS` in `broadcast/events.py`), so the
+   credential write (declared in `msad/op_classes.py`), so the
    approval input is stored encrypted and the broadcast shows no params. Its
    own preview shows the approver the account, the reference and `enable`.
 2. When the approved call runs, the handler reads the value from Vault under

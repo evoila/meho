@@ -1,2 +1,3 @@
 docs/vcenter-9.0/vcenter.yaml
 docs/vcenter-9.0/vi-json.yaml
+docs/vcenter-9.0/drift-demo-missing-file.yaml

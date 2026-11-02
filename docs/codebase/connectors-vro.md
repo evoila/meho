@@ -218,8 +218,11 @@ of the workflow, 200 per page, until the list ends (the server's `total`
 is reached, or a page comes back short). When one is still running or
 waiting, the answer is `already_running` with that run's id, and nothing
 starts. This is a help, not a lock: two callers can both check before
-either starts. A server that sends no `total` and ignores `startIndex`
-cannot keep the check reading: it stops after 50 pages.
+either starts. The check reads at most 50 pages (10,000 runs), so a
+server that ignores `startIndex` cannot keep it reading. When the list
+has not ended by then, MEHO refuses the start with an error that says
+so: an unfinished check must not start a second run. The caller can set
+`allow_parallel` to start anyway.
 
 Then MEHO reads each secret input from Vault and sends
 `POST .../executions` once, with no retry. The answer is `accepted` with

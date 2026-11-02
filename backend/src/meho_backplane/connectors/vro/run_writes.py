@@ -27,7 +27,9 @@ a second person's approval. The flow:
 3. Unless ``allow_parallel`` is true, it reads the runs of the workflow,
    page by page, until the list ends. When one is still running or
    waiting it returns ``already_running`` with that run's id and starts
-   nothing. This is a help, not a lock.
+   nothing. When the list has not ended after the last page the check
+   reads, it refuses the start: an unfinished check must not start a
+   second run. This is a help, not a lock.
 4. It reads each secret input from Vault (``secret_ref``,
    ``"<vault-path>#<field>"``) under the caller's identity, and sends
    ``POST /vco/api/workflows/{workflowId}/executions`` once (no retry).
@@ -139,8 +141,9 @@ WRITE_VENDOR_CALLS: Final[frozenset[tuple[str, str]]] = frozenset(
 
 #: Runs read per page for the "already running" check.
 _RUNNING_CHECK_ROWS: Final = 200
-#: Pages the check reads at most when the server sends no ``total``: a
-#: server that ignores ``startIndex`` must not keep the check reading.
+#: Pages the check reads at most: a server that ignores ``startIndex``
+#: must not keep the check reading. The start is refused when the list
+#: has not ended by then.
 _RUNNING_CHECK_MAX_PAGES: Final = 50
 #: Plain outcomes of a run that has not ended.
 _ACTIVE_OUTCOMES: Final[frozenset[str]] = frozenset({"running", "waiting"})
@@ -443,6 +446,8 @@ async def _running_execution(
     query ``vro.execution.list`` uses) until a page shows an active run,
     the server's ``total`` is reached, or a page comes back short. The
     vendor list has no state filter MEHO can rely on, so every run is read.
+    Raises :class:`VroRunRefusedError` when the list has not ended after
+    ``_RUNNING_CHECK_MAX_PAGES`` pages: then no run can be ruled out.
     """
     path = _EXECUTIONS_PATH.format(workflowId=path_segment("workflow", workflow_id))
     start = 0
@@ -464,7 +469,10 @@ async def _running_execution(
         total = page.get("total")
         if len(links) < _RUNNING_CHECK_ROWS or (isinstance(total, int) and start >= total):
             return None
-    return None
+    raise VroRunRefusedError(
+        f"the workflow has more than {start} runs, so MEHO could not check whether one "
+        "is still running. Nothing was started. Set allow_parallel to start anyway."
+    )
 
 
 def _mentions(text: str, secrets: list[str]) -> bool:

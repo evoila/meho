@@ -60,6 +60,7 @@ from meho_backplane.connectors.vro import (
     register_vro_typed_operations,
 )
 from meho_backplane.connectors.vro.run_writes import (
+    _RUNNING_CHECK_MAX_PAGES,
     RUN_OP_ID,
     VroRunRefusedError,
     wrap_value,
@@ -842,6 +843,24 @@ async def test_run_stops_reading_runs_at_the_total(session: AsyncSession) -> Non
     assert asked == [0]
     assert post.call_count == 1
     assert answer["status"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_run_refuses_when_the_check_ends_before_the_list(session: AsyncSession) -> None:
+    """An active run after the last page the check reads must not start a second run."""
+    connector = await _register()
+    params = {"workflow_id": _WF}
+    pages = [["completed"] * 200] * _RUNNING_CHECK_MAX_PAGES + [["running"]]
+    answer_page, asked = _runs_pages(*pages, total=_RUNNING_CHECK_MAX_PAGES * 200 + 1)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_workflow(mock)
+        card = await _card(connector, params)
+        mock.get(_EXECUTIONS).mock(side_effect=answer_page)
+        post = mock.post(_EXECUTIONS)
+        with pytest.raises(VroRunRefusedError, match=r"could not check.*allow_parallel"):
+            await _approved_run(connector, params, card)
+    assert len(asked) == _RUNNING_CHECK_MAX_PAGES
+    assert not post.called
 
 
 @pytest.mark.asyncio

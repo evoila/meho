@@ -143,6 +143,29 @@ Limits:
   pooled HTTP client is not affected: its key already includes the
   host, port, scheme and TLS settings.
 
+## Vault login role keys in `extras`
+
+A vault target may name the Vault login role and auth mount in
+`extras["vault_role"]` and `extras["vault_mount"]`
+([`connectors-vault.md`](connectors-vault.md)). Only a platform admin
+may set or change them. `create_target` and `update_target` call
+`enforce_vault_login_extras_platform_admin` (`targets/vault_login_extras.py`)
+before they store `extras`. The check compares the stored value of each
+key with the value the request would store:
+
+- Nothing changed, or the operator has `platform_admin`: the request
+  passes. A `PATCH` that re-sends the same values (the UI import does
+  that) or touches other fields passes too, so an existing target keeps
+  its role.
+- A key is added, changed or removed, and the operator has no
+  `platform_admin`: HTTP 403 `vault_login_role_requires_platform_admin`,
+  and the row is not changed. Values are compared as stored, so a blank
+  string is a change like any other.
+
+`targets.register` calls `create_target`, so the same rule holds there:
+the operation answers with an invalid-parameters error that names the
+403 detail.
+
 ## Control flow — listing targets
 
 ### REST and CLI: `GET /api/v1/targets`

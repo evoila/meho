@@ -11,6 +11,9 @@
 * ``POST /api/v1/targets/{name}/probe``   — invoke connector probe. ``operator`` role.
 * ``POST /api/v1/targets``                — create. ``tenant_admin`` role.
 * ``PATCH /api/v1/targets/{name}``        — update (partial). ``tenant_admin`` role.
+  On both, the Vault login role keys of ``extras`` (``vault_role``,
+  ``vault_mount``) need ``platform_admin``; see
+  :mod:`meho_backplane.targets.vault_login_extras`.
 * ``DELETE /api/v1/targets/{name}``       — soft-delete. ``tenant_admin`` role.
 
 All routes are tenant-scoped via ``operator.tenant_id`` extracted from the
@@ -182,6 +185,7 @@ from meho_backplane.targets.secret_field_map import (
     check_secret_field_map_sources,
     merge_secret_field_map,
 )
+from meho_backplane.targets.vault_login_extras import enforce_vault_login_extras_platform_admin
 
 __all__ = ["count_graph_node_refs", "router", "soft_delete_target"]
 
@@ -1398,6 +1402,34 @@ def _resolve_create_secret_ref(body: TargetCreate, operator: Operator) -> str | 
     return body.secret_ref
 
 
+def _validate_create_body_fields(body: TargetCreate, operator: Operator) -> str:
+    """Run the write-time validators for a target POST; return the product token.
+
+    Mirrors :func:`_validate_update_body_fields`. Three checks, all raising
+    before any row is built:
+
+    * **product** — G0.18-T2 (#1355) / G0.27 / T3 (#1817). Validate the
+      incoming product token against the registered set so a value copied
+      straight out of ``meho connector list`` is accept-equivalent here.
+      Every connector registers under the short, dispatch-canonical token
+      the listing emits, so the token is stored as-is (the write-time alias
+      bridge was retired by #1817). See
+      :func:`_canonicalise_and_validate_product`.
+    * **preferred_impl_id** — G0.15-T6 (#1215). Reject an unknown
+      ``preferred_impl_id`` at write time (the validated product token
+      scopes the valid set). See :func:`_validate_preferred_impl_id`.
+    * **extras** — the Vault login role keys (``vault_role`` /
+      ``vault_mount``) need a platform admin. See
+      :func:`~meho_backplane.targets.vault_login_extras.enforce_vault_login_extras_platform_admin`.
+    """
+    product = _canonicalise_and_validate_product(body.product)
+    _validate_preferred_impl_id(body.preferred_impl_id, product)
+    enforce_vault_login_extras_platform_admin(
+        operator, before=None, after=body.extras, target_name=body.name
+    )
+    return product
+
+
 @router.post("", response_model=Target, status_code=201)
 async def create_target(
     body: TargetCreate,
@@ -1435,17 +1467,9 @@ async def create_target(
     per-tenant default (#1723) and always passes; no-op when the guard
     is disabled. See :func:`_enforce_secret_ref_tenant_scope`.
     """
-    # G0.18-T2 (#1355) / G0.27 / T3 (#1817). Validate the incoming product
-    # token against the registered set so a value copied straight out of
-    # ``meho connector list`` is accept-equivalent here. Every connector
-    # now registers under the short, dispatch-canonical token the listing
-    # emits, so the token is stored as-is (the write-time alias bridge was
-    # retired by #1817). See :func:`_canonicalise_and_validate_product`.
-    product = _canonicalise_and_validate_product(body.product)
-    # G0.15-T6 (#1215). Reject an unknown ``preferred_impl_id`` at write
-    # time (the validated product token scopes the valid set). See
-    # :func:`_validate_preferred_impl_id`.
-    _validate_preferred_impl_id(body.preferred_impl_id, product)
+    # Write-time validators (product / impl-id / Vault login role keys) all
+    # raise before the row is built. See :func:`_validate_create_body_fields`.
+    product = _validate_create_body_fields(body, operator)
     now = datetime.now(UTC)
     create_fields = body.model_dump()
     # Persist the validated product token so the stored row matches the
@@ -1574,7 +1598,7 @@ def _validate_update_body_fields(
 
     Extracted from :func:`update_target` so the handler stays within the
     function-size budget while the validation phase reads as one unit.
-    Four checks, all raising *before* the row is mutated:
+    Five checks, all raising *before* the row is mutated:
 
     * **product** — G0.14-T4 (#1145) / G0.18-T2 (#1355). Reject
       ``{"product": null}`` and validate a changed product against the
@@ -1594,11 +1618,19 @@ def _validate_update_body_fields(
       stored map (``null`` entry removes, ``null`` map clears) and
       ``updates`` is rewritten to the merged result; a merged map above
       the entry limit is a 422. See :func:`merge_secret_field_map`.
+    * **extras** — a sent ``extras`` that adds, changes or removes the
+      Vault login role or auth mount (``vault_role`` / ``vault_mount``)
+      is a 403 unless the operator is a platform admin. See
+      :func:`~meho_backplane.targets.vault_login_extras.enforce_vault_login_extras_platform_admin`.
     """
     effective_product = _apply_product_patch(updates, t.product)
     _validate_preferred_impl_id(updates.get("preferred_impl_id"), effective_product)
     if updates.get("secret_ref") is not None:
         _enforce_secret_ref_tenant_scope(updates["secret_ref"], operator, t.name)
+    if "extras" in updates:
+        enforce_vault_login_extras_platform_admin(
+            operator, before=t.extras, after=updates["extras"], target_name=t.name
+        )
     if "secret_field_map" in updates:
         updates["secret_field_map"] = merge_secret_field_map(
             t.secret_field_map, updates["secret_field_map"]

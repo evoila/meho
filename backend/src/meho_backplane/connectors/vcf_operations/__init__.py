@@ -45,6 +45,7 @@ from typing import Final
 
 from meho_backplane.connectors._shared.vcf_auth import SessionLoginError
 from meho_backplane.connectors.registry import register_connector_v2
+from meho_backplane.connectors.vcf_operations import op_classes  # noqa: F401 -- declares the op classes
 from meho_backplane.connectors.vcf_operations.connector import VcfOperationsConnector
 from meho_backplane.connectors.vcf_operations.session import (
     VcfOperationsCredentialsLoader,

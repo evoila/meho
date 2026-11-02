@@ -3,16 +3,17 @@
 
 """Registry sweep: every credential write that can wait for approval has a preview (#4850).
 
-An op pinned ``credential_write``
-(:data:`~meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS`) gets no
-generic echo of its params when it waits for approval, because that echo
-cannot be trusted to hide every secret. Only a bespoke preview builder shows
+An op classified ``credential_write``
+(:func:`~meho_backplane.broadcast.events.classify_op`; a connector declares
+the class in its own ``op_classes.py``) gets no generic echo of its params
+when it waits for approval, because that echo cannot be trusted to hide every
+secret. Only a bespoke preview builder shows
 the approver anything. Without one, the approver sees the op id, the target
 and "credential write, redacted", and approves without knowing which user,
 secret or host changes.
 
 This sweep runs every typed-op registrar, takes each registered op that is
-pinned ``credential_write`` and can wait for approval, and checks that it has
+classified ``credential_write`` and can wait for approval, and checks that it has
 a registered preview builder. An op can wait for approval when it has
 ``requires_approval=True`` (every call waits) or a ``safety_level`` above
 ``safe`` (an agent's call waits). A new credential write without a builder
@@ -28,7 +29,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import or_, select
 
-from meho_backplane.broadcast.events import _CREDENTIAL_WRITE_OPS
+from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS
@@ -76,7 +77,7 @@ def _credential_writes_missing_preview(
     return sorted(
         op_id
         for op_id in set(op_ids)
-        if op_id in _CREDENTIAL_WRITE_OPS
+        if classify_op(op_id) == "credential_write"
         and op_id not in registered_builders
         and op_id not in exemptions
     )
@@ -98,14 +99,14 @@ async def _seed_and_collect_parkable_credential_writes(stub: AsyncMock) -> list[
     async with get_sessionmaker()() as session:
         rows = await session.execute(
             select(EndpointDescriptor.op_id).where(
-                EndpointDescriptor.op_id.in_(_CREDENTIAL_WRITE_OPS),
                 or_(
                     EndpointDescriptor.requires_approval.is_(True),
                     EndpointDescriptor.safety_level != "safe",
                 ),
             )
         )
-    return sorted(set(rows.scalars().all()))
+    parkable = set(rows.scalars().all())
+    return sorted(op_id for op_id in parkable if classify_op(op_id) == "credential_write")
 
 
 @pytest.mark.asyncio

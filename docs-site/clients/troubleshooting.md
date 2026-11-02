@@ -157,8 +157,8 @@ gave the call no answer at all.
 
 **Fix.** In Claude Desktop, open **Settings > Extensions** and turn the
 MEHO extension off and on. Finish the login in the browser tab that opens;
-it may open behind the Claude Desktop window. If a MEHO login tab opened
-when the call failed, you can close it.
+it may open behind the Claude Desktop window. Older bundles also opened a
+login tab when the call failed; you can close that one.
 
 ## The extension stops with "MEHO did not connect" (Claude Desktop)
 
@@ -181,14 +181,34 @@ expired. Run /mcp, pick meho, and reconnect to log in again." After that,
 `/mcp` shows `meho` as failed.
 
 **Wall.** The saved login can no longer be renewed: it was not used for
-the offline idle limit, or the session was ended in Keycloak. A new
-browser login is needed. The plugin does not wait for that login in the
-middle of a call, so the call fails fast instead of hanging.
+the offline idle limit, or the session was ended in Keycloak. The plugin
+checked this before it gave up: it asked the login server again, and it
+looked for a newer login that another session saved. A new browser login
+is needed. The plugin does not wait for that login in the middle of a
+call, so the call fails fast instead of hanging. The saved login file
+stays; the new login replaces it.
 
 **Fix.** Run `/mcp`, pick `meho`, and reconnect. Finish the login in the
-browser tab that opens. If Claude Code stops waiting before you finish,
-finish the login anyway and reconnect once more. If a MEHO login tab
-opened when the call failed, you can close it.
+browser tab that opens. Other Claude Code sessions that need a login at
+the same time wait for this one, then use it. If Claude Code stops
+waiting before you finish, finish the login anyway and reconnect once
+more. Older plugin versions also opened a login tab when the call failed;
+you can close that one.
+
+## A MEHO call says "The MEHO login server did not answer"
+
+**Symptom.** A MEHO tool call fails with "The MEHO login server did not
+answer, so the login could not be renewed. Your login is kept. Try again
+in a moment." The Claude Code plugin or the Claude Desktop extension keeps
+running.
+
+**Wall.** The login needed a renewal, and the login server (Keycloak) did
+not answer for about 30 seconds, or it answered with a server error
+(HTTP 5xx). The plugin tried again after 1, 2, 4 and 8 seconds. It did
+not open a browser login, and it kept the saved login.
+
+**Fix.** Check that you are on the VPN and that Keycloak is up. Then run
+the call again. No reconnect is needed.
 
 ## The plugin stops with "MEHO did not connect" (Claude Code plugin)
 
@@ -200,9 +220,10 @@ stopped.`
 seconds (default 300). Two common reasons:
 
 - A browser login started, but nobody finished it in time.
-- Another Claude Code session was running a login at the same time. This
-  session then waits, and it does not pick up the other session's login
-  even when that login is done.
+- Another Claude Code session was running a browser login at the same
+  time, and nobody finished it. This session waits for that login, and the
+  time limit counts the wait. When the other login is done in time, this
+  session uses it and opens no browser.
 
 Stopping frees the local callback port, so the next attempt can log in.
 Older plugin versions waited forever instead, and every later session

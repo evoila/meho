@@ -7,14 +7,15 @@
   ``POST /blueprint/api/blueprint-requests``
 * ``vcfa.tenant.blueprint_request.get`` -- safe:
   ``GET /blueprint/api/blueprint-requests/{requestId}``
-* ``vcfa.tenant.deployment.delete`` -- dangerous, approval:
+* ``vcfa.tenant.deployment.delete`` -- destructive, approval, preview first:
   ``DELETE /deployment/api/deployments/{deploymentId}``
 
 Handlers live in :mod:`._deploy`. Field names come from the pinned
 ``vra-blueprint.json`` (``BlueprintRequest``) and
-``vra-catalog-deployment.json`` (``Request``). The delete is ``dangerous``
-(it removes the deployment's VMs; the person who asks cannot approve it
-alone), like ``argocd.app.delete``.
+``vra-catalog-deployment.json`` (``Request``). The delete is written once for
+Aria Automation 8 and VCF Automation 9 in :mod:`.day2_ops` (handler and
+blast-radius preview in :mod:`._day2`). It is ``destructive``: only a person
+runs it, after a preview, and a second person approves.
 """
 
 from __future__ import annotations
@@ -26,8 +27,8 @@ from meho_backplane.connectors.vcf_automation._op_schemas import field, guidance
 from meho_backplane.connectors.vcf_automation._paths import (
     TENANT_BLUEPRINT_REQUEST_PATH,
     TENANT_BLUEPRINT_REQUESTS_PATH,
-    TENANT_DEPLOYMENT_API_DEPLOYMENT_PATH,
 )
+from meho_backplane.connectors.vcf_automation.day2_ops import VCFA_DEPLOYMENT_DELETE
 from meho_backplane.connectors.vcf_automation.typed_ops import VcfaTypedOp, validate_typed_ops
 
 __all__ = ["VCFA_DEPLOY_OPS"]
@@ -229,77 +230,11 @@ _BLUEPRINT_REQUEST_GET = VcfaTypedOp(
     ),
 )
 
-_DEPLOYMENT_DELETE = VcfaTypedOp(
-    op_id="vcfa.tenant.deployment.delete",
-    handler_attr="tenant_deployment_delete",
-    plane="tenant",
-    path=TENANT_DEPLOYMENT_API_DEPLOYMENT_PATH,
-    summary="Delete one deployment and all its VMs (tenant plane).",
-    description=(
-        "Sends DELETE /deployment/api/deployments/{deploymentId}. This removes every "
-        "resource of the deployment. Runs in the background. An unknown id answers "
-        "'unchanged'."
-    ),
-    parameter_schema={
-        "type": "object",
-        "properties": {
-            "id": {
-                "type": "string",
-                "minLength": 1,
-                "description": "The deployment id (from vcfa.tenant.deployment.list).",
-            },
-        },
-        "required": ["id"],
-        "additionalProperties": False,
-        "examples": [{"id": "<deployment-id>"}],
-    },
-    response_schema={
-        "type": "object",
-        "properties": {
-            "status": field(
-                "string",
-                "What the op did: submitted or unchanged.",
-                enum=["submitted", "unchanged"],
-            ),
-            "request": {
-                **obj(
-                    "The delete request; null on 'unchanged'.",
-                    {
-                        "id": field(["string", "null"], "The request id."),
-                        "name": field(["string", "null"], "The request label."),
-                        "status": field(["string", "null"], "The request state."),
-                        "deploymentId": field(["string", "null"], "The deployment id."),
-                    },
-                ),
-                "type": ["object", "null"],
-            },
-            "guidance": field(["string", "null"], "A short note on what to do next, or null."),
-        },
-        "required": ["status", "guidance"],
-        "additionalProperties": True,
-    },
-    group_key="vcfa-tenant-writes",
-    tags=("write", "vcfa", "tenant", "deployment", "delete"),
-    safety_level="dangerous",
-    requires_approval=True,
-    llm_instructions=guidance(
-        when_to_call="Call to remove a deployment and its VMs, for example to undo a test build.",
-        preconditions=(
-            "Check the id and name with vcfa.tenant.deployment.get first. The VMs and "
-            "their disks are deleted. A second person must approve the call."
-        ),
-        output_shape=(
-            "{status: submitted | unchanged, request: {id, name, status, deploymentId}, guidance}."
-        ),
-        next_step="Read vcfa.tenant.deployment.get with the same id until it answers not found.",
-    ),
-)
-
 #: The deploy ops, in the order of a build: request, wait, undo.
 VCFA_DEPLOY_OPS: Final[tuple[VcfaTypedOp, ...]] = (
     _BLUEPRINT_REQUEST_CREATE,
     _BLUEPRINT_REQUEST_GET,
-    _DEPLOYMENT_DELETE,
+    VCFA_DEPLOYMENT_DELETE,
 )
 
 

@@ -269,7 +269,8 @@ def _resolve_login_role(operator: Operator, settings: Settings, override: str | 
        (#3274), so a governed teardown's ``vault.kv.delete`` logs in under a
        dedicated narrow role instead of the shared ``meho-mcp`` identity;
     2. the check-runner's dedicated ``vault_check_runner_role`` (#2757),
-       selected only for the synthetic background-dispatch operator;
+       selected only for the synthetic operators that present the runner's
+       token (background Sensor dispatch and the inbound event intake);
     3. a per-tenant role from ``vault_oidc_role_by_tenant`` (#3852), keyed on
        ``operator.tenant_id`` — so an operator of a sandbox tenant logs into
        a role whose ``bound_claims`` + policy it satisfies instead of the

@@ -1499,3 +1499,89 @@ async def test_streamed_direct_run_is_limited_by_the_agent_grants(
     assert (rows[0].operator_sub, rows[0].actor_sub) == ("alice", "agent:reader")
     view = await invoker.poll(person, run_id)
     assert (view.identity_sub, view.identity_act) == ("alice", "agent:reader")
+
+
+#: Who called the identity-recording handler; cleared by each test that reads it.
+_CALLED_AS: list[Operator] = []
+
+
+async def _identity_recording_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Typed handler recording the operator the tool call ran as."""
+    _CALLED_AS.append(operator)
+    return {"ok": True}
+
+
+async def _seed_identity_recording_op(stub_embedding_service: AsyncMock) -> list[Operator]:
+    """Register ``vault.kv.read`` with a handler that records who called it."""
+    _CALLED_AS.clear()
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_identity_recording_handler,
+        summary="Read a secret.",
+        description="reads.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    return _CALLED_AS
+
+
+def _tenant_admin_person() -> Operator:
+    return _make_operator(sub="alice", role=TenantRole.TENANT_ADMIN).model_copy(
+        update={"approver": True, "self_approver": True, "platform_admin": True}
+    )
+
+
+def _assert_agent_limits(seen: list[Operator]) -> None:
+    assert len(seen) == 1
+    called_as = seen[0]
+    assert called_as.sub == "alice"
+    assert called_as.tenant_role is TenantRole.OPERATOR
+    assert (called_as.approver, called_as.self_approver, called_as.platform_admin) == (
+        False,
+        False,
+        False,
+    )
+
+
+async def test_direct_run_tool_calls_use_at_most_the_agent_role(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A tenant admin's direct run calls tools with the agent's own limits.
+
+    The person stays the subject, but the agent acts with the ``operator``
+    role at most and without the person's approval or platform flags.
+    """
+    seen = await _seed_identity_recording_op(stub_embedding_service)
+    await _seed_definition(toolset={"meta_tools": ["call_operation"]})
+    invoker = _invoker_with(_call_op_then_text("answer"))
+    person = _tenant_admin_person()
+
+    outcome = await invoker.run(person, "reader", "go")
+
+    assert outcome.status is AgentRunStatus.SUCCEEDED
+    _assert_agent_limits(seen)
+    view = await invoker.poll(person, outcome.run_id)
+    assert (view.identity_sub, view.identity_act) == ("alice", "agent:reader")
+
+
+async def test_streamed_direct_run_tool_calls_use_at_most_the_agent_role(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The streamed run path narrows the caller the same way."""
+    seen = await _seed_identity_recording_op(stub_embedding_service)
+    await _seed_definition(toolset={"meta_tools": ["call_operation"]})
+    invoker = _invoker_with(_call_op_then_text("answer"))
+
+    async for _rid, _event in invoker.stream_events(_tenant_admin_person(), "reader", "go"):
+        pass
+
+    _assert_agent_limits(seen)

@@ -3,8 +3,8 @@
 
 """Approval preview for ``vmware.composite.vm.guest.file.read`` (#4850).
 
-The op logs into the guest OS, so it is pinned ``credential_write``
-(:data:`~meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS`) and the
+The op logs into the guest OS, so it is declared ``credential_write``
+(``vmware_rest/op_classes.py``) and the
 generic echo of params is turned off. It is a ``caution`` read: an agent's
 call waits for approval, a person's call runs at once. Without this builder
 the approver of an agent's call saw only the op id and the target.
@@ -27,7 +27,7 @@ from typing import Any
 from meho_backplane.connectors.vmware_rest.composites._guest_secret_ref import (
     GUEST_SECRET_REF_PARAM,
 )
-from meho_backplane.operations._preview import PreviewContext, register_preview_builder
+from meho_backplane.operations._preview import PreviewContext
 
 OP_ID_GUEST_FILE_READ = "vmware.composite.vm.guest.file.read"
 
@@ -47,6 +47,3 @@ async def guest_file_read_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     if isinstance(guest_secret_ref, str) and guest_secret_ref:
         preview[GUEST_SECRET_REF_PARAM] = guest_secret_ref
     return preview
-
-
-register_preview_builder(OP_ID_GUEST_FILE_READ, guest_file_read_preview)

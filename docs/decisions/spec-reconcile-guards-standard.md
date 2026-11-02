@@ -709,6 +709,34 @@ API with eleven hand-written path constants (thirteen `METHOD:/path` pairs).
   goes on the shelf, the check gets a compare test, and this entry is
   withdrawn.
 
+### installer-cb-5.0 — no API file for Cloud Builder 5.x; the check uses the reference lists (#4469)
+
+The `installer-cb-5.0` connector (Cloud Builder 5.0 to 5.2, product
+`installer`) sends ten `METHOD:/path` calls under `/v1/sddcs`.
+
+- **Check file:** `backend/tests/test_connectors_vcf_cloud_builder_spec_reconcile.py`.
+  It reads the call sets of `vcf_cloud_builder/typed_reads.py` and
+  `typed_writes.py` live and pins them (always runs). When the shelf is
+  there, it checks every call against the reference list of each version:
+  `cloud-builder-5.0` (5.0.0), `cloud-builder-5.1` (5.1.0, 5.1.1) and
+  `cloud-builder-5.2` (5.2.0 to 5.2.4). CI checks out the three folders and
+  fails when a list is missing.
+- **What was checked (2026-10-19, on the shelf).** Broadcom publishes no
+  OpenAPI or Swagger file for VCF 5.x: the "Related Resources" page of each
+  version of the VMware Cloud Foundation API reference
+  (<https://developer.broadcom.com/xapis/vmware-cloud-foundation-api/5.2.0/>)
+  offers no download, and `vmware/vcf-api-specs` has 9.x tags only. The
+  shelf lists are made from the vendor's operation index and operation
+  pages, section "Sddc" (the Cloud Builder calls). One finding changed the
+  connector: `GET /v1/system/appliance-info` (the Installer's version call)
+  is in no 5.x list, so the connector reads the version from
+  `GET /v1/sddcs/about`.
+- **Residual risk, named.** The lists hold paths, not schemas. A field that
+  differs by patch release shows up only in a live call (the separate lab
+  proof).
+- **Activation:** Broadcom publishing a 5.x API file. Then the file goes on
+  the shelf next to the lists and the check compares against it.
+
 ## Red lane = finding (the protocol)
 
 A red lane on first run against the real shelf is **the guard working**,

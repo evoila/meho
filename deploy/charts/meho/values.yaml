@@ -430,6 +430,15 @@ config:
   # client for the realm-side recipe. G0.9.1-T9 (RDC dogfood Signal
   # #16, 2026-05-21).
   keycloakCliClientId: ""
+  # -- Public OAuth client_id of the fresh browser sign-in of `meho
+  # approvals approve` (#5515). Rendered into `KEYCLOAK_CLI_APPROVE_CLIENT_ID`
+  # and surfaced to the CLI via `GET /api/v1/auth-config` as
+  # `cli_approve_client_id`. Only a token made for this client can approve
+  # on the command line or REST. `meho admin keycloak bootstrap-clients`
+  # creates it. Empty: no token can approve; only the web interface can.
+  # Ignored when `coreKeycloak.enabled` is true: the built-in realm has
+  # `meho-cli-approve`.
+  keycloakCliApproveClientId: "meho-cli-approve"
   keycloakJwksCacheTtlSeconds: "300"
   keycloakJwtLeewaySeconds: "30"
   vaultAddr: ""
@@ -591,14 +600,23 @@ config:
   # `GET /ready` → `features.approval_queue.delegated_decision_posture`
   # shows the stance. See `docs/codebase/approvals.md`.
   approvalAllowDelegatedDecision: "false"
+  # -- The approval window, in seconds (#5515): how old a sign-in may be
+  # to approve on the command line or REST (#3979). One fresh sign-in may
+  # approve several waiting changes inside the window. The window counts
+  # from the sign-in; renewing the token does not make it longer. From 30
+  # to 3600. Rendered into `FRESH_SIGN_IN_MAX_AGE_SECONDS`. An older
+  # sign-in gets 401 and `meho approvals approve` opens a new browser
+  # sign-in. A destructive operation does not use the window (see
+  # `perActionSignInMaxAgeSeconds`). The web interface is not affected:
+  # the click is the proof.
+  freshSignInMaxAgeSeconds: "900"
   # -- How old a sign-in may be, in seconds, for an action that needs a
-  # fresh sign-in: turning approval off for an operation (#4711), and
-  # approving on the command line or REST (#3979). From 30 to 3600.
-  # Rendered into `FRESH_SIGN_IN_MAX_AGE_SECONDS`. An older sign-in gets
-  # 401 and `meho approvals approve` opens a new browser sign-in. One
-  # sign-in allows one approval. The web interface is not affected: the
-  # click is the proof.
-  freshSignInMaxAgeSeconds: "300"
+  # fresh sign-in each time (#5515): turning approval off or lowering a
+  # risk level for an operation (#4711), and approving a destructive
+  # operation. A destructive approval also needs a sign-in that approved
+  # nothing else. From 30 to 3600. Rendered into
+  # `PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`.
+  perActionSignInMaxAgeSeconds: "300"
   # -- Comma-separated `acr` values that mean the person entered a one-time
   # code from their authenticator app (#3979). Rendered into
   # `APPROVAL_ONE_TIME_CODE_ACR_VALUES`. Empty (the default) turns the
@@ -901,6 +919,10 @@ gsm:
 # matches the runner's service-account claims too. Recipe:
 # `docs/cross-repo/vault-provisioning.md` § "Bounding the check-runner
 # principal".
+#
+# On a Vault install the backplane enforces the first option: the check
+# runner does not start unless `VAULT_CHECK_RUNNER_ROLE` (set it through
+# `extraEnv`) names a Vault role of its own, not `config.vaultOidcRole`.
 #
 # `clientId` is non-secret operator config; `clientSecret` is wired
 # exclusively as a `secretKeyRef` — never a plaintext chart value. Default

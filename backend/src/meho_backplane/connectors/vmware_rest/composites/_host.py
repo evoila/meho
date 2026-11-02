@@ -75,6 +75,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     _unwrap_value,
     _write_vmomi_sub_op,
 )
+from meho_backplane.connectors.vmware_rest.host_config import find_service, read_property
 from meho_backplane.connectors.vmware_rest.host_target import (
     HOST_FLAVOR_ESXI,
     STANDALONE_ESXI_HOST_MOID,
@@ -175,9 +176,13 @@ _PROP_CM_SERVICE_SYSTEM: Final = "configManager.serviceSystem"
 # passed through to the vim method (the standing no-arbitrary-exec posture,
 # #2901). The set is the small family of ESXi services a diagnostic /
 # upgrade arc legitimately toggles: SSH (``TSM-SSH``), the ESXi Shell
-# (``TSM``), and the two time daemons (``ntpd`` / ``ptpd``). Each key is a
-# real ``HostService.key`` (``HostServiceSystem.serviceInfo``).
-_SERVICE_ALLOWLIST: Final[frozenset[str]] = frozenset({"TSM-SSH", "TSM", "ntpd", "ptpd"})
+# (``TSM``), the two time daemons (``ntpd`` / ``ptpd``), the SNMP agent
+# (``snmpd``), the CIM server (``sfcbd-watchdog``) and the SLP service
+# (``slpd``) that CIM discovery uses. Each key is a real ``HostService.key``
+# (``HostServiceSystem.serviceInfo``).
+_SERVICE_ALLOWLIST: Final[frozenset[str]] = frozenset(
+    {"TSM-SSH", "TSM", "ntpd", "ptpd", "snmpd", "sfcbd-watchdog", "slpd"}
+)
 
 # operator-facing ``action`` -> synchronous HostServiceSystem method op_id.
 _SERVICE_ACTION_OP_IDS: Final[dict[str, str]] = {
@@ -621,5 +626,30 @@ async def service_control_composite(
         "action": action,
         "policy": policy,
         "policy_updated": policy is not None,
+        "service_state": await _read_service_state(
+            connector, target, operator, service_system_moid, service
+        ),
         "guidance": None,
     }
+
+
+async def _read_service_state(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    service_system_moid: str | None,
+    service: str,
+) -> dict[str, Any] | None:
+    """Read the service back after the change: ``{key, label, running, policy}``.
+
+    Best effort: the change already ran, so a failed read gives ``None``.
+    """
+    if service_system_moid is None:
+        return None
+    try:
+        info = await read_property(
+            connector, operator, target, "HostServiceSystem", service_system_moid, "serviceInfo"
+        )
+    except (httpx.HTTPError, RuntimeError):
+        return None
+    return find_service(info, service)

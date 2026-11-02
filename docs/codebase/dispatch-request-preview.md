@@ -109,6 +109,8 @@ preview_dispatch(operator, connector_id, op_id, target, params)
         │       → status=unavailable (not_ingested)     ◄── governed tiers pass (#3198/#3312)
         ├─ validate_params → errors ? → status=error error_code=invalid_params
         │       (InvalidOpSchemaError ? → status=error error_code=invalid_op_schema, #3095)
+        ├─ params_check_errors → a problem ? → status=error error_code=invalid_params
+        │       (the op's own check from register_params_check; validator=params_check)
         ├─ resolve_connector_or_label → label ? → status=error (no_connector /
         │       ambiguous_connector)
         ├─ source_kind != 'ingested' (governed tier) ? → build_composite_preview:
@@ -258,7 +260,10 @@ named-pattern catalogue and policy resolution.
 - `operations._branches` — the shared request resolver.
 - `operations._lookup` — `parse_connector_id`, `lookup_descriptor`,
   `count_known_ops`.
-- `operations._validate` — `validate_params`, `policy_gate` (decide-only).
+- `operations._validate` — `validate_params`, `params_check_errors` (the
+  op's own params check, registered with `register_params_check`; the
+  dispatcher runs the same check before its policy gate), `policy_gate`
+  (decide-only).
 - `operations._handler_resolve` — `get_or_create_connector_instance`.
 - `connectors.resolve_connector_or_label` — the same yes/no/ambiguous
   connector resolution the dispatcher and the target-probe route use.

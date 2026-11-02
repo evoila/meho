@@ -36,7 +36,10 @@ HCX_READ_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
     GROUP_MANAGER: (
         "Use to read the HCX Manager itself and its partner sites: the Manager "
         "version, build and role, connector or cloud (hcx.about), and the site "
-        "pairings with the paired site's address (hcx.site_pairing.list)."
+        "pairings with the paired site's address (hcx.site_pairing.list). It also "
+        "holds two changes, each of which waits for a person's approval: pair with "
+        "a remote site or remove a pairing (hcx.site_pairing.set), and trust the "
+        "remote site's certificate (hcx.certificate.trust)."
     ),
     GROUP_SERVICE_MESH: (
         "Use to check the HCX service meshes and their appliances: the service "
@@ -345,8 +348,9 @@ _JOB_GET = HcxTypedOp(
     handler_attr="job_get",
     summary="Read one HCX job: whether it is done or failed, its progress and its times.",
     description=(
-        "Returns one HCX job by id: isDone, didFail, isCancelled, isRolledBack, "
-        "percentComplete, start and end time, and the user who started it."
+        "Returns one HCX job by id: outcome (queued, running, succeeded, failed, "
+        "cancelled, rolled_back, or not_reachable when HCX does not answer), "
+        "percentComplete, the vendor's error, start and end time, and the vendor flags."
     ),
     parameter_schema={
         "type": "object",
@@ -389,6 +393,30 @@ _JOB_GET = HcxTypedOp(
                 "type": ["integer", "null"],
                 "description": "End time, epoch milliseconds.",
             },
+            "outcome": {
+                "type": "string",
+                "enum": [
+                    "queued",
+                    "running",
+                    "succeeded",
+                    "failed",
+                    "cancelled",
+                    "rolled_back",
+                    "not_reachable",
+                    "unknown",
+                ],
+                "description": (
+                    "The job's state in plain words, from the vendor flags. not_reachable: "
+                    "HCX did not answer; it does not mean the job failed."
+                ),
+            },
+            "error": string_schema(
+                "The vendor's error text of the job, when the job object has one."
+            ),
+            "checked_at": {
+                "type": "string",
+                "description": "When MEHO read the job, ISO 8601 in UTC.",
+            },
         },
     },
     group_key=GROUP_JOBS_ALERTS,
@@ -398,12 +426,16 @@ _JOB_GET = HcxTypedOp(
     llm_instructions={
         "when_to_call": "Call to follow an HCX job that another HCX answer named by id.",
         "output_shape": (
-            "The vendor job object: {jobId, username, isQueued, isDone, didFail, "
-            "isCancelled, isRolledBack, percentComplete, startTime, endTime, ...}."
+            "The vendor job object {jobId, username, isQueued, isDone, didFail, "
+            "isCancelled, isRolledBack, percentComplete, startTime, endTime, ...} plus "
+            "outcome, error and checked_at. When HCX does not answer: {jobId, outcome: "
+            "not_reachable, error: null, checked_at}."
         ),
         "next_step": (
-            "If isDone is false, call again later. If didFail is true, call "
-            "hcx.alert.list to find the cause. A 404 means the id is unknown."
+            "If outcome is queued or running, call again later. If it is not_reachable, "
+            "wait and call again with the same job_id; MEHO keeps no job state. If it is "
+            "failed, read error and call hcx.alert.list for the cause. A 404 means the id "
+            "is unknown."
         ),
     },
 )

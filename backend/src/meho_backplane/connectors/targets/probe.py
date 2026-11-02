@@ -25,6 +25,14 @@ match there. The handler finds the target and then checks MEHO's policy for
 (:func:`~meho_backplane.operations.secondary_target_policy.secondary_target_refusal`),
 before the system is contacted and before anything is stored. A deny for
 that target refuses the call.
+
+A call that waits for approval (an agent with a ``needs-approval`` grant)
+runs, once approved, as the reviewer. So the park records who asked and
+the requester's policy on the named target
+(:func:`targets_probe_preflight`, through
+:func:`~meho_backplane.operations.secondary_target_policy.requester_policy_preflight`),
+and the approved run checks the requester again. A deny for the target
+added while the request waited still stops it.
 """
 
 from __future__ import annotations
@@ -44,12 +52,14 @@ from meho_backplane.connectors.targets.ops import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations.secondary_target_policy import (
     SecondaryTargetWrite,
+    requester_policy_preflight,
     secondary_target_refusal,
 )
 from meho_backplane.operations.typed_register import register_typed_operation
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
+    from meho_backplane.operations._preview import PreviewContext
     from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
@@ -58,6 +68,7 @@ __all__ = [
     "TARGETS_PROBE_RESPONSE_SCHEMA",
     "register_targets_probe_operation",
     "targets_probe",
+    "targets_probe_preflight",
 ]
 
 TARGETS_PROBE_OP_ID: Final[str] = "targets.probe"
@@ -207,6 +218,27 @@ async def targets_probe(operator: Operator, target: Any, params: dict[str, Any])
             },
         ),
     }
+
+
+async def targets_probe_preflight(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Record the requester's policy on the named target when the call parks.
+
+    Registered as the park-time permission check of ``targets.probe`` (the
+    package ``__init__``). Runs as the requester. Returns the ``requester``,
+    ``requester_denied`` and ``requester_reason`` keys of the approval card,
+    so a reviewer sees a denied requester and the approved run can check the
+    requester again. ``None`` when the target is not found: the handler
+    refuses the run itself then.
+    """
+    sessionmaker = get_sessionmaker()
+    try:
+        async with sessionmaker() as session:
+            row = await resolve_route_target(
+                session, ctx.operator.tenant_id, str(ctx.params.get("name"))
+            )
+    except HTTPException:
+        return None
+    return await requester_policy_preflight(ctx.operator, _PROBE_ON_TARGET, row)
 
 
 async def register_targets_probe_operation(

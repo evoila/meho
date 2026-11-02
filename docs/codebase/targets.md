@@ -447,6 +447,12 @@ params={"name": "<target-name>"})`. So a target the agent registered with
   the found target (`secondary_target_refusal`) before the system is
   contacted. A deny grant for that target refuses the call, and nothing is
   stored. Another target of the same agent is still probed.
+- **A call that waits for approval.** An agent with a `needs-approval`
+  grant parks the call; a reviewer runs the approved call as the reviewer.
+  So the park records who asked and the requester's policy on the named
+  target (`targets_probe_preflight`, through `requester_policy_preflight`),
+  and the approved run checks the requester again. A deny for the target
+  added while the request waited still stops it; nothing is stored then.
 - **Result.** `{target_id, name, vendor, product, version, build, edition,
   reachable, probed_at, probe_method}`. The connector's `extras` are not in
   the result. An unreachable system that the connector reports as

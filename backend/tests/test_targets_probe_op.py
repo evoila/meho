@@ -15,6 +15,10 @@
 * **Role** -- a ``read_only`` login is refused, as on the REST route.
 * **Policy on the named target** -- a deny grant for the target stops the
   probe before the system is contacted; another target is still probed.
+* **A call that waits for approval** -- an agent with a ``needs-approval``
+  grant parks the call; the approved run by a second person probes and
+  stores. A deny for the target, before the park or while the request
+  waits, still stops the approved run.
 * **No extras** -- the connector's ``extras`` never reach the result.
 * **Audit** -- every call writes a row with op id ``targets.probe``.
 """
@@ -46,12 +50,17 @@ from meho_backplane.connectors.targets.probe import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AgentPermission,
+    ApprovalRequest,
     AuditLog,
     EndpointDescriptor,
     PermissionVerdict,
 )
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations.approval_queue import (
+    approve_request,
+    resume_dispatch_after_approval,
+)
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.settings import get_settings
 
@@ -392,19 +401,23 @@ async def test_operator_and_tenant_admin_may_probe(role: TenantRole) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _deny_on_target(agent_sub: str, target_id: uuid.UUID) -> None:
+async def _grant(agent_sub: str, verdict: PermissionVerdict, target_scope: str) -> None:
     async with get_sessionmaker()() as session:
         session.add(
             AgentPermission(
                 tenant_id=_TENANT_ID,
                 principal_sub=agent_sub,
                 op_pattern=TARGETS_PROBE_OP_ID,
-                target_scope=str(target_id),
-                verdict=PermissionVerdict.DENY,
+                target_scope=target_scope,
+                verdict=verdict,
                 created_by_sub="op-admin",
             )
         )
         await session.commit()
+
+
+async def _deny_on_target(agent_sub: str, target_id: uuid.UUID) -> None:
+    await _grant(agent_sub, PermissionVerdict.DENY, str(target_id))
 
 
 @pytest.mark.parametrize("by", ["name", "id"])
@@ -428,3 +441,92 @@ async def test_a_deny_grant_for_the_target_stops_the_probe(by: str) -> None:
     assert allowed["status"] == "ok", allowed
     assert asked == ["other-system"]
     assert await _stored_fingerprint(other.id) is not None
+
+
+# ---------------------------------------------------------------------------
+# A call that waits for approval
+# ---------------------------------------------------------------------------
+
+
+def _reviewer() -> Operator:
+    return _operator("op-reviewer", kind=PrincipalKind.USER)
+
+
+async def _park(agent: Operator, name: str) -> ApprovalRequest:
+    """Dispatch as *agent*, whose grant makes the call wait for approval."""
+    parked = await dispatch(
+        operator=agent,
+        connector_id=TARGETS_REGISTRY_CONNECTOR_ID,
+        op_id=TARGETS_PROBE_OP_ID,
+        target=None,
+        params={"name": name},
+    )
+    assert parked.status == "awaiting_approval", parked
+    async with get_sessionmaker()() as session:
+        return await session.get_one(
+            ApprovalRequest, uuid.UUID(parked.extras["approval_request_id"])
+        )
+
+
+async def _approve_and_run(request_id: uuid.UUID) -> OperationResult:
+    """Approve as a second person and run the request, as the REST approve routes do."""
+    async with get_sessionmaker()() as session:
+        request = await approve_request(session, request_id, operator=_reviewer())
+        await session.commit()
+    result: OperationResult = await resume_dispatch_after_approval(
+        operator=_reviewer(), request=request, params=None
+    )
+    return result
+
+
+async def test_an_approved_probe_runs_and_stores_the_version() -> None:
+    asked = _use_connector(_fingerprint())
+    row = await _seed("waits-for-approval")
+    agent = _operator("agent-asks")
+    await _grant(agent.sub, PermissionVerdict.NEEDS_APPROVAL, "*")
+
+    request = await _park(agent, "waits-for-approval")
+
+    assert asked == []
+    assert await _stored_fingerprint(row.id) is None
+    preflight = dict(request.proposed_effect)["permission_preflight"]
+    assert preflight["requester"]["sub"] == agent.sub
+    assert preflight["requester"]["principal_kind"] == "agent"
+    assert preflight["requester_denied"] is False
+    assert preflight["requester_reason"] is None
+
+    result = await _approve_and_run(request.id)
+
+    assert result.status == "ok", result
+    assert result.result["version"] == "2.4.1"
+    assert asked == ["waits-for-approval"]
+    stored = await _stored_fingerprint(row.id)
+    assert stored is not None
+    assert stored["version"] == "2.4.1"
+
+
+@pytest.mark.parametrize("deny_when", ["before the park", "while the request waits"])
+async def test_a_target_deny_still_stops_the_approved_probe(deny_when: str) -> None:
+    """The reviewer runs the approved call; the requester's policy on the target still counts."""
+    asked = _use_connector(_fingerprint())
+    row = await _seed("denied-later")
+    agent = _operator("agent-denied-later")
+    await _grant(agent.sub, PermissionVerdict.NEEDS_APPROVAL, "*")
+    if deny_when == "before the park":
+        await _deny_on_target(agent.sub, row.id)
+
+    request = await _park(agent, "denied-later")
+
+    preflight = dict(request.proposed_effect)["permission_preflight"]
+    assert preflight["requester_denied"] is (deny_when == "before the park")
+    if deny_when == "while the request waits":
+        await _deny_on_target(agent.sub, row.id)
+
+    result = await _approve_and_run(request.id)
+
+    assert result.status == "error", result
+    message = str(result.extras.get("exception_message"))
+    assert message.startswith(f"policy_denied: requester {agent.sub!r}: {TARGETS_PROBE_OP_ID}")
+    assert "denied-later" in message
+    assert asked == []
+    assert await _stored_fingerprint(row.id) is None

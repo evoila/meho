@@ -33,6 +33,7 @@ import structlog
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.vmware_rest._content_library_schemas import (
     CONTENT_LIBRARY_GROUP_KEY,
+    CONTENT_LIBRARY_WHEN_TO_USE,
     FIND_LIBRARY_CALL,
     text,
 )
@@ -45,12 +46,13 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 
 __all__ = [
-    "CONTENT_LIBRARY_LIST_OPS",
     "ITEM_LIST_OP_ID",
     "LIST_OP_ID",
+    "TYPED_OPS",
     "VENDOR_OP_IDS",
     "VMWARE_CONTENT_LIBRARY_ITEM_LIST_OP",
     "VMWARE_CONTENT_LIBRARY_LIST_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "content_library_item_list_impl",
     "content_library_list_impl",
 ]
@@ -460,8 +462,11 @@ VMWARE_CONTENT_LIBRARY_ITEM_LIST_OP = VmwareTypedOp(
     },
 )
 
-#: The two lists, in the order :data:`.typed_ops.VMWARE_TYPED_OPS` lists them.
-CONTENT_LIBRARY_LIST_OPS: Final[tuple[VmwareTypedOp, ...]] = (
+#: The two lists; :mod:`.typed_ops` collects them into ``VMWARE_TYPED_OPS``.
+TYPED_OPS: Final[tuple[VmwareTypedOp, ...]] = (
     VMWARE_CONTENT_LIBRARY_LIST_OP,
     VMWARE_CONTENT_LIBRARY_ITEM_LIST_OP,
 )
+WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
+    CONTENT_LIBRARY_GROUP_KEY: CONTENT_LIBRARY_WHEN_TO_USE
+}

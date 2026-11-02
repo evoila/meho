@@ -97,10 +97,10 @@ from meho_backplane.connectors.vmware_rest.composites._library_export_session im
     leftover_remover,
     vcenter_url,
 )
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
@@ -109,8 +109,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
-    "EXPORT_OVF_COMPOSITE",
-    "ITEM_EXPORT_COMPOSITE",
+    "COMPOSITES",
     "content_library_item_export_composite",
     "vm_export_ovf_composite",
 ]
@@ -121,7 +120,7 @@ _OVF_TYPE: Final = "ovf"
 
 #: Every REST call of the two exports (reads and writes). The reconcile test
 #: checks them against the pinned vCenter 8.0 and 9.0 API files, and
-#: ``_governed_subops`` lists them for the grant set.
+#: the composite row lists them for the grant set.
 _SUB_OPS_CONTENT_LIBRARY_ITEM_EXPORT: Final[tuple[str, ...]] = (
     OP_GET_LIBRARY_ITEM,
     OP_SESSION_CREATE,
@@ -393,45 +392,51 @@ async def _export_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return {**effect, "summary": f"MEHO copies {what} to {params.get('destination_url')}."}
 
 
-register_preview_builder(OP_ID_ITEM_EXPORT, _export_preview)
-register_preview_builder(OP_ID_EXPORT_OVF, _export_preview)
-
-
-#: The registration rows, as ``_CompositeSpec`` keyword arguments. The
-#: ``token`` tag keeps the vendor request and answer bodies (which carry the
-#: download URLs) out of the flight recorder.
-ITEM_EXPORT_COMPOSITE: Final[dict[str, Any]] = {
-    "op_id": OP_ID_ITEM_EXPORT,
-    "handler": content_library_item_export_composite,
-    "summary": "Copy the files of a content library item to a URL that accepts HTTP PUT.",
-    "description": (
-        "Copies every file of one library item (OVF, ISO or other) out of vCenter to a web "
-        "server or object store that takes HTTP PUT; the token comes from Vault. Returns each "
-        "file with size and SHA-256. Use async: true. Waits until a second person approves."
+#: The registration rows. The ``token`` tag keeps the vendor request and
+#: answer bodies (which carry the download URLs) out of the flight recorder.
+#: Neither ``.export`` nor ``.export_ovf`` is a classifier suffix, so the
+#: broadcast classifier puts both ops in ``other``; their params hold a Vault
+#: reference at most, never a secret.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_ITEM_EXPORT,
+        handler=content_library_item_export_composite,
+        summary="Copy the files of a content library item to a URL that accepts HTTP PUT.",
+        description=(
+            "Copies every file of one library item (OVF, ISO or other) out of vCenter to a web "
+            "server or object store that takes HTTP PUT; the token comes from Vault. Returns "
+            "each file with size and SHA-256. Use async: true. Waits until a second person "
+            "approves."
+        ),
+        parameter_schema=ITEM_EXPORT_PARAMETER_SCHEMA,
+        response_schema=EXPORT_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=["composite", "write", "content-library", "export", "download", "token"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=ITEM_EXPORT_LLM_INSTRUCTIONS,
+        preview=_export_preview,
+        governed_subops=_SUB_OPS_CONTENT_LIBRARY_ITEM_EXPORT,
+        classifier_other=True,
     ),
-    "parameter_schema": ITEM_EXPORT_PARAMETER_SCHEMA,
-    "response_schema": EXPORT_RESPONSE_SCHEMA,
-    "group_key": "content_library",
-    "tags": ["composite", "write", "content-library", "export", "download", "token"],
-    "safety_level": "dangerous",
-    "requires_approval": True,
-    "llm_instructions": ITEM_EXPORT_LLM_INSTRUCTIONS,
-}
-
-EXPORT_OVF_COMPOSITE: Final[dict[str, Any]] = {
-    "op_id": OP_ID_EXPORT_OVF,
-    "handler": vm_export_ovf_composite,
-    "summary": "Export a VM as OVF files to a URL that accepts HTTP PUT.",
-    "description": (
-        "Captures a VM into a temporary OVF item of a local library (or uses an OVF item), "
-        "copies its files to a web server or object store that takes HTTP PUT, then deletes "
-        "the temporary item. Returns each file with size and SHA-256. Use async: true."
+    CompositeSpec(
+        op_id=OP_ID_EXPORT_OVF,
+        handler=vm_export_ovf_composite,
+        summary="Export a VM as OVF files to a URL that accepts HTTP PUT.",
+        description=(
+            "Captures a VM into a temporary OVF item of a local library (or uses an OVF item), "
+            "copies its files to a web server or object store that takes HTTP PUT, then deletes "
+            "the temporary item. Returns each file with size and SHA-256. Use async: true."
+        ),
+        parameter_schema=EXPORT_OVF_PARAMETER_SCHEMA,
+        response_schema=EXPORT_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=["composite", "write", "vm", "ovf", "export", "content-library", "token"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=EXPORT_OVF_LLM_INSTRUCTIONS,
+        preview=_export_preview,
+        governed_subops=_SUB_OPS_VM_EXPORT_OVF,
+        classifier_other=True,
     ),
-    "parameter_schema": EXPORT_OVF_PARAMETER_SCHEMA,
-    "response_schema": EXPORT_RESPONSE_SCHEMA,
-    "group_key": "content_library",
-    "tags": ["composite", "write", "vm", "ovf", "export", "content-library", "token"],
-    "safety_level": "dangerous",
-    "requires_approval": True,
-    "llm_instructions": EXPORT_OVF_LLM_INSTRUCTIONS,
-}
+)

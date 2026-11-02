@@ -48,6 +48,7 @@ from meho_backplane.connectors.vmware_rest.composites._library_export_schemas im
     TEMPLATE_VM,
 )
 from meho_backplane.connectors.vmware_rest.composites._library_local import LOCAL
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._teardown_reads import moid_problem
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _LIBRARY_ITEM_DEPLOY_TIMEOUT,
@@ -64,7 +65,6 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import VM_MOID_PAT
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 from meho_backplane.operations._vendor_text import VENDOR_TEXT_WITHHELD
 from meho_backplane.operations.composite import enforce_subop_policy
@@ -75,7 +75,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
-    "CAPTURE_COMPOSITE",
+    "COMPOSITES",
     "OP_CAPTURE_OVF",
     "capture_ovf",
     "check_step",
@@ -100,7 +100,7 @@ CLIENT_TOKEN_HEADER: Final = "Client-Token"
 
 #: Every REST call of the capture (reads and writes). The reconcile test checks
 #: them against the pinned vCenter 8.0 and 9.0 API files, and
-#: ``_governed_subops`` lists them for the grant set.
+#: the composite row lists them for the grant set.
 _SUB_OPS_VM_CAPTURE_TO_LIBRARY: Final[tuple[str, ...]] = (
     OP_GET_VM,
     _OP_FIND_LIBRARY,
@@ -504,24 +504,28 @@ async def _capture_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-register_preview_builder(OP_ID_CAPTURE, _capture_preview)
-
-
-#: The registration rows, as ``_CompositeSpec`` keyword arguments.
-CAPTURE_COMPOSITE: Final[dict[str, Any]] = {
-    "op_id": OP_ID_CAPTURE,
-    "handler": vm_capture_to_library_composite,
-    "summary": "Capture a VM into a local content library as an OVF template or VM template.",
-    "description": (
-        "Saves one VM into a local content library as a new item: an OVF template or a "
-        "vSphere VM template. Reads the new item back. An item name that is taken gives "
-        "already_exists and changes nothing. Waits until a second person approves."
+#: The registration row. ``.capture_to_library`` is no classifier suffix, so
+#: the broadcast classifier puts the op in ``other``; its params hold a Vault
+#: reference at most, never a secret.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_CAPTURE,
+        handler=vm_capture_to_library_composite,
+        summary="Capture a VM into a local content library as an OVF template or VM template.",
+        description=(
+            "Saves one VM into a local content library as a new item: an OVF template or a "
+            "vSphere VM template. Reads the new item back. An item name that is taken gives "
+            "already_exists and changes nothing. Waits until a second person approves."
+        ),
+        parameter_schema=CAPTURE_PARAMETER_SCHEMA,
+        response_schema=CAPTURE_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=["composite", "write", "content-library", "vm", "ovf", "capture"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=CAPTURE_LLM_INSTRUCTIONS,
+        preview=_capture_preview,
+        governed_subops=_SUB_OPS_VM_CAPTURE_TO_LIBRARY,
+        classifier_other=True,
     ),
-    "parameter_schema": CAPTURE_PARAMETER_SCHEMA,
-    "response_schema": CAPTURE_RESPONSE_SCHEMA,
-    "group_key": "content_library",
-    "tags": ["composite", "write", "content-library", "vm", "ovf", "capture"],
-    "safety_level": "caution",
-    "requires_approval": True,
-    "llm_instructions": CAPTURE_LLM_INSTRUCTIONS,
-}
+)

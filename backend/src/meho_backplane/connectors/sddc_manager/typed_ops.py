@@ -82,6 +82,7 @@ from meho_backplane.connectors.sddc_manager.typed_writes import (
     SDDC_HOST_VALIDATE_OP_ID,
     SDDC_NETWORK_POOL_CREATE_OP_ID,
 )
+from meho_backplane.operations import register_plain_fields
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -1934,3 +1935,8 @@ async def register_sddc_typed_operations(
         version=SddcManagerConnector.version,
         impl_id=SddcManagerConnector.impl_id,
     )
+
+
+# ``licenseKeyUsage`` holds the counts of a licence key (total, used, remaining)
+# and ``licenseKeyValidity`` its status and expiry date, never the key.
+register_plain_fields(_LICENSE_LIST.op_id, ("licenseKeyUsage", "licenseKeyValidity"))

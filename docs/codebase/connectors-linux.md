@@ -186,16 +186,73 @@ and cannot show that a host's resolver is broken.
 ### Path confinement
 
 The operator-named paths (`file.read`, `log.tail`) are confined with the
-bind9 `ensure_path_under_root` lexical-confinement mold, generalised to an
-**allow-list of read roots**: `/etc`, `/var/log`, `/var/lib`, `/run`,
-`/proc`, `/sys`. A resolved path must equal or descend one of these roots;
+bind9 `ensure_path_under_root` mold, generalised to an **allow-list of read
+roots** (`LINUX_READ_ROOTS`): `/etc`, `/var/log`, `/var/lib`, `/run`. A path
+must equal or descend one of these roots, or be one of a few **named single
+files** (`LINUX_READ_FILES`), mostly under `/proc` and `/sys`:
+`/proc/meminfo`, `/proc/partitions`, `/proc/cpuinfo`, `/proc/cmdline`,
+`/proc/loadavg`, `/proc/uptime`, `/proc/version`,
+`/sys/devices/system/cpu/online`, `/sys/firmware/efi`, the DMI identity
+files (`product_uuid`, `sys_vendor`, `product_name`, under both
+`/sys/class/dmi/id` and its real path `/sys/devices/virtual/dmi/id`), and
+`/usr/lib/os-release` (the real path of `/etc/os-release` on most systemd
+hosts). The rest of `/proc` and `/sys` is not readable; kernel parameters
+have `linux.sysctl.read`.
+
 `..` traversal is collapsed with `posixpath.normpath` and rejected if it
 escapes, a trailing-slash sentinel stops `/etc-evil` matching `/etc`,
-control bytes are refused, and a non-absolute path is rejected. Rejection
-raises `PathConfinementError` **before any SSH command is constructed**, so
-a rejected path never reaches the host. `file.read` caps content itself
-(`head -c`, default 64 KiB, hard cap 1 MiB) with a `truncated` flag,
-because a flat scalar dict is never JSONFlux-reduced.
+control bytes are refused, and a non-absolute path is rejected.
+
+**Key and password files are refused** even under an allowed root
+(`LINUX_READ_DENY`, `fnmatch` patterns on the full path): `/etc/shadow`,
+`/etc/gshadow` and their `-` backups, SSH host private keys, `/etc/ssl/private`,
+`/etc/pki/tls/private`, `/etc/letsencrypt`, kubeconfigs and PKI under
+`/etc/kubernetes`, `/etc/rancher`, the RKE2 / K3s server tokens,
+credentials, TLS and database under `/var/lib/rancher/*/server`,
+`/var/lib/kubelet/pki`, the kubelet kubeconfig, the pod volumes under
+`/var/lib/kubelet/pods` (mounted Kubernetes Secrets and service account
+tokens), the etcd data under `/var/lib/etcd`, the Docker container config
+files (`/var/lib/docker/containers/*/config.v2.json`), NetworkManager
+connection files, `/etc/wireguard`, `/etc/ipsec.secrets`,
+`/etc/ipsec.d/private`, `/etc/sssd/sssd.conf`, `/var/lib/sss/secrets`,
+`/run/secrets`, and any `*.key`, `*.keytab`, `*.p12`, `*.pfx`, `id_rsa`, `id_dsa`,
+`id_ecdsa`, `id_ed25519` file. Public files next to them (`/etc/passwd`,
+`*.pub`, `/etc/ssl/certs`, RKE2 agent logs, pod logs under
+`/var/log/pods`, Docker container logs) stay readable.
+
+The check runs twice:
+
+1. On the typed path, **before any SSH command is constructed**. A refused
+   path never reaches the host.
+2. On the **path of the file the host opened**. The read is one command
+   (`build_file_read_command` / `build_log_tail_command`): the shell opens
+   the file once (`3<<path>`), prints the path the kernel reports for that
+   open file (`readlink /proc/self/fd/3`, every symlink followed) as one
+   line of hex digits (`od -An -v -tx1`) and its size, then reads from
+   the same open file (`head -c` or `tail -n` on `<&3`). The hex line
+   keeps a path with line breaks or marker text in it on one line, so
+   such a path cannot pose as the size line, the marker or the content;
+   the handler decodes it whole and refuses a path with a control
+   character. The handler runs `confine_read_path` on the reported path and
+   returns the content only when it passes. Path and content come from
+   one open file, so a change of the path or of a parent directory after
+   the open cannot swap in another file, and a file swapped in before the
+   open is reported under its own path. So a symlink under `/var/lib`
+   that points at `/root/...`, at a `/proc/<pid>` file or at
+   `/etc/shadow` is refused. A file deleted while open (the kernel marks
+   its path `(deleted)`), an error exit and an unclear answer (no
+   reported path, more than one line, a path that is not clean hex) are
+   refused too. A missing file
+   gives `exists=false` (`file.read`) or no rows (`log.tail`); a file
+   that exists but cannot be opened gives `exists=true` with no content.
+
+Every refusal raises `PathConfinementError`. A root that is itself a
+symlink on a host (for example `/var/log` pointing elsewhere) is refused
+too, because the real path is outside the list. `file.read` caps content
+itself (`head -c`, default 64 KiB, hard cap 1 MiB) with a `truncated`
+flag, because a flat scalar dict is never JSONFlux-reduced. The default
+redaction policy also hides private key blocks and password hashes in
+any result (`docs/codebase/redaction.md`).
 
 ### Injection safety
 
@@ -319,10 +376,10 @@ No approval logic lives in any handler: the dispatcher parks a `dangerous`
 `_approved=True` resume path. Approval is a human-only decision — there is
 no MCP decision path for it. No op declares a `password` / `secret`
 parameter. Every operator-supplied value is `shlex.quote`d or base64-carried
-into a fixed command, and `file.write` confines its `path` under a
-**narrower** write-root allow-list (`/etc`, `/var/lib`, `/run`, `/opt`,
-`/srv`, `/usr/local`) than the read roots — `/proc` / `/sys` (the sysctl
-op's job) and `/var/log` are deliberately not writable here.
+into a fixed command, and `file.write` confines its `path` under its
+own write-root allow-list (`/etc`, `/var/lib`, `/run`, `/opt`, `/srv`,
+`/usr/local`) — `/proc` / `/sys` (the sysctl op's job) and `/var/log` are
+deliberately not writable here.
 
 **Operator rule (shared-machinery caveat):** do not put a bare secret in
 `content` / `arguments` / `env`. `ApprovalRequest.params` stores the params
@@ -394,7 +451,8 @@ connector has no `command.run` verb to extend it to.
   tuple, `LINUX_WHEN_TO_USE_BY_GROUP` the curated group blurbs,
   `normalise_json_rows` the `{rows, total}` envelope helper, and
   `ensure_path_under_root` / `confine_read_path` / `LINUX_READ_ROOTS` /
-  `PathConfinementError` the confinement primitives.
+  `LINUX_READ_FILES` / `LINUX_READ_DENY` / `PathConfinementError` the
+  confinement primitives.
 - Per-domain op modules: `ops_file.py` (file.read / log.tail),
   `ops_host.py` (service.status / sysctl.read / dns.lookup),
   `ops_firewall.py` (firewall.show), `ops_storage.py` (mount.list) — each

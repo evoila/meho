@@ -53,6 +53,9 @@ resolved VM + host group sets).
 ``vm.snapshot.delete``    live-read: the mandatory ``blast_radius`` from the
                           handler's plan -- the snapshot, the snapshots below
                           it when ``remove_children`` is set
+``vm.snapshot.delete_all`` live-read: the mandatory ``blast_radius`` from the
+                          handler's plan -- the VM and every snapshot it has
+``vm.disks.consolidate``  echo: vm
 ``vm.migrate``            echo: vm, cluster, target_host + resolution source
 ``vm.power``              live-read: vm, name, power_state, verb,
                           power_kind (hard vs Tools-soft); a failed read
@@ -193,37 +196,11 @@ from typing import Any
 
 import httpx
 
-from meho_backplane.connectors.vmware_rest.composites._alarm import (
-    alarm_acknowledge_preview,
-    alarm_reset_preview,
-)
-from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
-    datastore_dir_create_preview,
-    datastore_file_delete_preview,
-)
-from meho_backplane.connectors.vmware_rest.composites._drs_group import (
-    cluster_drs_group_members_set_preview,
-)
-from meho_backplane.connectors.vmware_rest.composites._drs_group_delete import (
-    cluster_drs_group_delete_preview,
-)
-from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
-    cluster_drs_rule_delete_preview,
-)
 from meho_backplane.connectors.vmware_rest.composites._drs_vm_host_rule_existing import (
     existing_groups_preview,
 )
-from meho_backplane.connectors.vmware_rest.composites._library_delete import (
-    content_library_delete_preview,
-    content_library_item_delete_preview,
-)
-from meho_backplane.connectors.vmware_rest.composites._license import license_assign_preview
 from meho_backplane.connectors.vmware_rest.composites._namespace import (
     _OP_GET_NAMESPACE,
-)
-from meho_backplane.connectors.vmware_rest.composites._snapshot import (
-    vm_snapshot_create_preview,
-    vm_snapshot_delete_preview,
 )
 from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
     _OP_STORAGE_POLICIES_LIST,
@@ -231,11 +208,6 @@ from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
     _resolve_category,
     _resolve_policy_by_name,
     _resolve_tag_in_category,
-)
-from meho_backplane.connectors.vmware_rest.composites._teardown import folder_delete_preview
-from meho_backplane.connectors.vmware_rest.composites._teardown_network import (
-    host_standard_portgroup_delete_preview,
-    network_portgroup_delete_preview,
 )
 from meho_backplane.connectors.vmware_rest.composites._vm_allocation import read_vm_allocation
 from meho_backplane.connectors.vmware_rest.composites._write import (
@@ -264,9 +236,7 @@ from meho_backplane.connectors.vmware_rest.host_target import (
     classify_host_target,
 )
 from meho_backplane.operations._preview import (
-    PreviewBuilder,
     PreviewContext,
-    register_preview_builder,
 )
 
 #: Cap on the ``resolved`` entity list stored in the durable
@@ -1847,92 +1817,3 @@ async def _namespace_delete_preview(ctx: PreviewContext) -> dict[str, Any] | Non
             "irreversibility": "permanent-cascades-to-workloads",
         },
     }
-
-
-_WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
-    "vmware.composite.supervisor.enable": _supervisor_enable_preview,
-    "vmware.composite.supervisor.disable": _supervisor_disable_preview,
-    "vmware.composite.vm.guest.file.write": _guest_file_write_preview,
-    "vmware.composite.vm.guest.program.run": _guest_program_run_preview,
-    "vmware.composite.vm.create": _vm_create_preview,
-    "vmware.composite.vm.destroy": _vm_destroy_preview,
-    "vmware.composite.vm.clone": _vm_clone_preview,
-    "vmware.composite.vm.deploy_from_library": _vm_deploy_from_library_preview,
-    "vmware.composite.vm.clone_from_template": _vm_clone_from_template_preview,
-    "vmware.composite.vm.snapshot.revert": _vm_snapshot_revert_preview,
-    "vmware.composite.vm.snapshot.create": vm_snapshot_create_preview,
-    # The snapshot delete is destructive: its blast radius is the handler's own
-    # plan (the snapshot, and the snapshots below it when they go too).
-    "vmware.composite.vm.snapshot.delete": vm_snapshot_delete_preview,
-    "vmware.composite.vm.migrate": _vm_migrate_preview,
-    "vmware.composite.vm.power": _vm_power_preview,
-    "vmware.composite.vm.power.bulk": _vm_power_bulk_preview,
-    "vmware.composite.vm.disk.grow": _vm_disk_grow_preview,
-    "vmware.composite.vm.disk.attach": _vm_disk_attach_preview,
-    "vmware.composite.vm.resource_allocation.set": _vm_resource_allocation_set_preview,
-    "vmware.composite.vm.resize": _vm_resize_preview,
-    "vmware.composite.vm.nic.repoint": _vm_nic_repoint_preview,
-    "vmware.composite.vm.device.cdrom": _vm_device_cdrom_preview,
-    "vmware.composite.host.evacuate": _host_evacuate_preview,
-    "vmware.composite.host.maintenance.exit": _host_maintenance_exit_preview,
-    "vmware.composite.host.detach_from_vds": _host_detach_from_vds_preview,
-    "vmware.composite.cluster.patch": _cluster_patch_preview,
-    "vmware.composite.cluster.drs_rule.create": _cluster_drs_rule_create_preview,
-    "vmware.composite.cluster.drs_vm_host_rule.create": _cluster_drs_vm_host_rule_create_preview,
-    "vmware.composite.resource_pool.create": _resource_pool_create_preview,
-    "vmware.composite.resource_pool.delete": _resource_pool_delete_preview,
-    "vmware.composite.folder.create": _folder_create_preview,
-    "vmware.composite.guest.customization_spec.create": _guest_customization_spec_create_preview,
-    "vmware.composite.vm.customize": _vm_customize_preview,
-    "vmware.composite.host.datastore_mount_nfs": _host_datastore_mount_nfs_preview,
-    "vmware.composite.host.disk_mark_flash": _host_disk_mark_flash_preview,
-    "vmware.composite.host.service_control": _host_service_control_preview,
-    "vmware.composite.storage_policy.create": _storage_policy_create_preview,
-    "vmware.composite.storage_policy.delete": _storage_policy_delete_preview,
-    "vmware.composite.namespace.create": _namespace_create_preview,
-    "vmware.composite.namespace.delete": _namespace_delete_preview,
-    "vmware.composite.content_library.subscribed.create": (
-        _content_library_subscribed_create_preview
-    ),
-    "vmware.composite.content_library.subscribed.sync": _content_library_subscribed_sync_preview,
-    # #3339 teardown: the destructive deletes register their handler's own
-    # plan as the mandatory blast radius (one planning function per op, so the
-    # approver reads exactly the refusal the handler applies); dir.create is a
-    # param echo.
-    "vmware.composite.network.portgroup.delete": network_portgroup_delete_preview,
-    "vmware.composite.host.standard_portgroup.delete": host_standard_portgroup_delete_preview,
-    "vmware.composite.folder.delete": folder_delete_preview,
-    "vmware.composite.datastore.file.delete": datastore_file_delete_preview,
-    "vmware.composite.datastore.dir.create": datastore_dir_create_preview,
-    "vmware.composite.content_library.delete": content_library_delete_preview,
-    "vmware.composite.content_library.item.delete": content_library_item_delete_preview,
-    # The DRS rule delete is destructive too: its blast radius is the
-    # handler's own plan (the rule, its type, its VMs or groups).
-    "vmware.composite.cluster.drs_rule.delete": cluster_drs_rule_delete_preview,
-    # The DRS group ops: the handler's own plan. The member change shows the
-    # members before, what is added and removed, and the rules that use the
-    # group; the destructive delete shows the group as its blast radius.
-    "vmware.composite.cluster.drs_group.members.set": cluster_drs_group_members_set_preview,
-    "vmware.composite.cluster.drs_group.delete": cluster_drs_group_delete_preview,
-    # Licence assign: live-read of the asset's licence now and the licence it
-    # would get, from the handler's own plan. Keys are masked.
-    "vmware.composite.license.assign": license_assign_preview,
-    # #4383 alarm changes: a live read of the alarm, or of the alarms the
-    # reset filter matches now.
-    "vmware.composite.alarm.acknowledge": alarm_acknowledge_preview,
-    "vmware.composite.alarm.reset": alarm_reset_preview,
-}
-
-
-def _register_vmware_write_preview_builders() -> None:
-    """Wire the 54 write-composite park-time preview builders. Import-time.
-
-    The read composites register no builder here. The one read that can
-    wait for approval, the ``caution`` ``vm.guest.file.read``, registers
-    its own in :mod:`._guest_file_read_preview` (#4850).
-    """
-    for op_id, builder in _WRITE_PREVIEW_BUILDERS.items():
-        register_preview_builder(op_id, builder)
-
-
-_register_vmware_write_preview_builders()

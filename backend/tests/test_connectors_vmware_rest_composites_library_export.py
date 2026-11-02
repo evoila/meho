@@ -39,20 +39,15 @@ from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest import _transfer
 from meho_backplane.connectors.vmware_rest.composites import (
     _library_capture,
+    _library_export,
     _library_export_session,
     _library_publish,
     _write,
 )
-from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
-    _GOVERNED_SUBOP_MANIFEST,
-)
 from meho_backplane.connectors.vmware_rest.composites._library_capture import (
-    CAPTURE_COMPOSITE,
     vm_capture_to_library_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._library_export import (
-    EXPORT_OVF_COMPOSITE,
-    ITEM_EXPORT_COMPOSITE,
     content_library_item_export_composite,
     vm_export_ovf_composite,
 )
@@ -62,11 +57,11 @@ from meho_backplane.connectors.vmware_rest.composites._library_export_schemas im
     PUBLISH_SET_RESPONSE_SCHEMA,
 )
 from meho_backplane.connectors.vmware_rest.composites._library_publish import (
-    PUBLISH_SET_COMPOSITE,
     content_library_publish_set_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._register import (
     _COMPOSITES,
+    _GOVERNED_SUBOP_MANIFEST,
     COMPOSITES_NOT_ON_8_0,
 )
 from meho_backplane.db.models import EndpointDescriptor
@@ -923,12 +918,11 @@ async def test_export_ovf_refuses_an_item_that_is_not_ovf(
 # ===========================================================================
 
 _ROWS = {
-    row["op_id"]: row
+    row.op_id: row
     for row in (
-        CAPTURE_COMPOSITE,
-        PUBLISH_SET_COMPOSITE,
-        ITEM_EXPORT_COMPOSITE,
-        EXPORT_OVF_COMPOSITE,
+        *_library_capture.COMPOSITES,
+        *_library_publish.COMPOSITES,
+        *_library_export.COMPOSITES,
     )
 }
 _LEVELS = {
@@ -951,19 +945,19 @@ def test_each_change_waits_for_approval_at_its_level(op_id: str) -> None:
 
 @pytest.mark.parametrize("op_id", sorted(_LEVELS))
 def test_examples_validate(op_id: str) -> None:
-    schema = _ROWS[op_id]["parameter_schema"]
+    schema = _ROWS[op_id].parameter_schema
     for example in schema["examples"]:
         assert validate_params(schema, example) == []
 
 
 def test_the_secret_bearing_rows_keep_bodies_out_of_the_flight_recorder() -> None:
-    assert "password" in PUBLISH_SET_COMPOSITE["tags"]
-    assert "token" in ITEM_EXPORT_COMPOSITE["tags"]
-    assert "token" in EXPORT_OVF_COMPOSITE["tags"]
+    assert "password" in _ROWS["vmware.composite.content_library.publish.set"].tags
+    assert "token" in _ROWS["vmware.composite.content_library.item.export"].tags
+    assert "token" in _ROWS["vmware.composite.vm.export_ovf"].tags
 
 
 def test_export_ovf_schema_wants_a_vm_with_a_library_or_an_item() -> None:
-    schema = EXPORT_OVF_COMPOSITE["parameter_schema"]
+    schema = _ROWS["vmware.composite.vm.export_ovf"].parameter_schema
     base = {"destination_url": _DEST, "destination_token_ref": "<ref>"}
     assert validate_params(schema, {**base, "vm": "vm-42"}) != []
     assert validate_params(schema, {**base, "vm": "vm-42", "library_item_id": _ITEM}) != []

@@ -44,6 +44,7 @@ from meho_backplane.connectors.vmware_rest.composites._library_export_schemas im
     PUBLISH_SET_PARAMETER_SCHEMA,
     PUBLISH_SET_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _OP_FIND_LIBRARY,
     _parse_vsphere_error,
@@ -51,7 +52,6 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors import OperationResult
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
-__all__ = ["PUBLISH_SET_COMPOSITE", "content_library_publish_set_composite"]
+__all__ = ["COMPOSITES", "content_library_publish_set_composite"]
 
 OP_ID_PUBLISH_SET: Final = "vmware.composite.content_library.publish.set"
 OP_GET_LOCAL_LIBRARY: Final = "GET:/content/local-library/{libraryId}"
@@ -67,7 +67,7 @@ OP_UPDATE_LOCAL_LIBRARY: Final = "PATCH:/content/local-library/{libraryId}"
 
 #: Every REST call of the change (reads and the write). The reconcile test
 #: checks them against the pinned vCenter 8.0 and 9.0 API files, and
-#: ``_governed_subops`` lists them for the grant set.
+#: the composite row lists them for the grant set.
 _SUB_OPS_CONTENT_LIBRARY_PUBLISH_SET: Final[tuple[str, ...]] = (
     _OP_FIND_LIBRARY,
     OP_GET_LIBRARY,
@@ -307,23 +307,25 @@ async def _publish_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-register_preview_builder(OP_ID_PUBLISH_SET, _publish_preview)
-
-#: The registration row, as ``_CompositeSpec`` keyword arguments.
-PUBLISH_SET_COMPOSITE: Final[dict[str, Any]] = {
-    "op_id": OP_ID_PUBLISH_SET,
-    "handler": content_library_publish_set_composite,
-    "summary": "Turn publishing of a local content library on or off and set its password.",
-    "description": (
-        "Publishes a local content library so other vCenters can subscribe, or stops it, "
-        "and sets how subscribers log in. Passwords come only as Vault references and are "
-        "never shown. Reads the library back. Waits until a second person approves."
+#: The registration row.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_PUBLISH_SET,
+        handler=content_library_publish_set_composite,
+        summary="Turn publishing of a local content library on or off and set its password.",
+        description=(
+            "Publishes a local content library so other vCenters can subscribe, or stops it, "
+            "and sets how subscribers log in. Passwords come only as Vault references and are "
+            "never shown. Reads the library back. Waits until a second person approves."
+        ),
+        parameter_schema=PUBLISH_SET_PARAMETER_SCHEMA,
+        response_schema=PUBLISH_SET_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=["composite", "write", "content-library", "local", "publish", "password"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=PUBLISH_SET_LLM_INSTRUCTIONS,
+        preview=_publish_preview,
+        governed_subops=_SUB_OPS_CONTENT_LIBRARY_PUBLISH_SET,
     ),
-    "parameter_schema": PUBLISH_SET_PARAMETER_SCHEMA,
-    "response_schema": PUBLISH_SET_RESPONSE_SCHEMA,
-    "group_key": "content_library",
-    "tags": ["composite", "write", "content-library", "local", "publish", "password"],
-    "safety_level": "caution",
-    "requires_approval": True,
-    "llm_instructions": PUBLISH_SET_LLM_INSTRUCTIONS,
-}
+)

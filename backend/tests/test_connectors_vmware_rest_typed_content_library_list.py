@@ -39,7 +39,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops import (
     VMWARE_TYPED_WHEN_TO_USE_BY_GROUP,
 )
 from meho_backplane.connectors.vmware_rest.typed_ops_content_library_list import (
-    CONTENT_LIBRARY_LIST_OPS,
+    TYPED_OPS,
     VMWARE_CONTENT_LIBRARY_ITEM_LIST_OP,
     VMWARE_CONTENT_LIBRARY_LIST_OP,
 )
@@ -323,24 +323,24 @@ async def test_a_long_item_list_goes_behind_a_result_handle(
 
 
 def test_the_two_lists_are_registered_typed_ops() -> None:
-    assert {op.op_id for op in CONTENT_LIBRARY_LIST_OPS} == {
+    assert {op.op_id for op in TYPED_OPS} == {
         "vmware.content_library.list",
         "vmware.content_library.item.list",
     }
-    for op in CONTENT_LIBRARY_LIST_OPS:
+    for op in TYPED_OPS:
         assert op in VMWARE_TYPED_OPS
         assert callable(getattr(VmwareRestConnector, op.handler_attr))
         assert op.group_key == "content_library"
         assert op.op_id in VMWARE_TYPED_WHEN_TO_USE_BY_GROUP[op.group_key]
 
 
-@pytest.mark.parametrize("op", CONTENT_LIBRARY_LIST_OPS, ids=lambda op: op.op_id)
+@pytest.mark.parametrize("op", TYPED_OPS, ids=lambda op: op.op_id)
 def test_each_list_is_safe_and_runs_without_approval(op: Any) -> None:
     assert op.safety_level == "safe"
     assert op.requires_approval is False
 
 
-@pytest.mark.parametrize("op", CONTENT_LIBRARY_LIST_OPS, ids=lambda op: op.op_id)
+@pytest.mark.parametrize("op", TYPED_OPS, ids=lambda op: op.op_id)
 def test_examples_validate(op: Any) -> None:
     for example in op.parameter_schema["examples"]:
         assert validate_params(op.parameter_schema, example) == []

@@ -100,6 +100,7 @@ from meho_backplane.connectors.kubernetes.ops_listparams import (
     LIST_BASE_PROPERTIES,
     NAMESPACE_XOR_ALL_NAMESPACES,
 )
+from meho_backplane.operations import register_plain_fields
 
 if TYPE_CHECKING:
     from kubernetes_asyncio.client.models import (
@@ -1367,3 +1368,8 @@ WORKLOAD_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=K8S_DEPLOYMENT_INFO_LLM_INSTRUCTIONS,
     ),
 )
+
+
+# ``image_pull_secrets`` lists the names of the pull secrets, never their content.
+for _op_id in ("k8s.pod.info", "k8s.deployment.info"):
+    register_plain_fields(_op_id, ("image_pull_secrets",))

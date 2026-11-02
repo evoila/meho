@@ -6831,6 +6831,15 @@ class ApprovalRequest(Base):
       refuses to run when it differs. NULL for a request with no target
       and on rows saved before this column. Added by migration ``0130``.
 
+    * ``reveal_secret`` -- Boolean NOT NULL DEFAULT ``false``. The requester
+      asked for the hidden values of the answer (``reveal_secret: true``;
+      an agent is refused before the call waits). It is not a parameter of
+      the operation: it is not in ``params``, not in the encrypted payload
+      of a credential write, and not part of ``params_hash``. Every
+      approved run reads it here, also the re-run of a failed credential
+      write, whose encrypted input the first run deleted. ``false`` on rows
+      saved before this column. Added by migration ``0131``.
+
     Indexes
     -------
 
@@ -7046,6 +7055,11 @@ class ApprovalRequest(Base):
     # The target's connection settings when the request was made. See the
     # class docstring. Added by migration ``0130``.
     target_hash: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # The requester asked for the hidden values of the answer. See the class
+    # docstring. Added by migration ``0131``.
+    reveal_secret: Mapped[bool] = mapped_column(
+        sa.Boolean(), nullable=False, default=False, server_default=sa.false()
+    )
 
     __table_args__ = (
         Index(

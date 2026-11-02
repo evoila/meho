@@ -193,6 +193,15 @@ class Settings(BaseModel):
         but the CLI surfaces an actionable error rather than silently
         misusing ``audience`` (which is the confidential resource-
         server identifier, not a public client).
+    keycloak_cli_approve_client_id:
+        The OAuth ``client_id`` of the **public** client that ``meho
+        approvals approve`` uses for the fresh browser sign-in of an
+        approval (#5515). Default ``meho-cli-approve``. Surfaced through
+        ``GET /api/v1/auth-config`` as ``cli_approve_client_id``. An
+        approve on the command line or REST counts only when the token's
+        ``azp`` claim is this client: a stored ``meho login`` token or an
+        MCP token never approves. Empty means no token can approve; only
+        the web interface can. Set via ``KEYCLOAK_CLI_APPROVE_CLIENT_ID``.
     keycloak_discovery_url:
         Realm base URL the backplane uses for its own calls to Keycloak:
         the discovery document and the token endpoint. For example the
@@ -442,6 +451,18 @@ class Settings(BaseModel):
         every existing token is unaffected unless a realm explicitly
         grants the claim. Override only when the realm exposes the flag
         under a different attribute.
+    jwt_self_approver_group:
+        Name of the login group whose members may approve their own
+        changes (#3327, the rules of #3325). Default
+        ``MEHO-SA-Operators``, the group the shipped login setup creates
+        (``docs/decisions/login-role-groups.md``). ``verify_jwt`` sets
+        :attr:`~meho_backplane.auth.operator.Operator.self_approver` when
+        the token's ``groups`` claim names this group. This is used only
+        when the token has no ``meho_tenants`` claim; with that claim, the
+        current tenant's ``SA-Operators`` entry decides. Off when the
+        group is missing; a machine login never gets the flag. Change it
+        only together with ``JWT_ROLE_GROUPS``, when the site renamed the
+        groups. A blank value keeps the default.
     jwt_runner_id_claim_name:
         Name of the JWT claim that carries a satellite runner principal's
         row UUID (Initiative #2415, #2502). Default ``runner_id`` matches
@@ -966,9 +987,9 @@ class Settings(BaseModel):
         :func:`load_session` never extends ``expires_at`` past
         ``created_at + this cap``; once the cap is reached the session
         lapses on its next load and the operator re-authenticates.
-        Default 43200 (12 hours) -- one working day of continuous wall
-        display without forcing a mid-shift re-login, while still
-        guaranteeing a daily re-auth. Must exceed
+        Default 36000 (10 hours) -- the same as the shipped realm's
+        ``ssoSessionMaxLifespan``, so the console session ends with the
+        login server's session and not after it (#5518). Must exceed
         ``ui_session_sliding_extension_seconds`` for the sliding window
         to have any effect.
     ui_session_read_revalidation_seconds:
@@ -1161,12 +1182,22 @@ class Settings(BaseModel):
         regardless of this flag — an operator withdrawing their own
         pending request is never a privilege escalation.
     fresh_sign_in_max_age_seconds:
-        How old a person's sign-in may be for an action that needs a
-        fresh sign-in: turning approval off for an operation over REST
-        (#4711), and approving a waiting change on the command line or
-        REST (#3979). The check reads the token's ``auth_time`` claim; see
-        :mod:`meho_backplane.auth.fresh_sign_in`. Default ``300`` (five
-        minutes). Set via ``FRESH_SIGN_IN_MAX_AGE_SECONDS``.
+        The approval window (#5515): how old a person's sign-in may be
+        to approve a waiting change on the command line or REST (#3979).
+        One sign-in may approve several requests inside this window. The
+        check reads the token's ``auth_time`` claim, so renewing the token
+        or approving does not make the window longer; see
+        :mod:`meho_backplane.auth.fresh_sign_in`. Default ``900`` (15
+        minutes). Set via ``FRESH_SIGN_IN_MAX_AGE_SECONDS``. A request
+        whose operation is ``destructive`` does not use this window: it
+        uses :attr:`per_action_sign_in_max_age_seconds`.
+    per_action_sign_in_max_age_seconds:
+        How old a sign-in may be for an action that needs a fresh sign-in
+        each time (#5515): turning approval off or lowering a risk level
+        for an operation (#4711), and approving a request whose operation
+        is ``destructive``. Such an approval also needs a sign-in that has
+        approved nothing else. Default ``300`` (five minutes). Set via
+        ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``.
     approval_one_time_code_acr_values:
         The ``acr`` values that mean "the person entered a one-time code
         from their authenticator app" (#3979). An approve whose token
@@ -1345,6 +1376,7 @@ class Settings(BaseModel):
     keycloak_issuer_url: HttpUrl
     keycloak_audience: str = Field(min_length=1)
     keycloak_cli_client_id: str = ""
+    keycloak_cli_approve_client_id: str = "meho-cli-approve"
     keycloak_discovery_url: HttpUrl | None = None
     keycloak_jwks_cache_ttl_seconds: int = Field(default=300, gt=0)
     keycloak_jwt_leeway_seconds: int = Field(default=30, ge=0)
@@ -1360,6 +1392,7 @@ class Settings(BaseModel):
     jwt_platform_admin_claim_name: str = Field(default="platform_admin", min_length=1)
     jwt_platform_admin_role_name: str | None = None
     jwt_approver_claim_name: str = Field(default="approver", min_length=1)
+    jwt_self_approver_group: str = Field(default="MEHO-SA-Operators", min_length=1)
     jwt_runner_id_claim_name: str = Field(default="runner_id", min_length=1)
     keycloak_admin_url: str = ""
     keycloak_admin_client_id: str = ""
@@ -1685,10 +1718,13 @@ class Settings(BaseModel):
     # the reason, #3692) are allowed only on lab-class deployments. Default
     # False is fail-closed: production refuses them.
     approval_allow_delegated_decision: bool = False
-    # #4711 -- how old a sign-in may be for an action that needs a person
-    # with a fresh sign-in (turning approval off over REST, and with #3979
-    # an approve on the command line or REST).
-    fresh_sign_in_max_age_seconds: int = Field(default=300, ge=30, le=3600)
+    # #5515 -- the approval window: how old a sign-in may be for an approve
+    # on the command line or REST (#3979). One sign-in, several approvals.
+    fresh_sign_in_max_age_seconds: int = Field(default=900, ge=30, le=3600)
+    # #5515 -- how old a sign-in may be for an action that needs a fresh
+    # sign-in each time: turning approval off (#4711) and a destructive
+    # approve.
+    per_action_sign_in_max_age_seconds: int = Field(default=300, ge=30, le=3600)
     # #3979 -- the acr values that mean a one-time code step. Empty = off.
     approval_one_time_code_acr_values: tuple[str, ...] = ()
     # #4622 -- sandbox mode: a standing grant may also cover deletes, only
@@ -1843,7 +1879,7 @@ class Settings(BaseModel):
     # cannot create an immortal session. ``sliding=0`` disables the
     # extension. See the field docstrings above for the full rationale.
     ui_session_sliding_extension_seconds: int = Field(default=3600, ge=0)
-    ui_session_absolute_lifetime_seconds: int = Field(default=43200, gt=0)
+    ui_session_absolute_lifetime_seconds: int = Field(default=36000, gt=0)
     # BFF read-path revalidation drift threshold. The session
     # middleware re-presents the stored access token to the JWT chain
     # when a session has not been revalidated within this window, so a
@@ -2223,7 +2259,8 @@ class Settings(BaseModel):
     #: candidate and would deny every legitimate per-tenant call. A deploy
     #: still mid-migration (secrets under the retired per-``sub`` layout)
     #: opts **out** by setting ``VAULT_KV_TENANT_SCOPE_PREFIX=""`` until its
-    #: secrets are relocated. Pre-#1725 this defaulted empty (guard off).
+    #: secrets are relocated; a path with a ``.`` / ``..`` segment, a ``%``
+    #: or a backslash is refused even then. Earlier releases defaulted empty.
     #: Set via ``VAULT_KV_TENANT_SCOPE_PREFIX``.
     vault_kv_tenant_scope_prefix: str = "secret/tenants/{tenant_id}/"
 
@@ -2585,6 +2622,9 @@ def get_settings() -> Settings:
         keycloak_issuer_url=os.environ["KEYCLOAK_ISSUER_URL"],  # type: ignore[arg-type]
         keycloak_audience=os.environ["KEYCLOAK_AUDIENCE"],
         keycloak_cli_client_id=os.environ.get("KEYCLOAK_CLI_CLIENT_ID", ""),
+        keycloak_cli_approve_client_id=os.environ.get(
+            "KEYCLOAK_CLI_APPROVE_CLIENT_ID", "meho-cli-approve"
+        ),
         keycloak_discovery_url=os.environ.get("KEYCLOAK_DISCOVERY_URL") or None,  # type: ignore[arg-type]
         keycloak_jwks_cache_ttl_seconds=int(
             os.environ.get("KEYCLOAK_JWKS_CACHE_TTL_SECONDS", "300"),
@@ -2629,6 +2669,9 @@ def get_settings() -> Settings:
         jwt_approver_claim_name=os.environ.get(
             "JWT_APPROVER_CLAIM_NAME",
             "approver",
+        ),
+        jwt_self_approver_group=(
+            os.environ.get("JWT_SELF_APPROVER_GROUP", "").strip() or "MEHO-SA-Operators"
         ),
         jwt_runner_id_claim_name=os.environ.get(
             "JWT_RUNNER_ID_CLAIM_NAME",
@@ -2864,9 +2907,13 @@ def get_settings() -> Settings:
         approval_allow_delegated_decision=parse_bool_env(
             os.environ.get("APPROVAL_ALLOW_DELEGATED_DECISION", "false"),
         ),
-        # #4711 -- how old a sign-in may be for an action that needs a person.
+        # #5515 -- the approval window, and the limit for an action that
+        # needs a fresh sign-in each time.
         fresh_sign_in_max_age_seconds=int(
-            os.environ.get("FRESH_SIGN_IN_MAX_AGE_SECONDS", "300"),
+            os.environ.get("FRESH_SIGN_IN_MAX_AGE_SECONDS", "900"),
+        ),
+        per_action_sign_in_max_age_seconds=int(
+            os.environ.get("PER_ACTION_SIGN_IN_MAX_AGE_SECONDS", "300"),
         ),
         # #3979 -- which acr values mean a one-time code step.
         approval_one_time_code_acr_values=tuple(
@@ -2967,7 +3014,7 @@ def get_settings() -> Settings:
             os.environ.get("UI_SESSION_SLIDING_EXTENSION_SECONDS", "3600"),
         ),
         ui_session_absolute_lifetime_seconds=int(
-            os.environ.get("UI_SESSION_ABSOLUTE_LIFETIME_SECONDS", "43200"),
+            os.environ.get("UI_SESSION_ABSOLUTE_LIFETIME_SECONDS", "36000"),
         ),
         ui_session_read_revalidation_seconds=int(
             os.environ.get("UI_SESSION_READ_REVALIDATION_SECONDS", "300"),

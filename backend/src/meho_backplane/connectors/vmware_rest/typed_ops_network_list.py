@@ -50,7 +50,9 @@ __all__ = [
     "NETWORK_LIST_PATH",
     "NETWORK_LIST_WHEN_TO_USE",
     "NETWORK_TYPES",
+    "TYPED_OPS",
     "VMWARE_NETWORK_LIST_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "network_list_impl",
 ]
 
@@ -404,3 +406,6 @@ VMWARE_NETWORK_LIST_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_NETWORK_LIST_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {NETWORK_LIST_GROUP_KEY: NETWORK_LIST_WHEN_TO_USE}

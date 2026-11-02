@@ -708,3 +708,24 @@ func KeyForBackplane(backplaneURL string) (service, user string) {
 // wraps the context with this timeout so the bound is enforced
 // regardless of what the IdP advertises in expires_in.
 const PollTimeout = 10 * time.Minute
+
+// IsInvalidScope reports whether the login server refused the login
+// because it asked for a scope the client does not offer (RFC 6749
+// §5.2 / RFC 8628 §3.2 `invalid_scope`). Keycloak answers this way when
+// `meho login` asks for `offline_access` on a realm whose `meho-cli`
+// client does not offer it. The device authorization request of
+// golang.org/x/oauth2 does not fill RetrieveError.ErrorCode, so the
+// body is read too.
+func IsInvalidScope(err error) bool {
+	var retr *oauth2.RetrieveError
+	if !errors.As(err, &retr) {
+		return false
+	}
+	if retr.ErrorCode != "" {
+		return retr.ErrorCode == "invalid_scope"
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	return json.Unmarshal(retr.Body, &payload) == nil && payload.Error == "invalid_scope"
+}

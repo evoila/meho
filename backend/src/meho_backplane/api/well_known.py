@@ -39,7 +39,7 @@ from typing import Any
 
 from fastapi import APIRouter
 
-from meho_backplane.mcp.auth import mcp_resource_uri
+from meho_backplane.mcp.auth import MCP_SCOPES_SUPPORTED, mcp_resource_uri
 from meho_backplane.settings import get_settings
 
 __all__ = ["router"]
@@ -65,10 +65,12 @@ async def protected_resource_metadata() -> dict[str, Any]:
       trailing-slash-normalised: RFC 8414 §3.3 makes clients compare
       it byte-for-byte with the ``issuer`` in the discovery document,
       and providers such as authentik publish theirs with a ``/``.
-    * ``scopes_supported`` — v0.2 ships two scopes that downstream
-      Tasks (T3 RBAC filter, T4 reference tool, T5 audit) consume.
-      Conservative: clients that request only ``mcp:read`` can list /
-      inspect but not invoke side-effecting tools.
+    * ``scopes_supported`` — :data:`~meho_backplane.mcp.auth.MCP_SCOPES_SUPPORTED`:
+      ``mcp:read`` and ``mcp:execute`` for the working surface, plus
+      ``offline_access`` so a client that asks for every listed scope
+      gets a login that renews itself. Clients that request only
+      ``mcp:read`` can list / inspect but not invoke side-effecting
+      tools. ``mcp:admin`` is not listed; a client asks for it on purpose.
     * ``bearer_methods_supported`` — ``["header"]`` only. MCP transport
       forbids tokens in the URI query (see §"Access Token Usage").
 
@@ -85,6 +87,6 @@ async def protected_resource_metadata() -> dict[str, Any]:
         "authorization_servers": [
             str(settings.keycloak_issuer_url),
         ],
-        "scopes_supported": ["mcp:read", "mcp:execute"],
+        "scopes_supported": list(MCP_SCOPES_SUPPORTED),
         "bearer_methods_supported": ["header"],
     }

@@ -70,6 +70,7 @@ import structlog
 
 import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.connectors._shared.cache_key import DEFAULT_PORTS, effective_scheme
+from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
 from meho_backplane.connectors._shared.pinned_transport import build_pinned_async_transport
 from meho_backplane.connectors.secret.endpoints import (
     SecretEndpoint,
@@ -84,7 +85,6 @@ from meho_backplane.targets.resolver import resolve_target
 from meho_backplane.targets.ssrf_guard import (
     TargetDestinationBlockedError,
     assert_public_destination_async,
-    screen_and_resolve,
 )
 
 if TYPE_CHECKING:
@@ -362,10 +362,12 @@ def _pin_store_addresses(host: str) -> list[str] | None:
     """Connect-time screen for the pinning transport, in handoff-error terms.
 
     Runs inside the transport's ``connect_tcp``. httpx hands an exception
-    it does not map back unchanged, so :func:`_unwrap` can catch it.
+    it does not map back unchanged, so :func:`_unwrap` can catch it. A name
+    that does not resolve is refused too, so the client dials only a checked
+    address.
     """
     try:
-        return screen_and_resolve(host)
+        return screen_dial_addresses(host)
     except TargetDestinationBlockedError as exc:
         raise _blocked("the store target", exc) from exc
 

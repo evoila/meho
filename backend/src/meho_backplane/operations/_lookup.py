@@ -367,7 +367,10 @@ async def lookup_descriptor(
     written back.
 
     A row of a connector package that is not installed is not found
-    (:func:`installed_owner_clause`).
+    (:func:`installed_owner_clause`). Nor is a row of a connector whose
+    code is not in this MEHO
+    (:func:`~meho_backplane.operations._code_presence.row_code_missing`,
+    #5585).
     "Enabled" is :func:`enabled_for_tenant_clause`: for a built-in row the
     tenant's own on/off setting wins over the install default (#5029).
     """
@@ -392,6 +395,11 @@ async def lookup_descriptor(
         )
         row = result.scalar_one_or_none()
         if row is None:
+            return None
+        # Imported here: the module imports this one.
+        from meho_backplane.operations._code_presence import row_code_missing
+
+        if await row_code_missing(session, tenant_id=tenant_id, row=row):
             return None
         return await apply_effective_policy(session, tenant_id=tenant_id, row=row)
 

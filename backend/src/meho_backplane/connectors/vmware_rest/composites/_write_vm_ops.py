@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _write
 from meho_backplane.connectors.vmware_rest.composites._spec import (
     CompositeSpec,
 )
@@ -85,6 +86,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.create"],
         preview=_vm_create_preview,
+        governed_subops=_write._SUB_OPS_VM_CREATE + _write._VIM_SUB_OPS_VM_CREATE,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.clone",
@@ -103,6 +105,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.clone"],
         preview=_vm_clone_preview,
+        governed_subops=_write._SUB_OPS_VM_CLONE,
         classifier_other=True,
     ),
     CompositeSpec(
@@ -123,6 +126,8 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.deploy_from_library"],
         preview=_vm_deploy_from_library_preview,
+        governed_subops=_write._SUB_OPS_VM_DEPLOY_FROM_LIBRARY
+        + _write._VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY,
         classifier_other=True,
     ),
     CompositeSpec(
@@ -141,6 +146,8 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.import_from_library"],
+        governed_subops=_write._SUB_OPS_VM_IMPORT_FROM_LIBRARY
+        + _write._VIM_SUB_OPS_VM_IMPORT_FROM_LIBRARY,
         no_preview=True,
         classifier_other=True,
     ),
@@ -161,6 +168,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.snapshot.revert"],
         preview=_vm_snapshot_revert_preview,
+        governed_subops=_write._VIM_SUB_OPS_VM_SNAPSHOT_REVERT,
         classifier_other=True,
     ),
     CompositeSpec(
@@ -182,6 +190,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.destroy"],
         preview=_vm_destroy_preview,
+        governed_subops=_write._SUB_OPS_VM_DESTROY + _write._VIM_SUB_OPS_VM_DESTROY,
         classifier_other=True,
     ),
     CompositeSpec(
@@ -201,6 +210,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.migrate"],
         preview=_vm_migrate_preview,
+        governed_subops=_write._SUB_OPS_VM_MIGRATE + _write._VIM_SUB_OPS_VM_MIGRATE,
         classifier_other=True,
     ),
     CompositeSpec(
@@ -220,6 +230,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.power.bulk"],
         preview=_vm_power_bulk_preview,
+        governed_subops=_write._SUB_OPS_VM_POWER_BULK,
         classifier_other=True,
     ),
     CompositeSpec(
@@ -239,6 +250,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.power"],
         preview=_vm_power_preview,
+        governed_subops=_write._SUB_OPS_VM_POWER,
         classifier_other=True,
     ),
     CompositeSpec(
@@ -258,6 +270,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.clone_from_template"],
         preview=_vm_clone_from_template_preview,
+        governed_subops=_write._VIM_SUB_OPS_VM_CLONE_FROM_TEMPLATE,
         classifier_other=True,
     ),
 )

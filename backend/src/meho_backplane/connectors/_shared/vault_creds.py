@@ -183,11 +183,21 @@ class BasicCredentialsTargetLike(Protocol):
     not part of the Protocol because most target-like stubs (a secret ref
     taken from op params, for example) must not have one; the loaders read
     it with :func:`secret_field_map_of`.
+
+    The loaders only read these fields, so the Protocol declares them as
+    read-only properties. A plain attribute satisfies a read-only property,
+    so the concrete models and the test stubs keep working, and so does the
+    read-only ``Target`` of the connector kit (``meho_connector_kit``).
     """
 
-    name: str
-    host: str
-    secret_ref: str | None
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def host(self) -> str: ...
+
+    @property
+    def secret_ref(self) -> str | None: ...
 
 
 class VaultCredentialsReadError(CredentialsReadError):

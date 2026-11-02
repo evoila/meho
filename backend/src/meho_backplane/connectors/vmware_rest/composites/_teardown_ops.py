@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _teardown
 from meho_backplane.connectors.vmware_rest.composites._spec import (
     CompositeSpec,
 )
@@ -55,5 +56,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.folder.delete"],
         preview=folder_delete_preview,
+        governed_subops=_teardown._VIM_SUB_OPS_FOLDER_DELETE,
     ),
 )

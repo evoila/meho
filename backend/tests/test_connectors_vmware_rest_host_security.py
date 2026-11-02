@@ -26,9 +26,6 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _host_security_writes,
     _write,
 )
-from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
-    _GOVERNED_SUBOP_MANIFEST,
-)
 from meho_backplane.connectors.vmware_rest.composites._host_access_writes import (
     host_coredump_set_composite,
     host_lockdown_exceptions_set_composite,
@@ -41,6 +38,9 @@ from meho_backplane.connectors.vmware_rest.composites._host_security_schemas imp
 from meho_backplane.connectors.vmware_rest.composites._host_security_writes import (
     host_advanced_settings_set_composite,
     host_firewall_ruleset_set_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._register import (
+    _GOVERNED_SUBOP_MANIFEST,
 )
 from meho_backplane.connectors.vmware_rest.host_security import is_secret_key
 from meho_backplane.connectors.vmware_rest.typed_ops_host_security import (

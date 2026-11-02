@@ -1645,6 +1645,7 @@ build = [
 ]
 dev = [
     { name = "aiosqlite" },
+    { name = "meho-connector-kit" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1714,6 +1715,7 @@ requires-dist = [
 build = [{ name = "hatchling" }]
 dev = [
     { name = "aiosqlite", specifier = ">=0.19" },
+    { name = "meho-connector-kit", editable = "connector-kit" },
     { name = "mypy", specifier = ">=2.3.0" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
@@ -1729,6 +1731,11 @@ docs = [
     { name = "mike", specifier = ">=2.2.0" },
     { name = "mkdocs-material", specifier = ">=9.7.7" },
 ]
+
+[[package]]
+name = "meho-connector-kit"
+version = "1.0"
+source = { editable = "connector-kit" }
 
 [[package]]
 name = "mergedeep"

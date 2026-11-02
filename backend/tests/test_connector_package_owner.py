@@ -150,7 +150,13 @@ async def _seed_op(
                 source_kind="typed",
                 method=None,
                 path=None,
-                handler_ref=f"meho_backplane.connectors.widget_pkg.ops.{op_id.replace('.', '_')}",
+                # A built-in op needs a handler that imports: a connector whose
+                # built-in handlers do not import has no code here (#5585).
+                handler_ref=(
+                    f"meho_backplane.connectors.widget_pkg.ops.{op_id.replace('.', '_')}"
+                    if owner
+                    else "tests.fixtures.composites.handlers.typed_sub_op_handler"
+                ),
                 summary=f"widget op {op_id}",
                 description="widget op",
                 group_id=group_id,

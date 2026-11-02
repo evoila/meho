@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
-from meho_backplane.connectors._shared.secret_echo import mentions_secret
+from meho_backplane.connectors._shared.secret_echo import mentions_secret, response_text
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
     load_param_secret_data,
@@ -177,13 +177,6 @@ def vapi_error(response: httpx.Response) -> tuple[str | None, list[str]]:
     return kept_type, messages[:_MAX_VENDOR_MESSAGES]
 
 
-def _response_text(response: httpx.Response) -> str:
-    try:
-        return response.text
-    except (UnicodeDecodeError, httpx.StreamError):
-        return ""
-
-
 def safe_vendor_text(
     response: httpx.Response, secrets: Iterable[str] = ()
 ) -> tuple[str | None, list[str]]:
@@ -194,7 +187,7 @@ def safe_vendor_text(
     secret, all of it is dropped. Empty secrets are ignored.
     """
     error_type, messages = vapi_error(response)
-    texts = [_response_text(response), error_type or "", *messages]
+    texts = [response_text(response), error_type or "", *messages]
     if any(mentions_secret(texts, secret) for secret in secrets if secret):
         return None, []
     return error_type, messages

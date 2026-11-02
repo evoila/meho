@@ -42,6 +42,12 @@ counted. A connector whose rows all come from such a package is still
 listed, with ``state="package_not_installed"``, zero counts,
 ``dispatchable=False`` and a ``next_step`` that names the package.
 
+A connector whose code is not in this MEHO (#5585,
+:func:`~meho_backplane.operations._code_presence.code_missing_connectors`)
+is listed with ``state="code_not_installed"``, zero counts,
+``dispatchable=False`` and a ``next_step`` that says the code is missing.
+Its rows have no package name, so the text names no package.
+
 Status filter semantics
 -----------------------
 
@@ -94,6 +100,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+from meho_backplane.operations._code_presence import code_missing_connectors
 from meho_backplane.operations._lookup import (
     connector_exists,
     installed_owner_clause,
@@ -496,6 +503,41 @@ def _package_not_installed_step(package: str) -> NextStep:
     )
 
 
+def _code_not_installed_step() -> NextStep:
+    """Return the ``next_step`` of a ``state="code_not_installed"`` row (#5585)."""
+    return NextStep(
+        verb="meho status",
+        rationale=(
+            "the code of this connector is not in this MEHO. Its operations were "
+            "written by a MEHO that had this connector built in. Run a MEHO image "
+            "that has this connector, or install the connector package that ships "
+            "it. `meho status` shows the version of this MEHO and its installed "
+            "packages."
+        ),
+    )
+
+
+def _keep_unusable_connectors(
+    groups_by_connector: dict[tuple[UUID | None, str, str, str], dict[str, int]],
+    op_counts_by_connector: dict[tuple[UUID | None, str, str, str], dict[str, int]],
+    missing_packages: dict[tuple[UUID | None, str, str, str], str],
+    missing_code: set[tuple[UUID | None, str, str, str]],
+) -> None:
+    """Give each connector that cannot be used a row, with zero counts.
+
+    A connector whose groups are all hidden still gets a row, so the
+    operator sees that its package is missing (#5560). Nothing of a
+    connector whose code is missing can be used, so its counts are zero
+    (#5585).
+    """
+    empty = {"total": 0, "staged": 0, "enabled": 0, "disabled": 0}
+    for key in missing_code:
+        groups_by_connector[key] = dict(empty)
+        op_counts_by_connector.pop(key, None)
+    for key in missing_packages:
+        groups_by_connector.setdefault(key, dict(empty))
+
+
 async def list_ingested_connectors(
     *,
     operator: Operator,
@@ -569,16 +611,17 @@ async def list_ingested_connectors(
             session,
             operator_tenant_id=operator.tenant_id,
         )
-    # A connector whose groups are all hidden still gets a row, so the
-    # operator sees that its package is missing (#5560).
-    for key in missing_packages:
-        groups_by_connector.setdefault(key, {"total": 0, "staged": 0, "enabled": 0, "disabled": 0})
+        missing_code = await code_missing_connectors(session, operator_tenant_id=operator.tenant_id)
+    _keep_unusable_connectors(
+        groups_by_connector, op_counts_by_connector, missing_packages, missing_code
+    )
 
     items = await _emit_db_backed_rows(
         operator=operator,
         groups_by_connector=groups_by_connector,
         op_counts_by_connector=op_counts_by_connector,
         missing_packages=missing_packages,
+        missing_code=missing_code,
         status=status,
     )
     items.extend(
@@ -678,6 +721,7 @@ async def _emit_db_backed_rows(
     groups_by_connector: dict[tuple[UUID | None, str, str, str], dict[str, int]],
     op_counts_by_connector: dict[tuple[UUID | None, str, str, str], dict[str, int]],
     missing_packages: dict[tuple[UUID | None, str, str, str], str],
+    missing_code: set[tuple[UUID | None, str, str, str]],
     status: ConnectorStatusFilter | None,
 ) -> list[ConnectorListItem]:
     """Emit one ``state="ingested"`` :class:`ConnectorListItem` per DB-backed connector.
@@ -701,7 +745,9 @@ async def _emit_db_backed_rows(
     A connector with no visible operation and rows of a connector package
     that is not installed (*missing_packages*) gets
     ``state="package_not_installed"``, ``dispatchable=False`` and the
-    install hint instead (#5560).
+    install hint instead (#5560). A connector whose code is not in this
+    MEHO (*missing_code*, zero counts already) gets
+    ``state="code_not_installed"`` and ``dispatchable=False`` (#5585).
 
     Extracted from :func:`list_ingested_connectors` so the DB-side
     emission and the class-side-only emission stay each below the
@@ -737,6 +783,10 @@ async def _emit_db_backed_rows(
         state: ConnectorState = "ingested"
         next_step = legacy_hint
         if legacy_hint is not None:
+            dispatchable = False
+        elif key in missing_code:
+            state = "code_not_installed"
+            next_step = _code_not_installed_step()
             dispatchable = False
         elif op_counts.get("total", 0) == 0 and key in missing_packages:
             state = "package_not_installed"

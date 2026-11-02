@@ -124,13 +124,18 @@ def _is_ip_literal(host: str) -> bool:
 #: Path prefixes of the tenant plane. The one tenant bearer from
 #: ``POST /iaas/api/login`` also works on the blueprint, deployment, content
 #: and IPAM provider APIs, as on Aria Automation 8 (see
-#: ``connectors/vra8/_paths.py``).
+#: ``connectors/vra8/_paths.py``), and on the approval, policy, ABX and
+#: event broker APIs (``governance_ops``).
 _TENANT_PREFIXES = (
     "/iaas/api/",
     "/blueprint/api/",
     "/deployment/api/",
     "/content/api/",
     "/provisioning/",
+    "/approval/api/",
+    "/policy/api/",
+    "/abx/api/",
+    "/event-broker/api/",
 )
 
 
@@ -138,8 +143,9 @@ def plane_for_path(path: str) -> Plane:
     """Classify a request path into one of the two auth planes.
 
     The split is unambiguous: ``/iaas/api/*``, ``/blueprint/api/*``,
-    ``/deployment/api/*``, ``/content/api/*`` and ``/provisioning/*`` are the
-    tenant plane; everything else
+    ``/deployment/api/*``, ``/content/api/*``, ``/provisioning/*`` and the
+    governance APIs (``/approval/api/*``, ``/policy/api/*``, ``/abx/api/*``,
+    ``/event-broker/api/*``) are the tenant plane; everything else
     (``/cloudapi/*``, ``/api/*``, anything that looks like the
     vCloud-Director-derived surface) is the provider plane.
     """

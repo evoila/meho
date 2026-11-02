@@ -1104,10 +1104,10 @@ async def _ingest_canary_corpus(
     """
     reset_dispatcher_caches()
     registry_as_found = _clear_connector_registry_keeping_copy()
-    reset_engine_for_testing()
-    eng = create_engine_for_url(async_pg_url, pool_size=5, pool_timeout=10.0)
-    engine_module._engine = eng
     try:
+        reset_engine_for_testing()
+        eng = create_engine_for_url(async_pg_url, pool_size=5, pool_timeout=10.0)
+        engine_module._engine = eng
         # Fresh-container hygiene + parity with the acceptance
         # ``pg_engine`` fixture's per-test baseline: the module-scoped
         # ``async_pg_url`` container is newly migrated (nothing to

@@ -320,6 +320,11 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # stores the approval input encrypted, and the flight recorder keeps
         # no body for it.
         "msad.user.set-password",
+        # The VCF Operations fleet password change. Same shape: both passwords
+        # come from the secret store at run time, params carry only the two
+        # references, and the vendor request body holds the values. The pin
+        # keeps that body out of the flight recorder.
+        "vrops.fleet.password.rotate",
         # The fleet locker writes. The password and the private key come from
         # Vault at run time and go in the request body; params carry only
         # Vault references. The pin keeps the body out of the flight recorder

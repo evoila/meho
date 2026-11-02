@@ -481,9 +481,11 @@ register_mcp_tool(
             "`unknown_group` (the group does not exist; `narrowing` lists "
             "valid group keys), `zero_enabled_operations` (nothing on "
             "this connector is enabled; do not call it, an operator must "
-            "enable operations), or `package_not_installed` (the "
+            "enable operations), `package_not_installed` (the "
             "connector package the operations come from is not installed; "
-            "do not call it, the advisory names the package to install). "
+            "do not call it, the advisory names the package to install), "
+            "or `code_not_installed` (the code of this connector is not in "
+            "this MEHO; do not call it; also the answer in exact-op mode). "
             "`advisory` explains any outcome other than "
             "`matched`; `narrowing` lists next steps."
         ),

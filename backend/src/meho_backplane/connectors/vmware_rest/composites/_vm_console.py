@@ -92,11 +92,6 @@ _VIM_SUB_OPS_VM_KEYS_SEND: Final[tuple[str, ...]] = (
     _OP_PUT_USB_SCAN_CODES,
 )
 
-VM_CONSOLE_GOVERNED_SUBOPS: Final[dict[str, tuple[str, ...]]] = {
-    OP_ID_VM_SCREENSHOT: _VIM_SUB_OPS_VM_SCREENSHOT,
-    OP_ID_VM_KEYS_SEND: _VIM_SUB_OPS_VM_KEYS_SEND,
-}
-
 _PROP_POWER: Final = "runtime.powerState"
 _SCAN_CODE_SPEC_TYPE: Final = "UsbScanCodeSpec"
 _KEY_EVENT_TYPE: Final = "UsbScanCodeSpecKeyEvent"
@@ -501,6 +496,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_SCREENSHOT_LLM_INSTRUCTIONS,
         preview=_vm_screenshot_preview,
+        governed_subops=_VIM_SUB_OPS_VM_SCREENSHOT,
         classifier_other=True,
     ),
     CompositeSpec(
@@ -520,6 +516,12 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_KEYS_SEND_LLM_INSTRUCTIONS,
         preview=_vm_keys_send_preview,
+        governed_subops=_VIM_SUB_OPS_VM_KEYS_SEND,
         classifier_other=True,
     ),
 )
+
+#: composite op id -> the vendor calls it may make, read from the rows.
+VM_CONSOLE_GOVERNED_SUBOPS: Final[dict[str, tuple[str, ...]]] = {
+    row.op_id: row.governed_subops for row in COMPOSITES if row.governed_subops
+}

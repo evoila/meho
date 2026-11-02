@@ -1027,6 +1027,31 @@ func TestPrintListTableMarksMissingPackage(t *testing.T) {
 	}
 }
 
+// TestPrintListTableMarksMissingCode — a connector whose code is not in
+// this MEHO (#5585) shows "no-code" in the status column, not the
+// "(empty)" rollup, and the dead-end "*" on its kind.
+func TestPrintListTableMarksMissingCode(t *testing.T) {
+	r := &connectorListEnvelope{
+		Items: []listEntry{
+			{
+				ConnectorID:  "gizmobox-api-2",
+				State:        "code_not_installed",
+				Kind:         "typed",
+				Dispatchable: false,
+			},
+		},
+	}
+	var buf bytes.Buffer
+	printListTable(&buf, "all", r)
+	out := buf.String()
+	if !strings.Contains(out, "no-code") || !strings.Contains(out, "typed*") {
+		t.Errorf("list render missing the no-code marker in:\n%s", out)
+	}
+	if strings.Contains(out, "(empty)") {
+		t.Errorf("list render shows the (empty) rollup for missing code:\n%s", out)
+	}
+}
+
 // TestPrintListTableMarksShadowedBuiltin — a built-in row shadowed by a
 // tenant-scoped twin (#2474) renders "(shadowed)" in the tenant column,
 // while the tenant-scoped twin that dispatch resolves keeps its tenant

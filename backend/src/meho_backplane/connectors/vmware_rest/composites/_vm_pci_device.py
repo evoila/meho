@@ -86,8 +86,8 @@ OP_ID_VM_PCI_DEVICE_REMOVE: Final = "vmware.composite.vm.pci_device.remove"
 _OP_QUERY_CONFIG_TARGET: Final = "POST:/EnvironmentBrowser/{moId}/QueryConfigTarget"
 
 #: Every VI-JSON method of each change. The reconcile tests check them
-#: against the pinned 8.0 and 9.0 VI-JSON files; ``_governed_subops`` lists
-#: them for the grant set.
+#: against the pinned 8.0 and 9.0 VI-JSON files; each row lists them for the
+#: grant set.
 _VIM_SUB_OPS_VM_PCI_DEVICE_ADD: Final[tuple[str, ...]] = (
     _OP_RETRIEVE_PROPERTIES,
     _OP_QUERY_CONFIG_TARGET,
@@ -97,11 +97,6 @@ _VIM_SUB_OPS_VM_PCI_DEVICE_REMOVE: Final[tuple[str, ...]] = (
     _OP_RETRIEVE_PROPERTIES,
     _OP_RECONFIG_VM_TASK,
 )
-
-VM_PCI_DEVICE_GOVERNED_SUBOPS: Final[dict[str, tuple[str, ...]]] = {
-    OP_ID_VM_PCI_DEVICE_ADD: _VIM_SUB_OPS_VM_PCI_DEVICE_ADD,
-    OP_ID_VM_PCI_DEVICE_REMOVE: _VIM_SUB_OPS_VM_PCI_DEVICE_REMOVE,
-}
 
 _PROP_DEVICES: Final = "config.hardware.device"
 _PROP_POWER: Final = "runtime.powerState"
@@ -494,6 +489,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_PCI_DEVICE_ADD_LLM_INSTRUCTIONS,
         preview=_vm_pci_device_add_preview,
+        governed_subops=_VIM_SUB_OPS_VM_PCI_DEVICE_ADD,
     ),
     CompositeSpec(
         op_id=OP_ID_VM_PCI_DEVICE_REMOVE,
@@ -512,5 +508,11 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_PCI_DEVICE_REMOVE_LLM_INSTRUCTIONS,
         preview=_vm_pci_device_remove_preview,
+        governed_subops=_VIM_SUB_OPS_VM_PCI_DEVICE_REMOVE,
     ),
 )
+
+#: composite op id -> the vendor calls it may make, read from the rows.
+VM_PCI_DEVICE_GOVERNED_SUBOPS: Final[dict[str, tuple[str, ...]]] = {
+    row.op_id: row.governed_subops for row in COMPOSITES if row.governed_subops
+}

@@ -78,8 +78,8 @@ if TYPE_CHECKING:
 # Every op_id is a well-formed ``METHOD:/path`` the pinned vcenter.yaml
 # ingest emits -- the reconcile lane sweeps these and fails on any path the
 # real spec does not serve (the "no fictional-path drift" AC). The two write
-# composites' manifests are also the grant-discovery source fed into
-# ``_GOVERNED_SUBOP_MANIFEST`` (#3349); the read composites need no grant.
+# composites' manifests are also the grant-discovery source on their
+# composite rows (#3349); the read composites need no grant.
 # ---------------------------------------------------------------------------
 
 #: ``content_library.subscribed.create`` -- resolve the datastore backing by

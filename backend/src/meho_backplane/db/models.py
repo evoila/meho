@@ -5863,6 +5863,14 @@ class _StandingGrantColumns:
     # Optional reason the operator gave when revoking (#3489). NULL when the
     # revoke carried no reason, and on every live row.
     revoked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Set when a new grant with the same key was made after this one ended
+    # (#5424). It takes the ended row out of the two unique indexes, so the
+    # new grant needs no revoke first. The row stays in the history.
+    replaced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
 
 
 def _standing_grant_table_args(table: str) -> tuple[Index, ...]:
@@ -5874,17 +5882,19 @@ def _standing_grant_table_args(table: str) -> tuple[Index, ...]:
       unique indexes enforcing "at most one active grant per fully-scoped
       key". Split because the nullable ``target_id`` would otherwise defeat
       a single unique index on the targetless case (``NULL != NULL``), and
-      scoped to ``revoked_at IS NULL`` so a revoked scope can be re-granted.
+      scoped to ``revoked_at IS NULL AND replaced_at IS NULL`` so a revoked
+      scope, or one whose grant ended (#5424), can be granted again.
       Since #3349 the ``…_targetless`` index is narrowed to *pure*
       targetless grants (``target_product`` and ``target_name_pattern`` both
       NULL); selector grants (#3349) also key ``target_id IS NULL`` but
       carry their own CRUD-layer uniqueness check.
     * ``<table>_expires_at_idx`` -- b-tree on ``expires_at``.
     """
+    live = "revoked_at IS NULL AND replaced_at IS NULL"
     targetless_where = (
-        "target_id IS NULL AND target_product IS NULL "
-        "AND target_name_pattern IS NULL AND revoked_at IS NULL"
+        f"target_id IS NULL AND target_product IS NULL AND target_name_pattern IS NULL AND {live}"
     )
+    targeted_where = f"target_id IS NOT NULL AND {live}"
     return (
         Index(
             f"{table}_lookup_idx",
@@ -5901,8 +5911,8 @@ def _standing_grant_table_args(table: str) -> tuple[Index, ...]:
             "connector_id",
             "target_id",
             unique=True,
-            postgresql_where=sa.text("target_id IS NOT NULL AND revoked_at IS NULL"),
-            sqlite_where=sa.text("target_id IS NOT NULL AND revoked_at IS NULL"),
+            postgresql_where=sa.text(targeted_where),
+            sqlite_where=sa.text(targeted_where),
         ),
         Index(
             f"uq_{table}_targetless",
@@ -5978,8 +5988,9 @@ class ServicePrincipalGrant(_StandingGrantColumns, Base):
       **partial** unique indexes enforcing "at most one active grant per
       fully-scoped key". Split because the nullable ``target_id`` would
       otherwise defeat a single unique index on the targetless case
-      (``NULL != NULL``), and scoped to ``revoked_at IS NULL`` so a revoked
-      scope can be re-granted. Since #3349 the ``…_targetless`` index is
+      (``NULL != NULL``), and scoped to ``revoked_at IS NULL AND replaced_at
+      IS NULL`` so a revoked scope, or one whose grant ended (#5424), can be
+      granted again. Since #3349 the ``…_targetless`` index is
       narrowed to *pure* targetless grants (``target_product`` and
       ``target_name_pattern`` both NULL); selector grants (#3349) also key
       ``target_id IS NULL`` but carry their own CRUD-layer uniqueness check.

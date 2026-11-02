@@ -4,26 +4,25 @@ Use this when your people log in with Microsoft Entra ID. Keycloak
 sends them to Entra. Entra checks who they are and sends back their
 groups. Keycloak puts each person into the matching MEHO group.
 
+You set this up with Helm values (`coreKeycloak.companyLogin`), not by
+hand in the Keycloak admin console. The install sets it up again at
+every `helm upgrade`. The page
+[Company login with authentik](../company-login-authentik.md) explains
+the same values in more detail.
+
 **Before you start:**
 
 - The realm is set up and the five MEHO groups exist. See
   [Company login](index.md).
-- You can log in to the Keycloak admin console as the console admin
-  (a user of realm `master`, default name `console-admin`; name and
-  temporary password in the Secret `<release>-core-console-admin`) at
-  `https://<meho-host>/auth/admin/master/console/#/meho`, then pick
-  realm `meho`. The console needs
-  `coreKeycloak.ingress.exposeAdmin: true`. See
-  [The console admin](../keycloak-realm.md#the-console-admin).
 - You can create an app registration in Entra.
-- You know the address of MEHO's Keycloak, for example
-  `https://keycloak.example.com`.
+- You know the address of your MEHO, for example
+  `https://meho.example.com`. This page writes it as `<meho-host>`.
 
-Pick an alias for the identity provider now, for example `entra`. It
-goes into the redirect URI:
+The Helm values use the alias `company` by default. The alias is part
+of the redirect URI:
 
 ```text
-https://<keycloak>/realms/meho/broker/<alias>/endpoint
+https://<meho-host>/auth/realms/meho/broker/company/endpoint
 ```
 
 ## 1. Make the Entra groups
@@ -40,7 +39,7 @@ In the Entra admin center: **App registrations → New registration**.
 |---|---|
 | **Name** | `MEHO Keycloak` |
 | **Supported account types** | Accounts in this organizational directory only |
-| **Redirect URI** | Platform **Web**, `https://<keycloak>/realms/meho/broker/<alias>/endpoint` |
+| **Redirect URI** | Platform **Web**, `https://<meho-host>/auth/realms/meho/broker/company/endpoint` |
 
 Then, on the new app:
 
@@ -56,69 +55,68 @@ If people are in many groups (more than 200), Entra leaves the
 step 2, and assign the MEHO groups to the app under **Enterprise
 applications → MEHO Keycloak → Users and groups**.
 
-## 3. Add Entra to Keycloak
+## 3. Store the client secret
 
-In the Keycloak admin console, realm `meho`: **Identity providers →
-OpenID Connect v1.0**.
+Put the Entra client secret into a Kubernetes Secret in MEHO's
+namespace. The chart reads it by name and never prints it.
 
-| Setting | Value |
-|---|---|
-| **Alias** | the alias you picked, for example `entra` |
-| **Display name** | `Company account` |
-| **Discovery endpoint** | `https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration` |
-| **Client authentication** | Client secret sent as post |
-| **Client ID** | the Application (client) ID |
-| **Client Secret** | the secret from step 2 |
+```bash
+read -rs CLIENT_SECRET     # paste the Entra client secret; it is not shown
+kubectl create secret generic meho-company-login -n meho \
+  --from-literal=client_secret="$CLIENT_SECRET"
+unset CLIENT_SECRET
+```
 
-Click **Add**. Then, on the provider:
+## 4. Add the Helm values
 
-- **Scopes**: `openid profile email`.
-- **Sync mode**: `Force`.
-- **Trust Email**: On.
+Add this to your values file, next to your other `coreKeycloak`
+values:
 
-Check that **Redirect URI** at the top of the page matches the one in
-Entra.
+```yaml
+coreKeycloak:
+  companyLogin:
+    enabled: true
+    alias: company
+    displayName: Company account
+    discoveryUrl: https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration
+    clientId: "<the Application (client) ID>"
+    clientSecret:
+      secretName: meho-company-login
+      secretKey: client_secret
+    scopes: openid profile email
+    groupsClaim: groups
+    groupMap:                         # Entra group Object ID -> MEHO group
+      "<object-id-of-readers>": MEHO-Readers
+      "<object-id-of-operators>": MEHO-Operators
+      "<object-id-of-sa-operators>": MEHO-SA-Operators
+      "<object-id-of-admins>": MEHO-Admins
+      "<object-id-of-approvers>": MEHO-Approvers
+    autoRedirect: false               # true later: go straight to Entra
+```
 
-## 4. Map each Entra group to a MEHO group
+- `groupMap`: the left side is the Entra group's **Object ID**, in
+  quotes. The right side is the MEHO group. **Only the groups you list
+  here give access.**
+- `autoRedirect`: with `true`, Keycloak sends everyone straight to
+  Entra and never shows its own password form. Start with `false`, so
+  the first admin can still log in with a password. Switch to `true`
+  once a person from Entra is in `MEHO-Admins`.
 
-On the provider → **Mappers** → **Add mapper**. Make one mapper per
-MEHO group:
+Then run `helm upgrade` as in
+[Install or upgrade](../company-login-authentik.md#3-install-or-upgrade).
+The install notes print the redirect URI. Check that it is the same as
+the one in Entra. If you turn the company login on for an install that
+already exists, read the note in that section first.
 
-| Setting | Value |
-|---|---|
-| **Name** | `MEHO-Operators` (the MEHO group) |
-| **Sync mode override** | `Force` |
-| **Mapper type** | `Advanced Claim to Group` |
-| **Claims** | Key `groups`, Value the Entra group's Object ID |
-| **Regex Claim Values** | Off |
-| **Group** | `/MEHO-Operators` |
-
-With **Force**, Keycloak checks the groups at every login. Remove a
-person from the Entra group, and Keycloak removes them from the MEHO
-group at their next login.
-
-Never add a mapper that writes `tenant_id`, `tenant_role`, `approver`
-or `platform_admin` on the person. The MEHO group gives those.
+Keycloak checks the groups at every login. Remove a person from the
+Entra group, and Keycloak removes them from the MEHO group at their
+next login.
 
 ## 5. Keep Entra's checks
 
 Entra's own checks stay in place: Conditional Access, MFA, blocked
 sign-ins. They run when Keycloak sends the person to Entra. You do not
 need a second step in Keycloak.
-
-## 6. Optional: hide the Keycloak password form
-
-By default the Keycloak login page shows a username and password form
-and a **Company account** button. To send people straight to Entra:
-
-1. **Authentication → Flows** → **browser** → **Action → Duplicate**.
-2. In the copy, open the settings (gear) of **Identity Provider
-   Redirector**. Set **Default Identity Provider** to your alias.
-3. **Action → Bind flow** → **Browser flow**.
-
-Do this only after a person from Entra is in `MEHO-Admins`. Local
-Keycloak users, such as the first admin, then no longer see the
-password form.
 
 ## Lab test
 

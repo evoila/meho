@@ -240,6 +240,7 @@ def site() -> Iterator[_Site]:
         BOOTSTRAP_SECRET_ENV: secrets.token_hex(16),
         "MEHO_REALM_PUBLIC_URL": _PUBLIC_URL,
         "MEHO_REALM_TENANT_ID": _TENANT_ID,
+        "MEHO_REALM_TENANT_NAME": "main",
         ADMIN_SECRET_ENV: secrets.token_hex(16),
         "MEHO_REALM_WEB_CLIENT_SECRET": secrets.token_hex(16),
         "MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET": secrets.token_hex(16),
@@ -253,6 +254,7 @@ def site() -> Iterator[_Site]:
         .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_SECRET", env[BOOTSTRAP_SECRET_ENV])
         .with_env("MEHO_REALM_PUBLIC_URL", _PUBLIC_URL)
         .with_env("MEHO_REALM_TENANT_ID", _TENANT_ID)
+        .with_env("MEHO_REALM_TENANT_NAME", "main")
         .with_env("MEHO_REALM_ADMIN_CLIENT_SECRET", env[ADMIN_SECRET_ENV])
         .with_env("MEHO_REALM_WEB_CLIENT_SECRET", env["MEHO_REALM_WEB_CLIENT_SECRET"])
         .with_env(
@@ -362,7 +364,7 @@ async def test_leaving_the_group_removes_the_tenant_from_new_logins_and_refreshe
     with pytest.raises(HTTPException) as refused:
         await _verify(site, after["access_token"], monkeypatch)
     assert refused.value.status_code == 401
-    assert refused.value.detail == "missing_tenant_claim"
+    assert str(refused.value.detail).startswith("missing_tenant_claim"), refused.value.detail
 
     # The session from before the change: Keycloak accepts the refresh (the
     # session is still valid) but builds the new access token from the
@@ -382,7 +384,7 @@ async def test_leaving_the_group_removes_the_tenant_from_new_logins_and_refreshe
         assert claim not in claims, claim
     with pytest.raises(HTTPException) as refused:
         await _verify(site, refreshed.json()["access_token"], monkeypatch)
-    assert refused.value.detail == "missing_tenant_claim"
+    assert str(refused.value.detail).startswith("missing_tenant_claim"), refused.value.detail
 
 
 # --- 3. The two people the setup makes ---------------------------------------

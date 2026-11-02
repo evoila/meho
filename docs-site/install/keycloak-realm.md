@@ -361,15 +361,19 @@ complete.
 The built-in Keycloak makes a third user at install: the console
 admin, default name `console-admin` (values key
 `coreKeycloak.firstLogin.consoleAdminUsername`). It administers realm
-`meho` in the Keycloak admin console. Use it for the
-[Company login](login/index.md) recipes.
+`meho` in the Keycloak admin console. Use it for the recipes
+[Local users](login/local-users.md) and [AD / LDAP](login/ad-ldap.md).
+A company login through OpenID Connect (Entra ID, authentik, your own
+Keycloak) is set up with Helm values instead.
 
 The console admin is a user of realm `master`, not of realm `meho`. It
 holds every role of the client `meho-realm` except `impersonation`:
 the client Keycloak makes in `master` to administer realm `meho`. That
 gives it the powers of `realm-admin` over realm `meho`, but it cannot log
-in as a person of realm `meho`. So it cannot approve a change in someone
-else's name. At its first login it sets a new password and an
+in as a person of realm `meho` directly. It can still reset a person's
+password and then log in as that person. So treat it as a full admin of
+realm `meho`, and give it only to people you trust with that. At its
+first login it sets a new password and an
 authenticator code, because realm `master` does not ask for a code by
 default. It lives in `master` for a reason:
 `meho-admin` has `manage-users` in realm `meho`, so it can reset the

@@ -125,15 +125,24 @@ the sync never removes a group the directory does not know, such as
 `MEHO-Platform-Admins`. The **LDAP Filter** keeps all other directory
 groups out of Keycloak.
 
-!!! warning "Way B: tell MEHO your group names"
+!!! warning "Way B on an older realm: tell MEHO your group names"
 
     MEHO refuses a person in two role groups (`401
-    multiple_role_groups`). It finds them by name in the token's
-    `groups` claim, and with way B that claim holds your names (for
-    example `SG-MEHO-Ops`), not the MEHO names. Set the backplane
-    setting `JWT_ROLE_GROUPS` to the five MEHO names **and** your five
-    names. Without it, a person in two of your groups gets one of the
-    two roles, and you cannot tell which.
+    multiple_role_groups`).
+
+    **The realm MEHO ships needs nothing here.** Its tokens carry the
+    field `meho_tenants`: one entry per role group, with the tenant.
+    Your groups inherit the tenant from the MEHO group above them. So a
+    person in two of your groups has the same tenant twice, and MEHO
+    refuses the login.
+
+    **An older realm** has no `meho_tenants` field in its tokens. Then
+    MEHO finds the role groups by name in the token's `groups` claim,
+    and with way B that claim holds your names (for example
+    `SG-MEHO-Ops`), not the MEHO names. Set the backplane setting
+    `JWT_ROLE_GROUPS` to the five MEHO names **and** your five names.
+    Without it, a person in two of your groups gets one of the two
+    roles, and you cannot tell which.
 
     The chart has no named value for this setting yet. Set it with
     `extraEnv` in your values file, comma-separated, no spaces:

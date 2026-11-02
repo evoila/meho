@@ -18,27 +18,26 @@ MEHO always ships its own Keycloak. You do not replace it with yours.
 MEHO accepts only tokens from its own Keycloak. A token from your
 Keycloak does not work at MEHO directly.
 
+On MEHO's side you set this up with Helm values
+(`coreKeycloak.companyLogin`), not by hand in the Keycloak admin
+console. The install sets it up again at every `helm upgrade`. The
+page [Company login with authentik](../company-login-authentik.md)
+explains the same values in more detail.
+
 **Before you start:**
 
 - The realm is set up and the five MEHO groups exist. See
   [Company login](index.md).
 - You are an admin in your Keycloak.
-- You can log in to the Keycloak admin console as the console admin
-  (a user of realm `master`, default name `console-admin`; name and
-  temporary password in the Secret `<release>-core-console-admin`) at
-  `https://<meho-host>/auth/admin/master/console/#/meho`, then pick
-  realm `meho`. The console needs
-  `coreKeycloak.ingress.exposeAdmin: true`. See
-  [The console admin](../keycloak-realm.md#the-console-admin).
 - You know the address of your MEHO, for example
   `https://meho.example.com`. MEHO's Keycloak is at
   `https://<meho-host>/auth`.
 
-Pick an alias for the identity provider now, for example
-`customer-kc`. It goes into the redirect URI:
+The Helm values use the alias `company` by default. The alias is part
+of the redirect URI:
 
 ```text
-https://<meho-host>/auth/realms/meho/broker/<alias>/endpoint
+https://<meho-host>/auth/realms/meho/broker/company/endpoint
 ```
 
 ## 1. Make the client in your Keycloak
@@ -52,14 +51,14 @@ In your Keycloak admin console, in the realm of your people: **Clients
 | **Client ID** | `meho-broker` |
 | **Client authentication** | On |
 | **Authentication flow** | **Standard flow** only. Turn off **Direct access grants**. |
-| **Valid redirect URIs** | `https://<meho-host>/auth/realms/meho/broker/<alias>/endpoint` |
+| **Valid redirect URIs** | `https://<meho-host>/auth/realms/meho/broker/company/endpoint` |
 
 Click **Save**. Then, on the client:
 
 1. **Advanced → Proof Key for Code Exchange Code Challenge Method**:
    `S256`.
-1. **Credentials**: copy the **Client Secret**.
-2. **Client scopes → `meho-broker-dedicated` → Configure a new mapper
+2. **Credentials**: copy the **Client Secret**.
+3. **Client scopes → `meho-broker-dedicated` → Configure a new mapper
    → Group Membership**:
 
     | Setting | Value |
@@ -90,29 +89,66 @@ for example:
 Put each person who may use MEHO in **one** of them. People in none of
 them cannot use MEHO.
 
-## 3. Add your Keycloak to MEHO's Keycloak
+## 3. Store the client secret
 
-In MEHO's Keycloak admin console, realm `meho`: **Identity providers →
-OpenID Connect v1.0**.
+Put the secret from step 1 into a Kubernetes Secret in MEHO's
+namespace. The chart reads it by name and never prints it.
 
-| Setting | Value |
-|---|---|
-| **Alias** | the alias you picked, for example `customer-kc` |
-| **Display name** | `Company account` |
-| **Discovery endpoint** | `https://<your-keycloak>/realms/<your-realm>/.well-known/openid-configuration` |
-| **Client authentication** | Client secret sent as post (Client secret as basic auth works too) |
-| **Client ID** | `meho-broker` |
-| **Client Secret** | the secret from step 1 |
+```bash
+read -rs CLIENT_SECRET     # paste the client secret; it is not shown
+kubectl create secret generic meho-company-login -n meho \
+  --from-literal=client_secret="$CLIENT_SECRET"
+unset CLIENT_SECRET
+```
 
-Click **Add**. Then, on the provider:
+If a private CA signs your Keycloak's certificate, also store the CA
+in a ConfigMap and set `caBundle` (see
+[Company login with authentik](../company-login-authentik.md#1-store-the-client-secret)).
 
-- **Use PKCE**: On. **PKCE Method**: `S256`.
-- **Scopes**: `openid profile email`.
-- **Sync mode**: `Force`.
-- **Trust Email**: On.
+## 4. Add the Helm values
 
-Check that **Redirect URI** at the top of the page matches the one in
-your client.
+Add this to your values file, next to your other `coreKeycloak`
+values:
+
+```yaml
+coreKeycloak:
+  companyLogin:
+    enabled: true
+    alias: company
+    displayName: Company account
+    discoveryUrl: https://<your-keycloak>/realms/<your-realm>/.well-known/openid-configuration
+    clientId: meho-broker
+    clientSecret:
+      secretName: meho-company-login
+      secretKey: client_secret
+    scopes: openid profile email
+    groupsClaim: groups
+    groupMap:                         # your group -> MEHO group
+      meho-readers: MEHO-Readers
+      meho-operators: MEHO-Operators
+      meho-sa-operators: MEHO-SA-Operators
+      meho-admins: MEHO-Admins
+      meho-approvers: MEHO-Approvers
+    autoRedirect: false               # true later: go straight to your Keycloak
+```
+
+- `groupMap`: the left side is your group's name, the right side is
+  the MEHO group. **Only the groups you list here give access.**
+- `autoRedirect`: with `true`, MEHO's Keycloak sends everyone straight
+  to yours and never shows its own password form. Start with `false`,
+  so the first admin can still log in with a password. Switch to
+  `true` once a person from your Keycloak is in `MEHO-Admins`.
+
+Then run `helm upgrade` as in
+[Install or upgrade](../company-login-authentik.md#3-install-or-upgrade).
+The install notes print the redirect URI. Check that it is the same as
+the one in your client. If you turn the company login on for an
+install that already exists, read the note in that section first.
+
+The install sets up the login with PKCE (`S256`). It makes one group
+rule per `groupMap` line. MEHO's Keycloak checks the groups at every
+login: remove a person from your group, and MEHO's Keycloak removes
+them from the MEHO group at their next login.
 
 !!! warning "Your Keycloak needs one fixed address"
     MEHO's Keycloak checks that every token from your Keycloak names the
@@ -130,57 +166,9 @@ carries the person's email, first name and last name. Keep the scopes
 `openid profile email` and fill those fields in your Keycloak. The
 person keeps the username from your Keycloak.
 
-## 4. Map each of your groups to a MEHO group
-
-On the provider → **Mappers** → **Add mapper**. Make one mapper per
-MEHO group:
-
-| Setting | Value |
-|---|---|
-| **Name** | `MEHO-Operators` (the MEHO group) |
-| **Sync mode override** | `Force` |
-| **Mapper type** | `Advanced Claim to Group` |
-| **Claims** | Key `groups`, Value your group's name, for example `meho-operators` |
-| **Regex Claim Values** | Off |
-| **Group** | `/MEHO-Operators` |
-
-All five:
-
-| Claim key | Claim value | Group |
-|---|---|---|
-| `groups` | `meho-readers` | `/MEHO-Readers` |
-| `groups` | `meho-operators` | `/MEHO-Operators` |
-| `groups` | `meho-sa-operators` | `/MEHO-SA-Operators` |
-| `groups` | `meho-admins` | `/MEHO-Admins` |
-| `groups` | `meho-approvers` | `/MEHO-Approvers` |
-
-With **Force**, Keycloak checks the groups at every login. Remove a
-person from your group, and Keycloak removes them from the MEHO group
-at their next login.
-
-Never add a mapper that writes `tenant_id`, `tenant_role`, `approver`
-or `platform_admin` on the person. The MEHO group gives those.
-
 Your Keycloak's own checks stay in place: its password policy, MFA and
 blocked accounts. They run when MEHO's Keycloak sends the person to
 yours.
-
-## 5. Optional: send people straight to your Keycloak
-
-By default MEHO's login page shows a username and password form and a
-**Company account** button. To skip it:
-
-1. **Authentication → Flows** → **browser** → **Action → Duplicate**.
-2. In the copy, open the settings (gear) of **Identity Provider
-   Redirector**. Set **Default Identity Provider** to your alias.
-3. **Action → Bind flow** → **Browser flow**.
-
-Or add `kc_idp_hint=<alias>` to a login link. That skips the form for
-that link only.
-
-Do this only after a person from your Keycloak is in `MEHO-Admins`.
-Local users in MEHO's Keycloak, such as the first admin, then no
-longer see the password form.
 
 ## The rules
 

@@ -45,8 +45,8 @@ What is true after the Job ran:
   approve their own request.
 - The console admin can log in to the admin console at
   `https://<host>/auth/admin/master/console/#/meho` (with
-  `coreKeycloak.ingress.exposeAdmin: true`), pick realm `meho` and set up
-  the company login (identity providers, user federation, mappers). MEHO
+  `coreKeycloak.ingress.exposeAdmin: true`), pick realm `meho` and manage
+  people and user directories (LDAP user federation). MEHO
   refuses its token: it does not come from realm `meho`.
 - A second run with the same values changes nothing.
 - The Job's output names objects and says `created`, `kept` or `removed`. It
@@ -87,8 +87,10 @@ pair never leaves one person with a stored password that does not work.
 Without it nobody could administer realm `meho`: the first-start account
 is removed on the first run, `meho-admin` has only `manage-clients` and
 `manage-users`, and the two people have no Keycloak admin rights. The
-company-login recipes (docs-site/install/login/) need an identity
-provider or a user federation, which only a realm admin can add.
+AD / LDAP recipe (docs-site/install/login/ad-ldap.md) needs a user
+federation, which only a realm admin can add. A company login through
+OpenID Connect is set from Helm values instead ("The company login"
+below).
 
 `meho-realm` is the client Keycloak makes in realm `master` to administer
 realm `meho`. Its roles give the same powers over realm `meho` as
@@ -100,7 +102,9 @@ Two limits on the console admin:
   person of realm `meho` with no password and no code. It could then
   approve in the web console in an approver's name, and the audit would
   name the approver. The Job never grants it. A role granted by hand
-  stays: the Job only adds roles.
+  stays: the Job only adds roles. This closes only the direct way in:
+  `manage-users` still lets the console admin reset a person's password
+  and log in as them. Treat it as a full admin of realm `meho`.
 - **An authenticator code.** Realm `master` asks for no code by default.
   The user is made with the required actions `UPDATE_PASSWORD` and
   `CONFIGURE_TOTP`, so the first login sets both a new password and a

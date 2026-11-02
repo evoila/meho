@@ -1288,8 +1288,8 @@ coreKeycloak:
     approverUsername: approver
     # -- User name of the console admin: a user of realm `master` who
     # administers realm `meho` in the Keycloak admin console (every role of
-    # the master client `meho-realm` except `impersonation`), for example to add your company
-    # login. It is not a user of realm `meho`, so MEHO refuses it and
+    # the master client `meho-realm` except `impersonation`), for example to connect a user
+    # directory (LDAP). It is not a user of realm `meho`, so MEHO refuses it and
     # `meho-admin` cannot reach it. Its temporary password is in
     # `<release>-core-console-admin`. Made at the first install only.
     consoleAdminUsername: console-admin

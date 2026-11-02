@@ -37,12 +37,16 @@ The full decision, with the reasons, is in the
 | Nowhere yet, or a small team | [Local users](local-users.md): create them in Keycloak. |
 | Active Directory or another LDAP directory | [AD / LDAP](ad-ldap.md): Keycloak reads the directory. |
 | Microsoft Entra ID | [Entra ID](entra-id.md): Keycloak sends people to Entra. |
-| authentik | [authentik](authentik.md): same pattern as Entra ID. |
+| authentik | [Company login with authentik](../company-login-authentik.md): set up with Helm values. |
 | Your own Keycloak | [Your own Keycloak](customer-keycloak.md): it stays in front of MEHO's Keycloak. |
 
-Okta or ADFS work like Entra ID: an OpenID Connect identity provider
-plus one group mapper per MEHO group. We have not tested them. For
-another Keycloak, see [Your own Keycloak](customer-keycloak.md).
+Entra ID, authentik and your own Keycloak connect through OpenID
+Connect. You set them up with the Helm values
+`coreKeycloak.companyLogin`, not by hand in the Keycloak admin
+console. Okta or ADFS work the same way. We have not tested them.
+
+Active Directory / LDAP is not OpenID Connect. The Helm values cannot
+set it up, so that recipe uses the Keycloak admin console.
 
 ## The rules
 

@@ -103,8 +103,8 @@ Company login (built-in Keycloak):
 
 Keycloak admin console (realm meho):
   The first install also made the console admin, a user of realm master who
-  administers realm meho in the Keycloak admin console (for example to add
-  your company login). MEHO refuses it. The Secret {{ printf "%s-core-console-admin" .Release.Name }} holds
+  administers realm meho in the Keycloak admin console (for example to connect
+  a user directory, LDAP). MEHO refuses it. The Secret {{ printf "%s-core-console-admin" .Release.Name }} holds
   its user name and temporary password. At the first login it sets a new
   password and an authenticator code:
        kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-console-admin" .Release.Name }} -o jsonpath='{.data.username}' | base64 -d

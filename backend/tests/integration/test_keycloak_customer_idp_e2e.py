@@ -464,6 +464,7 @@ def site(network: Network) -> Iterator[_OurSite]:
         BOOTSTRAP_SECRET_ENV: secrets.token_hex(16),
         "MEHO_REALM_PUBLIC_URL": _PUBLIC_URL,
         "MEHO_REALM_TENANT_ID": _TENANT_ID,
+        "MEHO_REALM_TENANT_NAME": "main",
         ADMIN_SECRET_ENV: secrets.token_hex(16),
         "MEHO_REALM_WEB_CLIENT_SECRET": secrets.token_hex(16),
         "MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET": secrets.token_hex(16),
@@ -480,6 +481,7 @@ def site(network: Network) -> Iterator[_OurSite]:
         .with_env("KC_BOOTSTRAP_ADMIN_PASSWORD", master_admin_password)
         .with_env("MEHO_REALM_PUBLIC_URL", _PUBLIC_URL)
         .with_env("MEHO_REALM_TENANT_ID", _TENANT_ID)
+        .with_env("MEHO_REALM_TENANT_NAME", "main")
         .with_env("MEHO_REALM_ADMIN_CLIENT_SECRET", env[ADMIN_SECRET_ENV])
         .with_env("MEHO_REALM_WEB_CLIENT_SECRET", env["MEHO_REALM_WEB_CLIENT_SECRET"])
         .with_env(
@@ -665,7 +667,7 @@ async def test_leaving_the_customer_group_removes_the_tenant_at_the_next_login(
     with pytest.raises(HTTPException) as refused:
         await _verify(site, after["access_token"], monkeypatch)
     assert refused.value.status_code == 401
-    assert refused.value.detail == "missing_tenant_claim"
+    assert str(refused.value.detail).startswith("missing_tenant_claim"), refused.value.detail
 
 
 # --- 3. MEHO does not take the customer's own tokens -------------------------

@@ -29,7 +29,9 @@ B. **Different names.** The directory has ``SG-MEHO-Ops`` and friends. One
 In both, leaving the directory group takes the tenant away at the next
 login (READ_ONLY reads membership from LDAP), and a refresh of an older
 session loses it too. In B the ``groups`` claim names the directory group,
-so MEHO's one-group check needs ``JWT_ROLE_GROUPS`` to list the SG-* names.
+but the ``meho_tenants`` claim of the shipped realm still lists the tenant
+once per inherited MEHO group, so MEHO refuses a person in two SG-* groups
+without any ``JWT_ROLE_GROUPS`` setting.
 
 The login is the password grant on ``meho-cli`` (switched on by the
 ``baseline`` fixture); Keycloak checks the password against LDAP. Adding user
@@ -670,21 +672,23 @@ async def test_b_two_directory_groups_need_the_sg_names_in_jwt_role_groups(
     assert sorted(claims["groups"]) == ["SG-MEHO-Admin", "SG-MEHO-Ops"]
     assert claims.get("tenant_role") in {"operator", "tenant_admin"}
 
-    # Default JWT_ROLE_GROUPS (the five MEHO-* names): the claim names none
-    # of them, so the one-group check does not see the conflict.
+    # The SG-* groups inherit meho_tenant from their MEHO parent, so the
+    # meho_tenants claim lists the tenant twice. MEHO refuses that with or
+    # without the directory names in JWT_ROLE_GROUPS.
+    print(f"[B] two groups: meho_tenants {claims.get('meho_tenants')}")
+    assert len(claims["meho_tenants"]) == 2
+    for role_groups in (None, ",".join([*_MEHO_GROUPS, *_RENAMED])):
+        if role_groups is None:
+            monkeypatch.delenv("JWT_ROLE_GROUPS", raising=False)
+        else:
+            monkeypatch.setenv("JWT_ROLE_GROUPS", role_groups)
+        detail = await _assert_refused(site, access_token, "multiple_role_groups", monkeypatch)
+        print(f"[B] two groups, JWT_ROLE_GROUPS={role_groups}: {detail}")
+        assert ":Operators" in detail
+        assert ":Admins" in detail
+
+    # A member of one SG group passes.
     monkeypatch.delenv("JWT_ROLE_GROUPS", raising=False)
-    operator = await _verify(site, access_token, monkeypatch)
-    print(f"[B] two groups, default JWT_ROLE_GROUPS: accepted as {operator.tenant_role.value}")
-    assert operator.tenant_role.value == claims["tenant_role"]
-
-    # With the directory names listed too, MEHO refuses it.
-    monkeypatch.setenv("JWT_ROLE_GROUPS", ",".join([*_MEHO_GROUPS, *_RENAMED]))
-    detail = await _assert_refused(site, access_token, "multiple_role_groups", monkeypatch)
-    print(f"[B] two groups, JWT_ROLE_GROUPS with SG-*: {detail}")
-    assert "SG-MEHO-Ops" in detail
-    assert "SG-MEHO-Admin" in detail
-
-    # A member of one SG group still passes with the longer list.
     single = ldap.add_person(_PEOPLE_B, "b-one-group", _GROUPS_B, ["SG-MEHO-Ops"])
     one_token = _password_login(site, "b-one-group", single)["access_token"]
     assert (await _verify(site, one_token, monkeypatch)).tenant_role is TenantRole.OPERATOR

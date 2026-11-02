@@ -536,14 +536,23 @@ customer's security team. `render_firewall_rules` writes it.
 - **The machine's own traffic passes first.** Packets on `lo`, on Calico's
   pod interfaces (`cali*`) and on flannel's VXLAN interface (`flannel*`)
   come from this machine or its pods. The chain accepts them before any
-  other rule. Then it accepts the packets of connections that are already
+  other rule. `lo` matches by its index (`iif "lo"`, `oif "lo"`): it always
+  exists, and CIS rule 4.3.6 looks for exactly `iif "lo" accept`. The
+  others match by name (`iifname "cali*"`), because Calico and flannel
+  create them later and the names need a wildcard (nft(8), "META
+  EXPRESSIONS"). Then it accepts the packets of connections that are already
   open (`ct state established,related`), and drops packets that
   connection tracking marks invalid.
-- **Pod and service ranges.** A packet from a network card with a source
-  address in the pod or service range is forged, so the chain drops it.
-  The ranges are the `--cluster-cidr` and `--service-cidr` values that
-  `config.yaml` gets too. The chain does not accept packets by these
-  ranges alone, because anyone on the network can forge a source address.
+- **Forged sources.** A packet from a network card with a source address
+  in the loopback range (`127.0.0.0/8`, `::1`), the pod range or the
+  service range is forged, so the chain drops it. kube-proxy in iptables
+  mode sets `net.ipv4.conf.all.route_localnet` to 1 for NodePorts on
+  127.0.0.1 (`--iptables-localhost-nodeports`, on by default). With it,
+  the kernel no longer treats a loopback address as invalid ("martian")
+  itself (ip-sysctl, `route_localnet`). The pod and service ranges are the
+  `--cluster-cidr` and `--service-cidr` values that `config.yaml` gets
+  too. The chain does not accept packets by these ranges alone, because
+  anyone on the network can forge a source address.
 - **Only for this machine.** The accept rules for 80, 443, SSH and ping
   match `fib daddr type local`: the packet is for an address of this
   machine. RKE2 turns IP forwarding on, so without this match a packet
@@ -558,8 +567,10 @@ customer's security team. `render_firewall_rules` writes it.
 - **Three chains for the appliance.** The table also has base chains on
   the `input`, `forward` and `output` hooks, at priority `filter` (0).
   They hold the rules of the MEHO appliance for traffic to the machine,
-  through it and from it. On a form-2 machine their policy is `accept`
-  and they have no drop rule, so they change nothing. The appliance build
+  through it and from it. On a form-2 machine their policy is `accept`.
+  Their only drop rules are the two loopback rules of CIS 4.3.6 in
+  `input`, for packets that `prerouting` drops first, so they change
+  nothing. The appliance build
   sets the three policies to `drop` and changes nothing else (form-2
   design, section 2, "One file for both forms"; ADR 0009 decision 1). The
   CIS Ubuntu 24.04 rules 4.3.5 to 4.3.8 look for a base chain with policy
@@ -574,22 +585,43 @@ customer's security team. `render_firewall_rules` writes it.
     hook. The kubelet, the API server and etcd reach each other over `lo`,
     also when they use the machine's own address, because Linux sends a
     packet for a local address through `lo`. Pods reach them over their
-    `cali*` interfaces. The drop rules of `prerouting` (`ct state invalid`
-    and the forged pod and service sources) stay in `prerouting` only.
+    `cali*` interfaces. After the cluster interfaces it drops the loopback
+    sources `127.0.0.0/8` and `::1`, the rules that CIS rule 4.3.6 looks
+    for. Its check (ComplianceAsCode `set_nftables_loopback_traffic`)
+    reads `nft list ruleset | awk '/hook input/,/}/'`: from the
+    `hook input` line to the next line with a closing brace. There it wants
+    `iif "lo" accept`, an `ip saddr` rule and, with IPv6 on, an
+    `ip6 saddr` rule. So these rules come before the first set of the
+    chain. The other drop rules of `prerouting` (`ct state invalid` and the
+    forged pod and service sources) stay in `prerouting` only.
   - `forward`: connections already set up, packets that the port
     forwarding rewrote (`ct status dnat`), and the pod and service ranges
     as source or destination.
   - `output`: `lo` and the cluster interfaces (for example the kubelet's
-    health checks), connections already set up, the pod and service
+    health checks), the machine's own addresses (`fib daddr type local`,
+    below), connections already set up, the pod and service
     ranges, DNS (UDP and TCP 53), NTP (UDP 123), the requests of the DHCP
     clients, ping, IPv6 neighbour discovery, and the multicast listener
     reports of MLD versions 1 and 2. Linux sends version 2 by default
     (`force_mld_version` is 0), so the chain accepts
     `mld2-listener-report` next to the design's list. The rule for the
     customer's log server comes with `meho-host log-server` (#4739).
-  - The loopback drop rules that CIS rule 4.3.6 also looks for (packets
-    from `127.0.0.0/8` or `::1` on a network card) are not in the file.
-    They can come with the appliance build.
+  - `fib daddr type local` in `output` is for kube-proxy's destination
+    NAT. A connection from this machine to a service whose endpoint is
+    this machine, for example the Kubernetes API service `10.43.0.1:443`,
+    gets the machine's own address (`<host>:6443`) in the NAT of the
+    output hook (priority `dstnat`). The chain `output` (priority
+    `filter`) then still sees the network card of the first route as the
+    output interface, not `lo`, so `oif "lo"` does not match it. The
+    week-4 install (#4741) showed this with `nft monitor trace`. Without
+    the rule, with the policy `drop`, Calico's CNI plugin could not reach
+    the API service, and no new pod started (#5629). nft(8) allows the
+    `type` result of `fib` in the output hook.
+  - On the week-4 install (#4741), with the three policies set to `drop`
+    and these rules, the ComplianceAsCode checks of the CIS rules 4.3.5,
+    4.3.6 and 4.3.8 pass, new pods start, and every pod is Ready again
+    after a restart of the machine. Before #5631, the file had no loopback
+    drop rules, and 4.3.6 failed.
 - **The customer's own rules.** The header of the file says where they
   go: accept rules in the chain `prerouting`, before its last rule
   (`counter`), then a reload. The form-2 design (section 8) tells the
@@ -933,16 +965,25 @@ machine for each test:
 `tests/test_firewall.py` covers the admin network check, the three
 firewall files, the order of step 2, firewalld and ufw, the port list and
 `firewall_state`. It also checks that the chains `input`, `forward` and
-`output` have policy `accept` and no drop rule, and that the chain `input`
+`output` have policy `accept` and no drop rule except the two loopback
+drops in `input`, that these come before the first set of `input`, that
+`output` accepts `fib daddr type local`, and that the chain `input`
 accepts the same traffic as the chain `prerouting`, so the two cannot
 drift apart. `tests/test_firewall_nft.py` checks the written rules
 file with the real `nft` and the real kernel: `nft -c -f`, and a load
 twice next to stand-in tables of kube-proxy and Canal. It also loads the
 appliance variant, with the three policies set to `drop`, and opens a TCP
-connection over `lo` with it. It runs in a new
+connection over `lo` with it. With a dummy network card and a stand-in
+for kube-proxy's NAT, it connects to `10.43.0.1:443`, which the NAT sends
+to the machine's own address; without `fib daddr type local` in `output`
+that connection times out. It also runs the checks of the CIS rules
+4.3.5, 4.3.6 and 4.3.8 (as the ComplianceAsCode scripts do them) on the
+real `nft list ruleset`, for the form-2 file and the appliance variant.
+It runs in a new
 user and network namespace (`unshare --map-root-user --net`), so the
 machine's own firewall stays as it is. It needs `nft`, user namespaces and
-a kernel with `nft_ct` and `nft_fib_inet`, and it is skipped without them.
+a kernel with `nft_ct` and `nft_fib_inet`, and the service test also needs
+`ip` and dummy network cards. It is skipped without them.
 The CI job installs `nftables` and sets `MEHO_REQUIRE_NFT_CHECK=1`, which
 turns that skip into a failure.
 
@@ -1065,14 +1106,12 @@ Tasks add in this folder are checked by the same job.
   reason, and `check-download.sh` checks every digest; see
   [linux-server-download.md](linux-server-download.md). A `docker save`
   archive would get new digests, and RKE2 would not find the images offline.
-- **The CIS profile is not proven on a real machine yet.** The tests here
+- **The CIS profile is proven on one real machine only.** The tests here
   prove the files and the order of the steps, not RKE2 itself. The week-4
-  install (#4741) checks that every pod is Ready under the profile, that no
-  MEHO namespace needs an exception, and that the console loads through
-  Traefik. An offline check of the chart, rendered with
-  `values-single-node.yaml`, found no pod of the `meho` namespace that
-  breaks the "restricted" rules, but only the API server's own check
-  proves it.
+  install (#4741, MEHO 0.41.0 on Ubuntu 24.04) had every pod Ready under
+  the profile with no MEHO namespace exception, and the console loaded
+  through Traefik. The release test (#4742) repeats this for every
+  release.
 - **A later sysctl file can undo a kernel setting.** The install stops when
   a file that `systemd-sysctl` reads after `60-rke2-cis.conf` sets one of
   RKE2's values again. If someone adds such a line after the install, RKE2
@@ -1082,16 +1121,16 @@ Tasks add in this folder are checked by the same job.
   The admin network is IPv4 too, so SSH over IPv6 gets no answer.
 - **SSH on port 22 only.** The rules open SSH on port 22. A session on
   another port stops the install (see [The admin network](#the-admin-network)).
-- **The live proof is still open.** No test here runs RKE2 with Canal
-  behind the rules. The week-4 install (#4741) checks them on a real
-  machine: `ss -tulpn`, a port scan from inside and outside the admin
-  network, the console in a browser, the redirect of port 80, and every
-  pod Ready. It records the real port list, and the closed list in
-  `lib/firewall.sh` follows it. It also sets the policies of the chains
-  `input`, `forward` and `output` to `drop`, as the appliance does, and
-  checks the CIS rules 4.3.5 to 4.3.8 with Canal running. The kernel test
-  here proves only that nft loads that variant and that traffic over `lo`
-  passes it.
+- **The live proof is from one machine.** No test here runs RKE2 with
+  Canal behind the rules. The week-4 install (#4741) checked them on a
+  real machine: from the admin network only TCP 22, 80 and 443 answer,
+  from outside it only 80 and 443, port 80 redirects, and every pod is
+  Ready. With the policies of `input`, `forward` and `output` set to
+  `drop`, as the appliance does, it found the two gaps that #5629 and
+  #5631 close. The real port list is in #4741; the port check of step 1
+  follows it in #5632. The kernel tests here prove that nft loads the
+  appliance variant, that traffic over `lo` and to a service on the
+  machine itself passes it, and that the CIS checks pass on it.
 - **A customer's `nftables.service`.** Its stop command (and on RHEL its
   reload) runs `flush ruleset`, which removes the MEHO table and the rules
   of kube-proxy and Canal. RKE2 keeps running until its next start, which

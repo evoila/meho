@@ -538,7 +538,7 @@ set them once (see [A realm that already runs](#a-realm-that-already-runs)).
   [The web console session](#the-web-console-session)). Deny needs no new
   sign-in.
 - **The console keeps its own limit.** MEHO ends a console session after
-  `UI_SESSION_ABSOLUTE_LIFETIME_SECONDS` (12 hours by default). The longer
+  `UI_SESSION_ABSOLUTE_LIFETIME_SECONDS` (10 hours by default). The longer
   Keycloak login does not make it longer. After that limit the console
   sends the person to the login page. In a remembered browser, that login
   asks nothing, and the new session can read and deny, but not approve

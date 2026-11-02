@@ -110,6 +110,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.http import HttpConnector, json_payload_or_empty
 from meho_backplane.connectors.schemas import (
@@ -223,6 +224,10 @@ class VcfAutomationConnector(HttpConnector, VraSharedHandlers):
         # token; the tenant id in the key keeps tenants apart (#1642/#1672).
         self._provider_tokens: dict[tuple[str, ...], str] = {}
         self._tenant_tokens: dict[tuple[str, ...], str] = {}
+        # The callers whose own Vault read of a plane's secret passed, per plane:
+        # the provider plane may read another secret than the tenant plane.
+        self._provider_readers = SecretReaders()
+        self._tenant_readers = SecretReaders()
         # One lock per plane -- provider and tenant first-uses are
         # independent and shouldn't block each other.
         self._provider_lock = asyncio.Lock()
@@ -379,14 +384,23 @@ class VcfAutomationConnector(HttpConnector, VraSharedHandlers):
                 "cannot read per-target vendor credentials)"
             )
         cache_key = _plane_cache_key(target, "provider")
+        override_ref = getattr(target, "provider_secret_ref", None)
         async with self._provider_lock:
             cached = self._provider_tokens.get(cache_key)
             if cached is not None:
+                # The caller's own Vault read, once per caller and target.
+                await self._provider_readers.ensure_read(
+                    target,
+                    operator,
+                    lambda: load_credentials_with_override(
+                        self._credentials_loader, target, operator, override_ref
+                    ),
+                )
                 return cached
-            override_ref = getattr(target, "provider_secret_ref", None)
             creds = await load_credentials_with_override(
                 self._credentials_loader, target, operator, override_ref
             )
+            self._provider_readers.record(target, operator)
             client = await self._http_client(target)
             jwt = await vcfa_provider_login(
                 client, creds, target, request_extensions=self._request_extensions(target)
@@ -434,10 +448,19 @@ class VcfAutomationConnector(HttpConnector, VraSharedHandlers):
         async with self._tenant_lock:
             cached = self._tenant_tokens.get(cache_key)
             if cached is not None:
+                # The caller's own Vault read, once per caller and target.
+                await self._tenant_readers.ensure_read(
+                    target,
+                    operator,
+                    lambda: load_credentials_with_override(
+                        self._credentials_loader, target, operator, None
+                    ),
+                )
                 return cached
             creds = await load_credentials_with_override(
                 self._credentials_loader, target, operator, None
             )
+            self._tenant_readers.record(target, operator)
             client = await self._http_client(target)
             token = await tenant_login(
                 client, creds, target, request_extensions=self._request_extensions(target)
@@ -1732,6 +1755,10 @@ class VcfAutomationConnector(HttpConnector, VraSharedHandlers):
         """
         await self._invalidate_plane(target, "provider", None)
         await self._invalidate_plane(target, "tenant", None)
+        async with self._provider_lock:
+            self._provider_readers.forget(target)
+        async with self._tenant_lock:
+            self._tenant_readers.forget(target)
 
     async def aclose(self) -> None:
         """Clear both plane token caches and tear down the httpx pool.
@@ -1743,8 +1770,10 @@ class VcfAutomationConnector(HttpConnector, VraSharedHandlers):
         """
         async with self._provider_lock:
             self._provider_tokens.clear()
+            self._provider_readers.clear()
         async with self._tenant_lock:
             self._tenant_tokens.clear()
+            self._tenant_readers.clear()
         await super().aclose()
 
 

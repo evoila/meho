@@ -6709,7 +6709,11 @@ class ApprovalRequest(Base):
       request id, not the params — can re-dispatch with the stored params
       rather than only recording the decision. Nullable so pre-0036 rows
       remain valid. Internal re-dispatch input; never serialised onto a
-      read view or broadcast frame.
+      read view or broadcast frame. Each secret-named value in it (a
+      password or a licence key inside a deployment spec) is replaced by a
+      marker as soon as the run claim is won or the request ends without a
+      run (``approval_queue.claim_resume`` / ``end_run_input``); migration
+      ``0132`` did the same for the rows that were already decided.
 
     * ``proposed_effect`` -- JSON (JSONB on PG). Human-readable summary of
       what the op would do if approved; populated at queue time; JSONB for

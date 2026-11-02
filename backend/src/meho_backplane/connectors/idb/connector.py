@@ -49,6 +49,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
 )
@@ -144,6 +145,8 @@ class IdbConnectorBase(HttpConnector):
         )
         self._credentials: dict[_CacheKey, IdbCredentials] = {}
         self._tokens: dict[_CacheKey, _Token] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._token_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
@@ -179,6 +182,10 @@ class IdbConnectorBase(HttpConnector):
         key = self._key(target)
         use_cache = _may_use_cache(operator)
         async with self._token_lock:
+            if use_cache and not self._readers.has_read(target, operator):
+                # The caller's own Vault read, once per caller and target.
+                self._credentials[key] = await self._credentials_loader(target, operator)
+                self._readers.record(target, operator)
             token = self._tokens.get(key) if use_cache else None
             if token is not None and token.expires_at > time.monotonic():
                 return token.headers()
@@ -256,11 +263,13 @@ class IdbConnectorBase(HttpConnector):
         async with self._token_lock:
             self._credentials.pop(key, None)
             self._tokens.pop(key, None)
+            self._readers.forget(target)
 
     async def aclose(self) -> None:
         """Forget every cached secret and token, then close the HTTP clients."""
         self._credentials.clear()
         self._tokens.clear()
+        self._readers.clear()
         await super().aclose()
 
     def trace_response_body(self, response: httpx.Response) -> Any:

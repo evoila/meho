@@ -57,6 +57,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -111,6 +112,8 @@ class CloudBuilderConnector(HttpConnector):
     def __init__(self, *, credentials_loader: InstallerCredentialsLoader | None = None) -> None:
         super().__init__()
         self._creds_cache: dict[tuple[str, str], dict[str, str]] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._creds_lock = asyncio.Lock()
         self._credentials_loader: InstallerCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
@@ -180,11 +183,19 @@ class CloudBuilderConnector(HttpConnector):
         """The cached ``{username, password}`` of *target*, read from Vault on first use.
 
         The system operator never reads from or writes to the cache.
+
+        A cached entry is handed to a caller only after that caller's own
+        Vault read of the target's secret passed once in this process
+        (:class:`~meho_backplane.connectors._shared.secret_readers.SecretReaders`).
+        A hit for another caller runs the loader under their login first.
+        The synthesised system operator is never recorded, so it always runs
+        the loader. A caller who has read keeps cold load → cache →
+        reuse.
         """
         cache_key = target_cache_key(target)
         async with self._creds_lock:
             cached = self._creds_cache.get(cache_key)
-            if cached is not None and not is_system_operator(operator):
+            if cached is not None and self._readers.has_read(target, operator):
                 return cached
             raw = await self._credentials_loader(target, operator)
             for key in ("username", "password"):
@@ -196,6 +207,7 @@ class CloudBuilderConnector(HttpConnector):
                     )
             if not is_system_operator(operator):
                 self._creds_cache[cache_key] = raw
+                self._readers.record(target, operator)
             _log.info("cloud_builder_credentials_loaded", target=target.name, host=target.host)
             return raw
 
@@ -203,6 +215,7 @@ class CloudBuilderConnector(HttpConnector):
         """Forget the cached account of *target*; the next call reads Vault again."""
         async with self._creds_lock:
             self._creds_cache.pop(target_cache_key(target), None)
+            self._readers.forget(target)
 
     async def send(
         self,
@@ -408,5 +421,6 @@ class CloudBuilderConnector(HttpConnector):
         """Forget cached accounts and remembered secrets, then close the HTTP pool."""
         async with self._creds_lock:
             self._creds_cache.clear()
+            self._readers.clear()
         self._secret_memory.clear()
         await super().aclose()

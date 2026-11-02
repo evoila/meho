@@ -1690,10 +1690,11 @@ async def test_service_ingest_rejects_divergent_product_with_handrolled_impl_no_
         cls=VcfLogsConnector,
     )
     operator = Operator(
-        sub="tenant-admin",
+        sub="platform-admin",
         raw_jwt="test-jwt",
         tenant_id=uuid.uuid4(),
         tenant_role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
     )
     service = IngestionPipelineService(operator=operator)
 

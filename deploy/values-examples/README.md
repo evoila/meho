@@ -36,6 +36,13 @@ request.
 
 ## Files
 
+Every file here brings its own PostgreSQL, Keycloak and Vault (or GSM), so
+each sets `corePostgres.enabled`, `coreKeycloak.enabled` and
+`coreVault.enabled` to `false`. Since chart 0.2.0 the three built-in parts
+are on by default (#4047); a values file of your own that brings its own
+parts needs the same three lines. For the built-in core, start from
+`deploy/linux-server/values-single-node.yaml` instead.
+
 | File | Targets | Backed by |
 | --- | --- | --- |
 | [`values-rdc-example.yaml`](./values-rdc-example.yaml) | The RDC Hetzner lab (`*.evba.lab` hosts, rke2-infra ingress-nginx, cluster-internal Postgres + Vault + Keycloak). | The actual, private file lives in `evoila-bosnia/claude-rdc-hetzner-dc`'s `manifests/meho/values-rdc.yaml`; this file is the sanitized template for other Vault-+-Keycloak-+-Postgres-shaped labs. |

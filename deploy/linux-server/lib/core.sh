@@ -63,14 +63,13 @@ tenant_id() {
     fi
 }
 
-# render_place_values <hostname> <tenant id> <admin user> <approver user> <pod range>:
+# render_place_values <hostname> <tenant id> <admin user> <approver user>:
 # print the answers of this place as Helm values (form-2 design, section 6).
-# shortcut: the two network-policy ranges are wiring, not a place answer,
-# until the chart derives them from its built-in parts (#4047); drop them
-# then. The update writes this file again from the install record, so the
-# next update removes them from existing place files.
+# The update writes this file again from the install record, so it also
+# drops the two network-policy ranges older installs wrote here: the chart
+# reaches its built-in parts by pod label since #4047.
 render_place_values() {
-    local hostname=$1 tenant_id=$2 admin_user=$3 approver_user=$4 pod_range=$5
+    local hostname=$1 tenant_id=$2 admin_user=$3 approver_user=$4
     cat <<EOF
 # Written by MEHO install.sh: the answers of this place. A later run of
 # install.sh passes this file to Helm again. It holds no secret.
@@ -82,12 +81,6 @@ coreKeycloak:
   firstLogin:
     adminUsername: "${admin_user}"
     approverUsername: "${approver_user}"
-# shortcut: the pod range, so MEHO may reach the built-in PostgreSQL and
-# OpenBao, until the chart derives these from its built-in parts (#4047).
-# Then the next update removes the two keys.
-networkPolicy:
-  postgresCIDR: "${pod_range}"
-  vaultCIDR: "${pod_range}"
 EOF
 }
 

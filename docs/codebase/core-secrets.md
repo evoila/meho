@@ -22,13 +22,15 @@ What is true after the Job ran:
 With every built-in part off (bring-your-own), the chart renders none of the
 new objects, so existing installs render byte for byte as before.
 
-Pointing MEHO's own pods at these Secrets (the backplane, Valkey, the
-Ingress) is the work of the wiring Task (#4047). With the built-in
-PostgreSQL on, the database migration already runs in the backplane pod, as
-its `migrate` init container (#5233). Until #4047 lands
-an install can point at a made Secret by name, for example
-`approvalHandoff.secretName: <release>-core-approval-handoff` (see
-"Use your own Secret" below).
+The chart points the backplane and the Ingress at these Secrets itself
+(#4047, [devops.md](devops.md#wiring-the-built-in-core-to-the-backplane-templates_core-wiringtpl-4047)):
+`DATABASE_URL` from `-core-postgres-meho`, the approval hand-off key from
+`-core-approval-handoff` (on by default with a built-in part), and the
+Ingress certificate from `-core-tls`. With the built-in PostgreSQL on, the
+database migration runs in the backplane pod, as its `migrate` init
+container (#5233). `postgres.credentialsSecret` cannot name a Secret of
+your own while `corePostgres.enabled` is on: the PostgreSQL pod sets the
+`meho` password from `-core-postgres-meho` only, so the render stops.
 
 ## The Secrets
 
@@ -39,7 +41,7 @@ Names are `<release>-core-…`. "alnum 32" means 32 characters from
 | Secret | Keys | Format | Made when | Values key for your own Secret |
 |---|---|---|---|---|
 | `-core-postgres-superuser` | `password` | alnum 32 | `corePostgres.enabled` | `corePostgres.existingSecrets.superuser` |
-| `-core-postgres-meho` | `password`, `url` | alnum 32; `postgresql+asyncpg://meho:<password>@<release>-postgres:5432/meho` | `corePostgres.enabled` | `postgres.credentialsSecret` |
+| `-core-postgres-meho` | `password`, `url` | alnum 32; `postgresql+asyncpg://meho:<password>@<release>-postgres:5432/meho` (the owner login that runs the migrations) | `corePostgres.enabled` | none: `postgres.credentialsSecret` must stay empty or name this Secret (#4047) |
 | `-core-postgres-meho-app` | `password`, `url` | alnum 32; `postgresql+asyncpg://meho_app:<password>@<release>-postgres:5432/meho` (the login of the running backplane; `meho` above runs the migrations) | `corePostgres.enabled` | `postgres.runtime.credentialsSecret` (must stay empty or name this Secret, see below) |
 | `-core-postgres-keycloak` | `password` | alnum 32 | `corePostgres.enabled` | `corePostgres.existingSecrets.keycloak` (not while `coreKeycloak.enabled` is on, see below) |
 | `-core-keycloak-bootstrap` | `client_id`, `client_secret` | alnum 32 | `coreKeycloak.enabled` | `coreKeycloak.existingSecrets.bootstrap` |
@@ -226,9 +228,9 @@ volumes together, or neither: new passwords do not match old data.
   user, one key per value. To rotate, write the new value and restart the
   pods that read it.
 - `-core-broadcast-auth` is made, but Valkey and the backplane keep reading
-  the subchart's own `<release>-broadcast-auth` until #4047 wires them. A
-  subchart cannot read the parent's `core*` values; only `global` or the
-  `broadcast:` block reach it.
+  the subchart's own `<release>-broadcast-auth`; the wiring (#4047) left it
+  out. A subchart cannot read the parent's `core*` values; only `global` or
+  the `broadcast:` block reach it.
 - The PostgreSQL subchart (#4039) must name its Service `<release>-postgres`;
   the made database URL points there.
 - A kept `-core-tls` keeps the host it was made for. After a change of

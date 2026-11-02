@@ -63,7 +63,7 @@ spec:
         - name: PGURL
           valueFrom:
             secretKeyRef:
-              name: {{ .Values.postgres.credentialsSecret }}
+              name: {{ include "meho.databaseSecretName" . }}
               key: url
       command:
         # ``bash`` rather than ``sh`` because the script uses

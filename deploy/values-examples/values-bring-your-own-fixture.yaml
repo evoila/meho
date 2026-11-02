@@ -89,6 +89,10 @@ config:
 # defaults are.
 corePostgres:
   enabled: false
+coreKeycloak:
+  enabled: false
+coreVault:
+  enabled: false
 
 postgres:
   host: postgres.meho.svc.cluster.local

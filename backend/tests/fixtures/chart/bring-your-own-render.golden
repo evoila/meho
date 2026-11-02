@@ -46,7 +46,7 @@ kind: NetworkPolicy
 metadata:
   name: test-meho
   labels:
-    helm.sh/chart: meho-chart-0.1.0
+    helm.sh/chart: meho-chart-<version>
     app.kubernetes.io/name: meho
     app.kubernetes.io/instance: test
     app.kubernetes.io/version: "0.1.0"
@@ -144,7 +144,7 @@ kind: Secret
 metadata:
   name: test-metrics-auth
   labels:
-    helm.sh/chart: meho-chart-0.1.0
+    helm.sh/chart: meho-chart-<version>
     app.kubernetes.io/name: meho
     app.kubernetes.io/instance: test
     app.kubernetes.io/version: "0.1.0"
@@ -228,7 +228,7 @@ kind: Service
 metadata:
   name: test-meho
   labels:
-    helm.sh/chart: meho-chart-0.1.0
+    helm.sh/chart: meho-chart-<version>
     app.kubernetes.io/name: meho
     app.kubernetes.io/instance: test
     app.kubernetes.io/version: "0.1.0"
@@ -377,7 +377,7 @@ kind: Deployment
 metadata:
   name: test-meho
   labels:
-    helm.sh/chart: meho-chart-0.1.0
+    helm.sh/chart: meho-chart-<version>
     app.kubernetes.io/name: meho
     app.kubernetes.io/instance: test
     app.kubernetes.io/version: "0.1.0"
@@ -400,7 +400,7 @@ spec:
         # means any change to what the pod consumes — config.*, memory.*,
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
-        checksum/config: cd847854582c3b10a8812fd9f2f61a32ded1ac6eda84c644539492c65c1d22d8
+        checksum/config: <checksum>
         # Roll the pod when the chart-made metrics token changes, so the
         # token the pod checks is the one the Secret holds. On a cluster
         # `lookup` keeps the value and the checksum stays stable.
@@ -446,7 +446,7 @@ spec:
             # is the only path that carries that value into the running
             # container (the image build does not know its chart release).
             - name: CHART_VERSION
-              value: "0.1.0"
+              value: "<version>"
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -663,7 +663,7 @@ kind: Ingress
 metadata:
   name: test-meho
   labels:
-    helm.sh/chart: meho-chart-0.1.0
+    helm.sh/chart: meho-chart-<version>
     app.kubernetes.io/name: meho
     app.kubernetes.io/instance: test
     app.kubernetes.io/version: "0.1.0"
@@ -691,7 +691,7 @@ kind: ConfigMap
 metadata:
   name: test-meho-config
   labels:
-    helm.sh/chart: meho-chart-0.1.0
+    helm.sh/chart: meho-chart-<version>
     app.kubernetes.io/name: meho
     app.kubernetes.io/instance: test
     app.kubernetes.io/version: "0.1.0"
@@ -961,7 +961,7 @@ kind: Pod
 metadata:
   name: test-meho-test-pgvector
   labels:
-    helm.sh/chart: meho-chart-0.1.0
+    helm.sh/chart: meho-chart-<version>
     app.kubernetes.io/name: meho
     app.kubernetes.io/instance: test
     app.kubernetes.io/version: "0.1.0"
@@ -1063,7 +1063,7 @@ kind: Job
 metadata:
   name: test-meho-migrate
   labels:
-    helm.sh/chart: meho-chart-0.1.0
+    helm.sh/chart: meho-chart-<version>
     app.kubernetes.io/name: meho
     app.kubernetes.io/instance: test
     app.kubernetes.io/version: "0.1.0"

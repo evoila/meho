@@ -12,7 +12,7 @@ first start `docs/codebase/appliance-firststart.md`.
 | `clean.sh` | Runs on the build VM: removes everything that must differ between appliances, checks itself, powers off. |
 | `rewrite-ovf.sh` | Puts our product section and the OVF transports into the exported `.ovf`. |
 | `product-section.xml` | The wizard fields of the import in vCenter. |
-| `firststart/` | Runs once at the appliance's first boot: reads the wizard fields, sets up the machine, installs the core from the disk. Also the console banner. |
+| `firststart/` | Runs once at the appliance's first boot: reads the wizard fields (or, without them, asks on the VM console), sets up the machine, installs the core from the disk. Also the console banner. |
 | `tests/` | Unit tests of `clean.sh`, `rewrite-ovf.sh`, `build.sh` (against a stub `govc`) and first start. No vCenter. |
 
 `.github/workflows/appliance-build.yml` runs the build on the lab runner.

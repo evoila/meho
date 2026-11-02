@@ -31,11 +31,13 @@ readonly FIREWALL_LOG_COMMAND="journalctl -u meho-firewall.service -e"
 # The ports as a port scan from another machine must see them. The rules
 # open the first two lists and drop everything else that comes in on a
 # network card. The closed lists are RKE2's own inbound ports (RKE2
-# requirements; ADR 0009), so that a test can prove them closed. The release
-# test of form 2 (#4742) reads all of them with firewall_port_list.
+# requirements; ADR 0009) and the ports that Canal listens on, on every
+# address (flanneld 8081, calico-node 9091; #4741), so that a test can prove
+# them closed. The release test of form 2 (#4742) reads all of them with
+# firewall_port_list.
 readonly FIREWALL_OPEN_TCP_PORTS=(80 443)
 readonly FIREWALL_SSH_PORT=22
-readonly FIREWALL_CLOSED_TCP_PORTS=(6443 9345 10250 2379 2380 2381 9099 30000-32767)
+readonly FIREWALL_CLOSED_TCP_PORTS=(6443 9345 10250 2379 2380 2381 9099 8081 9091 30000-32767)
 readonly FIREWALL_CLOSED_UDP_PORTS=(8472)
 
 # Interfaces of the machine's own Kubernetes: loopback, the pod interfaces

@@ -5890,11 +5890,11 @@ def _standing_grant_table_args(table: str) -> tuple[Index, ...]:
       carry their own CRUD-layer uniqueness check.
     * ``<table>_expires_at_idx`` -- b-tree on ``expires_at``.
     """
-    live = "revoked_at IS NULL AND replaced_at IS NULL"
     targetless_where = (
-        f"target_id IS NULL AND target_product IS NULL AND target_name_pattern IS NULL AND {live}"
+        "target_id IS NULL AND target_product IS NULL "
+        "AND target_name_pattern IS NULL AND revoked_at IS NULL AND replaced_at IS NULL"
     )
-    targeted_where = f"target_id IS NOT NULL AND {live}"
+    targeted_where = "target_id IS NOT NULL AND revoked_at IS NULL AND replaced_at IS NULL"
     return (
         Index(
             f"{table}_lookup_idx",

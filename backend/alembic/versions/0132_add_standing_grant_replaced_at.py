@@ -45,18 +45,29 @@ depends_on: str | Sequence[str] | None = None
 _TABLES = ("service_principal_grant", "sandbox_delete_grant")
 _COLUMN = "replaced_at"
 _KEY = ["tenant_id", "principal_sub", "op_id", "connector_id"]
-_TARGETLESS = "target_id IS NULL AND target_product IS NULL AND target_name_pattern IS NULL"
-_TARGETED = "target_id IS NOT NULL"
+
+#: ``WHERE`` of ``uq_<table>_targeted`` and ``uq_<table>_targetless``, old and new.
+_OLD_TARGETED = sa.text("target_id IS NOT NULL AND revoked_at IS NULL")
+_NEW_TARGETED = sa.text("target_id IS NOT NULL AND revoked_at IS NULL AND replaced_at IS NULL")
+_OLD_TARGETLESS = sa.text(
+    "target_id IS NULL AND target_product IS NULL "
+    "AND target_name_pattern IS NULL AND revoked_at IS NULL"
+)
+_NEW_TARGETLESS = sa.text(
+    "target_id IS NULL AND target_product IS NULL "
+    "AND target_name_pattern IS NULL AND revoked_at IS NULL AND replaced_at IS NULL"
+)
 
 
-def _build_unique_indexes(table: str, live: str) -> None:
-    """Drop and build the two partial unique indexes of *table* with *live* in ``WHERE``."""
-    for suffix, columns, shape in (
-        ("targeted", [*_KEY, "target_id"], _TARGETED),
-        ("targetless", _KEY, _TARGETLESS),
+def _build_unique_indexes(
+    table: str, *, targeted: sa.TextClause, targetless: sa.TextClause
+) -> None:
+    """Drop and build the two partial unique indexes of *table* with these ``WHERE`` clauses."""
+    for suffix, columns, where in (
+        ("targeted", [*_KEY, "target_id"], targeted),
+        ("targetless", _KEY, targetless),
     ):
         name = f"uq_{table}_{suffix}"
-        where = sa.text(f"{shape} AND {live}")
         op.drop_index(name, table_name=table)
         op.create_index(
             name,
@@ -72,19 +83,26 @@ def upgrade() -> None:
     """Add ``replaced_at`` and leave replaced rows out of the unique indexes."""
     for table in _TABLES:
         op.add_column(table, sa.Column(_COLUMN, sa.DateTime(timezone=True), nullable=True))
-        _build_unique_indexes(table, "revoked_at IS NULL AND replaced_at IS NULL")
+        _build_unique_indexes(table, targeted=_NEW_TARGETED, targetless=_NEW_TARGETLESS)
 
 
 def downgrade() -> None:
     """Mark replaced rows revoked, build the old indexes, drop ``replaced_at``."""
     for table in _TABLES:
+        grants = sa.table(
+            table,
+            sa.column("replaced_at", sa.DateTime(timezone=True)),
+            sa.column("revoked_at", sa.DateTime(timezone=True)),
+            sa.column("revoked_reason", sa.Text()),
+        )
         op.execute(
-            sa.text(
-                f"UPDATE {table} SET revoked_at = replaced_at, "
-                "revoked_reason = COALESCE(revoked_reason, 'replaced after it ended') "
-                "WHERE replaced_at IS NOT NULL AND revoked_at IS NULL"
+            sa.update(grants)
+            .where(grants.c.replaced_at.is_not(None), grants.c.revoked_at.is_(None))
+            .values(
+                revoked_at=grants.c.replaced_at,
+                revoked_reason=sa.func.coalesce(grants.c.revoked_reason, "replaced after it ended"),
             )
         )
-        _build_unique_indexes(table, "revoked_at IS NULL")
+        _build_unique_indexes(table, targeted=_OLD_TARGETED, targetless=_OLD_TARGETLESS)
         with op.batch_alter_table(table) as batch:
             batch.drop_column(_COLUMN)

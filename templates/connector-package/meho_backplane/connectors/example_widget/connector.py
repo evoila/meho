@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
 
+from meho_backplane.connectors.registry import list_connector_impls  # noqa: F401
 from meho_connector_kit import (
     FingerprintResult,
     HttpConnector,

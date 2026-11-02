@@ -533,9 +533,9 @@ descriptor), a `grantable` flag, and an `ungrantable_reason`. The child set
 is **derived from the manifests** — a connector registers, per composite op
 id, the manifest tuples it fans out to via
 `operations.governed_subops.register_governed_subops`
-(the vmware-rest map lives in
-`connectors/vmware_rest/composites/_governed_subops.py`, referencing the
-`_SUB_OPS_*` constants, never re-typing them) — not hand-maintained. A
+(for vmware-rest, each composite row carries its own list in
+`governed_subops`, referencing the `_SUB_OPS_*` constants, never re-typing
+them; `connectors/vmware_rest/composites/_register.py` reads the rows) — not hand-maintained. A
 **delete-shaped** rollback / delete leg (e.g. `vm.create`'s
 `DELETE:/vcenter/vm/{vm}`, which rides `_SUB_OPS_VM_CREATE`, or
 `vm.destroy`'s VI-JSON step `POST:/VirtualMachine/{moId}/Destroy_Task`,
@@ -637,8 +637,8 @@ on one of these routers has no matching CLI verb in that reference.
   (selector fields + mutual-exclusion validator).
 - `operations/governed_subops.py` (#3349) — connector-agnostic discovery
   registry + `build_governed_subops_response` + grantability classifier;
-  `connectors/vmware_rest/composites/_governed_subops.py` populates it from
-  the manifests.
+  `connectors/vmware_rest/composites/_register.py` populates it from the
+  `governed_subops` field of the composite rows.
 - `api/v1/operations.py` — `GET /api/v1/operations/governed-subops` route.
 - `operations/_validate.py` — `_non_agent_verdict` (safety_level consult +
   grant consultation + #3349 null-target hint via `_service_grant_verdict`),

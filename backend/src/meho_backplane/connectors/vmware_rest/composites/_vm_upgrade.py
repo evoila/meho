@@ -74,7 +74,7 @@ _OP_GET_TOOLS_INSTALLER: Final = "GET:/vcenter/vm/{vm}/tools/installer"
 _OP_CONNECT_TOOLS_INSTALLER: Final = "POST:/vcenter/vm/{vm}/tools/installer?action=connect"
 
 #: Every REST call of each change. The reconcile test checks them against the
-#: pinned vCenter 8.0 and 9.0 API files, and ``_governed_subops`` lists them.
+#: pinned vCenter 8.0 and 9.0 API files, and the composite rows list them.
 SUB_OPS_VM_HARDWARE_UPGRADE: Final[tuple[str, ...]] = (_OP_GET_HARDWARE, _OP_UPGRADE_HARDWARE)
 SUB_OPS_VM_TOOLS_UPGRADE: Final[tuple[str, ...]] = (
     _OP_GET_TOOLS,
@@ -565,6 +565,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_HARDWARE_UPGRADE_LLM_INSTRUCTIONS,
         preview=_vm_hardware_upgrade_preview,
+        governed_subops=SUB_OPS_VM_HARDWARE_UPGRADE,
         classifier_other=True,
     ),
     CompositeSpec(
@@ -584,6 +585,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_TOOLS_UPGRADE_LLM_INSTRUCTIONS,
         preview=_vm_tools_upgrade_preview,
+        governed_subops=SUB_OPS_VM_TOOLS_UPGRADE,
         classifier_other=True,
     ),
 )

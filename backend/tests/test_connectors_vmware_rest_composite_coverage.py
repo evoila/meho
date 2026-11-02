@@ -8,10 +8,10 @@ from __future__ import annotations
 import pytest
 
 from meho_backplane.broadcast.events import classify_op
-from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
+from meho_backplane.connectors.vmware_rest.composites._register import (
+    _COMPOSITES,
     _GOVERNED_SUBOP_MANIFEST,
 )
-from meho_backplane.connectors.vmware_rest.composites._register import _COMPOSITES
 from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS
 

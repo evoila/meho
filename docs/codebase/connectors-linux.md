@@ -349,8 +349,8 @@ The two credential-bearing writes and the two non-secret writes preview
 differently, by design:
 
 - `linux.file.write` (`content`) and `linux.script.run` (`arguments` /
-  `env`) can carry secret material in their params, so they are pinned
-  `credential_write` in `broadcast/events.py` (`_CREDENTIAL_WRITE_OPS`) —
+  `env`) can carry secret material in their params, so they are declared
+  `credential_write` in `linux/op_classes.py` —
   the broadcast collapses their params to aggregate-only — and
   `preview_operation` returns `preview_unavailable` for them (the
   credential-class exclusion in `_is_previewable`), because the request-time

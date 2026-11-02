@@ -13,10 +13,15 @@ returns a new task that runs. Names and ids are made up.
 from __future__ import annotations
 
 import copy
-import hashlib
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
@@ -31,9 +36,30 @@ from tests._vmware_teardown_fake import VimFake, moref
 VM = "vm-42"
 SOURCE_NAME = "example-vcenter-a"
 DEST_NAME = "example-vcenter-b"
-#: A made-up certificate and its SHA-1 hash in the form vCenter shows.
-CERT = b"example-certificate-der"
-THUMBPRINT = ":".join(f"{b:02X}" for b in hashlib.new("sha1", CERT, usedforsecurity=False).digest())
+
+
+def self_signed_der(common_name: str) -> bytes:
+    """A made-up, self-signed certificate (DER) with a key made for this test run."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime(2026, 1, 1, tzinfo=UTC))
+        .not_valid_after(datetime(2036, 1, 1, tzinfo=UTC))
+        .sign(key, hashes.SHA256())
+    )
+    return certificate.public_bytes(serialization.Encoding.DER)
+
+
+#: The other vCenter's certificate and its SHA-1 thumbprint in the form vCenter shows.
+CERT = self_signed_der("vc-b.example.test")
+THUMBPRINT = ":".join(
+    f"{b:02X}" for b in x509.load_der_x509_certificate(CERT).fingerprint(hashes.SHA1())
+)
 DEST_UUID = "1a2b3c4d-0000-4000-8000-00000000000b"
 LOGIN = {"username": "<user>", "password": "<password>"}
 

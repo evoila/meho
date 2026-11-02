@@ -42,6 +42,7 @@ from tests._vmware_cross_vcenter_fake import (
     dest_target,
     params,
     seed,
+    self_signed_der,
     source_target,
 )
 from tests._vmware_teardown_fake import (
@@ -177,7 +178,7 @@ async def test_a_parked_gate_is_returned_and_nothing_starts(
 @pytest.mark.usefixtures("destination")
 async def test_a_wrong_thumbprint_stops_before_the_login(gate: GateRecorder) -> None:
     conn = _seeded()
-    conn.cert = b"another-certificate"
+    conn.cert = self_signed_der("vc-b.example.test")
     out = await _move(conn)
     assert out["status"] == "certificate_mismatch", out
     assert "ssl_thumbprint" in out["guidance"]

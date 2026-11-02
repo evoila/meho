@@ -25,11 +25,15 @@ one short-lived HTTP client of their own:
 The session then serves the reads on the other vCenter (``instanceUuid`` of
 its ``ServiceContent``, the target objects of the move). The connector's
 pooled client and cached session of that target are not used at all.
+
+The connection check is the one the OVF upload does for the lease
+certificate (``ovf_upload_tls.py``); this module keeps its own copy because
+the thumbprint comes from a target, not from a lease, and the error is the
+call's own answer.
 """
 
 from __future__ import annotations
 
-import hashlib
 import ssl
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Final
@@ -37,6 +41,8 @@ from typing import TYPE_CHECKING, Any, Final
 import httpcore
 import httpx
 import structlog
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
 
 from meho_backplane.connectors.vmware_rest._mount import (
     SESSION_PATH_MODERN,
@@ -92,26 +98,38 @@ class DestinationLoginFailedError(Exception):
     """The login from Vault was refused, incomplete, or gave no ``instanceUuid``."""
 
 
-def certificate_thumbprint(der: bytes) -> str:
-    """The SHA-1 hash of a DER certificate as 40 lower-case hex digits.
+def certificate_thumbprint(der: bytes) -> str | None:
+    """The SHA-1 fingerprint of a DER certificate as 40 lower-case hex digits.
 
-    SHA-1 is what vCenter's ``sslThumbprint`` is; it names the certificate,
-    it does not protect anything.
+    SHA-1 is what vCenter's ``sslThumbprint`` is: the name of the
+    certificate, not a protection of it. ``None`` when *der* is not a
+    certificate.
     """
-    return hashlib.new("sha1", der, usedforsecurity=False).hexdigest()
+    try:
+        certificate = x509.load_der_x509_certificate(der)
+    except ValueError:
+        return None
+    return certificate.fingerprint(hashes.SHA1()).hex()
 
 
 class _ThumbprintStream(httpcore.AsyncNetworkStream):
-    """A connection whose TLS handshake must show the expected certificate."""
+    """A connection whose TLS handshake must show the expected certificate.
+
+    No byte is written before that: a write on a connection that has not
+    passed the check (for example one without TLS) is refused.
+    """
 
     def __init__(self, inner: httpcore.AsyncNetworkStream, thumbprint: str) -> None:
         self._inner = inner
         self._thumbprint = thumbprint
+        self._verified = False
 
     async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
         return await self._inner.read(max_bytes, timeout=timeout)
 
     async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        if not self._verified:
+            raise DestinationCertificateMismatchError(self._thumbprint, None)
         await self._inner.write(buffer, timeout=timeout)
 
     async def aclose(self) -> None:
@@ -123,16 +141,17 @@ class _ThumbprintStream(httpcore.AsyncNetworkStream):
         server_hostname: str | None = None,
         timeout: float | None = None,
     ) -> httpcore.AsyncNetworkStream:
-        tls = await self._inner.start_tls(
+        self._inner = await self._inner.start_tls(
             ssl_context, server_hostname=server_hostname, timeout=timeout
         )
-        ssl_object = tls.get_extra_info("ssl_object")
+        ssl_object = self._inner.get_extra_info("ssl_object")
         der = ssl_object.getpeercert(binary_form=True) if ssl_object is not None else None
         shown = certificate_thumbprint(der) if der else None
         if shown != self._thumbprint:
-            await tls.aclose()
+            await self._inner.aclose()
             raise DestinationCertificateMismatchError(self._thumbprint, shown)
-        return tls
+        self._verified = True
+        return self
 
     def get_extra_info(self, info: str) -> Any:
         return self._inner.get_extra_info(info)

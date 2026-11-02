@@ -32,10 +32,11 @@ from tests._vmware_cross_vcenter_fake import (
     LOGIN,
     THUMBPRINT,
     dest_target,
+    self_signed_der,
 )
 from tests._vmware_teardown_fake import operator
 
-OTHER_CERT = b"another-certificate-der"
+OTHER_CERT = self_signed_der("vc-b.example.test")
 _THUMBPRINT = THUMBPRINT.replace(":", "").lower()
 _VERSIONS = (
     '<namespaces version="1.0"><namespace><name>urn:vim25</name>'
@@ -194,14 +195,24 @@ async def test_a_wrong_certificate_on_the_first_connection_sends_nothing(
     assert stream.written == []
 
 
+@pytest.mark.parametrize("cert", [None, b"not-a-certificate"])
 async def test_a_connection_without_a_certificate_sends_nothing(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, cert: bytes | None
 ) -> None:
-    backend = _CertBackend([(None, [_response(_VERSIONS)])])
+    backend = _CertBackend([(cert, [_response(_VERSIONS)])])
     with pytest.raises(dst.DestinationCertificateMismatchError) as raised:
         await _open(monkeypatch, backend)
     assert raised.value.shown is None
     assert backend.streams[0].written == []
+
+
+async def test_a_write_before_the_handshake_is_refused() -> None:
+    """A connection that never ran TLS (plain http) carries no byte."""
+    inner = _CertStream([], CERT)
+    stream = dst._ThumbprintStream(inner, _THUMBPRINT)
+    with pytest.raises(dst.DestinationCertificateMismatchError):
+        await stream.write(b"GET / HTTP/1.1")
+    assert inner.written == []
 
 
 async def test_a_refused_login_is_login_failed(monkeypatch: pytest.MonkeyPatch) -> None:

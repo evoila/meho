@@ -452,6 +452,36 @@ async def test_rename_task_fault_reaches_the_answer(gate: GateRecorder) -> None:
         )
 
 
+class _RenamesThenCannotRead(InventoryFake):
+    """vCenter renames the object, then the read of its name fails (a permission error)."""
+
+    async def _post_vmomi_json(self, target: Any, path: str, **kwargs: Any) -> Any:
+        if path.endswith("/Rename_Task"):
+            mo_type, moid = path.split("/")[1:3]
+            self.unreadable[(mo_type, moid)] = {"name"}
+        return await super()._post_vmomi_json(target, path, **kwargs)
+
+
+async def test_rename_whose_read_back_fails_still_reports_the_rename(gate: GateRecorder) -> None:
+    """A failed read after the task does not hide a rename that went through."""
+    conn = _RenamesThenCannotRead()
+    conn.add("VirtualMachine", "vm-42", name="<old-name>")
+    out = await _run(
+        _object_rename_move.object_rename_composite,
+        conn,
+        object_type="vm",
+        moid="vm-42",
+        new_name="<new-name>",
+    )
+    assert out["status"] == "renamed"
+    assert out["old_name"] == "<old-name>"
+    assert out["name_after"] is None
+    assert out["issues"][0]["severity"] == "warning"
+    assert "could not read vm-42 back" in out["issues"][0]["message"]
+    assert "could not read name" in out["issues"][0]["message"]
+    assert conn.objects[("VirtualMachine", "vm-42")]["name"] == "<new-name>"
+
+
 async def test_rename_timeout_is_an_error(
     gate: GateRecorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -636,6 +666,73 @@ async def test_move_task_fault_names_the_objects_moved_before_it(gate: GateRecor
     assert out["guidance"] == (
         "vCenter moved vm-42 before the fault; the others stayed where they were."
     )
+
+
+class _FirstMovesThenFaultsAndCannotRead(_FirstMovesThenFaults):
+    """As above, and the read of the second object fails after the task (permissions)."""
+
+    async def _post_vmomi_json(self, target: Any, path: str, **kwargs: Any) -> Any:
+        if path.endswith("/MoveIntoFolder_Task"):
+            self.unreadable[("VirtualMachine", "vm-44")] = {"parent"}
+        return await super()._post_vmomi_json(target, path, **kwargs)
+
+
+def _two_vms(conn: InventoryFake) -> list[dict[str, str]]:
+    conn.add("Folder", "group-v7", name="<target-folder>", childType=["Folder", "VirtualMachine"])
+    conn.add("VirtualMachine", "vm-42", name="<vm-a>", parent=moref("Folder", "group-v4"))
+    conn.add("VirtualMachine", "vm-44", name="<vm-c>", parent=moref("Folder", "group-v4"))
+    return [{"object_type": "vm", "moid": "vm-42"}, {"object_type": "vm", "moid": "vm-44"}]
+
+
+async def test_move_task_fault_with_a_failed_read_back_keeps_the_fault_and_the_moved(
+    gate: GateRecorder,
+) -> None:
+    """A read that fails after the task hides neither the fault nor the confirmed move."""
+    conn = _FirstMovesThenFaultsAndCannotRead()
+    objects = _two_vms(conn)
+    out = await _run(
+        _object_rename_move.object_move_composite, conn, folder="group-v7", objects=objects
+    )
+    assert out["status"] == "failed"
+    assert [i["severity"] for i in out["issues"]] == ["error", "warning"]
+    assert "DuplicateName" in out["issues"][0]["message"]
+    assert "could not read vm-44 back" in out["issues"][1]["message"]
+    rows = {r["moid"]: r for r in out["objects"]}
+    assert rows["vm-42"]["parent"] == "group-v7"
+    assert rows["vm-42"]["moved"] is True
+    assert rows["vm-42"]["read_error"] is None
+    assert rows["vm-44"]["moved"] is None
+    assert rows["vm-44"]["present"] is None
+    assert rows["vm-44"]["parent_before"] == "group-v4"
+    assert "could not read parent" in rows["vm-44"]["read_error"]
+    assert out["guidance"] == (
+        "vCenter moved vm-42 before the fault; vm-44 did not read back (moved=null); "
+        "the others stayed where they were."
+    )
+
+
+class _MovesThenCannotReadOne(InventoryFake):
+    """vCenter moves both objects; then the read of the second one fails."""
+
+    async def _post_vmomi_json(self, target: Any, path: str, **kwargs: Any) -> Any:
+        if path.endswith("/MoveIntoFolder_Task"):
+            self.unreadable[("VirtualMachine", "vm-44")] = {"parent"}
+        return await super()._post_vmomi_json(target, path, **kwargs)
+
+
+async def test_move_whose_read_back_fails_is_partial_not_an_error(gate: GateRecorder) -> None:
+    conn = _MovesThenCannotReadOne()
+    objects = _two_vms(conn)
+    out = await _run(
+        _object_rename_move.object_move_composite, conn, folder="group-v7", objects=objects
+    )
+    assert out["status"] == "partial"
+    assert [i["severity"] for i in out["issues"]] == ["warning", "warning"]
+    assert "could not read vm-44 back" in out["issues"][1]["message"]
+    rows = {r["moid"]: r for r in out["objects"]}
+    assert rows["vm-42"]["moved"] is True
+    assert rows["vm-44"]["moved"] is None
+    assert out["guidance"] == "Check the rows with moved=false; moved=null did not read back."
 
 
 async def test_move_immediate_vim_fault_reaches_the_answer(gate: GateRecorder) -> None:

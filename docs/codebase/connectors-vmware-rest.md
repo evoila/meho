@@ -2047,8 +2047,8 @@ enum) are:
 | `folder.create` | `created`, `parent_not_found`, `ambiguous_parent` (synchronous `CreateFolder`, then a read-back into `folder_info`; both resolution refusals happen before any write and carry an `error` issue, so the operation fails and the audit row reads `error`, #3588; `ambiguous_parent` lists `candidate_folders`, behind a result handle when oversized, #4223) |
 | `datacenter.create` | `created` (synchronous `CreateDatacenter`, then a read-back into `datacenter_info`; a vim fault such as `DuplicateName` raises `connector_error` with the fault type and text) |
 | `datacenter.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present`, `timeout` (the teardown envelope; `precondition_failed` while the datacenter holds anything, listed in `blockers`) |
-| `object.rename` | `renamed`, `unchanged`, `invalid_request`, `not_found`, `timeout` (refusals happen before any write and carry an `error` issue; a vim fault raises `connector_error`) |
-| `object.move` | `moved`, `partial`, `failed`, `unchanged`, `invalid_request`, `not_found`, `precondition_failed`, `timeout` (`partial` when some objects do not read back in the folder; `failed` when the task failed, with the objects read back so the rows say which moved before the fault) |
+| `object.rename` | `renamed`, `unchanged`, `invalid_request`, `not_found`, `timeout` (refusals happen before any write and carry an `error` issue; a vim fault raises `connector_error`; a read that fails after the task keeps `renamed` with `name_after` null and a `warning` issue) |
+| `object.move` | `moved`, `partial`, `failed`, `unchanged`, `invalid_request`, `not_found`, `precondition_failed`, `timeout` (`partial` when some objects do not read back in the folder or did not read back at all; `failed` when the task failed, with the objects read back so the rows say which moved before the fault; a row that did not read back has `moved` null and `read_error`) |
 | `resource_pool.update` | `updated`, `unchanged`, `not_found`, `refused` (`refused` when vCenter answers 400; nothing changed) |
 | `network.portgroup.create` | `created`, `invalid_vlan_spec`, `timeout` (vim `CreateDVPortgroup_Task` polled, #3091; `invalid_vlan_spec` refuses a trunk+access clash before any write; `timeout` when the poll gives up; a task *fault* — e.g. `DuplicateName` — raises `connector_error`. The `created` envelope carries a read-back `observed` = `{name, vlan}` off the new portgroup's `config`. The trunk / access VLAN specs are `InheritablePolicy` subtypes, so each wire body carries `inherited: false` — without it vCenter defaults `inherited: true` and drops the `vlanId`, silently creating an untagged (VLAN 0) portgroup, #3356) |
 | `network.portgroup.security.set` | `updated`, `no_change_requested`, `timeout` (vim `ReconfigureDVPortgroup_Task` polled, #3091; `no_change_requested` refuses when none of the three booleans is supplied, before any read/write; `timeout` when the poll gives up; a task *fault* raises `connector_error`. Carries `previous` (pre-write security triple) + `observed` (post-write triple) read-backs) |
@@ -2946,8 +2946,8 @@ group.
 |---|---|---|---|---|
 | `datacenter.create` | Create a new, empty datacenter in the root folder or in a datacenter folder. | VIM `Folder.CreateDatacenter` | caution | the new datacenter id and `datacenter_info` (name, parent, its four root folders) |
 | `datacenter.delete` | Delete an empty datacenter. | VIM `Datacenter.Destroy_Task` | destructive | the teardown envelope: `object`, `blockers`, `task`, `task_state` |
-| `object.rename` | Rename one VM, folder, datacenter, cluster, datastore, datastore cluster, network, distributed switch or port group, or resource pool. | VIM `ManagedEntity.Rename_Task` | caution | `old_name`, `name_after` (read back) |
-| `object.move` | Move up to 50 objects into one folder; the folder's permissions then apply to them. | VIM `Folder.MoveIntoFolder_Task` | dangerous | one row per object: `parent_before`, `parent` (read back), `moved` |
+| `object.rename` | Rename one VM, folder, datacenter, cluster, datastore, datastore cluster, network, distributed switch or port group, or resource pool. | VIM `ManagedEntity.Rename_Task` | caution | `old_name`, `name_after` (read back; null when that read failed) |
+| `object.move` | Move up to 50 objects into one folder; the folder's permissions then apply to them. | VIM `Folder.MoveIntoFolder_Task` | dangerous | one row per object: `parent_before`, `parent` (read back), `moved` (null when the read failed), `read_error` |
 | `resource_pool.update` | Change the CPU and memory shares, limits and reservations of a resource pool. | REST `PATCH /api/vcenter/resource-pool/{resourcePool}` | dangerous | `before`, `sent`, `after` (read back) |
 
 Versions: 8.0 and 9.x for all five (the connector generations that register
@@ -2972,7 +2972,10 @@ them).
   its own vim path (`POST:/<Type>/{moId}/Rename_Task`), written out in
   `_RENAME_OPS`, so the reconcile lanes check each one. MEHO reads the name
   first: the same name gives `unchanged` and sends nothing. A standalone host
-  is not renamed (its name comes from the host).
+  is not renamed (its name comes from the host). After the task MEHO reads
+  the name again; when that read fails, the answer stays `renamed` with
+  `name_after` null and a `warning` issue, so a read error does not hide a
+  rename that went through.
 - **`object.move`**: MEHO reads the folder (`name`, `childType`) and each
   object (one read each: vCenter fails a property read as a whole when one
   object in it does not exist). It refuses before any write when an object
@@ -2989,8 +2992,13 @@ them).
   the first fault, so after a failed task MEHO reads every object back and
   answers `failed`: the fault in an `error` issue, `moved=true` on the rows
   whose location (and so permissions) changed, and the moved ids in
-  `guidance`. The move is `dangerous` because the folder's permissions then
-  apply to the objects.
+  `guidance`. The reads after the task are one per object and a read that
+  fails does not stop the others: that row gets `moved` null and the reason
+  in `read_error`, plus a `warning` issue, while the task fault and the rows
+  that did read back stay in the answer. Permission errors are expected
+  there, because the move changes the permissions the objects inherit. The
+  move is `dangerous` because the folder's permissions then apply to the
+  objects.
 - **`resource_pool.update`**: vCenter resets every field of an allocation
   that the PATCH leaves out (no reservation means 0, no limit means -1, no
   shares means NORMAL). So MEHO reads the pool, puts the asked changes on top

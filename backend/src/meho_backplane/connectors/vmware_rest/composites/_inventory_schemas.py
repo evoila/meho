@@ -277,7 +277,8 @@ _OBJECT_RENAME_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
         "new_name": {"type": "string", "description": "The asked name."},
         "name_after": {
             "type": ["string", "null"],
-            "description": "Name as read back after the task.",
+            "description": "Name as read back after the task; null when that read failed "
+            "(then a warning issue says why; the rename itself went through).",
         },
         "task": _TASK,
         "issues": _ISSUES,
@@ -357,16 +358,24 @@ _MOVE_ROW_SCHEMA: Final[dict[str, Any]] = {
         "object_type": {"type": "string", "description": "The asked kind."},
         "moid": {"type": "string", "description": "Object id."},
         "name": {"type": ["string", "null"], "description": "Object name."},
-        "present": {"type": "boolean", "description": "Whether the object exists."},
+        "present": {
+            "type": ["boolean", "null"],
+            "description": "Whether the object exists; null when it did not read back.",
+        },
         "parent": {"type": ["string", "null"], "description": "Parent folder id."},
         "parent_before": {
             "type": ["string", "null"],
             "description": "Parent before the move (after a move only).",
         },
         "moved": {
-            "type": "boolean",
+            "type": ["boolean", "null"],
             "description": "Whether it reads back in the folder (after a move only, also "
-            "after a failed one).",
+            "after a failed one); null when the read after the task failed.",
+        },
+        "read_error": {
+            "type": ["string", "null"],
+            "description": "Why the read after the task failed (after a move only); null "
+            "when it worked.",
         },
     },
 }
@@ -387,13 +396,13 @@ _OBJECT_MOVE_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
                 "timeout",
             ],
             "description": (
-                "moved: every object reads back in the folder; partial: some do not; "
-                "failed: the task failed, the rows say which objects moved before the "
-                "fault; unchanged: all were in it, nothing sent; invalid_request: bad ids; "
-                "not_found: no such folder; precondition_failed: an object is missing or "
-                "the folder cannot hold it, nothing moved; timeout: the task did not end "
-                "in time. A vCenter fault before the task starts fails the call with its "
-                "text."
+                "moved: every object reads back in the folder; partial: some do not, or "
+                "did not read back; failed: the task failed, the rows say which objects "
+                "moved before the fault; unchanged: all were in it, nothing sent; "
+                "invalid_request: bad ids; not_found: no such folder; precondition_failed: "
+                "an object is missing or the folder cannot hold it, nothing moved; timeout: "
+                "the task did not end in time. A vCenter fault before the task starts "
+                "fails the call with its text."
             ),
         },
         "folder": {"type": "string", "description": "The folder id."},
@@ -421,12 +430,13 @@ _OBJECT_MOVE_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     "output_shape": (
         "{status: moved|partial|failed|unchanged|invalid_request|not_found|"
         "precondition_failed|timeout, folder, folder_name, objects: [{object_type, moid, "
-        "name, present, parent, parent_before, moved}], task, issues, guidance}."
+        "name, present, parent, parent_before, moved, read_error}], task, issues, guidance}."
     ),
     "next_step": (
         "Safe to run twice: objects already in the folder are skipped. On partial or "
-        "failed, check the rows: moved=true changed location and permissions. To move a "
-        "resource pool, use the cluster group."
+        "failed, check the rows: moved=true changed location and permissions; moved=null "
+        "did not read back (read_error says why), read it again. To move a resource "
+        "pool, use the cluster group."
     ),
 }
 

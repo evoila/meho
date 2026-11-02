@@ -8,7 +8,8 @@
   datastore, datastore cluster, network, distributed switch, distributed port
   group or resource pool. MEHO reads the name first: when it already is the new
   name, nothing is sent (``unchanged``). After the task MEHO reads the name
-  again.
+  again; a read that fails there does not hide the rename (``name_after`` is
+  null and a warning says why).
 * ``vmware.composite.object.move`` (``dangerous``) -- vim
   ``Folder.MoveIntoFolder_Task``. Moves up to 50 objects into one folder. The
   folder's permissions then apply to the moved objects, which is why the move
@@ -17,7 +18,10 @@
   host folder, for example). Objects already in the folder are skipped. After
   the task MEHO reads each object's parent again, also after a failed task:
   vCenter moves the objects one by one and stops at the first fault, so the
-  answer names the objects that moved before it.
+  answer names the objects that moved before it. A read that fails after the
+  task is reported on its row (``moved`` is null, ``read_error`` says why) and
+  the other objects are still read, so neither the fault nor a confirmed move
+  is lost.
 
 Each object is named by its kind and its moid, never by name: after approval
 the change must run on the object the approver saw. Both wait for approval and
@@ -30,6 +34,7 @@ import re
 from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 import httpx
+import structlog
 
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest.composite_issues import issue
@@ -63,6 +68,8 @@ __all__ = [
     "object_move_composite",
     "object_rename_composite",
 ]
+
+_log = structlog.get_logger(__name__)
 
 OP_ID_OBJECT_RENAME: Final = "vmware.composite.object.rename"
 OP_ID_OBJECT_MOVE: Final = "vmware.composite.object.move"
@@ -216,6 +223,11 @@ def _task_fault(outcome: VimTaskResult, label: str) -> str:
     )
 
 
+def _read_back_failed(moid: str, exc: Exception) -> str:
+    """Why the read after the task failed, as one line (the message is redacted)."""
+    return f"could not read {moid} back after the task: {preview_failure_reason(exc)}"
+
+
 # ===========================================================================
 # object.rename -- ManagedEntity.Rename_Task
 # ===========================================================================
@@ -279,11 +291,38 @@ async def object_rename_composite(
             "issues": [_task_timeout_issue("Rename_Task", outcome.task)],
             "guidance": "The rename may still finish. Read the name again before a retry.",
         }
-    after = await read_object(
-        connector, target, operator, mo_type=mo_type, moid=moid, props=["name"]
-    )
-    envelope["name_after"] = None if after is None else after.get("name")
-    return {**envelope, "status": "renamed"}
+    return await _renamed(connector, target, operator, envelope, mo_type=mo_type, moid=moid)
+
+
+async def _renamed(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    envelope: dict[str, Any],
+    *,
+    mo_type: str,
+    moid: str,
+) -> dict[str, Any]:
+    """The ``renamed`` answer with the name read back.
+
+    The rename already happened, so a read that fails here is a warning with
+    ``name_after`` null, not a failed call.
+    """
+    try:
+        after = await read_object(
+            connector, target, operator, mo_type=mo_type, moid=moid, props=["name"]
+        )
+    except Exception as exc:
+        _log.warning("object_rename_read_back_failed", moid=moid, error=type(exc).__name__)
+        return {
+            **envelope,
+            "status": "renamed",
+            "name_after": None,
+            "issues": [issue("connector", "warning", _read_back_failed(moid, exc))],
+            "guidance": "The task ended without a fault; read the name again to confirm.",
+        }
+    name_after = None if after is None else after.get("name")
+    return {**envelope, "status": "renamed", "name_after": name_after}
 
 
 async def _object_rename_preview(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -352,6 +391,53 @@ async def _read_objects(
                 "parent": None if props is None else _moref_value(props.get("parent")),
             }
         )
+    return rows
+
+
+async def _read_back(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    folder: str,
+    before: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """The rows after the task: ``parent_before``, ``moved`` and ``read_error`` added.
+
+    The task already ran, so a read that fails must not hide its outcome or
+    the other objects: that row keeps ``moved`` null and says why in
+    ``read_error``, and the loop goes on. Permission errors are expected
+    here: the move changes the permissions the objects inherit.
+    """
+    rows = []
+    for row in before:
+        after = {**row, "parent_before": row["parent"], "read_error": None}
+        try:
+            props = await read_object(
+                connector,
+                target,
+                operator,
+                mo_type=OBJECT_KINDS[row["object_type"]].mo_type,
+                moid=row["moid"],
+                props=["name", "parent"],
+            )
+        except Exception as exc:
+            _log.warning("object_move_read_back_failed", moid=row["moid"], error=type(exc).__name__)
+            after.update(
+                name=None,
+                present=None,
+                parent=None,
+                moved=None,
+                read_error=_read_back_failed(row["moid"], exc),
+            )
+        else:
+            parent = None if props is None else _moref_value(props.get("parent"))
+            after.update(
+                name=None if props is None else props.get("name"),
+                present=props is not None,
+                parent=parent,
+                moved=parent == folder,
+            )
+        rows.append(after)
     return rows
 
 
@@ -470,39 +556,58 @@ async def object_move_composite(
             "issues": [_task_timeout_issue("MoveIntoFolder_Task", outcome.task)],
             "guidance": "The move may still finish. Read the objects again before a retry.",
         }
-    rows = await _read_objects(connector, target, operator, params["objects"])
-    before = {r["moid"]: r["parent"] for r in envelope["objects"]}
-    envelope["objects"] = [
-        {**r, "parent_before": before.get(r["moid"]), "moved": r["parent"] == folder} for r in rows
-    ]
+    envelope["objects"] = await _read_back(connector, target, operator, folder, envelope["objects"])
+    return _move_answer(envelope, outcome)
+
+
+def _move_answer(envelope: dict[str, Any], outcome: VimTaskResult) -> dict[str, Any]:
+    """``failed``, ``moved`` or ``partial`` from the task outcome and the rows read back.
+
+    A row that did not read back (``moved`` null) adds a warning issue and
+    never counts as moved. It does not hide the task fault, nor the rows
+    that did read back.
+    """
+    rows = envelope["objects"]
+    unread = [issue("connector", "warning", r["read_error"]) for r in rows if r["moved"] is None]
     if outcome.state == TASK_STATE_ERROR:
-        return _move_failed(envelope, outcome)
-    if all(r["moved"] for r in envelope["objects"]):
+        return _move_failed(envelope, outcome, unread)
+    if all(r["moved"] for r in rows):
         return {**envelope, "status": "moved"}
     return {
         **envelope,
         "status": "partial",
-        "issues": [issue("connector", "warning", "some objects did not read back in the folder")],
-        "guidance": "Check the rows with moved=false.",
+        "issues": [
+            issue("connector", "warning", "some objects did not read back in the folder"),
+            *unread,
+        ],
+        "guidance": "Check the rows with moved=false; moved=null did not read back.",
     }
 
 
-def _move_failed(envelope: dict[str, Any], outcome: VimTaskResult) -> dict[str, Any]:
+def _move_failed(
+    envelope: dict[str, Any], outcome: VimTaskResult, unread: list[dict[str, Any]]
+) -> dict[str, Any]:
     """The answer of a move whose task failed, with the objects as read back.
 
     vCenter moves the objects one by one and stops at the first fault, so the
-    objects before it are in the folder. The rows say which.
+    objects before it are in the folder. The rows say which; *unread* are the
+    warnings for the rows that did not read back.
     """
     folder = envelope["folder"]
-    moved = [r["moid"] for r in envelope["objects"] if r["moved"] and r["parent_before"] != folder]
+    rows = envelope["objects"]
+    moved = [r["moid"] for r in rows if r["moved"] and r["parent_before"] != folder]
+    unknown = [r["moid"] for r in rows if r["moved"] is None]
+    parts = []
+    if moved:
+        parts.append(f"vCenter moved {', '.join(moved)} before the fault")
+    if unknown:
+        parts.append(f"{', '.join(unknown)} did not read back (moved=null)")
     return {
         **envelope,
         "status": "failed",
-        "issues": [issue("connector", "error", _task_fault(outcome, "object.move"))],
+        "issues": [issue("connector", "error", _task_fault(outcome, "object.move")), *unread],
         "guidance": (
-            f"vCenter moved {', '.join(moved)} before the fault; the others stayed where they were."
-            if moved
-            else "Nothing moved."
+            "; ".join(parts) + "; the others stayed where they were." if parts else "Nothing moved."
         ),
     }
 

@@ -296,25 +296,32 @@ The twelve rules (the rule name is in brackets):
     real calls. A value fails when it holds an IPv4 or IPv6 address outside
     the documentation ranges (192.0.2.0/24, 198.51.100.0/24,
     203.0.113.0/24, 2001:db8::/32), a host name with a real top-level
-    domain (`.com`, `.net`, `.local`, `.lan`, ...), a vendor-shaped id
-    (`vm-42`, `host-12`, `domain-c8`, `datastore-15`, `resgroup-8`,
-    `group-v3`, ...) or a UUID other than the all-zero one. Nested values
+    domain, a vendor-shaped id (`vm-42`, `host-12`, `domain-c8`,
+    `datastore-15`, `resgroup-8`, `group-v3`, ...) or a UUID other than
+    the all-zero one. A real top-level domain is any public one (the
+    official list, kept in `backend/tests/data/top_level_domains.txt`) or
+    a private-network ending such as `.local` or `.lan`. Nested values
     count too. A placeholder in angle brackets, such as `<vm-id>`, always
-    passes. `example.com`, `example.org`, `example.net`, `.test` and
-    `.example` names are fine. Fixed vendor domains that are the same on
-    every system (for example `vsphere.local` or `cluster.local`) are in
-    `VENDOR_DOMAINS`, each with a reason. A field whose name holds
-    `version` may hold a value such as `9.0.2.0`. The checks are in
+    passes. `example.com`, `example.org`, `example.net`, `.test`,
+    `.example` and `.invalid` names are fine. Fixed vendor names that are
+    the same on every system and end like a domain (for example
+    `vsphere.local`, `cluster.local` or the Azure provider
+    `Microsoft.Storage`) are in `VENDOR_NAMES`, each with a reason. A
+    field whose name holds `version` may hold a value such as `9.0.2.0`.
+    A field whose name holds `path` or `file` may hold a file name such as
+    `release-notes.md`. The checks are in
     `backend/tests/_operation_contract_placeholders.py`.
     (`example_placeholders`)
 12. Every operation id that `llm_instructions` names in backticks is a
     registered operation, of any connector. A backticked word counts as an
     operation id when it has the shape of one (lowercase parts with dots,
-    such as `k8s.pod.list`) and its first part is the first part of a
-    registered id (`k8s`). So `config.yaml` is not checked. A word that
-    only looks like an operation id (for example the Linux setting
+    such as `k8s.pod.list`), whatever its first part. So a wrong first
+    part (`kubernetes.node.list` for `k8s.node.list`) is caught. A word
+    that only looks like an operation id (a file name such as
+    `config.yaml`, a field path, an API group, or the Linux setting
     `net.ipv4.ip_forward`) goes into `NOT_OPERATION_IDS` at the top of the
-    test, with a reason. This rule needs the list of all registered
+    test, with a reason. The live check fails on an entry that no guidance
+    names any more. This rule needs the list of all registered
     operations. So a test that checks one operation alone
     (`check_operation(op)`) skips it; the live check runs it.
     (`named_operations_exist`)

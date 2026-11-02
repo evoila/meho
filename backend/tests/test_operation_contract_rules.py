@@ -9,11 +9,13 @@ each rule fails with a message that names the problem, without a database.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Final
 
 import pytest
 
 from meho_backplane.operations._validate import validate_params
+from tests._operation_contract_placeholders import REAL_TOP_LEVEL_DOMAINS, load_top_level_domains
 from tests.test_operation_contracts import (
     DESCRIPTION_MAX,
     GAPS_FILE,
@@ -367,10 +369,15 @@ def test_a_real_looking_vm_id_fails_and_a_placeholder_passes() -> None:
         "fe80::1",
         "fd00::10",
         "vc01.not-a-real-host.com",
+        "vc01.not-a-real-host.fr",
+        "nas.made-up.uk",
+        "app.made-up.tech",
+        "shop.made-up.xyz",
         "esx-01.local",
         "nas.lan",
         "admin@made-up-domain.net",
         "https://vcenter.made-up.de/ui",
+        "release-notes.md",
         "0b6e3e0c-1f2a-4c55-9a51-2f6d7a8b9c01",
         "00000000-0000-4000-8000-000000000001",
         "0B6E3E0C-1F2A-4C55-9A51-2F6D7A8B9C01",
@@ -396,7 +403,10 @@ def test_a_real_looking_value_fails(value: str) -> None:
         "mail.example.net",
         "esx01.test",
         "vc.lab.example",
+        "host.invalid",
         "management.azure.com",
+        "Microsoft.Storage/storageAccounts",
+        "compute.provision.post",
         "sa@example-project.iam.gserviceaccount.com",
         "kubernetes.default.svc.cluster.local",
         "cert-manager.io",
@@ -441,6 +451,31 @@ def test_a_version_field_may_look_like_an_address() -> None:
     example = {"vm": "<vm-id>", "address": "9.0.2.0"}
     problems = _only_rule(_with_example(example), "example_placeholders")
     assert "'9.0.2.0'" in problems[0]
+
+
+@pytest.mark.parametrize("field", ["path", "files[].path", "tar_path", "config_file"])
+def test_a_path_field_may_hold_a_file_name_that_ends_like_a_domain(field: str) -> None:
+    """``release-notes.md`` in a ``*path*`` or ``*file*`` field is a file name, not a host."""
+    example: dict[str, Any] = {"vm": "<vm-id>"}
+    if "[]" in field:
+        example["files"] = [{"path": "docs/release-notes.md"}]
+    else:
+        example[field] = "docs/release-notes.md"
+    assert check_operation(_with_example(example)) == {}
+    problems = _only_rule(
+        _with_example({"vm": "<vm-id>", "name": "release-notes.md"}), "example_placeholders"
+    )
+    assert "'release-notes.md'" in problems[0]
+
+
+def test_the_top_level_domain_list_is_the_public_one(tmp_path: Path) -> None:
+    """The snapshot holds the public domains, lowercase; the reserved names are not in it."""
+    assert {"com", "fr", "uk", "tech", "xyz", "io"} <= REAL_TOP_LEVEL_DOMAINS
+    assert not {"test", "example", "invalid", "localhost"} & REAL_TOP_LEVEL_DOMAINS
+    assert all(domain == domain.lower() for domain in REAL_TOP_LEVEL_DOMAINS)
+    snapshot = tmp_path / "tlds.txt"
+    snapshot.write_text("# a comment\nCOM\n\n  fr \n", encoding="utf-8")
+    assert load_top_level_domains(snapshot) == {"com", "fr"}
 
 
 # ---------------------------------------------------------------------------
@@ -493,13 +528,26 @@ def test_the_registry_spans_every_connector() -> None:
     }
 
 
+def test_a_wrong_first_part_is_caught() -> None:
+    """``kubernetes.node.list`` is no operation when only ``k8s`` operations exist."""
+    node_list = _good_op(
+        connector="k8s", op_id="k8s.node.list", safety_level="safe", requires_approval=False
+    )
+    op = _guided("When the API is down, `kubernetes.node.list` cannot answer.")
+    assert find_problems([node_list, op]) == {
+        ("vmware-rest", "fake.vm.update", "named_operations_exist"): [
+            "guidance names 'kubernetes.node.list', which is no registered operation"
+        ]
+    }
+
+
 @pytest.mark.parametrize(
     "next_step",
     [
-        "Edit `config.yaml` and check `status.phase`.",
-        "Run `call_operation` with `op_id`.",
+        "Run `call_operation` with `op_id` and read `status`.",
         "A wildcard such as `fake.vm.*` is no name.",
         "`Fake.Vm.Nope` has capitals.",
+        "A placeholder such as `<op-id>` is no name.",
         "Plain text fake.vm.nope without backticks.",
     ],
 )
@@ -507,9 +555,7 @@ def test_backticked_words_that_are_no_operation_id_pass(next_step: str) -> None:
     assert find_problems([_guided(next_step)]) == {}
 
 
-def test_a_listed_non_operation_name_passes_even_with_a_registered_first_part() -> None:
+def test_a_listed_non_operation_name_passes_and_an_unlisted_one_fails() -> None:
     name = next(iter(NOT_OPERATION_IDS))
-    prefix = name.split(".", 1)[0]
-    probe = _good_op(op_id=f"{prefix}.probe.get", safety_level="safe", requires_approval=False)
-    assert find_problems([probe, _guided(f"Check `{name}`.")]) == {}
-    assert find_problems([probe, _guided(f"Check `{prefix}.probe.lost`.")]) != {}
+    assert find_problems([_guided(f"Check `{name}`.")]) == {}
+    assert find_problems([_guided("Check `status.phase`.")]) != {}

@@ -81,6 +81,7 @@ __all__ = [
     "K8S_EVENT_LIST_PARAMETER_SCHEMA",
     "K8S_EVENT_LIST_RESPONSE_SCHEMA",
     "MAX_EVENT_LIMIT",
+    "OPS",
     "event_last_seen_seconds_key",
     "event_row",
     "sort_event_rows_recent_first",
@@ -481,3 +482,6 @@ EVENT_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=K8S_EVENT_LIST_LLM_INSTRUCTIONS,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = EVENT_OPS

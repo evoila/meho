@@ -36,10 +36,9 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
   kubeconfig loader is injectable for tests.
 - **Op metadata** (`ops.py`) -- the `KubernetesOp` dataclass plus the
   `KUBERNETES_OPS` tuple the connector's `register_operations` walks
-  at startup. The tuple merges `k8s.about` (T1's canary, refactored
-  through G0.6), the T2 inventory ops (from `ops_core.py`), the T3
-  workload ops (from `ops_workload.py`), and the T5 logs op (from
-  `ops_logs.py`).
+  at startup. `collect_ops` builds the tuple from the `OPS` of every
+  `ops_*` module, sorted by op id (see "Module layout: where an op
+  lives").
 - **Core inventory helpers** (`ops_core.py`) -- pure mapping helpers
   (`namespace_row`, `node_row`, `taint_row`, `age_seconds`) plus the
   `CORE_OPS` registration rows for `k8s.ls` / `k8s.namespace.list` /
@@ -335,41 +334,39 @@ cycle (`claude-rdc-hetzner-dc#771` Finding 4). The fix is the
 single-source-of-truth shape — probe + dispatch both flow the same
 real operator through the same loader.
 
-## Shipped op surface
+## Module layout: where an op lives
 
-| op_id                  | safety | description                                                       |
-| ---------------------- | ------ | ----------------------------------------------------------------- |
-| `k8s.about`            | safe   | Product / version / platform via `VersionApi.get_code`.           |
-| `k8s.ls`               | safe   | Synthetic walker: root / namespace / namespace+kind.              |
-| `k8s.namespace.list`   | safe   | `CoreV1Api.list_namespace()` -- name / status / age.              |
-| `k8s.node.list`        | safe   | `CoreV1Api.list_node()` -- status / roles / version, plus `system_uuid` (the node's BIOS UUID), `os_image`, `architecture`, `cpu_capacity`, `memory_capacity` (`_node_identity.py`). |
-| `k8s.pod.list`         | safe   | Pods with selectors + server-side pagination.                     |
-| `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix. Includes init containers, their statuses, and `image_pull_secrets` (names only). |
-| `k8s.deployment.list`  | safe   | Deployments with live replica counts + image + strategy.          |
-| `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix. Includes `image_pull_secrets` (names only). |
-| `k8s.job.list`         | safe   | `BatchV1Api.list_namespaced_job()` / `list_job_for_all_namespaces()` -- one row per Job with a one-word `state`, pod counts, `completions`, start / completion times. Same selectors + paging as `k8s.pod.list`. (`ops_job.py`) |
-| `k8s.job.info`         | safe   | One Job by exact name or unique prefix: the row fields plus conditions (reason + message), `backoff_limit`, `active_deadline_seconds`, template containers, `pod_selector` and up to 50 of its pods, newest first. (`ops_job.py`) |
-| `k8s.workload.list`    | safe   | `AppsV1Api` list for one `kind` (Deployment / StatefulSet / DaemonSet): desired `replicas` (DaemonSet: pods it should run), per-container `requests` / `limits` as API quantities, images, `volumes` with `claim_name`, StatefulSet `volume_claim_templates`, and `pod_selector`. `containers` holds the app containers and the sidecars (init containers with `restartPolicy: Always`); plain init containers are left out. Same selectors + paging as `k8s.deployment.list`. (`ops_workload_set.py`) |
-| `k8s.service.list`     | safe   | `CoreV1Api.list_namespaced_service()` / `list_service_for_all_namespaces()` -- type / cluster_ip / ports / selector / lb_ingress (LoadBalancer VIP from `status.loadBalancer.ingress`, `[]` otherwise) + `label_selector`. |
-| `k8s.ingress.list`     | safe   | `NetworkingV1Api.list_namespaced_ingress()` / `list_ingress_for_all_namespaces()` -- class / hosts / TLS / rules + `label_selector`. |
-| `k8s.configmap.list`   | safe   | `CoreV1Api.list_namespaced_config_map()` / `list_config_map_for_all_namespaces()` -- **keys only, NO values** + `label_selector`. |
-| `k8s.configmap.info`   | safe   | `CoreV1Api.read_namespaced_config_map()` -- full data + binary_data. |
-| `k8s.event.list`       | safe   | `CoreV1Api.list_namespaced_event()` / `list_event_for_all_namespaces()` -- pulls up to `MAX_EVENT_LIMIT` (500) rows, sorts client-side by `last_seen` desc, truncates to caller's `--limit`. Server has no `lastTimestamp` ordering guarantee. EventSeries `count` honoured. Forwards `label_selector` + `field_selector`. |
-| `k8s.storageclass.list` | safe  | `StorageV1Api.list_storage_class()` -- name / provisioner / `is_default` (GA `storageclass.kubernetes.io/is-default-class` annotation) / reclaim_policy / volume_binding_mode / allow_expansion. Cluster-scoped, no params. (`ops_storage.py`) |
-| `k8s.persistentvolume.list` | safe | `CoreV1Api.list_persistent_volume()` -- name / phase / capacity / storage_class / claim_ref (`namespace/name`) / access_modes / reclaim_policy. Cluster-scoped, no params. (`ops_storage.py`) |
-| `k8s.persistentvolumeclaim.list` | safe | `CoreV1Api.list_namespaced_persistent_volume_claim()` / `list_persistent_volume_claim_for_all_namespaces()` -- name / namespace / status / capacity (`status.capacity.storage`) / storage_class / volume_name / access_modes. `namespace` XOR `all_namespaces`. Backs `k8s.ls /<ns>/persistentvolumeclaims`. (`ops_storage.py`) |
-| `k8s.crd.list`         | safe   | `ApiextensionsV1Api.list_custom_resource_definition()` -- group / kind / plural / scope / versions (`{name, served, storage}`). Discovery op for the generic CR reads. (`ops_customresource.py`) |
-| `k8s.cr.list`          | safe   | Generic CR list over `CustomObjectsApi.list_namespaced_custom_object()` (with `namespace`) / `list_cluster_custom_object()` (without). Rows = metadata + bounded JSON `spec_excerpt` (cap `CR_SPEC_EXCERPT_MAX_BYTES` = 2048 B, `spec_truncated` flag). Requires `group`/`version`/`plural`. `group: ""` reads the core group under `/api/{version}` instead (`ops_core_objects.py`, #3840). (`ops_customresource.py`) |
-| `k8s.cr.info`          | safe   | Generic single CR read over `CustomObjectsApi.get_namespaced_custom_object()` / `get_cluster_custom_object()`. Single-object projection (metadata + bounded `spec_excerpt`), not a rows envelope. Requires `group`/`version`/`plural`/`name`. `group: ""` reads one core-group object under `/api/{version}`. (`ops_customresource.py`) |
-| `k8s.auth.can_i`       | safe   | `AuthorizationV1Api.create_self_subject_access_review()` -- may the target's kubeconfig identity do one verb on one resource (or one non-resource path)? `{allowed, denied, reason, evaluation_error}`. Same as `kubectl auth can-i`. (`ops_access.py`, #3840) |
-| `k8s.auth.rules`       | safe   | `AuthorizationV1Api.create_self_subject_rules_review()` -- every rule that identity has in one namespace, one row per rule, plus `incomplete`. Same as `kubectl auth can-i --list`. (`ops_access.py`, #3840) |
-| `k8s.admission_webhook.list` | safe | `AdmissionregistrationV1Api.list_validating_webhook_configuration()` + `list_mutating_webhook_configuration()` -- one row per webhook: rules, selectors, `failure_policy`, `side_effects`, `timeout_seconds`, service or URL. `caBundle` is left out. Optional `type` filter. (`ops_admission.py`, #3840) |
-| `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap; since_time / until_time read an older time window, oldest line first. `container` also accepts an init container name. |
-| `k8s.exec`             | **dangerous** (`requires_approval=True`) | `CoreV1Api.connect_get_namespaced_pod_exec()` over the `WsApiClient` websocket transport -- bounded argv command-and-capture: stdout / stderr demuxed from the `v4.channel.k8s.io` channels + exit code parsed from the channel-3 status frame, per-stream 1 MiB cap, bounded timeout. Interactive `-it` deferred. |
-| `k8s.secret.list`     | safe   | `CoreV1Api.list_namespaced_secret()` / `list_secret_for_all_namespaces()` -- one row per Secret: name / namespace / type / `keys` (names only) / `key_count` / labels / `annotation_keys` (names only) / `owner_count` / created / resource_version. **Never a value.** Same `namespace` XOR `all_namespaces` + `label_selector` params as `k8s.configmap.list`. Needs `list` on `secrets`. (`ops_secret_list.py`) |
-| `k8s.secret.info`     | safe   | `CoreV1Api.read_namespaced_secret()` -- the list row fields plus `immutable`, `owners` (kind + name) and `key_sizes` (bytes per key). **Never a value.** Needs `get` on `secrets`. (`ops_secret_list.py`) |
-| `k8s.secret.read_to_ref` | **caution** (`requires_approval=True`) | `CoreV1Api.read_namespaced_secret()` -- reads one Secret's `data[data_key]` (default `value`), decodes it, and stages the value to a **tenant-scoped Vault `secret_ref`** via `vault.kv.put`; returns **only** the ref + provenance (SHA-256 / byte length), never the value. Classified `credential_read` (audit + broadcast aggregate-only). The governed VKS guest-kubeconfig read (`ops_secret_read.py`, #3496). |
-| `k8s.secret.compare_to_ref` | safe | `CoreV1Api.read_namespaced_secret()` -- checks that one Secret key holds the same value as its Vault copy `{path, key, mount?}`. Answers only `same` and, per copy, `found` / `matches_first` / version; never a value or a hash. Classified `credential_read`. (`ops_secret_compare.py`) |
+This page does not list the ops. Get the list from `list_operation_groups`
+and `search_operations` (connector `k8s-1.x`).
+
+- **One feature, one module.** Each `ops_<feature>.py` module holds the
+  rows of its ops (`KubernetesOp`: id, schemas, risk level, group,
+  guidance) and exports them as `OPS`, a tuple. The module also holds the
+  helpers and the handler code of the feature. Examples: `ops_core.py`,
+  `ops_job.py`, `ops_secret_list.py`. A row can live in a small module of
+  its own when the feature module is at the size cap (`ops_logs_meta.py`
+  for `k8s.logs`, `ops_write_meta.py` for the write ops).
+- **`ops.py` collects the modules.** `collect_ops` walks the package with
+  `pkgutil`, imports every `ops_*` module, reads its `OPS` and sorts the
+  rows by op id into `KUBERNETES_OPS`. A module without `OPS` is a helper.
+  Two rows with one op id, or a row that is not a `KubernetesOp`, fail at
+  import. `ops.py` keeps no list of ops or modules.
+- **The handler** is a method on `KubernetesConnector` (`connector.py`),
+  named by the row's `handler_attr`. Most methods only call the
+  handler function in the feature module.
+- **Group texts** stay hand-written in `_WHEN_TO_USE_BY_GROUP`
+  (`connector.py`), one entry per group. A new op in an existing group
+  changes nothing there. A new group adds its own entry.
+- **Tests check rules, not copies.** `test_connectors_k8s_ops_collect.py`
+  fails when a module holds rows that are not collected (for example rows
+  that are not exported as `OPS`). The end-to-end test
+  (`tests/integration/test_connectors_k8s_e2e.py`) checks that every row
+  of `KUBERNETES_OPS` is registered with its group, risk level and
+  approval flag. A feature's own test may pin its own ops.
+
+To add an op: add a row to the `OPS` of its feature module (or a new
+`ops_<feature>.py` with `OPS`), add the handler method on
+`KubernetesConnector`, and add a test for the feature.
 
 The multi-step read `k8s.migration.inventory` (group `migration`, `safe`)
 collects the cluster's nodes and workloads in the common migration inventory

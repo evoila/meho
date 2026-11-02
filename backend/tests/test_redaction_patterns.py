@@ -741,9 +741,10 @@ def test_get_pattern_unknown_raises() -> None:
         ("ceph_key", _CEPH_KEYRING_FIXTURE, True),
         ("ceph_key", _CEPH_AUTH_LS_FIXTURE, True),
         ("ceph_key", 'KEY="' + _CEPH_KEY_VALUE_FIXTURE + '"', True),
+        ("ceph_key", '{"entity": "client.admin", "key": "' + _CEPH_KEY_VALUE_FIXTURE + '"}', True),
+        ("ceph_key", "CEPH_KEY=" + _CEPH_KEY_VALUE_FIXTURE, True),
         ("ceph_key", "key = /etc/ceph/ceph.client.admin.keyring", False),
-        ("ceph_key", "ssl_certificate_key = " + _CEPH_KEY_VALUE_FIXTURE, False),
-        ("ceph_key", "monkey = " + _CEPH_KEY_VALUE_FIXTURE, False),
+        ("ceph_key", "ssl_certificate_key = /etc/ssl/private/server.pem", False),
         ("ceph_key", "key = AQshort==", False),
         ("ceph_key", "key = " + _CEPH_KEY_VALUE_FIXTURE[2:], False),
         # ipv4: dotted quad with valid 0-255 octets

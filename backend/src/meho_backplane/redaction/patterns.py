@@ -234,13 +234,15 @@ _PASSWORD_HASH = re.compile(
 # Ceph keys, as in a keyring file (``key = AQ...==``) and in the output
 # of ``ceph auth ls`` / ``ceph auth get`` (``key: AQ...==``). A Ceph key
 # is base64 of a fixed binary layout whose first bytes always encode to
-# ``AQ``; the value is 40 characters long and ends in ``==``. The ``AQ``
-# start and the length floor keep ``key = <path>`` and other short
-# ``key`` settings out. The label may not follow ``_`` or ``-``
-# (``ssl_certificate_key = ...`` is a path, not a key). The whole
-# ``key = value`` pair is the match, like ``api_key``.
+# ``AQ``; the value is 40 characters long and ends in ``==``. The value
+# shape decides the match: the ``AQ`` start and the length floor keep
+# ``key = <path>`` and other short ``key`` settings out. So the label
+# may be quoted, as in the JSON output of ``ceph auth get -f json``
+# (``"key": "AQ...=="``), or be the end of a longer name
+# (``CEPH_KEY=AQ...==``). The whole ``key = value`` pair is the match,
+# like ``api_key``.
 _CEPH_KEY = re.compile(
-    r"(?<![A-Za-z0-9_-])(?i:key)\s*[=:]\s*['\"]?"
+    r"(?i:key)['\"]?\s*[=:]\s*['\"]?"
     r"AQ[A-Za-z0-9+/]{30,}={0,2}['\"]?(?![A-Za-z0-9+/=])",
 )
 

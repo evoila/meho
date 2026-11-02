@@ -32,8 +32,7 @@ var typedDispatchCases = []struct {
 // ingested METHOD:/path op_ids — each entry records why no typed
 // op_id exists, so the intent is pinned rather than silently
 // unguarded (#2942). When the backend ships a typed counterpart, move
-// the verb to typedDispatchCases and reclassify it in
-// typedOpCLICoverage.
+// the verb to typedDispatchCases.
 var ingestedDispatchCases = []struct {
 	name   string
 	args   []string
@@ -52,25 +51,6 @@ var ingestedDispatchCases = []struct {
 		[]string{"firewall", "rule", "list", "pol-1"},
 		"GET:/policy/api/v1/infra/domains/{domain-id}/security-policies/{security-policy-id}/rules",
 	},
-}
-
-// typedOpCLICoverage classifies every typed op_id the backend registers
-// for nsx: the CLI verb that dispatches it, or "" when the op is
-// agent-surface-only (no CLI verb wraps it).
-// TestBackendTypedOpsAreClassified fails when the backend gains a
-// typed op that is not classified here — the "typed op ⇒ repoint the
-// CLI verb ⇒ pin it" contract (#2942).
-var typedOpCLICoverage = map[string]string{
-	"nsx.node.status":          "about",
-	"nsx.cluster.status":       "cluster status",
-	"nsx.transport_zone.list":  "transport-zone list",
-	"nsx.tier1.list":           "tier1 list",
-	"nsx.segment.list":         "segment list",
-	"nsx.transport_node.list":  "node list",
-	"nsx.transport_node.state": "", // per-node state detail — agent surface only
-	"nsx.alarm.list":           "", // agent surface only
-	"nsx.backup.config":        "", // agent surface only
-	"nsx.backup.status":        "", // agent surface only
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed NSX

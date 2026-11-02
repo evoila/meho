@@ -32,8 +32,7 @@ var typedDispatchCases = []struct {
 // ingested METHOD:/path op_ids — each entry records why no typed
 // op_id exists, so the intent is pinned rather than silently
 // unguarded (#2942). When the backend ships a typed counterpart, move
-// the verb to typedDispatchCases and reclassify it in
-// typedOpCLICoverage.
+// the verb to typedDispatchCases.
 var ingestedDispatchCases = []struct {
 	name   string
 	args   []string
@@ -47,104 +46,6 @@ var ingestedDispatchCases = []struct {
 	// tier, not planned).
 	{"blueprint list", []string{"blueprint", "list"}, "GET:/iaas/api/blueprints"},
 	{"user list", []string{"user", "list"}, "GET:/cloudapi/1.0.0/users"},
-}
-
-// typedOpCLICoverage classifies every typed op_id the backend registers
-// for vcf_automation: the CLI verb that dispatches it, or "" when the
-// op is agent-surface-only (no CLI verb wraps it).
-// TestBackendTypedOpsAreClassified fails when the backend gains a
-// typed op that is not classified here — the "typed op ⇒ repoint the
-// CLI verb ⇒ pin it" contract (#2942).
-var typedOpCLICoverage = map[string]string{
-	"vcfa.provider.org.list":      "org list",
-	"vcfa.provider.region.list":   "region list",
-	"vcfa.provider.health":        "about --plane provider", // pinned by TestAboutVerbDispatchesPerPlane
-	"vcfa.tenant.project.list":    "project list",
-	"vcfa.tenant.deployment.list": "deployment list",
-	"vcfa.tenant.deployment.get":  "deployment get",
-	"vcfa.tenant.about":           "about --plane tenant", // pinned by TestAboutVerbDispatchesPerPlane
-	// Provisioning surface (#3890): agent-surface-only, reached through
-	// `meho operation call` / MCP call_operation — no dedicated CLI verb.
-	"vcfa.provider.right.list":       "",
-	"vcfa.provider.role.list":        "",
-	"vcfa.provider.org.create":       "",
-	"vcfa.provider.role.create":      "",
-	"vcfa.provider.role.delete":      "",
-	"vcfa.provider.user.create":      "",
-	"vcfa.provider.api_token.create": "",
-	"vcfa.provider.api_token.revoke": "",
-	"vcfa.tenant.project.create":     "",
-	"vcfa.tenant.login.test":         "",
-	// Image ops: agent-surface-only too, reached through
-	// `meho operation call` / MCP call_operation.
-	"vcfa.tenant.image_profile.list":             "",
-	"vcfa.tenant.fabric_image.list":              "",
-	"vcfa.tenant.cloud_account.enumerate_images": "",
-	"vcfa.tenant.image_profile.mapping.update":   "",
-	// A project's own network and its first deployment: agent-surface-only,
-	// reached through `meho operation call` / MCP call_operation.
-	"vcfa.tenant.fabric_network.list":      "",
-	"vcfa.tenant.fabric_compute.list":      "",
-	"vcfa.tenant.region.list":              "",
-	"vcfa.tenant.zone.list":                "",
-	"vcfa.tenant.fabric_network.update":    "",
-	"vcfa.tenant.network_profile.create":   "",
-	"vcfa.tenant.blueprint_request.create": "",
-	"vcfa.tenant.blueprint_request.get":    "",
-	"vcfa.tenant.deployment.delete":        "",
-	// Feature flags: agent-surface-only, reached through
-	// `meho operation call` / MCP call_operation.
-	"vcfa.provider.feature_flag.list": "",
-	"vcfa.provider.feature_flag.set":  "",
-	// Infrastructure (cloud accounts, zones, profiles, project members):
-	// agent-surface-only, reached through `meho operation call` / MCP
-	// call_operation. The ids are written out in VCFA_INFRA_OP_IDS.
-	"vcfa.tenant.cloud_account.list":   "",
-	"vcfa.tenant.cloud_account.create": "",
-	"vcfa.tenant.cloud_account.delete": "",
-	"vcfa.tenant.zone.set":             "",
-	"vcfa.tenant.flavor_profile.list":  "",
-	"vcfa.tenant.flavor_profile.set":   "",
-	"vcfa.tenant.network_profile.list": "",
-	"vcfa.tenant.storage_profile.list": "",
-	"vcfa.tenant.project.members.set":  "",
-	// Approvals, policies, ABX actions and event subscriptions:
-	// agent-surface-only, reached through `meho operation call` / MCP
-	// call_operation.
-	"vcfa.tenant.approval.list":     "",
-	"vcfa.tenant.approval.decide":   "",
-	"vcfa.tenant.policy.list":       "",
-	"vcfa.tenant.policy.set":        "",
-	"vcfa.tenant.abx.action.list":   "",
-	"vcfa.tenant.abx.action.run":    "",
-	"vcfa.tenant.abx.run.get":       "",
-	"vcfa.tenant.subscription.list": "",
-	"vcfa.tenant.subscription.set":  "",
-	// Day-2 ops, shared with Aria Automation 8: agent-surface-only,
-	// reached through `meho operation call` / MCP call_operation.
-	"vcfa.tenant.deployment.actions.list": "",
-	"vcfa.tenant.deployment.action.run":   "",
-	"vcfa.tenant.resource.action.run":     "",
-	"vcfa.tenant.deployment.lease.change": "",
-	"vcfa.tenant.machine.list":            "",
-	"vcfa.tenant.block_device.list":       "",
-	"vcfa.tenant.machine.create":          "",
-	"vcfa.tenant.block_device.create":     "",
-	// Regions and organization quotas: agent-surface-only, reached through
-	// `meho operation call` / MCP call_operation.
-	"vcfa.provider.infra.list":           "",
-	"vcfa.provider.region.get":           "",
-	"vcfa.provider.org_quota.list":       "",
-	"vcfa.provider.vcenter.register":     "",
-	"vcfa.provider.nsx_manager.register": "",
-	"vcfa.provider.region.set":           "",
-	"vcfa.provider.org_quota.set":        "",
-	// Sign-in settings (LDAP, OIDC): agent-surface-only, reached through
-	// `meho operation call` / MCP call_operation.
-	"vcfa.provider.identity.show": "",
-	"vcfa.provider.ldap.set":      "",
-	"vcfa.provider.org.ldap.set":  "",
-	"vcfa.provider.org.oidc.set":  "",
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed VCFA

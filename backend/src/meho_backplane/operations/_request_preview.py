@@ -417,7 +417,7 @@ async def _governance_fields(
         )
         if steps is not None:
             verdict, step_reason = steps
-            reason = f"{reason}; {step_reason}" if reason else step_reason
+            reason = f"{reason}; but {step_reason}" if reason else step_reason
     return {
         "safety_level": descriptor.safety_level,
         "requires_approval": descriptor.requires_approval,

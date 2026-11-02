@@ -172,6 +172,10 @@ skips plain `GET` / `HEAD` reads and runs the same decide-only gate on
 each other step, with the step gate's facts (`dangerous`, no
 `requires_approval`). A denied step makes the verdict `deny`; a step that
 would wait makes it `needs-approval`, and the reason names those steps.
+A step that is itself a multi-step operation with its own list is
+checked the same way, at every level, and each operation only once, so
+a list that loops back cannot run forever. The step check runs on every
+instance, not only in sandbox mode.
 The list has every step the operation may run, also reads sent as `POST`
 and the steps of every way the connector can do the work. The preview
 cannot tell which ones the call will run, because it never contacts the

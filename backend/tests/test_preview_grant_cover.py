@@ -291,3 +291,51 @@ async def test_step_check_skips_reads_and_reports_waiting_and_denied_steps(
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_step_check_goes_into_a_step_that_has_its_own_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A lists step B; B is itself multi-step and lists the write step C.
+    # Only A and B have grants, so C waits and the preview must say so.
+    middle = "demo.composite.thing.move"
+    inner = "POST:/things/{id}?action=relocate"
+    register_governed_subops(
+        composite_op_id=_COMPOSITE, connector_id=_STEP_CONNECTOR, sub_op_ids=(middle,)
+    )
+    register_governed_subops(
+        composite_op_id=middle,
+        connector_id=_STEP_CONNECTOR,
+        # The loop back to A must not make the check run forever.
+        sub_op_ids=(inner, _COMPOSITE),
+    )
+    granted = {_COMPOSITE, middle}
+    seen: list[str] = []
+
+    async def fake_gate(**kwargs: Any) -> tuple[PermissionVerdict, str | None]:
+        op_id = kwargs["descriptor"].op_id
+        seen.append(op_id)
+        if op_id in granted:
+            return PermissionVerdict.AUTO_EXECUTE, None
+        return PermissionVerdict.NEEDS_APPROVAL, "no grant"
+
+    monkeypatch.setattr(_preview_steps, "policy_gate", fake_gate)
+
+    waiting = await preview_step_verdict(
+        operator=_service(), op_id=_COMPOSITE, connector_id=_STEP_CONNECTOR, target=None
+    )
+    assert seen == [middle, inner]
+    assert waiting is not None
+    assert waiting[0] is PermissionVerdict.NEEDS_APPROVAL
+    assert inner in waiting[1]
+    assert middle not in waiting[1]
+    assert waiting[1].startswith("these steps have no grant")
+
+    granted.add(inner)
+    assert (
+        await preview_step_verdict(
+            operator=_service(), op_id=_COMPOSITE, connector_id=_STEP_CONNECTOR, target=None
+        )
+        is None
+    )

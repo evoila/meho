@@ -199,8 +199,12 @@ def _default_database_url(
     # this conftest is loaded before any meho_backplane modules,
     # and importing the engine module here means it gets imported
     # once at fixture-resolution time per test.
+    import asyncio
     import shutil
 
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
+    from meho_backplane.db import engine as engine_module
     from meho_backplane.db.engine import dispose_engine, reset_engine_for_testing
 
     db_path = tmp_path / "default.db"
@@ -218,26 +222,42 @@ def _default_database_url(
     # ``DATABASE_URL`` win via last-write.
     monkeypatch.setenv("DATABASE_URL", url)
 
+    # Keep a reference to every engine the app makes during the test. Many
+    # test files call ``reset_engine_for_testing()`` in their own teardown,
+    # which runs before this one and drops the cached engine without closing
+    # it. Its pooled aiosqlite connections were then closed only by garbage
+    # collection, later, during another test and after their event loop was
+    # closed: aiosqlite then raised "Event loop is closed" in its worker
+    # thread. Closing every engine here, while a loop runs, prevents that.
+    made_engines: list[AsyncEngine] = []
+    make_engine = engine_module.create_engine_for_url
+
+    def _record_engine(url: str, *, pool_size: int, pool_timeout: float) -> AsyncEngine:
+        made = make_engine(url, pool_size=pool_size, pool_timeout=pool_timeout)
+        made_engines.append(made)
+        return made
+
+    monkeypatch.setattr(engine_module, "create_engine_for_url", _record_engine)
+
     get_settings.cache_clear()
     reset_engine_for_testing()
     yield
-    # Tests that constructed an engine via this URL leave a cached
-    # AsyncEngine pointing at a tmp file that pytest will reap;
-    # disposing here closes the asyncpg/aiosqlite pool cleanly so the
-    # next test gets a fresh engine bound to its own tmp DB.
-    try:
-        # Best-effort dispose; pytest-asyncio's event loop may already
-        # be torn down by the time we get here, in which case the
-        # cache reset alone is sufficient.
-        import asyncio
 
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(dispose_engine())
-        finally:
-            loop.close()
-    except Exception:
-        pass
+    async def _close_engines() -> None:
+        await dispose_engine()
+        for made in made_engines:
+            await made.dispose()
+
+    # The test's own event loop may already be closed here, so the engines
+    # are closed on a new loop. aiosqlite closes a connection on whatever
+    # loop is running, so this works for the pools of every test.
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_close_engines())
+    except Exception as exc:
+        warnings.warn(f"closing the test database engines failed: {exc!r}", stacklevel=1)
+    finally:
+        loop.close()
     reset_engine_for_testing()
     get_settings.cache_clear()
 

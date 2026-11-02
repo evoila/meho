@@ -22,8 +22,9 @@
 #
 # The firewall tests also check the MEHO nftables file with the real nft
 # and kernel, in a new user and network namespace, so the runner's own
-# firewall stays as it is. MEHO_REQUIRE_NFT_CHECK=1 makes those tests fail,
-# not skip, when the runner cannot run them.
+# firewall stays as it is. One of them adds a dummy network card there with
+# ip. MEHO_REQUIRE_NFT_CHECK=1 makes those tests fail, not skip, when the
+# runner cannot run them.
 #
 # The tests of --os-packages also run the real apt-get and gpg against a
 # small flat apt repository that the test signs, so the signature check and
@@ -168,18 +169,27 @@ jobs:
             exit 1
           fi
 
-      - name: Install nftables for the firewall file check
+      - name: Install nftables and iproute2 for the firewall file check
         # Same `sudo -n apt-get` pattern as the php-cli step in ci.yml. A
         # failed index refresh is a warning: the install below fails on its
-        # own when the Ubuntu indexes are missing. nft is in /usr/sbin, which
-        # the PATH of a non-root runner user may not hold.
+        # own when the Ubuntu indexes are missing. nft and ip are in
+        # /usr/sbin, which the PATH of a non-root runner user may not hold.
+        # The service test of test_firewall_nft.py adds a dummy network card
+        # and a route with ip.
         run: |
           set -euo pipefail
+          packages=()
           if ! command -v nft >/dev/null 2>&1 && [ ! -x /usr/sbin/nft ]; then
+            packages+=(nftables)
+          fi
+          if ! command -v ip >/dev/null 2>&1 && [ ! -x /usr/sbin/ip ]; then
+            packages+=(iproute2)
+          fi
+          if ((${#packages[@]} > 0)); then
             if ! sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y; then
-              echo "::warning::apt-get update could not refresh every package index; installing nftables from the indexes that did download"
+              echo "::warning::apt-get update could not refresh every package index; installing ${packages[*]} from the indexes that did download"
             fi
-            sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nftables
+            sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
           fi
           case ":${PATH}:" in
             *:/usr/sbin:*) ;;
@@ -189,6 +199,7 @@ jobs:
               ;;
           esac
           nft --version
+          ip -V
 
       - name: Run the unit tests
         env:

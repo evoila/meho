@@ -103,6 +103,12 @@ declare_op_classes(
         # scrubbing. The sibling reads and the sync write carry no credential
         # and are not declared.
         "vmware.composite.content_library.subscribed.create",
+        # #4342 -- the content-library publish change. Its params hold only
+        # Vault references (``password_ref`` / ``current_password_ref``), but
+        # it reads the passwords and sends them to vCenter in the request
+        # body. The class collapses the broadcast to aggregate-only and keeps
+        # the vendor bodies out of the flight recorder.
+        "vmware.composite.content_library.publish.set",
         # The vCenter appliance local-account password change. Its params
         # carry only a Vault path (``password_secret_ref``); the new password
         # is sent only in the request BODY. Its sibling

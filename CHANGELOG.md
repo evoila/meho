@@ -94,6 +94,170 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-11-02
+
+**This is the last release with the VMware connectors built into the
+public image.** From the next release on, the VMware connectors ship as
+a separate connector package, built on top of the public image. The
+decision record
+[evoila's own connectors leave the public repository](https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-own-connectors-leave-the-public-tree.md)
+says which connectors move and why.
+
+MEHO 0.43.0 checks each caller before it hands them a cached login.
+Only a platform admin ingests or deletes built-in connectors and sets
+the Vault login role of a target. In the console, running an operation
+needs the operator role, as on REST and MCP. A decided approval request
+keeps no secret values. A new script builds the MEHO appliance for
+vSphere.
+
+The upgrade runs one database migration (`0132`). It adds no column. It
+hides the secret values in the stored params of decided approval
+requests. Read "Breaking changes" and "Steps after the upgrade" first.
+
+### Security
+- A connector hands a cached login, token or client to a caller only
+  after that caller's own Vault read of the target's secret passed once.
+  The first read fills the cache. Every later caller reads the secret
+  once too, under their own login, and then uses the cached entry with
+  no second login at the vendor. A caller whose read is refused gets the
+  refusal, also when the cache is warm. The check runner (the job that
+  runs Sensors) is its own caller, also when it runs a Sensor that a
+  person made. A change of the target clears the list of callers whose
+  read passed (#5619).
+- The SSH connection pool keeps one login per caller and target. A
+  caller gets a connection only after their own Vault read of the
+  target's secret passed, and reuses only the connections they opened.
+  The check runner, a call without a login token and MEHO's own system
+  calls each have their own place in the pool. A change of the target
+  closes every connection to it. So MEHO opens one SSH login per caller
+  and target, not one per target (#5603).
+- A waiting approval request keeps its params only until it runs or
+  ends. When the run starts, MEHO replaces each secret-named value in
+  the stored params with `[REDACTED:param_name]`, for example a
+  password or a licence key in a deployment spec. The run gets the real
+  values. The same happens when a request is rejected, withdrawn or
+  expires. The migration `0132` does this once for the requests that
+  were decided before (#5608).
+- A waiting approval is also bound to the connector packages of the
+  image: the name, version and file checksum of each package. An image
+  with a new, updated, rebuilt or removed connector package counts as
+  another release. So the requests that still wait end with the reason
+  `release_changed`, and an approved request from the earlier image is
+  refused before the vendor call. The plain public image has no
+  connector packages, so its release identity stays the same (#5602).
+- Ingesting a connector into the built-in scope (with no tenant id) and
+  deleting a built-in connector's rows need the `platform_admin` flag,
+  as enabling, disabling and editing them already did. Every tenant
+  shares these rows. A tenant admin without the flag is refused before
+  any API file is read or any row changes. A tenant admin can still
+  ingest a copy into their own tenant (#5607).
+- Only a platform admin sets, changes or removes the Vault login role
+  of a target (`vault_role` and `vault_mount` in its extras): on
+  create, on update and in `targets.register`. Another caller gets 403
+  `vault_login_role_requires_platform_admin`, and the target stays as
+  it was. Existing targets keep their role (#5609).
+- The console checks the login token of a session again on read pages
+  about every 5 minutes, however many sessions are active. A session
+  that this MEHO process has not checked yet is checked on its next
+  read. So a session that the login server no longer accepts is refused
+  within one check window (#5606).
+- In the console, running or previewing an operation, writing, deleting
+  or moving a Vault secret, and starting, advancing or stopping a
+  runbook run need the `operator` role, the same as on REST and MCP. A
+  `read_only` session gets 403 `operator_required`, and nothing runs or
+  changes (#5605).
+- The mail recipient allowlist accepts only a plain address: the part
+  before the `@` holds only letters, digits and `.`, `_`, `+` and `-`.
+  A recipient with any other character is refused before MEHO connects
+  to the mail relay, for `mail.send` and for the mails of checks.
+  `mail.send` answers such an address with `invalid_params` (#5604).
+
+### Breaking changes
+- A caller whose own Vault read of a target's secret is refused now
+  gets the refusal, also when another caller already logged in to that
+  target. This holds for the connector caches and for the SSH pool
+  (#5619, #5603). What to do: make sure that each caller of a target
+  may read its secret in Vault. This includes people, service logins
+  and the Vault role of the check runner.
+- Ingesting into the built-in scope and deleting a built-in connector's
+  rows need `platform_admin` (#5607). What to do: give `platform_admin`
+  to the account that runs built-in ingests, for example an update
+  routine, or ingest into your own tenant with its tenant id.
+- Setting, changing or removing `vault_role` or `vault_mount` in the
+  extras of a target needs `platform_admin` (#5609). What to do: let a
+  platform admin set these keys. Sending the same values again still
+  works, so an import that keeps them is not refused.
+- A re-run of a failed approved run
+  (`POST /api/v1/approvals/{request_id}/rerun`) needs the params again
+  when they held a secret-named value, for example a password or a
+  licence key, because the stored copy no longer has it (#5608). What
+  to do: send the params with the re-run.
+- A new, updated, rebuilt or removed connector package in the image
+  ends every approval request that still waits, as a MEHO upgrade does
+  (#5602). What to do: decide waiting requests before you roll out a
+  new overlay image, or ask the requesters to send them again.
+- A `read_only` person gets 403 `operator_required` in the console when
+  they run or preview an operation, write a Vault secret or drive a
+  runbook run (#5605). What to do: give the `operator` role to the
+  people who do these things.
+- A mail recipient whose part before the `@` holds another character,
+  for example `%` or `!`, is refused (#5604). What to do: use plain
+  addresses. A full address on the allowlist must be plain too, or it
+  never matches.
+
+### Steps after the upgrade
+- Back up the database first. The migration `0132` adds no column. In
+  every approval request that no longer waits, it replaces each
+  secret-named value of the stored params with
+  `[REDACTED:param_name]`. A rollback does not bring the values back
+  (#5608).
+- The upgrade ends every approval request that still waits, as every
+  upgrade since 0.39.0 does: a `pending` request expires with the
+  reason `release_changed`. Decide waiting requests first, or ask the
+  requesters to send them again.
+- Existing Keycloak realm: on each client that people use for
+  `meho login` (`meho-cli` by default), turn on the standard flow and
+  the redirect address `http://127.0.0.1:*`, for example with the
+  operation `keycloak.client.update`. Do not set the PKCE method to
+  required (`S256`) on these clients, and clear it where it is set:
+  the device login of `meho login` sends no PKCE, so a required method
+  refuses every command line login. The fresh sign-in for approvals
+  sends PKCE by itself. Do not run
+  `meho admin keycloak bootstrap-clients` for this: on an existing
+  realm it also rewrites the `meho-cli` and `meho-mcp` clients and
+  their tenant and role mappers, and it sets the PKCE method of
+  `meho-cli` to required. The 0.40.0 notes asked for PKCE `S256` on
+  these clients; they are corrected too (#5627).
+- Give `platform_admin` to the account that runs built-in connector
+  ingests, for example an update routine (#5607).
+- An install with more than one tenant: tie each extra Vault login role
+  that a target names to one tenant, with `bound_claims` on the
+  `tenant_id` claim, as section 8 of
+  `docs/cross-repo/vault-provisioning.md` says (#5609).
+- Optional: set your mail relay to the same rule for recipients. On
+  Postfix, set `allow_percent_hack = no` and `swap_bangpath = no`
+  (#5604).
+
+### Added
+- Appliance: `deploy/appliance/build.sh` builds the MEHO appliance
+  `meho-appliance-<version>.ova` for vSphere with `govc`, the vSphere
+  command line tool. It starts from the Ubuntu 24.04 cloud image and
+  runs the Linux server install (form 2) of a release. Then it removes
+  the keys, passwords, host keys, logs and other files that must differ
+  between appliances, checks that they are gone, and exports the OVA
+  with its wizard fields, a manifest and `SHA256SUMS`. A workflow that
+  a person starts runs the build. The appliance is not part of a
+  release yet: it does not set itself up at its first start yet, and
+  the release does not publish it (#5067).
+
+### Documentation
+- The 0.40.0 Keycloak step no longer asks for PKCE `S256` on the
+  `meho login` clients. The same fix is in the 0.40.0 upgrade note, in
+  the realm guide on the docs site and in the login recipe in
+  `deploy/values-examples` (#5627).
+- Six docs and code comments that named tests or code that are gone now
+  say what the code does (#5622).
+
 ## [0.42.0] - 2026-11-02
 
 MEHO 0.42.0 hides secret-named fields in every answer and asks for a

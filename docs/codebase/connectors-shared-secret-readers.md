@@ -22,12 +22,15 @@ login. `SecretReaders` keeps that check when the cache is warm:
   matters because some vendors allow only one active session per user
   (see `connectors-shared-vault-creds.md § Connector cache keys`).
 
-Callers are told apart by `operator.sub`:
+Callers are told apart by their kind and their `operator.sub`
+(`caller_id`):
 
-- A person is one caller.
+- A person is one caller (kind `operator`).
 - The check runner (the background job that runs Sensors) has its own
-  `sub` and its own token, so it is its own caller and reads the secret
-  with its own Vault login.
+  token and Vault role, but it may run a Sensor under the `sub` of the
+  person who made it. So its kind (`check-runner`, from
+  `operator.check_runner_dispatch`) is part of the key: it never counts
+  as that person and reads the secret with its own Vault login.
 - The synthesised system operator (operator-less probes) is never
   recorded. It runs the loader every time, as before. On a live Vault that
   read fails closed, because its placeholder token is not a valid login.
@@ -38,9 +41,12 @@ caller and target instead (see `docs/architecture/connector-auth.md`).
 
 ## Key types
 
+- **`caller_id(operator) -> (kind, sub)`** — who the operator is for a
+  secret read: `("check-runner", sub)` for the check runner, else
+  `("operator", sub)`.
 - **`SecretReaders`** — the callers who have read a target's secret in
   this process. Keyed on the tenant-unique target key
-  (`target_cache_key`) and `operator.sub`.
+  (`target_cache_key`) and `caller_id`.
   - `has_read(target, operator) -> bool` — whether the caller has read.
     Always `False` for the system operator.
   - `record(target, operator)` — remember a passed read. Call it right
@@ -53,7 +59,7 @@ caller and target instead (see `docs/architecture/connector-auth.md`).
     `invalidate_credentials`, so a target change makes every caller read
     the new secret.
   - `clear()` — forget everything. Called from `aclose`.
-  - `subs(target)` — the recorded callers (for tests).
+  - `callers(target)` — the recorded `(kind, sub)` pairs (for tests).
 
 Every method is synchronous apart from `ensure_read`, and none of them
 awaits while it changes state, so a connector calls them under its own

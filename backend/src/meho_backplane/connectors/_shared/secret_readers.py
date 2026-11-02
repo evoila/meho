@@ -15,12 +15,14 @@ cached entry. So Vault's answer reaches every caller, and the vendor
 still sees one login per credential (some vendors allow only one active
 session per user, see :func:`~meho_backplane.connectors._shared.cache_key.credential_cache_key`).
 
-Callers are told apart by ``operator.sub``. A person is one caller. The
-check runner (the background job that runs Sensors) has its own ``sub``
-and its own token, so it is its own caller and reads the secret with its
-own login. The synthesised system operator (operator-less probes) is never
-recorded: it runs the loader every time, as before, and the loader fails
-closed on a live Vault.
+Callers are told apart by their kind and their ``operator.sub``
+(:func:`caller_id`). A person is one caller. The check runner (the
+background job that runs Sensors) has its own token and Vault role, but it
+may run a Sensor under the ``sub`` of the person who made it, so its kind
+(``check_runner_dispatch``) is part of the key: it never counts as that
+person and reads the secret with its own login. The synthesised system
+operator (operator-less probes) is never recorded: it runs the loader
+every time, as before, and the loader fails closed on a live Vault.
 
 A target change forgets the readers of that target
 (:meth:`SecretReaders.forget`), together with the cached entries, so the
@@ -54,6 +56,7 @@ own cache lock without a second lock.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from typing import Literal
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import (
@@ -62,7 +65,22 @@ from meho_backplane.connectors._shared.cache_key import (
 )
 from meho_backplane.connectors._shared.system_operator import is_system_operator
 
-__all__ = ["SecretReaders"]
+__all__ = ["SecretReaders", "caller_id"]
+
+#: The kind of a caller: how it logs in to Vault.
+CallerKind = Literal["operator", "check-runner"]
+
+
+def caller_id(operator: Operator) -> tuple[CallerKind, str]:
+    """Return ``(kind, sub)``: who *operator* is for a secret read.
+
+    The check runner (``check_runner_dispatch``) reads with its own token
+    and role, also when it runs a Sensor under a person's ``sub``, so it is
+    its own kind. Everything else is a person or machine login reading with
+    its own token.
+    """
+    kind: CallerKind = "check-runner" if operator.check_runner_dispatch else "operator"
+    return (kind, operator.sub)
 
 
 class SecretReaders:
@@ -70,11 +88,11 @@ class SecretReaders:
 
     Keyed on the tenant-unique target key
     (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`)
-    and the caller's ``operator.sub``.
+    and the caller (:func:`caller_id`: kind and ``sub``).
     """
 
     def __init__(self) -> None:
-        self._subs: dict[tuple[str, str], set[str]] = {}
+        self._callers: dict[tuple[str, str], set[tuple[CallerKind, str]]] = {}
 
     def has_read(self, target: TenantScopedTargetLike, operator: Operator) -> bool:
         """Return whether *operator* has read the secret of *target* in this process.
@@ -83,7 +101,7 @@ class SecretReaders:
         """
         if is_system_operator(operator):
             return False
-        return operator.sub in self._subs.get(target_cache_key(target), ())
+        return caller_id(operator) in self._callers.get(target_cache_key(target), ())
 
     def record(self, target: TenantScopedTargetLike, operator: Operator) -> None:
         """Remember that *operator*'s read of the secret of *target* passed.
@@ -93,7 +111,7 @@ class SecretReaders:
         """
         if is_system_operator(operator):
             return
-        self._subs.setdefault(target_cache_key(target), set()).add(operator.sub)
+        self._callers.setdefault(target_cache_key(target), set()).add(caller_id(operator))
 
     async def ensure_read(
         self,
@@ -115,12 +133,12 @@ class SecretReaders:
 
     def forget(self, target: TenantScopedTargetLike) -> None:
         """Forget every reader of *target*; the next call of each one reads again."""
-        self._subs.pop(target_cache_key(target), None)
+        self._callers.pop(target_cache_key(target), None)
 
     def clear(self) -> None:
         """Forget every reader of every target."""
-        self._subs.clear()
+        self._callers.clear()
 
-    def subs(self, target: TenantScopedTargetLike) -> frozenset[str]:
-        """The recorded callers of *target* (read-only, for tests)."""
-        return frozenset(self._subs.get(target_cache_key(target), ()))
+    def callers(self, target: TenantScopedTargetLike) -> frozenset[tuple[CallerKind, str]]:
+        """The recorded callers of *target*, as ``(kind, sub)`` (read-only, for tests)."""
+        return frozenset(self._callers.get(target_cache_key(target), ()))

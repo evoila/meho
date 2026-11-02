@@ -209,12 +209,15 @@ the cache guards are the **second** layer — defense-in-depth.
 The guard has two parts:
 
 - **Who has read.** Every cache keeps a `SecretReaders` list: the callers
-  (by `operator.sub`) whose own Vault read of the target's secret passed in
-  this process. A cache hit counts only for such a caller. For any other
-  caller the cache method runs the credential loader under that caller's
-  login first; the loader's answer decides, and a refused read raises. A
-  person, the check runner (its own `sub` and token) and the system
-  operator are each their own caller. The vendor login stays shared: a new
+  (by kind and `operator.sub`) whose own Vault read of the target's secret
+  passed in this process. A cache hit counts only for such a caller. For
+  any other caller the cache method runs the credential loader under that
+  caller's login first; the loader's answer decides, and a refused read
+  raises. A person, the check runner and the system operator are each
+  their own caller: the check runner has its own token and Vault role but
+  may run a Sensor under its creator's `sub`, so its kind
+  (`check_runner_dispatch`) is part of the key and it never counts as
+  that person. The vendor login stays shared: a new
   caller gets the cached token after their read, without a second login
   (some vendors allow only one active session per user). A target change
   (`invalidate_credentials`) forgets the readers of that target together

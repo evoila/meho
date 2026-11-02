@@ -12,7 +12,7 @@ import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.vault import VaultRoleDeniedError
-from meho_backplane.connectors._shared.secret_readers import SecretReaders
+from meho_backplane.connectors._shared.secret_readers import SecretReaders, caller_id
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 
 _TENANT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -43,7 +43,7 @@ def test_a_caller_has_read_only_after_record() -> None:
     assert not readers.has_read(target, alice)
     readers.record(target, alice)
     assert readers.has_read(target, alice)
-    assert readers.subs(target) == frozenset({"alice"})
+    assert readers.callers(target) == frozenset({("operator", "alice")})
 
 
 def test_another_caller_and_another_target_are_not_covered() -> None:
@@ -73,7 +73,32 @@ def test_the_system_operator_is_never_recorded() -> None:
     readers.record(target, system)
 
     assert not readers.has_read(target, system)
-    assert readers.subs(target) == frozenset()
+    assert readers.callers(target) == frozenset()
+
+
+def test_the_check_runner_under_a_persons_sub_is_another_caller() -> None:
+    """A Sensor may run under its creator's ``sub``; the runner's read is still its own."""
+    readers = SecretReaders()
+    target = _Target()
+    alice = _person("alice")
+    runner_as_alice = Operator(
+        sub="alice",
+        name=None,
+        email=None,
+        raw_jwt="runner.test.jwt",
+        tenant_id=_TENANT_ID,
+        tenant_role=TenantRole.OPERATOR,
+        check_runner_dispatch=True,
+    )
+    readers.record(target, alice)
+
+    assert caller_id(runner_as_alice) == ("check-runner", "alice")
+    assert not readers.has_read(target, runner_as_alice)
+
+    readers.record(target, runner_as_alice)
+
+    assert readers.has_read(target, runner_as_alice)
+    assert readers.callers(target) == frozenset({("operator", "alice"), ("check-runner", "alice")})
 
 
 @pytest.mark.asyncio
@@ -136,7 +161,7 @@ def test_forget_drops_one_target_and_clear_drops_all() -> None:
 
     readers.forget(target)
 
-    assert readers.subs(target) == frozenset()
+    assert readers.callers(target) == frozenset()
     assert readers.has_read(other, alice)
 
     readers.clear()

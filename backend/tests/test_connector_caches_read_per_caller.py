@@ -8,7 +8,8 @@ first caller's Vault read fills the cache. These tests show, for every such
 cache, that a later caller does not get the cached entry for free:
 
 * a caller whose own Vault read is refused (a person without the right, the
-  check runner, the system operator) is refused on a warm cache too;
+  check runner, also when it runs a Sensor under the first person's ``sub``,
+  and the system operator) is refused on a warm cache too;
 * a second caller who may read the secret gets the cached entry after one
   read of their own, with no second vendor login;
 * a caller who has read keeps using the cache without another read;
@@ -121,10 +122,14 @@ def _person(sub: str) -> Operator:
     )
 
 
-def _check_runner() -> Operator:
-    """The identity the Sensor runner dispatches with: its own token, not a person's."""
+def _check_runner(sub: str = "__sensor__") -> Operator:
+    """The identity the Sensor runner dispatches with: its own token, not a person's.
+
+    A Sensor may run under its creator's ``sub``; the token and the Vault
+    role are still the runner's.
+    """
     return Operator(
-        sub="__sensor__",
+        sub=sub,
         name=None,
         email=None,
         raw_jwt="runner.test.jwt",
@@ -144,7 +149,9 @@ class _Vault:
     async def read(self, target: Any, operator: Operator) -> Any:
         del target
         self.reads.append(operator.sub)
-        if operator.sub not in _ALLOWED:
+        if operator.sub not in _ALLOWED or operator.check_runner_dispatch:
+            # The runner's own Vault role may not read this secret, whatever
+            # ``sub`` the Sensor runs under.
             raise VaultRoleDeniedError(f"read refused for {operator.sub}")
         return self._secret
 
@@ -519,6 +526,7 @@ def _warm_for_alice(case: _Case) -> tuple[Any, _Vault, _Target]:
 _REFUSED_CALLERS = {
     "person-without-the-right": _person("bob"),
     "check-runner": _check_runner(),
+    "check-runner-under-the-persons-sub": _check_runner("alice"),
     "system-operator": synthesise_system_operator(),
 }
 
@@ -570,8 +578,8 @@ async def test_target_change_forgets_the_readers_of_that_target_only(case: _Case
 
     await connector.invalidate_credentials(target)
 
-    assert case.readers(connector).subs(target) == frozenset()
-    assert case.readers(connector).subs(other) == frozenset({"alice"})
+    assert case.readers(connector).callers(target) == frozenset()
+    assert case.readers(connector).callers(other) == frozenset({("operator", "alice")})
     assert not case.cached(connector, target)
     assert case.cached(connector, other)
     assert vault.reads == []

@@ -13,7 +13,7 @@ first start `docs/codebase/appliance-firststart.md`.
 | `rewrite-ovf.sh` | Puts our product section and the OVF transports into the exported `.ovf`. |
 | `product-section.xml` | The wizard fields of the import in vCenter. |
 | `firststart/` | Runs once at the appliance's first boot: reads the wizard fields, sets up the machine, installs the core from the disk. Also the console banner. |
-| `tests/` | Unit tests of `clean.sh`, `rewrite-ovf.sh` and first start. No vCenter. |
+| `tests/` | Unit tests of `clean.sh`, `rewrite-ovf.sh`, `build.sh` (against a stub `govc`) and first start. No vCenter. |
 
 `.github/workflows/appliance-build.yml` runs the build on the lab runner.
 
@@ -45,6 +45,11 @@ When a step fails, the build VM stays in vCenter. Fix the cause and go on
 from that step with `--from-step N` (2 the form-2 install, 3 the appliance
 pieces, 4 the clean, 5 the export), or destroy the VM with
 `govc vm.destroy <name>`.
+
+`--from-step 2` works only when `rke2-server` does not run on the build
+VM, that is, when `install.sh` stopped before its step 3. After a later
+failure, `install.sh` (v0.39.0 and later) finds a partly installed machine
+and changes nothing: destroy the VM and build again from step 1.
 
 A failed clean is different. `--from-step 4` works only when `clean.sh`
 stopped in its step 1 (the Secrets), while RKE2 still runs and SSH is

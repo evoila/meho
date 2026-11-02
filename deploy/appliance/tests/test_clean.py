@@ -9,7 +9,7 @@ from __future__ import annotations
 import shutil
 import unittest
 
-from clean_harness import BUILD_USER, LABEL, RKE2, CleanTestCase
+from clean_harness import BUILD_HOSTNAME, BUILD_USER, LABEL, RKE2, CleanTestCase
 
 GONE = (
     "/var/lib/meho/first-login-passwords",
@@ -26,6 +26,8 @@ GONE = (
     "/etc/rancher/node/password",
     "/etc/rancher/rke2/rke2.yaml",
     "/var/lib/kubelet",
+    "/etc/cni",
+    "/var/lib/cni",
     "/etc/meho/values-place.yaml",
     "/etc/meho/install.json",
     "/root/.ssh/authorized_keys",
@@ -153,6 +155,15 @@ class CleanTests(CleanTestCase):
         self.assertIn("userdel -r builder", self.vm.calls())
         self.assertFalse(self.vm.host_path("/home/builder").exists())
 
+    def test_the_build_host_name_is_replaced(self) -> None:
+        self.assert_succeeds(self.vm.run())
+
+        self.assertEqual("meho-appliance\n", self.vm.host_path("/etc/hostname").read_text())
+        self.assertEqual(
+            'tls-san:\n  - "meho-appliance"\nprofile: cis\n',
+            self.vm.host_path("/etc/rancher/rke2/config.yaml").read_text(),
+        )
+
     def test_wrong_usage_is_exit_2(self) -> None:
         result = self.vm.run("--wrong")
 
@@ -231,6 +242,16 @@ class CheckTests(CleanTestCase):
                 "/var/lib/kubelet",
                 "/var/lib/kubelet is still there",
             ),
+            "Canal's settings": (
+                "/etc/cni/net.d/calico-kubeconfig",
+                "/etc/cni",
+                "/etc/cni is still there",
+            ),
+            "Canal's address state": (
+                "/var/lib/cni/networks/x",
+                "/var/lib/cni",
+                "/var/lib/cni is still there",
+            ),
             "the install's answers": (
                 "/etc/meho/values-place.yaml",
                 "/etc/meho/values-place.yaml",
@@ -263,6 +284,21 @@ class CheckTests(CleanTestCase):
                 finally:
                     target = self.vm.host_path(remove)
                     shutil.rmtree(target) if target.is_dir() else target.unlink()
+
+    def test_the_build_host_name_is_found(self) -> None:
+        self.vm.host_file("/etc/hostname", "meho-build\n")
+        self.vm.host_file("/etc/hosts", f"127.0.1.1 {BUILD_HOSTNAME.upper()} meho-build\n")
+
+        result = self.vm.run("--check")
+
+        self.assert_fails_once(result, "2 thing(s) are still on the machine")
+        self.assertEqual(
+            [
+                "[LEFT] /etc/hostname does not say meho-appliance",
+                f"[LEFT] the build's host name {BUILD_HOSTNAME} in /etc/hosts",
+            ],
+            self.left_lines(result),
+        )
 
     def test_a_machine_id_is_found(self) -> None:
         self.vm.host_file("/etc/machine-id", "0123456789abcdef0123456789abcdef\n")

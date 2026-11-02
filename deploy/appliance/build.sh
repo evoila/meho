@@ -66,10 +66,11 @@ Usage:
   <out-dir>      The folder for meho-appliance-<version>.ova and SHA256SUMS.
   --from-step N  Go on from step N with the build VM that exists: 2 the
                  form-2 install, 3 the appliance pieces, 4 the clean,
-                 5 the export. Default: 1, a new build VM. 4 works only
-                 when clean.sh stopped in its step 1, while RKE2 still
-                 runs; after a later failure, destroy the VM and build
-                 again from step 1.
+                 5 the export. Default: 1, a new build VM. 2 works only
+                 when install.sh stopped before it started RKE2 (its
+                 step 3). 4 works only when clean.sh stopped in its
+                 step 1, while RKE2 still runs. After a later failure,
+                 destroy the VM and build again from step 1.
 
 Settings, from the environment:
   GOVC_URL, GOVC_USERNAME, GOVC_PASSWORD
@@ -275,8 +276,10 @@ download_base_image() {
 }
 
 deploy_build_vm() {
-    local spec disk
-    if [[ -n $(govc find -type m -name "$VM") ]]; then
+    local spec disk found
+    # An assignment, so the ERR trap stops the build when govc find fails.
+    found=$(govc find -type m -name "$VM")
+    if [[ -n $found ]]; then
         fail "The VM $VM already exists in vCenter." \
             "destroy it with 'govc vm.destroy $VM', or go on from a later step with --from-step."
     fi
@@ -372,12 +375,14 @@ run_clean() {
     scp_build "$APPLIANCE_DIR/clean.sh" "$BUILD_USER@${MEHO_BUILD_ADDRESS%/*}:meho-clean.sh"
     # /run is a RAM disk, so the script is not in the OVA. systemd-run
     # starts it outside this SSH session, which the script cuts. Its lines
-    # go to the VM console as well as the journal, so a failed check can be
-    # read in vCenter after SSH is closed. --collect: a failed unit does not
-    # keep the name, so a second run after a failure in its step 1 works.
+    # go to the VM's screen (tty1), so a failed check can be read in the
+    # vCenter console after SSH is closed. Not "console": on the cloud image
+    # that is the serial port. --collect: a failed unit does not keep the
+    # name, so a second run after a failure in its step 1 works. Ubuntu
+    # mounts /run noexec, so bash reads the script; it is not run.
     ssh_build "sudo install -m 0700 meho-clean.sh /run/meho-clean.sh && rm meho-clean.sh &&
-        sudo systemd-run --unit=$CLEAN_UNIT --collect -p StandardOutput=journal+console -p StandardError=journal+console \
-            /run/meho-clean.sh --build-user $BUILD_USER"
+        sudo systemd-run --unit=$CLEAN_UNIT --collect -p TTYPath=/dev/tty1 -p StandardOutput=tty -p StandardError=tty \
+            /bin/bash /run/meho-clean.sh --build-user $BUILD_USER --build-hostname $MEHO_BUILD_HOSTNAME"
     note "the clean script runs on the build VM; waiting for the power-off"
     until [[ $(vm_power_state) == poweredOff ]]; do
         ((waited += 15))

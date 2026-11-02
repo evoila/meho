@@ -18,7 +18,8 @@
 #      and rke2-killall.sh stops the pods, which outlive the service; then
 #      RKE2's own state: server/db, server/tls, server/cred and the token
 #      files; everything under agent/ except agent/images/; the node
-#      password; the kubeconfig; /var/lib/kubelet
+#      password; the kubeconfig; /var/lib/kubelet; Canal's /etc/cni and
+#      /var/lib/cni
 #   3. MEHO's data, once nothing writes to it: everything under
 #      /var/lib/meho/ (the data volumes, the OpenBao init in them, the two
 #      one-time files, support bundles), and the install's answers under
@@ -26,8 +27,9 @@
 #   4. the machine: the build user's sessions, the user, its key (also the
 #      copy cloud-init puts in root's authorized_keys) and its sudo rule;
 #      the build's network file; cloud-init's state, logs and the
-#      machine-id; the SSH host keys; SSH closed for every address
-#      (meho-host admin-network none); the logs; fstrim
+#      machine-id; the SSH host keys; the build's host name, a name of the
+#      build network, in /etc/hostname and RKE2's settings; SSH closed for
+#      every address (meho-host admin-network none); the logs; fstrim
 # What stays: server/manifests/, agent/images/, /etc/rancher/rke2/config.yaml,
 # the pod security file /etc/rancher/rke2/meho-pss.yaml and the appliance
 # pieces: /opt/meho/appliance and the two enabled units of first start and
@@ -35,8 +37,9 @@
 # is written.
 #
 # Usage:
-#   clean.sh [--build-user <name>]   clean, check, power off
-#   clean.sh --check [--build-user <name>]
+#   clean.sh --build-hostname <fqdn> [--build-user <name>]
+#                                    clean, check, power off
+#   clean.sh --check --build-hostname <fqdn> [--build-user <name>]
 #                                    only the check; exit 1 when anything is left
 #
 # Exit codes:
@@ -73,6 +76,10 @@ readonly RKE2_PRESET=/etc/systemd/system-preset/10-meho-appliance.preset
 # RKE2's tarball installer, which the form-2 install runs, puts it here.
 readonly RKE2_KILLALL=/usr/local/bin/rke2-killall.sh
 readonly KUBELET_DIR=/var/lib/kubelet
+# Canal's settings (with the node's host name and a login token of the
+# cluster) and its address state. Canal writes them again at every start;
+# RKE2's own uninstall removes both folders.
+readonly CNI_DIRS=(/etc/cni /var/lib/cni)
 readonly RKE2_SERVER_STATE=(server/db server/tls server/cred server/token server/agent-token server/node-token)
 readonly RKE2_KEEP=(server/manifests agent/images)
 readonly APPLIANCE_DIR=/opt/meho/appliance
@@ -93,8 +100,12 @@ readonly BUILD_NETPLAN=/etc/netplan/60-meho-build.yaml
 readonly SUDOERS_CLOUD_INIT=/etc/sudoers.d/90-cloud-init-users
 readonly MACHINE_ID=/etc/machine-id
 readonly ROOT_AUTHORIZED_KEYS=/root/.ssh/authorized_keys
+readonly ETC_HOSTNAME=/etc/hostname
+# The appliance's host name until first start sets the customer's.
+readonly NEUTRAL_HOSTNAME=meho-appliance
 
 BUILD_USER=meho-build
+BUILD_HOSTNAME=""
 CHECK_ONLY=0
 LEFT=0
 
@@ -103,9 +114,12 @@ usage() {
 clean.sh: clean the appliance build VM for copying, check it, power off.
 
 Usage:
-  clean.sh [--build-user <name>]
-  clean.sh --check [--build-user <name>]
+  clean.sh --build-hostname <fqdn> [--build-user <name>]
+  clean.sh --check --build-hostname <fqdn> [--build-user <name>]
 
+  --build-hostname <fqdn>
+                       Required. The host name the build VM was installed
+                       with. The clean replaces it with meho-appliance.
   --build-user <name>  The user the build logs in as. Default: meho-build.
   --check              Only check that nothing is left. Exit 1 when it is.
   -h, --help           Show this help and stop.
@@ -149,10 +163,16 @@ parse_options() {
                 BUILD_USER=$2
                 shift
                 ;;
+            --build-hostname)
+                [[ -n ${2-} && $2 != --* ]] || usage_error "--build-hostname needs a value."
+                BUILD_HOSTNAME=${2,,}
+                shift
+                ;;
             *) usage_error "unknown option: $1" ;;
         esac
         shift
     done
+    [[ -n $BUILD_HOSTNAME ]] || usage_error "--build-hostname is required."
 }
 
 kubectl() {
@@ -201,6 +221,9 @@ remove_rke2_state() {
     find "${HOST_ROOT}${RKE2_DIR}/agent" -mindepth 1 -maxdepth 1 ! -name images -exec rm -rf {} +
     rm -f "${HOST_ROOT}${RKE2_NODE_PASSWORD}" "${HOST_ROOT}${RKE2_KUBECONFIG}"
     rm -rf --one-file-system "${HOST_ROOT}${KUBELET_DIR}"
+    for item in "${CNI_DIRS[@]}"; do
+        rm -rf "${HOST_ROOT}${item:?}"
+    done
     ok "RKE2 and its pods are stopped, RKE2 does not start at boot (also not at the first boot), and its state is gone; its images and manifests stay"
 }
 
@@ -230,6 +253,15 @@ clean_machine_identity() {
     cloud-init clean --logs --machine-id
     rm -f "${HOST_ROOT}"/etc/ssh/ssh_host_*
     ok "cloud-init's state, the machine-id and the SSH host keys are gone"
+}
+
+# The build's host name has a DNS record in the build network, so it must not
+# ship. First start sets the customer's name, and its install.sh --from-disk
+# writes RKE2's settings again.
+replace_build_hostname() {
+    printf '%s\n' "$NEUTRAL_HOSTNAME" >"${HOST_ROOT}${ETC_HOSTNAME}"
+    sed -i "s/${BUILD_HOSTNAME//./\\.}/$NEUTRAL_HOSTNAME/gI" "${HOST_ROOT}${RKE2_CONFIG}"
+    ok "the build's host name is replaced with $NEUTRAL_HOSTNAME in $ETC_HOSTNAME and $RKE2_CONFIG"
 }
 
 close_ssh() {
@@ -300,7 +332,7 @@ check_clean() {
     done
     found=$(find "${HOST_ROOT}${RKE2_DIR}/agent" -mindepth 1 -maxdepth 1 ! -name images 2>/dev/null | head -n 1)
     [[ -z $found ]] || left "RKE2 state under $RKE2_DIR/agent/ other than images/"
-    check_none "$RKE2_NODE_PASSWORD" "$RKE2_KUBECONFIG" "$KUBELET_DIR" "$MEHO_PLACE_VALUES" "$MEHO_INSTALL_RECORD" \
+    check_none "$RKE2_NODE_PASSWORD" "$RKE2_KUBECONFIG" "$KUBELET_DIR" "${CNI_DIRS[@]}" "$MEHO_PLACE_VALUES" "$MEHO_INSTALL_RECORD" \
         "$BUILD_NETPLAN" "$SUDOERS_CLOUD_INIT" "$ROOT_AUTHORIZED_KEYS"
     if [[ $(systemctl is-enabled rke2-server 2>/dev/null || true) == enabled ]]; then
         left "rke2-server starts at boot"
@@ -323,6 +355,12 @@ check_clean() {
     if [[ -s ${HOST_ROOT}${MACHINE_ID} && $(cat "${HOST_ROOT}${MACHINE_ID}") != uninitialized ]]; then
         left "a machine-id in $MACHINE_ID"
     fi
+    [[ $(cat "${HOST_ROOT}${ETC_HOSTNAME}" 2>/dev/null) == "$NEUTRAL_HOSTNAME" ]] ||
+        left "$ETC_HOSTNAME does not say $NEUTRAL_HOSTNAME"
+    # Under /etc only: the logs are empty, and the rest holds no host name.
+    found=$(grep -rlisF -- "$BUILD_HOSTNAME" "${HOST_ROOT}/etc" || true)
+    found=${found//"$HOST_ROOT"/}
+    [[ -z $found ]] || left "the build's host name $BUILD_HOSTNAME in ${found//$'\n'/, }"
     ((LEFT == 0)) ||
         fail "$LEFT thing(s) are still on the machine; see the [LEFT] lines." \
             "fix clean.sh so that it removes them, and run the build again."
@@ -346,6 +384,7 @@ main() {
     step "Step 4: remove the build user, the machine identity and the logs"
     remove_build_user
     clean_machine_identity
+    replace_build_hostname
     close_ssh
     truncate_logs
     step "Step 5: check the machine"

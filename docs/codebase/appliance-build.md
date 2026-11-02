@@ -12,8 +12,8 @@ section 6 (hardware version 20).
 
 `deploy/appliance/build.sh <version> <out-dir>` runs the steps against the
 lab's vSphere 8 cluster with `govc`. `.github/workflows/appliance-build.yml`
-runs it on the lab runner and keeps the OVA, `SHA256SUMS` and the build log
-as workflow artifacts. Publishing is #4814.
+runs it on the lab runner and keeps the OVA and `SHA256SUMS` as workflow
+artifacts. Publishing is #4814.
 
 The clean step is the security-relevant part. A file missed there would be
 copied from one OVA into every appliance: the same RKE2 keys, the same SSH
@@ -30,7 +30,7 @@ what it keeps.
 | `deploy/appliance/rewrite-ovf.sh` | Replaces the product section of an exported `.ovf` and declares the OVF transports. `awk` does the rewrite. |
 | `deploy/appliance/product-section.xml` | The wizard fields of the form-1 design, section 2, with `@VERSION@`. |
 | `deploy/appliance/firststart/` | The first-start service and the console banner that step 3 puts into the OVA ([appliance-firststart.md](appliance-firststart.md)). |
-| `deploy/appliance/tests/` | `test_clean.py` with `clean_harness.py` (a fake build VM), `test_rewrite_ovf.py`, and the Ubuntu cloud image's own `.ovf` as the fixture. First start has its own tests; see [appliance-firststart.md](appliance-firststart.md). |
+| `deploy/appliance/tests/` | `test_clean.py` with `clean_harness.py` (a fake build VM), `test_rewrite_ovf.py`, `test_build.py` (`build.sh` against a stub `govc`), and the Ubuntu cloud image's own `.ovf` as the fixture. First start has its own tests; see [appliance-firststart.md](appliance-firststart.md). |
 | `.github/workflows/appliance-build.yml` | The build on the lab runner. |
 | `.github/workflows/linux-server-test.yml` | shellcheck and the unit tests, on every pull request that touches `deploy/appliance/`. |
 
@@ -75,15 +75,18 @@ the tests set it, as `install.sh` does.
    is not built yet; `add_appliance_pieces` marks where its lines go.
 4. **Clean for copying.** `clean.sh` goes to `/run/meho-clean.sh` (a RAM
    disk, so it is not in the OVA) and starts with
-   `systemd-run --unit=meho-clean --collect -p StandardOutput=journal+console`,
+   `systemd-run --unit=meho-clean --collect -p TTYPath=/dev/tty1 -p StandardOutput=tty /bin/bash /run/meho-clean.sh`
+   (Ubuntu mounts `/run` with `noexec`, so `bash` reads the script),
    outside the SSH session, because it deletes the build user and closes
-   SSH. Its lines go to the VM console as well as the journal. The build
-   reads the VM's power state (`govc object.collect`) until it is off. When it is still on
-   after 20 minutes, the script stopped or its check found something, and
-   the build fails with the advice to read the console. `--from-step 4`
-   works only when `clean.sh` stopped in its step 1, while RKE2 still
-   runs; after a later failure the VM is destroyed and the build starts
-   again.
+   SSH. build.sh passes the build user and the build's host name. Its
+   lines go to the VM's screen (tty1), which the vCenter console shows. Not
+   `journal+console`: the cloud image's system console is its serial port,
+   so those lines would go nowhere. The build reads the VM's power state
+   (`govc object.collect`) until it is off. When it is still on after 20
+   minutes, the script stopped or its check found something, and the build
+   fails with the advice to read the console. `--from-step 4` works only
+   when `clean.sh` stopped in its step 1, while RKE2 still runs; after a
+   later failure the VM is destroyed and the build starts again.
 5. **Export.** `govc vm.upgrade -version 20` (already set in step 1; the
    call accepts a VM at that version), then `govc export.ovf`. The
    build checks that the descriptor says `vmx-20`. `rewrite-ovf.sh` puts
@@ -92,7 +95,10 @@ the tests set it, as `install.sh` does.
    `tar --format=ustar` packs the descriptor first, then the manifest, then
    the disk: that is an OVA. `SHA256SUMS` goes next to it, and the build
    VM is destroyed. On a failure the VM stays, and `--from-step` goes on
-   from the failed step.
+   from the failed step. `--from-step 2` works only when `install.sh`
+   stopped before it started RKE2 (its step 3): after a later failure,
+   `install.sh` (v0.39.0 and later) finds a partly installed machine and
+   changes nothing, so the VM is destroyed and the build starts again.
 
 ### `clean.sh`, in order
 
@@ -119,7 +125,10 @@ the tests set it, as `install.sh` does.
    the node password `/etc/rancher/node/password`; the kubeconfig
    `/etc/rancher/rke2/rke2.yaml`; all of `/var/lib/kubelet` (the pods'
    folders, with the on-disk `emptyDir` volumes of the core's Jobs), as
-   RKE2's own uninstall script does. **Kept:** `server/manifests/` (the
+   RKE2's own uninstall script does; and, also as that script does,
+   `/etc/cni` (Canal's settings, with the node's host name and a login
+   token of the cluster) and `/var/lib/cni` (its address state). Canal
+   writes them again at every start. **Kept:** `server/manifests/` (the
    storage manifest of the form-2 install), `agent/images/` (the image
    archives), `/etc/rancher/rke2/config.yaml` and the pod security file
    `/etc/rancher/rke2/meho-pss.yaml` of the CIS profile. RKE2 makes new
@@ -142,7 +151,12 @@ the tests set it, as `install.sh` does.
    rule and the build's network file `/etc/netplan/60-meho-build.yaml` go.
    `cloud-init clean --logs --machine-id` removes cloud-init's state and
    logs and writes `uninitialized` to `/etc/machine-id`. The SSH host keys
-   under `/etc/ssh/ssh_host_*` go; first start makes new ones.
+   under `/etc/ssh/ssh_host_*` go; first start makes new ones. The
+   build's host name has a DNS record in the build network, so it must not
+   ship: `/etc/hostname` becomes `meho-appliance`, and the name in
+   `/etc/rancher/rke2/config.yaml` (its `tls-san`) is replaced with the
+   same. First start sets the customer's name, and its
+   `install.sh --from-disk` writes RKE2's settings again.
    `meho-host admin-network none` closes SSH for every address
    ([linux-server-meho-host.md](linux-server-meho-host.md)); the script
    runs in no SSH session, so the command does not ask. The journal is
@@ -156,10 +170,13 @@ the tests set it, as `install.sh` does.
    it exists, kubectl must answer and list none); a running
    `containerd-shim` (a pod that still runs); a file under `/var/lib/meho/`;
    each RKE2 path of step 2; anything under `agent/` but `images/`; the
-   node password; the kubeconfig; `/var/lib/kubelet`; the two files under
+   node password; the kubeconfig; `/var/lib/kubelet`; `/etc/cni` and
+   `/var/lib/cni`; the two files under
    `/etc/meho/`; root's `authorized_keys`; the build's network file and
    sudo rule; `rke2-server` enabled; an SSH host key; the build user
-   and its home; a machine-id other than `uninitialized`. It also checks
+   and its home; a machine-id other than `uninitialized`; an
+   `/etc/hostname` other than `meho-appliance`; the build's host name in
+   any file under `/etc`. It also checks
    that what must stay is there: `agent/images/`, `server/manifests/`,
    `config.yaml`, `meho-pss.yaml`, the preset file,
    `/opt/meho/appliance/download/install.sh`,
@@ -176,7 +193,9 @@ properties: `instance-id`, `hostname`, `seedfrom`, `public-keys`,
 on it, in place of the image's `iso`. With both transports, the appliance
 reads the wizard values through VMware Tools
 (`vmtoolsd --cmd 'info-get guestinfo.ovfEnv'`) or from the `ovf-env.xml`
-CD-ROM. `@VERSION@` becomes the version. A descriptor with no hardware
+CD-ROM. `@VERSION@` becomes the version. vCenter's
+`<!--Generated by ... User: ...-->` comment goes, because it names the
+vCenter login of the export. A descriptor with no hardware
 section, or more than one, is refused unchanged.
 
 ### The product section
@@ -196,8 +215,11 @@ this version runs as a single appliance.
 installs a pinned `govc`, fetches the tag's form-2 download from the
 GitHub release and checks it the way `docs/RELEASING.md` says (the cosign
 signature of `SHA256SUMS-linux`, then the checksum), makes a new ed25519
-key for the build, runs `build.sh` and keeps the OVA, `SHA256SUMS` and
-`build.log` as one artifact for 3 days. The vCenter login is in the
+key for the build, runs `build.sh` and keeps the OVA and `SHA256SUMS` as
+one artifact for 3 days. The job log of a public repository is public, so
+the build step masks the place of the build VM and its network (below)
+with `::add-mask::`. There is no build log file, because a mask does not
+reach a file. The vCenter login is in the
 repository secrets `GOVC_URL`, `GOVC_USERNAME` and `GOVC_PASSWORD`; the
 place of the build VM and its network are the repository variables
 `MEHO_LAB_DATASTORE`, `MEHO_LAB_FOLDER`, `MEHO_LAB_RESOURCE_POOL`,
@@ -227,11 +249,16 @@ test (#4816).
 
 ## Known issues
 
-- **Not run against vCenter yet.** The lab's test place is ready, but
-  steps 1, 2 and 5 have not run. They are written from the `govc`
-  reference and the lab's own cloud-image deploys, and wait for the first
-  build by hand. The first run will measure the times and may need the
-  waits changed.
+- **Only one full build so far, and no import yet.** The first full build
+  ran by hand in the lab on 2026-10-30, with a form-2 download built from
+  `main` (it has the migration fix #5248 and the OpenBao setup #4044). All
+  five steps passed and gave a 2.7 GB OVA. The form-2 install took about
+  10 minutes and the clean a few; the copy of the download to the build VM
+  took most of the time over the lab's slow link. No release can build
+  yet: v0.38.0 fails on the migration (#5145), and v0.39.0 has no OpenBao
+  setup. Build from the first release that has both. That build had no
+  first start in it, so two appliances from one OVA (different RKE2 CAs
+  and SSH host keys) wait for the next lab build and import.
 - **The hardening (#4640)** is not in the OVA yet. `add_appliance_pieces`
   in `build.sh` is where its install lines go.
 - **The cloud image's `ubuntu` user** is not made (no `default` in the
@@ -254,9 +281,15 @@ is already gone, so the pods must stop first.
 `test_clean.py` pins what goes and what stays, the order of the steps,
 that a Secret that survives the delete stops the script before anything
 else is removed, that a failed `admin-network none` leaves the VM on, and
-that the check names each kind of leftover and each missing keep.
+that the build's host name is replaced, and that the check names each
+kind of leftover and each missing keep.
 `test_rewrite_ovf.py` runs the rewrite on the Ubuntu cloud image's own
-descriptor and parses the result.
+descriptor and parses the result. `test_build.py` runs `build.sh` against
+a stub `govc` that refuses `vm.info`, as vCenter does for a login without
+rights on the host: the export's power-state check and the check for an
+existing build VM. It also runs the export on what the stub's
+`export.ovf` writes, opens the OVA, and checks the order of its files,
+the manifest's hashes and `SHA256SUMS`.
 
 The tests need Linux bash 5; on macOS run them in Docker
 (`deploy/appliance/README.md`). CI runs them with shellcheck in
@@ -275,6 +308,6 @@ The tests need Linux bash 5; on macOS run them in Docker
   (howto/disable_cloud_init), the `users` list without `default`
   (reference/yaml_examples/user_groups), growpart defaults
   (reference/modules).
-- systemd: `StandardOutput=journal+console` (systemd.exec), `systemd-run`.
+- systemd: `StandardOutput=tty` and `TTYPath=` (systemd.exec), `systemd-run`.
 - OVF: the envelope as vmware/govmomi `ovf/envelope.go` parses it
   (`ProductSection`, `Property`, `VirtualHardwareSection` `transport`).

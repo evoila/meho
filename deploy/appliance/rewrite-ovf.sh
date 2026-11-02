@@ -63,8 +63,13 @@ main() {
             match($0, /ovf:name="[^"]*"/)
             network = substr($0, RSTART + 10, RLENGTH - 11)
         }
-        network != "" && /<Network ovf:name=|<Description>The .* network<\/Description>|<rasd:Connection>|<rasd:Description>/ {
-            $0 = replace_all($0, network, neutral)
+        # Each value with its delimiters, so a name such as "Network" never
+        # matches a tag name.
+        network != "" {
+            $0 = replace_all($0, "<Network ovf:name=\"" network "\"", "<Network ovf:name=\"" neutral "\"")
+            $0 = replace_all($0, "<Description>The " network " network</Description>", "<Description>The " neutral " network</Description>")
+            $0 = replace_all($0, "<rasd:Connection>" network "</rasd:Connection>", "<rasd:Connection>" neutral "</rasd:Connection>")
+            if (/<rasd:Description>/) $0 = replace_all($0, "&quot;" network "&quot;", "&quot;" neutral "&quot;")
         }
         /<ProductSection/ { skipping = 1 }
         skipping { if (/<\/ProductSection>/) skipping = 0; next }

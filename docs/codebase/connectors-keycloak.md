@@ -617,7 +617,9 @@ Two ops in their own modules, registered by the same walk:
   level `safe`, group `identity_provider`. Reads every identity provider
   page by page (`first` / `max`, pages of 100, until a short page;
   `complete: false` past 100 pages), then the steps of each top-level flow.
-  A step `identity-provider-redirector` that is not `DISABLED` sends people
+  Keycloak lists a flow's steps as one flat list, depth first, with a
+  `level` per row. A step `identity-provider-redirector` that is not
+  `DISABLED`, and has no `DISABLED` sub-flow above it, sends people
   to the provider named by `defaultProvider` in its config
   (`GET .../authentication/config/{id}`). Each row is `{alias,
   display_name, type, enabled, hide_on_login, redirect_flows}`.

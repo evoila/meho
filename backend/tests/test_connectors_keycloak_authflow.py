@@ -463,12 +463,18 @@ def _idp(alias: str, **extra: Any) -> dict[str, Any]:
     return row
 
 
-def _mount_idp_flows(mock: respx.MockRouter) -> None:
+def _mount_idp_flows(mock: respx.MockRouter) -> respx.Route:
+    """Mount the flows and configs. Returns the config route no one may read."""
     mock.post(f"/realms/{_ADMIN_REALM}/protocol/openid-connect/token").respond(
         200, json={"access_token": "kc-admin-token", "expires_in": 300}
     )
     mock.get(f"{_ADMIN}/authentication/flows").respond(
-        200, json=[{"id": "b", "alias": "browser"}, {"id": "c", "alias": "company sso"}]
+        200,
+        json=[
+            {"id": "b", "alias": "browser"},
+            {"id": "c", "alias": "company sso"},
+            {"id": "p", "alias": "partner"},
+        ],
     )
     mock.get(url__regex=r".*/flows/browser/executions$").respond(
         200,
@@ -491,8 +497,43 @@ def _mount_idp_flows(mock: respx.MockRouter) -> None:
             }
         ],
     )
+    # A redirect inside a DISABLED sub-flow cannot run. The next sub-flow at
+    # the same level is on again, and its redirect counts.
+    mock.get(url__regex=r".*/flows/partner/executions$").respond(
+        200,
+        json=[
+            _step(0, "old partner", "DISABLED", 0, flow=True),
+            {
+                "level": 1,
+                "index": 0,
+                "providerId": "identity-provider-redirector",
+                "requirement": "ALTERNATIVE",
+                "authenticationConfig": "cfg-nested-off",
+            },
+            _step(0, "new partner", "ALTERNATIVE", 1, flow=True),
+            {
+                "level": 1,
+                "index": 0,
+                "providerId": "identity-provider-redirector",
+                "requirement": "ALTERNATIVE",
+                "authenticationConfig": "cfg-nested-on",
+            },
+        ],
+    )
     mock.get(f"{_ADMIN}/authentication/config/cfg-on").respond(
         200, json={"id": "cfg-on", "alias": "to-corp", "config": {"defaultProvider": "corp"}}
+    )
+    mock.get(f"{_ADMIN}/authentication/config/cfg-nested-on").respond(
+        200,
+        json={"id": "cfg-nested-on", "alias": "to-idp-1", "config": {"defaultProvider": "idp-1"}},
+    )
+    return mock.get(f"{_ADMIN}/authentication/config/cfg-nested-off").respond(
+        200,
+        json={
+            "id": "cfg-nested-off",
+            "alias": "to-partner",
+            "config": {"defaultProvider": "partner"},
+        },
     )
     mock.get(f"{_ADMIN}/authentication/config/cfg-off").respond(
         200, json={"id": "cfg-off", "alias": "off", "config": {"defaultProvider": "idp-0"}}
@@ -502,7 +543,8 @@ def _mount_idp_flows(mock: respx.MockRouter) -> None:
 async def test_identity_providers_every_page_redirects_and_no_secret(
     kc: KeycloakConnector,
 ) -> None:
-    first_page = [_idp("corp", hideOnLogin=True)] + [_idp(f"idp-{n}") for n in range(99)]
+    first_page = [_idp("corp", hideOnLogin=True), _idp("partner")]
+    first_page += [_idp(f"idp-{n}") for n in range(98)]
     legacy = _idp("legacy", hideOnLogin=None, config={"hideOnLoginPage": "true"})
     legacy.pop("hideOnLogin")
 
@@ -512,7 +554,7 @@ async def test_identity_providers_every_page_redirects_and_no_secret(
         return httpx.Response(200, json=first_page if first == 0 else [legacy])
 
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
-        _mount_idp_flows(mock)
+        nested_off = _mount_idp_flows(mock)
         listing = mock.get(f"{_ADMIN}/identity-provider/instances").mock(side_effect=_page)
         result = await _run(_IDP_OP, {})
 
@@ -532,6 +574,11 @@ async def test_identity_providers_every_page_redirects_and_no_secret(
     }
     # A DISABLED redirector does not count.
     assert rows["idp-0"]["redirect_flows"] == []
+    # A redirector inside a DISABLED sub-flow does not count either; its
+    # config is never read. The sub-flow after it is on, so its redirect counts.
+    assert rows["partner"]["redirect_flows"] == []
+    assert nested_off.call_count == 0
+    assert rows["idp-1"]["redirect_flows"] == ["partner"]
     assert rows["legacy"]["hide_on_login"] is True
     assert _MADE_UP_SECRET not in json.dumps(result)
     assert "config" not in rows["corp"]

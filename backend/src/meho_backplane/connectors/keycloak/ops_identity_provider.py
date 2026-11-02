@@ -14,10 +14,13 @@ How it works, on the target's managed realm:
    ``max``) until a page is short, so the list is never cut at Keycloak's
    default page of 100.
 2. ``GET .../authentication/flows``, then the steps of each top-level flow.
-   A step ``identity-provider-redirector`` that is not ``DISABLED`` and has a
-   config sends people to the provider named in the config key
-   ``defaultProvider`` (``GET .../authentication/config/{id}``). The flow's
-   alias is listed on that provider as ``redirect_flows``.
+   Keycloak lists the steps as one flat list, depth first: a sub-flow row
+   comes right before its own steps, which have a ``level`` one higher. A
+   step ``identity-provider-redirector`` that is not ``DISABLED``, is not
+   inside a ``DISABLED`` sub-flow, and has a config sends people to the
+   provider named in the config key ``defaultProvider``
+   (``GET .../authentication/config/{id}``). The flow's alias is listed on
+   that provider as ``redirect_flows``.
 
 No secret: the provider's ``config`` (which holds the client secret) is
 never returned. Only the named fields are copied. A read that fails, or a
@@ -79,6 +82,35 @@ async def _all_providers(
     return rows, False
 
 
+def _active_redirect_configs(steps: list[Any]) -> list[str]:
+    """The config ids of the redirect steps that can run.
+
+    A redirect step counts when it is not ``DISABLED`` and no sub-flow above
+    it is ``DISABLED``. Keycloak lists the steps depth first with a ``level``
+    per row, so the steps of a sub-flow follow it at the next level.
+    """
+    config_ids: list[str] = []
+    disabled_parent_level: int | None = None
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        level = step.get("level")
+        level = level if isinstance(level, int) else 0
+        if disabled_parent_level is not None and level <= disabled_parent_level:
+            disabled_parent_level = None
+        if disabled_parent_level is not None:
+            continue
+        if step.get("authenticationFlow") is True and step.get("requirement") == "DISABLED":
+            disabled_parent_level = level
+            continue
+        if step.get("providerId") != _REDIRECTOR or step.get("requirement") == "DISABLED":
+            continue
+        config_id = step.get("authenticationConfig")
+        if isinstance(config_id, str):
+            config_ids.append(config_id)
+    return config_ids
+
+
 async def _redirect_flows(
     connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike, realm: str
 ) -> dict[str, list[str]]:
@@ -99,12 +131,7 @@ async def _redirect_flows(
             ),
             operator=operator,
         )
-        for step in steps:
-            if not isinstance(step, dict) or step.get("providerId") != _REDIRECTOR:
-                continue
-            config_id = step.get("authenticationConfig")
-            if step.get("requirement") == "DISABLED" or not isinstance(config_id, str):
-                continue
+        for config_id in _active_redirect_configs(steps):
             config = await connector._get_admin_json(
                 target,
                 fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": quote_segment(config_id)}),

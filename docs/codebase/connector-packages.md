@@ -33,6 +33,9 @@ The rules:
   its files were installed by the distribution that the allowlist names.
 - Any other folder stops the start with `connector_package_not_allowed` and
   the folder name. Nothing is imported, not even the built-in folders.
+- Each listed package must name a range of connector kit versions, and the
+  kit in the image must fit it. Otherwise the start stops with
+  `connector_package_kit_mismatch` (see "The kit range at start").
 
 The plain public image has no allowlist file. There, only the built-in
 folders are allowed, and MEHO starts as before.
@@ -68,6 +71,28 @@ The start stops with `connector_package_list_invalid` when:
 
 A listed folder whose files were not all installed by its package stops the
 start with `connector_package_not_allowed`.
+
+### The kit range at start
+
+For each listed package, before MEHO looks at its folders, the start reads
+the package's kit range and the kit version of the image:
+
+- The range comes from the package's installed metadata: its
+  `Requires-Dist` values, read with `importlib.metadata`. A value counts
+  when it names `meho-connector-kit` with a version range, and has no link
+  and no environment marker (a marker can switch it off). Several such
+  values all apply.
+- The kit version is the installed version of `meho-connector-kit`.
+- The `packaging` library compares them.
+
+A package with no range, or with a range that the kit does not fit, stops
+the start with `connector_package_kit_mismatch`. The message names the
+package, its range and the kit version of the image. Nothing is imported.
+An image without the kit stops the same way.
+
+The overlay build already refuses both cases (see "What the build checks").
+So this stop only happens with an image made in another way. The plain
+public image has no allowlist file, so this check does not run there.
 
 ## How "installed by" is checked
 
@@ -242,12 +267,21 @@ environment cannot run code in the checks.
    - an extra wheel has no files in `meho_backplane/`, and no files for the
      `scripts`, `data` or `headers` parts of a wheel.
    - two connector wheels may not add the same folder.
+   - a connector wheel must say which versions of the connector kit it fits:
+     a `Requires-Dist` on `meho-connector-kit` with a version range, with no
+     link and no environment marker. A wheel without one is refused, and the
+     message names the package. Extra wheels need no kit range.
 2. **Snapshot**: the build records every file of `/app/.venv` and the version
    of every installed library. The public image installs exactly the
    versions of its lock file (`uv sync --locked`), so these versions are the
    lock to check against.
 3. **Install**: `uv pip install --offline --no-index --no-build` from the two
    local folders. No package index is used, and nothing is built from source.
+   The kit is already installed in the public image, so uv checks each
+   package's kit range against it. A range that the kit does not fit stops
+   the install with `No solution found`. `overlay_check.py` adds no code for
+   this. A unit test and the CI job (`.github/workflows/connector-overlay.yml`)
+   check it with the uv version that the Dockerfile pins.
 4. **After install**, against the snapshot:
    - every library keeps its version. Otherwise the build stops and names
      each library, for example `fakelib 1.0 -> 2.0`.
@@ -584,7 +618,10 @@ Where it lives and how it ships:
 
 The kit has its own version, starting at 1.0. It is not the MEHO release
 number. A package states the kit versions it fits in its `pyproject.toml`,
-for example `dependencies = ["meho-connector-kit>=1.0,<2"]`.
+for example `dependencies = ["meho-connector-kit>=1.0,<2"]`. The overlay
+build refuses a connector package without a range, and uv refuses a range
+that the kit in the image does not fit. MEHO checks the range again at
+start (see "The kit range at start").
 
 - The **first** number goes up when a name is removed or its inputs change.
   A package may break.
@@ -713,6 +750,9 @@ answer".
 - Wheel file format (`RECORD`, `.data` folder):
   https://packaging.python.org/en/latest/specifications/binary-distribution-format/
 - `uv pip install`: https://docs.astral.sh/uv/reference/cli/#uv-pip-install
+- Version ranges and `Requires-Dist`:
+  https://packaging.python.org/en/latest/specifications/version-specifiers/ and
+  https://packaging.python.org/en/latest/specifications/core-metadata/#requires-dist-multiple-use
 - cosign signing: https://docs.sigstore.dev/cosign/signing/signing_with_containers/
 - Python `importlib.metadata`:
   https://docs.python.org/3/library/importlib.metadata.html

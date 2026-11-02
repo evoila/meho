@@ -117,8 +117,6 @@ TARGET_KEYS: Final[tuple[str, ...]] = (
     "extras",
 )
 
-CONVENTION_KEYS: Final[tuple[str, ...]] = ("slug", "title", "body", "kind", "priority")
-
 _conventions = ConventionsService()
 
 

@@ -47,7 +47,7 @@ import ssl
 from collections.abc import AsyncIterator, Iterator
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Final
 from unittest.mock import AsyncMock
 from uuid import UUID
 
@@ -403,6 +403,64 @@ async def test_recipient_outside_allowlist_refuses_whole_send(
     result = await send_email(to=["oncall@example.com", "exfil@evil.test"], subject="s", body="b")
 
     assert result == MailSendResult(sent=False, reason="not_in_recipient_allowlist")
+
+
+#: Addresses whose domain is listed but whose local part holds a character
+#: outside letters, digits and ``. _ + -``. A relay may read ``%`` or ``!``
+#: in a local part as a forwarding instruction, so the gate refuses them.
+_NON_PLAIN_LOCAL_PART_RECIPIENTS: Final[list[str]] = [
+    "<box>x@example.com",
+    "box>x@example.com",
+    "box%other.test@example.com",
+    "other.test!box@example.com",
+]
+_NON_PLAIN_LOCAL_PART_IDS: Final[list[str]] = [
+    "angle-brackets",
+    "closing-bracket",
+    "percent",
+    "bang",
+]
+
+
+@pytest.mark.parametrize(
+    "recipient", _NON_PLAIN_LOCAL_PART_RECIPIENTS, ids=_NON_PLAIN_LOCAL_PART_IDS
+)
+async def test_non_plain_local_part_is_refused_before_any_smtp_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    exploding_smtp: None,
+    recipient: str,
+) -> None:
+    """The allowlist gate refuses a non-plain local part on the shared transport.
+
+    The domain is listed, so only the local-part rule stands between the
+    send and the (exploding) SMTP constructor. This is the path the checks
+    notifier uses, which never passes through the ``mail.send`` schema.
+    """
+    _configure_mail_env(monkeypatch)
+
+    result = await send_email(to=[recipient], subject="s", body="b")
+
+    assert result == MailSendResult(sent=False, reason="not_in_recipient_allowlist")
+
+
+@pytest.mark.parametrize(
+    "recipient", _NON_PLAIN_LOCAL_PART_RECIPIENTS, ids=_NON_PLAIN_LOCAL_PART_IDS
+)
+async def test_non_plain_local_part_is_invalid_params_on_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    exploding_smtp: None,
+    _registered_mail_op: None,
+    recipient: str,
+) -> None:
+    """A dispatched ``mail.send`` rejects a non-plain local part at the schema."""
+    _configure_mail_env(monkeypatch)
+
+    result = await _dispatch_send({"to": [recipient], "subject": "s", "body": "b"})
+
+    assert result.status == "error"
+    assert result.extras is not None
+    assert result.extras["error_code"] == "invalid_params"
+    assert any(err["validator"] == "pattern" for err in result.extras["validation_errors"])
 
 
 async def test_unconfigured_host_refuses_with_smtp_unconfigured(
@@ -925,8 +983,31 @@ def test_assert_recipient_allowed_full_address_and_domain(
 
 @pytest.mark.parametrize(
     "recipient",
-    ["", "no-at-sign", "two@@example.com", "a@b@c", "evil@example.com\r\nBcc: x@y.z"],
-    ids=["empty", "no-at", "double-at", "two-ats", "crlf-injection"],
+    ["plain@example.com", "first.last+tag@example.com", "On-Call_1@ops.test"],
+    ids=["plain", "dot-plus", "listed-address-hyphen-underscore-digit"],
+)
+def test_assert_recipient_allowed_admits_plain_local_parts(
+    monkeypatch: pytest.MonkeyPatch,
+    recipient: str,
+) -> None:
+    """Letters, digits and ``. _ + -`` in the local part still pass both entry shapes."""
+    monkeypatch.setenv("MAIL_RECIPIENT_ALLOWLIST", "on-call_1@ops.test, example.com")
+    get_settings.cache_clear()
+    assert_recipient_allowed(recipient)
+
+
+@pytest.mark.parametrize(
+    "recipient",
+    [
+        "",
+        "no-at-sign",
+        "two@@example.com",
+        "a@b@c",
+        "evil@example.com\r\nBcc: x@y.z",
+        '"quoted box"@example.com',
+        "box=tag@example.com",
+    ],
+    ids=["empty", "no-at", "double-at", "two-ats", "crlf", "quoted-local", "equals-sign"],
 )
 def test_assert_recipient_allowed_rejects_malformed_recipient(
     monkeypatch: pytest.MonkeyPatch,

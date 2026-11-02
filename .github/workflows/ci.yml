@@ -2232,7 +2232,11 @@ jobs:
         # requests use it to run only the tests their change can break (the
         # `changes` job, step `map`). Only the nightly run on `main` makes
         # it, and only when all 8 shards delivered their data: a map from
-        # partial data would pick too few tests.
+        # partial data would pick too few tests. The download steps and the
+        # junit count below are not proof of that: a crashed worker leaves
+        # a junit file but no coverage data, and the download still works.
+        # So the tool refuses a junit file that reports a crashed worker,
+        # or whose tests are not in the coverage data, and makes no map.
         id: test-map
         if: >-
           always() && github.event_name == 'schedule' &&

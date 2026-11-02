@@ -101,7 +101,11 @@ def _write_tree(root: Path, tree: dict[str, str]) -> None:
 
 
 def _map(made_at: datetime = NOW) -> dict[str, Any]:
-    return test_map.build_map(CONTEXTS, ITEMS, "abc1234def", made_at)
+    return test_map.build_map(CONTEXTS, [_shard(ITEMS)], "abc1234def", made_at)
+
+
+def _shard(test_ids: list[str], name: str = "pytest-coverage-junit-1.xml") -> test_map.Shard:
+    return test_map.Shard(name, test_ids, [])
 
 
 @pytest.fixture
@@ -137,9 +141,52 @@ def test_build_map_links_files_to_test_functions() -> None:
     assert files[f"{SRC}/schemas.py"] == []
 
 
-def test_build_map_refuses_data_without_test_names() -> None:
-    with pytest.raises(ValueError, match="no test names"):
-        test_map.build_map({f"{SRC}/core.py": set()}, ITEMS, "abc", NOW)
+def test_build_map_refuses_a_shard_that_did_not_save_its_coverage() -> None:
+    """A crashed worker leaves a junit file, but no coverage data of its shard."""
+    first = _shard([ITEMS[0], ITEMS[2]])
+    second = _shard([ITEMS[5], ITEMS[7]], "pytest-coverage-junit-2.xml")
+    assert test_map.build_map(CONTEXTS, [first, second], "abc", NOW)["total_tests"] == 4
+
+    lost = {
+        path: names - {"tests.test_service.TestService.test_run", "tests.test_unrelated.test_u"}
+        for path, names in CONTEXTS.items()
+    }
+    with pytest.raises(ValueError, match=r"junit-2\.xml: none of its 2 tests is in the coverage"):
+        test_map.build_map(lost, [first, second], "abc", NOW)
+    with pytest.raises(ValueError, match=r"junit-1\.xml: none of its 1 tests is in the coverage"):
+        test_map.build_map(CONTEXTS, [_shard([ITEMS[0]]), second], "abc", NOW)
+
+
+def test_build_map_refuses_a_shard_whose_worker_crashed() -> None:
+    crashed = test_map.Shard("pytest-coverage-junit-3.xml", ITEMS, [ITEMS[2]])
+
+    with pytest.raises(
+        ValueError, match=r"junit-3.xml: a worker crashed while running .*core\[a\]"
+    ):
+        test_map.build_map(CONTEXTS, [crashed], "abc", NOW)
+
+
+def test_read_junit_sees_a_crashed_worker(tmp_path: Path) -> None:
+    """pytest-xdist reports the test the dead worker ran as an error with this message."""
+    _write_tree(tmp_path, {"tests/__init__.py": "", "tests/test_core.py": ""})
+    junit = tmp_path / "pytest-coverage-junit-2.xml"
+    junit.write_text(
+        "<testsuites><testsuite>"
+        '<testcase classname="tests.test_core" name="test_core[a]"/>'
+        '<testcase classname="tests.test_core" name="test_core[b]">'
+        "<error message=\"failed on ??? with &quot;worker 'gw0' crashed while running"
+        " 'tests/test_core.py::test_core[b]'&quot;\">worker crashed</error></testcase>"
+        "</testsuite></testsuites>",
+        encoding="utf-8",
+    )
+
+    shard = test_map.read_junit(junit, tmp_path)
+
+    assert shard == test_map.Shard(
+        "pytest-coverage-junit-2.xml",
+        ["tests/test_core.py::test_core[a]", "tests/test_core.py::test_core[b]"],
+        ["tests/test_core.py::test_core[b]"],
+    )
 
 
 def test_junit_test_ids_from_a_real_pytest_run(tmp_path: Path) -> None:
@@ -173,9 +220,10 @@ def test_junit_test_ids_from_a_real_pytest_run(tmp_path: Path) -> None:
     )
     assert run.returncode == 0, run.stdout + run.stderr
 
-    ids = test_map.junit_test_ids([junit], project)
+    shard = test_map.read_junit(junit, project)
 
-    assert sorted(ids) == [
+    assert shard.crashed == []
+    assert sorted(shard.test_ids) == [
         "tests/sub/test_a.py::TestK::test_m",
         "tests/sub/test_a.py::TestSub::test_inherited",
         "tests/sub/test_a.py::test_p[1]",
@@ -235,6 +283,38 @@ def test_build_command_writes_the_map(tmp_path: Path) -> None:
     result = json.loads(out.read_text(encoding="utf-8"))
     assert result["tests"] == [["tests/test_core.py::test_core", 2]]
     assert result["files"] == {f"{SRC}/core.py": [0]}
+
+
+def test_build_command_makes_no_map_when_a_shard_delivered_only_its_junit_file(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """The worker of shard 2 crashed: its artifact holds the junit file, no coverage data."""
+    from coverage import CoverageData
+
+    _write_tree(
+        tmp_path, {"tests/__init__.py": "", "tests/test_core.py": "", "tests/test_b.py": ""}
+    )
+    data = CoverageData(str(tmp_path / ".coverage"))
+    data.set_context("tests.test_core.test_core")
+    data.add_lines({"src/meho_backplane/core.py": [1]})
+    data.write()
+    for shard, file in ((1, "test_core"), (2, "test_b")):
+        (tmp_path / f"pytest-coverage-junit-{shard}.xml").write_text(
+            f'<testsuites><testsuite><testcase classname="tests.{file}" name="{file}"/>'
+            "</testsuite></testsuites>",
+            encoding="utf-8",
+        )
+    out = tmp_path / "unit-test-map.json"
+    args = ["build", "--data", str(tmp_path / ".coverage"), "--commit", "abc", "--out", str(out)]
+    args += ["--backend-root", str(tmp_path)]
+    junit = [str(tmp_path / f"pytest-coverage-junit-{shard}.xml") for shard in (1, 2)]
+
+    assert test_map._main([*args, *junit]) == 1
+    assert not out.exists()
+    assert "no test map: pytest-coverage-junit-2.xml: none of its 1 tests" in capfd.readouterr().err
+
+    assert test_map._main([*args, junit[0]]) == 0
+    assert out.exists()
 
 
 # --- pick ---------------------------------------------------------------------
@@ -333,6 +413,103 @@ def test_changed_test_file_picks_its_own_tests(repo: Path) -> None:
     assert picked.tests == [CONTRACT, "tests/test_new.py", "tests/test_unrelated.py"]
     # The new file is not in the map: its test functions are counted.
     assert picked.line.endswith(": 3 of 10 tests")
+
+
+def test_new_test_file_counts_its_parameter_cases(repo: Path) -> None:
+    cases = ", ".join(str(n) for n in range(test_map.MAX_TESTS + 500))
+    _write_tree(
+        repo,
+        {
+            "backend/tests/test_big.py": (
+                f"import pytest\n\n\n@pytest.mark.parametrize('n', [{cases}])\n"
+                "def test_n(n):\n    pass\n"
+            )
+        },
+    )
+
+    picked = _pick(repo, ["backend/tests/test_big.py"])
+
+    assert picked.tests == []
+    assert picked.line == "full suite: the test map picked 2,501 tests, the limit is 1,999"
+
+
+def test_changed_test_file_counts_its_new_cases_and_keeps_the_map_count_otherwise(
+    repo: Path,
+) -> None:
+    """The map says ``test_core`` runs 3 items. The pull request changes the file."""
+    core = repo / "backend/tests/test_core.py"
+    core.write_text(
+        "import pytest\n\nCASES = [1, 2, 3, 4]\n"
+        "_BOTH = pytest.mark.parametrize('m', (0, 1), ids=['a', 'b'])\n\n\n"
+        "@pytest.mark.parametrize('n', CASES)\n@_BOTH\n@pytest.mark.usefixtures('x')\n"
+        "def test_core(n, m):\n    pass\n\n\n"
+        "class Base:\n    def test_base(self):\n        pass\n\n\n"
+        "@pytest.mark.parametrize('k', [5, pytest.param(6), 7])\nclass TestCore(Base):\n"
+        "    def test_one(self):\n        pass\n\n    def test_base(self):\n        pass\n",
+        encoding="utf-8",
+    )
+    # 4 x 2 cases, plus 2 methods x 3 cases of the class, plus the contract test.
+    assert _pick(repo, ["backend/tests/test_core.py"]).line.endswith(": 15 of 10 tests")
+
+    # Fewer tests in the file than the map says: a conftest fixture may multiply
+    # them, so the map's count stays.
+    core.write_text("def test_core():\n    pass\n", encoding="utf-8")
+    assert _pick(repo, ["backend/tests/test_core.py"]).line.endswith(": 4 of 10 tests")
+
+    # Not changed by the pull request: the map's count, whatever the file says.
+    core.write_text("def test_core():\n    pass\n\n\ndef test_x():\n    pass\n", encoding="utf-8")
+    assert _pick(repo, [f"{SRC}/core.py"]).line.endswith(": 4 of 10 tests")
+
+
+@pytest.mark.parametrize(
+    ("source", "reason"),
+    [
+        (
+            "@pytest.mark.parametrize('n', range(3))\ndef test_n(n):\n    pass\n",
+            "a parametrize list that is not written out",
+        ),
+        (
+            "CASES = [1]\nCASES += [2]\n\n\n@pytest.mark.parametrize('n', CASES)\n"
+            "def test_n(n):\n    pass\n",
+            "a parametrize list that is not written out",
+        ),
+        (
+            "pytestmark = pytest.mark.parametrize('n', [1, 2])\n\n\ndef test_n(n):\n    pass\n",
+            "a parametrize mark in pytestmark",
+        ),
+        (
+            "from tests._helpers import CASES\n\n\n@CASES\ndef test_n(n):\n    pass\n",
+            "the decorator CASES comes from another file",
+        ),
+        (
+            "_MARKS = [pytest.mark.parametrize('n', [1, 2])]\n\n\n@_MARKS[0]\ndef test_n(n):\n"
+            "    pass\n",
+            "a decorator that may hold a parametrize mark",
+        ),
+        (
+            "@pytest.fixture(params=[1, 2])\ndef n(request):\n    return request.param\n\n\n"
+            "def test_n(n):\n    pass\n",
+            "a fixture with params",
+        ),
+        (
+            "def pytest_generate_tests(metafunc):\n    pass\n\n\ndef test_n():\n    pass\n",
+            "pytest_generate_tests",
+        ),
+        (
+            "from tests._helpers import Cases\n\n\nclass TestN(Cases):\n    pass\n",
+            "the test class TestN has a base from another file",
+        ),
+    ],
+)
+def test_uncertain_count_of_a_changed_test_file_means_the_full_suite(
+    repo: Path, source: str, reason: str
+) -> None:
+    _write_tree(repo, {"backend/tests/test_core.py": "import pytest\n\n\n" + source})
+
+    picked = _pick(repo, ["backend/tests/test_core.py"])
+
+    assert picked.tests == []
+    assert picked.line == f"full suite: cannot count the tests of tests/test_core.py ({reason})"
 
 
 def test_other_suites_and_deleted_test_files_pick_nothing(repo: Path) -> None:

@@ -17,8 +17,11 @@ Two commands:
 ``build`` (the nightly ``python-coverage-combine`` job)
     Reads the combined coverage data, made with ``dynamic_context =
     test_function`` (each line carries the names of the test functions
-    that ran it), and the pytest junit files of the same run. Writes the
-    map as JSON. Needs ``coverage``.
+    that ran it), and the pytest junit files of the same run, one per
+    coverage shard. Writes the map as JSON. Needs ``coverage``. Makes no
+    map when a shard did not finish (its junit file reports a crashed
+    worker) or did not save its coverage (none of its tests is in the
+    data): a map from partial data would pick too few tests.
 
 ``pick`` (the ``changes`` job)
     Reads the changed files of a pull request (one path per line, relative
@@ -49,7 +52,16 @@ The rules of ``pick``. Any doubt means the full suite:
   ``uv.lock``, a workflow, the Go CLI, and a source file the map does not
   know (for example a new one);
 * :data:`MAX_TESTS` or more picked tests means the full suite: one job
-  would take too long.
+  would take too long. The map says how many test items each test runs.
+  A test file the pull request changed, or that the map does not know,
+  is counted from its source instead (the larger of that count and the
+  map's count): its test functions, times the cases of each
+  ``parametrize`` list that is written out or named at module level.
+  When that count is uncertain, the full suite runs: a parametrize list
+  built by code, a ``pytestmark`` with parametrize, a fixture with
+  ``params``, ``pytest_generate_tests``, a test class with a base from
+  another file, or a bare decorator name from another file (it may hold
+  a parametrize mark).
 
 A test id from the map can be out of date: the map may be days old, and
 the pull request may rename a test. A test id whose file is gone is
@@ -73,7 +85,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, TypeGuard
 
 if __package__:
     from . import _unit_connector_select as connector_select
@@ -94,8 +106,21 @@ _DOCS = re.compile(r"(^docs/|\.md$)")
 # --- build -------------------------------------------------------------------
 
 
-def junit_test_ids(paths: Iterable[Path], backend_root: Path) -> list[str]:
-    """Return the pytest test ids of every test case in the junit files.
+# pytest-xdist reports a test whose worker died with this text (dsession.py).
+_CRASHED = "crashed while running"
+
+
+@dataclass
+class Shard:
+    """What the pytest junit file of one coverage shard says."""
+
+    name: str
+    test_ids: list[str]
+    crashed: list[str]  # Test ids whose xdist worker died while running them.
+
+
+def read_junit(path: Path, backend_root: Path) -> Shard:
+    """Return the pytest test ids of every test case in a junit file.
 
     A test case carries ``classname`` (the dotted file path plus the class
     names) and ``name`` (the function name with its parameters). The path
@@ -104,18 +129,42 @@ def junit_test_ids(paths: Iterable[Path], backend_root: Path) -> list[str]:
     """
     from defusedxml.ElementTree import parse
 
-    ids: list[str] = []
-    for path in paths:
-        root = parse(path).getroot()
-        for case in root.iter("testcase"):
-            dotted = case.get("classname", "").split(".")
-            name = case.get("name", "")
-            for cut in range(len(dotted), 0, -1):
-                file = "/".join(dotted[:cut]) + ".py"
-                if (backend_root / file).is_file():
-                    ids.append("::".join([file, *dotted[cut:], name]))
-                    break
-    return ids
+    shard = Shard(path.name, [], [])
+    for case in parse(path).getroot().iter("testcase"):
+        dotted = case.get("classname", "").split(".")
+        name = case.get("name", "")
+        for cut in range(len(dotted), 0, -1):
+            file = "/".join(dotted[:cut]) + ".py"
+            if (backend_root / file).is_file():
+                test_id = "::".join([file, *dotted[cut:], name])
+                shard.test_ids.append(test_id)
+                reports = (child.get("message", "") + (child.text or "") for child in case)
+                if any(_CRASHED in report for report in reports):
+                    shard.crashed.append(test_id)
+                break
+    return shard
+
+
+def _check_shard(shard: Shard, recorded: set[str]) -> None:
+    """Refuse a shard that did not finish or whose coverage data is missing.
+
+    xdist reports a crashed worker as a failed test, and the tests after
+    it never run. A worker writes its coverage data only at the end of its
+    session, so after a crash the shard has a junit file but no data. One
+    worker runs a whole shard (``-n 1``), so the data of a shard is there
+    when any of its tests is recorded.
+    """
+    if shard.crashed:
+        raise ValueError(
+            f"{shard.name}: a worker crashed while running {shard.crashed[0]},"
+            " so the shard did not finish"
+        )
+    names = {context_name(function_id(test_id)) for test_id in shard.test_ids}
+    if not names & recorded:
+        raise ValueError(
+            f"{shard.name}: none of its {len(names)} tests is in the coverage data,"
+            " so the shard did not save its coverage"
+        )
 
 
 def function_id(test_id: str) -> str:
@@ -148,7 +197,7 @@ def coverage_contexts(data_file: str) -> dict[str, set[str]]:
 
 
 def build_map(
-    contexts: dict[str, set[str]], test_ids: Iterable[str], commit: str, made_at: datetime
+    contexts: dict[str, set[str]], shards: Iterable[Shard], commit: str, made_at: datetime
 ) -> dict[str, Any]:
     """Return the map: every measured source file -> the tests that ran it.
 
@@ -156,9 +205,14 @@ def build_map(
     number of test items each one runs. Tests under ``tests/integration/``
     and ``tests/migrations/`` are left out. A source file that no test ran
     is in the map with an empty list, so ``pick`` can tell it from a file
-    the map does not know.
+    the map does not know. Raises ``ValueError`` when a shard did not
+    finish or did not save its coverage (:func:`_check_shard`).
     """
-    items = [test_id for test_id in test_ids if not test_id.startswith(OTHER_SUITES)]
+    recorded = set[str]().union(*contexts.values())
+    items: list[str] = []
+    for shard in shards:
+        _check_shard(shard, recorded)
+        items += [test_id for test_id in shard.test_ids if not test_id.startswith(OTHER_SUITES)]
     counts: dict[str, int] = defaultdict(int)
     for test_id in items:
         counts[function_id(test_id)] += 1
@@ -168,8 +222,6 @@ def build_map(
         path: sorted(index[name] for name in names if name in index)
         for path, names in sorted(contexts.items())
     }
-    if not any(files.values()):
-        raise ValueError("the coverage data links no test to any file (no test names recorded?)")
     return {
         "format": MAP_FORMAT,
         "commit": commit,
@@ -328,15 +380,141 @@ def _defines(tree: ast.Module, names: list[str]) -> bool:
     return False
 
 
-def _count_tests(tree: ast.Module) -> int:
-    """Count the test functions of a file the map does not know (at least one)."""
-    count = 0
+def _is_test_function(node: ast.AST) -> TypeGuard[ast.FunctionDef | ast.AsyncFunctionDef]:
+    return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(
+        "test"
+    )
+
+
+def _is_mark(node: ast.AST, name: str) -> TypeGuard[ast.Call]:
+    """Tell whether ``node`` is ``pytest.mark.<name>(...)`` or ``<name>(...)``."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    return (isinstance(func, ast.Attribute) and func.attr == name) or (
+        isinstance(func, ast.Name) and func.id == name
+    )
+
+
+def _constants(tree: ast.Module) -> dict[str, ast.expr]:
+    """Module-level names bound once by a plain assignment, and never changed after."""
+    bound: dict[str, int] = defaultdict(int)
+    touched: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(
-            "test"
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for name in (n for target in targets for n in ast.walk(target)):
+                if isinstance(name, ast.Name):
+                    bound[name.id] += 1
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            touched.add(node.value.id)  # ``NAME.append(...)`` and the like.
+    return {
+        node.targets[0].id: node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and bound[node.targets[0].id] == 1
+        and node.targets[0].id not in touched
+    }
+
+
+def _cases(decorators: list[ast.expr], constants: dict[str, ast.expr]) -> int:
+    """Return how many items the ``parametrize`` decorators make of one test.
+
+    A decorator can be a module-level name that holds a parametrize mark
+    (``_CASES = pytest.mark.parametrize(...)``, then ``@_CASES``). A bare
+    name the module does not bind may be such a mark from another file,
+    so it makes the count uncertain.
+    """
+    count = 1
+    for decorator in decorators:
+        if isinstance(decorator, ast.Name):
+            if decorator.id not in constants:
+                raise ValueError(f"the decorator {decorator.id} comes from another file")
+            decorator = constants[decorator.id]
+        if _is_mark(decorator, "parametrize"):
+            count *= _parametrize_cases(decorator, constants)
+        elif not isinstance(decorator, (ast.Call, ast.Attribute)) or any(
+            _is_mark(node, "parametrize") for node in ast.walk(decorator)
         ):
-            count += 1
-    return max(count, 1)
+            raise ValueError("a decorator that may hold a parametrize mark")
+    return count
+
+
+def _parametrize_cases(mark: ast.Call, constants: dict[str, ast.expr]) -> int:
+    """Return the number of items in the list of one ``parametrize`` mark."""
+    keywords = {keyword.arg: keyword.value for keyword in mark.keywords}
+    values = mark.args[1] if len(mark.args) > 1 else keywords.get("argvalues")
+    if isinstance(values, ast.Name):
+        values = constants.get(values.id)
+    if not isinstance(values, (ast.List, ast.Tuple)) or any(
+        isinstance(item, ast.Starred) for item in values.elts
+    ):
+        raise ValueError("a parametrize list that is not written out")
+    return len(values.elts)
+
+
+def _class_count(
+    cls: ast.ClassDef, classes: dict[str, ast.ClassDef], constants: dict[str, ast.expr]
+) -> int:
+    """Count the test items of a ``Test*`` class, with the tests of its bases in the file."""
+    chain = [cls]
+    for current in chain:  # Grows while the loop runs.
+        for base in current.bases:
+            if not (isinstance(base, ast.Name) and base.id in classes):
+                raise ValueError(f"the test class {cls.name} has a base from another file")
+            if classes[base.id] not in chain:
+                chain.append(classes[base.id])
+    # A parametrize mark on a class, or on a base, applies to every test of the class.
+    factor = 1
+    for current in chain:
+        factor *= _cases(current.decorator_list, constants)
+    methods: dict[str, list[ast.expr]] = {}
+    count = 0
+    for current in chain:  # The class comes first: its own definition wins.
+        for node in current.body:
+            if _is_test_function(node) and node.name not in methods:
+                methods[node.name] = node.decorator_list
+            elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+                count += _class_count(node, classes, constants) * factor
+    return count + sum(_cases(decorators, constants) for decorators in methods.values()) * factor
+
+
+def _file_test_count(tree: ast.Module) -> int:
+    """Count the test items pytest collects from a test file.
+
+    Follows pytest's default names (``test*`` functions, ``Test*`` classes)
+    and ``@pytest.mark.parametrize`` with a list or tuple written out, or
+    named at module level. Raises ``ValueError`` when the count is
+    uncertain: a parametrize list built by code, a ``pytestmark`` with
+    parametrize, a fixture with ``params``, ``pytest_generate_tests``, a
+    test class with a base from another file, or a bare decorator name
+    from another file.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == "pytest_generate_tests":
+                raise ValueError("pytest_generate_tests")
+            for decorator in node.decorator_list:
+                if _is_mark(decorator, "fixture") and any(
+                    keyword.arg == "params" for keyword in decorator.keywords
+                ):
+                    raise ValueError("a fixture with params")
+        elif isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "pytestmark" for target in node.targets
+        ):
+            if any(_is_mark(call, "parametrize") for call in ast.walk(node.value)):
+                raise ValueError("a parametrize mark in pytestmark")
+    constants = _constants(tree)
+    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+    count = 0
+    for node in tree.body:
+        if _is_test_function(node):
+            count += _cases(node.decorator_list, constants)
+        elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            count += _class_count(node, classes, constants)
+    return count
 
 
 @dataclass
@@ -386,7 +564,16 @@ def _resolve(test_map: TestMap, numbers: set[int], files: set[str], backend: Pat
     return sorted(files) + sorted(ids)
 
 
-def _count(test_map: TestMap, selected: list[str], backend: Path) -> int:
+def _count(test_map: TestMap, selected: list[str], changed: set[str], backend: Path) -> int:
+    """Count the test items of the selection; conservative for ``changed`` test files.
+
+    A test id, or a test file the pull request did not change, counts what
+    the map says. A test file the pull request changed, or that the map
+    does not know, is counted from its source (:func:`_file_test_count`),
+    and the larger of that and the map's count is used: the map cannot
+    see the new tests, and the source cannot see what a fixture from
+    ``conftest.py`` multiplies.
+    """
     per_test = dict(test_map.tests)
     per_file: dict[str, int] = defaultdict(int)
     for test_id, count in test_map.tests:
@@ -395,10 +582,14 @@ def _count(test_map: TestMap, selected: list[str], backend: Path) -> int:
     for entry in selected:
         if "::" in entry:
             total += per_test[entry]
-        elif entry in per_file:
+        elif entry in per_file and entry not in changed:
             total += per_file[entry]
         else:
-            total += _count_tests(ast.parse((backend / entry).read_text(encoding="utf-8")))
+            tree = ast.parse((backend / entry).read_text(encoding="utf-8"))
+            try:
+                total += max(per_file.get(entry, 0), _file_test_count(tree))
+            except ValueError as reason:
+                raise FullSuiteError(f"cannot count the tests of {entry} ({reason})") from None
     return total
 
 
@@ -415,6 +606,7 @@ def _pick(changed: Iterable[str], map_path: Path, repo_root: Path, now: datetime
     backend = repo_root / "backend"
     numbers: set[int] = set()
     files: set[str] = set()
+    changed_tests: set[str] = set()
     no_test: list[str] = []
     paths = sorted({line.strip() for line in changed if line.strip()})
     if not paths:
@@ -429,6 +621,7 @@ def _pick(changed: Iterable[str], map_path: Path, repo_root: Path, now: datetime
         if path.startswith("backend/tests/"):
             if not inner.startswith(OTHER_SUITES) and (backend / inner).is_file():
                 files.add(inner)
+                changed_tests.add(inner)
         elif path not in test_map.files:
             raise FullSuiteError(f"the test map does not know {path}")
         elif test_map.files[path]:
@@ -453,7 +646,7 @@ def _pick(changed: Iterable[str], map_path: Path, repo_root: Path, now: datetime
     files.update(connector_select.CONTRACT_TESTS)
 
     selected = _resolve(test_map, numbers, files, backend)
-    count = _count(test_map, selected, backend)
+    count = _count(test_map, selected, changed_tests, backend)
     if count >= MAX_TESTS:
         raise FullSuiteError(f"the test map picked {count:,} tests, the limit is {MAX_TESTS - 1:,}")
     return Picked(
@@ -485,8 +678,12 @@ def _main(argv: list[str] | None = None) -> int:
 
     now = datetime.now(UTC)
     if args.command == "build":
-        test_ids = junit_test_ids(args.junit, args.backend_root)
-        result = build_map(coverage_contexts(args.data), test_ids, args.commit, now)
+        shards = [read_junit(path, args.backend_root) for path in args.junit]
+        try:
+            result = build_map(coverage_contexts(args.data), shards, args.commit, now)
+        except ValueError as reason:
+            print(f"no test map: {reason}", file=sys.stderr)
+            return 1
         args.out.write_text(json.dumps(result, separators=(",", ":")), encoding="utf-8")
         linked = sum(1 for ids in result["files"].values() if ids)
         print(

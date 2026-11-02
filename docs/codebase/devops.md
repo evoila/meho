@@ -2115,8 +2115,12 @@ run, not a broken `main`.
   a pytest junit file with every test id. The combine job runs
   `tests/_unit_test_map.py build` and uploads the artifact `unit-test-map`
   (kept 8 days). It does this only on the `schedule` run, and only when all
-  eight shards delivered their data. A pull request with the
-  `ci-coverage-validate` label never makes a map.
+  eight shards delivered their data. A crashed worker leaves a junit file
+  but no coverage data (the worker writes its data only at the end of its
+  session), and the download of that shard still works. So the tool checks
+  each junit file: one that reports a crashed worker, or whose tests are
+  not in the coverage data, means no map that night. A pull request with
+  the `ci-coverage-validate` label never makes a map.
 - **Who decides.** The `changes` job, step `map`. It runs only on a pull
   request that is not docs-only, has a backend change and is not a
   one-connector run. It downloads the newest `unit-test-map` artifact of a
@@ -2138,6 +2142,20 @@ run, not a broken `main`.
   No map, a map older than 7 days, 2,000 or more picked tests, or any
   error also means all the shards. Every selected run also runs
   `CONTRACT_TESTS` from `backend/tests/_unit_connector_select.py`.
+- **How the tests are counted.** The map says how many test items each
+  test runs, and that count is used for a test id and for a test file the
+  pull request did not change. A test file the pull request changed, or
+  that the map does not know, is counted from its source: its test
+  functions and `Test*` classes, times the cases of each `parametrize`
+  list that is written out or named at module level. The larger of that
+  count and the map's count is used, so a new or expanded test counts
+  fully and a fixture from `conftest.py` that multiplies tests still
+  counts. When the file's count is uncertain (a parametrize list built by
+  code, a `pytestmark` with parametrize, a fixture with `params`,
+  `pytest_generate_tests`, a test class with a base from another file, or
+  a bare decorator name from another file), all the shards run. On
+  2026-11-02 the count was certain, and right, for 1,074 of the 1,235
+  unit test files.
 - **Old test ids.** The map can be a few days old. A test id whose file is
   gone is dropped. A test id that its file no longer defines picks the
   whole file, so pytest never gets an id it cannot find.

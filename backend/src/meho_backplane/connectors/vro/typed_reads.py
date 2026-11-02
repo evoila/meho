@@ -19,15 +19,19 @@ and returns ``{"items": [...]}``, so MEHO can store a long list behind a
 result handle and the agent can filter it with ``result_query``.
 
 **Secrets.** A workflow run's inputs and outputs can hold passwords. A
-parameter whose type is ``SecureString``, whose ``encrypt-value`` flag is
-set, or whose name is a secret name comes back with its value replaced by
+parameter whose type holds a secret (``SecureString`` or
+``EncryptedString``, in any letter case, anywhere in the type name), whose
+``encrypt-value`` flag is set, whose name is a secret name, or whose value
+comes in a secret wrapper (``secure-string`` or ``encrypted-string``,
+whatever type is declared) comes back with its value replaced by
 :data:`REDACTED`. A name is secret when MEHO's shared rule
 (:func:`~meho_backplane.broadcast.events.is_secret_param_name`: password,
 passphrase, secret, token, API key, private key, ...) says so, or when it
 is one of the names listed here that the shared rule leaves out (bare
 ``license``, ``authorization``). Any field with such a name, at any depth,
-is replaced too. The connector masks the same fields before the flight
-recorder records a vendor answer.
+is replaced too. A secret wrapper at any depth (for example one element of
+a list) is replaced as well. The connector masks the same fields, with the
+same function, before the flight recorder records a vendor answer.
 
 **Checksum.** ``vro.workflow.get`` returns ``content_sha256``: the SHA-256
 of the workflow content in a fixed form (JSON with sorted keys and no
@@ -83,9 +87,11 @@ __all__ = [
     "LOG_TEXT_MAX",
     "OUTCOME_BY_STATE",
     "REDACTED",
+    "SECRET_VALUE_WRAPPERS",
     "VENDOR_CALLS",
     "content_sha256",
     "flat_rows",
+    "holds_secret_wrapper",
     "is_secret_name",
     "is_secret_parameter",
     "path_segment",
@@ -172,8 +178,14 @@ _SECRET_KEYS: Final[frozenset[str]] = frozenset(
         "licencekey",
         "license",
         "licence",
+        # The vendor's value wrappers that hold a secret (``secure-string``,
+        # ``encrypted-string``), so a wrapper at any depth is replaced.
+        "securestring",
+        "encryptedstring",
     }
 )
+#: The vendor's value wrapper keys that hold a secret, whatever type is declared.
+SECRET_VALUE_WRAPPERS: Final[frozenset[str]] = frozenset({"secure-string", "encrypted-string"})
 #: A key that ends with one of these (``adminPassword``, ``apiToken``) is secret too.
 _SECRET_SUFFIXES: Final[tuple[str, ...]] = (
     "password",
@@ -198,8 +210,17 @@ def is_secret_name(key: object) -> bool:
     return name in _SECRET_KEYS or name.endswith(_SECRET_SUFFIXES)
 
 
+def holds_secret_wrapper(value: Any) -> bool:
+    """True when *value* is a vendor value wrapper that holds a secret."""
+    return isinstance(value, dict) and not SECRET_VALUE_WRAPPERS.isdisjoint(value)
+
+
 def is_secret_parameter(param: dict[str, Any]) -> bool:
-    """A workflow parameter whose value must not come back."""
+    """A workflow parameter or attribute whose value must not come back.
+
+    True for a secret type, the ``encrypt-value`` flag, a secret name, or a
+    value in a secret wrapper (an attribute of type ``Any`` can hold one).
+    """
     kind = param.get("type")
     if isinstance(kind, str) and any(
         word in kind.lower() for word in ("securestring", "encryptedstring")
@@ -207,7 +228,7 @@ def is_secret_parameter(param: dict[str, Any]) -> bool:
         return True
     if param.get("encrypt-value") is True:
         return True
-    return is_secret_name(param.get("name"))
+    return is_secret_name(param.get("name")) or holds_secret_wrapper(param.get("value"))
 
 
 def _redact_object(value: dict[str, Any]) -> dict[str, Any]:
@@ -224,7 +245,9 @@ def redact_secrets(value: Any) -> Any:
         return value
     # Parameters are ``{name, type, value}``; Properties entries are ``{key, value}``.
     secret_param = "value" in value and (
-        ("name" in value and is_secret_parameter(value)) or is_secret_name(value.get("key"))
+        ("name" in value and is_secret_parameter(value))
+        or is_secret_name(value.get("key"))
+        or holds_secret_wrapper(value.get("value"))
     )
     return {
         key: (

@@ -189,17 +189,23 @@ MEHO stores a long list behind a result handle; the agent reads it with
 A workflow can do anything, so the run is `destructive`. An agent call is
 refused. A person runs it in three steps:
 
-1. `preview_operation` runs the preview builder. It reads the workflow
-   (`vro.workflow.get`: version, `content_sha256`, declared inputs) and
-   checks the inputs. It refuses when the workflow does not exist (or the
-   login may not read it) or an input is wrong. Then the call cannot wait
-   for approval. Otherwise it returns the approval card: the workflow, the
-   inputs, `run_sha256` and the `blast_radius` block (`object`: the
-   workflow; `children`: the plug-in objects the run is given;
-   `irreversibility`: the workflow's own code decides what it changes, and
-   MEHO cannot undo it).
-2. `call_operation` with the `preview_hash` waits until a second person
-   approves.
+1. `preview_operation` gives the `preview_hash` the call needs. It reads
+   nothing from Orchestrator and shows no card (`plan_shown: false`): it
+   runs the preview builder without a live connector, and the builder
+   declines.
+2. `call_operation` with the `preview_hash` enters the approval queue.
+   At that moment MEHO runs the preview builder with the live connector.
+   It reads the workflow (`vro.workflow.get`: version, `content_sha256`,
+   declared inputs) and checks the inputs. The approval card it builds
+   holds the workflow, the inputs, `run_sha256` and the `blast_radius`
+   block (`object`: the workflow; `children`: the plug-in objects the run
+   is given; `irreversibility`: the workflow's own code decides what it
+   changes, and MEHO cannot undo it). When the workflow does not exist (or
+   the login may not read it) or an input is wrong, the builder raises:
+   the request still waits for approval, but its card says
+   `preview_unavailable` with the reason, and it carries no `run_sha256`,
+   so the approved run stops with `precondition_failed`. Then the call
+   waits until a second person approves.
 3. The approved run reads the workflow again and computes `run_sha256`
    again. `run_sha256` is the SHA-256 of a fixed JSON form of the
    workflow id, its version, its `content_sha256`, the inputs (name, type,
@@ -207,10 +213,13 @@ refused. A person runs it in three steps:
    `allow_parallel`. When it differs from the card, or no card is bound,
    the answer is `precondition_failed` and nothing starts.
 
-Before the start, unless `allow_parallel` is true, the run reads up to 200
-runs of the workflow. When one is still running or waiting, the answer is
-`already_running` with that run's id, and nothing starts. This is a help,
-not a lock: two callers can both check before either starts.
+Before the start, unless `allow_parallel` is true, the run reads the runs
+of the workflow, 200 per page, until the list ends (the server's `total`
+is reached, or a page comes back short). When one is still running or
+waiting, the answer is `already_running` with that run's id, and nothing
+starts. This is a help, not a lock: two callers can both check before
+either starts. A server that sends no `total` and ignores `startIndex`
+cannot keep the check reading: it stops after 50 pages.
 
 Then MEHO reads each secret input from Vault and sends
 `POST .../executions` once, with no retry. The answer is `accepted` with
@@ -225,7 +234,10 @@ The run is one vendor call, so there is no part-way failure to report. A
 vendor error comes back as `connector_error` with the HTTP status and the
 vendor text (`extras.upstream_message`), so a person learns why
 Orchestrator refused the run. A test runs this through the whole flow:
-preview, approval, then a vendor `400`.
+preview, approval, then a vendor `400`. A `401` at the start means the
+cached login expired: the error keeps the `Authorization` header the
+start sent (and no body), so the dispatcher's login drop matches it, logs
+in again and retries the start once. A test covers this too.
 
 **Lost reply.** Call the run with `async: true`
 (`docs/codebase/async-governed-dispatch.md`): MEHO keeps the answer, with
@@ -254,24 +266,27 @@ for approval like every change.
 
 - `vro.workflow.get` returns no default values and no attribute values:
   they can hold secrets and are not needed to call a workflow.
-- `vro.execution.get` replaces the value of a parameter whose type is
-  `SecureString`, whose `encrypt-value` flag is set, or whose name is a
-  secret name, with `***REDACTED***`. A name is secret when MEHO's shared
+- `vro.execution.get` replaces the value of a parameter whose type holds
+  a secret (`SecureString` or `EncryptedString`, any letter case, anywhere
+  in the type name), whose `encrypt-value` flag is set, whose name is a
+  secret name, or whose value sits in a `secure-string` or
+  `encrypted-string` wrapper (an input of type `Any` can hold one), with
+  `***REDACTED***`. A name is secret when MEHO's shared
   rule (`is_secret_param_name` in `broadcast/events.py`: password,
   passphrase, secret, token, API key, private key and more, for example
   `adminPassword`, `passphrase`, `privateKeyPem`, `passwordValue`) says
   so, or when it is one of the few names the connector adds (bare
   `license`, `licence`, `authorization`).
 - Every answer, and every vendor answer the flight recorder stores
-  (`trace_response_body`), has secret-named fields replaced at any depth.
+  (`trace_response_body`), goes through the one function `redact_secrets`:
+  secret-named fields, secret parameters and secret wrappers are replaced
+  at any depth, also one wrapper inside a list.
 - The same goes for `{key, value}` entries, the shape a `Properties`
   value uses: when the key is a secret name, the value is replaced, at
   any depth. Entries shaped `{name, value}` are handled the same way.
-- `vro.config_element.list` replaces the value of an attribute whose type
-  is `SecureString` or `EncryptedString`, whose value sits in a
-  `secure-string` or `encrypted-string` wrapper, whose `encrypt-value`
-  flag is set, or whose name is a secret name, and marks the row
-  `masked: true`.
+- `vro.config_element.list` replaces the value of an attribute by the
+  same rule (type, wrapper, `encrypt-value` flag or name) and marks the
+  row `masked: true`.
 - `vro.workflow.run` takes a secret input only as `secret_ref`
   (`<vault-path>#<field>`), never as a value. Every input type that holds
   a secret is treated as secret: a type whose name contains

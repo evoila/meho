@@ -14,10 +14,13 @@ So these reads send no query, keep at most ``max_results`` rows and set
 ``module`` before the cut.
 
 **Secrets.** A configuration element attribute of type ``SecureString``
-or ``EncryptedString``, with the ``encrypt-value`` flag, or with a secret
-name comes back with its value replaced by
-:data:`~meho_backplane.connectors.vro.typed_reads.REDACTED`, the same rule
-the run reads use.
+or ``EncryptedString``, with the ``encrypt-value`` flag, with a secret
+name, or with its value in a secret wrapper (``secure-string`` or
+``encrypted-string``, whatever type the attribute declares) comes back
+with its value replaced by
+:data:`~meho_backplane.connectors.vro.typed_reads.REDACTED`. This is the
+one rule (:func:`~meho_backplane.connectors.vro.typed_reads.redact_secrets`)
+the run reads and the flight recorder trace use too.
 """
 
 from __future__ import annotations
@@ -109,21 +112,14 @@ async def vro_package_list_impl(
     return _whole_list_answer(payload, params)
 
 
-#: Value wrapper keys that hold a secret, whatever type the attribute declares.
-_SECRET_WRAPPERS: Final[frozenset[str]] = frozenset({"secure-string", "encrypted-string"})
-
-
 def _attribute_row(attribute: dict[str, Any]) -> dict[str, Any]:
-    value = attribute.get("value")
-    masked = is_secret_parameter(attribute) or (
-        isinstance(value, dict) and not _SECRET_WRAPPERS.isdisjoint(value)
-    )
+    masked = is_secret_parameter(attribute)
     return {
         "name": attribute.get("name"),
         "type": attribute.get("type"),
         "description": attribute.get("description"),
         "masked": masked,
-        "value": REDACTED if masked else value,
+        "value": REDACTED if masked else attribute.get("value"),
     }
 
 

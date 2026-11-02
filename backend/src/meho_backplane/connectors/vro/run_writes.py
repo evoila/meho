@@ -24,9 +24,10 @@ a second person's approval. The flow:
    again. When it differs from the value on the card (the workflow
    changed, or the inputs differ) it returns ``precondition_failed`` and
    starts nothing. It also stops when no approval card is bound.
-3. Unless ``allow_parallel`` is true, it reads the runs of the workflow.
-   When one is still running or waiting it returns ``already_running``
-   with that run's id and starts nothing. This is a help, not a lock.
+3. Unless ``allow_parallel`` is true, it reads the runs of the workflow,
+   page by page, until the list ends. When one is still running or
+   waiting it returns ``already_running`` with that run's id and starts
+   nothing. This is a help, not a lock.
 4. It reads each secret input from Vault (``secret_ref``,
    ``"<vault-path>#<field>"``) under the caller's identity, and sends
    ``POST /vco/api/workflows/{workflowId}/executions`` once (no retry).
@@ -136,8 +137,11 @@ WRITE_VENDOR_CALLS: Final[frozenset[tuple[str, str]]] = frozenset(
     }
 )
 
-#: Runs read for the "already running" check.
+#: Runs read per page for the "already running" check.
 _RUNNING_CHECK_ROWS: Final = 200
+#: Pages the check reads at most when the server sends no ``total``: a
+#: server that ignores ``startIndex`` must not keep the check reading.
+_RUNNING_CHECK_MAX_PAGES: Final = 50
 #: Plain outcomes of a run that has not ended.
 _ACTIVE_OUTCOMES: Final[frozenset[str]] = frozenset({"running", "waiting"})
 #: Plain outcomes of a run that has ended.
@@ -433,18 +437,33 @@ def _outcome(state: Any) -> str | None:
 async def _running_execution(
     connector: VroConnector, operator: Operator, target: VroTargetLike, workflow_id: str
 ) -> dict[str, Any] | None:
-    """A run of the workflow that is still running or waiting, if the list shows one."""
-    payload = await connector._vro_get(
-        target,
-        _EXECUTIONS_PATH.format(workflowId=path_segment("workflow", workflow_id)),
-        operator=operator,
-        params={"maxResult": _RUNNING_CHECK_ROWS, "startIndex": 0},
-    )
-    relations = payload.get("relations")
-    links = relations.get("link") if isinstance(relations, dict) else None
-    for row in flat_rows(links):
-        if _outcome(row.get("state")) in _ACTIVE_OUTCOMES:
-            return row
+    """A run of the workflow that is still running or waiting, if the list shows one.
+
+    Reads the runs page by page (``maxResult`` and ``startIndex``, the
+    query ``vro.execution.list`` uses) until a page shows an active run,
+    the server's ``total`` is reached, or a page comes back short. The
+    vendor list has no state filter MEHO can rely on, so every run is read.
+    """
+    path = _EXECUTIONS_PATH.format(workflowId=path_segment("workflow", workflow_id))
+    start = 0
+    for _ in range(_RUNNING_CHECK_MAX_PAGES):
+        payload = await connector._vro_get(
+            target,
+            path,
+            operator=operator,
+            params={"maxResult": _RUNNING_CHECK_ROWS, "startIndex": start},
+        )
+        relations = payload.get("relations")
+        page = relations if isinstance(relations, dict) else {}
+        links = page.get("link")
+        links = links if isinstance(links, list) else []
+        for row in flat_rows(links):
+            if _outcome(row.get("state")) in _ACTIVE_OUTCOMES:
+                return row
+        start += len(links)
+        total = page.get("total")
+        if len(links) < _RUNNING_CHECK_ROWS or (isinstance(total, int) and start >= total):
+            return None
     return None
 
 
@@ -456,16 +475,24 @@ def _mentions(text: str, secrets: list[str]) -> bool:
     return False
 
 
+def _login_header(request: httpx.Request) -> dict[str, str]:
+    """The ``Authorization`` header *request* sent, so the login drop can match it."""
+    sent = request.headers.get("Authorization")
+    return {"Authorization": sent} if sent else {}
+
+
 def _safe_error(exc: httpx.HTTPStatusError, secrets: list[str]) -> Exception:
     """The error the run raises for a vendor error answer, with no request body in it.
 
-    A ``401`` stays an :class:`httpx.HTTPStatusError` (rebuilt from the method
-    and URL alone), so the dispatcher logs in again and retries once. Any
-    other status is a :class:`ConnectorUpstreamError` with the vendor text,
-    or without it when the text holds a secret input value.
+    A ``401`` stays an :class:`httpx.HTTPStatusError`, rebuilt from the
+    method, the URL and the ``Authorization`` header alone: the dispatcher
+    drops the cached login only when the rejected request sent it, then
+    logs in again and retries once. Any other status is a
+    :class:`ConnectorUpstreamError` with the vendor text, or without it when
+    the text holds a secret input value.
     """
     status = exc.response.status_code
-    request = httpx.Request(exc.request.method, exc.request.url)
+    request = httpx.Request(exc.request.method, exc.request.url, headers=_login_header(exc.request))
     if status == httpx.codes.UNAUTHORIZED:
         return httpx.HTTPStatusError(
             f"Orchestrator answered HTTP {status}",

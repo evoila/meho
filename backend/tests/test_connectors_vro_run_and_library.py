@@ -7,7 +7,8 @@ What is covered, with a respx-mocked Orchestrator and no ingested catalog:
 
 * ``vro.action.list`` (flat rows, the module filter, ``more_rows``),
   ``vro.config_element.list`` (the list, and one element with its secret
-  values replaced) and ``vro.package.list``;
+  values replaced, in the answer and in the trace) and
+  ``vro.package.list``;
 * input values wrapped the way the vendor expects, and refused when they
   do not fit;
 * the ``vro.workflow.run`` preview: the card with ``blast_radius``, secret
@@ -17,12 +18,14 @@ What is covered, with a respx-mocked Orchestrator and no ingested catalog:
   preview, wait, a second person approves, the run starts once; no secret
   value in the approval row, the audit rows, the answer or the trace;
 * the approved run: ``precondition_failed`` when the card does not match
-  or no card is bound, ``already_running`` when a run still goes, the run
-  id from the body or the ``Location`` header, a vendor error with its
-  text (withheld when it holds a secret); through the whole flow the
-  vendor text reaches the answer and no secret reaches the approval row,
-  the audit rows, the trace or the broadcast feed;
-* the status read after a lost login: a new login, then the state;
+  or no card is bound, ``already_running`` when a run still goes (also on
+  a later page of the runs), the run id from the body or the ``Location``
+  header, a vendor error with its text (withheld when it holds a secret);
+  through the whole flow the vendor text reaches the answer and no secret
+  reaches the approval row, the audit rows, the trace or the broadcast
+  feed;
+* a lost login: at the start the run logs in again and starts once; the
+  status read logs in again, then reads the state;
 * ``vro.execution.cancel``: waits for approval, cancels a running run, a
   run that ended is ``unchanged``, a vendor error comes back.
 
@@ -319,7 +322,7 @@ async def test_config_element_list_lists_elements(session: AsyncSession) -> None
 
 @pytest.mark.asyncio
 async def test_config_element_attributes_hide_secret_values(session: AsyncSession) -> None:
-    await _register()
+    connector = await _register()
     element = {
         "id": "ce-1",
         "name": "<element>",
@@ -352,9 +355,39 @@ async def test_config_element_attributes_hide_secret_values(session: AsyncSessio
     for name in ("pw", "key", "apiToken", "blob", "other"):
         assert rows[name]["masked"] is True
         assert rows[name]["value"] == "***REDACTED***"
-    rendered = json.dumps(result.result)
-    for secret in ("s-1", "s-2", "s-3", "s-4", "s-5"):
-        assert secret not in rendered
+    trace = connector.trace_response_body(httpx.Response(200, json=element))
+    for rendered in (json.dumps(result.result), json.dumps(trace)):
+        assert "<host>" in rendered
+        for secret in ("s-1", "s-2", "s-3", "s-4", "s-5"):
+            assert secret not in rendered
+
+
+def test_trace_hides_a_secret_wrapper_whatever_the_declared_type() -> None:
+    """A ``secure-string`` wrapper under type ``Any``, or inside a list, never reaches the trace."""
+    payload = {
+        "id": _RUN,
+        "state": "completed",
+        "input-parameters": [
+            {"name": "other", "type": "Any", "value": {"secure-string": {"value": "s-6"}}},
+            {"name": "blob", "type": "Any", "value": {"encrypted-string": {"value": "s-7"}}},
+            {
+                "name": "list",
+                "type": "Array/Any",
+                "value": {
+                    "array": {
+                        "elements": [
+                            {"string": {"value": "<plain>"}},
+                            {"secure-string": {"value": "s-8"}},
+                        ]
+                    }
+                },
+            },
+        ],
+    }
+    trace = json.dumps(VroConnector().trace_response_body(httpx.Response(200, json=payload)))
+    assert "<plain>" in trace
+    for secret in ("s-6", "s-7", "s-8"):
+        assert secret not in trace
 
 
 @pytest.mark.asyncio
@@ -736,6 +769,81 @@ async def test_run_returns_the_running_run_and_starts_nothing(session: AsyncSess
     assert not post.called
 
 
+def _runs_pages(*pages: list[str], total: int | None = None) -> tuple[Any, list[int]]:
+    """A runs route that answers page by page from ``startIndex``; records the indexes asked."""
+    asked: list[int] = []
+
+    def _answer(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["maxResult"] == "200"
+        start = int(request.url.params["startIndex"])
+        asked.append(start)
+        offset = 0
+        links: list[dict[str, Any]] = []
+        for page in pages:
+            if offset == start:
+                links = [_link(id=f"run-{start + i}", state=x) for i, x in enumerate(page)]
+                break
+            offset += len(page)
+        relations: dict[str, Any] = {"startIndex": start, "link": links}
+        if total is not None:
+            relations["total"] = total
+        return httpx.Response(200, json={"relations": relations})
+
+    return _answer, asked
+
+
+@pytest.mark.asyncio
+async def test_run_finds_a_running_run_on_a_later_page(session: AsyncSession) -> None:
+    connector = await _register()
+    params = {"workflow_id": _WF}
+    answer_page, asked = _runs_pages(["completed"] * 200, ["failed", "running"], total=202)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_workflow(mock)
+        card = await _card(connector, params)
+        mock.get(_EXECUTIONS).mock(side_effect=answer_page)
+        post = mock.post(_EXECUTIONS)
+        answer = await _approved_run(connector, params, card)
+    assert asked == [0, 200]
+    assert answer["status"] == "already_running"
+    assert answer["execution_id"] == "run-201"
+    assert answer["state"] == "running"
+    assert not post.called
+
+
+@pytest.mark.asyncio
+async def test_run_reads_every_page_of_ended_runs_then_starts(session: AsyncSession) -> None:
+    connector = await _register()
+    params = {"workflow_id": _WF}
+    answer_page, asked = _runs_pages(["completed"] * 200, ["canceled"] * 200, ["failed"] * 7)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_workflow(mock)
+        card = await _card(connector, params)
+        mock.get(_EXECUTIONS).mock(side_effect=answer_page)
+        post = mock.post(_EXECUTIONS).respond(202, json={"id": "run-new", "state": "running"})
+        answer = await _approved_run(connector, params, card)
+    assert asked == [0, 200, 400]
+    assert post.call_count == 1
+    assert answer["status"] == "accepted"
+    assert answer["execution_id"] == "run-new"
+
+
+@pytest.mark.asyncio
+async def test_run_stops_reading_runs_at_the_total(session: AsyncSession) -> None:
+    """A full last page with ``total`` reached asks for no empty page after it."""
+    connector = await _register()
+    params = {"workflow_id": _WF}
+    answer_page, asked = _runs_pages(["completed"] * 200, total=200)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_workflow(mock)
+        card = await _card(connector, params)
+        mock.get(_EXECUTIONS).mock(side_effect=answer_page)
+        post = mock.post(_EXECUTIONS).respond(202, json={"id": "run-new"})
+        answer = await _approved_run(connector, params, card)
+    assert asked == [0]
+    assert post.call_count == 1
+    assert answer["status"] == "accepted"
+
+
 @pytest.mark.asyncio
 async def test_run_with_allow_parallel_skips_the_check_and_reads_the_id_from_the_body(
     session: AsyncSession,
@@ -852,6 +960,56 @@ async def test_run_vendor_error_that_echoes_a_secret_is_withheld(
     assert _SECRET not in str(raised.value.upstream_message)
     assert "withheld" in str(raised.value.upstream_message)
     assert raised.value.__context__ is None or _SECRET not in str(raised.value.__context__)
+
+
+@pytest.mark.asyncio
+async def test_run_logs_in_again_when_the_login_expired_at_the_start(
+    _stub_embedding: AsyncMock,
+    _vault: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """Preview, approval, then a 401 at the start: a new login, the run starts once."""
+    await _register()
+    await _seed_target()
+    requester = _operator("op-run-requester")
+    args = {
+        "connector_id": VRO_CONNECTOR_ID,
+        "op_id": RUN_OP_ID,
+        "target": "vro-run-target",
+        "params": {"workflow_id": _WF, "inputs": _INPUTS},
+    }
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_workflow(mock)
+        _mock_runs(mock)
+        post = mock.post(_EXECUTIONS)
+        post.side_effect = [
+            httpx.Response(401),
+            httpx.Response(202, json={"id": _RUN, "state": "running"}),
+        ]
+        preview = await preview_operation(requester, args)
+        assert preview["status"] == "ok", preview
+        call = await call_operation(requester, {**args, "preview_hash": preview["preview_hash"]})
+        assert call["status"] == "awaiting_approval", call
+        request_id = UUID(call["extras"]["approval_request_id"])
+        approver = _operator("op-run-approver")
+        async with get_sessionmaker()() as s:
+            await approve_request(s, request_id, operator=approver, params=None)
+            await s.commit()
+        async with get_sessionmaker()() as s:
+            row = await s.get(ApprovalRequest, request_id)
+            assert row is not None
+            _loader.reset_mock()
+            result = await resume_dispatch_after_approval(
+                operator=approver, request=row, params=None
+            )
+
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "accepted"
+    assert result.result["execution_id"] == _RUN
+    assert post.call_count == 2
+    assert all("authorization" in c.request.headers for c in post.calls)
+    assert _loader.await_count >= 1, "the expired login was not dropped, so no new login"
+    assert _SECRET not in json.dumps(result.result)
 
 
 @pytest.mark.asyncio

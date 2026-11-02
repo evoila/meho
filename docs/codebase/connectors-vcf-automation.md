@@ -491,9 +491,9 @@ and is not covered.
   `integration.list` with `view: git_sources` (each source with its last
   sync) before you start again.
 - **Credential class.** `integration.set` sends a password, so it carries the
-  tag `credential` and is pinned in `broadcast/events.py`
-  (`_CREDENTIAL_WRITE_OPS`): traces keep no request body and the broadcast is
-  aggregate-only. A refused input answers `invalid_request` with the reason
+  tag `credential` and each connector declares it `credential_write` in its
+  own `op_classes.py` (`vcf_automation/` and `vra8/`): traces keep no
+  request body and the broadcast is aggregate-only. A refused input answers `invalid_request` with the reason
   (an error text would be hidden for this class). Its preview shows the
   integration, `would` (`add`, `change`, `exists`), the properties without
   secret-named ones, the user name and the Vault path, never a value.

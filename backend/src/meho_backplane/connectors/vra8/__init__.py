@@ -48,6 +48,9 @@ connector's surface.
 from typing import Final
 
 from meho_backplane.connectors.registry import register_connector_v2
+
+# Imported for its side effect: declares the op classes of the connector.
+from meho_backplane.connectors.vra8 import op_classes  # noqa: F401
 from meho_backplane.connectors.vra8.connector import Vra8Connector
 from meho_backplane.connectors.vra8.integration_ops import register_vra8_integration_operations
 from meho_backplane.connectors.vra8.session import (

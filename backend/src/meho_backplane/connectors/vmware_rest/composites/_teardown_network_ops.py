@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _teardown_network
 from meho_backplane.connectors.vmware_rest.composites._spec import (
     CompositeSpec,
 )
@@ -53,6 +54,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
             "vmware.composite.network.portgroup.delete"
         ],
         preview=network_portgroup_delete_preview,
+        governed_subops=_teardown_network._VIM_SUB_OPS_NETWORK_PORTGROUP_DELETE,
     ),
     CompositeSpec(
         op_id="vmware.composite.host.standard_portgroup.delete",
@@ -83,5 +85,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
             "vmware.composite.host.standard_portgroup.delete"
         ],
         preview=host_standard_portgroup_delete_preview,
+        governed_subops=_teardown_network._VIM_SUB_OPS_HOST_STANDARD_PORTGROUP_DELETE,
     ),
 )

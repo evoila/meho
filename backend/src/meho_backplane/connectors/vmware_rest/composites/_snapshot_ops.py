@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _snapshot
 from meho_backplane.connectors.vmware_rest.composites._snapshot import (
     vm_snapshot_create_composite,
     vm_snapshot_create_preview,
@@ -50,6 +51,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.snapshot.create"],
         preview=vm_snapshot_create_preview,
+        governed_subops=_snapshot._VIM_SUB_OPS_VM_SNAPSHOT_CREATE,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.snapshot.delete",
@@ -69,5 +71,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.snapshot.delete"],
         preview=vm_snapshot_delete_preview,
+        governed_subops=_snapshot._VIM_SUB_OPS_VM_SNAPSHOT_DELETE,
     ),
 )

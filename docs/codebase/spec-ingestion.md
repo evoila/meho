@@ -623,8 +623,8 @@ catalog `(product, version)`, like `op_allowlist`. Operator guide:
 
 An ingested read whose answer holds credentials gets two guards, the same
 as its hand-written twin (#4617): a `safety_overlay` rule on its catalog
-row (`caution`, with approval) and an entry in `_CREDENTIAL_READ_OPS` in
-`broadcast/events.py`, so the dispatcher replaces every secret field in
+row (`caution`, with approval) and a `credential_read` declaration in the
+connector's `op_classes.py` (`sddc_manager/op_classes.py`), so the dispatcher replaces every secret field in
 the answer with `[REDACTED:param_name]`. That list stays the only list of
 secret reads. The SDDC Manager row `sddc` / `9.0` carries the first set:
 the `/v1/credentials` reads, the depot, backup and proxy settings, host
@@ -2102,7 +2102,9 @@ consume so the wire contract is defined once:
   the listing-integrity contract section above. A third value,
   `"package_not_installed"` (#5560), marks a connector whose rows all
   come from a connector package that is not installed; see
-  `connector-packages.md`, "When a package is removed".
+  `connector-packages.md`, "When a package is removed". A fourth value,
+  `"code_not_installed"` (#5585), marks a connector whose code is not in
+  this MEHO; see the same section, "Rows with no package name".
   `ConnectorListItem.next_step` (G0.13-T3 / #1133) is the workflow-
   completion hint: a `NextStep` object (verb + rationale) on
   `state="registered"` rows, `null` on `state="ingested"` rows — see

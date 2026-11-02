@@ -64,7 +64,7 @@ OP_ID_CONTENT_LIBRARY_CREATE: Final = "vmware.composite.content_library.create"
 _OP_CREATE_LOCAL_LIBRARY: Final = "POST:/content/local-library"
 
 #: Every REST call of the create (reads and the one write). The reconcile test
-#: checks them against the pinned vCenter 9.0 API file, and ``_governed_subops``
+#: checks them against the pinned vCenter 9.0 API file, and the composite row
 #: lists them for the grant set.
 _SUB_OPS_CONTENT_LIBRARY_CREATE: Final[tuple[str, ...]] = (
     _OP_FIND_LIBRARY,
@@ -260,5 +260,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=CONTENT_LIBRARY_CREATE_LLM_INSTRUCTIONS,
         preview=_content_library_create_preview,
+        governed_subops=_SUB_OPS_CONTENT_LIBRARY_CREATE,
     ),
 )

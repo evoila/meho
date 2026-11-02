@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _namespace
 from meho_backplane.connectors.vmware_rest.composites._namespace import (
     namespace_create_composite,
     namespace_delete_composite,
@@ -60,6 +61,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS["vmware.composite.namespace.create"],
         preview=_namespace_create_preview,
         not_on_8_0=SUPERVISOR_9X_REASON,
+        governed_subops=_namespace._SUB_OPS_NAMESPACE_CREATE,
     ),
     CompositeSpec(
         op_id="vmware.composite.namespace.delete",
@@ -86,6 +88,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS["vmware.composite.namespace.delete"],
         preview=_namespace_delete_preview,
         not_on_8_0=SUPERVISOR_9X_REASON,
+        governed_subops=_namespace._SUB_OPS_NAMESPACE_DELETE,
     ),
     CompositeSpec(
         op_id="vmware.composite.namespace.status",

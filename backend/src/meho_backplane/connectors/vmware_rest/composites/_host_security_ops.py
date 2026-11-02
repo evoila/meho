@@ -3,8 +3,8 @@
 
 """Registry rows, approval previews and grant sets of the six host security changes.
 
-``_register.py`` collects :data:`COMPOSITES`, and ``_governed_subops.py`` reads
-:data:`HOST_SECURITY_GOVERNED_SUBOPS`. All six changes are ``dangerous`` with
+``_register.py`` collects :data:`COMPOSITES`. Each row names the vim calls the
+change may make. All six changes are ``dangerous`` with
 ``requires_approval=True`` and sit in the ``vmware-host-security`` group with
 the two reads.
 """
@@ -70,17 +70,6 @@ if TYPE_CHECKING:
     from meho_backplane.operations._preview import PreviewContext
 
 __all__ = ["COMPOSITES", "HOST_SECURITY_GOVERNED_SUBOPS"]
-
-#: composite op id -> the vim calls it may make.
-HOST_SECURITY_GOVERNED_SUBOPS: Final[dict[str, tuple[str, ...]]] = {
-    OP_ID_ADVANCED_SETTINGS_SET: VIM_SUB_OPS_ADVANCED_SETTINGS_SET,
-    OP_ID_FIREWALL_RULESET_SET: VIM_SUB_OPS_FIREWALL_RULESET_SET,
-    OP_ID_LOCKDOWN_SET: VIM_SUB_OPS_LOCKDOWN_SET,
-    OP_ID_LOCKDOWN_EXCEPTIONS_SET: VIM_SUB_OPS_LOCKDOWN_EXCEPTIONS_SET,
-    OP_ID_SNMP_SET: VIM_SUB_OPS_SNMP_SET,
-    OP_ID_COREDUMP_SET: VIM_SUB_OPS_COREDUMP_SET,
-}
-
 
 # ---------------------------------------------------------------------------
 # Previews: the approver sees the host, its current setting and what is asked
@@ -165,6 +154,7 @@ def _row(
     description: str,
     tags: list[str],
     preview: PreviewBuilder,
+    sub_ops: tuple[str, ...],
     *,
     classifier_other: bool = False,
 ) -> CompositeSpec:
@@ -181,6 +171,7 @@ def _row(
         safety_level="dangerous",
         requires_approval=True,
         preview=preview,
+        governed_subops=sub_ops,
         classifier_other=classifier_other,
     )
 
@@ -197,6 +188,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         "approval.",
         ["advanced-settings"],
         _advanced_settings_preview,
+        VIM_SUB_OPS_ADVANCED_SETTINGS_SET,
     ),
     _row(
         OP_ID_FIREWALL_RULESET_SET,
@@ -208,6 +200,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         "Waits for approval.",
         ["firewall"],
         _firewall_ruleset_preview,
+        VIM_SUB_OPS_FIREWALL_RULESET_SET,
         classifier_other=True,
     ),
     _row(
@@ -220,6 +213,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         "approval.",
         ["lockdown", "security"],
         _lockdown_preview,
+        VIM_SUB_OPS_LOCKDOWN_SET,
         classifier_other=True,
     ),
     _row(
@@ -231,6 +225,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         "lockdown mode is on. Reads the list first and back after. Waits for approval.",
         ["lockdown", "security"],
         _lockdown_exceptions_preview,
+        VIM_SUB_OPS_LOCKDOWN_EXCEPTIONS_SET,
         classifier_other=True,
     ),
     _row(
@@ -242,6 +237,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         "shown; fields left out keep their value. Reads the agent back. Waits for approval.",
         ["snmp", "monitoring"],
         _snmp_preview,
+        VIM_SUB_OPS_SNMP_SET,
     ),
     _row(
         OP_ID_COREDUMP_SET,
@@ -253,6 +249,12 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         "approval.",
         ["coredump", "diagnostics"],
         _coredump_preview,
+        VIM_SUB_OPS_COREDUMP_SET,
         classifier_other=True,
     ),
 )
+
+#: composite op id -> the vim calls it may make, read from the rows.
+HOST_SECURITY_GOVERNED_SUBOPS: Final[dict[str, tuple[str, ...]]] = {
+    row.op_id: row.governed_subops for row in COMPOSITES if row.governed_subops
+}

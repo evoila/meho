@@ -119,9 +119,9 @@ def test_only_declared_safe_writes_count_as_safe_writes(fresh_registry: None) ->
 
 
 def test_the_only_safe_writes_are_the_github_ticket_writes() -> None:
-    # Ops of other connectors declared as a change (for example a vSphere guest
-    # process list) stay reads for health checks and satellite runners.
+    # Ops of other connectors declared as a change (for example the Kubernetes
+    # secret create) stay reads for health checks and satellite runners.
     _eager_import_connectors()
     assert set(TICKET_WRITE_OP_IDS) == op_classes._SAFE_WRITES
-    assert declared_op_class("vmware.composite.vm.guest.process.list") == "credential_write"
-    assert not op_classes.is_safe_write("vmware.composite.vm.guest.process.list")
+    assert declared_op_class("k8s.secret.create") == "credential_write"
+    assert not op_classes.is_safe_write("k8s.secret.create")

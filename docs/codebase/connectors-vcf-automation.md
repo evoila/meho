@@ -658,8 +658,10 @@ and the provider API references of 9.0, 9.1 and 9.1.1.
   stay out of traces, the broadcast is aggregate-only and the dispatcher
   withholds the vendor's error text. In a part-way answer the password is
   removed from the vendor's text in every form the text can carry it
-  (plain, JSON-escaped, HTML-escaped, URL-encoded); when it could still be
-  in the text, the text is withheld and only the HTTP status stays. The
+  (plain, JSON-escaped with hex digits in either case and surrogate pairs
+  joined, HTML-escaped, URL-encoded, form-encoded); when it could still be
+  in a decoded view of the text, the text is withheld and only the HTTP
+  status stays. The
   reads copy named fields only, so a password the vendor echoes never
   reaches an answer.
 - **Out of scope.** Deleting regions and quotas, VM Apps orgs on classic

@@ -25,10 +25,11 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
-from urllib.parse import quote
+from urllib.parse import quote, quote_plus
 
 import httpx
 import pytest
@@ -269,6 +270,75 @@ def test_vendor_error_text_hides_the_password_in_every_encoding(body: str) -> No
     assert not _carries(text, _TRICKY_PASSWORD)
     assert html.escape(_TRICKY_PASSWORD) not in text
     assert quote(_TRICKY_PASSWORD, safe="") not in text
+
+
+_EMOJI_PASSWORD = "pass\N{GRINNING FACE}word"
+_FORM_PASSWORD = "pass word&more/less"
+
+
+def _upper_json_escapes(text: str) -> str:
+    """*text* with the hex digits of its JSON ``\\uXXXX`` escapes in upper case."""
+    return re.sub(r"\\u([0-9a-f]{4})", lambda m: "\\u" + m.group(1).upper(), text)
+
+
+@pytest.mark.parametrize(
+    ("password", "body"),
+    [
+        # Two JSON escapes (a surrogate pair), with lower- and with upper-case hex digits.
+        pytest.param(
+            _EMOJI_PASSWORD,
+            json.dumps({"m": f"bad login / {_EMOJI_PASSWORD}"}),
+            id="json-lower-surrogates",
+        ),
+        pytest.param(
+            _EMOJI_PASSWORD,
+            _upper_json_escapes(json.dumps({"m": f"bad login / {_EMOJI_PASSWORD}"})),
+            id="json-upper-surrogates",
+        ),
+        # Form encoding: a space becomes ``+``; hex digits in either case.
+        pytest.param(_FORM_PASSWORD, f"bad login / login={quote_plus(_FORM_PASSWORD)}", id="form"),
+        pytest.param(
+            _FORM_PASSWORD,
+            f"bad login / login={quote_plus(_FORM_PASSWORD).lower()}",
+            id="form-lower-hex",
+        ),
+        pytest.param(
+            _FORM_PASSWORD,
+            f"bad login / login={quote(_FORM_PASSWORD, safe='').lower()}",
+            id="url-lower-hex",
+        ),
+    ],
+)
+def test_vendor_error_text_cleans_surrogate_pairs_and_form_encoding(
+    password: str, body: str
+) -> None:
+    text = vendor_error_text(_http_error(400, body), hide=(password,))
+    assert "bad login" in text and "<hidden>" in text
+    assert not _carries(text, password)
+    assert _upper_json_escapes(json.dumps(password)[1:-1]) not in text
+    for form in (quote_plus(password), quote(password, safe="")):
+        assert form not in text and form.lower() not in text
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # ``/`` escaped as ``\/`` next to an upper-case surrogate pair: no single form matches.
+        pytest.param(
+            _upper_json_escapes(json.dumps({"m": "pass/\N{GRINNING FACE}word"})).replace(
+                "/", "\\/"
+            ),
+            id="json-slash-escape-and-surrogates",
+        ),
+        # Form-encoded twice.
+        pytest.param(
+            f"login={quote_plus(quote_plus('pass/\N{GRINNING FACE}word'))}", id="form-twice"
+        ),
+    ],
+)
+def test_vendor_error_text_withholds_what_only_a_decoder_can_see(body: str) -> None:
+    text = vendor_error_text(_http_error(400, body), hide=("pass/\N{GRINNING FACE}word",))
+    assert text == "HTTP 400: the vendor's error text is withheld because it may hold the password"
 
 
 def test_vendor_error_text_keeps_the_rest_and_withholds_what_it_cannot_clean() -> None:

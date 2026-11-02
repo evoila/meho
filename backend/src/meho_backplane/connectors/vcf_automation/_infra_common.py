@@ -20,8 +20,8 @@
   told apart by ``part``.
 * **Vendor error text.** :func:`vendor_error_text` shortens the vendor's
   text and removes each value to hide in every form the text can carry it
-  (plain, JSON-escaped, HTML-escaped, URL-encoded). When a value could still
-  be in the text after that, the text is withheld.
+  (plain, JSON-escaped, HTML-escaped, URL-encoded, form-encoded). When a
+  value could still be in the text after that, the text is withheld.
 * **What the approver saw.** :func:`state_hash` hashes the fields of an
   object the change depends on. The preview stores it; the approved run
   compares it with a fresh read (:func:`approved_state_problem`).
@@ -37,7 +37,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
-from urllib.parse import quote, unquote
+from urllib.parse import quote, quote_plus, unquote, unquote_plus
 
 import httpx
 
@@ -84,6 +84,8 @@ _ERROR_TEXT_MAX: Final = 500
 _TASK_URN_PREFIX: Final = "urn:vcloud:task:"
 #: A JSON string escape: ``\uXXXX`` or one of ``\" \\ \/ \b \f \n \r \t``.
 _JSON_ESCAPE: Final = re.compile(r'\\u([0-9a-fA-F]{4})|\\(["\\/bfnrt])')
+#: The hex digits of a JSON ``\uXXXX`` escape or of a ``%XX`` URL escape.
+_ESCAPE_HEX: Final = re.compile(r"(?<=\\u)[0-9a-fA-F]{4}|(?<=%)[0-9a-fA-F]{2}")
 _JSON_SHORT_ESCAPES: Final[dict[str, str]] = {
     '"': '"',
     "\\": "\\",
@@ -153,37 +155,56 @@ def is_unreachable(exc: BaseException) -> bool:
 
 
 def _json_unescaped(text: str) -> str:
-    """*text* with its JSON string escapes decoded (``\\"`` to ``"``, and so on)."""
+    """*text* with its JSON string escapes decoded (``\\"`` to ``"``, and so on).
+
+    A character outside the Basic Multilingual Plane (an emoji) is two
+    ``\\uXXXX`` escapes in JSON, a surrogate pair. Decoding them one by one
+    gives two half characters, so the pair is joined afterwards.
+    """
 
     def _one(match: re.Match[str]) -> str:
         if match.group(1):
             return chr(int(match.group(1), 16))
         return _JSON_SHORT_ESCAPES[match.group(2)]
 
-    return _JSON_ESCAPE.sub(_one, text)
+    decoded = _JSON_ESCAPE.sub(_one, text)
+    return decoded.encode("utf-16", "surrogatepass").decode("utf-16", "surrogatepass")
+
+
+def _both_hex_cases(form: str) -> set[str]:
+    """*form* with the hex digits of its escapes in lower and in upper case."""
+    return {
+        _ESCAPE_HEX.sub(lambda m: m.group(0).lower(), form),
+        _ESCAPE_HEX.sub(lambda m: m.group(0).upper(), form),
+    }
 
 
 def _forms_of(secret: str) -> list[str]:
-    """Every form a vendor text can carry *secret* in, longest first."""
+    """Every form a vendor text can carry *secret* in, longest first.
+
+    Escapes with hex digits (``\\u00e9`` in JSON, ``%26`` in a URL) come in
+    both letter cases, because vendors differ.
+    """
     forms = {
         secret,
-        json.dumps(secret)[1:-1],
         json.dumps(secret, ensure_ascii=False)[1:-1],
         html.escape(secret),
         html.escape(secret, quote=False),
-        quote(secret, safe=""),
     }
+    for escaped in (json.dumps(secret)[1:-1], quote(secret, safe=""), quote_plus(secret)):
+        forms |= _both_hex_cases(escaped)
     return sorted((form for form in forms if form), key=len, reverse=True)
 
 
 def _decoded_views(text: str) -> list[str]:
-    """*text* and its decoded forms (JSON escapes, HTML entities, URL encoding), twice over."""
+    """*text* and its decoded forms (JSON, HTML, URL and form encoding), twice over."""
     views = [text]
     for _ in range(2):
         views.extend(
             [_json_unescaped(view) for view in views]
             + [html.unescape(view) for view in views]
             + [unquote(view) for view in views]
+            + [unquote_plus(view) for view in views]
         )
     return views
 
@@ -193,9 +214,9 @@ def vendor_error_text(exc: BaseException, *, hide: tuple[str, ...] = ()) -> str:
 
     A value is removed in every form the text can carry it: as it is, JSON-
     escaped (a quote or a backslash in the value becomes ``\\"`` or ``\\\\`` in a
-    JSON body), HTML-escaped and URL-encoded. When a value is still found in
-    a decoded view of the text after that, the text is withheld and only the
-    HTTP status stays.
+    JSON body), HTML-escaped, URL-encoded and form-encoded (a space becomes
+    ``+``). When a value is still found in a decoded view of the text after
+    that, the text is withheld and only the HTTP status stays.
     """
     if isinstance(exc, httpx.HTTPStatusError):
         status: int | None = exc.response.status_code

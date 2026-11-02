@@ -38,7 +38,7 @@ def _ci_integration_files() -> list[str]:
     return sorted(files | {CANARY_FILE})
 
 
-UNIT_SHARDS = 5
+UNIT_SHARDS = 6
 
 
 def _integration_shard_job() -> dict[str, Any]:

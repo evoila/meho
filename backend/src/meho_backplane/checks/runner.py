@@ -155,6 +155,7 @@ from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Sensor
 from meho_backplane.metrics import note_loop_tick
+from meho_backplane.op_classes import is_safe_write
 from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.meta_tools import _resolve_target_or_error
@@ -377,8 +378,11 @@ async def _safe_tier_floor(snap: _SensorSnapshot) -> AssertionOutcome | None:
     auto-execute its mutation on every unattended tick. Re-resolve the current
     descriptor with the same helper the create guard uses
     (:func:`~meho_backplane.operations._lookup.lookup_descriptor`) and fail
-    closed to ``unknown`` when it is missing or no longer ``safe``; a still-safe
-    op returns ``None`` and dispatches unchanged. ``parse_connector_id`` is
+    closed to ``unknown`` when it is missing or no longer ``safe``. A ``safe`` op
+    that its connector marks as a safe write
+    (:func:`~meho_backplane.op_classes.is_safe_write`) is also ``unknown``:
+    it needs no approval, but it is a write. A still-safe read returns ``None``
+    and dispatches unchanged. ``parse_connector_id`` is
     forgiving (never raises); a descriptor read that errors rides
     :func:`_run_evaluation`'s never-raises contract to ``unknown`` as well.
     """
@@ -397,6 +401,10 @@ async def _safe_tier_floor(snap: _SensorSnapshot) -> AssertionOutcome | None:
             "op_not_safe_at_dispatch",
             safety_level=descriptor.safety_level,
         )
+    if is_safe_write(snap.op_id):
+        # A ``safe`` write (for example a GitHub ticket write) needs no
+        # approval, but it is not a read: never run it on a tick.
+        return _unknown_outcome("op_is_write_at_dispatch", safety_level=descriptor.safety_level)
     return None
 
 

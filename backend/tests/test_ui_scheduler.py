@@ -668,7 +668,9 @@ def test_create_modal_carries_fire_at_utc_conversion() -> None:
     stores verbatim as UTC; the modal must carry the ``htmx:configRequest``
     handler that rewrites ``fire_at`` to a UTC ISO instant plus the live hint
     that makes the conversion visible. Asserts the load-bearing markers rather
-    than exercising the JS (covered by the Playwright regression in CI).
+    than exercising the JS. There is no browser test harness in this repo,
+    so the handler itself is unexercised -- these assertions pin the markers
+    it depends on, nothing more.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_agent(tenant_id=_TENANT_A)

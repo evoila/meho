@@ -88,10 +88,10 @@ from meho_backplane.operations._validate import (
     policy_gate,
     validate_params,
 )
-from meho_backplane.operations.approval_handoff import discard as discard_handoff
 from meho_backplane.operations.approval_queue import (
     approval_release_changed,
     consume_remote_write_approval,
+    end_run_input,
     find_remote_write_approval,
 )
 from meho_backplane.runner.satellite_tier import (
@@ -472,7 +472,7 @@ async def mint_gateway_command(
     # the single source of truth shared with the edge executor and the
     # assignment materialiser (defence in depth), before the policy gate so a
     # refused op is never parked.
-    tier = classify_satellite_tier(descriptor.safety_level)
+    tier = classify_satellite_tier(descriptor.safety_level, op_id=op_id)
     if tier is SatelliteMintTier.EXCLUDED:
         # dangerous / destructive — never minted (composes with #3183).
         structlog.get_logger(__name__).warning(
@@ -486,7 +486,7 @@ async def mint_gateway_command(
         return _refused(
             MintRefusalCode.OP_NOT_SAFE,
             f"op {op_id!r} has safety_level {descriptor.safety_level!r}; "
-            "dangerous/destructive ops are never minted to a satellite",
+            "dangerous/destructive ops and safe writes are never minted to a satellite",
         )
     if tier is SatelliteMintTier.REMOTE_WRITE:
         # Revocation hardening (#3192, the Stage-3 gate): a revoked runner
@@ -735,8 +735,9 @@ async def _mint_remote_write(
         )
 
     # Keep custody cleanup in the caller-owned mint transaction: a rollback
-    # restores both the approval claim and its encrypted execution input.
-    await discard_handoff(session, approval.id, approval.tenant_id)
+    # restores the approval claim, its encrypted execution input and the
+    # secret fields of its stored params.
+    await end_run_input(session, approval)
 
     return await _finalize_mint(
         session,

@@ -110,11 +110,11 @@ def _screen_item(item: RunnerWorkItem) -> str | None:
     """
     from meho_backplane.settings import get_settings
 
-    tier = classify_satellite_tier(item.safety_level)
+    tier = classify_satellite_tier(item.safety_level, op_id=item.op_id)
     if tier is SatelliteMintTier.EXCLUDED:
         return (
             f"safety_level {item.safety_level!r} refused; dangerous/destructive "
-            "ops are never dispatched to a runner"
+            "ops and safe writes are never dispatched to a runner"
         )
     if tier is SatelliteMintTier.REMOTE_WRITE:
         # Mechanism 1 edge check (#3189): verify the centre's signature +
@@ -247,7 +247,8 @@ async def _invoke_recording_effect(
     if (
         effect_chain is None
         or command_id is None
-        or classify_satellite_tier(item.safety_level) is not SatelliteMintTier.REMOTE_WRITE
+        or classify_satellite_tier(item.safety_level, op_id=item.op_id)
+        is not SatelliteMintTier.REMOTE_WRITE
     ):
         return await _invoke(handler, item)
 

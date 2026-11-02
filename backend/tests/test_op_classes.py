@@ -17,8 +17,14 @@ import pytest
 from meho_backplane import op_classes
 from meho_backplane.broadcast import events
 from meho_backplane.broadcast.events import classify_op
+from meho_backplane.connectors.github.op_classes import TICKET_WRITE_OP_IDS
 from meho_backplane.connectors.registry import _eager_import_connectors
-from meho_backplane.op_classes import declare_op_classes, declared_op_class, declared_op_ids
+from meho_backplane.op_classes import (
+    declare_op_classes,
+    declare_safe_writes,
+    declared_op_class,
+    declared_op_ids,
+)
 
 #: The connectors the backplane itself imports, or MEHO's own planes. Only
 #: their op ids may stay in ``broadcast/events.py``
@@ -30,12 +36,14 @@ _CORE_OP_PREFIXES = ("vault.", "keycloak.", "secret.", "targets.", "topology.", 
 def fresh_registry() -> Iterator[None]:
     """Empty the registry for one test and put the real declarations back after."""
     saved = dict(op_classes._DECLARED)
+    saved_safe_writes = set(op_classes._SAFE_WRITES)
     op_classes._reset_declared_op_classes_for_testing()
     try:
         yield
     finally:
         op_classes._reset_declared_op_classes_for_testing()
         op_classes._DECLARED.update(saved)
+        op_classes._SAFE_WRITES.update(saved_safe_writes)
 
 
 def test_declared_class_wins_over_the_pattern_rules(fresh_registry: None) -> None:
@@ -98,3 +106,22 @@ def test_connectors_declare_their_sensitive_ops_at_import() -> None:
     assert declared_op_class("GET:/v1/credentials") == "credential_read"
     assert declared_op_class("argocd.app.sync") == "write"
     assert classify_op("k8s.secret.create") == "credential_write"
+
+
+def test_only_declared_safe_writes_count_as_safe_writes(fresh_registry: None) -> None:
+    # A declared class alone does not make a safe write: only declare_safe_writes does.
+    declare_op_classes(write=("example.cache.flush", "example.ticket.create"))
+    declare_safe_writes(("example.ticket.create",))
+    declare_safe_writes(("example.ticket.create",))
+    assert op_classes.is_safe_write("example.ticket.create")
+    assert not op_classes.is_safe_write("example.cache.flush")
+    assert not op_classes.is_safe_write("example.never.declared")
+
+
+def test_the_only_safe_writes_are_the_github_ticket_writes() -> None:
+    # Ops of other connectors declared as a change (for example a vSphere guest
+    # process list) stay reads for health checks and satellite runners.
+    _eager_import_connectors()
+    assert set(TICKET_WRITE_OP_IDS) == op_classes._SAFE_WRITES
+    assert declared_op_class("vmware.composite.vm.guest.process.list") == "credential_write"
+    assert not op_classes.is_safe_write("vmware.composite.vm.guest.process.list")

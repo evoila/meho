@@ -26,7 +26,7 @@ from meho_backplane.connectors.kubernetes.ops import KubernetesOp
 from meho_backplane.connectors.kubernetes.ops_write import ANNOTATABLE_KINDS
 from meho_backplane.connectors.kubernetes.ops_write_dangerous import DELETABLE_KINDS
 
-__all__ = ["WRITE_CAUTION_OPS", "WRITE_DANGEROUS_OPS"]
+__all__ = ["OPS", "WRITE_CAUTION_OPS", "WRITE_DANGEROUS_OPS"]
 
 
 _NAME_PROP: dict[str, Any] = {
@@ -664,3 +664,6 @@ WRITE_DANGEROUS_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=_JOB_CREATE_LLM,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = (*WRITE_CAUTION_OPS, *WRITE_DANGEROUS_OPS)

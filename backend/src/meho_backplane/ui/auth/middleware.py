@@ -129,6 +129,7 @@ __all__ = [
     "UISessionContext",
     "UISessionMiddleware",
     "require_ui_admin",
+    "require_ui_operator",
     "require_ui_session",
 ]
 
@@ -690,6 +691,59 @@ async def require_ui_admin(
     Returns the same ``UISessionContext`` so callers can use it for
     ``tenant_id`` / ``operator_sub`` without a second dependency.
     """
+    from meho_backplane.auth.operator import TenantRole
+
+    return await _require_ui_role(
+        session,
+        minimum=TenantRole.TENANT_ADMIN,
+        detail="tenant_admin_required",
+        log_prefix="ui_admin_gate",
+    )
+
+
+async def require_ui_operator(
+    request: Request,
+    session: UISessionContext = Depends(require_ui_session),
+) -> UISessionContext:
+    """FastAPI dependency: assert at least the ``operator`` role for the BFF session.
+
+    The console twin of the REST ``require_role(TenantRole.OPERATOR)``
+    floor and the MCP ``required_role=OPERATOR`` on ``call_operation``.
+    Every console route that runs or queues an operation, or starts,
+    advances or aborts a runbook run, declares it: ``operator`` and
+    ``tenant_admin`` pass, ``read_only`` gets ``403 operator_required``
+    before the handler body runs.
+
+    Same load + verify + refresh chain as :func:`require_ui_admin` (the
+    role comes from the stored access token, never from the session row),
+    so a same-session role change takes effect on the next request.
+    Returns the same ``UISessionContext`` for ``tenant_id`` /
+    ``operator_sub``.
+    """
+    from meho_backplane.auth.operator import TenantRole
+
+    return await _require_ui_role(
+        session,
+        minimum=TenantRole.OPERATOR,
+        detail="operator_required",
+        log_prefix="ui_operator_gate",
+    )
+
+
+async def _require_ui_role(
+    session: UISessionContext,
+    *,
+    minimum: TenantRole,
+    detail: str,
+    log_prefix: str,
+) -> UISessionContext:
+    """Shared body of the role-gated console dependencies.
+
+    Loads the decrypted session row, re-verifies its access token through
+    the refresh-aware JWT chain, and raises ``403 <detail>`` when the token's
+    role ranks below *minimum*. Binds the operator identity into the audit
+    contextvars on success.
+    """
     # Deferred import avoids a circular dependency: auth.middleware →
     # auth.jwt (ok) but auth.jwt → settings → (no ui module import).
     # The lazy import is inside the async function body (not module-level)
@@ -710,7 +764,7 @@ async def require_ui_admin(
         # Session disappeared between middleware check and here (revoked /
         # expired in the gap). Treat as unauthenticated.
         log.info(
-            "ui_admin_gate_session_gone",
+            f"{log_prefix}_session_gone",
             session_id=str(session.session_id),
         )
         raise HTTPException(
@@ -725,13 +779,19 @@ async def require_ui_admin(
         )
     except HTTPException as exc:
         log.info(
-            "ui_admin_gate_jwt_invalid",
+            f"{log_prefix}_jwt_invalid",
             session_id=str(session.session_id),
             status_code=exc.status_code,
         )
         raise
 
-    _assert_tenant_admin_role(operator.tenant_role, session_id=session.session_id)
+    _assert_min_role(
+        operator.tenant_role,
+        minimum=minimum,
+        detail=detail,
+        log_event=f"{log_prefix}_forbidden",
+        session_id=session.session_id,
+    )
 
     # Bind operator identity into structlog contextvars so AuditMiddleware
     # can attribute the write operation (reads operator_sub + tenant_id from
@@ -744,13 +804,20 @@ async def require_ui_admin(
     return session
 
 
-def _assert_tenant_admin_role(tenant_role: TenantRole, *, session_id: uuid.UUID) -> None:
-    """Raise 403 unless *tenant_role* ranks at least ``tenant_admin``.
+def _assert_min_role(
+    tenant_role: TenantRole,
+    *,
+    minimum: TenantRole,
+    detail: str,
+    log_event: str,
+    session_id: uuid.UUID,
+) -> None:
+    """Raise ``403 <detail>`` unless *tenant_role* ranks at least *minimum*.
 
-    Extracted from :func:`require_ui_admin` (the gate's only caller)
-    purely to keep the dependency under the chassis function-size
-    budget; the rank semantics are unchanged from the T2 upload-RBAC
-    landing.
+    The rank order is the one :mod:`meho_backplane.auth.rbac` uses for the
+    REST ``require_role`` floor: ``read_only`` < ``operator`` <
+    ``tenant_admin``. An unknown role on either side ranks below every
+    known one, so it is refused rather than let through.
     """
     from meho_backplane.auth.operator import TenantRole
 
@@ -761,7 +828,7 @@ def _assert_tenant_admin_role(tenant_role: TenantRole, *, session_id: uuid.UUID)
     )
     try:
         actual_rank = _role_order.index(tenant_role)
-        required_rank = _role_order.index(TenantRole.TENANT_ADMIN)
+        required_rank = _role_order.index(minimum)
     except ValueError:
         actual_rank = -1
         required_rank = len(_role_order)
@@ -769,11 +836,12 @@ def _assert_tenant_admin_role(tenant_role: TenantRole, *, session_id: uuid.UUID)
     if actual_rank < required_rank:
         log = structlog.get_logger(__name__)
         log.info(
-            "ui_admin_gate_forbidden",
+            log_event,
             session_id=str(session_id),
             actual_role=tenant_role.value,
+            required_role=minimum.value,
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="tenant_admin_required",
+            detail=detail,
         )

@@ -61,6 +61,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CRONJOB_OPS",
     "INSTANTIATE_ANNOTATION",
+    "OPS",
     "build_job_from_cronjob",
     "k8s_cronjob_run",
     "model_to_json",
@@ -259,3 +260,6 @@ CRONJOB_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=K8S_CRONJOB_RUN_LLM_INSTRUCTIONS,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = CRONJOB_OPS

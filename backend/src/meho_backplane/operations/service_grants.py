@@ -1249,8 +1249,10 @@ async def consult_and_record_grant(
     the preview asks "would a grant clear this call?" without using the
     grant. A delete grant is then consulted without building its evidence,
     because that evidence may read the target and the preview never
-    contacts the target; a ``destructive`` delete stays refused here, as it
-    does for a call that presents no preview hash.
+    contacts the target. A live delete grant is reported also for a
+    ``destructive`` delete (#5492): the preview makes the hash that the
+    real call sends, and the real call checks the hash and the blast
+    radius before it uses the grant.
     """
     if sandbox_mode_active():
         grant_id = await _consult_delete_grant(
@@ -1372,7 +1374,7 @@ async def _consult_delete_grant(
     if grant is None:
         return None
     if not record:
-        return None if descriptor.safety_level == "destructive" else grant.id
+        return grant.id
     evidence = await _delete_grant_evidence(
         operator=operator,
         descriptor=descriptor,

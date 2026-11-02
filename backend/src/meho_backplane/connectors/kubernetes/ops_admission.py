@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
     from meho_backplane.connectors.kubernetes.kubeconfig import KubernetesTargetLike
 
-__all__ = ["ADMISSION_OPS", "admission_webhook_rows", "k8s_admission_webhook_list"]
+__all__ = ["ADMISSION_OPS", "OPS", "admission_webhook_rows", "k8s_admission_webhook_list"]
 
 
 def _service_ref(config: Any) -> dict[str, Any] | None:
@@ -234,3 +234,6 @@ ADMISSION_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=K8S_ADMISSION_WEBHOOK_LIST_LLM_INSTRUCTIONS,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = ADMISSION_OPS

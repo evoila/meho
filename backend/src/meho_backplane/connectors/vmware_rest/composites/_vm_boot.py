@@ -73,7 +73,7 @@ _OP_PUT_BOOT_DEVICES: Final = "PUT:/vcenter/vm/{vm}/hardware/boot/device"
 
 #: Every call of the change: the REST reads and writes, the VIM read and the
 #: ``ReconfigVM_Task``. The reconcile test checks them against the pinned API
-#: files, and ``_governed_subops`` lists them for the grant set.
+#: files, and the composite row lists them for the grant set.
 SUB_OPS_VM_BOOT_SET: Final[tuple[str, ...]] = (
     _OP_GET_BOOT,
     _OP_GET_BOOT_DEVICES,
@@ -485,6 +485,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_BOOT_SET_LLM_INSTRUCTIONS,
         preview=_vm_boot_set_preview,
+        governed_subops=SUB_OPS_VM_BOOT_SET,
         classifier_other=True,
     ),
 )

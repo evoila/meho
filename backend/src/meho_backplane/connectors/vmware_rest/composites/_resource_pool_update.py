@@ -338,5 +338,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=RESOURCE_POOL_UPDATE_LLM_INSTRUCTIONS,
         preview=_resource_pool_update_preview,
+        governed_subops=_SUB_OPS_RESOURCE_POOL_UPDATE,
     ),
 )

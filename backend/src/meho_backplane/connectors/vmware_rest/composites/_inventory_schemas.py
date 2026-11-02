@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from meho_backplane.connectors.vmware_rest.composites import _inventory_tree, _object_rename_move
 from meho_backplane.connectors.vmware_rest.composites._inventory_tree import (
     DATACENTER_FOLDER_MOID_PATTERN,
     OP_ID_DATACENTER_CREATE,
@@ -459,6 +460,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=_DATACENTER_CREATE_LLM_INSTRUCTIONS,
         preview=_datacenter_create_preview,
+        governed_subops=_inventory_tree._VIM_SUB_OPS_DATACENTER_CREATE,
     ),
     CompositeSpec(
         op_id=OP_ID_DATACENTER_DELETE,
@@ -477,6 +479,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=_DATACENTER_DELETE_LLM_INSTRUCTIONS,
         preview=_datacenter_delete_preview,
+        governed_subops=_inventory_tree._VIM_SUB_OPS_DATACENTER_DELETE,
     ),
     CompositeSpec(
         op_id=OP_ID_OBJECT_RENAME,
@@ -495,6 +498,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=_OBJECT_RENAME_LLM_INSTRUCTIONS,
         preview=_object_rename_preview,
+        governed_subops=_object_rename_move._VIM_SUB_OPS_OBJECT_RENAME,
         classifier_other=True,
     ),
     CompositeSpec(
@@ -514,6 +518,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=_OBJECT_MOVE_LLM_INSTRUCTIONS,
         preview=_object_move_preview,
+        governed_subops=_object_rename_move._VIM_SUB_OPS_OBJECT_MOVE,
         classifier_other=True,
     ),
 )

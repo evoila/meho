@@ -54,6 +54,9 @@ and the switchover window) live in
 :mod:`meho_backplane.connectors.hcx.migrations`.
 The Network Extension HA group operations live in
 :mod:`meho_backplane.connectors.hcx.ha_groups`.
+The HCX Manager setup operations (``hcx.manager.*``, appliance management
+API on port 9443) come from the mixin
+:class:`~meho_backplane.connectors.hcx.manager_setup_handlers.HcxManagerSetupOps`.
 
 Traces
 ------
@@ -79,6 +82,7 @@ from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vcf_auth import session_establish_auth_error
 from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.hcx.manager_setup_handlers import HcxManagerSetupOps
 from meho_backplane.connectors.hcx.session import (
     HcxSessionLoader,
     HcxTargetLike,
@@ -163,7 +167,7 @@ def parse_manager_version(payload: Any) -> HcxManagerVersion:
     )
 
 
-class HcxConnector(HttpConnector):
+class HcxConnector(HcxManagerSetupOps, HttpConnector):
     """HCX REST connector with session-token auth (``x-hm-authorization``)."""
 
     product = "hcx"

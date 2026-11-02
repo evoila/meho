@@ -1233,6 +1233,8 @@ async def test_search_operations_outcome_taxonomy(
         "no_match",
         "unknown_group",
         "zero_enabled_operations",
+        "package_not_installed",
+        "code_not_installed",
     }
     entry = get_tool("search_operations")
     assert entry is not None

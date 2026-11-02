@@ -98,9 +98,9 @@ flow only where a convertible OpenAPI 3.x spec is pinned — for VCFA only
 the 9.1 appliance-served IaaS document above would qualify, and none is
 pinned.
 
-**Operation contracts.** The 30 typed ops (the seven reads above, the
-ten provisioning ops, the four image ops and the nine network and deploy ops
-below) meet the VMware operation-contract check
+**Operation contracts.** The 38 typed ops (the seven reads above, the
+ten provisioning ops, the four image ops, the nine network and deploy ops and
+the eight day-2 ops below) meet the VMware operation-contract check
 (`backend/tests/test_operation_contracts.py`) and have no entry in its
 gap list:
 
@@ -304,7 +304,8 @@ approval preview in `_images.py`, all on the tenant plane, in the group
 the lifespan registrar list via `register_vcfa_typed_operations` in
 `__init__.py`) upserts the seven read descriptors, the nine
 provisioning descriptors, the four image descriptors, the nine network and
-deploy descriptors and the two feature-flag descriptors on startup — the same argocd / bind9 / Kubernetes
+deploy descriptors, the two feature-flag descriptors and the eight day-2
+descriptors on startup — the same argocd / bind9 / Kubernetes
 typed-registrar shape.
 
 **A project's own network and its first deployment.** With an org, a
@@ -324,7 +325,7 @@ handlers in `_network.py` / `_deploy.py`, paths in `_paths.py`:
 | `vcfa.tenant.network_profile.create` | caution, approval | `GET` (name check) then `POST /iaas/api/network-profiles` |
 | `vcfa.tenant.blueprint_request.create` | caution, approval | `POST /blueprint/api/blueprint-requests` (`plan: true` is the dry run) |
 | `vcfa.tenant.blueprint_request.get` | safe | `GET /blueprint/api/blueprint-requests/{requestId}` |
-| `vcfa.tenant.deployment.delete` | dangerous, approval | `DELETE /deployment/api/deployments/{deploymentId}` |
+| `vcfa.tenant.deployment.delete` | destructive, approval, preview first | `DELETE /deployment/api/deployments/{deploymentId}` |
 
 `vcfa.tenant.project.create` also takes `zones` (each a `zone_id` with a
 priority and limits for VMs, vCPUs, memory and storage, sent as
@@ -348,8 +349,7 @@ true).
   deployment in the same project (`name` and `projectId` both match)
   answers `unchanged` and requests nothing; the same name in another
   project does not count. `deployment.delete` answers `unchanged` on a
-  `404`; its approval preview reads the deployment with
-  `apiVersion=2021-07-15`.
+  `404` (the deployment went away after the approval).
 - **Two traps in the guidance.** A plan (`plan: true`) only checks the
   template and its inputs; it does not find placement errors (no fitting
   zone, network or quota) — only a real request does. VCF Automation reads
@@ -359,10 +359,8 @@ true).
   agent or runbook reads `blueprint_request.get` until `status` is
   `FINISHED`, `FAILED` or `CANCELLED`, and `deployment.get` until it answers
   not found. No op waits by itself.
-- **Delete.** `deployment.delete` is `dangerous` (the person who asks cannot
-  approve it alone), like `argocd.app.delete`. Its park-time preview reads
-  the deployment once so the approver sees its name and project
-  (`_provisioning_preview.py`).
+- **Delete.** `deployment.delete` is `destructive`: only a person runs it,
+  after a preview, and a second person approves. See **Day-2 work** below.
 - **Spec check.** The reconcile lane checks the new paths against
   `vra-iaas.json`, `vra-blueprint.json` and `vra-catalog-deployment.json`
   of the pinned `vra-sdk-go` v0.6.5 shelf.
@@ -403,6 +401,160 @@ handlers, the org-create check and the park-time preview are in
   display name, `current_enabled`, `requested_enabled` and `would`
   (`change` / `unchanged` / `invalid_request`). Without a connector it shows
   `would: set_if_different` and no current state.
+
+**Approvals, policies, ABX actions and event subscriptions (shared with
+vRA 8).** An agent can list the requests that wait for an Automation approval
+and decide one, list and set policies, list ABX actions, read an action run,
+and list event subscriptions. A person can also run an ABX action and change
+an event subscription. A VM Apps org of VCF Automation 9 serves the same
+approval, policy, ABX and event broker APIs as Aria Automation 8, so the nine
+ops are written once in `connectors/vmware_shared/`:
+
+- `vra_governance.py` and `vra_extensibility.py`: the handlers, the preview
+  builders and `VraGovCalls` (the GET and send each connector hands in).
+- `vra_governance_ops.py` and `vra_extensibility_ops.py`: the metadata, the
+  group texts and the shared registrar.
+- `vra_handlers.py`: the `VraSharedHandlers` mixin with the nine handler
+  methods. This connector and the vRA 8 connector both inherit it and add
+  `vra_gov_calls` with their own login.
+
+This connector registers them as `vcfa.tenant.*` in the groups
+`vcfa-tenant-governance` and `vcfa-tenant-extensibility`
+(`governance_ops.py`, with its own registrar). The vRA 8 connector registers
+the same ops as `vcfa.vra8.*` ([connectors-vra8.md](connectors-vra8.md)).
+`/approval/api/*`, `/policy/api/*`, `/abx/api/*` and `/event-broker/api/*`
+ride the tenant login.
+
+| op_id (VCF Automation 9 / Aria Automation 8) | what it does and returns | risk level / approval | wire | versions |
+|---|---|---|---|---|
+| `vcfa.tenant.approval.list` / `vcfa.vra8.approval.list` | Requests that wait for an approval, or were decided: `{approvals: [flat rows: id, status, action, requestId, requestedBy, deploymentName, projectName, catalogItemName, policyNames, pendingApprovers, ...], totalElements}` | safe | `GET /approval/api/approvals` (`requestState`, `search`, `page`, `size`) | 8.18, 9.x |
+| `vcfa.tenant.approval.decide` / `vcfa.vra8.approval.decide` | Approves or rejects one waiting request: `{status: decided / not_pending, decision, approval, guidance}` | dangerous, approval | `GET /approval/api/approvals/{id}` (still `PENDING`?), `POST /approval/api/approvals/action` | 8.18, 9.x |
+| `vcfa.tenant.policy.list` / `vcfa.vra8.policy.list` | Policies (approval, lease, day-2 actions, content sharing, ...): `{policies: [flat rows: id, name, typeId, enforcementType, projectId, definition, ...], totalElements}` | safe | `GET /policy/api/policies` (`search`, `expandDefinition`, `$top`, `$skip`) | 8.18, 9.x |
+| `vcfa.tenant.policy.set` / `vcfa.vra8.policy.set` | Creates or changes a policy: `{status: created / changed / unchanged / invalid_request, policy, guidance}` | dangerous, approval | `GET /policy/api/policies[/{id}]`, `POST /policy/api/policies?dryRun=true`, then `?dryRun=false` | 8.18, 9.x |
+| `vcfa.tenant.abx.action.list` / `vcfa.vra8.abx.action.list` | ABX actions: `{actions: [flat rows: id, name, actionType, runtime, projectId, shared, system, inputNames, ...], totalElements}` | safe | `GET /abx/api/resources/actions` (`page`, `size`, `nameCriteria`) | 8.18, 9.x |
+| `vcfa.tenant.abx.action.run` / `vcfa.vra8.abx.action.run` | Runs one action with inputs: `{status: started / invalid_request / precondition_failed, run: {id, actionId, name, runState, projectId}, guidance}` | destructive, approval, preview | `GET /abx/api/resources/actions/{id}`, `POST /abx/api/resources/actions/{id}/action-runs` | 8.18, 9.x |
+| `vcfa.tenant.abx.run.get` / `vcfa.vra8.abx.run.get` | State of a run: `{id, runState, done, errorMessage, inputs, outputs, log_lines_total, log_lines}` | safe | `GET /abx/api/resources/action-runs/{id}` | 8.18, 9.x |
+| `vcfa.tenant.subscription.list` / `vcfa.vra8.subscription.list` | Event subscriptions: `{subscriptions: [flat rows: id, name, eventTopicId, runnableType, runnableId, blocking, priority, disabled, criteria, projectIds, system], totalElements}` | safe | `GET /event-broker/api/subscriptions` (`page`, `size`) | 8.18, 9.x |
+| `vcfa.tenant.subscription.set` / `vcfa.vra8.subscription.set` | `action` create, update, disable, enable or delete: `{status: created / changed / disabled / enabled / deleted / unchanged / invalid_request / precondition_failed, subscription, guidance}` | destructive, approval, preview | `POST /event-broker/api/subscriptions`, `GET`, `PATCH` or `DELETE /event-broker/api/subscriptions/{id}`, `GET /event-broker/api/topics/{id}` (preview of a create) | 8.18, 9.x |
+
+- **Versions.** Every op exists on Aria Automation 8.18 and on VCF
+  Automation 9.0, 9.1 and 9.1.1, so no op stops early with a version
+  message.
+- **Approval in two places.** Deciding an Automation approval is itself a
+  change in MEHO: a second person must approve the MEHO call first (an agent
+  needs a grant). The decide op reads the Automation approval again and sends
+  nothing when it no longer waits (`not_pending`). The Automation login of the
+  target must be an approver of the request.
+- **Destructive changes.** Running an ABX action and changing an event
+  subscription can make any change, so both are `destructive`: an agent is
+  always refused, a person calls `preview_operation` first and then
+  `call_operation` with the `preview_hash`. The preview builder reads the
+  action or the subscription (for a create: the event topic, the ABX action it
+  runs, and that no subscription has the name), fills `blast_radius`
+  (`object`, `children`, `irreversibility`) and refuses when the object does
+  not exist or is a system subscription. When the approved call runs, the
+  handler reads the object again. The approval card holds a SHA-256 over all
+  fields that decide what runs: for an action `code_sha256` (source,
+  compressed content, content id, entrypoint, dependencies, runtime and its
+  version, action type, provider, configuration, inputs, timeout, memory); for
+  a subscription change `body_sha256` (name, topic, runnable type and id,
+  blocking, criteria, project constraints, disabled, priority, timeout). The
+  card holds only the hash, never the code. When the name, runtime, content
+  id, topic, runnable or the hash differ from the approval card, or the card
+  has no hash, nothing changes (`precondition_failed`).
+- **Safe to run twice.** `policy.set` without `id` changes the policy with
+  the same name, type and project; when nothing differs it sends nothing.
+  A subscription create finds an existing one by name and answers
+  `unchanged`; update, disable and enable send only the fields that differ.
+- **Secrets.** The source code, configuration and input defaults of an ABX
+  action are never returned, only the input names. A run input that holds a
+  secret is refused: a script reads its secrets from Automation action
+  constants, never from MEHO. Run inputs, outputs, error text and log lines,
+  and policy definitions, go through the secret-name scrub.
+- **Spec check.** `tests/test_vra_governance_spec_reconcile.py` pins all
+  shared calls. The policy calls are checked against
+  `vra-catalog-deployment.json` of the pinned `vra-sdk-go` v0.6.5 shelf.
+  Every call is also checked against the vendor's own reference lists on the
+  shelf, per VCF Automation version (9.0, 9.1, 9.1.1): approvals, policies
+  and ABX on each, and the event broker on 9.1 and 9.1.1 (the vendor
+  publishes no 9.0 event broker reference). Three calls are in no public
+  vendor reference, on any version: the subscription list, create and
+  change (`GET` and `POST /event-broker/api/subscriptions`, `PATCH
+  /event-broker/api/subscriptions/{id}`). The lane pins them as an evidenced
+  exclusion and fails when a vendor list starts to serve one. The live test
+  after the merge proves them. CI lists every shelf file the lane reads in
+  its required-file check, so the lane cannot skip there.
+- **Secrets in run inputs.** A run input that holds a secret is refused at
+  the preview and at the run, before any vendor call: a secret-named key at
+  any depth (inside an object or a list too), or a text input that holds a
+  secret-named pair. The refusal names the path, never the value.
+**Day-2 work: actions, lease, delete, machines and disks.** These ops are
+written once for VCF Automation 9 and Aria Automation 8.18, because both serve
+the same deployment API (`/deployment/api`) and IaaS API (`/iaas/api`). The
+metadata is built per op id prefix in `day2_ops.py` (with `_day2_specs.py` and
+`_day2_specs_iaas.py`), the handlers are in `_day2.py` and `_day2_create.py`, the paths in
+`_day2_paths.py`. This connector registers them as `vcfa.tenant.*` (group
+`vcfa-tenant-day2`; the delete stays in `vcfa-tenant-writes`); the `vra8`
+connector registers the same ops as `vcfa.vra8.*` (see
+[connectors-vra8.md](connectors-vra8.md)). All run on the tenant plane.
+
+| op_id | What it does and returns | risk level / approval | wire | Versions |
+|---|---|---|---|---|
+| `vcfa.tenant.deployment.actions.list` | The day-2 actions of a deployment or one of its resources: `{items: [{id, name, displayName, description, actionType, valid, schema}]}`. | safe | `GET /deployment/api/deployments/{deploymentId}/actions` or `GET /deployment/api/resources/{resourceId}/actions` | 8.18, 9.x |
+| `vcfa.tenant.deployment.action.run` | Runs one built-in deployment action: change owner, change lease, edit tags, power on, power off. Returns `{status: submitted, request, guidance}`. | dangerous, approval | `POST /deployment/api/deployments/{deploymentId}/requests` | 8.18, 9.x |
+| `vcfa.tenant.resource.action.run` | Runs one built-in vSphere machine action: power on, power off, reboot, resize, add disk, create snapshot. Same answer. | dangerous, approval | `POST /deployment/api/resources/{resourceId}/requests` | 8.18, 9.x |
+| `vcfa.tenant.deployment.lease.change` | Changes the lease end (`Deployment.ChangeLease`, input `Lease Expiration Date`). Same answer. | caution, approval | `POST /deployment/api/deployments/{deploymentId}/requests` | 8.18, 9.x |
+| `vcfa.tenant.deployment.delete` | Deletes a deployment and its resources: `{status: submitted \| unchanged, request, guidance}`. | destructive, approval, preview first | `DELETE /deployment/api/deployments/{deploymentId}` | 8.18, 9.x |
+| `vcfa.tenant.machine.list` | Every machine as a flat row: id, name, project, deployment, power state, address, host name, zone, disks. | safe | `GET /iaas/api/machines` (every page) | 8.18, 9.x |
+| `vcfa.tenant.block_device.list` | Every disk as a flat row: id, name, size, type, status, persistent, project, deployment, machine ids. | safe | `GET /iaas/api/block-devices` (every page) | 8.18, 9.x |
+| `vcfa.tenant.machine.create` | Creates a machine outside a template, with a project, flavor and image: `{status: submitted \| unchanged, request, machine, guidance}`. | dangerous, approval | `GET` (name check) then `POST /iaas/api/machines` | 8.18, 9.x |
+| `vcfa.tenant.block_device.create` | Creates a disk and attaches it to a machine, or attaches an existing disk: `{status: submitted \| in_progress \| failed, create_request, attach_request, block_device_id, guidance}`. | dangerous, approval | `POST /iaas/api/block-devices`, `GET /iaas/api/request-tracker/{id}`, `POST /iaas/api/machines/{id}/disks` | 8.18, 9.x |
+
+- **Fixed action lists.** The two action ops accept only the built-in
+  actions above (an `enum` in the schema, checked again in the handler).
+  Delete, remove-disk, delete-snapshot and custom actions are refused before
+  any call: custom actions run ABX actions or workflows, which can do
+  anything. A delete goes through `deployment.delete`. The `inputs` of an
+  action are free; `deployment.actions.list` shows each action's input
+  `schema` (resize takes `cpuCount` and `totalMemoryMB`).
+- **The delete is `destructive`.** An agent is always refused. A person calls
+  `preview_operation` first and `call_operation` with its `preview_hash`.
+  At park time the preview reads
+  `GET /deployment/api/deployments/{deploymentId}?expand=resources` and fills
+  the `blast_radius` block: the deployment (`object`), every resource that
+  goes with it (`children`) and `irreversibility: permanent`. A deployment
+  that does not exist makes the preview fail, so the delete is refused before
+  it waits for approval.
+- **Lists are flat.** `machine.list` and `block_device.list` read every page
+  (200 rows a page, at most 50 pages, so 10,000 rows) and return
+  `{items: [...]}`, so MEHO stores a long list behind a result link. A list
+  that has not ended after 50 pages is refused (`connector_error`,
+  `IncompleteListError`) with a `remediation` that asks for a `$filter`; MEHO
+  never returns a part of a list as if it were whole. The zone, disk and
+  machine ids come from the `_links` of each row. They leave out
+  `customProperties`.
+- **Resource ids.** The machine id from `machine.list` is the resource id of
+  the machine in the deployment API. This follows the vendor examples; the
+  live test will confirm it.
+- **Waiting.** The actions and the machine create run in the background; the
+  guidance names the read to repeat, per connector (`FOLLOW_UPS` in
+  `_day2.py`). Aria Automation 8: read `vcfa.vra8.deployment.get` until
+  `lastRequest.status` is `SUCCESSFUL`, `FAILED`, `ABORTED` or
+  `APPROVAL_REJECTED`; `leaseExpireAt` of the same read shows a new lease end.
+  VCF Automation 9: `vcfa.tenant.deployment.get` reads the IaaS API, which
+  shows neither the request nor the lease, and MEHO has no read of a request
+  there yet. So the guidance says to read `vcfa.tenant.machine.list` (with a
+  `deploymentId` filter) for the new power state, and that MEHO cannot show
+  the lease end. Both say to stop after 10 minutes and report the request id.
+  The disk create waits up to 60 seconds
+  for its request, then attaches the new disk. A create still running then
+  answers `in_progress` (attach it later with `block_device_id`); a failed
+  create answers `failed`. `machine.create` answers `unchanged` when the
+  project has a machine of that name. No input is a secret: the machine
+  create takes no password or key.
+- **Spec check.** The reconcile lanes of both connectors check every path
+  against `vra-catalog-deployment.json` and `vra-iaas.json` of the pinned
+  `vra-sdk-go` v0.6.5 shelf.
 
 Source: `backend/src/meho_backplane/connectors/vcf_automation/`.
 
@@ -469,6 +621,10 @@ domains.
 - **`VCFA_FEATURE_FLAG_OPS`** (`feature_flag_ops.py`) — the two
   feature-flag ops (see **Feature flags** above), validated by the same
   `validate_typed_ops()`.
+- **`VCFA_DAY2_OPS`** (`day2_ops.py`) — the eight day-2 ops (see **Day-2
+  work** above), built from the shared `Day2OpSpec` list that the `vra8`
+  connector also uses. `VCFA_DEPLOYMENT_DELETE` is the delete, built from the
+  same list and kept in `VCFA_DEPLOY_OPS`.
 - **`VCFA_PRODUCT` / `VCFA_VERSION` / `VCFA_IMPL_ID` /
   `VCFA_CONNECTOR_ID`** (`__init__.py`) — DB-side keys. Since #1814 the
   registry key `VcfAutomationConnector.product` was unified to `"vcfa"`,
@@ -554,7 +710,8 @@ before resolving headers.
 
 Plane classification (`_plane_for_path`):
 
-- `/iaas/api/*`, `/blueprint/api/*`, `/deployment/api/*` → tenant plane.
+- `/iaas/api/*`, `/blueprint/api/*`, `/deployment/api/*`, `/approval/api/*`,
+  `/policy/api/*`, `/abx/api/*`, `/event-broker/api/*` → tenant plane.
 - Everything else (`/cloudapi/*`, `/api/*`) → provider plane.
 
 The provider plane Bearer JWT authenticates both `/cloudapi/*` and the

@@ -349,6 +349,34 @@ def test_confidential_clients_use_the_secrets_from_the_environment(keycloak: _Ke
     assert "meho-backplane" not in audience
 
 
+def test_imported_realm_remembers_the_browser_and_offers_passkeys(keycloak: _Keycloak) -> None:
+    """Keycloak reads the remember-me and passkey settings of the realm file.
+
+    The browser flow of a new realm has the step that skips the one-time code
+    after a passkey login, and people can add a passkey themselves.
+    """
+    headers = _bootstrap_headers(keycloak)
+    admin = f"{keycloak.base_url}/admin/realms/meho"
+    realm = httpx.get(admin, headers=headers).json()
+    assert realm["rememberMe"] is True
+    assert realm["ssoSessionIdleTimeoutRememberMe"] == 30 * 24 * 3600
+    assert realm["ssoSessionMaxLifespanRememberMe"] == 30 * 24 * 3600
+    assert realm["webAuthnPolicyPasswordlessPasskeysEnabled"] is True
+    assert realm["webAuthnPolicyPasswordlessUserVerificationRequirement"] == "required"
+    assert realm["webAuthnPolicyPasswordlessRequireResidentKey"] == "Yes"
+
+    executions = httpx.get(
+        f"{admin}/authentication/flows/browser/executions", headers=headers
+    ).json()
+    assert "conditional-credential" in {e.get("providerId") for e in executions}
+
+    register = httpx.get(
+        f"{admin}/authentication/required-actions/webauthn-register-passwordless",
+        headers=headers,
+    ).json()
+    assert register["enabled"] is True
+
+
 async def test_backplane_reaches_keycloak_through_the_service_address(
     keycloak_behind_ingress: _Keycloak, monkeypatch: pytest.MonkeyPatch
 ) -> None:

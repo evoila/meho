@@ -16,12 +16,14 @@ from typing import Any, Final
 from meho_backplane.connectors.vmware_rest.customization_specs import (
     GET_OP_ID,
     GUEST_GROUP_KEY,
+    GUEST_WHEN_TO_USE,
     LIST_OP_ID,
     OS_TYPES,
+    SPEC_SECRETS_TAG,
 )
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp
 
-__all__ = ["CUSTOMIZATION_SPEC_OPS"]
+__all__ = ["TYPED_OPS", "WHEN_TO_USE_BY_GROUP"]
 
 _TAGS: Final[tuple[str, ...]] = (
     "read-only",
@@ -202,7 +204,9 @@ VMWARE_CUSTOMIZATION_SPEC_GET_OP = VmwareTypedOp(
         ],
     },
     group_key=GUEST_GROUP_KEY,
-    tags=_TAGS,
+    # The answer holds the spec's secrets in clear until hide_secrets runs; the
+    # tag keeps every body of this read out of the flight recorder.
+    tags=(*_TAGS, SPEC_SECRETS_TAG),
     safety_level="safe",
     requires_approval=False,
     llm_instructions={
@@ -226,7 +230,8 @@ VMWARE_CUSTOMIZATION_SPEC_GET_OP = VmwareTypedOp(
 )
 
 #: The two reads, in the order :data:`~.typed_ops.VMWARE_TYPED_OPS` lists them.
-CUSTOMIZATION_SPEC_OPS: Final[tuple[VmwareTypedOp, ...]] = (
+TYPED_OPS: Final[tuple[VmwareTypedOp, ...]] = (
     VMWARE_CUSTOMIZATION_SPEC_LIST_OP,
     VMWARE_CUSTOMIZATION_SPEC_GET_OP,
 )
+WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {GUEST_GROUP_KEY: GUEST_WHEN_TO_USE}

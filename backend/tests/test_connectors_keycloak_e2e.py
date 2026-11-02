@@ -43,7 +43,6 @@ import meho_backplane.connectors.keycloak  # noqa: F401 -- import for registry s
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_read import READ_OPS
-from meho_backplane.connectors.keycloak.redaction import REDACTED
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakClientCredentials,
@@ -346,7 +345,8 @@ async def test_keycloak_e2e_client_list_redacts_secret(keycloak_e2e: KeycloakCon
     rows = result["result"]["rows"]
     assert result["result"]["total"] == 1
     assert rows[0]["clientId"] == "meho-backplane"
-    assert rows[0]["secret"] == REDACTED
+    # The connector masks the field; the default view of every answer hides it once more.
+    assert rows[0]["secret"] == "[REDACTED:param_name]"
     assert _CLIENT_SECRET_SENTINEL not in str(result)
 
 
@@ -373,7 +373,7 @@ async def test_keycloak_e2e_client_get_returns_flows_uris_mappers(
     assert client["protocolMappers"][0]["name"] == "tenant_id"
     assert client["authenticationFlowBindingOverrides"]["browser"] == "flow-uuid-abc"
     # Acceptance: secret redacted.
-    assert client["secret"] == REDACTED
+    assert client["secret"] == "[REDACTED:param_name]"
     assert _CLIENT_SECRET_SENTINEL not in str(result)
 
 
@@ -417,7 +417,7 @@ async def test_keycloak_e2e_user_list_never_surfaces_credentials(
     rows = result["result"]["rows"]
     assert rows[0]["username"] == "operator-a"
     # Acceptance: credentials never surface.
-    assert rows[0]["credentials"] == REDACTED
+    assert rows[0]["credentials"] == "[REDACTED:param_name]"
     assert _USER_CRED_SENTINEL not in str(result)
 
 
@@ -486,7 +486,7 @@ async def test_keycloak_e2e_role_users_redacts_credentials(
     assert rows[0]["username"] == "operator-a"
     # Acceptance: a planted credentials field is redacted identically to
     # keycloak.user.list's UserRepresentation scrub.
-    assert rows[0]["credentials"] == REDACTED
+    assert rows[0]["credentials"] == "[REDACTED:param_name]"
     assert _ROLE_USER_CRED_SENTINEL not in str(result)
 
 

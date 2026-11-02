@@ -3,11 +3,7 @@
 
 """VcfFleetConnector — hand-rolled HttpConnector subclass for VCF Fleet 9.0.
 
-Skeleton-only — auth + fingerprint + probe + the G0.6 dispatch shim.
-Operations arrive in #835 via G0.7 spec ingestion against the Fleet
-(vRSLCM-derived) OpenAPI surface. Until then the connector is registered
-and discoverable but ``execute(target, op_id, ...)`` against any
-``op_id`` resolves to "unknown operation" at the dispatcher layer.
+Auth, fingerprint, probe, the G0.6 dispatch shim and the typed op handlers.
 
 Registered against the v2 registry at module-import time via
 :func:`~meho_backplane.connectors.registry.register_connector_v2` in
@@ -97,13 +93,9 @@ is the right shape.
 Operations
 ----------
 
-This module ships zero operations — the G0.6 dispatch shim
-:meth:`execute` exists for ABC compatibility but operations land in the
-``endpoint_descriptor`` table via #835's spec ingestion. Until then,
-the connector is registered and discoverable but
-``execute(target, op_id, ...)`` against any ``op_id`` resolves to
-"unknown operation" at the dispatcher layer — which is the correct
-behaviour for a registered-but-empty connector at this Task's stage.
+The typed ops are listed in :mod:`.typed_ops`. Their handlers are bound
+methods here; the longer bodies live in :mod:`.api_file`, :mod:`.locker`
+and :mod:`.product_certificate`.
 """
 
 from __future__ import annotations
@@ -127,7 +119,12 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.vcf_fleet import locker as _locker
+from meho_backplane.connectors.vcf_fleet.changes import FleetChangeHandlers
 from meho_backplane.connectors.vcf_fleet.lifecycle import FleetLifecycleOps
+from meho_backplane.connectors.vcf_fleet.product_certificate import (
+    product_certificate_replace as _replace_certificate,
+)
 from meho_backplane.connectors.vcf_fleet.session import (
     VcfFleetCredentialsLoader,
     VcfFleetTargetLike,
@@ -176,7 +173,7 @@ _FLEET_ABOUT_PATH = "/lcm/lcops/api/v2/about"
 _FLEET_ENVIRONMENTS_PATH = "/lcm/lcops/api/v2/environments"
 
 
-class VcfFleetConnector(FleetLifecycleOps):
+class VcfFleetConnector(FleetChangeHandlers, FleetLifecycleOps):
     """VCF Fleet 9.0 REST connector with HTTP Basic auth.
 
     Per-target credentials cached in :attr:`_creds` via the shared
@@ -397,7 +394,7 @@ class VcfFleetConnector(FleetLifecycleOps):
         )
 
     # ------------------------------------------------------------------
-    # Typed read ops (T4 · #2304, Initiative #2266)
+    # Typed ops (T4 · #2304, Initiative #2266, and later)
     #
     # The audited Fleet read set — about/health probe + component
     # inventory — dispatched off the connector's existing HTTP Basic
@@ -407,7 +404,9 @@ class VcfFleetConnector(FleetLifecycleOps):
     # ``operator`` by name (see ``dispatch_typed``); ``operator`` is
     # forwarded to ``_get_json`` so the credential loader reads the
     # per-target Basic credentials under the operator's identity. All are
-    # read-only. The request, inventory sync and health ops are in lifecycle.py.
+    # read-only. The request, inventory sync and health ops are in lifecycle.py;
+    # the upgrade, binary and environment changes in changes.py; the locker
+    # and product-certificate ops in locker.py and product_certificate.py.
     # ``fleet.api_file.get`` (``api_file_get`` below, body in ``api_file.py``)
     # reads the API descriptions the appliance serves so the vendor's
     # ``/lcm`` files can be pinned.
@@ -499,6 +498,24 @@ class VcfFleetConnector(FleetLifecycleOps):
         from meho_backplane.connectors.vcf_fleet.api_file import fleet_api_file_get_impl
 
         return await fleet_api_file_get_impl(self, operator, target, params)
+
+    # Locker and product-certificate ops; bodies in .locker and .product_certificate.
+    async def locker_password_list(self, operator: Operator, target: Any, params: Any) -> Any:
+        return await _locker.password_list(self, operator, target, params)
+
+    async def locker_password_add(self, operator: Operator, target: Any, params: Any) -> Any:
+        return await _locker.password_add(self, operator, target, params)
+
+    async def locker_certificate_list(self, operator: Operator, target: Any, params: Any) -> Any:
+        return await _locker.certificate_list(self, operator, target, params)
+
+    async def locker_certificate_import(self, operator: Operator, target: Any, params: Any) -> Any:
+        return await _locker.certificate_import(self, operator, target, params)
+
+    async def product_certificate_replace(
+        self, operator: Operator, target: Any, params: Any
+    ) -> Any:
+        return await _replace_certificate(self, operator, target, params)
 
     @classmethod
     async def register_operations(cls) -> None:

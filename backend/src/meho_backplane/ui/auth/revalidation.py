@@ -10,7 +10,7 @@ its identity from :func:`~meho_backplane.ui.auth.middleware.
 require_ui_session` without ever re-presenting the stored access token
 to the IdP-backed JWT chain. Because the row's ``expires_at`` slides
 forward on active use (up to the absolute lifetime ceiling,
-``ui_session_absolute_lifetime_seconds``, default 12 h), a session
+``ui_session_absolute_lifetime_seconds``, default 10 h), a session
 whose IdP-side grant has been revoked keeps rendering authorized reads
 until the absolute ceiling -- token re-validation only ran on the
 write/admin path (``require_ui_admin``) and the per-route operator
@@ -39,7 +39,7 @@ happens the first time revalidation observes the access token past its
     access-token TTL  +  ui_session_read_revalidation_seconds
 
 (~5 min Keycloak default + 300 s default = ~10 minutes), instead of
-the previous bound of ``ui_session_absolute_lifetime_seconds`` (12 h).
+the previous bound of ``ui_session_absolute_lifetime_seconds`` (10 h).
 Deployments wanting a tighter bound set
 ``UI_SESSION_READ_REVALIDATION_SECONDS=0`` (revalidate on every read
 request) and/or shorten the IdP access-token TTL.

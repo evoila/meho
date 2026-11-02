@@ -23,8 +23,9 @@ on:
     branches: [main]
     paths:
       - 'clients/claude-desktop-mcpb/**'
-      # The login guard is shared with the plugin and packed into the bundle.
-      - 'clients/claude-code-plugin/lib/login-guard.mjs'
+      # The login guard and its helper files are shared with the plugin and
+      # packed into the bundle.
+      - 'clients/claude-code-plugin/lib/**'
       - '.github/workflows/mcpb-bundle.yml'
 
 permissions:

@@ -49,7 +49,8 @@ _VM_NAME: Final[dict[str, Any]] = {
     "description": "Name of the new VM. It must not be in use in the target folder.",
 }
 
-#: Where the new VM goes. vCenter needs a resource pool, a host or a cluster.
+#: Where the new VM goes. The deploy needs a resource pool, a host or a
+#: cluster; the check-out takes the template's placement for what is left out.
 _PLACEMENT: Final[dict[str, Any]] = {
     "folder": {
         **_MOID,
@@ -119,6 +120,10 @@ DEPLOY_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
 
 CHECK_OUT_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
+    "description": (
+        "The placement inputs are optional here: without them the VM goes where the "
+        "template is (the same folder, resource pool and host)."
+    ),
     "properties": {
         "template_library_item": _TEMPLATE_ITEM,
         "name": {
@@ -314,6 +319,9 @@ CHECK_OUT_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     "parameter_hints": {
         "template_library_item": "The item id (UUID), not its name.",
         "folder": "Omit it to use the folder of the template.",
+        "resource_pool": (
+            "Omit resource_pool, host and cluster to place the VM where the template is."
+        ),
     },
     "output_shape": (
         "{status: checked_out|refused|not_found, template_library_item, vm, check_out: "

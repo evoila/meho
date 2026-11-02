@@ -11,7 +11,7 @@ tenant name). REST, MCP and the web interface all reach it through
 :func:`~meho_backplane.auth.jwt.verify_jwt_for_audience`.
 
 The picked tenant's values go into ``Operator.tenant_id``,
-``tenant_role`` and ``approver``. Every check that reads those fields
+``tenant_role``, ``approver`` and ``self_approver``. Every check that reads those fields
 (the role checks, the cross-tenant check, the Vault role, the Vault path
 guard, the audit tenant) so keeps working, and sees only the current
 tenant. Design: ``docs/decisions/2026-10-28-several-tenants-per-person.md``
@@ -32,7 +32,7 @@ several tenants     400           that tenant            403 tenant_not_member
 
 A platform admin (a person, never a machine) may also name any tenant that
 exists in the ``tenant`` table. There they act as ``tenant_admin``, never
-with ``approver``, and :attr:`Operator.role_from_platform_admin` is set so
+with ``approver`` or ``self_approver``, and :attr:`Operator.role_from_platform_admin` is set so
 the audit row can say so. A tenant that does not exist gives
 ``403 tenant_not_found``; the lookup never creates a tenant row. The
 lookup never raises the role of a tenant the person is already in: when
@@ -82,9 +82,11 @@ _MAX_HEADER_LENGTH = 200
 def with_membership(operator: Operator, membership: TenantMembership) -> Operator:
     """Return *operator* working in the tenant of *membership*.
 
-    The role and the ``approver`` flag come from the login group of that
-    entry (:func:`~meho_backplane.auth.operator.group_grant`), never from
-    another tenant.
+    The role, the ``approver`` flag and the ``self_approver`` flag come
+    from the login group of that entry
+    (:func:`~meho_backplane.auth.operator.group_grant`), never from
+    another tenant. ``self_approver`` stays off when the token's tenant
+    claim had a part MEHO could not read (#3327, fail closed).
     """
     grant = group_grant(membership.group)
     return operator.model_copy(
@@ -92,6 +94,7 @@ def with_membership(operator: Operator, membership: TenantMembership) -> Operato
             "tenant_id": membership.tenant_id,
             "tenant_role": grant.role,
             "approver": grant.approver,
+            "self_approver": grant.self_approval and not operator.tenants_claim_malformed,
             "tenant_chosen": True,
             "role_from_platform_admin": False,
         }
@@ -292,6 +295,7 @@ async def _as_platform_admin(operator: Operator, wanted: str) -> Operator:
             "tenant_id": tenant_id,
             "tenant_role": TenantRole.TENANT_ADMIN,
             "approver": False,
+            "self_approver": False,
             "tenant_chosen": True,
             "role_from_platform_admin": True,
         }

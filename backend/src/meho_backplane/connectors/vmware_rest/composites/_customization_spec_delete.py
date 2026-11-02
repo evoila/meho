@@ -21,7 +21,10 @@ the plan-then-act seam of :mod:`._teardown`:
 No VM keeps a link to a spec: vCenter copies the settings into a VM when it
 clones or deploys it. So the blast radius has no children; it says so. Only
 names and dates of the spec reach the preview and the answer, never its
-settings, so no secret of the spec leaves MEHO.
+settings, so no secret of the spec leaves MEHO. The ``GET`` answers hold the
+spec with every secret in clear, so the row carries
+:data:`~meho_backplane.connectors.vmware_rest.customization_specs.SPEC_SECRETS_TAG`
+and the flight recorder stores no body of these calls.
 
 Calls vSphere REST on the connector session, so it needs no catalog ingest
 and works on vCenter 8 and 9.
@@ -32,6 +35,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Final
 
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._teardown import (
     STATUS_DELETED,
     STATUS_STILL_PRESENT,
@@ -41,8 +45,10 @@ from meho_backplane.connectors.vmware_rest.composites._teardown import (
     pre_write_outcome,
 )
 from meho_backplane.connectors.vmware_rest.composites._write import _write_sub_op
-from meho_backplane.connectors.vmware_rest.customization_specs import read_spec
-from meho_backplane.operations._preview import register_preview_builder
+from meho_backplane.connectors.vmware_rest.customization_specs import (
+    SPEC_SECRETS_TAG,
+    read_spec,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -51,8 +57,7 @@ if TYPE_CHECKING:
     from meho_backplane.operations._preview import PreviewContext
 
 __all__ = [
-    "CUSTOMIZATION_SPEC_DELETE_COMPOSITES",
-    "CUSTOMIZATION_SPEC_DELETE_GOVERNED_SUBOPS",
+    "COMPOSITES",
     "OP_ID_CUSTOMIZATION_SPEC_DELETE",
     "SUB_OPS_CUSTOMIZATION_SPEC_DELETE",
     "customization_spec_delete_composite",
@@ -65,8 +70,8 @@ _OP_GET_SPEC: Final = "GET:/vcenter/guest/customization-specs/{name}"
 _OP_DELETE_SPEC: Final = "DELETE:/vcenter/guest/customization-specs/{name}"
 
 #: Every REST call of the delete. The reconcile test checks them against the
-#: pinned vCenter 8.0 and 9.0 API files; ``_governed_subops`` lists them for
-#: the grant set (the DELETE is delete-shaped, so it is never grantable).
+#: pinned vCenter 8.0 and 9.0 API files; the row lists them as its child calls,
+#: for the grant set (the DELETE is delete-shaped, so it is never grantable).
 SUB_OPS_CUSTOMIZATION_SPEC_DELETE: Final[tuple[str, ...]] = (_OP_GET_SPEC, _OP_DELETE_SPEC)
 
 _NO_CHILDREN_NOTE: Final = (
@@ -142,9 +147,6 @@ async def customization_spec_delete_preview(ctx: PreviewContext) -> dict[str, An
     if not plan.present:
         raise LookupError(f"vCenter has no guest customization spec named {name!r}")
     return blast_radius(plan)
-
-
-register_preview_builder(OP_ID_CUSTOMIZATION_SPEC_DELETE, customization_spec_delete_preview)
 
 
 # ---------------------------------------------------------------------------
@@ -229,28 +231,25 @@ CUSTOMIZATION_SPEC_DELETE_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     ),
 }
 
-#: The registration row, as ``_CompositeSpec`` keyword arguments.
-CUSTOMIZATION_SPEC_DELETE_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_CUSTOMIZATION_SPEC_DELETE,
-        "handler": customization_spec_delete_composite,
-        "summary": "Delete one saved guest customization spec by name; it cannot be undone.",
-        "description": (
+#: The registration row.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_CUSTOMIZATION_SPEC_DELETE,
+        handler=customization_spec_delete_composite,
+        summary="Delete one saved guest customization spec by name; it cannot be undone.",
+        description=(
             "Deletes a saved guest customization spec from vCenter, by name, and reads back "
             "that it is gone. VMs made with it do not change. A second person always "
             "approves, after a preview."
         ),
-        "parameter_schema": CUSTOMIZATION_SPEC_DELETE_PARAMETER_SCHEMA,
-        "response_schema": CUSTOMIZATION_SPEC_DELETE_RESPONSE_SCHEMA,
-        "group_key": "guest",
-        "tags": ["composite", "write", "guest", "customization", "delete"],
-        "safety_level": "destructive",
-        "requires_approval": True,
-        "llm_instructions": CUSTOMIZATION_SPEC_DELETE_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=CUSTOMIZATION_SPEC_DELETE_PARAMETER_SCHEMA,
+        response_schema=CUSTOMIZATION_SPEC_DELETE_RESPONSE_SCHEMA,
+        group_key="guest",
+        tags=["composite", "write", "guest", "customization", "delete", SPEC_SECRETS_TAG],
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions=CUSTOMIZATION_SPEC_DELETE_LLM_INSTRUCTIONS,
+        preview=customization_spec_delete_preview,
+        governed_subops=SUB_OPS_CUSTOMIZATION_SPEC_DELETE,
+    ),
 )
-
-#: The governed REST calls of the delete, for ``_governed_subops``.
-CUSTOMIZATION_SPEC_DELETE_GOVERNED_SUBOPS: Final[dict[str, tuple[str, ...]]] = {
-    OP_ID_CUSTOMIZATION_SPEC_DELETE: SUB_OPS_CUSTOMIZATION_SPEC_DELETE,
-}

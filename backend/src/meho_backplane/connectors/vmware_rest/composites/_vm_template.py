@@ -10,12 +10,14 @@ approval (``requires_approval=True``); an agent needs a grant.
 * ``vmware.composite.library.vm_template.deploy`` --
   ``POST /vcenter/vm-template/library-items/{item}?action=deploy`` with a
   ``DeploySpec`` (name, placement, storage, power-on, guest customization
-  spec). vCenter answers with the new VM id when the copy is done (the call is
-  synchronous, so it gets the long deploy timeout). MEHO reads the VM back.
+  spec). vCenter answers with the new VM id when the copy is done. MEHO reads
+  the VM back.
 * ``vmware.composite.library.vm_template.check_out`` --
   ``POST .../check-outs?action=check-out`` with a ``CheckOutSpec``. vCenter
-  makes a VM from the template to edit and answers with its id. MEHO reads
-  the check-out and the VM back.
+  makes a VM from the template to edit and answers with its id. The vendor
+  API needs the ``placement`` object; MEHO always sends it, empty when the
+  caller names no placement, and then the VM goes where the template is.
+  MEHO reads the check-out and the VM back.
 * ``vmware.composite.library.vm_template.check_in`` --
   ``POST .../check-outs/{vm}?action=check-in`` with a ``CheckInSpec``
   (``message``). The VM becomes the new template version; vCenter keeps the
@@ -28,11 +30,17 @@ run changes exactly what the approver saw. vCenter answers HTTP 400 when it
 refuses and HTTP 404 when something does not exist; the answer is then
 ``refused`` or ``not_found`` with vCenter's reason, and nothing changed.
 
+Each change is one synchronous call: vCenter copies the template's disks
+(deploy, check-out) or saves the VM as the new version (check-in) and holds
+the request open until it is done. A large template takes longer than the
+default HTTP timeout, so every change uses the long deploy timeout of
+``vm.clone`` (:data:`._write._LIBRARY_ITEM_DEPLOY_TIMEOUT`). Otherwise MEHO
+would report a failure while vCenter still creates the VM.
+
 All calls go through the shared write seam (:func:`._write._write_sub_op`)
 on the connector session, so the changes need no catalog ingest and work on
-vCenter 8 and 9 alike. The registry in ``_register.py`` only splats
-:data:`VM_TEMPLATE_COMPOSITES`; ``_governed_subops.py`` reads
-:data:`VM_TEMPLATE_GOVERNED_SUBOPS`.
+vCenter 8 and 9 alike. The registry in ``_register.py`` collects
+:data:`COMPOSITES`; each row carries its preview builder and its child calls.
 """
 
 from __future__ import annotations
@@ -43,6 +51,7 @@ from typing import TYPE_CHECKING, Any, Final
 import httpx
 
 from meho_backplane.connectors.vmware_rest.composites._library_checks import id_problem
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._vm_template_schemas import (
     CHECK_IN_LLM_INSTRUCTIONS,
     CHECK_IN_PARAMETER_SCHEMA,
@@ -65,7 +74,6 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     _write_sub_op,
 )
 from meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware import check_vm_moid
-from meho_backplane.operations._preview import register_preview_builder
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -74,14 +82,13 @@ if TYPE_CHECKING:
     from meho_backplane.operations._preview import PreviewContext
 
 __all__ = [
+    "COMPOSITES",
     "OP_ID_CHECK_IN",
     "OP_ID_CHECK_OUT",
     "OP_ID_DEPLOY",
     "SUB_OPS_CHECK_IN",
     "SUB_OPS_CHECK_OUT",
     "SUB_OPS_DEPLOY",
-    "VM_TEMPLATE_COMPOSITES",
-    "VM_TEMPLATE_GOVERNED_SUBOPS",
     "vm_template_check_in_composite",
     "vm_template_check_out_composite",
     "vm_template_deploy_composite",
@@ -98,8 +105,8 @@ _OP_GET_TEMPLATE: Final = f"GET:{_ITEM_PATH}"
 _OP_GET_CHECK_OUT: Final = f"GET:{_ITEM_PATH}/check-outs/{{vm}}"
 
 #: Every REST call of each change. The reconcile test checks them against the
-#: pinned vCenter 8.0 and 9.0 API files; ``_governed_subops`` lists them for
-#: the grant set.
+#: pinned vCenter 8.0 and 9.0 API files; the rows list them as their child
+#: calls, for the grant set.
 SUB_OPS_DEPLOY: Final[tuple[str, ...]] = (_OP_DEPLOY_LIBRARY_VM, _OP_GET_VM)
 SUB_OPS_CHECK_OUT: Final[tuple[str, ...]] = (_OP_CHECK_OUT, _OP_GET_CHECK_OUT, _OP_GET_VM)
 SUB_OPS_CHECK_IN: Final[tuple[str, ...]] = (_OP_CHECK_IN, _OP_GET_TEMPLATE)
@@ -161,12 +168,15 @@ async def _send(
     op_id: str,
     params: dict[str, Any],
     envelope: dict[str, Any],
-    timeout: Any = httpx.USE_CLIENT_DEFAULT,
 ) -> tuple[dict[str, Any] | OperationResult | None, Any]:
-    """Send one governed write. Returns ``(early answer, None)`` or ``(None, payload)``."""
+    """Send one governed write. Returns ``(early answer, None)`` or ``(None, payload)``.
+
+    vCenter holds each of these calls open until the copy or the save is done
+    (#3076), so every one gets the long deploy timeout.
+    """
     try:
         gate, payload = await _write_sub_op(
-            connector, target, operator, op_id, params, timeout=timeout
+            connector, target, operator, op_id, params, timeout=_LIBRARY_ITEM_DEPLOY_TIMEOUT
         )
     except httpx.HTTPError as exc:
         answer = _vendor_answer(envelope, exc)
@@ -282,8 +292,6 @@ async def vm_template_deploy_composite(
         op_id=_OP_DEPLOY_LIBRARY_VM,
         params={"templateLibraryItem": item, **_deploy_body(params)},
         envelope=envelope,
-        # Synchronous: vCenter holds the POST open for the whole copy (#3076).
-        timeout=_LIBRARY_ITEM_DEPLOY_TIMEOUT,
     )
     if early is not None:
         return early
@@ -315,13 +323,13 @@ async def vm_template_check_out_composite(
         "error_type": None,
         "guidance": None,
     }
+    # The vendor API needs ``placement``; an empty object means "where the
+    # template is" for the folder, the resource pool and the host.
     body: dict[str, Any] = {
         "name": params["name"],
+        "placement": _placement(params),
         "powered_on": bool(params.get("powered_on", False)),
     }
-    placement = _placement(params)
-    if placement:
-        body["placement"] = placement
     early, payload = await _send(
         connector,
         target,
@@ -467,74 +475,74 @@ async def _preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return preview
 
 
-for _op_id in (OP_ID_DEPLOY, OP_ID_CHECK_OUT, OP_ID_CHECK_IN):
-    register_preview_builder(_op_id, _preview)
-
-
 # ---------------------------------------------------------------------------
 # Registration rows
 # ---------------------------------------------------------------------------
 
 _TAGS: Final[list[str]] = ["composite", "write", "content-library", "vm-template", "vm"]
 
-#: The three registration rows, as ``_CompositeSpec`` keyword arguments.
-VM_TEMPLATE_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_DEPLOY,
-        "handler": vm_template_deploy_composite,
-        "summary": "Deploy a new VM from a VM template in a content library.",
-        "description": (
+#: The three registration rows. ``.deploy``, ``.check_out`` and ``.check_in``
+#: are not classifier suffixes, so the broadcast classifier puts the three
+#: op ids in its generic ``other`` class, like ``vm.deploy_from_library``.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_DEPLOY,
+        handler=vm_template_deploy_composite,
+        summary="Deploy a new VM from a VM template in a content library.",
+        description=(
             "Makes a new VM from a VM-template library item, with placement, optional "
             "datastore, power-on and a saved guest customization spec. Waits for the copy, "
             "then reads the VM back. Waits for approval."
         ),
-        "parameter_schema": DEPLOY_PARAMETER_SCHEMA,
-        "response_schema": DEPLOY_RESPONSE_SCHEMA,
-        "group_key": "content_library",
-        "tags": [*_TAGS, "deploy"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": DEPLOY_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_CHECK_OUT,
-        "handler": vm_template_check_out_composite,
-        "summary": "Check a VM template out of a content library as a VM you can edit.",
-        "description": (
+        parameter_schema=DEPLOY_PARAMETER_SCHEMA,
+        response_schema=DEPLOY_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=[*_TAGS, "deploy"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=DEPLOY_LLM_INSTRUCTIONS,
+        preview=_preview,
+        governed_subops=SUB_OPS_DEPLOY,
+        classifier_other=True,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_CHECK_OUT,
+        handler=vm_template_check_out_composite,
+        summary="Check a VM template out of a content library as a VM you can edit.",
+        description=(
             "vCenter makes a VM from a VM-template library item so you can change it; the "
             "template stays as it is until the check-in. Reads the check-out and the VM "
             "back. Waits for approval."
         ),
-        "parameter_schema": CHECK_OUT_PARAMETER_SCHEMA,
-        "response_schema": CHECK_OUT_RESPONSE_SCHEMA,
-        "group_key": "content_library",
-        "tags": [*_TAGS, "check-out"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": CHECK_OUT_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_CHECK_IN,
-        "handler": vm_template_check_in_composite,
-        "summary": "Check a changed VM back into its content-library item as a new template.",
-        "description": (
+        parameter_schema=CHECK_OUT_PARAMETER_SCHEMA,
+        response_schema=CHECK_OUT_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=[*_TAGS, "check-out"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=CHECK_OUT_LLM_INSTRUCTIONS,
+        preview=_preview,
+        governed_subops=SUB_OPS_CHECK_OUT,
+        classifier_other=True,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_CHECK_IN,
+        handler=vm_template_check_in_composite,
+        summary="Check a changed VM back into its content-library item as a new template.",
+        description=(
             "Saves a checked-out, powered-off VM into its VM-template library item as the "
             "new version; vCenter keeps the previous version as a backup. Reads the template "
             "back. Waits for approval."
         ),
-        "parameter_schema": CHECK_IN_PARAMETER_SCHEMA,
-        "response_schema": CHECK_IN_RESPONSE_SCHEMA,
-        "group_key": "content_library",
-        "tags": [*_TAGS, "check-in"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": CHECK_IN_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=CHECK_IN_PARAMETER_SCHEMA,
+        response_schema=CHECK_IN_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=[*_TAGS, "check-in"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=CHECK_IN_LLM_INSTRUCTIONS,
+        preview=_preview,
+        governed_subops=SUB_OPS_CHECK_IN,
+        classifier_other=True,
+    ),
 )
-
-#: The governed REST calls of each change, for ``_governed_subops``.
-VM_TEMPLATE_GOVERNED_SUBOPS: Final[dict[str, tuple[str, ...]]] = {
-    OP_ID_DEPLOY: SUB_OPS_DEPLOY,
-    OP_ID_CHECK_OUT: SUB_OPS_CHECK_OUT,
-    OP_ID_CHECK_IN: SUB_OPS_CHECK_IN,
-}

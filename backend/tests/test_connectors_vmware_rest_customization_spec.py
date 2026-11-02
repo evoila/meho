@@ -41,17 +41,18 @@ from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector, VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.composites import _customization_spec_delete as delete
 from meho_backplane.connectors.vmware_rest.composites import _write
-from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
-    _GOVERNED_SUBOP_MANIFEST,
-)
 from meho_backplane.connectors.vmware_rest.composites._register import (
     _COMPOSITES,
+    _GOVERNED_SUBOP_MANIFEST,
     _WHEN_TO_USE_BY_GROUP,
     COMPOSITES_NOT_ON_8_0,
     register_vmware_composite_operations,
 )
 from meho_backplane.connectors.vmware_rest.customization_specs import (
+    GET_OP_ID,
     GUEST_WHEN_TO_USE,
+    LIST_OP_ID,
+    SPEC_SECRETS_TAG,
     hide_secrets,
 )
 from meho_backplane.connectors.vmware_rest.typed_ops import (
@@ -459,6 +460,8 @@ def test_delete_is_destructive_on_both_catalogs_with_a_preview_builder() -> None
     assert spec.llm_instructions["preconditions"]
     assert spec.op_id not in COMPOSITES_NOT_ON_8_0
     assert _PREVIEW_BUILDERS[spec.op_id] is delete.customization_spec_delete_preview
+    assert spec.preview is delete.customization_spec_delete_preview
+    assert spec.governed_subops == delete.SUB_OPS_CUSTOMIZATION_SPEC_DELETE
     assert _GOVERNED_SUBOP_MANIFEST[spec.op_id] == delete.SUB_OPS_CUSTOMIZATION_SPEC_DELETE
 
 
@@ -694,3 +697,80 @@ async def test_an_agent_delete_is_refused() -> None:
     assert "destructive" in (result.error or "")
     assert await _approval_count() == 0
     assert _WIN in conn.specs
+
+
+# ---------------------------------------------------------------------------
+# The flight recorder stores no body of the calls that carry a spec
+# ---------------------------------------------------------------------------
+
+_SPEC_WITH_SECRETS: dict[str, Any] = {
+    "spec": {
+        "name": _WIN,
+        "spec": {
+            "configuration_spec": {
+                "windows_config": {
+                    "sysprep_xml": (
+                        "<unattend><AdministratorPassword><Value>"
+                        f"{_ADMIN_PASSWORD}</Value></AdministratorPassword></unattend>"
+                    ),
+                    "sysprep": {"gui_run_once_commands": [f"net user admin {_ADMIN_PASSWORD}"]},
+                },
+                "linux_config": {"script_text": f"#!/bin/sh\necho {_ADMIN_PASSWORD} | passwd"},
+            }
+        },
+    }
+}
+
+
+def _typed_op(op_id: str) -> Any:
+    return next(op for op in VMWARE_TYPED_OPS if op.op_id == op_id)
+
+
+def _redaction(op_id: str, tags: Any) -> Any:
+    from meho_backplane.redaction.flight_recorder.span import redact_span
+
+    return redact_span(
+        op_id=op_id,
+        connector_id="vmware-rest-9.0",
+        method="GET",
+        tags=tuple(tags),
+        response_body=json.dumps(_SPEC_WITH_SECRETS),
+        response_content_type="application/json",
+        delete_shaped_patterns=(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("op_id", "tags"),
+    [
+        (GET_OP_ID, _typed_op(GET_OP_ID).tags),
+        (
+            delete.OP_ID_CUSTOMIZATION_SPEC_DELETE,
+            next(s for s in _COMPOSITES if s.op_id == delete.OP_ID_CUSTOMIZATION_SPEC_DELETE).tags,
+        ),
+    ],
+)
+def test_trace_of_a_spec_read_keeps_no_body_so_xml_and_script_secrets_never_land(
+    op_id: str, tags: Any
+) -> None:
+    """A password inside sysprep XML, a run-once command or a script is not a named field.
+
+    The shared redaction cannot see it, so the op's tags must keep the whole
+    body out of the trace, with a certain (not uncertain) verdict.
+    """
+    assert SPEC_SECRETS_TAG in tags
+    redaction = _redaction(op_id, tags)
+    assert redaction.body_recorded is False
+    assert redaction.uncertain is False
+    assert _ADMIN_PASSWORD not in json.dumps(redaction.model_dump())
+
+
+def test_without_the_tag_the_shared_redaction_would_keep_the_xml_secret() -> None:
+    """Why the tag is there: the same body with plain tags keeps the password."""
+    redaction = _redaction(GET_OP_ID, ("read-only", "vmware", "guest"))
+    assert redaction.body_recorded is True
+    assert _ADMIN_PASSWORD in json.dumps(redaction.model_dump())
+
+
+def test_the_list_read_carries_no_secret_tag_so_its_trace_stays_readable() -> None:
+    assert SPEC_SECRETS_TAG not in _typed_op(LIST_OP_ID).tags

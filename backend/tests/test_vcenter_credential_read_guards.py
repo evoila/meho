@@ -76,6 +76,16 @@ _VCENTER_REST_CREDENTIAL_PATHS: tuple[str, ...] = (
     "/container-image-registries/{containerImageRegistry}",
 )
 
+#: The same reads as the vCenter 8.0 vendor file spells them: it names the
+#: path parameters ``{library_id}`` and ``{container_image_registry}``.
+_VCENTER_8_REST_CREDENTIAL_PATHS: tuple[str, ...] = (
+    "/content/library/{library_id}",
+    "/content/local-library/{library_id}",
+    "/content/subscribed-library/{library_id}",
+    "/vcenter/namespace-management/supervisors/{supervisor}"
+    "/container-image-registries/{container_image_registry}",
+)
+
 #: The older-API (VI-JSON) reads, spelled as ``vi-json.yaml`` writes them.
 _VCENTER_VI_JSON_CREDENTIAL_PATHS: tuple[str, ...] = (
     "/HostSystem/{moId}/config",
@@ -89,6 +99,8 @@ _VCENTER_VI_JSON_CREDENTIAL_PATHS: tuple[str, ...] = (
 _VCENTER_CREDENTIAL_PATHS: tuple[str, ...] = (
     *_VCENTER_REST_CREDENTIAL_PATHS,
     *(f"/api{path}" for path in _VCENTER_REST_CREDENTIAL_PATHS),
+    *_VCENTER_8_REST_CREDENTIAL_PATHS,
+    *(f"/api{path}" for path in _VCENTER_8_REST_CREDENTIAL_PATHS),
     *_VCENTER_VI_JSON_CREDENTIAL_PATHS,
 )
 

@@ -27,6 +27,16 @@ when it clones or deploys a VM. This module holds:
 Both reads call the vCenter REST API on the connector's own session, so they
 need no spec ingest. Each answer is a plain field copy: no field is passed on
 without a check for secrets.
+
+The vCenter answer of ``GET .../customization-specs/{name}`` holds the spec
+with every secret in clear, and the flight recorder stores a vendor answer
+before :func:`hide_secrets` runs. Its shared redaction knows a secret by its
+field name, not inside free text such as ``sysprep_xml``. So the read of one
+spec and the governed delete carry :data:`SPEC_SECRETS_TAG`: its ``secrets``
+token is a secret-family tag token of the flight recorder, and then no
+request or answer body of their vCenter calls is stored at all. The list
+answer holds only names, descriptions, OS types and dates, so the list read
+stays without the tag and its trace stays readable.
 """
 
 from __future__ import annotations
@@ -55,6 +65,7 @@ __all__ = [
     "OS_TYPES",
     "SPECS_PATH",
     "SPEC_PATH",
+    "SPEC_SECRETS_TAG",
     "customization_spec_get_impl",
     "customization_spec_list_impl",
     "hide_secrets",
@@ -74,6 +85,12 @@ SPEC_PATH: Final = "/vcenter/guest/customization-specs/{name}"
 OS_TYPES: Final[tuple[str, ...]] = ("WINDOWS", "LINUX")
 
 GUEST_GROUP_KEY: Final = "guest"
+
+#: Tag on the read of one spec and on the governed delete. Its ``secrets``
+#: token makes the flight recorder drop the body of every vCenter call they
+#: make (:data:`~meho_backplane.redaction.flight_recorder.families.SECRET_FAMILY_TAGS`):
+#: the answers hold passwords, keys, sysprep XML and scripts in clear.
+SPEC_SECRETS_TAG: Final = "customization-secrets"
 
 GUEST_WHEN_TO_USE: Final = (
     "Use for guest OS customization: how a cloned or deployed VM gets its host name "

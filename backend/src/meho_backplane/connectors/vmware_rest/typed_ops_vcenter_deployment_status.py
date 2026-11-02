@@ -47,7 +47,9 @@ if TYPE_CHECKING:
 __all__ = [
     "DEPLOYMENT_STATUS_GROUP_KEY",
     "DEPLOYMENT_STATUS_WHEN_TO_USE",
+    "TYPED_OPS",
     "VMWARE_VCENTER_DEPLOYMENT_STATUS_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "deployment_status_impl",
 ]
 
@@ -318,3 +320,6 @@ VMWARE_VCENTER_DEPLOYMENT_STATUS_OP = VmwareTypedOp(
         "result_scalars": {"keys": _RESULT_SCALARS},
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_VCENTER_DEPLOYMENT_STATUS_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {DEPLOYMENT_STATUS_GROUP_KEY: DEPLOYMENT_STATUS_WHEN_TO_USE}

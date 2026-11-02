@@ -35,11 +35,9 @@ from meho_backplane.connectors.registry import clear_registry, register_connecto
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest.composites import _vm_template as tpl
 from meho_backplane.connectors.vmware_rest.composites import _write
-from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
-    _GOVERNED_SUBOP_MANIFEST,
-)
 from meho_backplane.connectors.vmware_rest.composites._register import (
     _COMPOSITES,
+    _GOVERNED_SUBOP_MANIFEST,
     COMPOSITES_NOT_ON_8_0,
     register_vmware_composite_operations,
     register_vmware_composite_operations_8_0,
@@ -210,7 +208,10 @@ def test_each_change_is_dangerous_and_waits_for_approval(op_id: str) -> None:
     assert spec.requires_approval is True
     assert spec.group_key == "content_library"
     assert op_id not in COMPOSITES_NOT_ON_8_0
-    assert op_id in _GOVERNED_SUBOP_MANIFEST
+    assert _GOVERNED_SUBOP_MANIFEST[op_id] == spec.governed_subops
+    assert spec.governed_subops
+    assert spec.preview is tpl._preview
+    assert spec.classifier_other is True
     for key in ("when_to_call", "preconditions", "output_shape", "next_step"):
         assert spec.llm_instructions[key]
 
@@ -412,10 +413,11 @@ async def test_check_out_sends_the_check_out_spec_and_reads_back(gate: _GateReco
             _CHECK_OUT,
             {
                 "name": "<vm-name>",
-                "powered_on": False,
                 "placement": {"resource_pool": "resgroup-1"},
+                "powered_on": False,
             },
-            httpx.USE_CLIENT_DEFAULT,
+            # vCenter copies the template's disks before it answers (#3076).
+            _write._LIBRARY_ITEM_DEPLOY_TIMEOUT,
         )
     ]
     assert out["status"] == "checked_out"
@@ -426,12 +428,34 @@ async def test_check_out_sends_the_check_out_spec_and_reads_back(gate: _GateReco
     Draft202012Validator(tpl.CHECK_OUT_RESPONSE_SCHEMA).validate(out)
 
 
-async def test_check_out_without_placement_sends_no_placement(gate: _GateRecorder) -> None:
+async def test_check_out_without_placement_inputs_sends_an_empty_placement(
+    gate: _GateRecorder,
+) -> None:
+    """The vendor API needs the placement object; empty means where the template is."""
     conn = _RestFake()
     await _run(
         tpl.vm_template_check_out_composite, conn, template_library_item=_ITEM, name="<vm-name>"
     )
-    assert conn.posts[0][1] == {"name": "<vm-name>", "powered_on": False}
+    assert conn.posts[0][1] == {"name": "<vm-name>", "placement": {}, "powered_on": False}
+
+
+@pytest.mark.parametrize(
+    ("handler", "params"),
+    [
+        (tpl.vm_template_deploy_composite, {"name": "<vm-name>", "host": "host-1"}),
+        (tpl.vm_template_check_out_composite, {"name": "<vm-name>"}),
+        (tpl.vm_template_check_in_composite, {"vm": _CHECKED_OUT_VM, "message": "<m>"}),
+    ],
+)
+async def test_every_change_uses_the_long_deploy_timeout(
+    gate: _GateRecorder, handler: Any, params: dict[str, Any]
+) -> None:
+    """vCenter holds each call open while it copies or saves; the default 30 s is too short."""
+    conn = _RestFake()
+    await _run(handler, conn, template_library_item=_ITEM, **params)
+    assert len(conn.posts) == 1
+    assert conn.posts[0][2] is _write._LIBRARY_ITEM_DEPLOY_TIMEOUT
+    assert conn.posts[0][2].read >= 3600
 
 
 async def test_check_out_of_a_subscribed_item_is_refused(gate: _GateRecorder) -> None:
@@ -463,7 +487,9 @@ async def test_check_in_sends_the_message_and_reads_the_template_back(
         vm=_CHECKED_OUT_VM,
         message="<what changed>",
     )
-    assert conn.posts == [(_CHECK_IN, {"message": "<what changed>"}, httpx.USE_CLIENT_DEFAULT)]
+    assert conn.posts == [
+        (_CHECK_IN, {"message": "<what changed>"}, _write._LIBRARY_ITEM_DEPLOY_TIMEOUT)
+    ]
     assert out["status"] == "checked_in"
     assert out["version"] == _VERSION
     assert out["template"] == {

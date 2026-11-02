@@ -309,7 +309,9 @@ The twelve rules (the rule name is in brackets):
     `Microsoft.Storage`) are in `VENDOR_NAMES`, each with a reason. A
     field whose name holds `version` may hold a value such as `9.0.2.0`.
     A field whose name holds `path` or `file` may hold a file name such as
-    `release-notes.md`. The checks are in
+    `release-notes.md`; there only the host parts are checked: the host of
+    a URL, of a network share (`\\host\share`) or of an NFS export
+    (`host:/export`). The checks are in
     `backend/tests/_operation_contract_placeholders.py`.
     (`example_placeholders`)
 12. Every operation id that `llm_instructions` names in backticks is a

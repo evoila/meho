@@ -468,6 +468,40 @@ def test_a_path_field_may_hold_a_file_name_that_ends_like_a_domain(field: str) -
     assert "'release-notes.md'" in problems[0]
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "\\\\nas01.made-up.com\\backups\\full.bak",
+        "//nas01.made-up.local/backups/full.bak",
+        "file://nas01.made-up.com/backups/release-notes.md",
+        "smb://backup@nas01.made-up.com:445/backups/full.bak",
+        "nfs-01.made-up.net:/exports/backups",
+    ],
+)
+def test_a_path_field_with_a_real_looking_host_fails(value: str) -> None:
+    """The host of a network share, a file URL or an NFS export is still checked."""
+    problems = _only_rule(_with_example({"vm": "<vm-id>", "path": value}), "example_placeholders")
+    assert len(problems) == 1, problems
+    assert problems[0].startswith("example 0: path holds 'n")
+    assert "made-up." in problems[0]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "\\\\<backup-server>\\backups\\<file>.bak",
+        "\\\\nas.example.com\\backups\\release-notes.md",
+        "file://nas.example.com/backups/release-notes.md",
+        "file:///var/backups/release-notes.md",
+        "nas.example.com:/exports/release-notes.md",
+        "C:/Users/<name>/release-notes.md",
+    ],
+)
+def test_a_path_field_with_a_made_up_host_passes(value: str) -> None:
+    """A placeholder or example host passes, and the file name part is never a host."""
+    assert check_operation(_with_example({"vm": "<vm-id>", "path": value})) == {}
+
+
 def test_the_top_level_domain_list_is_the_public_one(tmp_path: Path) -> None:
     """The snapshot holds the public domains, lowercase; the reserved names are not in it."""
     assert {"com", "fr", "uk", "tech", "xyz", "io"} <= REAL_TOP_LEVEL_DOMAINS

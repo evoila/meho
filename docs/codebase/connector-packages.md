@@ -95,13 +95,13 @@ operations). The phpIPAM connector is a small, complete example:
 
 The folder's `__init__.py` does three things when MEHO imports it:
 
-1. **Register the connector class** with `register_connector_v2` from
-   `meho_backplane/connectors/registry.py`. The class is a subclass of
-   `Connector` (`connectors/base.py`), or of `HttpConnector`
-   (`connectors/adapters/http.py`) for an HTTP API. It sets `product`,
-   `version` and `impl_id`, and has `fingerprint`, `probe` and `execute`.
-2. **Queue the registering function** with `register_typed_op_registrar`
-   from `meho_backplane/operations/typed_register.py`. Do not register the
+1. **Register the connector class** with `register_connector_v2` from the
+   connector kit (`meho_connector_kit`). The class is a subclass of the
+   kit's `Connector`, or of its `HttpConnector` for an HTTP API. It sets
+   `product`, `version` and `impl_id`, and has `fingerprint` and `probe`.
+   It needs no `execute` (see "`Connector.execute`" below).
+2. **Queue the registering function** with the kit's
+   `register_typed_op_registrar`. Do not register the
    operations at import: the import must stay quick and must not touch the
    database.
 3. **Register the approval previews**, if a change shows a person what it
@@ -112,7 +112,7 @@ Nothing else runs at import. Other code that runs at import is a reason to
 refuse the package in the review (see "The review checklist").
 
 At start, after every folder is imported, MEHO runs each queued function.
-It calls `register_typed_operation` (same module) once per operation. That
+It calls the kit's `register_typed_operation` once per operation. That
 call stores the operation as a row, with its input and answer schemas, its
 risk level (`safety_level`), whether it waits for approval
 (`requires_approval`), its group and its texts for agents. It is safe to
@@ -120,27 +120,28 @@ run twice: MEHO runs it at every start.
 
 ```python
 # meho_backplane/connectors/example_widget/__init__.py
+import meho_connector_kit as kit
+
 from meho_backplane.connectors.example_widget.connector import ExampleWidgetConnector
 from meho_backplane.connectors.example_widget.operations import register_widget_operations
-from meho_backplane.connectors.registry import register_connector_v2
-from meho_backplane.operations.typed_register import register_typed_op_registrar
 
-register_connector_v2(
+kit.register_connector_v2(
     product="example",
     version="1.x",
     impl_id="example-widget",
     cls=ExampleWidgetConnector,
 )
-register_typed_op_registrar(register_widget_operations)
+kit.register_typed_op_registrar(register_widget_operations)
 ```
 
 ```python
 # meho_backplane/connectors/example_widget/operations.py
 async def register_widget_operations(*, embedding_service=None) -> None:
-    from meho_backplane.connectors.example_widget.connector import ExampleWidgetConnector
-    from meho_backplane.operations.typed_register import register_typed_operation
+    import meho_connector_kit as kit
 
-    await register_typed_operation(
+    from meho_backplane.connectors.example_widget.connector import ExampleWidgetConnector
+
+    await kit.register_typed_operation(
         product=ExampleWidgetConnector.product,
         version=ExampleWidgetConnector.version,
         impl_id=ExampleWidgetConnector.impl_id,
@@ -178,15 +179,11 @@ Before you build, run MEHO's operation contract check
 (`backend/tests/test_operation_contracts.py`) with the package's folder in
 a MEHO checkout. The review for tier 2 asks for it too.
 
-**Which MEHO modules a package may import.** Today no MEHO module is a
-promise to a package: any of them can change in any release. Modules whose
-path has a part that starts with an underscore, such as
-`connectors/_shared/vault_creds.py`, are private by name. The connector
-kit (one module with the names a package may use, #5278) will be the
-promise. Its design is in
-[`docs/decisions/2026-11-01-connector-kit.md`](../decisions/2026-11-01-connector-kit.md).
-Until it ships, test your package against the exact MEHO release you build
-for.
+**Which MEHO modules a package may import.** Only the connector kit,
+`meho_connector_kit` (see "The connector kit" below). Every other MEHO
+module can change in any release. The page for connector authors in the
+docs site, [`docs-site/extend/connector-kit.md`](../../docs-site/extend/connector-kit.md)
+("Write a connector package"), lists every kit name.
 
 More to read:
 

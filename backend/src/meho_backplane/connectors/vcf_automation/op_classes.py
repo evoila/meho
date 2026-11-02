@@ -27,6 +27,13 @@ declare_op_classes(
         # password read from ``password_secret_ref``. ``.revoke`` would
         # otherwise fall through to ``other`` and broadcast in full.
         "vcfa.provider.api_token.revoke",
+        # Connecting a vCenter or an NSX manager to VCF Automation. Like
+        # ``vcfa.provider.user.create``, the params carry only a Vault path
+        # (``password_secret_ref``); the password is read in-process and sent
+        # only in the request BODY. The class keeps the bodies out of traces
+        # and the broadcast aggregate-only.
+        "vcfa.provider.vcenter.register",
+        "vcfa.provider.nsx_manager.register",
         # The cloud account add. Its params carry only a Vault path
         # (``password_secret_ref``); the password is read in-process and sent
         # only in the ``POST /iaas/api/cloud-accounts-vsphere|-nsx-t`` request

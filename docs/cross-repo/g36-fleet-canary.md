@@ -47,13 +47,19 @@ the **vRSLCM LCM REST corpus**:
    [`run_llm_grouping`](../../backend/src/meho_backplane/operations/ingest/llm_groups.py)
    pass derives operation groups with operator-readable
    `when_to_use` hints + per-op group assignments. The
-   path-prefix classifier in
-   [`meho_backplane.connectors.vcf_fleet.core_ops.FLEET_PATH_RULES`](../../backend/src/meho_backplane/connectors/vcf_fleet/core_ops.py)
-   names the 6 groups the curated core spans.
-4. **Curate.** The operator drives `apply_fleet_core_curation`
-   (which uses `ReviewService.edit_group` + `enable_group` +
-   `edit_op(llm_instructions=…)`) against the staged connector to
-   land the 8 read-only core ops + their guidance blobs.
+   grouping is derived from the spec itself; there is no longer a
+   hand-maintained path-prefix classifier.
+4. **Enable.** The operator enables the reads generically via
+   `ReviewService.enable_reads` against the staged connector.
+
+   > **Changed in #2362.** This step used to drive
+   > `apply_fleet_core_curation` over a hand-curated list of 8 core ops.
+   > That apparatus — `FLEET_PATH_RULES`, `FLEET_CORE_GROUPS`,
+   > `FLEET_CORE_OPS`, `classify_fleet_op` and the applier — was retired:
+   > it had no production call sites, because real deploys always used the
+   > generic review flow. The audited-in-use ops are now **typed** ops in
+   > `typed_ops.py`; what remains ingested is enabled as generic breadth.
+   > See [`docs/codebase/connectors-vcf-fleet.md`](../codebase/connectors-vcf-fleet.md).
 5. **Verify.** The operator dispatches one list op through
    `call_operation` to prove the end-to-end agent path works. The
    JSONFlux *seam* (set-shaped payload handle threading) is
@@ -72,11 +78,14 @@ the **vRSLCM LCM REST corpus**:
 
   The env-gated **automated** canary acceptance test that drives the
   ingest against `IngestionPipelineService` is a follow-up; until it
-  lands, the operator runs this procedure manually, and the
-  substrate-level curation tests live at
-  [`backend/tests/test_connectors_vcf_fleet_core_ops.py`](../../backend/tests/test_connectors_vcf_fleet_core_ops.py)
-  (classifier rules, read-only invariants, and the SQLite-backed
-  `apply_fleet_core_curation` integration suite).
+  lands, the operator runs this procedure manually.
+
+  The substrate-level coverage is
+  [`backend/tests/test_connectors_vcf_fleet_typed_reads.py`](../../backend/tests/test_connectors_vcf_fleet_typed_reads.py).
+  The curation suite this section used to point at (`apply_fleet_core_curation`,
+  the classifier rules and the read-only invariants) no longer exists: the
+  two-layer ingested-curation apparatus was retired in #2362 because it had
+  no production call sites, and its tests went with it.
 
 - **A Postgres instance with pgvector + FTS extensions.** Local
   development uses the testcontainers fixture; production uses the
@@ -195,8 +204,8 @@ meho connector review fleet-rest-9.0
 Expected: a rendered table of 6-14 groups (the path-prefix classifier
 maps to 6 named groups; the LLM may propose extras for tails the
 classifier doesn't catch — `/lcm/locker/`, `/lcm/authzn/`, etc.).
-Compare against the canonical 6 groups in
-[`FLEET_CORE_GROUPS`](../../backend/src/meho_backplane/connectors/vcf_fleet/core_ops.py):
+The 6 groups the curated core used to span were, for reference (the
+`FLEET_CORE_GROUPS` constant that defined them was retired in #2362):
 
 | group_key | name | covers |
 |---|---|---|
@@ -207,41 +216,35 @@ Compare against the canonical 6 groups in
 | `fleet-product` | VCF Fleet Products | `/lcm/lcops/api/v2/environments/{environmentId}/products` |
 | `fleet-request` | VCF Fleet Lifecycle Requests | `/lcm/request/api/v2/requests` + `…/{requestId}` |
 
-### Step 3 — apply the curated read-core
+### Step 3 — enable the reads
 
-The Python entrypoint is `apply_fleet_core_curation`. From a
-backplane Python shell:
-
-```python
-from meho_backplane.connectors.vcf_fleet import apply_fleet_core_curation
-from meho_backplane.operations.ingest import ReviewService
-
-review_service = ReviewService(operator)
-await apply_fleet_core_curation(review_service, tenant_id=None)
+```bash
+meho connector enable-reads fleet-rest-9.0
 ```
 
-This drives, for every entry in `FLEET_CORE_GROUPS`:
+This flips `is_enabled=True` on **every** ingested `GET`/`HEAD` operation
+for the connector in one pass, and prints how many it enabled. Writes
+(`POST` / `PUT` / `PATCH` / `DELETE`), typed ops and composites stay
+default-deny — that split is the governance boundary, not an oversight.
 
-1. `ReviewService.edit_group(group_key, name=…, when_to_use=…)` —
-   lands the operator-reviewed text the agent reads through
-   `list_operation_groups`.
-2. `ReviewService.enable_group(group_key)` — flips
-   `review_status='enabled'`; cascades child ops to
-   `is_enabled=True` while skipping operator-overridden non-core ops
-   (the audit-log-driven exclusion path).
+It does **not** hand-pick a core set, does not write `llm_instructions`,
+and does **not** move any group's `review_status`: it is purely a per-op
+flip. The grouping and guidance come from the T3 LLM pass in step 2.
 
-Then for every entry in `FLEET_CORE_OPS`:
+> **Changed in #2362.** This step used to call
+> `apply_fleet_core_curation`, which walked a hand-maintained
+> `FLEET_CORE_GROUPS` / `FLEET_CORE_OPS` list and applied
+> `ReviewService.edit_group` + `enable_group` +
+> `edit_op(llm_instructions=…)` per entry. That apparatus was deleted: it
+> had no production call sites, because real deploys always used the
+> generic flow above.
+>
+> The reads and changes the adopter actually uses are now **typed** ops
+> registered in `typed_ops.py`, not ingested ones, so they need no
+> enabling at all. Only the remaining ingested breadth goes through this
+> step. See
+> [`docs/codebase/connectors-vcf-fleet.md`](../codebase/connectors-vcf-fleet.md).
 
-3. `ReviewService.edit_op(op_id, llm_instructions=…)` — lands the
-   per-op JSON blob the agent inlines into reasoning context when
-   the op surfaces in `search_operations` hits.
-
-Each op's `llm_instructions` is a three-key blob (`when_to_call` /
-`output_shape` / `next_step`) matching the typed-connector convention
-from [`connectors/bind9/ops_zone.py`](../../backend/src/meho_backplane/connectors/bind9/ops_zone.py)
-and the ingested-connector convention from
-[`connectors/nsx/core_ops.py`](../../backend/src/meho_backplane/connectors/nsx/core_ops.py)
-/ [`connectors/harbor/core_ops.py`](../../backend/src/meho_backplane/connectors/harbor/core_ops.py).
 
 ### Step 4 — verify the curation
 
@@ -251,17 +254,19 @@ meho operation search fleet-rest-9.0 "list fleet environments" --limit 5
 meho operation search fleet-rest-9.0 "what fleet upgrade requests are running" --limit 5
 ```
 
-The first command should return 6 enabled groups, each with the
-canonical `when_to_use` from `FLEET_CORE_GROUPS`. The second should
-return `GET:/lcm/lcops/api/v2/environments` in the top-3. The third
-should return `GET:/lcm/request/api/v2/requests` in the top-3 (and
-ideally `…/{requestId}` close behind).
+The first command should list the groups with the `when_to_use` hints
+the T3 LLM pass derived. The second should return
+`GET:/lcm/lcops/api/v2/environments` in the top-3. The third should
+return `GET:/lcm/request/api/v2/requests` in the top-3 (and ideally
+`…/{requestId}` close behind).
 
-Every other Fleet op the spec ingestion produced should be in the
-`is_enabled=False` state — `search_operations` filters on
-`OperationGroup.review_status='enabled'` AND
-`EndpointDescriptor.is_enabled=True`, so a staged group's ops never
-surface.
+**What to expect after `enable-reads`, which differs from the old curated
+flow.** Groups stay `staged` — `enable_reads` never moves a group's
+`review_status` — and every ingested `GET`/`HEAD` op is enabled, not a
+hand-picked subset. A staged group still surfaces in search, because the
+visibility rule resolves a group that is either fully enabled **or**
+staged while holding at least one per-op-enabled descriptor. Writes,
+typed ops and composites remain `is_enabled=False`.
 
 ### Step 5 — dispatch one list op end-to-end
 
@@ -340,10 +345,11 @@ can be refreshed and the workaround note removed.
 
 ### 2. Env-gated automated canary is a follow-up
 
-G3.6-T8 (#835) ships the operator-review substrate
-(`apply_fleet_core_curation` helper), the curated 8-op data
-(`FLEET_CORE_OPS`), the SQLite-backed curation acceptance tests, and
-this runbook. The env-gated automated canary that mirrors
+G3.6-T8 (#835) shipped the operator-review substrate and this runbook.
+Its curation helper (`apply_fleet_core_curation`), the curated 8-op data
+(`FLEET_CORE_OPS`) and the SQLite-backed curation acceptance tests were
+all retired in #2362; the substrate itself (`ReviewService`) remains.
+The env-gated automated canary that mirrors
 `test_g07_vsphere_canary.py` for Fleet — drives the full ingest
 through `IngestionPipelineService` against a real LLM stub or live
 Anthropic adapter — is a follow-up.
@@ -359,9 +365,9 @@ Task.
 
 ### 4. CLI verbs and onboarding doc
 
-`apply_fleet_core_curation` is exposed at the Python level (the
-substrate the curation helper drives). The `meho vcf-fleet …` CLI
-verb tree and the operator-facing
+Reads are enabled at the Python level through `ReviewService.enable_reads`
+(`apply_fleet_core_curation` was retired in #2362). The `meho vcf-fleet …`
+CLI verb tree and the operator-facing
 `docs/cross-repo/vcf-fleet-onboarding.md` are deferred to
 G3.6-T9 #839.
 
@@ -381,8 +387,9 @@ G3.6-T9 #839.
   (spec ingestion pipeline).
 - vRSLCM REST API reference — Broadcom developer portal:
   <https://developer.broadcom.com/xapis/vrealize-suite-lifecycle-manager/latest/>
-- Curated data:
-  [`backend/src/meho_backplane/connectors/vcf_fleet/core_ops.py`](../../backend/src/meho_backplane/connectors/vcf_fleet/core_ops.py).
+- Typed ops:
+  [`backend/src/meho_backplane/connectors/vcf_fleet/typed_ops.py`](../../backend/src/meho_backplane/connectors/vcf_fleet/typed_ops.py).
+  (The curated-data module `core_ops.py` was retired in #2362.)
 - Codebase doc: [`docs/codebase/connectors-vcf-fleet.md`](../codebase/connectors-vcf-fleet.md).
 - Consumer wrapper this contract retires (per Initiative #369):
   `scripts/vcf-fleet.sh` in the consumer's `claude-rdc-hetzner-dc`

@@ -12,7 +12,10 @@
 #
 # The checks of the build itself (clashing library, files outside the
 # connector folder, start-up hooks, the allowlist file) are unit tests in
-# backend/tests/test_connector_overlay_build.py.
+# backend/tests/test_connector_overlay_build.py. The last step builds two
+# more made-up wheels, one with no kit range and one with a kit range that
+# does not fit, and checks that the build refuses both. The second case is
+# refused by the uv version that the Dockerfile pins.
 
 name: connector-overlay
 
@@ -93,3 +96,29 @@ jobs:
       - name: uv and pip are not in the image
         run: |
           docker run --rm "$IMAGE" sh -c '! command -v uv && ! python -m pip --version'
+
+      - name: The build refuses a package with no kit range or a kit range that does not fit
+        run: |
+          set -euo pipefail
+          refused() {  # case name, sed expression for pyproject.toml, expected message
+            src="$RUNNER_TEMP/$1/src" wheels="$RUNNER_TEMP/$1/wheels" log="$RUNNER_TEMP/$1/build.log"
+            mkdir -p "$RUNNER_TEMP/$1"
+            cp -r deploy/connector-overlay/example "$src"
+            sed -i "$2" "$src/pyproject.toml"
+            if grep -q 'meho-connector-kit>=1.0,<2' "$src/pyproject.toml"; then
+              echo "::error::the $1 case did not change the kit range" >&2
+              exit 1
+            fi
+            uv build --wheel --out-dir "$wheels" "$src"
+            if deploy/connector-overlay/build.sh --base "$BASE_IMAGE" --connectors "$wheels" \
+                --tag "meho-connector-overlay:$1" >"$log" 2>&1; then
+              cat "$log"
+              echo "::error::the overlay build accepted the $1 wheel" >&2
+              exit 1
+            fi
+            grep -F "$3" "$log" || { cat "$log"; echo "::error::no '$3' in the $1 build log" >&2; exit 1; }
+          }
+          refused no-kit-range '/^dependencies = /d' \
+            'example-overlay-connector 0.1.0 (example_overlay_connector-0.1.0-py3-none-any.whl) does not say which versions of the connector kit it fits'
+          refused kit-range-does-not-fit 's/meho-connector-kit>=1.0,<2/meho-connector-kit>=99,<100/' \
+            'No solution found'

@@ -84,12 +84,17 @@ _ISSUES_SCHEMA: dict[str, Any] = {
 
 _STATUS_READ_SCHEMA: dict[str, Any] = {
     "type": ["object", "null"],
-    "description": "The read to follow the vCenter task: op_id and params. Null without a task.",
+    "description": (
+        "The read to follow the vCenter task: op_id and params. Null without a task. The "
+        "read answers not_reachable with the task id and the time when vCenter does not "
+        "answer; then read again later with the same task id."
+    ),
     "properties": {
-        "op_id": {"type": "string", "description": "vmware.tasks.recent."},
+        "op_id": {"type": "string", "description": "Always vmware.task.info."},
         "params": {
             "type": "object",
-            "description": "The parameters of that read (none; find the task id in its list).",
+            "description": "The parameters of that read: the task id.",
+            "properties": {"task": {"type": "string", "description": "The vCenter task id."}},
         },
     },
 }
@@ -168,8 +173,9 @@ _ENCRYPTION_AT_REST_FIELD: dict[str, Any] = {
             "minLength": 1,
             "maxLength": 255,
             "description": (
-                "Name of the key provider in vCenter that gives the keys. Leave it out to use "
-                "the default key provider."
+                "Name of the key provider in vCenter that gives the keys. Required when "
+                "enabled is true: vSAN has no default key provider. vmware.vsan.cluster.info "
+                "shows the one a cluster uses."
             ),
         },
         "erase_disks_before_use": {

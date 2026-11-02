@@ -22,8 +22,10 @@ on the vCenter 8 and 9 wire is in ``..._vsan_changes_wire.py``.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 from meho_backplane.connectors.vmware_rest.composites import (
@@ -40,6 +42,7 @@ from meho_backplane.connectors.vmware_rest.composites._vsan_config_common import
     vsan_op_id,
 )
 from meho_backplane.connectors.vmware_rest.typed_ops import VMWARE_TYPED_OPS
+from meho_backplane.connectors.vmware_rest.typed_ops_task_info import task_info_impl
 from meho_backplane.operations._preview import blast_radius_missing_reason
 from meho_backplane.operations._validate import validate_params
 from tests._vmware_teardown_fake import GateRecorder, moref, operator, parked, preview_ctx
@@ -93,7 +96,7 @@ async def test_configure_sends_the_spec_in_vendor_order_and_answers_accepted(
 
     assert out["status"] == "accepted"
     assert out["task"] == "task-1"
-    assert out["status_read"] == {"op_id": "vmware.tasks.recent", "params": {}}
+    assert out["status_read"] == {"op_id": "vmware.task.info", "params": {"task": "task-1"}}
     assert out["cluster_name"] == "cluster-a"
     assert "not done yet" in out["guidance"]
     [(method, body)] = conn.vsan_calls
@@ -134,6 +137,59 @@ def test_status_read_is_a_registered_typed_op() -> None:
     assert _vsan_config_common.STATUS_READ_OP_ID in {op.op_id for op in VMWARE_TYPED_OPS}
 
 
+def _status_read_op() -> Any:
+    return next(op for op in VMWARE_TYPED_OPS if op.op_id == "vmware.task.info")
+
+
+async def _accepted_configure(conn: VsanFake) -> dict[str, Any]:
+    conn.add_cluster()
+    out = await _run(
+        _vsan_cluster.vsan_cluster_configure_composite, conn, cluster=CLUSTER, vsan_enabled=True
+    )
+    assert out["status"] == "accepted"
+    return out
+
+
+async def test_status_read_follows_the_task_by_id_beyond_the_recent_tasks(
+    gate: GateRecorder,
+) -> None:
+    """The status read takes the task id, so a job outside the recent-task list is found."""
+    conn = VsanFake()
+    out = await _accepted_configure(conn)
+    # Many later tasks: the vSAN job is no longer among the recent ones.
+    for n in range(2, 62):
+        conn._tasks[f"task-{n}"] = {"state": "success", "result": None}
+    read = out["status_read"]
+    assert validate_params(_status_read_op().parameter_schema, read["params"]) == []
+    answer = await task_info_impl(conn, operator(), SimpleNamespace(name="vc"), read["params"])
+    assert answer["task"] == out["task"] == "task-1"
+    assert answer["state"] == "success"
+    assert answer["reachable"] is True
+
+
+async def test_status_read_answers_not_reachable_with_the_task_and_the_time(
+    gate: GateRecorder,
+) -> None:
+    """When vCenter does not answer, the read keeps the task id and says when it tried."""
+    conn = VsanFake()
+    out = await _accepted_configure(conn)
+
+    class _Down(VsanFake):
+        async def _post_vmomi_json(self, target: Any, path: str, **kwargs: Any) -> Any:
+            raise httpx.ConnectError("connection refused")
+
+    down = _Down()
+    answer = await task_info_impl(
+        down, operator(), SimpleNamespace(name="vc"), out["status_read"]["params"]
+    )
+    assert answer["state"] == "not_reachable"
+    assert answer["reachable"] is False
+    assert answer["task"] == "task-1"
+    assert isinstance(answer["checked_at"], str) and answer["checked_at"]
+    assert answer["unreachable_reason"] == "connect_failed"
+    assert "same task id" in answer["guidance"]
+
+
 async def test_configure_returns_a_running_vsan_job_and_starts_nothing(
     gate: GateRecorder,
 ) -> None:
@@ -147,7 +203,7 @@ async def test_configure_returns_a_running_vsan_job_and_starts_nothing(
 
     assert out["status"] == "already_running"
     assert out["task"] == "task-78"
-    assert out["status_read"]["op_id"] == "vmware.tasks.recent"
+    assert out["status_read"] == {"op_id": "vmware.task.info", "params": {"task": "task-78"}}
     assert conn.vsan_calls == []
     assert gate.calls == []
 
@@ -252,6 +308,51 @@ async def test_encryption_set_sends_both_encryption_configs(gate: GateRecorder) 
     }
 
 
+@pytest.mark.parametrize(
+    "data_at_rest",
+    [
+        pytest.param({"enabled": True}, id="no-key-provider"),
+        pytest.param({"enabled": True, "key_provider": ""}, id="empty-key-provider"),
+    ],
+)
+async def test_encryption_on_without_a_key_provider_is_refused_before_any_call(
+    gate: GateRecorder, data_at_rest: dict[str, Any]
+) -> None:
+    """vSAN needs the key provider to turn data-at-rest encryption on; there is no default."""
+    conn = VsanFake()
+    conn.add_cluster()
+    out = await _run(
+        _vsan_cluster.vsan_encryption_set_composite,
+        conn,
+        cluster=CLUSTER,
+        data_at_rest=data_at_rest,
+    )
+    assert out["status"] == "invalid_request"
+    assert out["task"] is None
+    assert out["status_read"] is None
+    assert "key_provider" in out["guidance"]
+    assert "Nothing was sent" in out["guidance"]
+    assert conn.vsan_calls == []
+    assert gate.calls == []
+
+
+async def test_encryption_off_needs_no_key_provider(gate: GateRecorder) -> None:
+    conn = VsanFake()
+    conn.add_cluster()
+    out = await _run(
+        _vsan_cluster.vsan_encryption_set_composite,
+        conn,
+        cluster=CLUSTER,
+        data_at_rest={"enabled": False},
+    )
+    assert out["status"] == "accepted"
+    spec = conn.vsan_calls[0][1]["vsanReconfigSpec"]
+    assert spec["dataEncryptionConfig"] == {
+        "_typeName": "VsanDataEncryptionConfig",
+        "encryptionEnabled": False,
+    }
+
+
 async def test_encryption_off_sends_only_the_flag(gate: GateRecorder) -> None:
     conn = VsanFake()
     conn.add_cluster()
@@ -314,7 +415,7 @@ async def test_rekey_poll_timeout_answers_timeout_with_the_task(gate: GateRecord
     out = await _run(_vsan_cluster.vsan_encryption_rekey_composite, conn, cluster=CLUSTER)
     assert out["status"] == "timeout"
     assert out["task"] == "task-1"
-    assert out["status_read"]["op_id"] == "vmware.tasks.recent"
+    assert out["status_read"] == {"op_id": "vmware.task.info", "params": {"task": "task-1"}}
     assert out["issues"][0]["severity"] == "error"
 
 

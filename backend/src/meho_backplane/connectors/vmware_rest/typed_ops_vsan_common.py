@@ -76,7 +76,7 @@ VSAN_WHEN_TO_USE: Final = (
     "(vsan.disk.claim, dangerous); wipe disks so vSAN can claim them (vsan.disk.wipe, "
     "destructive); turn data-at-rest or data-in-transit encryption on or off "
     "(vsan.encryption.set, dangerous) and rekey it (vsan.encryption.rekey, dangerous). "
-    "Follow a started vSAN job with vmware.tasks.recent. For the vSAN health tests of a "
+    "Follow a started vSAN job with vmware.task.info. For the vSAN health tests of a "
     "cluster, use vmware.host.vsan_health."
 )
 

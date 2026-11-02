@@ -421,7 +421,7 @@ async def _wipe_secure(
             guidance=(
                 f"the secure wipe task {outcome.task} did not end within "
                 f"{int(_TASK_TIMEOUT_SECONDS)} seconds; a secure wipe can take hours. Follow "
-                "it with vmware.tasks.recent. Do not start it again."
+                "it with vmware.task.info. Do not start it again."
             ),
         )
         timed_out["issues"] = [_task_timeout_issue("VsanHostWipeDisk", outcome.task)]

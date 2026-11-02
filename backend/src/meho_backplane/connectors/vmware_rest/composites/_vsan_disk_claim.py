@@ -176,7 +176,7 @@ async def _claim_result(
             guidance=(
                 f"the claim task {outcome.task} did not end within "
                 f"{int(_TASK_TIMEOUT_SECONDS)} seconds; it may still end. Follow it with "
-                "vmware.tasks.recent, then call this operation again: it sends nothing when "
+                "vmware.task.info, then call this operation again: it sends nothing when "
                 "vSAN already uses the disks."
             ),
         )

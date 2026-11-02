@@ -5431,16 +5431,18 @@ approval.
 
 | Operation | Risk | Vendor call | What it returns | Versions |
 |---|---|---|---|---|
-| `vmware.composite.vsan.cluster.configure` | `dangerous`, waits for approval | vSAN `VsanVcClusterConfigSystem.VsanClusterReconfig` (`vsanClusterConfig`, `dataEfficiencyConfig`, `perfsvcConfig`) | `accepted` with the vCenter task id and the status read (`vmware.tasks.recent`); `already_running` with the running vSAN job | 8.0, 9.x |
+| `vmware.composite.vsan.cluster.configure` | `dangerous`, waits for approval | vSAN `VsanVcClusterConfigSystem.VsanClusterReconfig` (`vsanClusterConfig`, `dataEfficiencyConfig`, `perfsvcConfig`) | `accepted` with the vCenter task id and the status read (`vmware.task.info` with that id); `already_running` with the running vSAN job | 8.0, 9.x |
 | `vmware.composite.vsan.disk.claim` | `dangerous`, waits for approval | vSAN `VimClusterVsanVcDiskManagementSystem.VsanAddStoragePoolDisk` (ESA) or `.InitializeDiskMappings` (OSA); VIM `HostVsanSystem.QueryDisksForVsan` | `claimed` with one row per disk, read again after the task | 8.0, 9.x |
 | `vmware.composite.vsan.disk.wipe` | `destructive`, a person only, after a preview | VIM `HostStorageSystem.UpdateDiskPartitions` (empty partition spec); vSAN `VsanSystemEx.VsanHostWipeDisk` and `.VsanHostQueryWipeDisk` (secure wipe) | `wiped` with one step per disk and the disks read again | 8.0, 9.x |
-| `vmware.composite.vsan.encryption.set` | `dangerous`, waits for approval | vSAN `VsanVcClusterConfigSystem.VsanClusterReconfig` (`dataEncryptionConfig`, `dataInTransitEncryptionConfig`) | like `vsan.cluster.configure` | 8.0, 9.x |
+| `vmware.composite.vsan.encryption.set` | `dangerous`, waits for approval | vSAN `VsanVcClusterConfigSystem.VsanClusterReconfig` (`dataEncryptionConfig`, `dataInTransitEncryptionConfig`) | like `vsan.cluster.configure`; `invalid_request` when data-at-rest encryption is turned on without `key_provider` | 8.0, 9.x |
 | `vmware.composite.vsan.encryption.rekey` | `dangerous`, waits for approval | vSAN `VsanVcClusterConfigSystem.VsanEncryptedClusterRekey_Task` (`deepRekey`) | `rekeyed` when the task ended well; `timeout` with the task id | 8.0, 9.x |
 
 "8.0, 9.x" means vCenter 8.0 U1, U2 and U3, and 9.0, 9.1 and 9.1.1. Every
 call is in the vendor files of these versions, so no version check is
-needed. All five are registered on `vmware-rest-8.0` and `vmware-rest-9.0`,
-in the group `vsan`.
+needed. All five are registered on `vmware-rest-8.0` and `vmware-rest-9.0`.
+The rows are in `composites/_vsan_ops.py` (`COMPOSITES`, with the preview
+and the child calls of each change). They share the group `vmware-vsan` and
+its text with the six vSAN reads (`typed_ops_vsan_common.py`).
 
 **How the vSAN calls are sent.** Each vSAN method is a `VsanMethod` constant
 in `composites/_vsan_config_common.py` and goes through
@@ -5462,8 +5464,8 @@ take a long time: a space-efficiency or encryption change writes all data
 again. So these two answer as soon as vSAN accepted the job:
 
 - The answer says `accepted`, gives the vCenter task id, and names the status
-  read `vmware.tasks.recent`. The caller finds the task id in its list. It
-  never says the work is done.
+  read: `vmware.task.info` with that task id (`status_read: {op_id, params:
+  {task}}`). It never says the work is done.
 - Before a start, the operation reads the cluster's recent tasks. When a
   vSAN job (a task whose `descriptionId` or `name` has "vsan" in it) is
   queued or running, it returns that task as `already_running` and starts
@@ -5473,10 +5475,17 @@ again. So these two answer as soon as vSAN accepted the job:
   async run handle (when it used `async: true`, see
   `async-governed-dispatch.md`), or `vmware.tasks.recent`. Calling again is
   safe too: a running job comes back as `already_running`.
-- The status read `vmware.tasks.recent` gives the state, the progress and
-  the vendor's error text of each recent task. A later change switches the
-  status read to a read of one task by its id. MEHO keeps no job state
-  between calls.
+- The status read `vmware.task.info` reads the one task by its id, so a
+  long vSAN job is found also when it is no longer among the recent tasks
+  of vCenter. It gives the state, the progress and the vendor's error text.
+  When vCenter does not answer, it says `not_reachable` with the task id
+  and the time of the read, and the caller reads again later with the same
+  id. MEHO keeps no job state between calls.
+- To turn data-at-rest encryption on, the caller names the key provider
+  (`data_at_rest.key_provider`). vSAN needs it (`kmsProviderId`) and has no
+  default, so a request without it is refused as `invalid_request` before
+  anything is sent. `vmware.vsan.cluster.info` shows the key provider a
+  cluster uses.
 
 **Claim.** The handler reads the host and asks vSAN about the named disks
 (`QueryDisksForVsan`). It sends nothing unless every disk is `eligible`:

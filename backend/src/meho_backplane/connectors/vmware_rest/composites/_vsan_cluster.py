@@ -16,7 +16,7 @@
 The first two are vendor jobs: vSAN can take a long time (a space-efficiency
 or encryption change writes the disks again). They answer ``accepted`` with
 the vCenter task id as soon as vSAN took the job, and name the status read
-(``vmware.tasks.recent``). Before a start they look for a vSAN job that still
+(``vmware.task.info`` with that id). Before a start they look for a vSAN job that still
 runs on the cluster; when they find one they return it (``already_running``)
 and start nothing.
 
@@ -135,7 +135,7 @@ def _answer(
         "cluster_name": cluster_name,
         "requested": requested,
         "task": task,
-        "status_read": status_read() if task is not None else None,
+        "status_read": status_read(task) if task is not None else None,
         "guidance": guidance,
     }
 
@@ -190,7 +190,7 @@ def build_encryption_spec(params: dict[str, Any]) -> tuple[dict[str, Any], dict[
             VIM_TYPE_NAME_KEY: "VsanDataEncryptionConfig",
             "encryptionEnabled": bool(at_rest["enabled"]),
         }
-        if at_rest.get("key_provider"):
+        if at_rest.get("key_provider") is not None:
             config["kmsProviderId"] = {
                 VIM_TYPE_NAME_KEY: "KeyProviderId",
                 "id": at_rest["key_provider"],
@@ -222,6 +222,25 @@ def _configure_problem(params: dict[str, Any]) -> str | None:
             "esa: true needs vsan_enabled: true in the same call "
             "(ESA is chosen when vSAN is turned on)"
         )
+    return None
+
+
+def _encryption_problem(params: dict[str, Any]) -> str | None:
+    """Why an encryption request cannot be sent, or ``None``.
+
+    vSAN needs the key provider (``kmsProviderId``) to turn data-at-rest
+    encryption on; there is no default provider. So the request is refused
+    here, before anything is sent, instead of failing in vCenter.
+    """
+    at_rest = params.get("data_at_rest")
+    if isinstance(at_rest, dict) and at_rest.get("enabled") is True:
+        key_provider = at_rest.get("key_provider")
+        if not isinstance(key_provider, str) or not key_provider:
+            return (
+                "data_at_rest.enabled: true needs data_at_rest.key_provider: the name of the "
+                "key provider in vCenter (vmware.vsan.cluster.info shows the one a cluster "
+                "uses). Nothing was sent."
+            )
     return None
 
 
@@ -262,8 +281,8 @@ async def _start_reconfigure(
             task=running,
             guidance=(
                 f"a vSAN job ({running}) already runs on cluster {cluster!r}. Nothing new was "
-                "started. Follow it with vmware.tasks.recent, then read the cluster again and "
-                "decide whether this change is still needed."
+                "started. Follow it with vmware.task.info (status_read), then read the cluster "
+                "again and decide whether this change is still needed."
             ),
         )
     gate, answer = await send_vsan_change(
@@ -290,8 +309,8 @@ async def _start_reconfigure(
         task=task,
         guidance=(
             f"vSAN accepted the {kind} change as task {task}; it is not done yet. Read "
-            "vmware.tasks.recent and find this task id until it ends. Do not start the "
-            "change again."
+            "vmware.task.info with this task id (status_read) until it ends. Do not start "
+            "the change again."
         ),
     )
 
@@ -344,6 +363,14 @@ async def vsan_encryption_set_composite(
     the reconfigure spec.
     """
     spec, requested = build_encryption_spec(params)
+    problem = _encryption_problem(params)
+    if problem is not None:
+        return _answer(
+            STATUS_INVALID_REQUEST,
+            str(params.get("cluster")),
+            requested=requested,
+            guidance=problem,
+        )
     return await _start_reconfigure(
         connector,
         target,
@@ -459,7 +486,8 @@ async def vsan_encryption_rekey_composite(
             guidance=(
                 f"the rekey task {outcome.task} did not end within "
                 f"{int(_TASK_TIMEOUT_SECONDS)} seconds; a deep rekey writes all data again and "
-                "can take hours. Follow it with vmware.tasks.recent. Do not start it again."
+                "can take hours. Follow it with vmware.task.info (status_read). Do not start "
+                "it again."
             ),
         )
         timed_out["issues"] = [_task_timeout_issue("VsanEncryptedClusterRekey_Task", outcome.task)]

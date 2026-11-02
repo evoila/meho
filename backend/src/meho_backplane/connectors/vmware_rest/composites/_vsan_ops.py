@@ -48,13 +48,14 @@ _JOB_LOST_REPLY: Final = (
 
 _JOB_OUTPUT: Final = (
     "{status: accepted|already_running|not_found|invalid_request, cluster, cluster_name, "
-    "requested, task, status_read: {op_id: vmware.tasks.recent, params: {}}, guidance}. "
+    "requested, task, status_read: {op_id: vmware.task.info, params: {task}}, guidance}. "
     "accepted means vSAN took the job; it does not mean the work is done."
 )
 
 _JOB_NEXT: Final = (
-    "Call status_read (vmware.tasks.recent) and find the task id in the list until its state "
-    "is success or error. Then read the vSAN health (vmware.host.vsan_health)."
+    "Call status_read (vmware.task.info with the task id) until its state is success or "
+    "error; not_reachable means vCenter did not answer, read again later with the same task "
+    "id. Then read the vSAN health (vmware.host.vsan_health)."
 )
 
 _CONFIGURE_LLM: Final[dict[str, Any]] = {
@@ -83,12 +84,16 @@ _ENCRYPTION_SET_LLM: Final[dict[str, Any]] = {
         "(the traffic between hosts) on or off for a cluster. " + _JOB_LOST_REPLY
     ),
     "preconditions": (
-        "The target is a vCenter and vSAN is on. For data at rest, vCenter has a key "
-        "provider; name it in key_provider or leave it out for the default one. A change of "
+        "The target is a vCenter and vSAN is on. To turn data-at-rest encryption on, name "
+        "the key provider in key_provider: vSAN needs it, there is no default. "
+        "vmware.vsan.cluster.info shows the key provider a cluster uses now. A change of "
         "data-at-rest encryption writes all data again. The call waits for approval."
     ),
     "parameter_hints": {
-        "data_at_rest": "{enabled, key_provider?, erase_disks_before_use?}.",
+        "data_at_rest": (
+            "{enabled, key_provider, erase_disks_before_use?}; key_provider is required "
+            "when enabled is true."
+        ),
         "data_in_transit": "{enabled, rekey_interval_minutes?}.",
     },
     "output_shape": _JOB_OUTPUT,
@@ -111,8 +116,8 @@ _REKEY_LLM: Final[dict[str, Any]] = {
         "error with vCenter's fault type and text."
     ),
     "next_step": (
-        "On timeout follow the task with vmware.tasks.recent; do not start the rekey again. "
-        "Then read the vSAN health (vmware.host.vsan_health)."
+        "On timeout follow the task with status_read (vmware.task.info with the task id); do "
+        "not start the rekey again. Then read the vSAN health (vmware.host.vsan_health)."
     ),
 }
 
@@ -140,7 +145,8 @@ _CLAIM_LLM: Final[dict[str, Any]] = {
     ),
     "next_step": (
         "On claimed, read the vSAN health (vmware.host.vsan_health). On precondition_failed, "
-        "read vsan_state and vsan_error of each disk."
+        "read vsan_state and vsan_error of each disk. On timeout, follow the task with "
+        "vmware.task.info."
     ),
 }
 
@@ -167,7 +173,7 @@ _WIPE_LLM: Final[dict[str, Any]] = {
     "next_step": (
         "On wiped, claim the disks with vsan.disk.claim. On failed_part_way, steps says which "
         "disks were wiped, which failed (with vCenter's error) and which were not touched; "
-        "nothing was undone."
+        "nothing was undone. On timeout, follow the task with vmware.task.info."
     ),
 }
 
@@ -244,7 +250,8 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         description=(
             "Starts one vSAN reconfigure job with the encryption settings and answers accepted "
             "with the vCenter task id; it does not wait. Starts nothing when a vSAN job "
-            "already runs on the cluster."
+            "already runs on the cluster. Turning data-at-rest encryption on needs the key "
+            "provider."
         ),
         parameter_schema=VSAN_ENCRYPTION_SET_PARAMETER_SCHEMA,
         response_schema=VSAN_CLUSTER_JOB_RESPONSE_SCHEMA,

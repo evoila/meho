@@ -5,8 +5,6 @@ package auth
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -677,81 +675,6 @@ func TestNextCheck(t *testing.T) {
 				t.Errorf("got (%v, %v, %v), want (%v, %v, %v)", got, last, ok, tc.want, tc.wantLast, tc.wantOK)
 			}
 		})
-	}
-}
-
-// TestRunDeviceFlowSendsPKCE pins the PKCE contract a Keycloak client
-// with "PKCE challenge method: S256" enforces on the device flow: the
-// device request carries an S256 code_challenge, and every token poll
-// carries the matching code_verifier.
-func TestRunDeviceFlowSendsPKCE(t *testing.T) {
-	var (
-		challenge string
-		verifiers []string
-	)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/auth/device":
-			if got := r.PostForm.Get("code_challenge_method"); got != "S256" {
-				w.WriteHeader(http.StatusBadRequest)
-				_ = json.NewEncoder(w).Encode(map[string]string{
-					"error":             "invalid_request",
-					"error_description": "Missing parameter: code_challenge_method",
-				})
-				return
-			}
-			challenge = r.PostForm.Get("code_challenge")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"device_code":      "dev-code-fixture",
-				"user_code":        "ABCD-EFGH",
-				"verification_uri": "https://kc.example/device",
-				"expires_in":       600,
-				"interval":         1,
-			})
-		case "/token":
-			verifiers = append(verifiers, r.PostForm.Get("code_verifier"))
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"access_token": "at-from-fake-idp",
-				"token_type":   "Bearer",
-				"expires_in":   3600,
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer srv.Close()
-
-	doc := &DiscoveryDocument{
-		Issuer:                      "https://kc.example/realms/meho",
-		DeviceAuthorizationEndpoint: srv.URL + "/auth/device",
-		TokenEndpoint:               srv.URL + "/token",
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if _, err := RunDeviceFlow(ctx, doc, "meho-cli", DeviceFlowOptions{
-		HTTPClient: srv.Client(),
-		Prompter:   func(context.Context, *oauth2.DeviceAuthResponse) error { return nil },
-	}); err != nil {
-		t.Fatalf("RunDeviceFlow: %v", err)
-	}
-
-	if challenge == "" {
-		t.Fatal("device request carried no code_challenge")
-	}
-	if len(verifiers) == 0 || verifiers[0] == "" {
-		t.Fatalf("token request carried no code_verifier: %q", verifiers)
-	}
-	sum := sha256.Sum256([]byte(verifiers[0]))
-	if want := base64.RawURLEncoding.EncodeToString(sum[:]); challenge != want {
-		t.Errorf("code_challenge %q does not match S256(code_verifier) %q", challenge, want)
 	}
 }
 

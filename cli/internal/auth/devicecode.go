@@ -283,15 +283,7 @@ func RunDeviceFlow(ctx context.Context, doc *DiscoveryDocument, clientID string,
 		Scopes: scopes,
 	}
 
-	// PKCE (S256) rides on the device flow too. RFC 8628 doesn't
-	// define it, but Keycloak enforces it on the device endpoint when
-	// the client's "PKCE challenge method" is set — without it the
-	// realm answers `invalid_request: Missing parameter:
-	// code_challenge_method`. IdPs that don't require it ignore the
-	// extra parameters, so we always send them.
-	verifier := oauth2.GenerateVerifier()
-
-	deviceResp, err := cfg.DeviceAuth(flowCtx, oauth2.S256ChallengeOption(verifier))
+	deviceResp, err := cfg.DeviceAuth(flowCtx)
 	if err != nil {
 		return nil, fmt.Errorf("meho: device auth initiation: %w", err)
 	}
@@ -300,7 +292,7 @@ func RunDeviceFlow(ctx context.Context, doc *DiscoveryDocument, clientID string,
 		return nil, err
 	}
 
-	tok, err := pollDeviceToken(ctx, httpClient, doc.TokenEndpoint, clientID, deviceResp, verifier)
+	tok, err := pollDeviceToken(ctx, httpClient, doc.TokenEndpoint, clientID, deviceResp)
 	if err != nil {
 		return nil, classifyDeviceTokenError(opts.ParentContext, err)
 	}
@@ -349,14 +341,13 @@ var errDeviceCodeExpired = errors.New("meho: device code expired before authoris
 // longer). The last check before the code's end is planned ahead
 // (see nextCheck) so that it, too, keeps the full wait to the check
 // before it; the IdP answers slow_down to a check that comes sooner,
-// which would hide an approval. Every check carries the PKCE
-// code_verifier that matches the device request's code_challenge.
+// which would hide an approval.
 //
 // The code's end is also a deadline for the sleeps and the requests,
 // as it was in the oauth2 package's own loop. An answer that stalls
 // past the end stops the login with the "device code expired"
 // message, not with the outer PollTimeout message.
-func pollDeviceToken(ctx context.Context, httpClient *http.Client, tokenURL, clientID string, da *oauth2.DeviceAuthResponse, verifier string) (*oauth2.Token, error) {
+func pollDeviceToken(ctx context.Context, httpClient *http.Client, tokenURL, clientID string, da *oauth2.DeviceAuthResponse) (*oauth2.Token, error) {
 	wait := defaultPollInterval
 	if da.Interval > 0 {
 		wait = time.Duration(da.Interval) * time.Second
@@ -374,10 +365,9 @@ func pollDeviceToken(ctx context.Context, httpClient *http.Client, tokenURL, cli
 	codeEnded := func() bool { return pollCtx.Err() != nil && ctx.Err() == nil }
 
 	form := url.Values{
-		"grant_type":    {deviceCodeGrantType},
-		"device_code":   {da.DeviceCode},
-		"client_id":     {clientID},
-		"code_verifier": {verifier},
+		"grant_type":  {deviceCodeGrantType},
+		"device_code": {da.DeviceCode},
+		"client_id":   {clientID},
 	}
 
 	first := true

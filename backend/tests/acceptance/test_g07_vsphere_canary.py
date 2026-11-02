@@ -165,7 +165,13 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.registry import all_connectors_v2, clear_registry
+from meho_backplane.connectors import registry as connector_registry
+from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.registry import (
+    all_connectors,
+    all_connectors_v2,
+    clear_registry,
+)
 from meho_backplane.db import engine as engine_module
 from meho_backplane.db.engine import (
     create_engine_for_url,
@@ -749,6 +755,47 @@ def test_stub_taxonomy_passes_production_proposal_validation() -> None:
     assert not unknown, f"_PATH_RULES targets not in _PROPOSE_RESPONSE: {sorted(unknown)}"
 
 
+class _RegistryProbeConnector(Connector):
+    """Stand-in registry entry for :func:`test_ingest_bracket_puts_registry_back`."""
+
+    product = "canary-registry-probe"
+
+    async def fingerprint(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    async def probe(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+
+def test_ingest_bracket_puts_registry_back() -> None:
+    """The shared-ingest bracket empties the registry, then puts back what it found.
+
+    Fixture-less (no DB, no spec shelf), like the stub-taxonomy test
+    above, so it runs in every unit lane. The module-scoped
+    :func:`_canary_corpus` ingest runs before the per-test registry net
+    in :mod:`tests.conftest` takes its snapshot, so the ingest must put
+    the registry back itself. When it only cleared the registry on the
+    way out, every later test file in the same process that reads the
+    registry without reloading its connector package failed at setup
+    with "not registered" (NSX, VCF fleet, VCF Operations, SDDC
+    Manager). Registrations made inside the bracket (the ingest's
+    auto-shim) must not survive it either.
+    """
+    key_found = ("canary-registry-probe", "1.0", "canary-registry-probe-rest")
+    key_inside = ("canary-registry-probe", "2.0", "canary-registry-probe-rest")
+    connector_registry._REGISTRY["canary-registry-probe"] = _RegistryProbeConnector
+    connector_registry._REGISTRY_V2[key_found] = _RegistryProbeConnector
+
+    copy = _clear_connector_registry_keeping_copy()
+    assert all_connectors() == {}
+    assert all_connectors_v2() == {}
+    connector_registry._REGISTRY_V2[key_inside] = _RegistryProbeConnector
+    _restore_connector_registry(copy)
+
+    assert all_connectors() == {"canary-registry-probe": _RegistryProbeConnector}
+    assert all_connectors_v2() == {key_found: _RegistryProbeConnector}
+
+
 # ---------------------------------------------------------------------------
 # Fixtures (test-local + re-exports from tests/integration/conftest.py)
 # ---------------------------------------------------------------------------
@@ -980,6 +1027,47 @@ def _structlog_warning_floor() -> Iterator[None]:
         structlog.configure(**saved_config)
 
 
+#: A copy of both connector registry layers (v1 keyed by product, v2
+#: keyed by the ``(product, version, impl_id)`` triple).
+_ConnectorRegistryCopy = tuple[
+    dict[str, type[Connector]],
+    dict[tuple[str, str, str], type[Connector]],
+]
+
+
+def _clear_connector_registry_keeping_copy() -> _ConnectorRegistryCopy:
+    """Empty both connector registry layers and return a copy of what they held.
+
+    Pair with :func:`_restore_connector_registry`. The module-scoped
+    :func:`_canary_corpus` ingest runs before the per-test
+    ``_isolate_global_registries`` net in :mod:`tests.conftest` takes
+    its snapshot. If the ingest only cleared the registry on its way
+    out, that snapshot would be empty, and the net would put an empty
+    registry back after every later test in the same process. A test
+    file that reads the registry without reloading its connector
+    package (``tests/test_connectors_nsx_e2e.py`` and its siblings)
+    then fails at setup with "not registered". Connector packages
+    register themselves on first import only, so a cleared registry
+    never refills by itself.
+    """
+    copy = (dict(connector_registry._REGISTRY), dict(connector_registry._REGISTRY_V2))
+    clear_registry()
+    return copy
+
+
+def _restore_connector_registry(copy: _ConnectorRegistryCopy) -> None:
+    """Put the copied registry contents back; drop everything registered since.
+
+    Restores the dict *contents*, not the bindings: other modules hold
+    the same dict objects (the rule the root conftest net follows).
+    """
+    registry_v1, registry_v2 = copy
+    connector_registry._REGISTRY.clear()
+    connector_registry._REGISTRY.update(registry_v1)
+    connector_registry._REGISTRY_V2.clear()
+    connector_registry._REGISTRY_V2.update(registry_v2)
+
+
 async def _ingest_canary_corpus(
     async_pg_url: str,
     *,
@@ -1002,16 +1090,20 @@ async def _ingest_canary_corpus(
     the stub client's call log) escapes.
 
     Also brackets the process-global registry/dispatcher caches: the
-    ingest registers the ``GenericRestConnector`` auto-shim, and the
-    per-test autouse ``_reset_module_state`` clears the registry before
-    every test body anyway, so the corpus leaves the globals as it
-    found them. Consequence (load-bearing): the shared-corpus tests run
+    ingest registers the ``GenericRestConnector`` auto-shim into an
+    emptied registry, and on the way out the registry is put back as
+    it was found (:func:`_clear_connector_registry_keeping_copy` /
+    :func:`_restore_connector_registry`), not cleared again -- the
+    per-test net in :mod:`tests.conftest` has not taken its snapshot
+    yet when this module-scoped ingest runs. The per-test autouse
+    ``_reset_module_state`` clears the registry before every test body
+    anyway. Consequence (load-bearing): the shared-corpus tests run
     with an EMPTY v2 registry — they may only exercise DB-backed reads
     (``connector_exists`` short-circuits
     ``_require_dispatchable_connector`` before any registry lookup).
     """
     reset_dispatcher_caches()
-    clear_registry()
+    registry_as_found = _clear_connector_registry_keeping_copy()
     reset_engine_for_testing()
     eng = create_engine_for_url(async_pg_url, pool_size=5, pool_timeout=10.0)
     engine_module._engine = eng
@@ -1092,7 +1184,7 @@ async def _ingest_canary_corpus(
         await dispose_engine()
         reset_engine_for_testing()
         reset_dispatcher_caches()
-        clear_registry()
+        _restore_connector_registry(registry_as_found)
 
 
 @pytest.fixture(scope="module")

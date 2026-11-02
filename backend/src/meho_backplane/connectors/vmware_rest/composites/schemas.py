@@ -165,6 +165,8 @@ __all__ = [
     "VM_DESTROY_RESPONSE_SCHEMA",
     "VM_DEVICE_CDROM_PARAMETER_SCHEMA",
     "VM_DEVICE_CDROM_RESPONSE_SCHEMA",
+    "VM_DISKS_CONSOLIDATE_PARAMETER_SCHEMA",
+    "VM_DISKS_CONSOLIDATE_RESPONSE_SCHEMA",
     "VM_DISK_GROW_PARAMETER_SCHEMA",
     "VM_DISK_GROW_RESPONSE_SCHEMA",
     "VM_FOLDER_MOID_PATTERN",
@@ -185,6 +187,8 @@ __all__ = [
     "VM_RESOURCE_ALLOCATION_SHOW_RESPONSE_SCHEMA",
     "VM_SNAPSHOT_CREATE_PARAMETER_SCHEMA",
     "VM_SNAPSHOT_CREATE_RESPONSE_SCHEMA",
+    "VM_SNAPSHOT_DELETE_ALL_PARAMETER_SCHEMA",
+    "VM_SNAPSHOT_DELETE_ALL_RESPONSE_SCHEMA",
     "VM_SNAPSHOT_DELETE_PARAMETER_SCHEMA",
     "VM_SNAPSHOT_DELETE_RESPONSE_SCHEMA",
     "VM_SNAPSHOT_MOID_PATTERN",
@@ -4382,10 +4386,11 @@ VM_NIC_REPOINT_PARAMETER_SCHEMA: dict[str, Any] = {
 #: ``vmware.composite.vm.device.cdrom`` parameter schema.
 #:
 #: Verb-driven CD-ROM edit: ``remove`` (DELETE the device), ``update``
-#: (PATCH its backing -- requires ``backing``), or ``disconnect`` (POST
-#: ``?action=disconnect``; the device stays but the guest sees it
-#: unplugged). The resolution read surfaces the current backing (the
-#: host-local ISO path the approver needs to see) into the preview.
+#: (PATCH its backing -- requires ``backing``), ``connect`` (POST
+#: ``?action=connect``) or ``disconnect`` (POST ``?action=disconnect``;
+#: the device stays but the guest sees it unplugged). The resolution read
+#: surfaces the current backing (the host-local ISO path the approver needs
+#: to see) into the preview.
 VM_DEVICE_CDROM_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -4401,12 +4406,13 @@ VM_DEVICE_CDROM_PARAMETER_SCHEMA: dict[str, Any] = {
         },
         "action": {
             "type": "string",
-            "enum": ["remove", "update", "disconnect"],
+            "enum": ["remove", "update", "connect", "disconnect"],
             "description": (
                 "``remove`` -> ``DELETE:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}``; "
                 "``update`` -> ``PATCH`` the backing (requires ``backing``); "
-                "``disconnect`` -> ``POST ?action=disconnect`` (the device "
-                "stays, the guest sees it unplugged)."
+                "``connect`` -> ``POST ?action=connect`` (plug the drive in, VM "
+                "powered on); ``disconnect`` -> ``POST ?action=disconnect`` (the "
+                "device stays, the guest sees it unplugged)."
             ),
         },
         "backing": {
@@ -4445,7 +4451,7 @@ VM_DEVICE_CDROM_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "New CD-ROM backing spec when ``action='update'`` (e.g. "
                 '``{"type": "CLIENT_DEVICE"}`` to un-pin a host-local '
-                "ISO backing). Ignored for ``remove`` / ``disconnect``."
+                "ISO backing). Ignored for ``remove`` / ``connect`` / ``disconnect``."
             ),
         },
     },
@@ -4613,10 +4619,18 @@ VM_DEVICE_CDROM_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "status": {
             "type": "string",
-            "enum": ["removed", "updated", "disconnected", "invalid_request", "result_unknown"],
+            "enum": [
+                "removed",
+                "updated",
+                "connected",
+                "disconnected",
+                "invalid_request",
+                "result_unknown",
+            ],
             "description": (
                 "``'removed'`` -- the device was deleted; ``'updated'`` -- "
-                "its backing was PATCHed; ``'disconnected'`` -- the device "
+                "its backing was PATCHed; ``'connected'`` -- the device was "
+                "connected; ``'disconnected'`` -- the device "
                 "was disconnected in-guest; ``'invalid_request'`` -- "
                 "``action='update'`` without a ``backing`` object (no write "
                 "issued); ``'result_unknown'`` -- the change timed out and "
@@ -4627,7 +4641,7 @@ VM_DEVICE_CDROM_RESPONSE_SCHEMA: dict[str, Any] = {
         "cdrom": {"type": "string", "description": "CD-ROM device id acted on."},
         "action": {
             "type": "string",
-            "enum": ["remove", "update", "disconnect"],
+            "enum": ["remove", "update", "connect", "disconnect"],
             "description": "The verb requested.",
         },
         "current_backing": {
@@ -5770,7 +5784,8 @@ HOST_SERVICE_CONTROL_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Host service key (``HostService.key``). Enforced server-side "
                 "against a curated allowlist (``TSM-SSH`` / ``TSM`` / ``ntpd`` / "
-                "``ptpd``); any other name is refused with "
+                "``ptpd`` / ``snmpd`` / ``sfcbd-watchdog`` / ``slpd``); any other name "
+                "is refused with "
                 "``status='service_not_allowed'`` before any resolution or write."
             ),
         },
@@ -6007,6 +6022,21 @@ HOST_SERVICE_CONTROL_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": {"type": "string"},
             "description": "The curated allowlist, echoed on ``service_not_allowed``.",
+        },
+        "service_state": {
+            "type": ["object", "null"],
+            "description": (
+                "The service as read back after the change; null when the read failed."
+            ),
+            "properties": {
+                "key": {"type": "string", "description": "Service key."},
+                "label": {"type": ["string", "null"], "description": "Display name."},
+                "running": {"type": ["boolean", "null"], "description": "Runs now."},
+                "policy": {
+                    "type": ["string", "null"],
+                    "description": "Start policy: on, automatic or off.",
+                },
+            },
         },
         "candidate_hosts": {
             "type": "array",
@@ -7619,8 +7649,8 @@ NAMESPACE_STATUS_RESPONSE_SCHEMA: dict[str, Any] = {
 #: Create a SUBSCRIBED content library subscribed to a remote publisher (the
 #: TKr/VKr image source for a vSphere Supervisor). The subscription
 #: ``password`` may be secret; it rides the request body but never a preview /
-#: broadcast / audit-hash surface (the op is pinned into
-#: ``_CREDENTIAL_WRITE_OPS`` and carries a bespoke identity-only preview).
+#: broadcast / audit-hash surface (the op is declared ``credential_write`` in
+#: ``vmware_rest/op_classes.py`` and carries a bespoke identity-only preview).
 CONTENT_LIBRARY_SUBSCRIBED_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -9436,3 +9466,117 @@ VM_SNAPSHOT_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
         },
     },
 )
+
+
+#: ``vmware.composite.vm.snapshot.delete_all`` parameter schema.
+VM_SNAPSHOT_DELETE_ALL_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Moid of the VM whose snapshots all go, in the shape 'vm-<number>' "
+                "(vmware.vm.info finds it from the name). The call checks the shape."
+            ),
+        },
+    },
+    "required": ["vm"],
+    "additionalProperties": False,
+    "examples": [{"vm": "<vm-id>"}],
+}
+
+#: ``vmware.composite.vm.snapshot.delete_all`` response schema.
+VM_SNAPSHOT_DELETE_ALL_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
+    ["deleted", "unchanged", "invalid_request", "still_present", "timeout"],
+    "``'deleted'`` -- the delete ran and the VM has no snapshots left; "
+    "``'unchanged'`` -- the VM had no snapshots, nothing was written; "
+    "``'invalid_request'`` -- no VM with this moid, or the moid has the wrong shape; "
+    "``'still_present'`` -- the task ended but snapshots still read back; "
+    "``'timeout'`` -- RemoveAllSnapshots_Task outran the poll bound, it may still finish. A "
+    "vSphere fault is not a status: it raises (``connector_error``, audited as failed).",
+    object_properties={
+        "kind": {"type": "string", "description": "Always ``vm_snapshots``."},
+        "vm": {"type": "string", "description": "VM moid."},
+        "vm_name": {"type": ["string", "null"], "description": "VM name."},
+        "snapshot_count": {
+            "type": "integer",
+            "description": "Number of snapshots the VM had before the delete.",
+        },
+        "snapshots_left": {
+            "type": "integer",
+            "description": "Number of snapshots read back after the task.",
+        },
+    },
+)
+
+#: ``vmware.composite.vm.disks.consolidate`` parameter schema.
+VM_DISKS_CONSOLIDATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Moid of the VM whose disks to consolidate, in the shape 'vm-<number>' "
+                "(vmware.vm.info finds it from the name). The call checks the shape."
+            ),
+        },
+    },
+    "required": ["vm"],
+    "additionalProperties": False,
+    "examples": [{"vm": "<vm-id>"}],
+}
+
+#: ``vmware.composite.vm.disks.consolidate`` response schema.
+VM_DISKS_CONSOLIDATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "consolidated",
+                "unchanged",
+                "unknown",
+                "still_needed",
+                "unverified",
+                "not_found",
+                "invalid_request",
+                "timeout",
+            ],
+            "description": (
+                "``'consolidated'`` -- the task ran and vCenter reports the flag as false; "
+                "``'unchanged'`` -- the VM did not need it, nothing was written; "
+                "``'unknown'`` -- vCenter did not report the flag, nothing was written; "
+                "``'still_needed'`` -- the task ended but vCenter still asks for it; "
+                "``'unverified'`` -- the task ended but vCenter did not report the flag; "
+                "``'not_found'`` -- no VM with this moid; ``'invalid_request'`` -- the moid "
+                "has the wrong shape; ``'timeout'`` -- the task outran the poll bound."
+            ),
+        },
+        "vm": {"type": "string", "description": "VM moid."},
+        "vm_name": {"type": ["string", "null"], "description": "VM name."},
+        "consolidation_needed": {
+            "type": ["boolean", "null"],
+            "description": (
+                "vCenter's runtime.consolidationNeeded from the last read; null when vCenter "
+                "did not report it."
+            ),
+        },
+        "task": {"type": ["string", "null"], "description": "vim Task moid, when one ran."},
+        "task_state": {
+            "type": ["string", "null"],
+            "description": "Terminal task state when a task ran.",
+        },
+        "guidance": {"type": ["string", "null"], "description": "What to do next, if anything."},
+        "issues": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": (
+                "Error details, e.g. a task that did not finish in time, or a warning when "
+                "the result could not be confirmed."
+            ),
+        },
+    },
+    "required": ["status", "vm"],
+}

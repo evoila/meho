@@ -42,10 +42,21 @@ documentation that a running HCX Manager serves, so the vendor API files
 can be pinned. The other reads (``hcx.about``, site pairings, service
 meshes, appliances, the service mesh diagnostics, jobs, alerts and the
 inventory) live in :mod:`meho_backplane.connectors.hcx.typed_reads`.
+The profile changes live in :mod:`meho_backplane.connectors.hcx.profile_writes`,
+the site pairing change and the certificate trust in
+:mod:`meho_backplane.connectors.hcx.site_pairing_writes`.
 The service mesh changes and the task read ``hcx.task.get`` live in
 :mod:`meho_backplane.connectors.hcx.service_mesh_writes`. The network
 extension operations (list, extend, unextend, Mobility Optimized
 Networking) live in :mod:`meho_backplane.connectors.hcx.network_extension`.
+The migration operations (validate, start, list, cancel, mobility groups
+and the switchover window) live in
+:mod:`meho_backplane.connectors.hcx.migrations`.
+The Network Extension HA group operations live in
+:mod:`meho_backplane.connectors.hcx.ha_groups`.
+The HCX Manager setup operations (``hcx.manager.*``, appliance management
+API on port 9443) come from the mixin
+:class:`~meho_backplane.connectors.hcx.manager_setup_handlers.HcxManagerSetupOps`.
 
 Traces
 ------
@@ -68,9 +79,11 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vcf_auth import session_establish_auth_error
 from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.hcx.manager_setup_handlers import HcxManagerSetupOps
 from meho_backplane.connectors.hcx.session import (
     HcxSessionLoader,
     HcxTargetLike,
@@ -155,7 +168,7 @@ def parse_manager_version(payload: Any) -> HcxManagerVersion:
     )
 
 
-class HcxConnector(HttpConnector):
+class HcxConnector(HcxManagerSetupOps, HttpConnector):
     """HCX REST connector with session-token auth (``x-hm-authorization``)."""
 
     product = "hcx"
@@ -167,6 +180,8 @@ class HcxConnector(HttpConnector):
     def __init__(self, *, session_loader: HcxSessionLoader | None = None) -> None:
         super().__init__()
         self._session_tokens: dict[tuple[str, ...], str] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._session_lock = asyncio.Lock()
         self._session_loader: HcxSessionLoader = (
             session_loader if session_loader is not None else load_session_credentials_from_vault
@@ -194,8 +209,13 @@ class HcxConnector(HttpConnector):
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
+                # The caller's own Vault read, once per caller and target.
+                await self._readers.ensure_read(
+                    target, operator, lambda: self._session_loader(target, operator)
+                )
                 return cached
             creds = await self._session_loader(target, operator)
+            self._readers.record(target, operator)
             try:
                 body = {"username": creds["username"], "password": creds["password"]}
             except KeyError as exc:
@@ -246,6 +266,17 @@ class HcxConnector(HttpConnector):
             drop_rejected_token(
                 self._session_tokens, cache_key, rejected, lambda token: {_AUTH_HEADER: token}
             )
+
+    async def invalidate_credentials(self, target: HcxTargetLike) -> None:
+        """Drop the session of *target* and forget who has read its secret.
+
+        Called after a failed login and after a target change. The next call
+        of every caller reads the secret from Vault again, under their own
+        login, and logs in with what it finds.
+        """
+        async with self._session_lock:
+            self._session_tokens.pop(credential_cache_key(target), None)
+            self._readers.forget(target)
 
     async def manager_version(self, target: HcxTargetLike, operator: Operator) -> HcxManagerVersion:
         """Read the HCX Manager version. Never raises: a failure is named in ``error``."""
@@ -440,6 +471,38 @@ class HcxConnector(HttpConnector):
 
         return await hcx_inventory_network_list_impl(self, operator, target, params)
 
+    async def profile_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.profile.list`` shim."""
+        from meho_backplane.connectors.hcx.profile_writes import hcx_profile_list_impl
+
+        return await hcx_profile_list_impl(self, operator, target, params)
+
+    async def profile_set(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.profile.set`` shim."""
+        from meho_backplane.connectors.hcx.profile_writes import hcx_profile_set_impl
+
+        return await hcx_profile_set_impl(self, operator, target, params)
+
+    async def site_pairing_set(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.site_pairing.set`` shim."""
+        from meho_backplane.connectors.hcx.site_pairing_writes import hcx_site_pairing_set_impl
+
+        return await hcx_site_pairing_set_impl(self, operator, target, params)
+
+    async def certificate_trust(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.certificate.trust`` shim."""
+        from meho_backplane.connectors.hcx.site_pairing_writes import hcx_certificate_trust_impl
+
+        return await hcx_certificate_trust_impl(self, operator, target, params)
+
     async def service_mesh_create(
         self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -520,6 +583,78 @@ class HcxConnector(HttpConnector):
 
         return await hcx_network_extension_mon_set_impl(self, operator, target, params)
 
+    async def migration_validate(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.migration.validate`` shim."""
+        from meho_backplane.connectors.hcx.migrations import hcx_migration_validate_impl
+
+        return await hcx_migration_validate_impl(self, operator, target, params)
+
+    async def migration_start(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.migration.start`` shim."""
+        from meho_backplane.connectors.hcx.migrations import hcx_migration_start_impl
+
+        return await hcx_migration_start_impl(self, operator, target, params)
+
+    async def migration_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.migration.list`` shim."""
+        from meho_backplane.connectors.hcx.migrations import hcx_migration_list_impl
+
+        return await hcx_migration_list_impl(self, operator, target, params)
+
+    async def migration_cancel(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.migration.cancel`` shim."""
+        from meho_backplane.connectors.hcx.migrations import hcx_migration_cancel_impl
+
+        return await hcx_migration_cancel_impl(self, operator, target, params)
+
+    async def mobility_group_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.mobility_group.list`` shim."""
+        from meho_backplane.connectors.hcx.migrations import hcx_mobility_group_list_impl
+
+        return await hcx_mobility_group_list_impl(self, operator, target, params)
+
+    async def mobility_group_set(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.mobility_group.set`` shim."""
+        from meho_backplane.connectors.hcx.migrations import hcx_mobility_group_set_impl
+
+        return await hcx_mobility_group_set_impl(self, operator, target, params)
+
+    async def migration_schedule(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.migration.schedule`` shim."""
+        from meho_backplane.connectors.hcx.migrations import hcx_migration_schedule_impl
+
+        return await hcx_migration_schedule_impl(self, operator, target, params)
+
+    async def network_extension_ha_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.network_extension.ha.list`` shim."""
+        from meho_backplane.connectors.hcx.ha_groups import hcx_network_extension_ha_list_impl
+
+        return await hcx_network_extension_ha_list_impl(self, operator, target, params)
+
+    async def network_extension_ha_set(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.network_extension.ha.set`` shim."""
+        from meho_backplane.connectors.hcx.ha_groups import hcx_network_extension_ha_set_impl
+
+        return await hcx_network_extension_ha_set_impl(self, operator, target, params)
+
     def trace_response_body(self, response: httpx.Response) -> Any:
         """Mask the secret-named fields of a vendor answer before the trace records it.
 
@@ -541,4 +676,5 @@ class HcxConnector(HttpConnector):
         """Clear cached session tokens, then tear down the httpx pool."""
         async with self._session_lock:
             self._session_tokens.clear()
+            self._readers.clear()
         await super().aclose()

@@ -28,8 +28,8 @@ A missing CronJob raises
 before anything is created.
 
 The params and the result hold only names, so the op is not a credential
-op and is not pinned in
-:data:`~meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS`. The
+op and is not declared ``credential_write`` in
+``kubernetes/op_classes.py``. The
 approval preview (``ops_write_preview.py``) reads the CronJob and shows its
 schedule, flags, running Jobs and containers; env var names, never values.
 
@@ -61,6 +61,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CRONJOB_OPS",
     "INSTANTIATE_ANNOTATION",
+    "OPS",
     "build_job_from_cronjob",
     "k8s_cronjob_run",
     "model_to_json",
@@ -259,3 +260,6 @@ CRONJOB_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=K8S_CRONJOB_RUN_LLM_INSTRUCTIONS,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = CRONJOB_OPS

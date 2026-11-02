@@ -83,7 +83,19 @@ surface: ``vcfa.vra8.project.list`` / ``.deployment.list`` / ``.deployment.get``
 ``source_kind="typed"`` (:mod:`.typed_ops` / :mod:`.typed_reads`, per-op
 ``llm_instructions`` in :mod:`._llm_instructions`) so they dispatch on a fresh boot
 with **zero catalog ingest**. Set-shaped results are reduced to a JSONFlux handle by
-the dispatcher. A write surface is deliberately out of scope for this read core.
+the dispatcher.
+
+The infrastructure ops (group ``vcfa-vra8-infra``: cloud accounts, cloud zones,
+flavor, network and storage profiles, project create and members) are written once
+for Aria Automation 8 and VCF Automation 9 in
+:mod:`meho_backplane.connectors.vcf_automation.infra_ops`; the shims below call
+:mod:`meho_backplane.connectors.vcf_automation._infra` and ``._infra_changes``. Every
+change waits for approval.
+
+The day-2 ops (group ``vcfa-vra8-day2``: day-2 actions, lease, delete, machines and
+disks) are written once for Aria Automation 8 and VCF Automation 9 in
+:mod:`meho_backplane.connectors.vcf_automation.day2_ops`; the shims below call
+:mod:`meho_backplane.connectors.vcf_automation._day2`. Every change waits for approval.
 
 One more read, ``vcfa.vra8.api_file.get`` (:mod:`.api_file`, group ``vcfa-vra8-api-files``),
 reads one API description page or file the appliance serves, so the 8.18 files can be
@@ -94,6 +106,7 @@ pinned with their size, SHA-256 and the build the Orchestrator reports
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -103,6 +116,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import is_acceptable_auth_model
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -112,6 +126,8 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.vmware_shared.vra_governance import VraGovCalls
+from meho_backplane.connectors.vmware_shared.vra_handlers import VraSharedHandlers
 from meho_backplane.connectors.vra8._paths import _ABOUT_PATH
 from meho_backplane.connectors.vra8.session import (
     Vra8CredentialsLoader,
@@ -144,7 +160,7 @@ def _session_cache_key(target: Any) -> tuple[str, ...]:
     return credential_cache_key(target, domain)
 
 
-class Vra8Connector(HttpConnector):
+class Vra8Connector(HttpConnector, VraSharedHandlers):
     """vRealize Automation 8.x REST connector — two-step bearer session mint.
 
     Minted bearers cached in :attr:`_session_tokens` per credential
@@ -186,6 +202,8 @@ class Vra8Connector(HttpConnector):
         # single lock serialises concurrent first-use callers so they don't
         # double-run the two-step login.
         self._session_tokens: dict[tuple[str, ...], str] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._session_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
@@ -235,8 +253,13 @@ class Vra8Connector(HttpConnector):
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
+                # The caller's own Vault read, once per caller and target.
+                await self._readers.ensure_read(
+                    target, operator, lambda: self._credentials_loader(target, operator)
+                )
                 return cached
             creds = await self._credentials_loader(target, operator)
+            self._readers.record(target, operator)
             client = await self._http_client(target)
             # Lazy import so pure fingerprint/probe unit tests don't pay the _auth
             # module's import; the login helper owns the two-step wire POSTs.
@@ -457,6 +480,36 @@ class Vra8Connector(HttpConnector):
 
         return await vra8_about_impl(self, operator, target, params)
 
+    def vra_gov_calls(self, operator: Operator, target: Any) -> VraGovCalls:
+        """The bearer GET and send of the shared governance ops.
+
+        The approval, policy, ABX and subscription handlers are inherited from
+        :class:`~meho_backplane.connectors.vmware_shared.vra_handlers.VraSharedHandlers`;
+        the metadata is in :mod:`.governance_ops`.
+        """
+
+        async def get(path: str, query: Mapping[str, Any] | None) -> dict[str, Any]:
+            params = dict(query) if query is not None else None
+            return await self._vra_get(target, path, operator=operator, params=params)
+
+        async def send(
+            method: str,
+            path: str,
+            query: Mapping[str, Any] | None,
+            body: Mapping[str, Any] | None,
+        ) -> Any:
+            return await self._post_json(
+                target,
+                path,
+                operator=operator,
+                verb=method,
+                params=dict(query) if query is not None else None,
+                json=dict(body) if body is not None else None,
+                extra_headers={"Accept": _JSON_ACCEPT},
+            )
+
+        return VraGovCalls(get=get, send=send, prefix="vcfa.vra8")
+
     async def api_file_get(
         self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -469,6 +522,190 @@ class Vra8Connector(HttpConnector):
         from meho_backplane.connectors.vra8.api_file import vra8_api_file_get_impl
 
         return await vra8_api_file_get_impl(self, operator, target, params)
+
+    # ------------------------------------------------------------------
+    # Infrastructure: cloud accounts, cloud zones, profiles, project members.
+    # Shared with VCF Automation 9; handlers in ``vcf_automation._infra``
+    # and ``vcf_automation._infra_changes``, metadata in :mod:`.infra_ops`.
+    # ------------------------------------------------------------------
+
+    async def infra_cloud_account_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.cloud_account.list`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.cloud_account_list(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def infra_cloud_account_create(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.cloud_account.create`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.cloud_account_create(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def infra_cloud_account_delete(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.cloud_account.delete`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.cloud_account_delete(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def infra_zone_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.zone.list`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.zone_list(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def infra_zone_set(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.zone.set`` -- see ``vcf_automation._infra_changes``."""
+        from meho_backplane.connectors.vcf_automation import _infra_changes
+
+        return await _infra_changes.zone_set(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def infra_flavor_profile_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.flavor_profile.list`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.flavor_profile_list(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def infra_flavor_profile_set(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.flavor_profile.set`` -- see ``vcf_automation._infra_changes``."""
+        from meho_backplane.connectors.vcf_automation import _infra_changes
+
+        return await _infra_changes.flavor_profile_set(
+            self, operator, target, params, prefix="vcfa.vra8"
+        )
+
+    async def infra_network_profile_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.network_profile.list`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.network_profile_list(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def infra_storage_profile_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.storage_profile.list`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.storage_profile_list(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def infra_project_members_set(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.project.members.set`` -- see ``vcf_automation._infra_changes``."""
+        from meho_backplane.connectors.vcf_automation import _infra_changes
+
+        return await _infra_changes.project_members_set(
+            self, operator, target, params, prefix="vcfa.vra8"
+        )
+
+    async def infra_project_create(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.project.create`` -- see ``vcf_automation._infra_changes``."""
+        from meho_backplane.connectors.vcf_automation import _infra_changes
+
+        return await _infra_changes.project_create(
+            self, operator, target, params, prefix="vcfa.vra8"
+        )
+
+    # ------------------------------------------------------------------
+    # Day-2 ops, written once for Aria Automation 8 and VCF Automation 9.
+    # Thin shims over ``vcf_automation._day2``; metadata in
+    # ``vcf_automation.day2_ops`` (``VRA8_DAY2_OPS`` here).
+    # ------------------------------------------------------------------
+
+    async def deployment_actions_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.deployment.actions.list`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.deployment_actions_list(
+            self, operator, target, params, prefix="vcfa.vra8"
+        )
+
+    async def deployment_action_run(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.deployment.action.run`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.deployment_action_run(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def resource_action_run(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.resource.action.run`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.resource_action_run(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def deployment_lease_change(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.deployment.lease.change`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.deployment_lease_change(
+            self, operator, target, params, prefix="vcfa.vra8"
+        )
+
+    async def deployment_delete(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.deployment.delete`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.deployment_delete(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def machine_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.machine.list`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.machine_list(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def block_device_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.block_device.list`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.block_device_list(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def machine_create(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.machine.create`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2_create
+
+        return await _day2_create.machine_create(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def block_device_create(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.block_device.create`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2_create
+
+        return await _day2_create.block_device_create(
+            self, operator, target, params, prefix="vcfa.vra8"
+        )
 
     # ------------------------------------------------------------------
     # Dispatch-path session-recovery hooks (#2067 / #2396)
@@ -503,9 +740,12 @@ class Vra8Connector(HttpConnector):
         credential-bytes cache to evict; the only per-target state is the bearer, so
         this also drops it — a no-op when the establish already failed before caching,
         harmless otherwise. Kept so the connector advertises both dispatch-path
-        recovery hooks.
+        recovery hooks. It also forgets who has read the target's secret, so
+        the next call of every caller reads it again.
         """
         await self._evict_session_token(target)
+        async with self._session_lock:
+            self._readers.forget(target)
 
     async def _evict_session_token(
         self, target: Vra8TargetLike, *, rejected: httpx.Request | None = None
@@ -532,4 +772,5 @@ class Vra8Connector(HttpConnector):
         """
         async with self._session_lock:
             self._session_tokens.clear()
+            self._readers.clear()
         await super().aclose()

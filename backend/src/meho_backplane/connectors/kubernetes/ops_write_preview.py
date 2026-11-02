@@ -4,8 +4,8 @@
 """Approval previews for ``k8s.secret.create``, ``k8s.job.create`` (#4850)
 and ``k8s.cronjob.run``.
 
-The first two ops are pinned ``credential_write``
-(:data:`~meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS`): a Secret's
+The first two ops are declared ``credential_write``
+(``kubernetes/op_classes.py``): a Secret's
 values ride in the params, and a Job's pod template can hold secrets in its
 ``env`` values or its command line. For such an op the generic echo of
 params is turned off, so without these builders the approver saw only the op

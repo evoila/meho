@@ -90,12 +90,16 @@ from sqlalchemy import CursorResult, and_, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.approval_sign_in import ApprovalAuth
+from meho_backplane.auth.approval_sign_in import ApprovalAuth, approval_sign_in_max_age
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast.events import classify_op
+from meho_backplane.broadcast.events import (
+    classify_op,
+    holds_hidden_param_values,
+    scrub_secret_named_values,
+)
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.models import (
     ApprovalRequest,
@@ -117,6 +121,7 @@ from meho_backplane.operations._errors import (
     result_release_changed_while_waiting,
     result_target_changed_since_approval,
 )
+from meho_backplane.operations._secret_values import split_reveal_secret, with_reveal_secret
 from meho_backplane.operations._validate import (
     params_hash_candidates,
     params_hash_matches,
@@ -154,6 +159,7 @@ __all__ = [
     "ApprovalRequestExpiredError",
     "ApprovalResultState",
     "ApprovalSignInReusedError",
+    "ApprovalSignInTooOldError",
     "ChainPosition",
     "DelegatedDecisionForbiddenError",
     "DelegatedReasonInvalidError",
@@ -332,20 +338,46 @@ class PreviewBindingMissingError(ApprovalError):
 
 
 class ApprovalSignInReusedError(ApprovalError):
-    """This sign-in already gave an approval (#3979).
+    """This sign-in cannot give this approval: it is used up (#3979, #5515).
 
-    One fresh sign-in or one-time code allows exactly one approval. Raised
-    by :func:`approve_request` when an earlier ``approval.decision`` audit
-    row of the same person carries the same ``sign_in_key``. The REST layer
-    answers ``401`` with the same fresh sign-in challenge as a too-old
-    sign-in, so the command line asks for a new sign-in.
+    Raised by :func:`approve_request` in two cases, both read from the
+    person's earlier ``approval.decision`` audit rows with the same
+    ``sign_in_key``:
+
+    * the request is ``destructive`` and the sign-in already approved
+      something: a destructive approve needs a sign-in of its own;
+    * the sign-in already approved a ``destructive`` request: that sign-in
+      approves nothing more.
+
+    The REST layer answers ``401`` with the same fresh sign-in challenge as
+    a too-old sign-in, so the command line asks for a new sign-in.
     """
 
     def __init__(self, request_id: uuid.UUID) -> None:
         self.request_id = request_id
         super().__init__(
-            f"approval_request {request_id}: this sign-in was already used for "
-            "an approval; one sign-in allows one approval"
+            f"approval_request {request_id}: this sign-in was already used; "
+            "a destructive operation needs a sign-in of its own"
+        )
+
+
+class ApprovalSignInTooOldError(ApprovalError):
+    """The sign-in is too old for this request (#5515).
+
+    Each risk level has its own limit
+    (:func:`~meho_backplane.auth.approval_sign_in.approval_sign_in_max_age`):
+    the approval window ``FRESH_SIGN_IN_MAX_AGE_SECONDS``, or for a
+    ``destructive`` request ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``.
+    ``max_age_seconds`` is the limit that applied. The REST layer answers
+    ``401`` with the fresh sign-in challenge and that ``max_age``.
+    """
+
+    def __init__(self, request_id: uuid.UUID, *, max_age_seconds: int) -> None:
+        self.request_id = request_id
+        self.max_age_seconds = max_age_seconds
+        super().__init__(
+            f"approval_request {request_id}: the sign-in is older than "
+            f"{max_age_seconds} seconds; approving needs a newer one"
         )
 
 
@@ -1208,6 +1240,7 @@ async def create_pending_request(
     resume_parent: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
     requester: ResumeRequester | None = None,
+    reveal_secret: bool = False,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
 
@@ -1277,6 +1310,15 @@ async def create_pending_request(
             requester of the request being re-run, not to the reviewer who
             runs it. ``None`` saves *operator* (and the bound actor) as the
             requester.
+        reveal_secret: The caller asked for the hidden values of the answer
+            (``reveal_secret: true``; the dispatcher refused an agent
+            already). The choice is saved in its own column on the request,
+            not with the params and not in the encrypted payload of a
+            credential write, so every approved run returns the values,
+            also the re-run of a failed credential write after the first
+            run deleted the payload. It is not part of *params_hash*, so
+            the retry check and the approval surfaces compare the call
+            without it.
 
     Returns:
         The flushed :class:`ApprovalRequest` row (new, or reused).
@@ -1392,6 +1434,7 @@ async def create_pending_request(
         target_hash=await park_time_target_hash(
             session, tenant_id=operator.tenant_id, target_id=target_id
         ),
+        reveal_secret=reveal_secret,
     )
     if idempotency_key is None:
         session.add(request)
@@ -1448,25 +1491,39 @@ def _sign_in_lock_key(sign_in_key: str) -> int:
     return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
 
 
-async def _refuse_reused_sign_in(
+def _is_destructive(request: ApprovalRequest) -> bool:
+    """Whether the parked operation is ``destructive`` (read off ``proposed_effect``)."""
+    return (request.proposed_effect or {}).get("safety_level") == "destructive"
+
+
+async def _check_sign_in_use(
     session: AsyncSession,
-    request_id: uuid.UUID,
+    request: ApprovalRequest,
     operator: Operator,
     approval_auth: ApprovalAuth,
-) -> None:
-    """Raise :class:`ApprovalSignInReusedError` when this sign-in already approved.
+) -> bool:
+    """Check the sign-in's age and use for a token approve; return whether it is single-use.
 
-    Looks at the person's ``approval.decision`` audit rows written since
-    the sign-in. The sign-in is at most a few minutes old, so the scan is
-    short. A web click is not single-use and is never checked.
+    The sign-in must be young enough for the request's risk level
+    (:func:`~meho_backplane.auth.approval_sign_in.approval_sign_in_max_age`,
+    :class:`ApprovalSignInTooOldError` otherwise): the approval window, or
+    for a ``destructive`` request its own limit. Inside the window one
+    sign-in may approve several requests (#5515). A ``destructive`` request
+    is the exception: its sign-in must have approved nothing else, and
+    after it that sign-in approves nothing more
+    (:class:`ApprovalSignInReusedError` in both cases). The check is the
+    same for an approve on REST and in the web interface.
 
-    Two approves with the same sign-in can run at the same moment, for two
-    different requests and on two replicas. So the check first takes a
-    transaction-level PostgreSQL advisory lock on the sign-in key. The
-    second approve waits until the first commits or rolls back, and then
-    its scan sees the first audit row. PostgreSQL releases the lock with
-    the transaction. On other databases (the single-writer SQLite test
-    path) there is no lock.
+    The earlier approves of the sign-in are the person's
+    ``approval.decision`` audit rows with the same ``sign_in_key``,
+    written since the sign-in. The scan is short: the window is minutes.
+
+    Two approves with the same sign-in can run at the same moment, on two
+    replicas. So the check first takes a transaction-level PostgreSQL
+    advisory lock on the sign-in key. The second approve waits until the
+    first commits or rolls back, and then its scan sees the first audit
+    row. PostgreSQL releases the lock with the transaction. On other
+    databases (the single-writer SQLite test path) there is no lock.
 
     The scan starts :data:`~meho_backplane.auth.fresh_sign_in.CLOCK_SKEW_SECONDS`
     before ``auth_time``: the fresh sign-in check accepts an ``auth_time``
@@ -1474,8 +1531,19 @@ async def _refuse_reused_sign_in(
     have an audit time before ``auth_time``.
     """
     key = approval_auth.sign_in_key(operator.sub)
-    if key is None or approval_auth.auth_time is None:
-        return
+    destructive = _is_destructive(request)
+    from meho_backplane.settings import get_settings
+
+    max_age = approval_sign_in_max_age(get_settings(), destructive=destructive)
+    if _now().timestamp() - approval_auth.auth_time > max_age:
+        _log().warning(
+            "approval_sign_in_too_old",
+            approval_request_id=str(request.id),
+            operator_sub=operator.sub,
+            destructive=destructive,
+            max_age_seconds=max_age,
+        )
+        raise ApprovalSignInTooOldError(request.id, max_age_seconds=max_age)
     conn = await session.connection()
     if conn.dialect.name == "postgresql":
         await session.execute(
@@ -1491,13 +1559,17 @@ async def _refuse_reused_sign_in(
     )
     for (payload,) in rows:
         earlier = payload.get("approval_auth") if isinstance(payload, dict) else None
-        if isinstance(earlier, dict) and earlier.get("sign_in_key") == key:
+        if not isinstance(earlier, dict) or earlier.get("sign_in_key") != key:
+            continue
+        if destructive or earlier.get("single_use") is True:
             _log().warning(
                 "approval_sign_in_reused",
-                approval_request_id=str(request_id),
+                approval_request_id=str(request.id),
                 operator_sub=operator.sub,
+                destructive=destructive,
             )
-            raise ApprovalSignInReusedError(request_id)
+            raise ApprovalSignInReusedError(request.id)
+    return destructive
 
 
 # code-quality-allow: 101 lines but ~70 are the Args/Raises docstring documenting
@@ -1564,9 +1636,11 @@ async def approve_request(
         reason: Optional human-readable approval reason (recorded in the
             audit payload). Mirrors :func:`reject_request`.
         approval_auth: How the person proved they were present (#3979): a
-            web click, a fresh sign-in or a one-time code. Recorded in the
-            audit payload as ``approval_auth``. A token proof allows one
-            approval only. Every production approve path passes it.
+            fresh sign-in or a one-time code, on REST or in the web
+            interface. Recorded in the audit payload as ``approval_auth``.
+            Inside the approval window one sign-in may approve several
+            requests; a ``destructive`` request needs a sign-in of its own
+            (#5515). Every production approve path passes it.
 
     Returns:
         The updated, flushed :class:`ApprovalRequest`.
@@ -1586,8 +1660,12 @@ async def approve_request(
             (``Instructed-by:``) but its trailer block is incomplete (#3692).
         DelegatedDecisionForbiddenError: *reason* is a valid delegated
             decision but the deployment is not lab-class (#3693).
-        ApprovalSignInReusedError: *approval_auth* names a sign-in that
-            already gave an approval (#3979).
+        ApprovalSignInReusedError: The request is ``destructive`` and
+            *approval_auth* names a sign-in that already approved something,
+            or the sign-in already approved a ``destructive`` request (#5515).
+        ApprovalSignInTooOldError: The sign-in is older than the limit of
+            the request's risk level: the approval window, or for a
+            ``destructive`` request ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``.
     """
     request = await _load_pending_for_approval(
         session, request_id, operator=operator, params=params
@@ -1596,8 +1674,9 @@ async def approve_request(
     # reason leaves the row pending (#3692, #3693).
     delegation = parse_delegation(reason)
     _check_delegated_allowed(delegation, request=request, operator=operator, decision="approved")
+    single_use = False
     if approval_auth is not None:
-        await _refuse_reused_sign_in(session, request_id, operator, approval_auth)
+        single_use = await _check_sign_in_use(session, request, operator, approval_auth)
 
     now = _now()
     request.status = ApprovalRequestStatus.APPROVED.value
@@ -1613,7 +1692,7 @@ async def approve_request(
     if reason:
         extra["reason"] = reason
     if approval_auth is not None:
-        extra["approval_auth"] = approval_auth.audit_payload(operator.sub)
+        extra["approval_auth"] = approval_auth.audit_payload(operator.sub, single_use=single_use)
     _record_delegation(extra, delegation, request=request, operator=operator, decision="approved")
 
     approve_audit_id = uuid.uuid4()
@@ -1693,7 +1772,7 @@ async def reject_request(
     # claim (#3300); ``None`` fail-opens to the raw sub. See approve_request.
     request.reviewed_by_name = operator.name
     request.decided_at = now
-    await discard_handoff(session, request.id, request.tenant_id)
+    await end_run_input(session, request)
     await session.flush()
 
     extra: dict[str, Any] = {"decision": "rejected", "reviewed_by": operator.sub}
@@ -1770,7 +1849,7 @@ async def withdraw_request(
     request.status = ApprovalRequestStatus.WITHDRAWN.value
     request.withdrawn_at = _now()
     request.withdraw_reason = reason or None
-    await discard_handoff(session, request.id, request.tenant_id)
+    await end_run_input(session, request)
     await session.flush()
 
     extra: dict[str, Any] = {"withdrawn_by": operator.sub}
@@ -1799,6 +1878,41 @@ async def withdraw_request(
     )
     request._audit_id = withdraw_audit_id  # type: ignore[attr-defined]
     return request
+
+
+def params_with_secret_fields_hidden(params: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The stored params with each secret-named value replaced, or ``None``.
+
+    ``None`` when *params* is ``None`` or holds no secret-named value
+    (``password``, ``licenseKey``, ``client_secret``, ...; the name rule of
+    :func:`~meho_backplane.broadcast.events.scrub_secret_named_values`), so
+    a row without such a field is never rewritten. A number under such a
+    name (a PIN, a password sent as a number) is hidden too. The other
+    fields keep their value, as in the audit row's raw copy.
+    """
+    if params is None:
+        return None
+    hidden, found = scrub_secret_named_values(params, hide_numbers=True)
+    if not found:
+        return None
+    return cast(dict[str, Any], hidden)
+
+
+async def end_run_input(session: AsyncSession, request: ApprovalRequest) -> None:
+    """Drop what MEHO kept only to run *request*: the row is ending without a run.
+
+    Deletes the encrypted custody row of a credential write
+    (:func:`~meho_backplane.operations.approval_handoff.discard`) and
+    replaces each secret-named value in the stored ``params`` (a password or
+    a licence key inside a deployment spec) with a marker. The caller holds
+    the row lock, flushes and commits. Rejected, withdrawn and expired
+    requests end here; a request that runs has its values hidden when the
+    run claim is won (:func:`claim_resume`).
+    """
+    await discard_handoff(session, request.id, request.tenant_id)
+    hidden = params_with_secret_fields_hidden(request.params)
+    if hidden is not None:
+        request.params = hidden
 
 
 async def claim_resume(
@@ -1848,27 +1962,41 @@ async def claim_resume(
     so a dispatch that fails after a won claim is not silently retried into
     a possible double write; the residual expiry follow-up (out of scope
     here) makes such a void approval visibly "expired".
+
+    The winner already read the stored params into memory for its run. So
+    the same transaction replaces each secret-named value in the row's
+    ``params`` (a password or a licence key inside a deployment spec) with
+    a marker: the row keeps them only until the run starts. A later re-run
+    of a failed run needs the params sent again
+    (:func:`~meho_backplane.operations.approval_rerun.rerun_failed_request`).
     """
     from meho_backplane.db.engine import get_sessionmaker
 
     stamp = now or _now()
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        # ``session.execute()`` on an ``UPDATE`` returns a ``CursorResult``
-        # (carrying the DBAPI ``rowcount``) at runtime; the static stub is
-        # the generic ``Result`` so mypy needs the cast to read ``rowcount``.
         # ``synchronize_session=False`` -- no ORM identity map to keep in
-        # step, this is a bare claim probe. Read ``rowcount`` before the
-        # commit closes the cursor.
-        raw_result = await session.execute(
+        # step, this is a bare claim probe. ``id`` is the primary key, so
+        # the claim returns one row when won and none when lost.
+        claimed = await session.execute(
             update(ApprovalRequest)
             .where(ApprovalRequest.id == request_id)
             .where(ApprovalRequest.resumed_at.is_(None))
             .where(ApprovalRequest.status == ApprovalRequestStatus.APPROVED.value)
             .values(resumed_at=stamp)
+            .returning(ApprovalRequest.params)
             .execution_options(synchronize_session=False)
         )
-        won = cast(CursorResult[Any], raw_result).rowcount == 1
+        row = claimed.first()
+        won = row is not None
+        hidden = params_with_secret_fields_hidden(row[0]) if row is not None else None
+        if hidden is not None:
+            await session.execute(
+                update(ApprovalRequest)
+                .where(ApprovalRequest.id == request_id)
+                .values(params=hidden)
+                .execution_options(synchronize_session=False)
+            )
         await session.commit()
     return won
 
@@ -2037,7 +2165,10 @@ async def resume_dispatch_after_approval(
     (:func:`refuse_resume_if_preview_changed`). Either change refuses the
     run, and the requester asks again.
     """
-    effective_params = params if params is not None else request.params
+    # The requester's reveal choice is on the request row, outside the
+    # params and the hash (``create_pending_request``). It goes on the
+    # params of the run only.
+    effective_params, reveal_secret = _stored_call(request, params)
     if effective_params is None and request.execution_handle is None:
         return _resume_pre0036_denied(operator, request)
 
@@ -2100,7 +2231,32 @@ async def resume_dispatch_after_approval(
         resolved_target=resolved_target,
         effective_params=cast(dict[str, Any], effective_params),
         resume_parent_override=resume_parent_override,
+        reveal_secret=reveal_secret,
     )
+
+
+def _stored_call(
+    request: ApprovalRequest, params: dict[str, Any] | None
+) -> tuple[dict[str, Any] | None, bool]:
+    """Return the params an approved run uses, and the requester's reveal choice.
+
+    *params* (the caller's own copy of the call) win over the stored
+    ``request.params``. A ``reveal_secret`` flag sent with them comes off
+    before the hash and preview checks and does not count: the choice is the
+    one of the original call, stored on the request row
+    (``request.reveal_secret``). So the choice also survives for a
+    credential write, whose params are not on the row and come from the
+    caller on a re-run. The params are ``None`` when the row stores none and
+    none were sent. Stored params whose secret-named values were replaced
+    by a marker (after the first run, :func:`claim_resume`) count as none:
+    they can no longer run the call.
+    """
+    if params is not None:
+        params, _ = split_reveal_secret(params)
+    effective: dict[str, Any] | None = params
+    if effective is None and not holds_hidden_param_values(request.params):
+        effective = cast(dict[str, Any] | None, request.params)
+    return effective, bool(request.reveal_secret)
 
 
 async def refuse_resume_if_release_changed(
@@ -2488,6 +2644,7 @@ async def _dispatch_resume_with_bound_context(
     effective_params: dict[str, Any],
     resume_parent_override: dict[str, Any] | None = None,
     rerun_attempt: int | None = None,
+    reveal_secret: bool = False,
 ) -> Any:
     """Re-bind the parked row's stored context, then dispatch ``_approved=True``.
 
@@ -2529,6 +2686,11 @@ async def _dispatch_resume_with_bound_context(
     (:func:`~meho_backplane.operations.secondary_target_policy.bind_approved_requester`),
     so an op that writes to a second, caller-named target checks the
     requester's policy there too, not only the reviewer's.
+
+    *reveal_secret* is the requester's ``reveal_secret: true``, stored on
+    the request row. It goes on the params of the run, so the answer holds
+    the values the requester asked for; the dispatcher stamps the choice on
+    the audit row of the run.
     """
     from meho_backplane.operations.dispatcher import dispatch
     from meho_backplane.operations.secondary_target_policy import bind_approved_requester
@@ -2558,6 +2720,8 @@ async def _dispatch_resume_with_bound_context(
             dispatch_op_id, dispatch_params = (
                 parent_call if parent_call is not None else (request.op_id, effective_params)
             )
+            if reveal_secret:
+                dispatch_params = with_reveal_secret(dispatch_params)
             result = await dispatch(
                 operator=operator,
                 connector_id=request.connector_id,
@@ -2877,7 +3041,7 @@ async def _expire_request(
         request.expires_at = request.created_at + default_ttl
     request.status = ApprovalRequestStatus.EXPIRED.value
     request.decided_at = cutoff
-    await discard_handoff(session, request.id, request.tenant_id)
+    await end_run_input(session, request)
     await session.flush()
 
     expire_audit_id = uuid.uuid4()

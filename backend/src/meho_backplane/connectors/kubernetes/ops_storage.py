@@ -93,6 +93,7 @@ __all__ = [
     "K8S_STORAGECLASS_LIST_LLM_INSTRUCTIONS",
     "K8S_STORAGECLASS_LIST_PARAMETER_SCHEMA",
     "K8S_STORAGECLASS_LIST_RESPONSE_SCHEMA",
+    "OPS",
     "STORAGE_OPS",
     "persistentvolume_row",
     "persistentvolumeclaim_row",
@@ -494,3 +495,6 @@ STORAGE_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=K8S_PERSISTENTVOLUMECLAIM_LIST_LLM_INSTRUCTIONS,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = STORAGE_OPS

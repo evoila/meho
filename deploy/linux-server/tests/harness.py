@@ -98,7 +98,7 @@ PREROUTING_CHAIN = """\
 table inet meho {
 \tchain prerouting {
 \t\ttype filter hook prerouting priority mangle; policy drop;
-\t\tiifname "lo" accept
+\t\tiif "lo" accept
 \t\tct state established,related accept
 \t\tcounter packets 0 bytes 0
 \t}

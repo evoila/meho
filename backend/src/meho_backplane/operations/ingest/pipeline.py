@@ -26,7 +26,7 @@ admin MCP tools (T7) all consume:
 Both surfaces are tenant-scoped at construction time: the service is
 built from an :class:`Operator` and every operation acts on either
 ``tenant_id == operator.tenant_id`` or ``tenant_id is None`` (built-in
-scope, gated on :class:`TenantRole.TENANT_ADMIN`). Cross-tenant probes
+scope, which needs ``platform_admin``). Cross-tenant probes
 raise :class:`ConnectorNotFoundError` — the same conflation
 :class:`ReviewService` uses to keep the operator-facing failure
 surface uniform.
@@ -89,7 +89,7 @@ from packaging.version import InvalidVersion, Version
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.audit_cutover import note_preview
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.profile import AuthSchemeName, ExecutionProfile
 from meho_backplane.connectors.registry import product_impl_id_round_trips
 from meho_backplane.db.engine import get_sessionmaker
@@ -498,13 +498,15 @@ class IngestionPipelineService:
     :class:`Operator` at construction.
 
     Tenant scoping: :meth:`ingest` optionally takes an explicit
-    ``tenant_id`` (``None`` → built-in scope). Built-in ingests are
-    gated on :class:`TenantRole.TENANT_ADMIN`; tenant-curated ingests
-    are gated on a match between the requested ``tenant_id`` and the
-    operator's tenant, unless the operator holds ``platform_admin``
-    (#3800 — a platform operator seeding a connector row for another
-    tenant). Mismatches raise :class:`PermissionError`, which the REST
-    router maps onto HTTP 403.
+    ``tenant_id`` (``None`` → built-in scope). A built-in ingest needs
+    ``platform_admin``: the rows it writes are shared by every tenant,
+    the same rule the enable / disable / edit / delete paths of
+    :class:`~meho_backplane.operations.ingest.service.ReviewService`
+    apply. Tenant-curated ingests are gated on a match between the
+    requested ``tenant_id`` and the operator's tenant, unless the
+    operator holds ``platform_admin`` (#3800 — a platform operator
+    seeding a connector row for another tenant). Mismatches raise
+    :class:`PermissionError`, which the REST router maps onto HTTP 403.
 
     LLM-client factory: pass a custom factory to inject a test stub or
     a production adapter once one lands. The default fail-closed
@@ -535,9 +537,15 @@ class IngestionPipelineService:
     def authorize_scope(self, tenant_id: UUID | None) -> None:
         """Mirror :meth:`ReviewService._authorize_scope` for ingest paths.
 
-        Built-in ingests require ``tenant_admin``; tenant-curated
-        ingests require the operator's tenant_id to match. Raises
-        :class:`PermissionError` on a violation.
+        A built-in ingest (``tenant_id`` ``None``) requires
+        ``platform_admin``. A built-in connector's rows are shared by
+        every tenant, and a second ingest of an existing built-in
+        connector updates those rows in place, so the write is a
+        platform action like enable, disable, edit and delete. A
+        tenant_admin who wants their own copy ingests into their own
+        tenant. Tenant-curated ingests require the operator's
+        tenant_id to match. Raises :class:`PermissionError` on a
+        violation.
 
         The one exception (#3800): an operator with ``platform_admin``
         may ingest into another tenant. This only happens when the
@@ -556,9 +564,11 @@ class IngestionPipelineService:
         get the same isolation even if they skip the route gate.
         """
         if tenant_id is None:
-            if self._operator.tenant_role is not TenantRole.TENANT_ADMIN:
+            if not self._operator.platform_admin:
                 raise PermissionError(
-                    "built-in connector ingest requires tenant_admin",
+                    "built-in connector ingest requires platform_admin: "
+                    "a built-in connector's rows are shared by every tenant; "
+                    "pass your own tenant_id for a tenant-scoped ingest",
                 )
             return
         if tenant_id != self._operator.tenant_id and not self._operator.platform_admin:

@@ -479,6 +479,13 @@ What the code does:
   so a `destructive` step or child stays refused. A delete below
   `destructive` needs no hash. With no delete grant the call falls through
   to the rules above, so an ordinary grant never changes its verdict.
+- **Role checks in a handler.** A service login has the `operator` role
+  on purpose. An op whose handler asks for `tenant_admin` must let a
+  service principal through when its call runs at once in sandbox mode,
+  or the delete grant cannot help. `targets.remove` does this (#5480): the
+  handler checks `sandbox_mode_active()`, the principal kind and the
+  gate's verdict (`policy_decision_var` is `auto-execute`). See
+  [`targets.md`](targets.md#removing-a-target-targetsremove).
 - **The grant-use row.** `payload.delete_grant = true`, plus
   `preview_hash` and `blast_radius` for a `destructive` call, or
   `proposed_effect` for a delete below it. A step's row names its
@@ -533,9 +540,9 @@ descriptor), a `grantable` flag, and an `ungrantable_reason`. The child set
 is **derived from the manifests** — a connector registers, per composite op
 id, the manifest tuples it fans out to via
 `operations.governed_subops.register_governed_subops`
-(the vmware-rest map lives in
-`connectors/vmware_rest/composites/_governed_subops.py`, referencing the
-`_SUB_OPS_*` constants, never re-typing them) — not hand-maintained. A
+(for vmware-rest, each composite row carries its own list in
+`governed_subops`, referencing the `_SUB_OPS_*` constants, never re-typing
+them; `connectors/vmware_rest/composites/_register.py` reads the rows) — not hand-maintained. A
 **delete-shaped** rollback / delete leg (e.g. `vm.create`'s
 `DELETE:/vcenter/vm/{vm}`, which rides `_SUB_OPS_VM_CREATE`, or
 `vm.destroy`'s VI-JSON step `POST:/VirtualMachine/{moId}/Destroy_Task`,
@@ -637,8 +644,8 @@ on one of these routers has no matching CLI verb in that reference.
   (selector fields + mutual-exclusion validator).
 - `operations/governed_subops.py` (#3349) — connector-agnostic discovery
   registry + `build_governed_subops_response` + grantability classifier;
-  `connectors/vmware_rest/composites/_governed_subops.py` populates it from
-  the manifests.
+  `connectors/vmware_rest/composites/_register.py` populates it from the
+  `governed_subops` field of the composite rows.
 - `api/v1/operations.py` — `GET /api/v1/operations/governed-subops` route.
 - `operations/_validate.py` — `_non_agent_verdict` (safety_level consult +
   grant consultation + #3349 null-target hint via `_service_grant_verdict`),

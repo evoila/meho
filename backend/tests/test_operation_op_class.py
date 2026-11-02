@@ -10,7 +10,8 @@ only from the last word of its op id:
 
 * ``caution`` or higher: a write class;
 * ``safe``: ``read``, except the few ``safe`` operations that make the target
-  do work, which are pinned ``write``;
+  do work, which are pinned ``write``, and the ``safe`` writes their connector
+  marks as safe writes (for example the GitHub ticket writes);
 * the credential and audit-query classes always win.
 
 The sweep runs every registrar MEHO runs at start-up, so a new operation is
@@ -34,6 +35,7 @@ from meho_backplane.broadcast.events import resolve_operation_op_class
 from meho_backplane.broadcast.history import WRITE_OP_CLASSES
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, EndpointDescriptor
+from meho_backplane.op_classes import is_safe_write
 from meho_backplane.operations._audit import write_audit_row
 from meho_backplane.operations.typed_register import run_typed_op_registrars
 from meho_backplane.settings import get_settings
@@ -117,7 +119,7 @@ async def test_every_hand_written_operation_has_a_read_or_write_class() -> None:
             continue
         if row.safety_level != "safe":
             expected = WRITE_OP_CLASSES
-        elif row.op_id in _SAFE_OPERATIONS_THAT_CHANGE_THINGS:
+        elif row.op_id in _SAFE_OPERATIONS_THAT_CHANGE_THINGS or is_safe_write(row.op_id):
             expected = frozenset({"write"})
         else:
             expected = frozenset({"read"})

@@ -48,14 +48,14 @@ never depends on mutable per-deploy catalog state.
 identity + network keys and *never* reads any ``*Password`` / ``credentials``
 field of the ``SddcSpec``. The park-time approval **preview** and the **sub-op
 policy params** — the two reviewer-facing surfaces — are built from it, redaction
-by construction. This does **not** cover ``ApprovalRequest.params``: when the
-top-level op parks, the dispatcher persists the raw dispatch ``params`` (i.e. the
-full ``SddcSpec`` including plaintext passwords) verbatim on that row for the
-approval TTL (#1503's store-verbatim). That column is never surfaced by any API /
-audit / broadcast read path (those carry only ``params_hash`` / the scrubbed
-preview), so exposure is at-rest-in-the-governance-table, gated by DB/row access
-control — the same posture as every ``requires_approval`` op that takes inline
-secrets (e.g. the GOSC composites). It is *not* redacted.
+by construction. ``ApprovalRequest.params`` holds the full ``SddcSpec`` only
+while the request waits: MEHO runs the approved call with it. As soon as the run
+claim is won, or the request is rejected, withdrawn or expires, every
+secret-named value in that column (``*Password``, ``licenseKey``, ...) is
+replaced by a marker (``approval_queue.claim_resume`` / ``end_run_input``). The
+column is never surfaced by any API / audit / broadcast read path (those carry
+only ``params_hash`` / the scrubbed preview). A re-run of a failed bring-up needs
+the spec sent again.
 """
 
 from __future__ import annotations
@@ -85,6 +85,7 @@ from meho_backplane.connectors.vcf_installer.typed_writes import (
     INSTALLER_DEPOT_SET_OP_ID,
     INSTALLER_TRUSTED_CERTIFICATE_ADD_OP_ID,
 )
+from meho_backplane.operations import register_plain_fields
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 from meho_backplane.operations.composite import enforce_subop_policy
 
@@ -663,3 +664,7 @@ register_preview_builder(INSTALLER_BRINGUP_RETRY_OP_ID, _sddc_bringup_retry_prev
 register_preview_builder(INSTALLER_DEPOT_SET_OP_ID, _depot_set_preview)
 register_preview_builder(INSTALLER_TRUSTED_CERTIFICATE_ADD_OP_ID, _trusted_certificate_add_preview)
 register_preview_builder(INSTALLER_BUNDLES_DOWNLOAD_OP_ID, _bundles_download_preview)
+
+
+# ``referenceToken`` is the id of a vendor error message, not a credential.
+register_plain_fields(INSTALLER_BRINGUP_OP_ID, ("referenceToken",))

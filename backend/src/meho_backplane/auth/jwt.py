@@ -1583,6 +1583,16 @@ def _extract_sign_in_claims(claims: Any) -> tuple[int | None, str | None, str | 
     )
 
 
+def _extract_azp(claims: Any) -> str | None:
+    """Read the ``azp`` claim: the client the token was made for (#5515).
+
+    The approve check compares it with the approval client. A value that
+    is not a non-empty string reads as missing, so the check refuses.
+    """
+    azp = claims.get("azp")
+    return azp if isinstance(azp, str) and azp else None
+
+
 def _start_tenant(
     claims: Any, settings: Settings, tenants: tuple[TenantMembership, ...]
 ) -> tuple[UUID, TenantRole, bool]:
@@ -1727,6 +1737,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             auth_time=auth_time,
             acr=acr,
             sid=sid,
+            azp=_extract_azp(claims),
         )
     except pydantic.ValidationError as exc:
         raise _http_401("invalid_token") from exc

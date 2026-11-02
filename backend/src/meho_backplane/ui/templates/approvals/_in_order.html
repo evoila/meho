@@ -10,7 +10,10 @@
     * the step the run waits at (dangerous / destructive) with an
       "Approve step k and go on" button that posts ``confirm_id`` = that
       request's id, so the yes covers only that step;
-    * the step the run stopped at, why, and the steps it did not run;
+    * the step the run stopped at, why, and the steps it did not run; when
+      the step's approval needs a new sign-in, a "Sign in again" link
+      (``sign_in_url``) to the console login that asks for the password and
+      comes back to this change ticket;
     * a done banner.
   Every form here carries the CSRF token minted for this render; the route
   re-sets the cookie on the same response.
@@ -18,7 +21,8 @@
   Context:
     work_ref, steps (list of {step, request, safety_level, outcome, detail}),
     total, pending, started, warnings, waiting, waiting_context, stopped,
-    approved_now, reason, csrf_token, status_pill_class, result_state_pill
+    sign_in_url (str | None), approved_now, reason, csrf_token,
+    status_pill_class, result_state_pill
 -#}
 {% from "_icons.html" import icon %}
 {%- set outcome_badge = {
@@ -68,6 +72,9 @@
           {% if not_run %}
             <p class="mt-1">Not run: step{{ "s" if not_run | length > 1 else "" }}
               {{ not_run | map(attribute="step") | join(", ") }}. They still wait for a decision.</p>
+          {% endif %}
+          {% if sign_in_url %}
+            <a class="btn btn-sm btn-primary mt-2" href="{{ sign_in_url }}" data-action="sign-in-to-approve">Sign in again</a>
           {% endif %}
         </div>
       </div>

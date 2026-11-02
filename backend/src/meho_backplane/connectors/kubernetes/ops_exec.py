@@ -76,6 +76,7 @@ from kubernetes_asyncio.stream.ws_client import (
     WsApiClient,
 )
 
+from meho_backplane.connectors.kubernetes.ops import KubernetesOp
 from meho_backplane.connectors.kubernetes.ops_logs import resolve_pod_and_container
 
 if TYPE_CHECKING:
@@ -85,12 +86,14 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_TIMEOUT_SECONDS",
+    "EXEC_OP",
     "K8S_EXEC_LLM_INSTRUCTIONS",
     "K8S_EXEC_PARAMETER_SCHEMA",
     "K8S_EXEC_RESPONSE_SCHEMA",
     "MAX_COMMAND_ARGS",
     "MAX_STREAM_BYTES",
     "MAX_TIMEOUT_SECONDS",
+    "OPS",
     "k8s_exec",
     "truncate_bytes_to_cap",
 ]
@@ -538,3 +541,45 @@ async def k8s_exec(
         result["stdout_truncated_byte_count"] = stdout_dropped
         result["stderr_truncated_byte_count"] = stderr_dropped
     return result
+
+
+#: The ``k8s.exec`` registration row (G3.14-T2 #1404).
+EXEC_OP = KubernetesOp(
+    op_id="k8s.exec",
+    handler_attr="exec_command",
+    summary="Run a bounded argv command in a container; capture stdout/stderr + exit code.",
+    description=(
+        "Executes an explicit ``argv`` command inside a running "
+        "container over the Kubernetes API's pod-exec websocket "
+        "transport (``v4.channel.k8s.io`` sub-protocol via "
+        "``kubernetes_asyncio.stream.WsApiClient``) and returns the "
+        "captured stdout / stderr plus the process exit code parsed "
+        "from the channel-3 status frame. DANGEROUS and "
+        "approval-gated -- a command can mutate container state. "
+        "Command-and-capture only: the command runs to completion "
+        "or a bounded timeout (default "
+        f"{DEFAULT_TIMEOUT_SECONDS}s, capped at "
+        f"{MAX_TIMEOUT_SECONDS}s); on timeout the socket is closed "
+        "and partial output is returned with ``timed_out=true``. "
+        "Each stream is capped at 1 MiB and truncated from the "
+        "front when oversize. Pod name resolution accepts an exact "
+        "match or a unique prefix within the namespace; "
+        "multi-container pods require ``--container``. Interactive "
+        "exec (``kubectl exec -it`` -- a live PTY/shell) is "
+        "deliberately out of scope: the dispatcher returns a single "
+        "response with no incremental stdin/stdout envelope, the "
+        "same deferral ``k8s.logs -f`` took. Output bytes are never "
+        "written to the audit log (only the request params are "
+        "hashed)."
+    ),
+    parameter_schema=K8S_EXEC_PARAMETER_SCHEMA,
+    response_schema=K8S_EXEC_RESPONSE_SCHEMA,
+    group_key="exec",
+    tags=("write", "exec", "pod", "dangerous"),
+    safety_level="dangerous",
+    requires_approval=True,
+    llm_instructions=K8S_EXEC_LLM_INSTRUCTIONS,
+)
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = (EXEC_OP,)

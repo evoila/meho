@@ -376,9 +376,15 @@ class Operator(BaseModel):
     #: How the person signed in, from the ``acr`` claim. ``None`` when absent.
     acr: str | None = None
     #: The Keycloak sign-in session id, from the ``sid`` claim. ``None`` when
-    #: absent. With ``auth_time`` it names one sign-in, so one sign-in allows
-    #: one approval (#3979).
+    #: absent. With ``auth_time`` it names one sign-in; the ``destructive``
+    #: approval rule uses it (#3979, #5515).
     sid: str | None = None
+    #: The ``azp`` claim (authorized party): the OAuth client the token was
+    #: made for, for every principal kind. ``None`` when absent. An approve
+    #: on the command line or REST counts only when it is the approval
+    #: client (#5515). Not the same as :attr:`client_id`, which names a
+    #: service identity and stays ``None`` for a person.
+    azp: str | None = None
     #: ``False`` only for a status answer of a login with several tenants
     #: and no chosen tenant (#5239). Never use the tenant fields then.
     tenant_chosen: bool = True

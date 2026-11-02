@@ -1326,6 +1326,7 @@ def test_host_vi_json_paths_exist_in_the_pinned_spec() -> None:
 # vi-json.yaml like the #3091 portgroup writes above.
 # ---------------------------------------------------------------------------
 
+from meho_backplane.connectors.vmware_rest import typed_ops_inventory_find  # noqa: E402
 from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
     _datastore_files,
     _drs_group,
@@ -1333,8 +1334,10 @@ from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
     _drs_rule_delete,
     _library_delete,
     _snapshot,
+    _snapshot_cleanup,
     _teardown,
     _teardown_network,
+    _vapp,
 )
 
 _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
@@ -1427,6 +1430,66 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
         {
             "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
             "POST:/VirtualMachineSnapshot/{moId}/RemoveSnapshot_Task",
+        },
+    ),
+    # --- vApps (#4341): the vApp read (also the task poll) and one write each.
+    "_VIM_SUB_OPS_VAPP_CREATE": (
+        _vapp,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+            "POST:/ResourcePool/{moId}/CreateVApp",
+        },
+    ),
+    "_VIM_SUB_OPS_VAPP_POWER": (
+        _vapp,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualApp/{moId}/PowerOnVApp_Task",
+            "POST:/VirtualApp/{moId}/PowerOffVApp_Task",
+        },
+    ),
+    "_VIM_SUB_OPS_VAPP_START_ORDER": (
+        _vapp,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualApp/{moId}/UpdateVAppConfig",
+        },
+    ),
+    "_VIM_SUB_OPS_VAPP_DELETE": (
+        _vapp,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualApp/{moId}/Destroy_Task",
+        },
+    ),
+    # --- end vApps (#4341)
+    # Delete all snapshots of a VM, and consolidate its disks.
+    "_VIM_SUB_OPS_VM_SNAPSHOT_DELETE_ALL": (
+        _snapshot_cleanup,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualMachine/{moId}/RemoveAllSnapshots_Task",
+        },
+    ),
+    "_VIM_SUB_OPS_VM_DISKS_CONSOLIDATE": (
+        _snapshot_cleanup,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualMachine/{moId}/ConsolidateVMDisks_Task",
+        },
+    ),
+    # The container-view reads of vm.list, inventory.find and the snapshot list of
+    # every VM, plus the inventory-path search (typed reads, not governed writes).
+    "INVENTORY_FIND_CALLS": (
+        typed_ops_inventory_find,
+        {
+            "POST:/ServiceInstance/{moId}/RetrieveServiceContent",
+            "POST:/ViewManager/{moId}/CreateContainerView",
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+            "POST:/ContainerView/{moId}/DestroyView",
+            "POST:/SearchIndex/{moId}/FindByInventoryPath",
         },
     ),
 }

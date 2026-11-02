@@ -110,6 +110,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.http import HttpConnector, json_payload_or_empty
 from meho_backplane.connectors.schemas import (
@@ -150,6 +151,8 @@ from meho_backplane.connectors.vcf_automation.typed_ops import (
     TENANT_PROJECTS_PATH,
     provider_regions_path,
 )
+from meho_backplane.connectors.vmware_shared.vra_governance import VraGovCalls
+from meho_backplane.connectors.vmware_shared.vra_handlers import VraSharedHandlers
 
 __all__ = ["VcfAutomationConfigurationError", "VcfAutomationConnector"]
 
@@ -182,7 +185,7 @@ def _plane_cache_key(target: VcfAutomationTargetLike, plane: Plane) -> tuple[str
     return credential_cache_key(target, fqdn, _tenant_domain(target))
 
 
-class VcfAutomationConnector(HttpConnector):
+class VcfAutomationConnector(HttpConnector, VraSharedHandlers):
     """VCF Automation 9.x REST connector with dual-plane Bearer-token auth.
 
     Two independent per-target token caches:
@@ -221,6 +224,10 @@ class VcfAutomationConnector(HttpConnector):
         # token; the tenant id in the key keeps tenants apart (#1642/#1672).
         self._provider_tokens: dict[tuple[str, ...], str] = {}
         self._tenant_tokens: dict[tuple[str, ...], str] = {}
+        # The callers whose own Vault read of a plane's secret passed, per plane:
+        # the provider plane may read another secret than the tenant plane.
+        self._provider_readers = SecretReaders()
+        self._tenant_readers = SecretReaders()
         # One lock per plane -- provider and tenant first-uses are
         # independent and shouldn't block each other.
         self._provider_lock = asyncio.Lock()
@@ -377,14 +384,23 @@ class VcfAutomationConnector(HttpConnector):
                 "cannot read per-target vendor credentials)"
             )
         cache_key = _plane_cache_key(target, "provider")
+        override_ref = getattr(target, "provider_secret_ref", None)
         async with self._provider_lock:
             cached = self._provider_tokens.get(cache_key)
             if cached is not None:
+                # The caller's own Vault read, once per caller and target.
+                await self._provider_readers.ensure_read(
+                    target,
+                    operator,
+                    lambda: load_credentials_with_override(
+                        self._credentials_loader, target, operator, override_ref
+                    ),
+                )
                 return cached
-            override_ref = getattr(target, "provider_secret_ref", None)
             creds = await load_credentials_with_override(
                 self._credentials_loader, target, operator, override_ref
             )
+            self._provider_readers.record(target, operator)
             client = await self._http_client(target)
             jwt = await vcfa_provider_login(
                 client, creds, target, request_extensions=self._request_extensions(target)
@@ -432,10 +448,19 @@ class VcfAutomationConnector(HttpConnector):
         async with self._tenant_lock:
             cached = self._tenant_tokens.get(cache_key)
             if cached is not None:
+                # The caller's own Vault read, once per caller and target.
+                await self._tenant_readers.ensure_read(
+                    target,
+                    operator,
+                    lambda: load_credentials_with_override(
+                        self._credentials_loader, target, operator, None
+                    ),
+                )
                 return cached
             creds = await load_credentials_with_override(
                 self._credentials_loader, target, operator, None
             )
+            self._tenant_readers.record(target, operator)
             client = await self._http_client(target)
             token = await tenant_login(
                 client, creds, target, request_extensions=self._request_extensions(target)
@@ -1108,8 +1133,118 @@ class VcfAutomationConnector(HttpConnector):
         return await provider_feature_flag_set(self, operator, target, params)
 
     # ------------------------------------------------------------------
+    # Region and quota ops -- thin shims; metadata in :mod:`.provider_infra_ops`.
+    # ------------------------------------------------------------------
+
+    async def provider_infra_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.infra.list`` — see :mod:`._infra_reads`."""
+        from meho_backplane.connectors.vcf_automation._infra_reads import provider_infra_list
+
+        return await provider_infra_list(self, operator, target, params)
+
+    async def provider_region_get(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.region.get`` — see :mod:`._infra_reads`."""
+        from meho_backplane.connectors.vcf_automation._infra_reads import provider_region_get
+
+        return await provider_region_get(self, operator, target, params)
+
+    async def provider_org_quota_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.org_quota.list`` — see :mod:`._infra_reads`."""
+        from meho_backplane.connectors.vcf_automation._infra_reads import provider_org_quota_list
+
+        return await provider_org_quota_list(self, operator, target, params)
+
+    async def provider_vcenter_register(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.vcenter.register`` — see :mod:`._infra_connect`."""
+        from meho_backplane.connectors.vcf_automation._infra_connect import (
+            provider_vcenter_register,
+        )
+
+        return await provider_vcenter_register(self, operator, target, params)
+
+    async def provider_nsx_manager_register(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.nsx_manager.register`` — see :mod:`._infra_nsx`."""
+        from meho_backplane.connectors.vcf_automation._infra_nsx import (
+            provider_nsx_manager_register,
+        )
+
+        return await provider_nsx_manager_register(self, operator, target, params)
+
+    async def provider_region_set(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.region.set`` — see :mod:`._infra_region`."""
+        from meho_backplane.connectors.vcf_automation._infra_region import provider_region_set
+
+        return await provider_region_set(self, operator, target, params)
+
+    async def provider_org_quota_set(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.org_quota.set`` — see :mod:`._infra_quota`."""
+        from meho_backplane.connectors.vcf_automation._infra_quota import provider_org_quota_set
+
+        return await provider_org_quota_set(self, operator, target, params)
+
+    # ------------------------------------------------------------------
     # Image ops -- thin shims over :mod:`._images`; metadata in :mod:`.image_ops`.
     # ------------------------------------------------------------------
+
+    def vra_gov_calls(self, operator: Operator, target: Any) -> VraGovCalls:
+        """The tenant-login GET and send of the shared governance ops.
+
+        The approval, policy, ABX and subscription handlers are inherited from
+        :class:`~meho_backplane.connectors.vmware_shared.vra_handlers.VraSharedHandlers`;
+        the metadata is in :mod:`.governance_ops`.
+        """
+
+        async def get(path: str, query: Mapping[str, Any] | None) -> dict[str, Any]:
+            return await self._request_json(target, "GET", path, operator=operator, params=query)
+
+        async def send(
+            method: str,
+            path: str,
+            query: Mapping[str, Any] | None,
+            body: Mapping[str, Any] | None,
+        ) -> Any:
+            # A write answer can be a list or empty, which _post_json refuses.
+            resp = await self._send_with_retry(
+                target, method, path, operator=operator, params=query, json=body
+            )
+            return json_payload_or_empty(resp)
+
+        return VraGovCalls(get=get, send=send, prefix="vcfa.tenant")
 
     async def tenant_image_profile_list(
         self,
@@ -1253,16 +1388,258 @@ class VcfAutomationConnector(HttpConnector):
 
         return await tenant_blueprint_request_get(self, operator, target, params)
 
+    # ------------------------------------------------------------------
+    # Day-2 ops, shared with Aria Automation 8 -- thin shims over ``_day2``.
+    # Metadata lives in :mod:`.day2_ops`.
+    # ------------------------------------------------------------------
+
+    async def tenant_deployment_actions_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.deployment.actions.list`` — see :mod:`._day2`."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.deployment_actions_list(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
+    async def tenant_deployment_action_run(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.deployment.action.run`` — see :mod:`._day2`."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.deployment_action_run(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
+    async def tenant_resource_action_run(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.resource.action.run`` — see :mod:`._day2`."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.resource_action_run(self, operator, target, params, prefix="vcfa.tenant")
+
+    async def tenant_deployment_lease_change(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.deployment.lease.change`` — see :mod:`._day2`."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.deployment_lease_change(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
     async def tenant_deployment_delete(
         self,
         operator: Operator,
         target: VcfAutomationTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """``vcfa.tenant.deployment.delete`` — see :mod:`._deploy`."""
-        from meho_backplane.connectors.vcf_automation._deploy import tenant_deployment_delete
+        """``vcfa.tenant.deployment.delete`` — see :mod:`._day2`."""
+        from meho_backplane.connectors.vcf_automation import _day2
 
-        return await tenant_deployment_delete(self, operator, target, params)
+        return await _day2.deployment_delete(self, operator, target, params, prefix="vcfa.tenant")
+
+    async def tenant_machine_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.machine.list`` — see :mod:`._day2`."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.machine_list(self, operator, target, params, prefix="vcfa.tenant")
+
+    async def tenant_block_device_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.block_device.list`` — see :mod:`._day2`."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.block_device_list(self, operator, target, params, prefix="vcfa.tenant")
+
+    async def tenant_machine_create(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.machine.create`` — see :mod:`._day2`."""
+        from meho_backplane.connectors.vcf_automation import _day2_create
+
+        return await _day2_create.machine_create(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
+    async def tenant_block_device_create(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.block_device.create`` — see :mod:`._day2`."""
+        from meho_backplane.connectors.vcf_automation import _day2_create
+
+        return await _day2_create.block_device_create(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
+    # ------------------------------------------------------------------
+    # Infrastructure: cloud accounts, cloud zones, profiles, project members.
+    # Shared with the vRA 8 connector; handlers in ``._infra`` and
+    # ``._infra_changes``, metadata in :mod:`.infra_ops`.
+    # ------------------------------------------------------------------
+
+    async def infra_cloud_account_list(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.cloud_account.list`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.cloud_account_list(self, operator, target, params, prefix="vcfa.tenant")
+
+    async def infra_cloud_account_create(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.cloud_account.create`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.cloud_account_create(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
+    async def infra_cloud_account_delete(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.cloud_account.delete`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.cloud_account_delete(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
+    async def infra_zone_set(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.zone.set`` -- see ``vcf_automation._infra_changes``."""
+        from meho_backplane.connectors.vcf_automation import _infra_changes
+
+        return await _infra_changes.zone_set(self, operator, target, params, prefix="vcfa.tenant")
+
+    async def infra_flavor_profile_list(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.flavor_profile.list`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.flavor_profile_list(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
+    async def infra_flavor_profile_set(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.flavor_profile.set`` -- see ``vcf_automation._infra_changes``."""
+        from meho_backplane.connectors.vcf_automation import _infra_changes
+
+        return await _infra_changes.flavor_profile_set(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
+    async def infra_network_profile_list(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.network_profile.list`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.network_profile_list(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
+    async def infra_storage_profile_list(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.storage_profile.list`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.storage_profile_list(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
+    async def infra_project_members_set(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.project.members.set`` -- see ``vcf_automation._infra_changes``."""
+        from meho_backplane.connectors.vcf_automation import _infra_changes
+
+        return await _infra_changes.project_members_set(
+            self, operator, target, params, prefix="vcfa.tenant"
+        )
+
+    # Sign-in ops -- thin shims over :mod:`._identity`, :mod:`._identity_ldap`
+    # and :mod:`._identity_oidc`; metadata in :mod:`.identity_ops`.
+
+    async def provider_identity_show(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.identity.show`` — see :mod:`._identity`."""
+        from meho_backplane.connectors.vcf_automation._identity import provider_identity_show
+
+        return await provider_identity_show(self, operator, target, params)
+
+    async def provider_ldap_set(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.ldap.set`` — see :mod:`._identity_ldap`."""
+        from meho_backplane.connectors.vcf_automation._identity_ldap import provider_ldap_set
+
+        return await provider_ldap_set(self, operator, target, params)
+
+    async def provider_org_ldap_set(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.org.ldap.set`` — see :mod:`._identity_ldap`."""
+        from meho_backplane.connectors.vcf_automation._identity_ldap import provider_org_ldap_set
+
+        return await provider_org_ldap_set(self, operator, target, params)
+
+    async def provider_org_oidc_set(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.org.oidc.set`` — see :mod:`._identity_oidc`."""
+        from meho_backplane.connectors.vcf_automation._identity_oidc import provider_org_oidc_set
+
+        return await provider_org_oidc_set(self, operator, target, params)
 
     @classmethod
     async def register_typed_operations(cls) -> None:
@@ -1275,8 +1652,12 @@ class VcfAutomationConnector(HttpConnector):
         :data:`~meho_backplane.connectors.vcf_automation.provisioning_ops.VCFA_PROVISIONING_OPS`,
         :data:`~meho_backplane.connectors.vcf_automation.image_ops.VCFA_IMAGE_OPS`,
         :data:`~meho_backplane.connectors.vcf_automation.network_ops.VCFA_NETWORK_OPS`,
-        :data:`~meho_backplane.connectors.vcf_automation.deploy_ops.VCFA_DEPLOY_OPS` and
+        :data:`~meho_backplane.connectors.vcf_automation.deploy_ops.VCFA_DEPLOY_OPS`,
         :data:`~meho_backplane.connectors.vcf_automation.feature_flag_ops.VCFA_FEATURE_FLAG_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.day2_ops.VCFA_DAY2_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.infra_ops.VCFA_INFRA_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.provider_infra_ops.VCFA_PROVIDER_INFRA_OPS`
+        and :data:`~meho_backplane.connectors.vcf_automation.identity_ops.VCFA_IDENTITY_OPS`,
         resolves each op's ``handler_attr`` to the bound method, looks the
         group's curated ``when_to_use`` up in
         :data:`~meho_backplane.connectors.vcf_automation.typed_ops.VCFA_TYPED_WHEN_TO_USE_BY_GROUP`,
@@ -1290,12 +1671,18 @@ class VcfAutomationConnector(HttpConnector):
         # Lazy import: the operations package pulls in the embedding
         # pipeline (ONNX runtime + model) which pure fingerprint/probe unit
         # tests should not pay. Lifespan callers have it warmed by now.
+        from meho_backplane.connectors.vcf_automation.day2_ops import VCFA_DAY2_OPS
         from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
         from meho_backplane.connectors.vcf_automation.feature_flag_ops import (
             VCFA_FEATURE_FLAG_OPS,
         )
+        from meho_backplane.connectors.vcf_automation.identity_ops import VCFA_IDENTITY_OPS
         from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
+        from meho_backplane.connectors.vcf_automation.infra_ops import VCFA_INFRA_OPS
         from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
+        from meho_backplane.connectors.vcf_automation.provider_infra_ops import (
+            VCFA_PROVIDER_INFRA_OPS,
+        )
         from meho_backplane.connectors.vcf_automation.provisioning_ops import (
             VCFA_PROVISIONING_OPS,
         )
@@ -1312,6 +1699,10 @@ class VcfAutomationConnector(HttpConnector):
             *VCFA_NETWORK_OPS,
             *VCFA_DEPLOY_OPS,
             *VCFA_FEATURE_FLAG_OPS,
+            *VCFA_INFRA_OPS,
+            *VCFA_DAY2_OPS,
+            *VCFA_PROVIDER_INFRA_OPS,
+            *VCFA_IDENTITY_OPS,
         )
         for op in all_ops:
             handler = getattr(cls, op.handler_attr, None)
@@ -1364,6 +1755,10 @@ class VcfAutomationConnector(HttpConnector):
         """
         await self._invalidate_plane(target, "provider", None)
         await self._invalidate_plane(target, "tenant", None)
+        async with self._provider_lock:
+            self._provider_readers.forget(target)
+        async with self._tenant_lock:
+            self._tenant_readers.forget(target)
 
     async def aclose(self) -> None:
         """Clear both plane token caches and tear down the httpx pool.
@@ -1375,8 +1770,10 @@ class VcfAutomationConnector(HttpConnector):
         """
         async with self._provider_lock:
             self._provider_tokens.clear()
+            self._provider_readers.clear()
         async with self._tenant_lock:
             self._tenant_tokens.clear()
+            self._tenant_readers.clear()
         await super().aclose()
 
 

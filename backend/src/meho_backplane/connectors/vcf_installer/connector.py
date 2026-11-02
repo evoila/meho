@@ -63,6 +63,7 @@ from meho_backplane.connectors._shared.cache_key import (
 )
 from meho_backplane.connectors._shared.profile_auth import SESSION_SCHEME_SPECS
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -152,6 +153,8 @@ class InstallerConnector(HttpConnector):
     ) -> None:
         super().__init__()
         self._creds_cache: dict[tuple[str, str], dict[str, str]] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._creds_lock = asyncio.Lock()
         self._session_tokens: dict[tuple[str, ...], str] = {}
         self._session_lock = asyncio.Lock()
@@ -179,15 +182,19 @@ class InstallerConnector(HttpConnector):
         """Return the cached session token for *target*, establishing on first use.
 
         The lock serialises concurrent first-use callers so two don't both pay
-        the ``POST /v1/tokens`` round-trip. The cache fast-path is closed to the
-        synthesised system operator (``is_system_operator``): a system caller
-        always re-establishes and its token is never written to the shared cache
-        (#1008).
+        the ``POST /v1/tokens`` round-trip. A cached token is used by a caller
+        only after their own Vault read of the target's secret passed once
+        (:meth:`_load_credentials` runs it on a hit). The cache fast-path is
+        closed to the synthesised system operator (``is_system_operator``): a
+        system caller always re-establishes and its token is never written to
+        the shared cache.
         """
         cache_key = credential_cache_key(target)
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None and not is_system_operator(operator):
+                # The caller's own Vault read, once; a hit for a caller who has read.
+                await self._load_credentials(target, operator)
                 return cached
             creds = await self._load_credentials(target, operator)
             client = await self._http_client(target)
@@ -229,6 +236,7 @@ class InstallerConnector(HttpConnector):
         """Public duck-typed credential-eviction hook for the dispatch path (#2396)."""
         async with self._creds_lock:
             self._creds_cache.pop(target_cache_key(target), None)
+            self._readers.forget(target)
 
     async def _get_json_with_session_retry(
         self,
@@ -300,13 +308,20 @@ class InstallerConnector(HttpConnector):
         """Return the cached credentials for *target*, loading from Vault on first use.
 
         The loaded dict must contain ``"username"`` and ``"password"``; a missing
-        key raises :exc:`RuntimeError` naming the target and key. The cache
-        fast-path is closed to the synthesised system operator (#1008).
+        key raises :exc:`RuntimeError` naming the target and key.
+
+        A cached entry is handed to a caller only after that caller's own
+        Vault read of the target's secret passed once in this process
+        (:class:`~meho_backplane.connectors._shared.secret_readers.SecretReaders`).
+        A hit for another caller runs the loader under their login first.
+        The synthesised system operator is never recorded, so it always runs
+        the loader. A caller who has read keeps cold load → cache →
+        reuse.
         """
         cache_key = target_cache_key(target)
         async with self._creds_lock:
             cached = self._creds_cache.get(cache_key)
-            if cached is not None and not is_system_operator(operator):
+            if cached is not None and self._readers.has_read(target, operator):
                 return cached
             raw = await self._credentials_loader(target, operator)
             try:
@@ -319,6 +334,7 @@ class InstallerConnector(HttpConnector):
                     "{'username': str, 'password': str}"
                 ) from exc
             self._creds_cache[cache_key] = raw
+            self._readers.record(target, operator)
             _log.info("installer_credentials_loaded", target=target.name, host=target.host)
             return raw
 
@@ -650,4 +666,5 @@ class InstallerConnector(HttpConnector):
             self._session_tokens.clear()
         async with self._creds_lock:
             self._creds_cache.clear()
+            self._readers.clear()
         await super().aclose()

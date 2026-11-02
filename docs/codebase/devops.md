@@ -859,7 +859,7 @@ on a person directly: the claim always comes from the group.
 | Client | Kind | Notes |
 | --- | --- | --- |
 | `meho-backplane` | confidential, no login flow | the token audience only |
-| `meho-cli` | public, device flow | `meho login`; no `offline_access` (as `bootstrap-clients` without `--cli-offline-access`) |
+| `meho-cli` | public, device flow | `meho login`; optional scope `offline_access`; offline login idle limit 48 hours (as `bootstrap-clients` with its default `--cli-offline-access`) |
 | `meho-mcp` | public, authorization code + PKCE (S256) | redirect URIs `http://localhost:*`, `http://127.0.0.1:*`; optional scopes `offline_access`, `mcp:read`, `mcp:execute`, `mcp:admin`; offline login idle limit 48 hours |
 | `meho-web` | confidential, authorization code + PKCE (S256) | redirect `https://<host>/ui/auth/callback`, after logout `https://<host>/ui/auth/login` |
 | `meho-admin` | confidential, service account | realm-management roles `manage-clients` and `manage-users`; with the company login on, the chart adds `manage-identity-providers` and `manage-realm` (#4592) |
@@ -898,6 +898,7 @@ realm file, not from `config.*` or `keycloakAdmin.*`:
 | `KEYCLOAK_DISCOVERY_URL` | `http://<release>-keycloak:8080/auth/realms/meho`, the Service |
 | `KEYCLOAK_AUDIENCE` | `meho-backplane` |
 | `KEYCLOAK_CLI_CLIENT_ID` | `meho-cli` |
+| `KEYCLOAK_CLI_APPROVE_CLIENT_ID` | `meho-cli-approve` |
 | `UI_KEYCLOAK_CLIENT_ID` | `meho-web` |
 | `KEYCLOAK_ADMIN_URL` | `http://<release>-keycloak:8080/auth/admin/realms/meho` |
 | `KEYCLOAK_ADMIN_CLIENT_ID` | `meho-admin` |
@@ -1564,7 +1565,7 @@ incidents #634 / #697.
 Since #3251 the required unit lane is **sharded**: the required context
 `Python (ruff + mypy + pytest)` no longer maps to one monolithic job but
 to a **fan-in** (`python-unit-lane`) over a lint job (`python-lint`) and a
-5-way pytest matrix (`python-unit-shard`). The required-context
+6-way pytest matrix (`python-unit-shard`). The required-context
 _string_ is unchanged, so branch protection / the ruleset are untouched —
 see [Sharded unit lane (#3251)](#sharded-unit-lane-3251) below.
 
@@ -1741,7 +1742,7 @@ workflow files, this doc, and the changelog.
 | Job | Surface | Steps |
 | --- | --- | --- |
 | `python-lint` (`Python lint + typecheck (ruff + mypy)`) | `backend/src/` + `backend/tests/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict`. Non-required; whole-tree, unshardable-by-file, runs once on a GitHub-hosted runner (#3251, #4626). |
-| `python-unit-shard` (`Python unit shard N/5`) | `backend/` unit + acceptance subtree, split 5 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). A pull request that changes one connector runs one leg instead (`Python unit tests for connector <name>`, see [One-connector unit run](#one-connector-unit-run-5297)). |
+| `python-unit-shard` (`Python unit shard N/6`) | `backend/` unit + acceptance subtree, split 6 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). A pull request that changes one connector runs one leg instead (`Python unit tests for connector <name>`, see [One-connector unit run](#one-connector-unit-run-5297)). |
 | `python-outside-backend` (`Python tests that read files outside backend`) | the backend tests that read files outside `backend/` | Runs only on a PR with no `backend/` change (`backend_python=false`) that is not docs-only. `pytest -n 3` over the fixed list in `backend/tests/_outside_backend_tests.py`, on a GitHub-hosted runner. Non-required; the fan-in requires it on that path (#5296). See [No-backend path (#5296)](#no-backend-path-5296). |
 | `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252); on a no-backend diff it requires `python-outside-backend` to pass (#5296). |
 | `python-integration-shard` (`Python integration shard N/4`) | `backend/tests/integration/` + the G0.7 vSphere canary module, split 4 ways | `uv sync --locked --all-groups` -> `pytest -x -rs` over a file set split by measured time, against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. No xdist inside a shard. Non-required matrix (#5384). |
@@ -1749,9 +1750,23 @@ workflow files, this doc, and the changelog.
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
 
-The five `python-unit-shard` legs run on `meho-runners-ci-heavy`
-(dedicated ARC scale set, 6000m requests=limits — #761 /
-rdc-gitops#55; the pool size lives outside this repo). The four
+The six `python-unit-shard` legs run on one of two heavy runner sets
+(ARC scale sets on the same machines; their sizes live outside this
+repo, #761). The set depends on the event:
+
+- `merge_group` only: `meho-runners-ci-heavy-queue` (6 runners, enough
+  for the six shards of one merge-queue run).
+- Every other event (pull requests, `push` to `main` and the nightly
+  run): `meho-runners-ci-heavy`.
+
+Why two sets: GitHub gives queued jobs to runners in queue order, with
+no priority for the merge queue. When many pull requests ran at once,
+their shards filled the heavy runners and the merge queue's shards
+waited behind them. Pushes to `main` stay on `meho-runners-ci-heavy`:
+otherwise every merged commit would run its shards on the 6 queue
+runners twice (merge-queue run, then push run), and the queue would
+merge only about half as fast. The nightly `python-coverage` shards
+stay on `meho-runners-ci-heavy`. The four
 `python-integration-shard` legs, `python-migration-tests` and the
 nightly `python-coverage-combine` run on the dense `meho-runners-ci` pool
 (4-core): they pull their test images from the internal image mirror or
@@ -1811,17 +1826,17 @@ shape (deterministic file-level matrix + fan-in):
   checks that cannot be split by test file and cost ~1-2 min, so they run
   **once** on the light pool rather than N times per shard. Only pytest
   fans out.
-- **`python-unit-shard`** — the pytest sweep as a **5-way matrix split by
+- **`python-unit-shard`** — the pytest sweep as a **6-way matrix split by
   measured file time**. Each shard lists the test files with `find tests
   -name 'test_*.py' -not -path 'tests/integration/*' -not -path
   'tests/migrations/*' | sort` and pipes the list into
-  `tests/_unit_shard_split.py --shard N --total 5`. The splitter reads the
+  `tests/_unit_shard_split.py --shard N --total 6`. The splitter reads the
   measured seconds per test file from `tests/_unit_shard_durations.json`,
   sorts the files slowest first, and gives each file to the shard with
   the least time so far (a file without a measurement counts as the
   median; every file also carries a small fixed cost for import and
   collection, so files whose tests all skip still spread out). The same
-  list always gives the same split, and the five shards partition the
+  list always gives the same split, and the six shards partition the
   file set **exactly** (union == full, pairwise disjoint;
   `tests/test_unit_shard_split.py` pins both). The splitter prints the
   file count and the predicted seconds per shard on stderr, so the shard
@@ -1859,9 +1874,17 @@ shape (deterministic file-level matrix + fan-in):
   busiest run near 850 s per shard, so #5433 refreshed the file times
   (now the mean of those seven runs) and raised the count to 5. In the
   busiest of those runs the slowest shard carried 2,497 s of test time
-  with the old split and would carry 1,924 s with the new one. To
-  change the count, edit the matrix and `TOTAL` in the pytest step
-  together; `tests/test_unit_shard_split.py` checks that they match. File-level sharding is
+  with the old split and would carry 1,924 s with the new one. Three
+  days later, on 2026-11-02, shard 4 ran past 900 s three times in one
+  morning in the merge queue, with every test passing (#5623). The unit
+  tests had grown by about 15% in two days, 132 test files had no
+  measured time, and in green runs the five shards took 600-890 s. The
+  file times are now the mean of eight green merge-queue runs of that
+  morning, and the count is 6. In the run that failed on time, the
+  slowest shard carried 2,568 s of test time (933 s). Fresh file times
+  with five shards would still leave 2,344 s (about 850 s); with six
+  shards it is 1,965 s (about 720 s). To change the count, edit the
+  matrix and `TOTAL` in the pytest step together; `tests/test_unit_shard_split.py` checks that they match. File-level sharding is
   strictly coarser than what xdist `--dist loadscope` already does across
   workers (whole modules stay together, conftest semantics identical to a
   full run), so an xdist-safe suite is shard-safe — proven live by the
@@ -1983,7 +2006,7 @@ completes CI in minutes.
   fail-safe defaults (`docs_only=false`). `merge_group` and `push` NEVER
   fast-path (a queue batch may mix docs + code; a `main` push must always run
   the full matrix).
-- **What skips.** `python-lint`, the five `python-unit-shard` legs, and
+- **What skips.** `python-lint`, the six `python-unit-shard` legs, and
   the four `python-integration-shard` legs gain `needs: changes` and an
   `if:` that skips them when `docs_only == 'true'` (same #2140 shape as the
   `python-migration-tests` gate). The required contexts `Python (ruff +
@@ -2022,7 +2045,7 @@ runs one short job instead.
   quotes a path that holds a double quote, a backslash or a control
   character; such a line keeps every fail-safe default (full run and
   migration gate on).
-- **What skips.** `python-lint`, the five `python-unit-shard` legs and
+- **What skips.** `python-lint`, the six `python-unit-shard` legs and
   the four `python-integration-shard` legs skip by their own `if:` when
   `backend_python` is `false`, the same way as on a docs-only PR. The
   `python-integration` fan-in accepts the skipped legs on this path.
@@ -2054,10 +2077,10 @@ runs one short job instead.
 ### One-connector unit run (#5297)
 
 A pull request that changes only one connector folder runs **one** unit
-job instead of the five `python-unit-shard` legs. The job is named
+job instead of the six `python-unit-shard` legs. The job is named
 `Python unit tests for connector <name>`. It runs that connector's tests
 plus a fixed contract set. The merge queue and pushes to `main` always run
-the five shards, so every test still runs before a change lands on `main`.
+the six shards, so every test still runs before a change lands on `main`.
 
 - **Who decides.** The `changes` job sets the output `single_connector`.
   It pipes the changed files into
@@ -2218,6 +2241,27 @@ in their dedicated workflows. There, the `Semgrep SAST` job sends every
 finding of its four rule packs (error, warning and info) to the GitHub
 Security tab and shows new ones as annotations on pull requests, but it
 fails only on a finding from an error-level rule.
+
+### Secret scan (`secret-scan.yml`)
+
+Two jobs scan for secrets:
+
+- **`TruffleHog Secret Scan`** (a required check) scans the commits of
+  the push, pull request or merge-queue range.
+- **`Gitleaks whole-tree scan`** (#5333) scans every file of the
+  checkout with `gitleaks dir`. It uses the same gitleaks version as the
+  pre-commit hook (`.pre-commit-config.yaml`), downloaded from the
+  release and checked against a pinned SHA-256. The hook checks only the
+  lines a commit adds. So without this job, a made-up secret with no
+  skip mark showed up only later, when a merge of main into an older
+  branch brought the whole file into a commit.
+
+A test that needs a made-up secret marks its line with a
+`# gitleaks:allow` comment (gitleaks skips any line that holds this
+text). The repo has no `.gitleaksignore` file: its entries name a line
+number, so they stopped working when the value moved. When a value
+cannot carry a comment on its own line (for example a shell line that
+ends in `\`), move it to a line that can.
 
 ### Coverage handoff to SonarCloud
 
@@ -2383,7 +2427,7 @@ their isolation posture:
 | `readme-version-check.yml` | yes (inline shell over PR content) | **route**: fork PR → disposable GitHub-hosted runner |
 | `plugin-version-check.yml` | yes (runs `check_plugin_version.py`) | **route**: fork PR → disposable GitHub-hosted runner |
 | `linux-server-test.yml` | yes (shellcheck, and the unit tests run `deploy/linux-server/install.sh` against stub commands) | **route**: fork PR → disposable GitHub-hosted runner |
-| `secret-scan.yml` | yes (`docker run` TruffleHog over PR content) | **route**: fork PR → disposable GitHub-hosted runner |
+| `secret-scan.yml` | yes (`docker run` TruffleHog and the gitleaks binary over PR content) | **route**: fork PR → disposable GitHub-hosted runner |
 | `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** (skip on fork PR — the job runs inside the internal Harbor-proxied container, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`) |
 | `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted) |
 

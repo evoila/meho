@@ -623,8 +623,8 @@ catalog `(product, version)`, like `op_allowlist`. Operator guide:
 
 An ingested read whose answer holds credentials gets two guards, the same
 as its hand-written twin (#4617): a `safety_overlay` rule on its catalog
-row (`caution`, with approval) and an entry in `_CREDENTIAL_READ_OPS` in
-`broadcast/events.py`, so the dispatcher replaces every secret field in
+row (`caution`, with approval) and a `credential_read` declaration in the
+connector's `op_classes.py` (`sddc_manager/op_classes.py`), so the dispatcher replaces every secret field in
 the answer with `[REDACTED:param_name]`. That list stays the only list of
 secret reads. The SDDC Manager row `sddc` / `9.0` carries the first set:
 the `/v1/credentials` reads, the depot, backup and proxy settings, host
@@ -2099,7 +2099,12 @@ consume so the wire contract is defined once:
   land. `ConnectorListItem.state` (G0.9.1-T1 / #773) is `"ingested"`
   for DB-backed rows the dispatcher can resolve and `"registered"`
   for class-side-only rows the dispatcher cannot resolve yet — see
-  the listing-integrity contract section above.
+  the listing-integrity contract section above. A third value,
+  `"package_not_installed"` (#5560), marks a connector whose rows all
+  come from a connector package that is not installed; see
+  `connector-packages.md`, "When a package is removed". A fourth value,
+  `"code_not_installed"` (#5585), marks a connector whose code is not in
+  this MEHO; see the same section, "Rows with no package name".
   `ConnectorListItem.next_step` (G0.13-T3 / #1133) is the workflow-
   completion hint: a `NextStep` object (verb + rationale) on
   `state="registered"` rows, `null` on `state="ingested"` rows — see
@@ -2191,8 +2196,13 @@ way: `POST /ingest` (and the `meho connector ingest` CLI verb that
 drives it) accepts an optional body `tenant_id` with the same
 semantics as the MCP tool `meho_connector_ingest`'s argument —
 omitted or `null` targets the built-in / global scope (`tenant_id IS
-NULL`, tenant_admin only), the operator's own tenant UUID targets
-their tenant-curated namespace, and any other UUID is rejected with
+NULL`, platform_admin only: the rows are shared by every tenant, and a
+second ingest of an existing built-in connector updates those rows in
+place, so the write is a platform action like enable, disable, edit
+and delete; a tenant_admin without `platform_admin` gets a 403 with
+the message "built-in connector ingest requires platform_admin"), the
+operator's own tenant UUID targets their tenant-curated namespace, and
+any other UUID is rejected with
 a synchronous 403 by `IngestionPipelineService.authorize_scope` —
 run eagerly at the REST route on both the sync and async branches
 (before the async job row is created, #2208), eagerly in the MCP

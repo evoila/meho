@@ -590,6 +590,19 @@ Not changed, on purpose:
   token does not end the old one, and the Keycloak token also depends on
   the realm set on the target.
 
+## Who may use a cached entry (one read per caller)
+
+A cache key says which entry a call looks up. It does not say who may use
+it. That is the job of `SecretReaders`
+(`connectors/_shared/secret_readers.py`, see
+`connectors-shared-secret-readers.md`): every connector cache hands an
+entry to a caller only after that caller's own Vault read of the target's
+secret passed once in this process. The first caller's read fills the
+cache. A later caller reads the secret once too, under their own login,
+and then uses the same cached entry. The vendor still sees one login per
+credential. A target change forgets the readers together with the
+entries.
+
 ## Dependencies
 
 - **`hvac`** (2.4.0 resolved) — `client.secrets.kv.v2.read_secret_version`

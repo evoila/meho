@@ -6,14 +6,17 @@
 Importing this package registers :class:`SaltConnector` against the v2
 connector registry under ``(product="salt", version="8.18",
 impl_id="salt-raas")`` plus the product wildcard, and queues the typed-op
-registrar so the six Salt reads land in ``endpoint_descriptor`` before the
-first dispatch. The ``>=8.0,<10.0`` range keeps Aria Automation Config 8.x
+registrar so the six Salt reads and six changes land in
+``endpoint_descriptor`` before the first dispatch. Importing
+:mod:`.key_writes` and :mod:`.job_writes` registers the preview builders of
+the destructive changes. The ``>=8.0,<10.0`` range keeps Aria Automation Config 8.x
 and VCF 9.1 Salt on the same class: both serve the RaaS RPC API.
 """
 
 from typing import Final
 
 from meho_backplane.connectors.registry import register_connector_v2
+from meho_backplane.connectors.salt import job_writes, key_writes
 from meho_backplane.connectors.salt.connector import (
     SaltConnector,
     SaltRpcError,
@@ -65,6 +68,8 @@ __all__ = [
     "SaltSessionLoader",
     "SaltTargetLike",
     "SaltTypedOp",
+    "job_writes",
+    "key_writes",
     "load_session_credentials_from_vault",
     "register_salt_typed_operations",
 ]

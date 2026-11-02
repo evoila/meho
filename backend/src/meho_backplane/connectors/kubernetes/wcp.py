@@ -89,6 +89,9 @@ import yaml
 from kubernetes_asyncio.client.configuration import Configuration
 from kubernetes_asyncio.config import load_kube_config_from_dict
 
+from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
+from meho_backplane.connectors._shared.pinned_transport import build_pinned_async_transport
+
 __all__ = [
     "DEFAULT_WCP_LOGIN_TIMEOUT_SECONDS",
     "DEFAULT_WCP_TOKEN_TTL_SECONDS",
@@ -405,7 +408,10 @@ async def wcp_login(
     tls = _wcp_tls(host=host, verify_tls=verify_tls, ca_pem=ca_pem, tls_server_name=tls_server_name)
     url = f"https://{host}:{login_port}{WCP_LOGIN_PATH}"
     try:
-        async with httpx.AsyncClient(verify=tls.verify, timeout=timeout) as http:
+        # The pinned transport checks the address when it connects and dials
+        # only the checked IP; TLS still verifies against the server name.
+        transport = build_pinned_async_transport(screen_dial_addresses, verify=tls.verify)
+        async with httpx.AsyncClient(transport=transport, timeout=timeout) as http:
             resp = await http.post(
                 url,
                 auth=(username, password),

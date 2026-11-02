@@ -116,6 +116,7 @@ from meho_backplane.connectors._shared.profile_auth import (
     build_static_headers,
 )
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.vault_creds import (
     VaultCredentialsReadError,
     load_basic_credentials,
@@ -251,6 +252,8 @@ class ProfiledRestConnector(HttpConnector):
         # teardown so a legacy-only target (vcsim) routes ops to ``/rest``
         # instead of defaulting to the modern ``/api`` mount.
         self._session_login_paths: dict[tuple[str, ...], str] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._session_lock = asyncio.Lock()
 
     # -- auth -----------------------------------------------------------
@@ -395,8 +398,13 @@ class ProfiledRestConnector(HttpConnector):
             now = time.monotonic()
             cached = self._session_tokens.get(cache_key)
             if cached is not None and cached.is_fresh(now):
+                # The caller's own Vault read, once per caller and target.
+                await self._readers.ensure_read(
+                    target, operator, lambda: self._load_credentials(target, operator)
+                )
                 return cached.token
             minted = await self._mint_session_token(target, operator)
+            self._readers.record(target, operator)
             expires_at = None if minted.ttl_seconds is None else now + minted.ttl_seconds
             self._session_tokens[cache_key] = _CachedSessionToken(minted.token, expires_at)
             return minted.token
@@ -635,6 +643,17 @@ class ProfiledRestConnector(HttpConnector):
                 # re-discovers the live endpoint from a clean state (#2031).
                 self._session_login_paths.pop(cache_key, None)
 
+    async def invalidate_credentials(self, target: Any) -> None:
+        """Drop the login of *target* and forget who has read its secret.
+
+        Called after a failed login and after a target change. The next call
+        of every caller reads the secret from Vault again, under their own
+        login, and logs in with what it finds.
+        """
+        await self._invalidate_session(target)
+        async with self._session_lock:
+            self._readers.forget(target)
+
     # -- fingerprint / probe (G0.28-T6 #1972) ---------------------------
 
     async def fingerprint(
@@ -785,5 +804,6 @@ class ProfiledRestConnector(HttpConnector):
         """
         async with self._session_lock:
             self._session_tokens.clear()
+            self._readers.clear()
             self._session_login_paths.clear()
         await super().aclose()

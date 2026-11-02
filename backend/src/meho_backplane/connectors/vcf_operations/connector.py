@@ -135,6 +135,10 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.vcf_operations.fleet_iam_handlers import VropsFleetIamHandlers
+from meho_backplane.connectors.vcf_operations.fleet_secrets_handlers import (
+    VropsFleetSecretsHandlers,
+)
 from meho_backplane.connectors.vcf_operations.licensing_handlers import VropsLicensingHandlers
 from meho_backplane.connectors.vcf_operations.session import (
     VcfOperationsCredentialsLoader,
@@ -221,7 +225,9 @@ def _session_cache_key(target: Any) -> tuple[str, ...]:
     return credential_cache_key(target, getattr(target, "auth_source", None) or None)
 
 
-class VcfOperationsConnector(VropsLicensingHandlers, HttpConnector):
+class VcfOperationsConnector(
+    VropsFleetIamHandlers, VropsLicensingHandlers, VropsFleetSecretsHandlers, HttpConnector
+):
     """vROps 9.0 REST connector with acquired-token (``OpsToken``) auth.
 
     Session token cached in :attr:`_session_tokens` per credential and
@@ -325,6 +331,8 @@ class VcfOperationsConnector(VropsLicensingHandlers, HttpConnector):
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
+                # The caller's own Vault read, once; a hit for a caller who has read.
+                await self._creds.get(target, operator)
                 return cached
             creds = await self._creds.get(target, operator)
             auth_source = getattr(target, "auth_source", None) or None

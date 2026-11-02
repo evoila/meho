@@ -1110,6 +1110,91 @@ class VcfAutomationConnector(HttpConnector, VraSharedHandlers):
         return await provider_feature_flag_set(self, operator, target, params)
 
     # ------------------------------------------------------------------
+    # Region and quota ops -- thin shims; metadata in :mod:`.provider_infra_ops`.
+    # ------------------------------------------------------------------
+
+    async def provider_infra_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.infra.list`` — see :mod:`._infra_reads`."""
+        from meho_backplane.connectors.vcf_automation._infra_reads import provider_infra_list
+
+        return await provider_infra_list(self, operator, target, params)
+
+    async def provider_region_get(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.region.get`` — see :mod:`._infra_reads`."""
+        from meho_backplane.connectors.vcf_automation._infra_reads import provider_region_get
+
+        return await provider_region_get(self, operator, target, params)
+
+    async def provider_org_quota_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.org_quota.list`` — see :mod:`._infra_reads`."""
+        from meho_backplane.connectors.vcf_automation._infra_reads import provider_org_quota_list
+
+        return await provider_org_quota_list(self, operator, target, params)
+
+    async def provider_vcenter_register(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.vcenter.register`` — see :mod:`._infra_connect`."""
+        from meho_backplane.connectors.vcf_automation._infra_connect import (
+            provider_vcenter_register,
+        )
+
+        return await provider_vcenter_register(self, operator, target, params)
+
+    async def provider_nsx_manager_register(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.nsx_manager.register`` — see :mod:`._infra_nsx`."""
+        from meho_backplane.connectors.vcf_automation._infra_nsx import (
+            provider_nsx_manager_register,
+        )
+
+        return await provider_nsx_manager_register(self, operator, target, params)
+
+    async def provider_region_set(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.region.set`` — see :mod:`._infra_region`."""
+        from meho_backplane.connectors.vcf_automation._infra_region import provider_region_set
+
+        return await provider_region_set(self, operator, target, params)
+
+    async def provider_org_quota_set(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.org_quota.set`` — see :mod:`._infra_quota`."""
+        from meho_backplane.connectors.vcf_automation._infra_quota import provider_org_quota_set
+
+        return await provider_org_quota_set(self, operator, target, params)
+
+    # ------------------------------------------------------------------
     # Image ops -- thin shims over :mod:`._images`; metadata in :mod:`.image_ops`.
     # ------------------------------------------------------------------
 
@@ -1547,8 +1632,9 @@ class VcfAutomationConnector(HttpConnector, VraSharedHandlers):
         :data:`~meho_backplane.connectors.vcf_automation.deploy_ops.VCFA_DEPLOY_OPS`,
         :data:`~meho_backplane.connectors.vcf_automation.feature_flag_ops.VCFA_FEATURE_FLAG_OPS`,
         :data:`~meho_backplane.connectors.vcf_automation.day2_ops.VCFA_DAY2_OPS`,
-        :data:`~meho_backplane.connectors.vcf_automation.infra_ops.VCFA_INFRA_OPS` and
-        :data:`~meho_backplane.connectors.vcf_automation.identity_ops.VCFA_IDENTITY_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.infra_ops.VCFA_INFRA_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.provider_infra_ops.VCFA_PROVIDER_INFRA_OPS`
+        and :data:`~meho_backplane.connectors.vcf_automation.identity_ops.VCFA_IDENTITY_OPS`,
         resolves each op's ``handler_attr`` to the bound method, looks the
         group's curated ``when_to_use`` up in
         :data:`~meho_backplane.connectors.vcf_automation.typed_ops.VCFA_TYPED_WHEN_TO_USE_BY_GROUP`,
@@ -1571,6 +1657,9 @@ class VcfAutomationConnector(HttpConnector, VraSharedHandlers):
         from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
         from meho_backplane.connectors.vcf_automation.infra_ops import VCFA_INFRA_OPS
         from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
+        from meho_backplane.connectors.vcf_automation.provider_infra_ops import (
+            VCFA_PROVIDER_INFRA_OPS,
+        )
         from meho_backplane.connectors.vcf_automation.provisioning_ops import (
             VCFA_PROVISIONING_OPS,
         )
@@ -1589,6 +1678,7 @@ class VcfAutomationConnector(HttpConnector, VraSharedHandlers):
             *VCFA_FEATURE_FLAG_OPS,
             *VCFA_INFRA_OPS,
             *VCFA_DAY2_OPS,
+            *VCFA_PROVIDER_INFRA_OPS,
             *VCFA_IDENTITY_OPS,
         )
         for op in all_ops:

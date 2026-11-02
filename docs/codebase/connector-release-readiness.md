@@ -307,8 +307,11 @@ The twelve rules (the rule name is in brackets):
     purpose: `PUBLIC_EXAMPLE_NAMES` holds a few public vendor names (for
     example `management.azure.com` or `vsphere.local`, the default
     sign-on domain), each with a reason, and `FILE_ENDINGS` holds the
-    two-letter file endings that are also country codes (`notes.md`,
-    `setup.sh`). (`example_placeholders`)
+    two-letter file endings that are also country codes. A bare file
+    name with one dot passes (`notes.md`, `docs/setup.sh`). A name with
+    more dots (`nas.corp.pl`), or one in the host position of a URL or
+    address (`https://notes.md/`, `admin@setup.sh`, `wiki.md:8443`), is
+    a host name and fails. (`example_placeholders`)
 12. Every operation id that the guidance (`llm_instructions`) names in
     backticks is a registered operation. A name in backticks counts as an
     operation id when it has the shape `a.b` and its first part is the

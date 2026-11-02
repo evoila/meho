@@ -10,9 +10,12 @@ a real system. Used by :mod:`tests.test_operation_contracts`.
 
 A host name looks real when its last part is a common top-level domain
 (``.com``, ``.local``, ...) or any two-letter country code (``.fr``, ``.ca``,
-``.au``), except the two-letter file endings in :data:`FILE_ENDINGS`
-(``notes.md``). A trailing dot, as in ``host.corp.local.``, does not hide
-a name.
+``.au``). A trailing dot, as in ``host.corp.local.``, does not hide a name.
+A bare file name with a two-letter ending from :data:`FILE_ENDINGS`
+(``notes.md``, ``docs/setup.sh``) is not a host name. It stops being a file
+name when it has more than one dot (``nas.corp.pl``) or sits where a URL or
+address puts its host (``https://notes.md/``, ``admin@setup.sh``,
+``wiki.md:8443``).
 """
 
 from __future__ import annotations
@@ -42,8 +45,8 @@ DOCUMENTATION_NETWORKS: Final = tuple(
     ipaddress.ip_network(net)
     for net in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32")
 )
-#: Common top-level domains that make a host name look real. Two-letter
-#: endings are country codes; :func:`_is_real_top_level_domain` covers them
+#: Common top-level domains that make a host name look real. Every two-letter
+#: ending is a country code; :func:`_is_real_top_level_domain` covers them
 #: all. ``.example``, ``.test`` and ``.invalid`` are reserved for examples, so
 #: they are not here.
 REAL_TOP_LEVEL_DOMAINS: Final[frozenset[str]] = frozenset(
@@ -53,7 +56,8 @@ REAL_TOP_LEVEL_DOMAINS: Final[frozenset[str]] = frozenset(
     | {"world", "live", "store", "shop", "ltd", "gmbh", "inc", "llc"}
 )
 #: Two-letter file endings that are also country codes. ``notes.md`` or
-#: ``setup.sh`` in an example is a file name, not a host name.
+#: ``setup.sh`` in an example is a file name, not a host name, as long as
+#: :func:`_is_file_name` says so.
 FILE_ENDINGS: Final[frozenset[str]] = frozenset(
     {"md", "sh", "py", "go", "js", "ts", "tf", "rs", "cs", "rb", "pl", "pm", "ps", "so", "cc"}
 )
@@ -68,6 +72,10 @@ _HOST_NAME: Final = re.compile(
     r"(?<![\w.-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}\.?(?![\w.-])",
     re.IGNORECASE,
 )
+#: What comes right before and after the host of a URL or address:
+#: ``https://host``, ``user@host``, ``host/path``, ``host:443``.
+_BEFORE_URL_HOST: Final = re.compile(r"(?://|@)$")
+_AFTER_URL_HOST: Final = re.compile(r"^(?:/|:\d)")
 _VENDOR_ID: Final = re.compile(
     r"(?<![\w-])(?:vm|host|domain|datastore|resgroup|group|network|dvportgroup|dvs|datacenter"
     r"|folder)-[a-z]?\d+(?![\w-])"
@@ -87,13 +95,29 @@ def _is_public_name(name: str) -> bool:
 def _is_real_top_level_domain(host: str) -> bool:
     """Whether the lower-case *host* ends with a real top-level domain.
 
-    Every two-letter ending is a country code (``.fr``, ``.ca``, ``.au``),
-    except the file endings in :data:`FILE_ENDINGS`.
+    Every two-letter ending is a country code (``.fr``, ``.ca``, ``.au``).
     """
     top_level = host.rsplit(".", 1)[1]
-    if top_level in REAL_TOP_LEVEL_DOMAINS:
-        return True
-    return len(top_level) == 2 and top_level not in FILE_ENDINGS
+    return top_level in REAL_TOP_LEVEL_DOMAINS or len(top_level) == 2
+
+
+def _is_example_domain(host: str) -> bool:
+    return any(host == domain or host.endswith(f".{domain}") for domain in EXAMPLE_DOMAINS)
+
+
+def _is_file_name(text: str, match: re.Match[str]) -> bool:
+    """Whether the host-name *match* in *text* is a file name such as ``notes.md``.
+
+    A file name has one dot and an ending from :data:`FILE_ENDINGS`, and it
+    does not sit where a URL or address puts its host: after ``://`` or
+    ``@``, or before ``/`` or a port. ``nas.corp.pl`` has two dots, and
+    ``https://notes.md/`` is a URL, so both are host names.
+    """
+    stem, _, ending = match.group(0).rstrip(".").rpartition(".")
+    if "." in stem or ending.lower() not in FILE_ENDINGS:
+        return False
+    before, after = text[: match.start()], text[match.end() :]
+    return not (_BEFORE_URL_HOST.search(before) or _AFTER_URL_HOST.match(after))
 
 
 def real_looking_parts(value: str) -> list[str]:
@@ -110,9 +134,9 @@ def real_looking_parts(value: str) -> list[str]:
     for match in _HOST_NAME.finditer(text):
         name = match.group(0).rstrip(".")
         host = name.lower()
-        if _is_real_top_level_domain(host) and not any(
-            host == domain or host.endswith(f".{domain}") for domain in EXAMPLE_DOMAINS
-        ):
+        if _is_file_name(text, match) or _is_example_domain(host):
+            continue
+        if _is_real_top_level_domain(host):
             found.append(name)
     found.extend(_VENDOR_ID.findall(text))
     found.extend(uuid for uuid in _UUID.findall(text) if uuid != _NIL_UUID)

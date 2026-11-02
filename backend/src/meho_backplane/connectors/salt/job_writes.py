@@ -27,8 +27,10 @@ The start returns as soon as RaaS accepted the job, with its ``jid``. The
 caller follows the job with ``salt.job.result``.
 
 Before a start, the body looks for a running job of the same function on
-the same minions (``cmd.get_cmds``). When one runs, it returns that job's
-``jid`` and starts nothing. This is a help, not a lock.
+the same minions (``cmd.get_cmds``). It reads every page of that list, up
+to :data:`RUNNING_JOB_PAGES` pages of :data:`RUNNING_JOB_PAGE_LIMIT` rows,
+and refuses the start when the list is longer than that. When one runs, it
+returns that job's ``jid`` and starts nothing. This is a help, not a lock.
 
 A command whose text looks like it holds a secret (a ``password=...``
 argument, a password in a common command-line form, or text the shared
@@ -82,6 +84,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "MAX_RUN_MINIONS",
+    "RUNNING_JOB_PAGES",
+    "RUNNING_JOB_PAGE_LIMIT",
     "RUN_COMMAND_OP_ID",
     "RUN_STATE_OP_ID",
     "STATUS_READ",
@@ -101,6 +105,11 @@ STATUS_READ: Final[str] = "salt.job.result"
 
 #: Most minions one run may reach. A bigger target is refused; narrow it.
 MAX_RUN_MINIONS: Final[int] = 500
+
+#: Rows per page of the running-job check (the most the job list read takes),
+#: and how many pages it reads before it refuses the start.
+RUNNING_JOB_PAGE_LIMIT: Final[int] = 500
+RUNNING_JOB_PAGES: Final[int] = 20
 
 #: Target types, as the ``tgt`` page of the RaaS reference lists them.
 TGT_TYPES: Final[tuple[str, ...]] = (
@@ -365,10 +374,33 @@ async def _running_job(
     fun: str,
     list_target: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """A job of *fun* that has not ended and runs on the same minions, if RaaS lists one."""
-    kwarg = {"state": list(RUNNING_JOB_STATES), "fun": fun, "cmd": "local", "limit": 50}
-    rows, _ = _results(await connector.rpc(target, operator, CMDS_RPC, kwarg))
-    return next((row for row in rows if row.get("tgt") == list_target), None)
+    """A job of *fun* that has not ended and runs on the same minions, if RaaS lists one.
+
+    Reads page after page until a job matches, a page is empty, or ``count``
+    rows were seen. The first page is asked for without ``page``, like the
+    list reads do. Raises when the list has more pages than MEHO reads.
+    """
+    kwarg: dict[str, Any] = {
+        "state": list(RUNNING_JOB_STATES),
+        "fun": fun,
+        "cmd": "local",
+        "limit": RUNNING_JOB_PAGE_LIMIT,
+    }
+    seen = 0
+    for page in range(RUNNING_JOB_PAGES):
+        page_kwarg = {**kwarg, "page": page} if page else kwarg
+        rows, count = _results(await connector.rpc(target, operator, CMDS_RPC, page_kwarg))
+        match = next((row for row in rows if row.get("tgt") == list_target), None)
+        if match is not None:
+            return match
+        seen += len(rows)
+        if not rows or (count is not None and seen >= count):
+            return None
+    raise SaltChangeRefusedError(
+        f"Nothing was started: more than {RUNNING_JOB_PAGES * RUNNING_JOB_PAGE_LIMIT} {fun} "
+        "jobs have not ended, so MEHO could not check whether one runs on these minions. "
+        "salt.job.list shows them; stop or wait for them first."
+    )
 
 
 def _start_answer(

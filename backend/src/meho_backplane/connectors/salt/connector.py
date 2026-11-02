@@ -105,6 +105,7 @@ __all__ = [
     "TARGET_MINIONS_RPC",
     "SaltChangeRefusedError",
     "SaltConnector",
+    "SaltLoginError",
     "SaltRpcError",
     "SaltServerVersion",
     "parse_server_version",
@@ -151,6 +152,19 @@ class SaltRpcError(RuntimeError):
 
 class SaltChangeRefusedError(RuntimeError):
     """MEHO refuses a Salt change before it calls the vendor; the message says why."""
+
+
+class SaltLoginError(RuntimeError):
+    """The login call answered with an HTTP status that is not an auth refusal.
+
+    A ``401`` or ``403`` at login raises ``ConnectorAuthError`` instead. This
+    error keeps the status, so a read can tell a server that does not answer
+    (``502``, ``503``, ``504``) from any other failure.
+    """
+
+    def __init__(self, message: str, *, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -295,7 +309,7 @@ class SaltConnector(HttpConnector):
                 )
                 raise (
                     session_establish_auth_error(exc, message=message, target=target)
-                    or RuntimeError(message)
+                    or SaltLoginError(message, status_code=exc.response.status_code)
                 ) from exc
             cookies = {cookie.name: cookie.value for cookie in resp.cookies.jar if cookie.value}
             xsrf = cookies.get(_XSRF_COOKIE) or resp.headers.get(_XSRF_HEADER)

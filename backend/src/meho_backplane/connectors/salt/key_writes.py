@@ -10,6 +10,13 @@ the whole call when a pair has no key. Then it calls
 ``minions.set_minion_key_state`` once with all pairs, and reads the states
 again so the answer shows what changed.
 
+The read after the change runs when the change is already done, so its
+failure must not make the dispatcher run the change again. A ``401`` there
+(the login expired between the change and the read) drops the session and
+reads once more. When the read still fails, the answer keeps
+``status: requested``, leaves ``changed_count`` and each ``key_state_after``
+``null``, and says in ``reason`` why the states could not be read.
+
 ``salt.key.delete`` is ``destructive``. Its preview builder reads the keys
 and puts them, with their states, on the approval card. The approved run
 reads them again and stops with ``precondition_failed`` when a key or its
@@ -21,6 +28,8 @@ from __future__ import annotations
 import hashlib
 import json
 from typing import TYPE_CHECKING, Any, Final, Literal
+
+import httpx
 
 from meho_backplane.connectors.salt.connector import (
     MINION_KEY_STATE_RPC,
@@ -47,6 +56,12 @@ DELETE_OP_ID: Final[str] = "salt.key.delete"
 
 #: Rows one key read asks for; the body then picks the exact pair.
 _KEY_READ_LIMIT: Final[int] = 100
+
+#: Longest error text the answer keeps when the read after a change fails.
+_READ_ERROR_LIMIT: Final[int] = 300
+
+#: The HTTP status RaaS answers when the login expired.
+_LOGIN_EXPIRED: Final[int] = 401
 
 #: The include flags each action takes, as the vendor page lists them.
 _INCLUDE_FLAGS: Final[dict[str, tuple[str, ...]]] = {
@@ -175,6 +190,55 @@ def _set_kwarg(
     return kwarg
 
 
+async def _states_after_change(
+    connector: SaltConnector,
+    operator: Operator,
+    target: SaltTargetLike,
+    pairs: list[tuple[str, str]],
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """The key states after the change, or ``None`` and why they could not be read.
+
+    Raises nothing the RPC path raises: the change is done, and an error here
+    would make the dispatcher run it again. A ``401`` drops the session and
+    reads once more, like the dispatcher does for a whole call.
+    """
+    logged_in_again = False
+    while True:
+        try:
+            return await read_key_states(connector, operator, target, pairs), None
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == _LOGIN_EXPIRED and not logged_in_again:
+                logged_in_again = True
+                await connector.invalidate_session(target, rejected=exc.request)
+                continue
+            failure: Exception = exc
+        except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
+            failure = exc
+        return None, f"{type(failure).__name__}: {failure}"[:_READ_ERROR_LIMIT]
+
+
+def _unread_answer(action: KeyAction, before: list[dict[str, Any]], error: str) -> dict[str, Any]:
+    """The answer of a change RaaS took, whose states could not be read afterwards."""
+    return {
+        "status": "requested",
+        "action": action,
+        "reason": (
+            f"RaaS took the change, but the read of the key states after it failed: "
+            f"{error}. Do not send the change again; salt.key.list shows the states now."
+        ),
+        "changed_count": None,
+        "keys": [
+            {
+                "master_id": row["master_id"],
+                "minion_id": row["minion_id"],
+                "key_state_before": row["key_state"],
+                "key_state_after": None,
+            }
+            for row in before
+        ],
+    }
+
+
 async def key_change_impl(
     connector: SaltConnector,
     operator: Operator,
@@ -208,7 +272,9 @@ async def key_change_impl(
                 ],
             }
     await connector.rpc(target, operator, SET_KEY_STATE_RPC, _set_kwarg(action, pairs, params))
-    after = await read_key_states(connector, operator, target, pairs)
+    after, error = await _states_after_change(connector, operator, target, pairs)
+    if after is None:
+        return _unread_answer(action, before, error or "unknown error")
     keys = [
         {
             "master_id": old["master_id"],

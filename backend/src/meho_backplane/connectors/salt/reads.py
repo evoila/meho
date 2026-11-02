@@ -30,6 +30,7 @@ from meho_backplane.connectors.salt.connector import (
     MINION_PRESENCE_RPC,
     RETURNS_RPC,
     TARGET_GROUP_RPC,
+    SaltLoginError,
     parse_server_version,
 )
 from meho_backplane.connectors.salt.returns import RETURN_BYTES_LIMIT, result_row
@@ -299,6 +300,14 @@ async def job_list_impl(
 _UNREACHABLE_STATUS: Final[frozenset[int]] = frozenset({502, 503, 504})
 
 
+def _not_reachable(exc: httpx.TransportError | httpx.HTTPStatusError | SaltLoginError) -> bool:
+    """Whether *exc* says the server did not answer, on an RPC call or at the login."""
+    if isinstance(exc, httpx.TransportError):
+        return True
+    status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else exc.status_code
+    return status in _UNREACHABLE_STATUS
+
+
 #: The ``cmd.get_cmds`` fields ``salt.job.result`` shows next to the state.
 _PROGRESS_FIELDS: Final[tuple[str, ...]] = (
     "fun",
@@ -331,9 +340,10 @@ async def job_result_impl(
 ) -> dict[str, Any]:
     """``salt.job.result`` -- the job state (``cmd.get_cmds``) and ``ret.get_returns``.
 
-    When the server does not answer, the read says ``not reachable`` with the
-    jid and the time, and does not say the job failed. A ``401`` is not
-    caught: the dispatcher logs in again and runs the read once more.
+    When the server does not answer (on the RPC call, or at the login when
+    no session is cached), the read says ``not reachable`` with the jid and
+    the time, and does not say the job failed. A ``401`` is not caught: the
+    dispatcher logs in again and runs the read once more.
     """
     jid = params["jid"]
     kwarg = {
@@ -348,11 +358,8 @@ async def job_result_impl(
             await connector.rpc(target, operator, CMDS_RPC, {"jid": jid, "limit": 1})
         )
         ret = await connector.rpc(target, operator, RETURNS_RPC, kwarg)
-    except (httpx.TransportError, httpx.HTTPStatusError) as exc:
-        if (
-            isinstance(exc, httpx.HTTPStatusError)
-            and exc.response.status_code not in _UNREACHABLE_STATUS
-        ):
+    except (httpx.TransportError, httpx.HTTPStatusError, SaltLoginError) as exc:
+        if not _not_reachable(exc):
             raise
         return {
             "jid": jid,

@@ -137,7 +137,9 @@ From the vendor page "API Usage" of the RaaS 8.18 reference:
    and clears the pooled client's cookies for it. The dispatcher runs the
    call once more, and the connector logs in again and reads Vault again.
    A `401` or `403` at login itself raises `ConnectorAuthError` naming
-   the target.
+   the target. Any other HTTP status at login raises `SaltLoginError`,
+   which keeps the status, so a read can tell a server that does not
+   answer from another failure.
 5. An RPC answer with `error` set raises `SaltRpcError`; the message names
    the RPC method and the vendor's text, and reaches the operation's
    answer.
@@ -171,7 +173,8 @@ next call logs in again. `fingerprint()` and `probe()` use it.
   succeeded, failed, incomplete, unknown), `job_ended`, and the progress
   counts `expected`, `returned`, `returned_good`, `returned_failed`. When
   the server does not answer (no connection, a timeout, or HTTP 502, 503 or
-  504), the read returns `reachable: false`, `job_status: "not reachable"`,
+  504, on the RPC call or at the login when no session is cached), the
+  read returns `reachable: false`, `job_status: "not reachable"`,
   the `jid`, `checked_at` and the error, and does not say the job failed. A
   `401` is not caught: the dispatcher logs in again and runs the read once
   more. The read then shows the return of each minion only when it is
@@ -258,6 +261,15 @@ more keys than the caller named. The body:
    `key_state_after` per key, and `changed_count`. The master applies the
    change, so a key can show its old state for a few seconds.
 
+The read in step 4 runs when the change is already done, so the body
+handles its failures itself: an error there would reach the dispatcher,
+which would run the whole change again (a second accept, or a delete that
+then finds no key). A `401` on that read (the login expired between the
+change and the read) drops the session and reads once more. When the read
+still fails, the answer keeps `status: requested`, leaves `changed_count`
+and each `key_state_after` `null`, and says in `reason` why the states
+could not be read and that `salt.key.list` shows them.
+
 `salt.key.delete` is `destructive`. Its preview builder reads the keys and
 fills the approval card: `object` (the count and a hash of the keys with
 their states), `children` (each key with its state) and `irreversibility`.
@@ -317,10 +329,13 @@ The vendor does the work after the start call returns.
   true (see "The reads").
 - **A job that already runs.** Before a start, the body lists the jobs of
   the same function that have not ended (`cmd.get_cmds` with the states
-  new, retrieved, resuming, resumed, pausing, paused, stopping). When one
-  has the same `list` target, the answer is `status: "already_running"`
-  with that job's `jid`, and nothing starts. This is a help, not a lock:
-  two callers can both check before either starts.
+  new, retrieved, resuming, resumed, pausing, paused, stopping). It reads
+  every page of that list, 500 rows per page and up to 20 pages, until a
+  job matches, a page is empty or `count` rows were seen. When one has
+  the same `list` target, the answer is `status: "already_running"` with
+  that job's `jid`, and nothing starts. When the list has more pages than
+  that, the start is refused: MEHO could not check it. This is a help,
+  not a lock: two callers can both check before either starts.
 - **A lost reply.** The caller does not start again blindly. It reads
   `salt.job.list` (function, user, newest first) to find the `jid` first.
   The guidance tells callers to pass `async: true` to `call_operation`
@@ -384,10 +399,12 @@ stays done.
   passes a vendor error on; the destructive ones are refused without a
   `preview_hash` and for an agent, their cards list every key or minion,
   and the full flow (preview, wait, a second person approves, run) works;
-  drift after the approval gives `precondition_failed`; a run reaches only
-  the card's minions; a running job is not started twice; a command with a
-  secret is refused; the status read gives the job state, says `not
-  reachable`, and logs in again after a `401`; the stored traces.
+  drift after the approval gives `precondition_failed`; a key change is
+  sent once when the read after it gets a `401` or fails; a run reaches
+  only the card's minions; a running job is not started twice, also when
+  it is on a later page; a command with a secret is refused; the status
+  read gives the job state, says `not reachable` (also when the login
+  gets no answer), and logs in again after a `401`; the stored traces.
 - `backend/tests/test_connectors_salt_spec_reconcile.py` -- every `*_RPC`
   method is in the pinned RaaS 8.18 reference list
   (`salt-raas-8.18/salt-raas-8.18-reference-operations.tsv` on the spec

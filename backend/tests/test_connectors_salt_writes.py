@@ -22,13 +22,16 @@ What is proven:
 * the approved run stops with ``precondition_failed`` when the keys or the
   matched minions differ from the card, and a run reaches only the minions
   on the card (a ``list`` target);
-* a job that already runs on the same minions is not started again;
+* a key change sends the change once: a ``401`` on the read after it logs
+  in again, and a read that still fails leaves the change in the answer;
+* a job that already runs on the same minions is not started again, also
+  when it is on a later page of the job list;
 * a command that looks like it holds a secret is refused;
 * the flight recorder stores no vendor body of a run, and only the job
   state fields and the stop's job id of a job stop;
 * the status read ``salt.job.result`` gives the job state, says
-  ``not reachable`` when the server does not answer, and logs in again
-  after a ``401``.
+  ``not reachable`` when the server does not answer (on a call, or at the
+  login), and logs in again after a ``401``.
 """
 
 from __future__ import annotations
@@ -223,11 +226,12 @@ class _Raas:
     def __init__(self, answers: _Answers) -> None:
         self.answers = answers
         self.calls: list[dict[str, Any]] = []
+        self.login: respx.Route | None = None
         self._mock = respx.mock(base_url=_BASE_URL, assert_all_called=False)
 
     def __enter__(self) -> _Raas:
         mock = self._mock.__enter__()
-        mock.get(_LOGIN).mock(return_value=_login())
+        self.login = mock.get(_LOGIN).mock(return_value=_login())
         mock.post(_RPC).mock(side_effect=_fake_raas(self.answers, self.calls))
         return self
 
@@ -415,6 +419,47 @@ async def test_accept_sets_the_key_state_and_reads_it_back(salt: SaltConnector) 
     assert _PASSWORD not in json.dumps(result)
 
 
+def _fail_reads_after_the_change(
+    states: dict[str, str | None], new_state: str | None, status: int, times: int
+) -> _Answers:
+    """Answers where the first *times* key reads after the change answer HTTP *status*."""
+    read_keys = _key_answer(states)
+    set_keys = _set_keys(states, new_state)
+    left = {"failures": 0}
+
+    def _set(kwarg: dict[str, Any]) -> Any:
+        left["failures"] = times
+        return set_keys(kwarg)
+
+    def _read(kwarg: dict[str, Any]) -> Any:
+        if left["failures"] > 0:
+            left["failures"] -= 1
+            return httpx.Response(status, json={"message": f"http {status}"})
+        return read_keys(kwarg)
+
+    return {
+        ("minions", "get_minion_key_state"): _read,
+        ("minions", "set_minion_key_state"): _set,
+    }
+
+
+async def test_accept_logs_in_again_when_the_read_after_the_change_gets_a_401(
+    salt: SaltConnector,
+) -> None:
+    """The login expires right after the change: MEHO reads again and sends the change once."""
+    states: dict[str, str | None] = {"<minion-new>": "pending"}
+    answers = _fail_reads_after_the_change(states, "accepted", 401, times=1)
+    with _Raas(answers) as raas:
+        result = await _run("salt.key.accept", _ONE_KEY)
+    assert result["status"] == "ok", result
+    assert len(raas.called("minions", "set_minion_key_state")) == 1
+    assert raas.login is not None and raas.login.call_count == 2
+    assert result["result"]["status"] == "requested"
+    assert result["result"]["reason"] is None
+    assert result["result"]["changed_count"] == 1
+    assert result["result"]["keys"][0]["key_state_after"] == "accepted"
+
+
 async def test_reject_sends_include_accepted(salt: SaltConnector) -> None:
     states: dict[str, str | None] = {"<minion-new>": "accepted"}
     answers: _Answers = {
@@ -558,6 +603,37 @@ async def test_delete_waits_for_a_second_person_then_runs(salt: SaltConnector) -
     assert raas.called("minions", "set_minion_key_state") == [
         {"state": "delete", "minions": [["<master-1>", "<minion-a>"], ["<master-1>", "<minion-b>"]]}
     ]
+
+
+@pytest.mark.parametrize(
+    ("status", "times"), [(503, 1), (401, 2)], ids=["http-503", "login-rejected-twice"]
+)
+async def test_delete_keeps_the_change_when_the_read_after_it_fails(
+    salt: SaltConnector, status: int, times: int
+) -> None:
+    """RaaS took the delete, the read after it fails: the answer says so, the delete runs once."""
+    from meho_backplane.connectors.salt.key_writes import _delete_card
+
+    states = _two_key_states()
+    card = _delete_card(
+        [
+            {"master_id": "<master-1>", "minion_id": minion, "key_state": state}
+            for minion, state in states.items()
+        ]
+    )
+    answers = _fail_reads_after_the_change(states, None, status, times)
+    with _Raas(answers) as raas:
+        result = await _run("salt.key.delete", _TWO_KEYS, card=card)
+    assert result["status"] == "ok", result
+    body = result["result"]
+    assert body["status"] == "requested"
+    assert body["changed_count"] is None
+    assert "Do not send the change again" in body["reason"]
+    assert str(status) in body["reason"]
+    assert [key["key_state_before"] for key in body["keys"]] == ["accepted", "rejected"]
+    assert [key["key_state_after"] for key in body["keys"]] == [None, None]
+    assert len(raas.called("minions", "set_minion_key_state")) == 1
+    assert states == {"<minion-a>": None, "<minion-b>": None}
 
 
 async def test_delete_stops_when_a_key_changed_after_the_approval(salt: SaltConnector) -> None:
@@ -757,6 +833,80 @@ async def test_run_does_not_start_a_job_that_already_runs(salt: SaltConnector) -
         "paused",
         "stopping",
     ]
+    assert raas.called("cmd", "route_cmd") == []
+
+
+_OTHER_RUNNING_JOB = {"jid": "20260101000000000007", "fun": "state.apply", "state": "retrieved"}
+
+
+async def test_run_finds_a_running_job_on_the_second_page(
+    salt: SaltConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The running-job check reads every page of the job list, not only the first one."""
+    from meho_backplane.connectors.salt import job_writes
+
+    monkeypatch.setattr(job_writes, "RUNNING_JOB_PAGE_LIMIT", 1)
+    match = {
+        "jid": "20260101000000000008",
+        "fun": "state.apply",
+        "state": "new",
+        "tgt": _LIST_TARGET,
+    }
+
+    def _cmds(kwarg: dict[str, Any]) -> Any:
+        return {"count": 2, "results": [match] if kwarg.get("page") == 1 else [_OTHER_RUNNING_JOB]}
+
+    card = _card_for("salt.job.run_state", _STATE_PARAMS)
+    with _Raas(_run_answers(**{"cmd.get_cmds": _cmds})) as raas:
+        result = await _run("salt.job.run_state", _STATE_PARAMS, card=card)
+    assert result["status"] == "ok", result
+    assert result["result"]["status"] == "already_running"
+    assert result["result"]["jid"] == "20260101000000000008"
+    pages = raas.called("cmd", "get_cmds")
+    assert [kwarg.get("page") for kwarg in pages] == [None, 1]
+    assert {kwarg["limit"] for kwarg in pages} == {1}
+    assert raas.called("cmd", "route_cmd") == []
+
+
+async def test_run_reads_all_pages_before_it_starts(
+    salt: SaltConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No match on any page: the check stops at the count and the job starts."""
+    from meho_backplane.connectors.salt import job_writes
+
+    monkeypatch.setattr(job_writes, "RUNNING_JOB_PAGE_LIMIT", 1)
+
+    def _cmds(kwarg: dict[str, Any]) -> Any:
+        del kwarg
+        return {"count": 3, "results": [_OTHER_RUNNING_JOB]}
+
+    card = _card_for("salt.job.run_state", _STATE_PARAMS)
+    with _Raas(_run_answers(**{"cmd.get_cmds": _cmds})) as raas:
+        result = await _run("salt.job.run_state", _STATE_PARAMS, card=card)
+    assert result["status"] == "ok", result
+    assert result["result"]["status"] == "accepted"
+    assert [kwarg.get("page") for kwarg in raas.called("cmd", "get_cmds")] == [None, 1, 2]
+    assert len(raas.called("cmd", "route_cmd")) == 1
+
+
+async def test_run_is_refused_when_the_running_jobs_do_not_fit_the_pages(
+    salt: SaltConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from meho_backplane.connectors.salt import job_writes
+
+    monkeypatch.setattr(job_writes, "RUNNING_JOB_PAGE_LIMIT", 1)
+    monkeypatch.setattr(job_writes, "RUNNING_JOB_PAGES", 2)
+
+    def _cmds(kwarg: dict[str, Any]) -> Any:
+        del kwarg
+        return {"results": [_OTHER_RUNNING_JOB]}
+
+    card = _card_for("salt.job.run_state", _STATE_PARAMS)
+    with _Raas(_run_answers(**{"cmd.get_cmds": _cmds})) as raas:
+        result = await _run("salt.job.run_state", _STATE_PARAMS, card=card)
+    assert result["status"] == "error", result
+    assert "could not check whether one runs" in json.dumps(result)
+    assert len(raas.called("cmd", "get_cmds")) == 2
     assert raas.called("cmd", "route_cmd") == []
 
 
@@ -1146,6 +1296,41 @@ async def test_status_read_says_not_reachable(salt: SaltConnector, failure: Any)
     assert body["checked_at"]
     assert body["error"]
     assert body["results"] == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.ConnectError("connection refused"), httpx.Response(503, text="upgrading")],
+    ids=["no-connection", "http-503"],
+)
+async def test_status_read_says_not_reachable_when_the_login_fails(
+    salt: SaltConnector, failure: Any
+) -> None:
+    """No session is cached yet, and the login itself gets no answer."""
+    with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        if isinstance(failure, httpx.Response):
+            mock.get(_LOGIN).mock(return_value=failure)
+        else:
+            mock.get(_LOGIN).mock(side_effect=failure)
+        rpc = mock.post(_RPC).mock(return_value=httpx.Response(500, text="not expected"))
+        result = await _run("salt.job.result", {"jid": _JID}, approved=False)
+    assert result["status"] == "ok", result
+    body = result["result"]
+    assert body["jid"] == _JID
+    assert body["reachable"] is False
+    assert body["job_status"] == "not reachable"
+    assert body["job_ended"] is False
+    assert body["error"]
+    assert rpc.call_count == 0
+
+
+async def test_status_read_passes_on_another_login_failure(salt: SaltConnector) -> None:
+    """A login that fails for another reason (HTTP 500) is an error, not "not reachable"."""
+    with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.get(_LOGIN).mock(return_value=httpx.Response(500, text="boom"))
+        result = await _run("salt.job.result", {"jid": _JID}, approved=False)
+    assert result["status"] == "error", result
+    assert "500" in json.dumps(result)
 
 
 async def test_status_read_logs_in_again_after_the_login_expired(salt: SaltConnector) -> None:

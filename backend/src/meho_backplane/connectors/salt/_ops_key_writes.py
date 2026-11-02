@@ -79,10 +79,16 @@ _RESPONSE: dict[str, Any] = {
             "enum": ["accept", "reject", "delete"],
             "description": "The change that was asked for.",
         },
-        "reason": _text("Why nothing was changed; null otherwise."),
+        "reason": _text(
+            "Why nothing was changed, or why the states after the change could not be "
+            "read; null otherwise."
+        ),
         "changed_count": {
-            "type": "integer",
-            "description": "Keys whose state differs after the change.",
+            "type": ["integer", "null"],
+            "description": (
+                "Keys whose state differs after the change; null when the read after the "
+                "change failed."
+            ),
         },
         "keys": {
             "type": "array",
@@ -104,7 +110,10 @@ _RESPONSE: dict[str, Any] = {
 _OUTPUT_SHAPE = (
     "{status, action, reason, changed_count, keys: [{master_id, minion_id, "
     "key_state_before, key_state_after}]}. key_state_after is read right after the "
-    "change; the master applies it, so a key can show its old state for a few seconds."
+    "change; the master applies it, so a key can show its old state for a few seconds. "
+    "When that read fails, status stays requested, changed_count and key_state_after "
+    "are null, and reason says so: do not send the change again; salt.key.list shows "
+    "the states."
 )
 
 _RESULT_SCALARS = {"keys": ["status", "action", "reason", "changed_count"]}

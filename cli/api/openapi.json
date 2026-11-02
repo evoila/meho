@@ -21166,7 +21166,7 @@
           "ui-operations"
         ],
         "summary": "Operations Preview",
-        "description": "Render the read-only request **preview** fragment (no dispatch).\n\nCSRF-gated by the ``ui/csrf.py`` middleware (a ``POST`` under\n``/ui/``) and ``require_ui_session``-gated. Resolves the same op +\ntarget + params a real dispatch would and renders the literal\nwould-be HTTP request -- ``method`` / ``resolved_path`` / ``query``\n/ ``redacted_body`` -- WITHOUT sending it and WITHOUT writing an\naudit row. Operator-input faults land inside the rendered envelope\n(``status=\"error\"`` / ``\"unavailable\"``); a missing target name\nsurfaces as an inline ``400`` form error.",
+        "description": "Render the read-only request **preview** fragment (no dispatch).\n\nCSRF-gated by the ``ui/csrf.py`` middleware (a ``POST`` under\n``/ui/``) and ``require_ui_operator``-gated (``read_only`` gets 403,\nlike on REST). Resolves the same op +\ntarget + params a real dispatch would and renders the literal\nwould-be HTTP request -- ``method`` / ``resolved_path`` / ``query``\n/ ``redacted_body`` -- WITHOUT sending it and WITHOUT writing an\naudit row. Operator-input faults land inside the rendered envelope\n(``status=\"error\"`` / ``\"unavailable\"``); a missing target name\nsurfaces as an inline ``400`` form error.",
         "operationId": "operations_preview_ui_operations_preview_post",
         "requestBody": {
           "content": {
@@ -21252,7 +21252,7 @@
           "ui-operations"
         ],
         "summary": "Operations Call",
-        "description": "Dispatch the chosen op in-process; render the ``OperationResult`` inline.\n\nThe highest-blast-radius action the console gains -- it executes a\nreal connector op against a live target. CSRF-gated (a ``POST`` under\n``/ui/``) and ``require_ui_session``-gated; calls\n:func:`~meho_backplane.operations.meta_tools.call_operation`\nin-process (the same BFF pattern the approvals decision POSTs use).\nThe structured envelope is surfaced verbatim\n(``ok`` / ``error`` / ``denied`` / ``awaiting_approval``); the one\n``ValueError`` the meta-tool raises (a missing target name) is mapped\nto an inline ``400`` form error so the operator stays in the modal.\n\n``preview_hash`` comes from the run window's preview step. A\n``destructive`` op needs it, or MEHO refuses to store the approval\nrequest (#5015).",
+        "description": "Dispatch the chosen op in-process; render the ``OperationResult`` inline.\n\nThe highest-blast-radius action the console gains -- it executes a\nreal connector op against a live target. CSRF-gated (a ``POST`` under\n``/ui/``) and ``require_ui_operator``-gated (``read_only`` gets 403\nbefore anything is dispatched or queued, like on REST); calls\n:func:`~meho_backplane.operations.meta_tools.call_operation`\nin-process (the same BFF pattern the approvals decision POSTs use).\nThe structured envelope is surfaced verbatim\n(``ok`` / ``error`` / ``denied`` / ``awaiting_approval``); the one\n``ValueError`` the meta-tool raises (a missing target name) is mapped\nto an inline ``400`` form error so the operator stays in the modal.\n\n``preview_hash`` comes from the run window's preview step. A\n``destructive`` op needs it, or MEHO refuses to store the approval\nrequest (#5015).",
         "operationId": "operations_call_ui_operations_call_post",
         "requestBody": {
           "content": {
@@ -22997,7 +22997,7 @@
           "ui-vault-writes"
         ],
         "summary": "Vault Put",
-        "description": "Dispatch ``vault.kv.put`` in-process; render the result inline.\n\nCSRF-gated (a ``POST`` under ``/ui/``) + ``require_ui_session``-gated.\n``data`` is the operator-supplied secret key/value JSON object;\n``cas`` rides in ``params`` ONLY when the operator set it (the CLI\n``Changed(\"cas\")`` rule). The BFF logs no secret material.",
+        "description": "Dispatch ``vault.kv.put`` in-process; render the result inline.\n\nCSRF-gated (a ``POST`` under ``/ui/``) + ``require_ui_operator``-gated\n(``read_only`` gets 403 before any dispatch). ``data`` is the\noperator-supplied secret key/value JSON object;\n``cas`` rides in ``params`` ONLY when the operator set it (the CLI\n``Changed(\"cas\")`` rule). The BFF logs no secret material.",
         "operationId": "vault_put_ui_vault_put_post",
         "requestBody": {
           "content": {
@@ -23038,7 +23038,7 @@
           "ui-vault-writes"
         ],
         "summary": "Vault Delete",
-        "description": "Dispatch ``vault.kv.delete`` in-process; render the result inline.\n\nCSRF-gated + ``require_ui_session``-gated. ``versions`` is the\ncomma-separated list of version numbers to soft-delete.",
+        "description": "Dispatch ``vault.kv.delete`` in-process; render the result inline.\n\nCSRF-gated + ``require_ui_operator``-gated. ``versions`` is the\ncomma-separated list of version numbers to soft-delete.",
         "operationId": "vault_delete_ui_vault_delete_post",
         "requestBody": {
           "content": {
@@ -23079,7 +23079,7 @@
           "ui-vault-writes"
         ],
         "summary": "Vault Move",
-        "description": "Dispatch ``secret.move`` in-process; render the value-free result.\n\nCSRF-gated + ``require_ui_session``-gated. Dispatches the SEPARATE\n``secret-broker-1.x`` connector with ``from`` / ``to`` references (+\noptional reason). VALUE-FREE: no value field is accepted, dispatched,\nlogged, or rendered -- only the ``{status, value_sha256, length}``\nconfirmation surfaces.",
+        "description": "Dispatch ``secret.move`` in-process; render the value-free result.\n\nCSRF-gated + ``require_ui_operator``-gated. Dispatches the SEPARATE\n``secret-broker-1.x`` connector with ``from`` / ``to`` references (+\noptional reason). VALUE-FREE: no value field is accepted, dispatched,\nlogged, or rendered -- only the ``{status, value_sha256, length}``\nconfirmation surfaces.",
         "operationId": "vault_move_ui_vault_move_post",
         "requestBody": {
           "content": {

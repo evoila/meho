@@ -88,7 +88,17 @@ def test_passkeys_are_on_and_need_user_verification(realm: dict[str, Any]) -> No
     # can offer without a user name first.
     assert realm["webAuthnPolicyPasswordlessPasskeysEnabled"] is True
     assert realm["webAuthnPolicyPasswordlessUserVerificationRequirement"] == "required"
-    assert realm["webAuthnPolicyPasswordlessRequireResidentKey"] == "Yes"
+    assert realm["webAuthnPolicyPasswordlessResidentKey"] == "required"
+
+
+def test_passkeys_do_not_use_the_old_discoverable_credential_field(
+    realm: dict[str, Any],
+) -> None:
+    # Keycloak 26.7 replaced "Require discoverable credential" (Yes/No) with
+    # "Discoverable credential". The old field logs a warning when set, and a
+    # later Keycloak may remove it.
+    assert "webAuthnPolicyPasswordlessRequireResidentKey" not in realm
+    assert "webAuthnPolicyRequireResidentKey" not in realm
 
 
 def test_browser_session_limits_match_the_console(realm: dict[str, Any]) -> None:

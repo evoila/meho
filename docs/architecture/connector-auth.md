@@ -191,6 +191,7 @@ For a target tagged `shared_service_account`:
 | vmware-rest | `backend/src/meho_backplane/connectors/vmware_rest/connector.py` | `_session_tokens` (in `_session_token`) | `vmware-api-session-id` cache; the G3.9 precedent every other cache here copied. |
 | harbor | `backend/src/meho_backplane/connectors/harbor/connector.py` | `_creds_cache` (in `_load_credentials`) | Credential dict cache; per-target `{username, password}` consumed via HTTP Basic. |
 | sddc-manager | `backend/src/meho_backplane/connectors/sddc_manager/connector.py` | `_creds_cache` (in `_load_credentials`) | Credential dict cache; per-target `{username, password}` consumed via HTTP Basic (username suffixed with `@sso_realm`). |
+| SSH adapter (linux, bind9, pfsense, rke2, holodeck, windows_dns) | `backend/src/meho_backplane/connectors/adapters/ssh.py` | `_connections` (in `_connect`) | Open SSH connection pool, keyed on `(tenant_id, id, caller sub)`. Not a credential cache: an entry is a logged-in session, so it is handed back only to the caller whose own Vault read opened it. The check runner and an operator-less probe have their own slots. `invalidate_credentials` drops every caller's connection to the target. |
 
 Every cache site applies a fail-closed guard before the cache lookup so a
 cache hit can never short-circuit past the loader and return
@@ -255,6 +256,12 @@ operator who has ever dispatched against the target, all entries holding
 byte-identical credentials. Storage waste, identical wire traffic, no
 extra audit fidelity (Vault still attributes only the first read per
 operator-cache-entry).
+
+The SSH connection pool is the one cache keyed on the caller. It does not
+hold the credential; it holds an open, logged-in session. Serving that
+session to a second caller would skip the Vault read for that caller, so
+the pool keeps one connection per caller and target. The cost is one SSH
+login per caller per target instead of one per target.
 
 ### When this changes — `per_user` / `impersonation`
 

@@ -13,8 +13,10 @@ extended by #2155's Vault-path ``secret_ref`` contract):
   carrying a Vault KV-v2 **path string** resolved through the
   ``_resolve_secret`` seam (#2155; the embedded-dict shape is the
   bind9 anti-shape and is rejected).
-* Per-target connection pool: same ``target.name`` reuses the same
-  connection object; different names get distinct connections.
+* Connection pool keyed per target and caller: the same caller on the same
+  target reuses the connection object; different targets get distinct
+  connections. The per-caller rule itself is covered in
+  ``test_ssh_pool_per_caller.py``.
 * Idle TTL eviction: connection idle past ``_POOL_TTL_S`` is replaced on
   next ``_connect`` call.
 * Key auth path: the resolved Vault secret with ``ssh_private_key`` uses
@@ -378,8 +380,8 @@ async def test_different_targets_get_different_connections(
 
     assert ssh_a is not ssh_b
     # Pool is keyed on the tenant-unique ``(tenant_id, id)`` tuple.
-    assert (target_a.tenant_id, target_a.id) in conn._connections
-    assert (target_b.tenant_id, target_b.id) in conn._connections
+    assert (target_a.tenant_id, target_a.id, SYSTEM_OPERATOR_SUB) in conn._connections
+    assert (target_b.tenant_id, target_b.id, SYSTEM_OPERATOR_SUB) in conn._connections
     await conn.aclose()
 
 
@@ -407,8 +409,8 @@ async def test_same_name_different_tenant_get_distinct_connections(
 
     assert ssh_a is not ssh_b
     assert len(conn._connections) == 2
-    assert (target_a.tenant_id, target_a.id) in conn._connections
-    assert (target_b.tenant_id, target_b.id) in conn._connections
+    assert (target_a.tenant_id, target_a.id, SYSTEM_OPERATOR_SUB) in conn._connections
+    assert (target_b.tenant_id, target_b.id, SYSTEM_OPERATOR_SUB) in conn._connections
     # Re-fetching B's connection returns B's, not A's (no first-writer bleed).
     assert await conn._connect(target_b) is ssh_b
     await conn.aclose()
@@ -488,7 +490,10 @@ async def test_run_command_timeout_raises_asyncio_timeout_error() -> None:
         # never runs — the path string is deliberately unregistered.
         secret_ref="meho/testing/ssh/unused-timeout-path",
     )
-    conn._connections[(target.tenant_id, target.id)] = (mock_conn, time.monotonic())
+    conn._connections[(target.tenant_id, target.id, SYSTEM_OPERATOR_SUB)] = (
+        mock_conn,
+        time.monotonic(),
+    )
 
     with pytest.raises(asyncio.TimeoutError):
         await conn._run_command(target, "sleep 60", timeout=0.05)
@@ -776,7 +781,7 @@ async def test_idle_ttl_evicts_stale_connection(
     ssh_first = await conn._connect(target)
 
     # Backdate last_used to simulate idle expiry.
-    conn._connections[(target.tenant_id, target.id)] = (
+    conn._connections[(target.tenant_id, target.id, SYSTEM_OPERATOR_SUB)] = (
         ssh_first,
         time.monotonic() - _POOL_TTL_S - 1.0,
     )

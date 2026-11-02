@@ -660,6 +660,46 @@ def test_llm_unavailable_renders_panel() -> None:
     assert "unavailable" in body.lower()
 
 
+def test_global_scope_forbidden_renders_panel() -> None:
+    """A 403 on the global write scope renders an inline panel, not a bare error.
+
+    The global scope needs ``platform_admin``; the panel carries the
+    route's message so the operator knows to pick "This tenant only".
+    """
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    forbidden = HTTPException(
+        status_code=403,
+        detail="built-in connector ingest requires platform_admin: pass your own tenant_id",
+    )
+    ingest_mock = AsyncMock(side_effect=forbidden)
+    try:
+        with patch(_INGEST_ENDPOINT, ingest_mock):
+            resp = client.post(
+                "/ui/connectors/registry/ingest",
+                data={
+                    "mode": "explicit",
+                    "product": "vmware",
+                    "version": "9.0",
+                    "impl_id": "vmware-rest",
+                    "spec_uri": ["https://vendor.example/openapi.yaml"],
+                    "scope": "global",
+                },
+                headers=_form_headers(csrf),
+            )
+    finally:
+        mock.stop()
+
+    assert resp.status_code == 403, resp.text
+    body = resp.text
+    assert "data-registry-error" in body
+    assert "Traceback" not in body
+    assert "requires platform_admin" in body
+
+
 # ---------------------------------------------------------------------------
 # AC: a body setting BOTH shapes is rejected with a friendly error, not a 500
 # ---------------------------------------------------------------------------

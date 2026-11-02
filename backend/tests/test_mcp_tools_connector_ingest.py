@@ -1063,6 +1063,31 @@ async def test_async_foreign_tenant_denied_eagerly_no_job_no_task() -> None:
     assert ci_mod._background_tasks == set()
 
 
+@pytest.mark.parametrize("run_async", [False, True], ids=["inline", "async"])
+async def test_builtin_scope_needs_platform_admin_on_both_paths(run_async: bool) -> None:
+    """An omitted ``tenant_id`` is the built-in scope, which needs ``platform_admin``.
+
+    A tenant_admin without it gets the -32602 denial before any job row
+    or pipeline task exists, on the inline and the async path alike.
+    """
+    op = build_operator(TenantRole.TENANT_ADMIN)
+
+    with pytest.raises(McpInvalidParamsError, match="requires platform_admin") as caught:
+        await ci_mod._ingest_handler(
+            op,
+            {
+                "product": "scopedenied",
+                "version": "1.0",
+                "impl_id": "scopedenied-rest",
+                "specs": [{"uri": "docs:never-fetched/spec.yaml"}],
+                "async": run_async,
+            },
+        )
+    assert str(caught.value).startswith("built-in connector ingest requires platform_admin")
+    assert get_job_registry()._jobs == {}
+    assert ci_mod._background_tasks == set()
+
+
 async def test_inline_foreign_tenant_denied_with_same_envelope() -> None:
     """The sync path returns the identical structured denial (#2214).
 

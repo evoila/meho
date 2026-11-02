@@ -246,13 +246,15 @@
           class="select select-bordered select-sm w-full"
           aria-label="Write scope"
         >
-          <option value="global" selected>Global (built-in scope) &mdash; visible to every tenant</option>
+          <option value="global" selected>Global (built-in scope) &mdash; visible to every tenant, platform admins only</option>
           <option value="tenant">This tenant only</option>
         </select>
         <span class="text-xs opacity-70">
           Global matches the CLI / REST default (omitting
-          <span class="font-mono">tenant_id</span>); &ldquo;This
-          tenant&rdquo; curates the connector under your tenant only.
+          <span class="font-mono">tenant_id</span>) and needs
+          platform_admin, because every tenant shares those rows;
+          &ldquo;This tenant&rdquo; curates the connector under your
+          tenant only.
         </span>
       </label>
 

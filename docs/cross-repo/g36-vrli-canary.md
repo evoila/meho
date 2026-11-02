@@ -226,20 +226,17 @@ that defined them was retired in #2362):
 ### Step 3 — enable the reads
 
 ```bash
-meho connector review vrli-rest-8.x --enable-reads
+meho connector enable-reads vrli-rest-9.0
 ```
 
-Or, from a backplane Python shell:
+This flips `is_enabled=True` on **every** ingested `GET`/`HEAD` operation
+for the connector in one pass, and prints how many it enabled. Writes
+(`POST` / `PUT` / `PATCH` / `DELETE`), typed ops and composites stay
+default-deny — that split is the governance boundary, not an oversight.
 
-```python
-from meho_backplane.operations.ingest.service import ReviewService
-
-await ReviewService().enable_reads(connector_id="vrli-rest-8.x", tenant_id=None)
-```
-
-This enables the ingested read ops generically. It does not hand-pick a
-core set and does not write `llm_instructions`: the grouping and guidance
-come from the T3 LLM pass in step 2.
+It does **not** hand-pick a core set, does not write `llm_instructions`,
+and does **not** move any group's `review_status`: it is purely a per-op
+flip. The grouping and guidance come from the T3 LLM pass in step 2.
 
 > **Changed in #2362.** This step used to call `apply_vrli_core_curation`,
 > which walked a hand-maintained `VRLI_CORE_GROUPS` / `VRLI_CORE_OPS`
@@ -264,17 +261,19 @@ meho operation search vrli-rest-9.0 "how many alerts are configured" --limit 5
 meho operation search vrli-rest-9.0 "what hosts are reporting logs" --limit 5
 ```
 
-The first command should return 5 enabled groups, each with the
-`when_to_use` hints the T3 LLM pass derived. The second should
-return `GET:/api/v2/events/{constraints}` in the top-3. The third
-should return `GET:/api/v2/alerts` in the top-3. The fourth should
-return `GET:/api/v2/hosts` in the top-3.
+The first command should list the groups with the `when_to_use` hints
+the T3 LLM pass derived. The second should return
+`GET:/api/v2/events/{constraints}` in the top-3. The third should return
+`GET:/api/v2/alerts` in the top-3. The fourth should return
+`GET:/api/v2/hosts` in the top-3.
 
-Every other vRLI op the spec ingestion produced should be in the
-`is_enabled=False` state — `search_operations` filters on
-`OperationGroup.review_status='enabled'` AND
-`EndpointDescriptor.is_enabled=True`, so a staged group's ops
-never surface.
+**What to expect after `enable-reads`, which differs from the old curated
+flow.** Groups stay `staged` — `enable_reads` never moves a group's
+`review_status` — and every ingested `GET`/`HEAD` op is enabled, not a
+hand-picked subset of 7. A staged group still surfaces in search, because
+the visibility rule resolves a group that is either fully enabled **or**
+staged while holding at least one per-op-enabled descriptor. Writes,
+typed ops and composites remain `is_enabled=False`.
 
 ### Step 5 — dispatch one read op end-to-end
 

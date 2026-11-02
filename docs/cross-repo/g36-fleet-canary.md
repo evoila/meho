@@ -219,20 +219,17 @@ The 6 groups the curated core used to span were, for reference (the
 ### Step 3 — enable the reads
 
 ```bash
-meho connector review fleet-rest-9.0 --enable-reads
+meho connector enable-reads fleet-rest-9.0
 ```
 
-Or, from a backplane Python shell:
+This flips `is_enabled=True` on **every** ingested `GET`/`HEAD` operation
+for the connector in one pass, and prints how many it enabled. Writes
+(`POST` / `PUT` / `PATCH` / `DELETE`), typed ops and composites stay
+default-deny — that split is the governance boundary, not an oversight.
 
-```python
-from meho_backplane.operations.ingest.service import ReviewService
-
-await ReviewService().enable_reads(connector_id="fleet-rest-9.0", tenant_id=None)
-```
-
-This enables the ingested read ops generically. It does not hand-pick a
-core set and does not write `llm_instructions`: the grouping and guidance
-come from the T3 LLM pass in step 2.
+It does **not** hand-pick a core set, does not write `llm_instructions`,
+and does **not** move any group's `review_status`: it is purely a per-op
+flip. The grouping and guidance come from the T3 LLM pass in step 2.
 
 > **Changed in #2362.** This step used to call
 > `apply_fleet_core_curation`, which walked a hand-maintained
@@ -257,17 +254,19 @@ meho operation search fleet-rest-9.0 "list fleet environments" --limit 5
 meho operation search fleet-rest-9.0 "what fleet upgrade requests are running" --limit 5
 ```
 
-The first command should return the enabled groups with the
-`when_to_use` hints the T3 LLM pass derived. The second should
-return `GET:/lcm/lcops/api/v2/environments` in the top-3. The third
-should return `GET:/lcm/request/api/v2/requests` in the top-3 (and
-ideally `…/{requestId}` close behind).
+The first command should list the groups with the `when_to_use` hints
+the T3 LLM pass derived. The second should return
+`GET:/lcm/lcops/api/v2/environments` in the top-3. The third should
+return `GET:/lcm/request/api/v2/requests` in the top-3 (and ideally
+`…/{requestId}` close behind).
 
-Every other Fleet op the spec ingestion produced should be in the
-`is_enabled=False` state — `search_operations` filters on
-`OperationGroup.review_status='enabled'` AND
-`EndpointDescriptor.is_enabled=True`, so a staged group's ops never
-surface.
+**What to expect after `enable-reads`, which differs from the old curated
+flow.** Groups stay `staged` — `enable_reads` never moves a group's
+`review_status` — and every ingested `GET`/`HEAD` op is enabled, not a
+hand-picked subset. A staged group still surfaces in search, because the
+visibility rule resolves a group that is either fully enabled **or**
+staged while holding at least one per-op-enabled descriptor. Writes,
+typed ops and composites remain `is_enabled=False`.
 
 ### Step 5 — dispatch one list op end-to-end
 

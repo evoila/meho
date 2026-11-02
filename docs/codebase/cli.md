@@ -2706,10 +2706,14 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
   realm against the recipe:
   1. Public device-code client (default name `meho-cli`,
      `publicClient=true`, `oauth2DeviceAuthorizationGrantEnabled=true`).
-     The standard flow is on too, with `pkce.code.challenge.method=S256`
-     and the one redirect URI `http://127.0.0.1:*`: `meho approvals
-     approve` uses it for the fresh browser sign-in an approval needs
-     (#3979). Implicit, password and service-account flows stay off.
+     The standard flow is on too, with the one redirect URI
+     `http://127.0.0.1:*`: older CLI versions use it for the fresh
+     browser sign-in an approval needs (#3979). The client requires no
+     PKCE method: `meho login` sends no PKCE, and Keycloak checks PKCE
+     at the device login too, so a required method would refuse every
+     `meho login`. The run sends `pkce.code.challenge.method` as an
+     empty value, so Keycloak drops the `S256` that a run of 0.40.0 or
+     0.41.0 set. Implicit, password and service-account flows stay off.
   2. Public authorization-code+PKCE MCP client (default name
      `meho-mcp`, `standardFlowEnabled=true`,
      `pkce.code.challenge.method=S256`, default redirect URIs for the

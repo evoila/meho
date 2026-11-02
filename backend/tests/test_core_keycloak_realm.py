@@ -237,6 +237,19 @@ def test_cli_client_uses_device_flow(realm: dict[str, Any]) -> None:
     assert client["attributes"]["oauth2.device.authorization.grant.enabled"] == "true"
 
 
+def test_cli_client_requires_no_pkce(realm: dict[str, Any]) -> None:
+    """`meho login` sends no PKCE, and Keycloak checks PKCE at the device login too.
+
+    The clients without a device login keep the PKCE method.
+    """
+    client = _client(realm, "meho-cli")
+    assert "pkce.code.challenge.method" not in client["attributes"]
+    for client_id in ("meho-cli-approve", "meho-mcp", "meho-web"):
+        other = _client(realm, client_id)
+        assert other["attributes"]["pkce.code.challenge.method"] == "S256"
+        assert other["attributes"]["oauth2.device.authorization.grant.enabled"] == "false"
+
+
 def test_cli_client_offers_a_long_login(realm: dict[str, Any]) -> None:
     """`meho login` asks for offline_access; it ends after 48 hours without use."""
     client = _client(realm, "meho-cli")
@@ -330,12 +343,11 @@ def test_no_secret_or_host_written_in_the_file(realm: dict[str, Any]) -> None:
 def test_cli_client_allows_the_fresh_sign_in_for_an_approval(realm: dict[str, Any]) -> None:
     """``meho approvals approve`` signs in again in the browser (#3979).
 
-    The browser flow is on with PKCE and a 127.0.0.1 loopback redirect only;
+    The browser flow is on with a 127.0.0.1 loopback redirect only;
     ``meho login`` keeps the device flow. Same as the bootstrap recipe.
     """
     client = _client(realm, "meho-cli")
     assert client["standardFlowEnabled"] is True
-    assert client["attributes"]["pkce.code.challenge.method"] == "S256"
     assert client["attributes"]["oauth2.device.authorization.grant.enabled"] == "true"
     assert client["redirectUris"] == ["http://127.0.0.1:*"]
     assert client["webOrigins"] == []

@@ -25,6 +25,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._vm_device_schemas import (
     VM_CPU_MEMORY_OPTIONS_SET_LLM_INSTRUCTIONS,
     VM_CPU_MEMORY_OPTIONS_SET_PARAMETER_SCHEMA,
@@ -50,7 +51,6 @@ from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, pol
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
-    "VM_CPU_MEMORY_OPTIONS_COMPOSITES",
+    "COMPOSITES",
     "read_vm_cpu_memory_options",
     "vm_cpu_memory_options_set_composite",
 ]
@@ -344,25 +344,27 @@ async def _vm_cpu_memory_options_set_preview(ctx: PreviewContext) -> dict[str, A
     return preview
 
 
-register_preview_builder(OP_ID_VM_CPU_MEMORY_OPTIONS_SET, _vm_cpu_memory_options_set_preview)
-
-#: The registration row, as ``_CompositeSpec`` keyword arguments.
-VM_CPU_MEMORY_OPTIONS_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_VM_CPU_MEMORY_OPTIONS_SET,
-        "handler": vm_cpu_memory_options_set_composite,
-        "summary": "Turn CPU and memory hot add on or off, and set CPU and memory shares.",
-        "description": (
+#: The registration row. ``_register.py`` collects it at start-up.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_VM_CPU_MEMORY_OPTIONS_SET,
+        handler=vm_cpu_memory_options_set_composite,
+        summary="Turn CPU and memory hot add on or off, and set CPU and memory shares.",
+        description=(
             "Changes a VM's CPU and memory hot add and its CPU and memory shares in one "
             "vCenter task. Only the settings you pass change. Hot add changes need the VM "
             "powered off. Waits for approval."
         ),
-        "parameter_schema": VM_CPU_MEMORY_OPTIONS_SET_PARAMETER_SCHEMA,
-        "response_schema": VM_CPU_MEMORY_OPTIONS_SET_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "hardware", "vi-json"],
-        "safety_level": "caution",
-        "requires_approval": True,
-        "llm_instructions": VM_CPU_MEMORY_OPTIONS_SET_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=VM_CPU_MEMORY_OPTIONS_SET_PARAMETER_SCHEMA,
+        response_schema=VM_CPU_MEMORY_OPTIONS_SET_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "hardware", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=VM_CPU_MEMORY_OPTIONS_SET_LLM_INSTRUCTIONS,
+        preview=_vm_cpu_memory_options_set_preview,
+        governed_subops=VIM_SUB_OPS_VM_CPU_MEMORY_OPTIONS_SET,
+        # ``.set`` is not a classifier suffix -> ``other``.
+        classifier_other=True,
+    ),
 )

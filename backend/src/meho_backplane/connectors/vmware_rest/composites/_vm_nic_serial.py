@@ -27,8 +27,7 @@ state, for example), the answer is ``refused`` with vCenter's reason, and
 nothing changed.
 
 The parameters, answers and AI guidance live in :mod:`._vm_device_schemas`.
-The shared registry in ``_register.py`` only splats
-:data:`VM_NIC_SERIAL_COMPOSITES`.
+The registration rows are :data:`COMPOSITES`; ``_register.py`` collects them.
 """
 
 from __future__ import annotations
@@ -37,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._vm_device_schemas import (
     VM_NIC_CONNECT_LLM_INSTRUCTIONS,
     VM_NIC_CONNECT_PARAMETER_SCHEMA,
@@ -56,7 +56,6 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware import check_vm
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
@@ -65,7 +64,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
-    "VM_NIC_SERIAL_COMPOSITES",
+    "COMPOSITES",
     "vm_nic_connect_composite",
     "vm_serial_port_add_composite",
 ]
@@ -80,8 +79,8 @@ _OP_CREATE_VM_SERIAL: Final = "POST:/vcenter/vm/{vm}/hardware/serial"
 _OP_GET_VM_SERIAL: Final = "GET:/vcenter/vm/{vm}/hardware/serial/{port}"
 
 #: Every REST call of each change (reads and writes). The reconcile test
-#: checks them against the pinned vCenter 8.0 and 9.0 API files, and
-#: ``_governed_subops`` lists them for the grant set.
+#: checks them against the pinned vCenter 8.0 and 9.0 API files, and the
+#: rows carry them as ``governed_subops`` for the grant set.
 SUB_OPS_VM_NIC_CONNECT: Final[tuple[str, ...]] = (
     _OP_GET_VM_NIC,
     _OP_CONNECT_VM_NIC,
@@ -355,48 +354,50 @@ async def _vm_serial_port_add_preview(ctx: PreviewContext) -> dict[str, Any] | N
     }
 
 
-register_preview_builder(OP_ID_VM_NIC_CONNECT, _vm_nic_connect_preview)
-register_preview_builder(OP_ID_VM_SERIAL_PORT_ADD, _vm_serial_port_add_preview)
-
-
 # ---------------------------------------------------------------------------
 # Registration rows
 # ---------------------------------------------------------------------------
 
-#: The two registration rows, as ``_CompositeSpec`` keyword arguments.
-VM_NIC_SERIAL_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_VM_NIC_CONNECT,
-        "handler": vm_nic_connect_composite,
-        "summary": "Connect or disconnect a network adapter of a running VM.",
-        "description": (
+#: The two registration rows. ``_register.py`` collects them at start-up.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_VM_NIC_CONNECT,
+        handler=vm_nic_connect_composite,
+        summary="Connect or disconnect a network adapter of a running VM.",
+        description=(
             "Plugs a network adapter of a powered-on VM in or out, named by VM id and "
-            "adapter id. Reads the adapter first and sends nothing when it is already in "
-            "the asked state. Waits for approval."
+            "adapter id. Reads the adapter first and sends nothing when it already "
+            "reports the asked state. Waits for approval."
         ),
-        "parameter_schema": VM_NIC_CONNECT_PARAMETER_SCHEMA,
-        "response_schema": VM_NIC_CONNECT_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "hardware", "nic"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VM_NIC_CONNECT_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_VM_SERIAL_PORT_ADD,
-        "handler": vm_serial_port_add_composite,
-        "summary": "Add a serial port to a VM, to a datastore file or a network address.",
-        "description": (
+        parameter_schema=VM_NIC_CONNECT_PARAMETER_SCHEMA,
+        response_schema=VM_NIC_CONNECT_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "hardware", "nic"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VM_NIC_CONNECT_LLM_INSTRUCTIONS,
+        preview=_vm_nic_connect_preview,
+        governed_subops=SUB_OPS_VM_NIC_CONNECT,
+        # ``.connect`` is not a classifier suffix -> ``other``.
+        classifier_other=True,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_VM_SERIAL_PORT_ADD,
+        handler=vm_serial_port_add_composite,
+        summary="Add a serial port to a VM, to a datastore file or a network address.",
+        description=(
             "Adds a serial port to a powered-off VM, named by its VM id. The port writes "
             "to a file on a datastore, or listens on or connects to a network address. "
             "Reads the new port back. Waits for approval."
         ),
-        "parameter_schema": VM_SERIAL_PORT_ADD_PARAMETER_SCHEMA,
-        "response_schema": VM_SERIAL_PORT_ADD_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "hardware", "serial"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VM_SERIAL_PORT_ADD_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=VM_SERIAL_PORT_ADD_PARAMETER_SCHEMA,
+        response_schema=VM_SERIAL_PORT_ADD_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "hardware", "serial"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VM_SERIAL_PORT_ADD_LLM_INSTRUCTIONS,
+        preview=_vm_serial_port_add_preview,
+        governed_subops=SUB_OPS_VM_SERIAL_PORT_ADD,
+    ),
 )

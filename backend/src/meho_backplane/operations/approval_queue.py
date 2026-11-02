@@ -95,7 +95,11 @@ from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast.events import classify_op
+from meho_backplane.broadcast.events import (
+    classify_op,
+    holds_hidden_param_values,
+    scrub_secret_named_values,
+)
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.models import (
     ApprovalRequest,
@@ -1768,7 +1772,7 @@ async def reject_request(
     # claim (#3300); ``None`` fail-opens to the raw sub. See approve_request.
     request.reviewed_by_name = operator.name
     request.decided_at = now
-    await discard_handoff(session, request.id, request.tenant_id)
+    await end_run_input(session, request)
     await session.flush()
 
     extra: dict[str, Any] = {"decision": "rejected", "reviewed_by": operator.sub}
@@ -1845,7 +1849,7 @@ async def withdraw_request(
     request.status = ApprovalRequestStatus.WITHDRAWN.value
     request.withdrawn_at = _now()
     request.withdraw_reason = reason or None
-    await discard_handoff(session, request.id, request.tenant_id)
+    await end_run_input(session, request)
     await session.flush()
 
     extra: dict[str, Any] = {"withdrawn_by": operator.sub}
@@ -1874,6 +1878,40 @@ async def withdraw_request(
     )
     request._audit_id = withdraw_audit_id  # type: ignore[attr-defined]
     return request
+
+
+def params_with_secret_fields_hidden(params: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The stored params with each secret-named value replaced, or ``None``.
+
+    ``None`` when *params* is ``None`` or holds no secret-named value
+    (``password``, ``licenseKey``, ``client_secret``, ...; the name rule of
+    :func:`~meho_backplane.broadcast.events.scrub_secret_named_values`), so
+    a row without such a field is never rewritten. The other fields keep
+    their value, as in the audit row's raw copy.
+    """
+    if params is None:
+        return None
+    hidden, found = scrub_secret_named_values(params)
+    if not found:
+        return None
+    return cast(dict[str, Any], hidden)
+
+
+async def end_run_input(session: AsyncSession, request: ApprovalRequest) -> None:
+    """Drop what MEHO kept only to run *request*: the row is ending without a run.
+
+    Deletes the encrypted custody row of a credential write
+    (:func:`~meho_backplane.operations.approval_handoff.discard`) and
+    replaces each secret-named value in the stored ``params`` (a password or
+    a licence key inside a deployment spec) with a marker. The caller holds
+    the row lock, flushes and commits. Rejected, withdrawn and expired
+    requests end here; a request that runs has its values hidden when the
+    run claim is won (:func:`claim_resume`).
+    """
+    await discard_handoff(session, request.id, request.tenant_id)
+    hidden = params_with_secret_fields_hidden(request.params)
+    if hidden is not None:
+        request.params = hidden
 
 
 async def claim_resume(
@@ -1923,27 +1961,41 @@ async def claim_resume(
     so a dispatch that fails after a won claim is not silently retried into
     a possible double write; the residual expiry follow-up (out of scope
     here) makes such a void approval visibly "expired".
+
+    The winner already read the stored params into memory for its run. So
+    the same transaction replaces each secret-named value in the row's
+    ``params`` (a password or a licence key inside a deployment spec) with
+    a marker: the row keeps them only until the run starts. A later re-run
+    of a failed run needs the params sent again
+    (:func:`~meho_backplane.operations.approval_rerun.rerun_failed_request`).
     """
     from meho_backplane.db.engine import get_sessionmaker
 
     stamp = now or _now()
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        # ``session.execute()`` on an ``UPDATE`` returns a ``CursorResult``
-        # (carrying the DBAPI ``rowcount``) at runtime; the static stub is
-        # the generic ``Result`` so mypy needs the cast to read ``rowcount``.
         # ``synchronize_session=False`` -- no ORM identity map to keep in
-        # step, this is a bare claim probe. Read ``rowcount`` before the
-        # commit closes the cursor.
-        raw_result = await session.execute(
+        # step, this is a bare claim probe. ``id`` is the primary key, so
+        # the claim returns one row when won and none when lost.
+        claimed = await session.execute(
             update(ApprovalRequest)
             .where(ApprovalRequest.id == request_id)
             .where(ApprovalRequest.resumed_at.is_(None))
             .where(ApprovalRequest.status == ApprovalRequestStatus.APPROVED.value)
             .values(resumed_at=stamp)
+            .returning(ApprovalRequest.params)
             .execution_options(synchronize_session=False)
         )
-        won = cast(CursorResult[Any], raw_result).rowcount == 1
+        row = claimed.first()
+        won = row is not None
+        hidden = params_with_secret_fields_hidden(row[0]) if row is not None else None
+        if hidden is not None:
+            await session.execute(
+                update(ApprovalRequest)
+                .where(ApprovalRequest.id == request_id)
+                .values(params=hidden)
+                .execution_options(synchronize_session=False)
+            )
         await session.commit()
     return won
 
@@ -2194,12 +2246,16 @@ def _stored_call(
     (``request.reveal_secret``). So the choice also survives for a
     credential write, whose params are not on the row and come from the
     caller on a re-run. The params are ``None`` when the row stores none and
-    none were sent.
+    none were sent. Stored params whose secret-named values were replaced
+    by a marker (after the first run, :func:`claim_resume`) count as none:
+    they can no longer run the call.
     """
     if params is not None:
         params, _ = split_reveal_secret(params)
-    effective = params if params is not None else request.params
-    return cast(dict[str, Any] | None, effective), bool(request.reveal_secret)
+    effective: dict[str, Any] | None = params
+    if effective is None and not holds_hidden_param_values(request.params):
+        effective = cast(dict[str, Any] | None, request.params)
+    return effective, bool(request.reveal_secret)
 
 
 async def refuse_resume_if_release_changed(
@@ -2984,7 +3040,7 @@ async def _expire_request(
         request.expires_at = request.created_at + default_ttl
     request.status = ApprovalRequestStatus.EXPIRED.value
     request.decided_at = cutoff
-    await discard_handoff(session, request.id, request.tenant_id)
+    await end_run_input(session, request)
     await session.flush()
 
     expire_audit_id = uuid.uuid4()

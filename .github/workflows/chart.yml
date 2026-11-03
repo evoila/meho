@@ -1429,9 +1429,11 @@ jobs:
       - name: Start a bring-your-own PostgreSQL outside the release (#5412)
         # This is the customer's database. It is the chart's own PostgreSQL
         # objects (`--show-only`), applied with kubectl and not with Helm, so
-        # they are not part of the release below. The three Secrets they read
+        # they are not part of the release below. The four Secrets they read
         # are made here with throwaway passwords. Their names, keys and URL
-        # shape are those the install's secrets Job uses.
+        # shape are those the install's secrets Job uses. The release below
+        # runs with one login (`postgres.runtime` empty), so `meho_app` is
+        # created by the database but not used here.
         #
         # The database start-up script creates the `vector` extension as the
         # superuser. That is the one step a customer's database admin does by
@@ -1448,6 +1450,10 @@ jobs:
           kubectl -n meho-test create secret generic meho-test-core-postgres-meho \
             --from-literal=password="$meho_pw" \
             --from-literal=url="postgresql+asyncpg://meho:${meho_pw}@meho-test-postgres:5432/meho"
+          app_pw=$(openssl rand -hex 16)
+          kubectl -n meho-test create secret generic meho-test-core-postgres-meho-app \
+            --from-literal=password="$app_pw" \
+            --from-literal=url="postgresql+asyncpg://meho_app:${app_pw}@meho-test-postgres:5432/meho"
           kubectl -n meho-test create secret generic meho-test-core-postgres-keycloak \
             --from-literal=password="$(openssl rand -hex 16)"
           helm template meho-test ./deploy/charts/meho \

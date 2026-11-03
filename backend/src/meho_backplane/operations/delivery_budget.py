@@ -56,6 +56,7 @@ import structlog
 from meho_backplane.connectors.schemas import OperationResult, ResultHandle
 from meho_backplane.operations._errors import result_receipt_too_large
 from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+from meho_backplane.untrusted_text import with_data_notice
 
 __all__ = [
     "RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES",
@@ -106,6 +107,16 @@ def measure_delivered_wire_bytes(result: Any, *, structured: bool = True) -> int
     if structured:
         total += len(_transport_encode(result))
     return total
+
+
+def measure_call_operation_bytes(result: OperationResult) -> int:
+    """Return the bytes *result* takes on the wire as the ``call_operation`` tool sends it.
+
+    The MCP tool adds the ``data_notice`` field to every answer after the
+    bounding below ran, so the notice is counted here: the answer that is
+    measured is the answer that is delivered.
+    """
+    return measure_delivered_wire_bytes(with_data_notice(result.model_dump(mode="json")))
 
 
 def handle_is_readable(handle: ResultHandle | None) -> bool:
@@ -187,7 +198,7 @@ def receipt_wire_bytes(op_id: str, max_bytes: int) -> int:
         audit_id=_PLACEHOLDER_AUDIT_ID,
     )
     receipt = _trimmed(widest, "unavailable", _WIDEST_BYTE_COUNT, max_bytes)
-    return measure_delivered_wire_bytes(receipt.model_dump(mode="json"))
+    return measure_call_operation_bytes(receipt)
 
 
 def refuse_undeliverable_receipt(op_id: str, max_bytes: int) -> OperationResult | None:
@@ -236,15 +247,15 @@ def bound_complete_response(result: OperationResult, max_bytes: int) -> Operatio
     """
     if result.status != "ok":
         return result
-    size = measure_delivered_wire_bytes(result.model_dump(mode="json"))
+    size = measure_call_operation_bytes(result)
     if size <= max_bytes:
         return result
     if handle_is_readable(result.handle):
         partial = _trimmed(result, "partial", size, max_bytes)
-        if measure_delivered_wire_bytes(partial.model_dump(mode="json")) <= max_bytes:
+        if measure_call_operation_bytes(partial) <= max_bytes:
             return partial
     receipt = _trimmed(result, "unavailable", size, max_bytes)
-    receipt_size = measure_delivered_wire_bytes(receipt.model_dump(mode="json"))
+    receipt_size = measure_call_operation_bytes(receipt)
     if receipt_size > max_bytes:
         _log.warning(
             "delivery_receipt_over_ceiling",

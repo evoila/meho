@@ -70,6 +70,8 @@ RETIRED_OPS: frozenset[RetiredOp] = frozenset(
         # Shipped in v0.38.0; replaced by inventory.export on the inventory-1.x
         # connector, which takes the file format as a parameter.
         RetiredOp("migration", "1.x", "migration-assess", "migration.inventory.csv"),
+        # Renamed to installer.sddc.bringup.status; the old handler was removed.
+        RetiredOp("installer", "9.1", "installer-rest", "installer.sddc.status"),
     }
 )
 """Built-in typed/composite ops the sweep deletes at boot.

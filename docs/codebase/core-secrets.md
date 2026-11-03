@@ -40,6 +40,7 @@ Names are `<release>-core-…`. "alnum 32" means 32 characters from
 |---|---|---|---|---|
 | `-core-postgres-superuser` | `password` | alnum 32 | `corePostgres.enabled` | `corePostgres.existingSecrets.superuser` |
 | `-core-postgres-meho` | `password`, `url` | alnum 32; `postgresql+asyncpg://meho:<password>@<release>-postgres:5432/meho` | `corePostgres.enabled` | `postgres.credentialsSecret` |
+| `-core-postgres-meho-app` | `password`, `url` | alnum 32; `postgresql+asyncpg://meho_app:<password>@<release>-postgres:5432/meho` (the login of the running backplane; `meho` above runs the migrations) | `corePostgres.enabled` | `postgres.runtime.credentialsSecret` |
 | `-core-postgres-keycloak` | `password` | alnum 32 | `corePostgres.enabled` | `corePostgres.existingSecrets.keycloak` (not while `coreKeycloak.enabled` is on, see below) |
 | `-core-keycloak-bootstrap` | `client_id`, `client_secret` | alnum 32 | `coreKeycloak.enabled` | `coreKeycloak.existingSecrets.bootstrap` |
 | `-core-keycloak-admin` | `client_secret` | alnum 32 | `coreKeycloak.enabled` | `keycloakAdmin.clientSecret.secretName` (not while `coreKeycloak.enabled` is on, see below) |

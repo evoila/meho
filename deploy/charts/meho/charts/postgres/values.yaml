@@ -4,12 +4,16 @@
 # `corePostgres:` values block onto it through a dependency `alias`, so
 # operators set these keys under `corePostgres:`.
 #
-# The subchart makes no password. The three Secrets it reads are made by
+# The subchart makes no password. The four Secrets it reads are made by
 # the install's secrets Job before the pod starts:
 #   - `<release>-core-postgres-superuser` (key `password`): the image
 #     superuser. Only the `postgres` container mounts it; initdb reads it
 #     once, on an empty disk.
-#   - `<release>-core-postgres-meho` (key `password`): the `meho` role.
+#   - `<release>-core-postgres-meho` (key `password`): the `meho` role,
+#     which owns the `meho` database and runs the migrations.
+#   - `<release>-core-postgres-meho-app` (key `password`): the `meho_app`
+#     role, the login of the running backplane. The migration gives it
+#     its rights; it cannot change or delete audit rows.
 #   - `<release>-core-postgres-keycloak` (key `password`): the `keycloak`
 #     role.
 

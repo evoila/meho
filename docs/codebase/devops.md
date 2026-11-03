@@ -640,11 +640,15 @@ Design: the internal core design note, §2 (one database server) and §1
   wins). The image is built FROM the official `postgres:17-bookworm` image,
   so the official entrypoint runs. PostgreSQL 18 is not used: it moves the
   data directory layout.
-- **Two databases, two roles.** One SQL file (`core.sql` in the ConfigMap)
+- **Two databases, three roles.** One SQL file (`core.sql` in the ConfigMap)
   makes the roles `meho` and `keycloak` (`LOGIN NOSUPERUSER NOCREATEDB
   NOCREATEROLE`, connection limits 60 and 25), the databases `meho` and
   `keycloak`, each owned by its role, takes CONNECT and TEMPORARY away from
-  PUBLIC, and creates `vector` in `meho` as the image superuser. Every
+  PUBLIC, and creates `vector` in `meho` as the image superuser. It also
+  makes `meho_app`, the login of the running backplane (same role
+  settings, connection limit 60, `CONNECT` on `meho`, owns nothing); the
+  migration, which runs as the owner `meho`, grants it its rights on the
+  tables (`docs/codebase/migrations.md`, "The runtime role"). Every
   statement is safe to run twice (`CREATE` is guarded with `\gexec`).
   Passwords reach SQL only as psql variables (`\getenv`).
 - **Two paths, one file.** On an empty disk the entrypoint runs `apply.sh`
@@ -658,11 +662,11 @@ Design: the internal core design note, §2 (one database server) and §1
   (`/var/run/postgresql`, an emptyDir) through initdb's `local all all
   trust` line. It never needs the superuser password.
 - **Secrets.** The chart makes no password. It reads
-  `<release>-core-postgres-superuser`, `-meho` and `-keycloak` (key
-  `password`), which the install's secrets Job makes (#4041). The
+  `<release>-core-postgres-superuser`, `-meho`, `-meho-app` and `-keycloak`
+  (key `password`), which the install's secrets Job makes (#4041). The
   superuser Secret is mounted by the `postgres` container alone, as
   `POSTGRES_PASSWORD_FILE`; initdb reads it once. The sidecar mounts only
-  the two role Secrets. `corePostgres.existingSecrets.{superuser,keycloak}`
+  the three role Secrets. `corePostgres.existingSecrets.{superuser,keycloak}`
   names operator-made Secrets instead.
 - **Logins.** `POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256`: TCP logins
   from inside the pod (127.0.0.1, also `kubectl port-forward`) need a
@@ -695,7 +699,10 @@ Design: the internal core design note, §2 (one database server) and §1
   change, but not on its own clock).
 - **What wires it to the backplane.** Not this subchart. The migration
   runs as the backplane's `migrate` init container in this mode (#5233,
-  see [Migration Job](#migration-job-templatesmigration-jobyaml)). The
+  see [Migration Job](#migration-job-templatesmigration-jobyaml)), with
+  the owner login and `DATABASE_RUNTIME_ROLE=meho_app`; the backplane
+  container reads `DATABASE_URL` from `<release>-core-postgres-meho-app`
+  (parent helpers `meho.postgres.*` in `templates/_helpers.tpl`). The
   `DATABASE_URL` default and the schema conditionals come with #4047.
 
 **Helm test.** `templates/tests/test-pgvector.yaml` runs on the same

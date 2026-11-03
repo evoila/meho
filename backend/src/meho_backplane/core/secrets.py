@@ -80,6 +80,7 @@ _API_TIMEOUT_S = 30
 Kind = Literal[
     "postgres-superuser",
     "postgres-meho",
+    "postgres-meho-app",
     "postgres-keycloak",
     "keycloak-bootstrap",
     "keycloak-admin",
@@ -101,6 +102,7 @@ class _KindSpec:
 _KINDS: Mapping[str, _KindSpec] = {
     "postgres-superuser": _KindSpec(("password",)),
     "postgres-meho": _KindSpec(("password", "url"), needs_host=True),
+    "postgres-meho-app": _KindSpec(("password", "url"), needs_host=True),
     "postgres-keycloak": _KindSpec(("password",)),
     "keycloak-bootstrap": _KindSpec(("client_id", "client_secret")),
     "keycloak-admin": _KindSpec(("client_secret",)),
@@ -123,7 +125,8 @@ class MakeEntry(BaseModel):
 
     name: str = Field(min_length=1)
     kind: Kind
-    # The database host for ``postgres-meho``, the Ingress host for ``tls``.
+    # The database host for ``postgres-meho`` and ``postgres-meho-app``, the
+    # Ingress host for ``tls``.
     host: str | None = None
 
     @model_validator(mode="after")
@@ -183,9 +186,12 @@ def build_data(entry: MakeEntry) -> dict[str, str]:
     match entry.kind:
         case "postgres-superuser" | "postgres-keycloak":
             return {"password": new_password()}
-        case "postgres-meho":
+        case "postgres-meho" | "postgres-meho-app":
+            # `meho` owns the schema and runs the migrations; `meho_app` is
+            # the login of the running backplane (db/runtime_role.py).
+            user = "meho" if entry.kind == "postgres-meho" else "meho_app"
             password = new_password()
-            url = f"postgresql+asyncpg://meho:{quote(password, safe='')}@{host}:5432/meho"
+            url = f"postgresql+asyncpg://{user}:{quote(password, safe='')}@{host}:5432/meho"
             return {"password": password, "url": url}
         case "keycloak-bootstrap":
             return {"client_id": new_password(), "client_secret": new_password()}

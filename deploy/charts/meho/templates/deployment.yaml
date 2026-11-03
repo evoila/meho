@@ -80,6 +80,9 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.postgres.credentialsSecret }}
                   key: url
+            {{- with include "meho.postgres.runtimeRoleEnv" . }}
+            {{- . | nindent 12 }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -125,10 +128,15 @@ spec:
             # container (the image build does not know its chart release).
             - name: CHART_VERSION
               value: {{ .Chart.Version | quote }}
+            {{- /*
+            The running backplane logs in with its own, narrower login when
+            the install has one (`meho.postgres.backplaneSecretName`); the
+            migration above keeps the owner login.
+            */}}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.postgres.credentialsSecret }}
+                  name: {{ include "meho.postgres.backplaneSecretName" . }}
                   key: url
             {{- if .Values.broadcast.enabled }}
             # BROADCAST_REDIS_URL points the backplane at the in-cluster

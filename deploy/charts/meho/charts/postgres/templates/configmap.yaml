@@ -9,20 +9,27 @@ data:
   # /docker-entrypoint-initdb.d on an empty disk, and again from the
   # reconcile sidecar at every pod start and whenever a mounted Secret
   # changes. Every statement is safe to run twice. Passwords reach SQL only
-  # as psql variables, never written into a statement. Neither role is a
-  # superuser; each owns its own database and nothing else. The superuser
+  # as psql variables, never written into a statement. No role is a
+  # superuser; `meho` and `keycloak` each own their own database and
+  # nothing else. `meho_app` is the login of the running backplane: it
+  # owns nothing and may only connect here; the migration, which runs as
+  # the owner `meho`, grants it its rights on the tables. The superuser
   # creates `vector`, so MEHO's migrations never need a superuser.
   core.sql: |
     \getenv meho_pw MEHO_DB_PASSWORD
+    \getenv meho_app_pw MEHO_APP_DB_PASSWORD
     \getenv keycloak_pw KEYCLOAK_DB_PASSWORD
     SELECT 'CREATE ROLE meho' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'meho')\gexec
+    SELECT 'CREATE ROLE meho_app' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'meho_app')\gexec
     SELECT 'CREATE ROLE keycloak' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'keycloak')\gexec
     ALTER ROLE meho LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 60 PASSWORD :'meho_pw';
+    ALTER ROLE meho_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 60 PASSWORD :'meho_app_pw';
     ALTER ROLE keycloak LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 25 PASSWORD :'keycloak_pw';
     SELECT 'CREATE DATABASE meho OWNER meho ENCODING ''UTF8''' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'meho')\gexec
     SELECT 'CREATE DATABASE keycloak OWNER keycloak ENCODING ''UTF8''' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'keycloak')\gexec
     REVOKE CONNECT, TEMPORARY ON DATABASE meho FROM PUBLIC;
     REVOKE CONNECT, TEMPORARY ON DATABASE keycloak FROM PUBLIC;
+    GRANT CONNECT ON DATABASE meho TO meho_app;
     \c meho
     CREATE EXTENSION IF NOT EXISTS vector;
     -- After a new image brings a newer pgvector, this moves the extension
@@ -30,7 +37,7 @@ data:
     ALTER EXTENSION vector UPDATE;
 
   # Runs core.sql once over the local socket as the image superuser
-  # (initdb's `local all all trust` line), with the two role passwords
+  # (initdb's `local all all trust` line), with the three role passwords
   # read from the mounted Secret files. Used by both paths: the server
   # container runs it from /docker-entrypoint-initdb.d, the sidecar from
   # its loop.
@@ -39,12 +46,13 @@ data:
     set -eu
     secrets=/etc/core-postgres/secrets
     MEHO_DB_PASSWORD=$(cat "$secrets/meho/password")
+    MEHO_APP_DB_PASSWORD=$(cat "$secrets/meho-app/password")
     KEYCLOAK_DB_PASSWORD=$(cat "$secrets/keycloak/password")
-    if [ -z "$MEHO_DB_PASSWORD" ] || [ -z "$KEYCLOAK_DB_PASSWORD" ]; then
+    if [ -z "$MEHO_DB_PASSWORD" ] || [ -z "$MEHO_APP_DB_PASSWORD" ] || [ -z "$KEYCLOAK_DB_PASSWORD" ]; then
       echo "core-postgres: a mounted password file is empty; nothing changed" >&2
       exit 1
     fi
-    export MEHO_DB_PASSWORD KEYCLOAK_DB_PASSWORD
+    export MEHO_DB_PASSWORD MEHO_APP_DB_PASSWORD KEYCLOAK_DB_PASSWORD
     export PGOPTIONS="-c client_min_messages=warning"
     exec psql -X -q -v ON_ERROR_STOP=1 -h /var/run/postgresql -U postgres -d postgres \
       -f /etc/core-postgres/config/core.sql
@@ -68,7 +76,7 @@ data:
     interval=2
     while :; do
       if pg_isready -q -h 127.0.0.1 -p 5432 -U postgres; then
-        current=$(cat "$config/core.sql" "$secrets/meho/password" "$secrets/keycloak/password" | sha256sum)
+        current=$(cat "$config/core.sql" "$secrets/meho/password" "$secrets/meho-app/password" "$secrets/keycloak/password" | sha256sum)
         if [ "$current" != "$applied" ]; then
           if "$config/apply.sh"; then
             applied=$current

@@ -811,6 +811,27 @@ postgres:
   # posture. See `deploy/values-examples/README.md` (§ pgvector extension
   # prerequisite) and `docs/decisions/pgvector-superuser-prerequisite.md`.
   credentialsSecret: ""
+  # The login of the running backplane, apart from the owner login above.
+  # The owner login (`credentialsSecret`) owns the tables and runs the
+  # migrations. The running backplane can use a second, narrower login
+  # instead: it may read and write every table, but on `audit_log` it may
+  # only add rows, read them, and empty the `raw_payload` column (the
+  # weekly age-off). It cannot change or delete audit rows, and it does
+  # not own the table. The migration gives the role these rights on every
+  # run (`DATABASE_RUNTIME_ROLE`, backend `db/runtime_role.py`).
+  #
+  # With the built-in PostgreSQL (`corePostgres.enabled`) the install makes
+  # the role `meho_app` and the Secret `<release>-core-postgres-meho-app`;
+  # leave both keys empty there. With your own PostgreSQL, create the role
+  # yourself (LOGIN, no superuser, CONNECT on the database) and a Secret
+  # with its DSN at key `url`, then name both here. The migration waits
+  # for the role to exist, so create it before the upgrade. Both empty =
+  # one login for everything, as before.
+  runtime:
+    # -- Name of the runtime role (a lower-case PostgreSQL role name).
+    role: ""
+    # -- Kubernetes Secret with the runtime login's DSN at key `url`.
+    credentialsSecret: ""
 
 vault:
   # -- Vault address (e.g. `https://vault.example.org`) — MUST be set; empty
@@ -1149,8 +1170,8 @@ approvalHandoff:
 # to the two blocks below.
 corePostgres:
   # -- Built-in PostgreSQL. When on, the install makes
-  # `<release>-core-postgres-superuser`, `-core-postgres-meho` and
-  # `-core-postgres-keycloak`.
+  # `<release>-core-postgres-superuser`, `-core-postgres-meho`,
+  # `-core-postgres-meho-app` and `-core-postgres-keycloak`.
   enabled: false
   existingSecrets:
     # -- Your own Secret with the PostgreSQL superuser password (key
@@ -1163,7 +1184,9 @@ corePostgres:
     keycloak: ""
   # The subchart settings below (#4039): one PostgreSQL 17 server with
   # pgvector and two databases, `meho` and `keycloak`, each owned by a role
-  # of the same name that is not a superuser. The chart creates the
+  # of the same name that is not a superuser. A third role, `meho_app`, is
+  # the login of the running backplane (see `postgres.runtime`); the owner
+  # role `meho` runs the migrations. The chart creates the
   # `vector` extension itself, so the pgvector step described at
   # `postgres.credentialsSecret` is not needed. A sidecar in the
   # PostgreSQL pod sets the role passwords again whenever the Secrets

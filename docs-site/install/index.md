@@ -127,6 +127,37 @@ the [values-examples deep-dive](https://github.com/evoila/meho/blob/main/deploy/
 — the trail continues the same either way, as long as the Secret
 exists before you install.
 
+**Optional: a second, narrower login for the running backplane.** The
+login above owns the tables and runs the migrations. The running
+backplane can use its own role instead. That role may read and write
+every table, but on the audit log it may only add rows, read them and
+empty the raw-payload column; it cannot change or delete audit rows.
+Create the role as a superuser, give it `CONNECT`, and put its DSN in a
+second Secret:
+
+```sql
+CREATE ROLE meho_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD '<password>';
+GRANT CONNECT ON DATABASE meho TO meho_app;
+```
+
+```bash
+kubectl create secret generic meho-postgres-app -n meho \
+  --from-literal=url='postgresql+asyncpg://meho_app:<password>@<host>:5432/meho'
+```
+
+Then name both in the values file (Step 6):
+
+```yaml
+postgres:
+  runtime:
+    role: meho_app
+    credentialsSecret: meho-postgres-app
+```
+
+The migration Job grants the role its rights on every install and
+upgrade, so create the role before the upgrade that first names it. The
+built-in PostgreSQL of the chart does all of this on its own.
+
 ## Step 4 — Set up the Keycloak realm
 
 MEHO authenticates every caller against Keycloak, and MEHO ships a

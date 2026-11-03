@@ -108,6 +108,9 @@ spec:
             - name: meho
               mountPath: /etc/core-postgres/secrets/meho
               readOnly: true
+            - name: meho-app
+              mountPath: /etc/core-postgres/secrets/meho-app
+              readOnly: true
             - name: keycloak
               mountPath: /etc/core-postgres/secrets/keycloak
               readOnly: true
@@ -132,6 +135,9 @@ spec:
               readOnly: true
             - name: meho
               mountPath: /etc/core-postgres/secrets/meho
+              readOnly: true
+            - name: meho-app
+              mountPath: /etc/core-postgres/secrets/meho-app
               readOnly: true
             - name: keycloak
               mountPath: /etc/core-postgres/secrets/keycloak
@@ -168,6 +174,13 @@ spec:
         - name: meho
           secret:
             secretName: {{ include "corePostgres.mehoSecretName" . }}
+            defaultMode: 0440
+            items:
+              - key: password
+                path: password
+        - name: meho-app
+          secret:
+            secretName: {{ include "corePostgres.mehoAppSecretName" . }}
             defaultMode: 0440
             items:
               - key: password

@@ -158,3 +158,48 @@ Resolved Kubernetes Secret name holding the Keycloak Admin client secret
 {{- fail "keycloakAdmin.enabled=true requires either keycloakAdmin.clientSecret.secretName=<your-secret> (BYO) or eso.keycloakAdmin.enabled=true (chart-rendered ExternalSecret)." -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+The database login of the running backplane (the runtime role), apart
+from the owner login that runs the migrations. With the built-in
+PostgreSQL it is the role `meho_app` and the Secret
+`<release>-core-postgres-meho-app`, both made by the install. With your
+own PostgreSQL it is `postgres.runtime.role` and
+`postgres.runtime.credentialsSecret`; both empty means one login for
+everything. The migration container gets the role name as
+DATABASE_RUNTIME_ROLE and grants the role its rights
+(backend/src/meho_backplane/db/runtime_role.py).
+*/}}
+{{- define "meho.postgres.runtimeRole" -}}
+{{- if .Values.corePostgres.enabled -}}
+{{- .Values.postgres.runtime.role | default "meho_app" -}}
+{{- else -}}
+{{- .Values.postgres.runtime.role -}}
+{{- end -}}
+{{- end }}
+
+{{- define "meho.postgres.runtimeSecretName" -}}
+{{- if .Values.corePostgres.enabled -}}
+{{- .Values.postgres.runtime.credentialsSecret | default (printf "%s-core-postgres-meho-app" .Release.Name) -}}
+{{- else -}}
+{{- .Values.postgres.runtime.credentialsSecret -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+The Secret (key `url`) the backplane container reads DATABASE_URL from:
+the runtime login when there is one, else the owner login.
+*/}}
+{{- define "meho.postgres.backplaneSecretName" -}}
+{{- include "meho.postgres.runtimeSecretName" . | default .Values.postgres.credentialsSecret -}}
+{{- end }}
+
+{{/*
+The DATABASE_RUNTIME_ROLE line of a migration container, or nothing.
+*/}}
+{{- define "meho.postgres.runtimeRoleEnv" -}}
+{{- with include "meho.postgres.runtimeRole" . -}}
+- name: DATABASE_RUNTIME_ROLE
+  value: {{ . | quote }}
+{{- end -}}
+{{- end }}

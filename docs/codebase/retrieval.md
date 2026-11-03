@@ -372,7 +372,14 @@ never holds a query or a body, and it never averages across groups.
   operator); GIN index `documents_metadata_gin_idx` (migration `0033`,
   default `jsonb_ops` opclass) backs the lookup.
 - **fastembed** — the `EmbeddingService` wraps a `BAAI/bge-small-en-v1.5`
-  ONNX model (384-dim).
+  ONNX model (384-dim). The model gets one thread per CPU the container
+  may use: `retrieval/cpu_limit.py` reads the CPU limit (cgroup v2
+  `cpu.max`, or cgroup v1 `cpu.cfs_quota_us` / `cpu.cfs_period_us`),
+  rounds it down to whole CPUs (at least 1) and passes it as
+  `TextEmbedding(threads=...)`. Without a limit the ONNX runtime keeps
+  its default (one thread per host core). Why: more threads than the
+  limit make the kernel pause the whole process, the event loop too, so
+  health checks time out during a large spec ingest.
 - **SQLAlchemy 2.0 async** — `AsyncSession` for both candidate queries
   + the hydration `IN` fetch. Raw `text()` for the two candidate SQL
   statements because `@@` / `<=>` / `@>` have no first-class ORM

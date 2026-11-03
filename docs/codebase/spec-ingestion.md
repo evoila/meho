@@ -2890,6 +2890,17 @@ recomposed text (via `build_embedding_text`), so no `body_hash`
 column is needed in v0.2 — the cost is one recompose-and-hash per
 op, well under the ONNX inference budget.
 
+The first ingest of a large spec embeds one text per operation (about
+1,300 for vCenter). The embedding model runs in a worker thread, so the
+event loop is free. But the ONNX runtime starts one thread per **host**
+core by default, and it does not read the pod's CPU limit. With a limit
+of one CPU on a large node, those threads use up the limit in a few
+milliseconds of each scheduler period, and the kernel pauses the whole
+process, the event loop too. `/healthz` and `/ready` then time out, on
+and off, for minutes. So the model is built with one thread per CPU the
+container may use (`retrieval/cpu_limit.py`, `embedding_thread_count`).
+See `retrieval.md`.
+
 `OpIdCollision` fires from two distinct sites: the up-front within-
 batch set scan (two ops in one call share `op_id`) and the per-row
 cross-call check (this call's `spec_source` differs from the

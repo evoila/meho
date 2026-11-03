@@ -1249,14 +1249,18 @@ jobs:
           stop=/tmp/update-samples.stop
           : > "$samples"
           rm -f "$stop"
+          sample() {
+            local now
+            now=$(date +%s.%N)
+            kubectl -n meho-test get pods \
+              -l app.kubernetes.io/name=meho,app.kubernetes.io/instance=meho-test \
+              -o jsonpath='{range .items[?(@.metadata.ownerReferences[0].kind=="ReplicaSet")]}{.metadata.name}{","}{.metadata.deletionTimestamp}{","}{.status.conditions[?(@.type=="Ready")].status}{","}{.status.containerStatuses[?(@.name=="backplane")].state.running.startedAt}{";"}{end}' \
+              2>/dev/null | sed "s/^/${now} /" >> "$samples" || true
+            echo >> "$samples"
+          }
           (
             while [ ! -f "$stop" ]; do
-              now=$(date +%s.%N)
-              kubectl -n meho-test get pods \
-                -l app.kubernetes.io/name=meho,app.kubernetes.io/instance=meho-test \
-                -o jsonpath='{range .items[?(@.metadata.ownerReferences[0].kind=="ReplicaSet")]}{.metadata.name}{","}{.metadata.deletionTimestamp}{","}{.status.conditions[?(@.type=="Ready")].status}{","}{.status.containerStatuses[?(@.name=="backplane")].state.running.startedAt}{";"}{end}' \
-                2>/dev/null | sed "s/^/${now} /" >> "$samples" || true
-              echo >> "$samples"
+              sample
               sleep 0.5
             done
           ) &
@@ -1274,6 +1278,9 @@ jobs:
             --timeout 10m
           touch "$stop"
           wait "$watcher"
+          # helm --wait has seen the new pod ready. The watcher can stop
+          # before it samples that, so take one last sample now.
+          sample
           python3 - "$samples" "$old_pod" <<'PY'
           import os
           import sys

@@ -11,14 +11,12 @@ secret-gated sparse checkout and points ``MEHO_CONSUMER_DOCS_ROOT`` at
 it (see ``docs/decisions/vendor-spec-ci-provisioning.md``); local dev
 sets the same env var at a full shelf clone.
 
-This module generalises the vcenter-only resolver
-(:mod:`tests.acceptance._vcenter_spec`, which now delegates its
-shelf-root branch here) into the harness every per-vendor reconcile
-lane builds on (#2981-#2993). A lane is three calls:
+This module is the harness every per-vendor reconcile lane builds on
+(#2981-#2993). A lane is three calls:
 
-    spec_path = require_shelf_spec("nsx-9.0", "nsx-openapi.json")
+    spec_path = require_shelf_spec("keycloak-26.3", "keycloak-admin-openapi.json")
     served = openapi_served_op_ids(spec_path)
-    assert_op_ids_served(declared, served, spec_label="nsx-9.0/nsx-openapi.json")
+    assert_op_ids_served(declared, served, spec_label="keycloak-26.3/keycloak-admin-openapi.json")
 
 Skip semantics are uniform: when ``MEHO_CONSUMER_DOCS_ROOT`` is unset,
 or the product directory / spec file is absent from the configured

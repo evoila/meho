@@ -149,26 +149,8 @@ class SharedList:
 
 
 SHARED_LISTS: Final[tuple[SharedList, ...]] = (
-    SharedList(
-        where="meho_backplane.connectors.vmware_rest.composites.__all__",
-        pin=77,
-        instead=(
-            "A new vSphere multi-step operation goes in its own module in "
-            "connectors/vmware_rest/composites/ and exports COMPOSITES. The "
-            "collector finds it, so it needs no name here (rules 1 and 2)."
-        ),
-        count=python_list("meho_backplane.connectors.vmware_rest.composites", "__all__"),
-    ),
-    SharedList(
-        where="meho_backplane.connectors.vmware_rest.composites.schemas.__all__",
-        pin=128,
-        instead=(
-            "A new vSphere multi-step operation keeps its schemas in its own "
-            "module, for example composites/_<feature>_schemas.py, not in "
-            "schemas.py (rule 1)."
-        ),
-        count=python_list("meho_backplane.connectors.vmware_rest.composites.schemas", "__all__"),
-    ),
+    # The two vSphere lists that this table first pinned left the public tree
+    # with evoila's own connectors. Add a row here for the next shared list.
 )
 
 

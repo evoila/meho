@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
-
-	"github.com/evoila/meho/cli/internal/typedops"
 )
 
 // typedDispatchCases pins every SDDC Manager verb whose backend read
@@ -73,8 +71,7 @@ var typedDispatchCases = []struct {
 // dispatch ingested METHOD:/path op_ids — each entry records why no
 // typed op_id exists, so the intent is pinned rather than silently
 // unguarded (#2942). When the backend ships a typed counterpart, move
-// the verb to typedDispatchCases and reclassify it in
-// typedOpCLICoverage.
+// the verb to typedDispatchCases.
 var ingestedDispatchCases = []struct {
 	name   string
 	args   []string
@@ -89,30 +86,6 @@ var ingestedDispatchCases = []struct {
 	// Genuine ingested detail read (#2942 marks it correct): the typed
 	// surface ships sddc.domain.list only, no per-id detail op.
 	{"domain info", []string{"domain", "info", "d-1"}, "GET:/v1/domains/{id}"},
-}
-
-// typedOpCLICoverage classifies every typed op_id the backend registers
-// for sddc_manager: the CLI verb that dispatches it, or "" when the op
-// is agent-surface-only (no CLI verb wraps it).
-// TestBackendTypedOpsAreClassified fails when the backend gains a
-// typed op that is not classified here — the "typed op ⇒ repoint the
-// CLI verb ⇒ pin it" contract (#2942).
-var typedOpCLICoverage = map[string]string{
-	"sddc.domain.list":       "domain list",
-	"sddc.manager.list":      "manager list",
-	"sddc.network_pool.list": "network-pool list",
-	"sddc.network_pool.get":  "network-pool get",
-	"sddc.cluster.list":      "cluster list",
-	"sddc.host.list":         "host list",
-	"sddc.task.list":         "workflow list",
-	"sddc.task.get":          "", // agent surface only (the #3497 WLD-write poll primitive: agents/automation poll a single Task by id; workflow list covers the list surface, no per-id get verb — the sddc.domain.status precedent)
-	"sddc.credential.list":   "", // agent surface only
-	"sddc.license.list":      "", // agent surface only
-	"sddc.nsxt_cluster.list": "", // agent surface only
-	"sddc.vcenter.list":      "", // agent surface only
-	"sddc.vcf_service.list":  "", // agent surface only
-	"sddc.domain.status":     "", // agent surface only
-	"sddc.system.info":       "", // agent surface only (reads /v1/system, not the about verb's /v1/releases/system)
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed SDDC
@@ -135,40 +108,6 @@ func TestIngestedVerbsDispatchPinnedOpIDs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assertVerbDispatchesOpID(t, tc.args, tc.wantOp, nil)
 		})
-	}
-}
-
-// TestBackendTypedOpsAreClassified reconciles the backend's typed-op
-// registry against typedOpCLICoverage so a typed op shipped without a
-// CLI-repoint decision fails this test instead of leaving the verb a
-// zero-catalog dead end (#2942).
-func TestBackendTypedOpsAreClassified(t *testing.T) {
-	inventory, err := typedops.BackendOpIDs("sddc_manager")
-	if err != nil {
-		t.Fatalf("read backend typed-op inventory: %v", err)
-	}
-	invSet := make(map[string]bool, len(inventory))
-	for _, id := range inventory {
-		invSet[id] = true
-	}
-	for _, id := range inventory {
-		if _, ok := typedOpCLICoverage[id]; !ok {
-			t.Errorf("backend typed op %q is unclassified — repoint the CLI verb "+
-				"covering this read (and add it to typedDispatchCases) or record it "+
-				"as agent-surface-only in typedOpCLICoverage (#2942 contract)", id)
-		}
-	}
-	for id := range typedOpCLICoverage {
-		if !invSet[id] {
-			t.Errorf("typedOpCLICoverage entry %q no longer exists in the backend "+
-				"registry — drop or rename it", id)
-		}
-	}
-	for _, tc := range typedDispatchCases {
-		if !invSet[tc.wantOp] {
-			t.Errorf("typed dispatch case %q asserts op_id %q that the backend "+
-				"does not register", tc.name, tc.wantOp)
-		}
 	}
 }
 

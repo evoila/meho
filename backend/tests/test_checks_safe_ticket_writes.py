@@ -41,8 +41,8 @@ from meho_backplane.settings import get_settings
 _TENANT = UUID("abababab-abab-abab-abab-abababababab")
 _CONNECTOR_ID = "gh-rest-3"
 _READ_OP = "gh.composite.issue_view"
-_VMWARE_CONNECTOR_ID = "vmware-rest-9.0"
-_VMWARE_READ_OP = "vmware.composite.vm.guest.process.list"
+_K8S_CONNECTOR_ID = "k8s-1.x"
+_K8S_WRITE_OP = "k8s.secret.create"
 _ASSERTION: dict[str, Any] = {
     "select": {"path": "$.count"},
     "compare": {"type": "threshold", "op": "lt", "critical": 10},
@@ -150,16 +150,16 @@ async def test_the_runner_floor_lets_a_safe_read_through() -> None:
 
 @pytest.mark.asyncio
 async def test_a_safe_op_of_another_connector_declared_write_is_still_a_sensor_op() -> None:
-    # vSphere's guest process list is declared ``credential_write`` for the feed, but it
-    # is not a safe write, so a Sensor may still use it and the runner runs it.
-    import meho_backplane.connectors.vmware_rest.op_classes  # noqa: F401
+    # The Kubernetes secret create is declared ``credential_write`` for the feed, but
+    # it is not a safe write, so a Sensor may still use it and the runner runs it.
+    import meho_backplane.connectors.kubernetes.op_classes  # noqa: F401
 
-    assert declared_op_class(_VMWARE_READ_OP) == "credential_write"
-    await _seed(_VMWARE_READ_OP, product="vmware", version="9.0", impl_id="vmware-rest")
+    assert declared_op_class(_K8S_WRITE_OP) == "credential_write"
+    await _seed(_K8S_WRITE_OP, product="k8s", version="1.x", impl_id="k8s")
     entry = await SensorAdminService().create(
         tenant_id=_TENANT,
         created_by_sub="op-admin",
-        payload=_payload(_VMWARE_READ_OP, _VMWARE_CONNECTOR_ID),
+        payload=_payload(_K8S_WRITE_OP, _K8S_CONNECTOR_ID),
     )
-    assert entry.name == f"sensor-{_VMWARE_READ_OP}"
-    assert await _safe_tier_floor(_snapshot(_VMWARE_READ_OP, _VMWARE_CONNECTOR_ID)) is None
+    assert entry.name == f"sensor-{_K8S_WRITE_OP}"
+    assert await _safe_tier_floor(_snapshot(_K8S_WRITE_OP, _K8S_CONNECTOR_ID)) is None

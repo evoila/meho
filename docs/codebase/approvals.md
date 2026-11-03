@@ -1651,7 +1651,7 @@ fan-out composites (`vm.power.bulk`, `host.evacuate`,
 the same read-only listing helpers the handlers use — `{..., resolved,
 total_resolved}` with the list capped — and the single-entity
 composites echo their params; see
-[`connectors-vmware-rest.md`](connectors-vmware-rest.md) "Park-time
+`connectors-vmware-rest.md` "Park-time
 approval previews". The Keycloak write ops register bespoke builders in
 `connectors/keycloak/ops_write_preview.py` (#1857): `keycloak.realm.create`
 populates `{resource, realm, representation}`, `keycloak.user.create`
@@ -1919,7 +1919,7 @@ Requirement 1 of
 `vmware.composite.vm.destroy` (`safety_level="destructive"`,
 `requires_approval=True`; the dual-arm handler + blast-radius preview
 builder are documented in
-[`connectors-vmware-rest.md`](connectors-vmware-rest.md)). Wiring it in
+`connectors-vmware-rest.md`). Wiring it in
 surfaced — and this task closed — three gaps in the tier's *human*-side
 enforcement that #3196/#3197 left, plus one machinery limitation:
 

@@ -1899,8 +1899,7 @@ shape (deterministic file-level matrix + fan-in):
   hang left no test name in the log). `signal`, not `thread`, because
   the thread method calls `os._exit()`, which xdist reads as a worker
   crash. The `tests/integration` /
-  `tests/migrations` exclusions and the `MEHO_SKIP_SPEC_INGEST_TESTS` G0.7
-  canary opt-out (#2980) are preserved on **every** shard. Every shard also
+  `tests/migrations` exclusions are preserved on **every** shard. Every shard also
   installs Helm v3.16.4 (the same pinned `azure/setup-helm` step as
   `chart.yml`) and sets `MEHO_REQUIRE_HELM=1`, so the `tests/test_chart_*.py`
   render tests really run there and fail, not skip, if helm is missing.
@@ -2001,11 +2000,20 @@ completes CI in minutes.
   against it also lists other PRs' files, which cost docs-only PRs the fast
   path (#4657). `--no-renames` makes a rename appear as delete(old) +
   add(new) so a code→`*.md` (or `*.md`→code) rename can never smuggle a
-  non-docs path past the allow-list. The step is written to always exit `0`
-  and emit both outputs — an unresolvable diff or an empty diff keeps the
-  fail-safe defaults (`docs_only=false`). `merge_group` and `push` NEVER
-  fast-path (a queue batch may mix docs + code; a `main` push must always run
-  the full matrix).
+  non-docs path past the allow-list. The step always exits `0` and emits
+  every output. It is "full run unless proven": the outputs start at the
+  full run (`migrations=true`, `docs_only=false`, `backend_python=true`, no
+  `single_connector`), and a shorter run is taken only when every step of
+  the classification worked. The list of changed files is written to a file
+  under `RUNNER_TEMP` (not a here-string and not a pipe: both can fail
+  before `grep` runs, and that failure read as "no match"), each classifier
+  `grep` gets the file as an argument and must exit `0` (match) or `1` (no
+  match), and the connector selection runs after that. Anything else (the
+  list cannot be written, the diff fails or is empty, a quoted path, a
+  `grep` error, a failing selection tool) keeps the full run, with one log
+  line that says why. Tests: `backend/tests/test_ci_backend_python_skip.py`.
+  `merge_group` and `push` NEVER fast-path (a queue batch may mix docs +
+  code; a `main` push must always run the full matrix).
 - **What skips.** `python-lint`, the six `python-unit-shard` legs, and
   the four `python-integration-shard` legs gain `needs: changes` and an
   `if:` that skips them when `docs_only == 'true'` (same #2140 shape as the
@@ -2085,10 +2093,12 @@ plus a fixed contract set. The merge queue and pushes to `main` always run
 the six shards, so every test still runs before a change lands on `main`.
 
 - **Who decides.** The `changes` job sets the output `single_connector`.
-  It pipes the changed files into
+  It gives its file of changed files to
   `python3 backend/tests/_unit_connector_select.py detect` (standard
-  library only, because the job installs nothing). Empty means the full
-  run. It is only computed on a `pull_request` that is not docs-only.
+  library only, because the job installs nothing) on standard input. Empty
+  means the full run. It is only computed on a `pull_request` that is not
+  docs-only, and only after every classifier gave an answer; when the tool
+  fails, the whole step keeps the full run.
 - **When it is set.** Every changed file that is not `.md` is in one folder
   `backend/src/meho_backplane/connectors/<name>/`, or is that connector's
   test file (`backend/tests/test_connectors_<name>_*.py`,
@@ -2251,26 +2261,17 @@ repo. `ci.yml` provisions them at runtime, gated on a secret:
   `$GITHUB_WORKSPACE/spec-shelf/docs` on both jobs. When the secret is absent
   (fork PRs, Dependabot runs, not-yet-provisioned repos) the checkout step
   skips, the directory doesn't exist, and the resolvers
-  (`backend/tests/_spec_shelf.py`, the product-agnostic #2980 harness the
-  vcenter-specific `backend/tests/acceptance/_vcenter_spec.py` delegates its
-  shelf-root branch to) return `None` → the lanes
+  (`backend/tests/_spec_shelf.py`, the product-agnostic #2980 harness)
+  return `None` → the lanes
   `pytest.skip()` exactly as before the wiring. When the secret exists, all
   five lanes run for real, and a fail-loud verify step turns any shelf-layout
   drift into a job failure instead of a silent regression to lane-skip.
 - Lane placement (#2980): the seconds-cheap reconcile lanes run armed in
-  the unit sweep; the canary's full-ingest tests run armed only in
-  `python-integration-shard` — its pytest step selects
-  `tests/acceptance/test_g07_vsphere_canary.py` explicitly, and the unit
-  sweep opts out via `MEHO_SKIP_SPEC_INGEST_TESTS=1` (a collection-time
-  `skipif` marker on the canary's full-ingest tests, backstopped in its
-  shared `_canary_corpus` fixture and its `vcenter_spec_path` fixture).
-  The armed cost is amortised: the ~164 s two-spec ingest runs ONCE per
-  module via the module-scoped `_canary_corpus` fixture (PR #2995 — the
-  original per-test-ingest shape was 25 ingests and timeout-killed the
-  60-min integration cap on its first armed run). Rationale + rule +
-  the shared-corpus pattern for future heavy lanes:
-  [`spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md)
-  §Lane placement.
+  the unit sweep. Full-ingest tests of a real vendor spec (minutes per
+  lane) belong in `python-integration-shard`, never in the unit sweep;
+  rule of record: `docs/decisions/spec-reconcile-guards-standard.md`.
+  The vSphere canary that first set this rule left with evoila's own
+  connectors (#3345) and runs in the private connector package.
 - The required shelf files are listed in `ci/spec-shelf/`, one small
   `.txt` file per product version, one file path per line. The script
   `scripts/ci/spec_shelf.sh` reads the lists: a step before the checkout

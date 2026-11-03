@@ -104,9 +104,9 @@ _OP_ADMIN = "op-admin"
 
 #: The connector triple the enable-reads REST suite uses; it resolves
 #: through the dispatcher so the seeded rows surface in the listing.
-_PRODUCT = "vmware"
-_VERSION = "9.0"
-_IMPL_ID = "vmware-rest"
+_PRODUCT = "harbor"
+_VERSION = "2.x"
+_IMPL_ID = "harbor-rest"
 _CONNECTOR_ID = f"{_IMPL_ID}-{_VERSION}"
 
 
@@ -327,7 +327,7 @@ def test_registry_list_renders_rows() -> None:
     """The list renders the seeded connector_id + state pill; cross-tenant absent.
 
     Tenant A and tenant B both seed the same resolvable triple
-    (``vmware-rest-9.0``) under their own tenant; tenant B's rows carry a
+    (``harbor-rest-2.x``) under their own tenant; tenant B's rows carry a
     distinctive enabled-op signature (``2/2`` ops enabled). Tenant A must
     see its OWN row (scope chip "tenant", ``ingested``, 0 ops enabled) and
     NOT tenant B's signature -- the service's SQL-level tenant filter never
@@ -610,7 +610,7 @@ def test_enable_reads_verb_succeeds() -> None:
 def test_delete_verb_removes_row() -> None:
     """A tenant_admin delete removes the ingested rows + returns the empty OOB stub.
 
-    ``vmware-rest`` is a registered v2 connector class, so after the DB
+    ``harbor-rest`` is a registered v2 connector class, so after the DB
     rows are deleted the triple reappears as a class-side ``registered``
     (zero-count) STUB -- not the deleted ``ingested`` row. The test
     asserts the delete's OOB row-removal swap is correct, and that the
@@ -821,7 +821,7 @@ def test_write_verbs_require_csrf() -> None:
 def test_registry_list_renders_kind_chip() -> None:
     """The list renders the per-row authoring-mode kind chip (#1980).
 
-    ``vmware-rest`` is a hand-coded v2 connector class, so the resolver maps
+    ``harbor-rest`` is a hand-coded v2 connector class, so the resolver maps
     it to ``kind="typed"`` (dispatchable). The row must carry the typed chip
     + the Kind column header.
     """
@@ -852,7 +852,7 @@ def test_registry_list_renders_kind_chip() -> None:
 def test_registry_list_kind_filter_narrows() -> None:
     """``?kind=`` narrows the rows in-process; a bad value 422s at the enum.
 
-    The seeded ``vmware-rest`` resolves to ``kind="typed"``, so ``?kind=typed``
+    The seeded ``harbor-rest`` resolves to ``kind="typed"``, so ``?kind=typed``
     keeps it and ``?kind=ingested-shim`` (or ``?kind=profiled``) hides it. An
     out-of-range ``?kind=`` 422s at the ``_KindFilter`` enum boundary (the
     filter contract), exactly like ``?status=``.

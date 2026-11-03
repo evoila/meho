@@ -1,2 +1,0 @@
-docs/vcenter-9.0/vcenter.yaml
-docs/vcenter-9.0/vi-json.yaml

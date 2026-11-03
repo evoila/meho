@@ -92,8 +92,8 @@ The pipeline is broken into work items per Initiative #389:
   operator review + benchmark expansion) is tracked under #227 G3.1
   T3 — out of scope for the canary itself. Three of 10 queries
   currently `xfail` pending a T3 per-op `llm_instructions`
-  enhancement. See the [vSphere canary
-  runbook](../cross-repo/g07-vsphere-canary.md) for the operator
+  enhancement. See the vSphere canary
+  runbook for the operator
   procedure.
 * **T9 — Docs** (#409). Two new docs:
   [docs/architecture/spec-ingestion.md](../architecture/spec-ingestion.md)
@@ -607,7 +607,7 @@ VMware's corrections live in `connectors/vmware_rest/ingest_corrections.py`:
 - a VI-JSON operation whose summary another operation of the same spec shares
   gets its managed object type in front.
 
-See [connectors-vmware-rest.md](connectors-vmware-rest.md).
+See connectors-vmware-rest.md.
 
 #### Catalog safety overlay (#3340)
 
@@ -3332,7 +3332,7 @@ All three delegate to `ReviewService.delete_connector`
   canonical architecture doc; companion to this codebase map.
 * [docs/cross-repo/connector-ingestion.md](../cross-repo/connector-ingestion.md) —
   operator runbook for adding a new vendor surface end-to-end.
-* [docs/cross-repo/g07-vsphere-canary.md](../cross-repo/g07-vsphere-canary.md) —
+* docs/cross-repo/g07-vsphere-canary.md —
   the worked-example canary procedure operators reproduce locally.
 * `meho_backplane/db/models.py::EndpointDescriptor` — the ORM target.
 * `meho_backplane/operations/typed_register.py` — typed-connector

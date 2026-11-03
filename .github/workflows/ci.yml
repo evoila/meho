@@ -285,49 +285,89 @@ jobs:
         id: detect
         run: |
           set -euo pipefail
-          # Fail-safe defaults: RUN the migration gate, and DO NOT take the
-          # docs-only fast path. Only a positive classification flips either.
+          # Full run unless proven. The four outputs start at the full run:
+          # the migration gate on, no docs-only fast path, every Python
+          # lane, six unit shards. `classify` below works out a shorter run
+          # into the c_* variables and returns 0 only when every step of it
+          # worked: the file list was written, each classifier `grep` exited
+          # 0 (match) or 1 (no match), and the connector selection ran
+          # after that. Only then are the outputs taken from the c_*
+          # variables. Any other result (an error, an early exit) keeps the
+          # full run, with one log line that says why. A plain
+          # `if grep ...; then ... else ...` would read a grep error as "no
+          # match" and could skip a required job; this shape cannot.
           migrations=true
           docs_only=false
           backend_python=true
           single_connector=
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            # push / merge_group: never fast-path; always the full matrix.
-            echo "non-PR event (${{ github.event_name }}) -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python} (full run)"
-          # HEAD^1, not `github.event.pull_request.base.sha`: the event's
-          # base sha is `main` as of when the PR was opened. Once `main`
-          # moves, a diff against it also lists other PRs' files and a
-          # docs-only PR loses the fast path (#4657).
-          # core.quotePath=false: git prints a path with non-ASCII bytes
-          # (e.g. `café.json`) as is. By default git wraps such a path in
-          # double quotes and escapes the bytes, and the classifiers below
-          # would not match it (#5310).
-          elif ! changed="$(git -c core.quotePath=false diff --name-only --no-renames HEAD^1 HEAD)"; then
-            # Diff unavailable -> keep fail-safe defaults (full run + migration gate on).
-            echo "git diff failed -> migrations=${migrations}, docs_only=${docs_only} (fail-safe full run)"
-          elif [ -z "${changed}" ]; then
-            # No file changes (e.g. an empty / branch-only PR) -> full run, fail-safe.
-            echo "empty diff -> migrations=${migrations}, docs_only=${docs_only} (fail-safe full run)"
-          elif grep -q '^"' <<<"${changed}"; then
+          reason=
+          c_migrations=
+          c_docs_only=
+          c_backend_python=
+          c_single_connector=
+
+          # Run `grep` on a file and return 0 (match), 1 (no match) or 2
+          # (error). `set -e` does not stop a command whose status is
+          # tested, so the caller reads the code from `$?`.
+          classify() {
+            local list non_md rc
+            # The list of changed files goes into a file under RUNNER_TEMP,
+            # and the classifiers get the file as an argument. Not a
+            # here-string: bash writes it to a temporary file of its own,
+            # and when that write fails the command exits 1 before `grep`
+            # runs, which looked like "no match" (docs only). Not a pipe:
+            # `grep -q` stops at its first match, a `printf` into the pipe
+            # then fails on a list longer than the pipe buffer, and with
+            # `pipefail` that also read as "no match".
+            if ! list="$(mktemp "${RUNNER_TEMP:-/tmp}/changed-files.XXXXXX")"; then
+              reason="could not make the list file"
+              return 1
+            fi
+            if ! non_md="$(mktemp "${RUNNER_TEMP:-/tmp}/changed-files-non-md.XXXXXX")"; then
+              reason="could not make the second list file"
+              return 1
+            fi
+            # HEAD^1, not `github.event.pull_request.base.sha`: the event's
+            # base sha is `main` as of when the PR was opened. Once `main`
+            # moves, a diff against it also lists other PRs' files and a
+            # docs-only PR loses the fast path (#4657).
+            # core.quotePath=false: git prints a path with non-ASCII bytes
+            # (e.g. `café.json`) as is. By default git wraps such a path in
+            # double quotes and escapes the bytes, and the classifiers below
+            # would not match it (#5310).
+            if ! git -c core.quotePath=false diff --name-only --no-renames HEAD^1 HEAD >"${list}"; then
+              reason="git diff failed"
+              return 1
+            fi
+            if [ ! -s "${list}" ]; then
+              # No file changes (e.g. an empty / branch-only PR).
+              reason="empty diff"
+              return 1
+            fi
+            printf 'changed files (HEAD^1..HEAD):\n'
+            cat "${list}"
             # git still quotes a path that holds a double quote, a backslash
             # or a control character. The classifiers below work line by
-            # line and cannot read such a path -> keep fail-safe defaults.
-            printf 'changed files (HEAD^1..HEAD):\n%s\n' "${changed}"
-            echo "quoted path in the diff -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python} (fail-safe full run)"
-          else
-            printf 'changed files (HEAD^1..HEAD):\n%s\n' "${changed}"
+            # line and cannot read such a path.
+            rc=0
+            grep -q '^"' "${list}" || rc=$?
+            case "${rc}" in
+              0) reason="quoted path in the diff"; return 1 ;;
+              1) ;;
+              *) reason="quote check failed (grep exit ${rc})"; return 1 ;;
+            esac
             # --- migration classification (#2140, unchanged) ---
             # Files that make the migration suite meaningful to run: the
             # alembic tree, the relocated migration test suite, the db
             # migrate/migrations modules under test, the compat script, and
             # the workflows that define this gate.
-            if printf '%s\n' "${changed}" | grep -qE '^(backend/alembic/|backend/tests/migrations/|backend/src/meho_backplane/db/(migrations|migrate)\.py$|scripts/ci/(check_migration_(compat|heads)|recheck_migration_prs)\.py$|\.github/workflows/(ci|migration-compat|migration-heads)\.yml$)'; then
-              migrations=true
-              echo "migration-related change detected -> migrations=true"
-            else
-              migrations=false
-              echo "no migration-related change -> migrations=false"
-            fi
+            rc=0
+            grep -qE '^(backend/alembic/|backend/tests/migrations/|backend/src/meho_backplane/db/(migrations|migrate)\.py$|scripts/ci/(check_migration_(compat|heads)|recheck_migration_prs)\.py$|\.github/workflows/(ci|migration-compat|migration-heads)\.yml$)' "${list}" || rc=$?
+            case "${rc}" in
+              0) c_migrations=true; echo "migration-related change detected -> migrations=true" ;;
+              1) c_migrations=false; echo "no migration-related change -> migrations=false" ;;
+              *) reason="migration check failed (grep exit ${rc})"; return 1 ;;
+            esac
             # --- docs-only classification (allow-list; #3252) ---
             # docs-only IFF every changed path matches the allow-list:
             #   ^docs/   any file under docs/
@@ -337,36 +377,60 @@ jobs:
             # — that line is a non-docs path (code / tests / workflows /
             # configs / cli/ / deploy/ ...) and forces the full run. Only when
             # grep finds no such line (exit 1) is the diff proven docs-only.
-            if printf '%s\n' "${changed}" | grep -qvE '(^docs/|\.md$)'; then
-              docs_only=false
-              echo "non-docs file(s) present -> docs_only=false (full run)"
-            else
-              docs_only=true
-              echo "all changed files are docs/*.md -> docs_only=true (fast path)"
-            fi
+            rc=0
+            grep -qvE '(^docs/|\.md$)' "${list}" || rc=$?
+            case "${rc}" in
+              0) c_docs_only=false; echo "non-docs file(s) present -> docs_only=false (full run)" ;;
+              1) c_docs_only=true; echo "all changed files are docs/*.md -> docs_only=true (fast path)" ;;
+              *) reason="docs-only check failed (grep exit ${rc})"; return 1 ;;
+            esac
             # --- backend Python classification (#5296) ---
             # backend_python=false only when no changed path, apart from
             # `.md` files, is under backend/, is this workflow file or is
             # a spec-shelf list or its script: the shelf check runs only in
             # the unit and integration shards.
-            # grep exits 1 when it selects no line (every file is `.md`);
-            # any other non-zero exit is an error and keeps the full run.
+            # The first grep writes the non-`.md` paths to the second file.
+            # It exits 1 when it selects no line (every file is `.md`); that
+            # is an answer, not an error, and the second grep then finds
+            # nothing.
             rc=0
-            non_md="$(grep -vE '\.md$' <<<"${changed}")" || rc=$?
+            grep -vE '\.md$' "${list}" >"${non_md}" || rc=$?
             if [ "${rc}" -gt 1 ]; then
-              echo "could not filter the changed files -> backend_python=true (fail-safe full run)"
-            elif grep -qE '^(backend/|\.github/workflows/ci\.yml$|ci/spec-shelf/|scripts/ci/spec_shelf\.sh$)' <<<"${non_md}"; then
-              echo "backend/, ci.yml or spec-shelf list change detected -> backend_python=true (full run)"
-            else
-              backend_python=false
-              echo "no backend/ change -> backend_python=false (only the tests that read outside backend/)"
+              reason="could not filter the changed files (grep exit ${rc})"
+              return 1
             fi
-            # --- one-connector classification (#5297) ---
-            # An error in the tool leaves single_connector empty (full run).
-            if [ "${docs_only}" = "false" ]; then
-              single_connector="$(printf '%s\n' "${changed}" | python3 backend/tests/_unit_connector_select.py detect)" || single_connector=
-              echo "single_connector=${single_connector:-<empty>} (empty -> six unit shards)"
+            rc=0
+            grep -qE '^(backend/|\.github/workflows/ci\.yml$|ci/spec-shelf/|scripts/ci/spec_shelf\.sh$)' "${non_md}" || rc=$?
+            case "${rc}" in
+              0) c_backend_python=true; echo "backend/, ci.yml or spec-shelf list change detected -> backend_python=true (full run)" ;;
+              1) c_backend_python=false; echo "no backend/ change -> backend_python=false (only the tests that read outside backend/)" ;;
+              *) reason="backend check failed (grep exit ${rc})"; return 1 ;;
+            esac
+            # --- one-connector selection (#5297) ---
+            # Only here, after every classifier gave an answer. The tool
+            # reads the list file and prints the connector name when the
+            # short run is safe, or nothing. When the tool fails, nothing
+            # above is trusted either: the caller keeps the full run.
+            if [ "${c_docs_only}" = "false" ]; then
+              if ! c_single_connector="$(python3 backend/tests/_unit_connector_select.py detect <"${list}")"; then
+                reason="connector selection failed"
+                return 1
+              fi
             fi
+            return 0
+          }
+
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            # push / merge_group: never fast-path; always the full matrix.
+            echo "non-PR event (${{ github.event_name }}) -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python}, single_connector=<empty> (full run)"
+          elif classify; then
+            migrations="${c_migrations}"
+            docs_only="${c_docs_only}"
+            backend_python="${c_backend_python}"
+            single_connector="${c_single_connector}"
+            echo "classified -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python}, single_connector=${single_connector:-<empty>} (empty -> six unit shards)"
+          else
+            echo "${reason:-classification failed} -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python}, single_connector=<empty> (fail-safe full run)"
           fi
           {
             echo "migrations=${migrations}"
@@ -612,20 +676,12 @@ jobs:
       # meho-internal#75). The test code reads these env vars with a
       # docker.io short-name default — see backend/tests/test_db_engine.py
       # `MEHO_TEST_PGVECTOR_IMAGE`, backend/tests/test_broadcast_client.py
-      # `MEHO_TEST_VALKEY_IMAGE`, backend/tests/integration/
-      # test_connectors_vmware_rest_vcsim.py `MEHO_TEST_VCSIM_IMAGE` —
-      # so the env-only swap requires no source-code changes.
+      # `MEHO_TEST_VALKEY_IMAGE` — so the env-only swap requires no
+      # source-code changes.
       # `docker/login-action` below stays load-bearing until #78's Half
       # B sees a green cache-hit week and retires it.
       MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
-      # vcsim pinned to an explicit release tag (same rule as the
-      # pgvector/valkey/Vault rows — never `:latest`) so the
-      # vmware-rest acceptance tests are reproducible and an upstream
-      # image push can't break or silently alter CI without a commit.
-      # v0.55.1 is what `:latest` resolved to at pin time
-      # (digest sha256:fcca7b87bfb16c3f7b8c8aa94d9d95855891c86fcb216bd6d8dc7b27af385085).
-      MEHO_TEST_VCSIM_IMAGE: harbor.evba.lab/dockerhub-proxy/vmware/vcsim:v0.55.1
       # Vault dev-mode container for the G3.3-T7 kv/sys/auth e2e suite
       # (backend/tests/integration/test_connectors_vault_dev_e2e.py).
       # Same env-knob shape as the rows above: the test reads this with
@@ -644,21 +700,13 @@ jobs:
       # only the presence flag is surfaced, never the token value, so
       # the secret is not exported into every step's environment.
       SPEC_SHELF_TOKEN_PRESENT: ${{ secrets.SPEC_SHELF_TOKEN != '' }}
-      # Points the vCenter spec resolvers (tests/acceptance/
-      # _vcenter_spec.py + tests/integration/test_operations_ingest_
-      # vcenter.py) at the spec-shelf checkout. Set UNCONDITIONALLY:
-      # when the shelf checkout was skipped (secret absent — fork PRs,
-      # Dependabot runs, not-yet-provisioned repos) the directory does
-      # not exist, the resolvers return None, and the spec-backed lanes
-      # pytest.skip exactly as they did before #2949. When the checkout
-      # ran, the seconds-cheap reconcile lanes run for real in this job;
-      # the G0.7 canary's full-ingest tests are opted out here and run
-      # armed in python-integration-shard instead (#2980 — see this job's
-      # MEHO_SKIP_SPEC_INGEST_TESTS env row). The docs-root form (not
-      # MEHO_VCENTER_OPENAPI_VCENTER / _VI_JSON) is deliberate: it is
-      # the only single setting that lights every spec lane, because
-      # test_operations_ingest_vcenter.py predates the explicit
-      # per-file env vars and reads only the legacy var or this root.
+      # Points the spec-shelf resolver (tests/_spec_shelf.py) at the
+      # spec-shelf checkout. Set UNCONDITIONALLY: when the shelf checkout
+      # was skipped (secret absent — fork PRs, Dependabot runs,
+      # not-yet-provisioned repos) the directory does not exist, the
+      # resolver returns None, and the spec-backed lanes pytest.skip
+      # exactly as they did before #2949. When the checkout ran, the
+      # seconds-cheap reconcile lanes run for real in this job.
       MEHO_CONSUMER_DOCS_ROOT: ${{ github.workspace }}/spec-shelf/docs
     defaults:
       run:
@@ -727,9 +775,8 @@ jobs:
             echo 'SPEC_SHELF_PATHS_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Checkout vendor spec-shelf (secret-gated, #2949; nsx #2981)
-        # The vendor API files (listed in ci/spec-shelf/; for example
-        # the vSphere and NSX OpenAPI specs, thousands of paths) are
+      - name: Checkout vendor spec-shelf (secret-gated, #2949)
+        # The vendor API files (listed in ci/spec-shelf/) are
         # vendor-licensed and deliberately NOT
         # committed to this public repo — they live in the operator's
         # private spec-shelf repo. This step fetches ONLY the pinned
@@ -754,7 +801,7 @@ jobs:
         # Sharded (#3251): every shard runs this checkout, because each
         # shard's file set may include the spec-backed reconcile
         # lanes; the cone-mode sparse + blob:none filter keeps it cheap
-        # (about 150 MB in total, mostly the vSphere and NSX specs), and the
+        # (the listed folders only), and the
         # SPEC_SHELF_TOKEN PAT is read-only, so the parallel fetches are
         # safe.
         if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
@@ -770,7 +817,7 @@ jobs:
           # `ref:` pin — the shelf's default branch IS the
           # operator-curated pin (the directories are version-named),
           # matching the local-dev contract documented in
-          # tests/acceptance/_vcenter_spec.py + tests/_spec_shelf.py.
+          # tests/_spec_shelf.py.
           sparse-checkout: ${{ steps.spec-shelf-list.outputs.paths }}
           filter: blob:none
           # Read-only consumer; never pushes. Don't leave the token in
@@ -792,9 +839,7 @@ jobs:
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
         # spinning up pgvector/pgvector:pg16 for test_db_engine.py /
-        # test_migration_rollback.py / tests/integration/*, plus
-        # vmware/vcsim for the G3.1-T8 vmware-rest acceptance tests
-        # under tests/acceptance/test_vmware_rest_*.py) share the
+        # test_migration_rollback.py / tests/integration/*) share the
         # ARC cluster's NAT egress IP, which exhausts Docker Hub's
         # 100/6h anonymous bucket. Authenticated Personal-tier doubles
         # it to 200/6h
@@ -995,26 +1040,6 @@ jobs:
           # (en_core_web_lg) once that lane provisions the heavier
           # model.
           MEHO_REDACTION_SPACY_MODEL: en_core_web_sm
-          # Lane placement (#2980): opt this sweep out of the G0.7
-          # canary's full-ingest spec tests. With the spec shelf armed
-          # (#2949/#2966) each of those tests re-runs the full two-spec
-          # ingest (~3,470 ops through parse + register + embedding +
-          # grouping — the fixture is function-scoped by design), which
-          # took the whole sweep from 478 s (2026-08-17 16:57Z, canary
-          # still erroring fast) past this job's cap. Per this
-          # workflow's perf-budget discipline (#898/#793/#827): the slow
-          # path is relocated, not the cap raised. The canary's
-          # full-ingest tests run armed in the python-integration-shard job
-          # (which selects the file explicitly, see its Pytest step);
-          # its fixture-less self-checks and every seconds-cheap
-          # reconcile lane stay in this sweep. Honored by a
-          # collection-time skipif marker in tests/acceptance/
-          # test_g07_vsphere_canary.py (fixture-level backstop in
-          # vcenter_spec_path); rule of record in
-          # docs/decisions/spec-reconcile-guards-standard.md. The
-          # canary module lands in exactly one shard, so this opt-out
-          # must stay on every shard.
-          MEHO_SKIP_SPEC_INGEST_TESTS: "1"
           # #5297: set only on a pull request that changes one connector.
           SINGLE_CONNECTOR: ${{ needs.changes.outputs.single_connector }}
           # #5642: `true` on a pull request whose tests the test map picked.
@@ -1673,9 +1698,6 @@ jobs:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
-      # vcsim release-tag pin — see the comment on the first
-      # MEHO_TEST_VCSIM_IMAGE occurrence (backend-tests job) for why.
-      MEHO_TEST_VCSIM_IMAGE: harbor.evba.lab/dockerhub-proxy/vmware/vcsim:v0.55.1
       MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
     defaults:
       run:
@@ -1795,15 +1817,6 @@ jobs:
         shell: bash
         env:
           MEHO_REDACTION_SPACY_MODEL: en_core_web_sm
-          # Same lane-placement opt-out as the required unit lane's
-          # Pytest step (#2980) — this job re-runs that sweep, serially
-          # and under a 45-min per-shard step cap, so the canary's full-ingest
-          # tests are opted out here for the same budget reason. Today
-          # this is belt-and-suspenders (this job has no spec-shelf
-          # checkout, so those tests skip on shelf absence anyway);
-          # it keeps a future shelf-arming of this job from silently
-          # re-importing the multi-minute ingest wall.
-          MEHO_SKIP_SPEC_INGEST_TESTS: "1"
           # Each xdist worker is a subprocess; coverage's a1_coverage.pth hook
           # calls coverage.process_startup() when COVERAGE_PROCESS_START points
           # at a config, so every worker writes its OWN parallel data file
@@ -2200,14 +2213,13 @@ jobs:
     # testcontainers)` is carried by the python-integration fan-in below,
     # the same shape as python-unit-shard + python-unit-lane (#5384).
     # Holds the container-heavy tests/integration/ subtree
-    # (pgvector/valkey/k3d/vcsim testcontainers) plus the G0.7 vSphere
-    # canary module. Kept apart from the unit shards so the required
+    # (pgvector/valkey/k3d testcontainers). Kept apart from the unit shards so the required
     # lint+mypy+unit gate stays fast while integration runs on every PR.
     # The fan-in has been a required merge gate since 2026-05-20 (#698):
     # it was the structural corrective to the v0.2 / G3.4
     # green-but-hollow incidents (#634 / #697) — the lane that
     # exercises real connector dispatch, k3d / bind9-container /
-    # vcsim / federated-write acceptance, must be merge-blocking so
+    # federated-write acceptance, must be merge-blocking so
     # red integration cannot ship to ``main`` again.
     #
     # Why shards (#5384): the serial job grew to ~28 min of pytest and
@@ -2261,9 +2273,6 @@ jobs:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
-      # vcsim release-tag pin — see the comment on the first
-      # MEHO_TEST_VCSIM_IMAGE occurrence (backend-tests job) for why.
-      MEHO_TEST_VCSIM_IMAGE: harbor.evba.lab/dockerhub-proxy/vmware/vcsim:v0.55.1
       MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
       # G3.2-T6 (#326) — k3s container fixture for the K8s typed-connector
       # E2E acceptance harness (tests/integration/test_connectors_k8s_e2e.py
@@ -2286,13 +2295,11 @@ jobs:
       # any future fork PR job that doesn't see this env) the test
       # skips cleanly with a clear remediation message.
       MEHO_TEST_KEYCLOAK_IMAGE: harbor.evba.lab/dockerhub-proxy/keycloak/keycloak:26.0
-      # #2949 — vendor vCenter spec-shelf wiring; this job runs the
-      # tests/integration real-spec ingest lanes
-      # (test_operations_ingest_vcenter.py / _vi_json.py). See the
-      # comment on the python-unit-shard job's occurrence of these two
-      # rows for the full rationale (presence-flag gating; the
-      # unconditional docs-root that degrades to lane-skip when the
-      # shelf checkout was skipped).
+      # #2949 — vendor spec-shelf wiring for the tests/integration
+      # real-spec lanes. See the comment on the python-unit-shard job's
+      # occurrence of these two rows for the full rationale
+      # (presence-flag gating; the unconditional docs-root that degrades
+      # to lane-skip when the shelf checkout was skipped).
       SPEC_SHELF_TOKEN_PRESENT: ${{ secrets.SPEC_SHELF_TOKEN != '' }}
       MEHO_CONSUMER_DOCS_ROOT: ${{ github.workspace }}/spec-shelf/docs
     defaults:
@@ -2319,7 +2326,7 @@ jobs:
             echo 'SPEC_SHELF_PATHS_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Checkout vendor spec-shelf (secret-gated, #2949; nsx #2981)
+      - name: Checkout vendor spec-shelf (secret-gated, #2949)
         # Same secret-gated sparse checkout as the python-unit-shard
         # job's spec-shelf step — see that step's comment for the
         # licensing pointer (docs/decisions/vendor-spec-ci-
@@ -2345,7 +2352,7 @@ jobs:
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-unit-shard's login step — the
         # integration subtree is the heaviest testcontainers consumer
-        # (pgvector/valkey/k3d/vcsim), so authenticated pulls are
+        # (pgvector/valkey/k3d), so authenticated pulls are
         # load-bearing here in particular.
         # Empty-secret guard — see the python-tests job's login step for
         # why Dependabot runs need it. This job pulls the most images, so
@@ -2380,28 +2387,12 @@ jobs:
         run: uv sync --locked --all-groups
 
       - name: Pytest (integration testcontainers, one shard)
-        # The tests/integration/ subtree plus the G0.7 vSphere canary
-        # module, split over the shards. No --cov here: coverage is emitted
+        # The tests/integration/ subtree, split over the shards. No --cov
+        # here: coverage is emitted
         # by the python-coverage jobs. -x for fast-fail on the first broken
         # integration case in this shard. No xdist inside a shard: the
         # container-heavy fixtures were never checked under xdist; the
         # speed comes from the parallel shards instead (#5384).
-        #
-        # The canary module is selected here (#2980) because its
-        # armed-shelf full-ingest tests need the container-heavy
-        # budget: the ~164 s two-spec ingest runs ONCE per module
-        # (module-scoped _canary_corpus fixture, amortised in PR #2995
-        # after per-test ingests — 25 x ~164 s — timeout-killed the
-        # serial job's 60-min cap on the first armed run; per-test ingests
-        # had already blown the unit lane's 25-min cap the day the
-        # shelf was armed). These shards are the canary's single armed
-        # lane; the unit sweep opts out via
-        # MEHO_SKIP_SPEC_INGEST_TESTS (see its Pytest step's env
-        # comment). Shelf absent (fork/Dependabot/unprovisioned) → the
-        # canary skips exactly as it always did; its fixture-less
-        # self-checks also run (again) here — seconds, harmless. Lane
-        # placement rule + amortisation pattern:
-        # docs/decisions/spec-reconcile-guards-standard.md.
         # -rs prints the reason of every skipped test. The k3s tests skip
         # when the cluster cannot pull an image; without the reason a green
         # lane hides that nothing ran on the cluster.
@@ -2414,7 +2405,7 @@ jobs:
           # the predicted seconds per shard on stderr.
           TOTAL=4
           SHARD="${{ matrix.shard }}"
-          mapfile -t SHARD_FILES < <({ find tests/integration -name 'test_*.py'; echo tests/acceptance/test_g07_vsphere_canary.py; } | sort | uv run python tests/_unit_shard_split.py --durations tests/_integration_shard_durations.json --shard "${SHARD}" --total "${TOTAL}")
+          mapfile -t SHARD_FILES < <(find tests/integration -name 'test_*.py' | sort | uv run python tests/_unit_shard_split.py --durations tests/_integration_shard_durations.json --shard "${SHARD}" --total "${TOTAL}")
           echo "shard ${SHARD}/${TOTAL}: ${#SHARD_FILES[@]} test files"
           if [ "${#SHARD_FILES[@]}" -eq 0 ]; then
             echo "::error::shard ${SHARD} selected 0 test files — shard split broken"

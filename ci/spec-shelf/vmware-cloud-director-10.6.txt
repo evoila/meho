@@ -1,2 +1,0 @@
-docs/vmware-cloud-director-10.6/api-39.1/vmware-cloud-director-api-39.1-reference-operations.tsv
-docs/vmware-cloud-director-10.6/cloudapi-39.2.json

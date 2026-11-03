@@ -3,11 +3,14 @@
 
 """``preview_operation`` says whether a live grant runs the call at once (#5492).
 
-The harness is the one ``test_sandbox_mode_calls.py`` uses (the vm.destroy
-connector double, the migrated SQLite engine, the embedding stub).
+The operation under test is a synthetic ``destructive`` delete that the test
+declares itself: a small connector, a multi-step op that waits for approval,
+a preview builder that states the blast radius, and three listed steps (one
+read, one delete, one plain write). It runs on the migrated SQLite engine
+with the embedding stub.
 
-* With a delete grant for the operation and for each listed write step,
-  the preview says ``auto-execute`` and names the grant; the real call
+* With a delete grant for the operation and a grant for each listed write
+  step, the preview says ``auto-execute`` and names the grant; the real call
   with the preview's hash then runs with no approval request.
 * Without a grant, the preview says the call waits for approval.
 * With a grant for the operation but not for its steps, the preview does
@@ -26,20 +29,30 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from meho_backplane.auth.operator import Operator, PrincipalKind
-from meho_backplane.connectors.registry import clear_registry
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EventOutbox, PermissionVerdict, ServicePrincipalGrant
+from meho_backplane.db.models import (
+    ApprovalRequest,
+    EventOutbox,
+    PermissionVerdict,
+    ServicePrincipalGrant,
+)
 from meho_backplane.operations import _preview_steps, reset_dispatcher_caches
+from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 from meho_backplane.operations._preview_steps import preview_step_verdict
 from meho_backplane.operations.governed_subops import (
     register_governed_subops,
     reset_governed_subop_registry,
 )
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
+from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.settings import get_settings
+from tests._oidc_jwt_helpers import DEFAULT_TENANT_ID
 from tests._sandbox_mode_helpers import (
     grant_use_rows,
     seed_delete_grant,
@@ -48,35 +61,71 @@ from tests._sandbox_mode_helpers import (
     turn_sandbox_mode_off,
     turn_sandbox_mode_on,
 )
-from tests.test_connectors_vmware_rest_vm_destroy import (
-    _CONNECTOR_ID,
-    _OP_ID,
-    _PARAMS,
-    _TENANT_ID,
-    _bootstrap,
-    _make_operator,
-    _pending_count,
-    _RecordingVmwareConnector,
-    _seed_target,
-    _seed_vm_reads,
-)
+from tests._targets_helpers import _insert_target
 
+_TENANT_ID = uuid.UUID(DEFAULT_TENANT_ID)
 _SERVICE_SUB = "svc:test-runner"
-_REST_STEP = "DELETE:/vcenter/vm/{vm}"
-_VIM_STEP = "POST:/VirtualMachine/{moId}/Destroy_Task"
-_VIM_READ_STEP = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+_PRODUCT = "example"
+_VERSION = "1.x"
+_IMPL_ID = "example-rest"
+_CONNECTOR_ID = f"{_IMPL_ID}-{_VERSION}"
+_OP_ID = "example.thing.delete"
+_TARGET_NAME = "doomed-thing-host"
+_PARAMS: dict[str, Any] = {"thing": "thing-1"}
+#: The governed steps the test lists for the op. A step id has the
+#: ``METHOD:/path`` shape of a vendor call.
+_READ_STEP = "GET:/things/{id}"
+_DELETE_STEP = "DELETE:/things/{id}"
+_WRITE_STEP = "POST:/things/{id}/tags"
 _ARGS: dict[str, Any] = {
     "connector_id": _CONNECTOR_ID,
     "op_id": _OP_ID,
-    "target": "test-vcenter",
+    "target": _TARGET_NAME,
     "params": _PARAMS,
 }
 _GRANT_FIELDS: dict[str, Any] = {
     "tenant_id": _TENANT_ID,
     "principal_sub": _SERVICE_SUB,
     "connector_id": _CONNECTOR_ID,
-    "target_product": "vmware",
+    "target_product": _PRODUCT,
 }
+
+
+class _ExampleConnector(Connector):
+    """A connector the resolver accepts; the op's handler makes no vendor call."""
+
+    product = _PRODUCT
+    version = _VERSION
+    impl_id = _IMPL_ID
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+        raise NotImplementedError
+
+
+async def _thing_delete(
+    operator: Operator, target: Any, params: dict[str, Any], dispatch_child: Any
+) -> dict[str, Any]:
+    """The multi-step delete; it records the identifier and makes no vendor call."""
+    del operator, target, dispatch_child
+    return {"deleted": params["thing"]}
+
+
+async def _thing_delete_preview(ctx: PreviewContext) -> dict[str, Any]:
+    """The blast radius a destructive op must state before it may park or run."""
+    thing = str(ctx.params.get("thing"))
+    return {
+        "blast_radius": {
+            "object": {"kind": "thing", "id": thing},
+            "children": [],
+            "irreversibility": "permanent",
+        }
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -111,24 +160,69 @@ def stub_embedding_service() -> AsyncMock:
 
 
 def _service() -> Operator:
-    return _make_operator(sub=_SERVICE_SUB, principal_kind=PrincipalKind.SERVICE)
+    return Operator(
+        sub=_SERVICE_SUB,
+        name=None,
+        email=None,
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=_TENANT_ID,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.SERVICE,
+    )
 
 
-async def _ready(stub_embedding_service: AsyncMock) -> _RecordingVmwareConnector:
-    recorder = _RecordingVmwareConnector(about_version="9.0.0")
-    _seed_vm_reads(recorder)
-    await _bootstrap(recorder, stub_embedding_service)
-    await _seed_target()
-    return recorder
+async def _ready(stub_embedding_service: AsyncMock) -> None:
+    """Register the connector, the op, its preview and its steps; seed the target."""
+    register_connector_v2(
+        product=_PRODUCT, version=_VERSION, impl_id=_IMPL_ID, cls=_ExampleConnector
+    )
+    await register_composite_operation(
+        product=_PRODUCT,
+        version=_VERSION,
+        impl_id=_IMPL_ID,
+        op_id=_OP_ID,
+        handler=_thing_delete,
+        summary="Delete a thing.",
+        description="Delete a thing; a synthetic destructive multi-step operation.",
+        parameter_schema={
+            "type": "object",
+            "properties": {"thing": {"type": "string"}},
+            "required": ["thing"],
+        },
+        when_to_use=None,
+        safety_level="destructive",
+        requires_approval=True,
+        embedding_service=stub_embedding_service,
+    )
+    register_preview_builder(_OP_ID, _thing_delete_preview)
+    register_governed_subops(
+        composite_op_id=_OP_ID,
+        connector_id=_CONNECTOR_ID,
+        sub_op_ids=(_READ_STEP, _DELETE_STEP, _WRITE_STEP),
+    )
+    await _insert_target(
+        tenant_id=_TENANT_ID,
+        name=_TARGET_NAME,
+        product=_PRODUCT,
+        host="203.0.113.5",
+        fingerprint={"version": _VERSION},
+        preferred_impl_id=_IMPL_ID,
+    )
 
 
 async def _grant_op_and_steps() -> uuid.UUID:
-    """Grants for vm.destroy and each listed write step; returns the op's grant."""
+    """Grants for the op and each listed write step; returns the op's grant."""
     op_grant = await seed_delete_grant(op_id=_OP_ID, **_GRANT_FIELDS)
-    await seed_delete_grant(op_id=_REST_STEP, **_GRANT_FIELDS)
-    await seed_delete_grant(op_id=_VIM_STEP, **_GRANT_FIELDS)
-    await seed_grant_row(model=ServicePrincipalGrant, op_id=_VIM_READ_STEP, **_GRANT_FIELDS)
+    await seed_delete_grant(op_id=_DELETE_STEP, **_GRANT_FIELDS)
+    await seed_grant_row(model=ServicePrincipalGrant, op_id=_WRITE_STEP, **_GRANT_FIELDS)
     return op_grant
+
+
+async def _pending_count() -> int:
+    async with get_sessionmaker()() as session:
+        return int(
+            (await session.execute(select(func.count()).select_from(ApprovalRequest))).scalar_one()
+        )
 
 
 async def _auto_approved_events() -> list[str]:
@@ -207,10 +301,10 @@ async def test_grant_on_the_operation_alone_does_not_read_as_covered(
     assert preview["policy_verdict"] == "needs-approval"
     reason = preview["policy_reason"]
     assert str(op_grant) in reason
-    assert _REST_STEP in reason
-    assert _VIM_STEP in reason
-    # The GET read of the VM is not a write step.
-    assert "GET:/vcenter/vm/{vm}" not in reason
+    assert _DELETE_STEP in reason
+    assert _WRITE_STEP in reason
+    # The read of the thing is not a write step.
+    assert _READ_STEP not in reason
     assert await grant_use_rows() == []
 
 

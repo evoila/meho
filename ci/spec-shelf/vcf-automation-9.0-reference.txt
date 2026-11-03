@@ -1,4 +1,0 @@
-docs/vcf-automation-9.0-reference/vcf-automation-9.0-provider-infrastructure-apis-reference-operations.tsv
-docs/vcf-automation-9.0-reference/vcf-automation-9.0-vm-apps-org-abx-reference-operations.tsv
-docs/vcf-automation-9.0-reference/vcf-automation-9.0-vm-apps-org-approval-reference-operations.tsv
-docs/vcf-automation-9.0-reference/vcf-automation-9.0-vm-apps-org-policies-reference-operations.tsv

@@ -1,1 +1,0 @@
-docs/esxi-9.0/wsdl/vim/vim.wsdl

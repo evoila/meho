@@ -904,7 +904,7 @@ async def test_list_splits_enabled_vs_total_operation_count(
 
 @pytest.fixture
 def _registered_class_only_connectors() -> Iterator[None]:
-    """Ensure harbor + sddc are registered against the v2 registry.
+    """Ensure harbor is registered against the v2 registry.
 
     The autouse ``_isolate_global_registries`` fixture in conftest
     snapshots the registry before each test and restores after, so the
@@ -921,13 +921,9 @@ def _registered_class_only_connectors() -> Iterator[None]:
     ``RuntimeError: connector already registered``.
     """
     from meho_backplane.connectors.harbor.connector import HarborConnector
-    from meho_backplane.connectors.nsx.connector import NsxConnector
     from meho_backplane.connectors.registry import (
         all_connectors_v2,
         register_connector_v2,
-    )
-    from meho_backplane.connectors.sddc_manager.connector import (
-        SddcManagerConnector,
     )
 
     existing = all_connectors_v2()
@@ -937,23 +933,6 @@ def _registered_class_only_connectors() -> Iterator[None]:
             version="2.x",
             impl_id="harbor-rest",
             cls=HarborConnector,
-        )
-    if ("sddc", "9.0", "sddc-rest") not in existing:
-        register_connector_v2(
-            product="sddc",
-            version="9.0",
-            impl_id="sddc-rest",
-            cls=SddcManagerConnector,
-        )
-    # nsx/9.0 stays catalog_ingest: spec-only (fqdn-templated upstream, no
-    # shipped spec) after #1976 made vmware/sddc profile-backed, so the
-    # spec-only next_step test below pivots onto it.
-    if ("nsx", "9.0", "nsx-rest") not in existing:
-        register_connector_v2(
-            product="nsx",
-            version="9.0",
-            impl_id="nsx-rest",
-            cls=NsxConnector,
         )
     yield
 
@@ -1026,25 +1005,6 @@ async def test_list_surfaces_register_connector_v2_only_entries(
     # row has no descriptor rows yet, so it is not dispatchable.
     assert harbor["kind"] == "typed"
     assert harbor["dispatchable"] is False
-
-    assert "sddc-rest-9.0" in by_id
-    sddc = by_id["sddc-rest-9.0"]
-    # The listing emits the parser-derived product ("sddc"), which since
-    # #1814 (Initiative #1810) also equals the v2 registry's product.
-    # The value below is what an operator copies into
-    # POST /api/v1/targets; round-trip closure is proved by
-    # ``test_create_target_accepts_sddc_short_token`` in
-    # ``test_api_v1_targets.py`` (``"sddc"`` validates directly, no
-    # alias needed).
-    assert sddc["product"] == "sddc"
-    assert sddc["impl_id"] == "sddc-rest"
-    assert sddc["version"] == "9.0"
-    assert sddc["operation_count"] == 0
-    assert sddc["enabled_operation_count"] == 0
-    assert sddc["group_count"] == 0
-    assert sddc["state"] == "registered"
-    assert sddc["kind"] == "typed"
-    assert sddc["dispatchable"] is False
 
 
 @pytest.fixture
@@ -1337,27 +1297,45 @@ async def test_list_registered_row_carries_catalog_next_step_hint(
     assert "ingest" in harbor["next_step"]["rationale"]
 
 
+@pytest.fixture
+def _registered_addon_profiled_connector() -> Iterator[None]:
+    """Register a profile-backed class for the meho-automation catalog row.
+
+    The row ships ``catalog_ingest: spec-only`` (no vendored spec; the
+    OpenAPI is ingested at registration from the add-on's own
+    ``/openapi.json``). The class is synthesised at registration in
+    production; here a test-local subclass stands in so the listing shows
+    the registered row.
+    """
+    from meho_backplane.connectors.profiled import ProfiledRestConnector
+    from meho_backplane.connectors.registry import register_connector_v2
+
+    class _AddonProfiled(ProfiledRestConnector):
+        product = "mehoauto"
+        version = "0.1.0"
+        impl_id = "mehoauto-rest"
+        supported_version_range = ">=0.1.0,<1.0"
+
+    register_connector_v2(
+        product="mehoauto", version="0.1.0", impl_id="mehoauto-rest", cls=_AddonProfiled
+    )
+    yield
+
+
 @pytest.mark.asyncio
 async def test_list_registered_row_spec_only_catalog_entry_points_at_spec(
     client: TestClient,
-    _registered_class_only_connectors: None,
+    _registered_addon_profiled_connector: None,
 ) -> None:
     """Catalog-hit + ``catalog_ingest="spec-only"``: row carries the ``--spec`` verb.
 
-    G0.18-T8 (#1361) / RDC #789 N8. ``nsx/9.0`` ships with
-    ``catalog_ingest: spec-only`` because its first upstream is an
-    fqdn-templated appliance URL (``<nsx-mgr-fqdn>``) and no MEHO-authored
-    spec ships for it — neither shape can drive ``meho connector ingest
-    --catalog`` server-side. The previous hint ("spec available in catalog;
-    run ingest") sent operators into a 422; the refined hint points at the
-    explicit-quadruple ``--spec`` form using the catalog's native triple so
-    the verb still copies-and-runs once the operator has the spec file in
-    hand.
-
-    #1964 T2 (#1976) moved the two former HTML-portal offenders
-    (``vmware/9.0``, ``sddc/9.0``) off this branch: they are now
-    profile-backed shipped-spec rows (``catalog_ingest: supported``), so
-    NSX is the canonical remaining spec-only example here.
+    G0.18-T8 (#1361) / RDC #789 N8. The meho-automation add-on row ships
+    with ``catalog_ingest: spec-only`` because no MEHO-authored spec ships
+    for it (the OpenAPI is read from the live add-on at registration), so
+    it cannot drive ``meho connector ingest --catalog`` server-side. The
+    refined hint points at the explicit-quadruple ``--spec`` form using the
+    catalog's native triple so the verb still copies-and-runs once the
+    operator has the spec file in hand.
     """
     tenant_a = uuid.uuid4()
     key, token = _operator_token(tenant_id=tenant_a)
@@ -1367,19 +1345,19 @@ async def test_list_registered_row_spec_only_catalog_entry_points_at_spec(
     assert response.status_code == 200
     by_id = {c["connector_id"]: c for c in response.json()["items"]}
 
-    nsx = by_id["nsx-rest-9.0"]
-    assert nsx["state"] == "registered"
-    assert nsx["next_step"] is not None
-    verb = nsx["next_step"]["verb"]
+    row = by_id["mehoauto-rest-0.1.0"]
+    assert row["state"] == "registered"
+    assert row["next_step"] is not None
+    verb = row["next_step"]["verb"]
     # The refined hint must NOT promise the broken ``--catalog`` path.
     assert "--catalog" not in verb
     # And must direct the operator at ``--spec`` with the catalog's
     # native triple (so the registered class resolves at ingest time).
-    assert "--product nsx" in verb
-    assert "--version 9.0" in verb
-    assert "--impl nsx-rest" in verb
+    assert "--product mehoauto" in verb
+    assert "--version 0.1.0" in verb
+    assert "--impl mehoauto-rest" in verb
     assert "--spec" in verb
-    rationale = nsx["next_step"]["rationale"]
+    rationale = row["next_step"]["rationale"]
     # Rationale names the reason so an operator (or LLM agent) knows
     # the catalog row isn't broken, it's just upstream-shape-bound.
     assert "HTML-portal" in rationale or "fqdn-templated" in rationale
@@ -1670,16 +1648,11 @@ def _every_v2_connector_registered() -> Iterator[None]:
     from meho_backplane.connectors.harbor.connector import HarborConnector
     from meho_backplane.connectors.hetzner_robot.connector import HetznerRobotConnector
     from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
-    from meho_backplane.connectors.nsx.connector import NsxConnector
     from meho_backplane.connectors.registry import (
         all_connectors_v2,
         register_connector_v2,
     )
-    from meho_backplane.connectors.sddc_manager.connector import (
-        SddcManagerConnector,
-    )
     from meho_backplane.connectors.vault.connector import VaultConnector
-    from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
     existing = all_connectors_v2()
     entries: tuple[tuple[str, str, str, type], ...] = (
@@ -1687,10 +1660,7 @@ def _every_v2_connector_registered() -> Iterator[None]:
         ("harbor", "2.x", "harbor-rest", HarborConnector),
         ("hetzner", "2026.04", "hetzner-rest", HetznerRobotConnector),
         ("k8s", "1.x", "k8s", KubernetesConnector),
-        ("nsx", "9.0", "nsx-rest", NsxConnector),
-        ("sddc", "9.0", "sddc-rest", SddcManagerConnector),
         ("vault", "1.x", "vault", VaultConnector),
-        ("vmware", "9.0", "vmware-rest", VmwareRestConnector),
     )
     for product, version, impl_id, cls in entries:
         if (product, version, impl_id) not in existing:
@@ -1745,16 +1715,6 @@ async def test_register_connector_v2_round_trip_lossless_for_every_entry(
     )
 
     registry = all_connectors_v2()
-    # Sanity-check the registry actually has the SDDC entry. Since #1814
-    # (Initiative #1810) realigned it, SDDC registers under the short
-    # ``sddc`` token (``product == impl_id.split("-")[0]``) like every
-    # other connector — the historical ``product != derived`` exception
-    # is gone.
-    assert ("sddc", "9.0", "sddc-rest") in registry, (
-        "SDDC v2 registration missing — the round-trip property is "
-        "checked against every registered connector"
-    )
-
     for (product, version, impl_id), _cls in registry.items():
         if not version or not impl_id:
             # v1-compat shim (e.g. ("vault", "", "")) — not separately
@@ -4916,15 +4876,6 @@ def test_ingest_packaged_catalog_no_broadcom_portal_fetch_entries_remain() -> No
         "spec via spec_resource (the #1976 on-ramp) instead of a fetchable "
         "HTML-portal upstream."
     )
-
-    # The former offenders are now profile-backed with a null upstream and
-    # the on-ramp note referencing T2 (#1976).
-    for product in ("vmware", "sddc"):
-        entry = catalog.get(product, "9.0")
-        assert entry is not None
-        assert entry.upstream is None
-        assert entry.spec_resource is not None
-        assert "#1976" in entry.notes
 
 
 # ---------------------------------------------------------------------------

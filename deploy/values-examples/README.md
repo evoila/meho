@@ -670,7 +670,7 @@ TOKEN=$(meho login --print-token https://meho.example.com)
 # tls_ca_pin field; --rawfile keeps the multi-line cert intact as a JSON
 # string.
 jq -n --rawfile pin /path/to/appliance-ca.pem \
-  '{name:"vcf-logs-lab", product:"vmware-rest", host:"vrli.nested.lab",
+  '{name:"harbor-lab", product:"harbor", host:"harbor.example.internal",
     auth_model:"shared_service_account", tls_ca_pin:$pin}' \
 | curl -sf -X POST https://meho.example.com/api/v1/targets \
     -H "Authorization: Bearer $TOKEN" \
@@ -680,12 +680,12 @@ jq -n --rawfile pin /path/to/appliance-ca.pem \
 # PEM. The pooled client is rebuilt — the pin digest is part of the
 # client-pool cache key, so the old client is never reused.
 jq -n --rawfile pin /path/to/new-appliance-ca.pem '{tls_ca_pin:$pin}' \
-| curl -sf -X PATCH https://meho.example.com/api/v1/targets/vcf-logs-lab \
+| curl -sf -X PATCH https://meho.example.com/api/v1/targets/harbor-lab \
     -H "Authorization: Bearer $TOKEN" \
     -H 'Content-Type: application/json' -d @-
 
 # Clear the pin (the CA is now in the global bundle, say): send null.
-curl -sf -X PATCH https://meho.example.com/api/v1/targets/vcf-logs-lab \
+curl -sf -X PATCH https://meho.example.com/api/v1/targets/harbor-lab \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"tls_ca_pin": null}'
@@ -713,15 +713,15 @@ curl -sf -X POST https://meho.example.com/api/v1/targets \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
-        "name": "vcf-logs-lab",
-        "product": "vmware-rest",
-        "host": "vrli.nested.lab",
+        "name": "harbor-lab",
+        "product": "harbor",
+        "host": "harbor.example.internal",
         "auth_model": "shared_service_account",
         "verify_tls": false
       }'
 
 # Flip an existing target back to secure once its CA is in the bundle.
-curl -sf -X PATCH https://meho.example.com/api/v1/targets/vcf-logs-lab \
+curl -sf -X PATCH https://meho.example.com/api/v1/targets/harbor-lab \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"verify_tls": true}'
@@ -756,9 +756,9 @@ descriptor below are the two supported ways to set these.
 targets:
   # Secure path: pin the appliance CA. Verification stays ON (chain +
   # hostname) against the pinned CA. Prefer this over verify_tls: false.
-  - name: vcf-logs-lab
-    product: vmware-rest
-    host: vrli.nested.lab
+  - name: harbor-lab
+    product: harbor
+    host: harbor.example.internal
     auth_model: shared_service_account
     tls_ca_pin: |
       -----BEGIN CERTIFICATE-----
@@ -768,8 +768,8 @@ targets:
   # Last resort: verification OFF for this one target. Read the MITM /
   # credential-exposure caveat above before setting this.
   - name: legacy-appliance
-    product: vmware-rest
-    host: appliance.nested.lab
+    product: proxmox
+    host: appliance.example.internal
     auth_model: shared_service_account
     verify_tls: false
 ```

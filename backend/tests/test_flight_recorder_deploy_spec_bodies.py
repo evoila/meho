@@ -3,27 +3,22 @@
 
 """Deployment specs and depot credentials stay out of flight-recorder traces.
 
-These operations send a body with passwords to the appliance:
+Some write operations send a body with passwords to an appliance: a
+deployment spec that holds the passwords of the systems it sets up and can
+hold licence keys, the account of a software depot, which the appliance can
+echo back, or a proxy account whose password MEHO reads from Vault at run
+time and puts into the request body.
 
-* SDDC Manager: ``sddc.domain.validate`` and ``sddc.domain.create`` send the
-  domain spec. It holds the passwords of the new domain and can hold licence
-  keys.
-* VCF Installer: ``installer.sddc.spec.validate``,
-  ``installer.sddc.bringup.start``, ``installer.sddc.bringup.retry`` and the
-  multi-step ``installer.composite.sddc.bringup`` send the SddcSpec, which
-  holds the core passwords. ``installer.system.depot.set`` sends the depot
-  password, and the answer can echo it. ``installer.system.proxy.set`` sends
-  the proxy password and ``installer.sddc.resources.calculate`` the SddcSpec
-  passwords; both read them from Vault (faked here).
-
-Each of these operations carries the tag ``credential``. Its word is a secret
-tag word of the flight recorder, so a trace keeps no request or answer body of
+Each such operation carries the tag ``credential``. Its word is a secret tag
+word of the flight recorder, so a trace keeps no request or answer body of
 the operation's vendor calls, the same as for a credential write.
 
-Each case runs the operation through the real dispatcher, with the tenant's
-flight recorder on, against a fake appliance (respx). The body holds a made-up
-password and, where the vendor shape has one, a made-up licence key. The test
-checks:
+The operations here are synthetic: a small appliance connector the test
+declares itself, with four write operations of those shapes (the public tree
+holds no VMware connector). Each case runs the operation through the real
+dispatcher, with the tenant's flight recorder on, against a fake appliance
+(respx). The body holds a made-up password and, where the shape has one, a
+made-up licence key. The test checks:
 
 * the stored trace: the vendor call is there, without its bodies, and no
   made-up value is anywhere in the trace;
@@ -58,36 +53,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared import vault_creds
+from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
-from meho_backplane.connectors.sddc_manager import (
-    SDDC_CONNECTOR_ID,
-    SDDC_DOMAIN_CREATE_OP_ID,
-    SDDC_DOMAIN_VALIDATE_OP_ID,
-    SDDC_IMPL_ID,
-    SDDC_PRODUCT,
-    SDDC_VERSION,
-    SddcManagerConnector,
-    register_sddc_typed_operations,
-)
-from meho_backplane.connectors.vcf_installer import (
-    INSTALLER_BRINGUP_OP_ID,
-    INSTALLER_BRINGUP_RETRY_OP_ID,
-    INSTALLER_BRINGUP_START_OP_ID,
-    INSTALLER_CONNECTOR_ID,
-    INSTALLER_IMPL_ID,
-    INSTALLER_PRODUCT,
-    INSTALLER_SPEC_VALIDATE_OP_ID,
-    INSTALLER_VERSION,
-    InstallerConnector,
-    _secret_refs,
-    register_installer_composite_operations,
-    register_installer_typed_operations,
-)
-from meho_backplane.connectors.vcf_installer.resources_calc import (
-    INSTALLER_RESOURCES_CALCULATE_OP_ID,
-)
-from meho_backplane.connectors.vcf_installer.system_settings import INSTALLER_PROXY_SET_OP_ID
-from meho_backplane.connectors.vcf_installer.typed_writes import INSTALLER_DEPOT_SET_OP_ID
+from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     DispatchTrace,
@@ -97,11 +66,8 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.flight_recorder import AGENT_TRACE_HANDLE_EXTRA_KEY, agent_read
 from meho_backplane.flight_recorder.config import reset_flight_recorder_config_cache_for_testing
-from meho_backplane.operations import dispatch, reset_dispatcher_caches
-from meho_backplane.operations._handler_resolve import (
-    get_or_create_connector_instance,
-    reset_handler_cache,
-)
+from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
+from meho_backplane.operations._handler_resolve import reset_handler_cache
 from meho_backplane.operations.result_query import read_result_window
 from meho_backplane.redaction.flight_recorder import SECRET_FAMILY_OMITTED_MARKER
 from meho_backplane.settings import get_settings
@@ -109,10 +75,17 @@ from meho_backplane.settings import get_settings
 from ._result_store_helpers import MemoryResultStore
 
 _TENANT_ID = UUID("00000000-0000-0000-0000-00000000c4e1")
-_SDDC_HOST = "sddc-spec-trace.test.invalid"
-_INSTALLER_HOST = "installer-spec-trace.test.invalid"
-_TOKEN_PATH = "/v1/tokens"
+_HOST = "spec-trace-appliance.test.invalid"
+_PRODUCT = "specdeploy"
+_VERSION = "1.x"
+_IMPL_ID = "specdeploy-rest"
+_CONNECTOR_ID = f"{_IMPL_ID}-{_VERSION}"
 _TAG = "credential"
+
+_SPEC_VALIDATE_OP_ID = "specdeploy.spec.validate"
+_SPEC_APPLY_OP_ID = "specdeploy.spec.apply"
+_DEPOT_SET_OP_ID = "specdeploy.depot.set"
+_PROXY_SET_OP_ID = "specdeploy.proxy.set"
 
 #: Made-up values. The test fails if one of them shows up in a trace.
 _PASSWORD = "Made-Up-Pass-4c1e-not-real"
@@ -120,42 +93,91 @@ _LICENCE_KEY = "FAKE0-AAAAA-BBBBB-CCCCC-4C1E0"
 _SECRETS = (_PASSWORD, _LICENCE_KEY)
 
 
-def _domain_spec() -> dict[str, Any]:
-    """A short DomainCreationSpec with a made-up password and licence key."""
+def _deploy_spec() -> dict[str, Any]:
+    """A short deployment spec with a made-up password and licence key."""
     return {
-        "domainName": "<domain-name>",
-        "vcenterSpec": {
-            "name": "<vcenter-name>",
+        "name": "<deployment-name>",
+        "managerSpec": {
+            "hostname": "<manager-fqdn>",
             "rootPassword": _PASSWORD,
             "licenseKey": _LICENCE_KEY,
         },
-        "nsxTSpec": {"nsxManagerAdminPassword": _PASSWORD, "licenseKey": _LICENCE_KEY},
-    }
-
-
-def _sddc_spec() -> dict[str, Any]:
-    """A short SddcSpec with a made-up password and licence key."""
-    return {
-        "sddcId": "<sddc-id>",
-        "vcenterSpec": {
-            "vcenterHostname": "<vcenter-fqdn>",
-            "rootVcenterPassword": _PASSWORD,
-            "licenseKey": _LICENCE_KEY,
-        },
-        "sddcManagerSpec": {"hostname": "<sddc-manager-fqdn>", "rootPassword": _PASSWORD},
+        "nodes": [{"hostname": "<node-fqdn>", "adminPassword": _PASSWORD}],
     }
 
 
 def _depot_settings() -> dict[str, Any]:
-    """Offline depot settings with a made-up depot password (they hold no licence key)."""
+    """Depot settings with a made-up depot password (they hold no licence key)."""
     return {
-        "offlineAccount": {"username": "<depot-user>", "password": _PASSWORD},
-        "depotConfiguration": {
-            "isOfflineDepot": True,
-            "hostname": "depot.test.invalid",
-            "port": 443,
-        },
+        "account": {"username": "<depot-user>", "password": _PASSWORD},
+        "hostname": "depot.test.invalid",
+        "port": 443,
     }
+
+
+class _DeployConnector(HttpConnector):
+    """A synthetic appliance connector whose write operations send passwords.
+
+    The handlers are bound methods, the shape the in-tree HTTP connectors
+    use, so each vendor call runs through the shared HTTP seam that records
+    the flight-recorder span.
+    """
+
+    product = _PRODUCT
+    version = _VERSION
+    impl_id = _IMPL_ID
+
+    async def auth_headers(self, target: Any, operator: Operator) -> dict[str, str]:
+        return {"Authorization": "Bearer spec-trace-session"}
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def spec_validate(
+        self, operator: Operator, target: Any, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Check a deployment spec; the body holds the spec's passwords."""
+        return await self._post_json(
+            target, "/v1/deployments/validations", operator=operator, json=params["spec"]
+        )
+
+    async def spec_apply(
+        self, operator: Operator, target: Any, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Start a deployment; the body holds the spec's passwords."""
+        return await self._post_json(
+            target, "/v1/deployments", operator=operator, json=params["spec"]
+        )
+
+    async def depot_set(
+        self, operator: Operator, target: Any, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Set the depot account; the appliance echoes the settings back."""
+        return await self._post_json(
+            target, "/v1/settings/depot", operator=operator, verb="PUT", json=params["settings"]
+        )
+
+    async def proxy_set(
+        self, operator: Operator, target: Any, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Set the proxy account; the password comes from Vault at run time."""
+        secret = await vault_creds.load_param_secret_data(
+            target, operator, param="password_secret_ref"
+        )
+        body = {
+            "host": params["host"],
+            "username": params["username"],
+            "password": secret["password"],
+        }
+        return await self._post_json(
+            target, "/v1/settings/proxy", operator=operator, verb="PATCH", json=body
+        )
 
 
 @dataclass(frozen=True)
@@ -170,137 +192,52 @@ class _Call:
 
 @dataclass(frozen=True)
 class _Case:
-    """One operation: where it runs, its params and the vendor calls it makes.
+    """One operation: its params, the vendor call it makes, and its approval.
 
     ``approved`` runs the dispatch that follows a person's approval, for the
     operations that wait for one.
     """
 
     op_id: str
-    connector_id: str
-    product: str
-    version: str
-    host: str
     params: dict[str, Any]
-    calls: tuple[_Call, ...]
+    call: _Call
     approved: bool
 
 
-_VALIDATION = {"id": "validation-0001", "executionStatus": "IN_PROGRESS"}
-_VALIDATION_DONE = {
-    "id": "validation-0001",
-    "executionStatus": "COMPLETED",
-    "resultStatus": "SUCCEEDED",
-}
+_VALIDATION = {"id": "validation-0001", "status": "IN_PROGRESS"}
 _TASK = {"id": "task-0001", "status": "IN_PROGRESS"}
 
-
-def _sddc_case(op_id: str, call: _Call, *, approved: bool) -> _Case:
-    return _Case(
-        op_id=op_id,
-        connector_id=SDDC_CONNECTOR_ID,
-        product=SDDC_PRODUCT,
-        version=SDDC_VERSION,
-        host=_SDDC_HOST,
-        params={"spec": _domain_spec()},
-        calls=(call,),
-        approved=approved,
-    )
-
-
-def _installer_case(op_id: str, params: dict[str, Any], *calls: _Call, approved: bool) -> _Case:
-    return _Case(
-        op_id=op_id,
-        connector_id=INSTALLER_CONNECTOR_ID,
-        product=INSTALLER_PRODUCT,
-        version=INSTALLER_VERSION,
-        host=_INSTALLER_HOST,
-        params=params,
-        calls=calls,
-        approved=approved,
-    )
-
-
 _CASES = (
-    _sddc_case(
-        SDDC_DOMAIN_VALIDATE_OP_ID,
-        _Call("POST", "/v1/domains/validations", 202, _VALIDATION),
+    _Case(
+        _SPEC_VALIDATE_OP_ID,
+        {"spec": _deploy_spec()},
+        _Call("POST", "/v1/deployments/validations", 202, _VALIDATION),
         approved=False,
     ),
-    _sddc_case(SDDC_DOMAIN_CREATE_OP_ID, _Call("POST", "/v1/domains", 202, _TASK), approved=True),
-    _installer_case(
-        INSTALLER_SPEC_VALIDATE_OP_ID,
-        {"spec": _sddc_spec()},
-        _Call("POST", "/v1/sddcs/validations", 202, _VALIDATION),
-        approved=False,
-    ),
-    _installer_case(
-        INSTALLER_BRINGUP_START_OP_ID,
-        {"spec": _sddc_spec()},
-        _Call("POST", "/v1/sddcs", 202, _TASK),
+    _Case(
+        _SPEC_APPLY_OP_ID,
+        {"spec": _deploy_spec()},
+        _Call("POST", "/v1/deployments", 202, _TASK),
         approved=True,
     ),
-    _installer_case(
-        INSTALLER_BRINGUP_RETRY_OP_ID,
-        {"id": "task-0001", "spec": _sddc_spec()},
-        _Call("PATCH", "/v1/sddcs/task-0001", 202, _TASK),
-        approved=True,
-    ),
-    # The multi-step bring-up: the check and the deploy call run under one op.
-    _installer_case(
-        INSTALLER_BRINGUP_OP_ID,
-        {"spec": _sddc_spec()},
-        _Call("POST", "/v1/sddcs/validations", 200, _VALIDATION_DONE),
-        _Call("POST", "/v1/sddcs", 202, _TASK),
-        approved=True,
-    ),
-    # The answer echoes the settings with the password, as the appliance can.
-    _installer_case(
-        INSTALLER_DEPOT_SET_OP_ID,
+    # The answer echoes the settings with the password, as an appliance can.
+    _Case(
+        _DEPOT_SET_OP_ID,
         {"settings": _depot_settings()},
-        _Call("PUT", "/v1/system/settings/depot", 200, _depot_settings()),
+        _Call("PUT", "/v1/settings/depot", 200, _depot_settings()),
         approved=True,
     ),
     # The proxy password comes from Vault and rides the request body.
-    _installer_case(
-        INSTALLER_PROXY_SET_OP_ID,
+    _Case(
+        _PROXY_SET_OP_ID,
         {
-            "enabled": True,
             "host": "proxy.test.invalid",
-            "port": 3128,
             "username": "<proxy-user>",
             "password_secret_ref": "kv/proxy",
         },
-        _Call("PATCH", "/v1/system/proxy-configuration", 202, _TASK),
+        _Call("PATCH", "/v1/settings/proxy", 202, _TASK),
         approved=True,
     ),
-    # The SddcSpec passwords come from Vault and ride the request body.
-    _installer_case(
-        INSTALLER_RESOURCES_CALCULATE_OP_ID,
-        {
-            "spec": {"sddcId": "<sddc-id>", "vcenterSpec": {"vcenterHostname": "<vcenter-fqdn>"}},
-            "password_refs": [
-                {"pointer": "/vcenterSpec/rootVcenterPassword", "secret_ref": "kv/vc-root"}
-            ],
-        },
-        _Call(
-            "POST",
-            "/v1/sddcs/resources-calculation",
-            202,
-            {"id": "calc-0001", "executionStatus": "COMPLETED", "resultStatus": "SUCCEEDED"},
-        ),
-        approved=False,
-    ),
-)
-
-
-#: The cases where the tag alone keeps the body out. The proxy change and the
-#: resource calculation are also pinned as credential writes in
-#: ``broadcast/events.py``, which keeps their bodies out without the tag too.
-_TAG_ONLY_CASES = tuple(
-    case
-    for case in _CASES
-    if case.op_id not in {INSTALLER_PROXY_SET_OP_ID, INSTALLER_RESOURCES_CALCULATE_OP_ID}
 )
 
 
@@ -317,19 +254,13 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _reset_module_state() -> Iterator[None]:
-    """Reset caches, the registry and the trace config; register both connectors."""
+    """Reset caches, the registry and the trace config; register the connector."""
     reset_dispatcher_caches()
     reset_handler_cache()
     clear_registry()
     reset_flight_recorder_config_cache_for_testing()
     register_connector_v2(
-        product=SDDC_PRODUCT, version=SDDC_VERSION, impl_id=SDDC_IMPL_ID, cls=SddcManagerConnector
-    )
-    register_connector_v2(
-        product=INSTALLER_PRODUCT,
-        version=INSTALLER_VERSION,
-        impl_id=INSTALLER_IMPL_ID,
-        cls=InstallerConnector,
+        product=_PRODUCT, version=_VERSION, impl_id=_IMPL_ID, cls=_DeployConnector
     )
     yield
     reset_dispatcher_caches()
@@ -345,7 +276,7 @@ def _fake_vault(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _load(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         return {"password": _PASSWORD}
 
-    monkeypatch.setattr(_secret_refs, "load_param_secret_data", _load)
+    monkeypatch.setattr(vault_creds, "load_param_secret_data", _load)
 
 
 @pytest.fixture(autouse=True)
@@ -375,18 +306,17 @@ def result_store(monkeypatch: pytest.MonkeyPatch) -> MemoryResultStore:
 
 @dataclass
 class _Target:
-    """A target the resolver and both connectors accept."""
+    """A target the resolver and the connector accept."""
 
-    product: str
-    version: str
-    host: str
+    product: str = _PRODUCT
+    version: str = _VERSION
+    host: str = _HOST
     name: str = "spec-trace-appliance"
     id: UUID = field(default_factory=uuid.uuid4)
     tenant_id: UUID = _TENANT_ID
     port: int = 443
     secret_ref: str = "targets/spec-trace/appliance"
     auth_model: str = "shared_service_account"
-    sso_realm: str = "vsphere.local"
     tls_server_name: str | None = None
     preferred_impl_id: str | None = None
 
@@ -406,19 +336,29 @@ def _operator() -> Operator:
     )
 
 
-async def _service_login(_target: object, _operator: Operator) -> dict[str, str]:
-    """A fixed service-account login, so no Vault read runs."""
-    return {"username": "svc-spec-trace", "password": "svc-login-not-in-any-spec"}
-
-
 async def _register_operations(session: AsyncSession) -> None:
-    """Register the SDDC Manager and Installer ops; turn the tenant's recorder on."""
-    await register_sddc_typed_operations()
-    await register_installer_typed_operations()
-    await register_installer_composite_operations()
-    for cls in (SddcManagerConnector, InstallerConnector):
-        connector = get_or_create_connector_instance(cls)
-        connector._credentials_loader = _service_login  # type: ignore[attr-defined]
+    """Register the four write operations; turn the tenant's recorder on."""
+    handlers = {
+        _SPEC_VALIDATE_OP_ID: (_DeployConnector.spec_validate, False),
+        _SPEC_APPLY_OP_ID: (_DeployConnector.spec_apply, True),
+        _DEPOT_SET_OP_ID: (_DeployConnector.depot_set, True),
+        _PROXY_SET_OP_ID: (_DeployConnector.proxy_set, True),
+    }
+    for op_id, (handler, requires_approval) in handlers.items():
+        await register_typed_operation(
+            product=_PRODUCT,
+            version=_VERSION,
+            impl_id=_IMPL_ID,
+            op_id=op_id,
+            handler=handler,
+            summary=f"Synthetic write {op_id}.",
+            description=f"Synthetic write {op_id}; its body holds a password.",
+            parameter_schema={"type": "object"},
+            when_to_use=None,
+            tags=[_TAG],
+            safety_level="dangerous" if requires_approval else "caution",
+            requires_approval=requires_approval,
+        )
     session.add(
         Tenant(id=_TENANT_ID, slug="spec-trace", name="spec-trace", flight_recorder_enabled=True)
     )
@@ -428,24 +368,20 @@ async def _register_operations(session: AsyncSession) -> None:
 
 async def _dispatch(case: _Case) -> Any:
     """Run *case* through the real dispatcher against a fake appliance."""
-    target = _Target(product=case.product, version=case.version, host=case.host)
-    async with respx.mock(base_url=f"https://{case.host}", assert_all_called=False) as mock:
-        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "spec-trace-access-token"})
-        mock.get("/v1/tasks").respond(200, json={"elements": []})
-        routes = [
-            mock.request(call.method, call.path).respond(call.status, json=call.answer)
-            for call in case.calls
-        ]
+    async with respx.mock(base_url=f"https://{_HOST}", assert_all_called=False) as mock:
+        route = mock.request(case.call.method, case.call.path).respond(
+            case.call.status, json=case.call.answer
+        )
         result = await dispatch(
             operator=_operator(),
-            connector_id=case.connector_id,
+            connector_id=_CONNECTOR_ID,
             op_id=case.op_id,
-            target=target,
+            target=_Target(),
             params=case.params,
             _approved=case.approved,
         )
     assert result.status == "ok", result.error
-    assert [route.call_count for route in routes] == [1] * len(routes)
+    assert route.call_count == 1
     return result
 
 
@@ -470,17 +406,13 @@ async def _stored_trace(audit_id: UUID) -> tuple[DispatchTrace, list[DispatchTra
 
 
 def _vendor_spans(spans: list[DispatchTraceSpan], case: _Case) -> list[DispatchTraceSpan]:
-    """The spans of the case's vendor calls (not the token login)."""
-    wanted = {(call.method, call.path) for call in case.calls}
+    """The spans of the case's vendor call."""
     return [
         span
         for span in spans
         if span.span_kind == "vendor_call"
-        and any(
-            span.attributes.get("method") == method
-            and str(span.attributes.get("url", "")).endswith(path)
-            for method, path in wanted
-        )
+        and span.attributes.get("method") == case.call.method
+        and str(span.attributes.get("url", "")).endswith(case.call.path)
     ]
 
 
@@ -514,18 +446,17 @@ async def test_the_trace_and_the_agent_copy_hold_no_body(
     assert result.audit_id is not None
     trace, spans = await _stored_trace(result.audit_id)
     vendor_spans = _vendor_spans(spans, case)
-    assert len(vendor_spans) == len(case.calls), "the trace should hold each vendor call"
-    for span in vendor_spans:
-        assert span.attributes["body_recorded"] is False
-        assert span.attributes["request_body"] == SECRET_FAMILY_OMITTED_MARKER
-        assert span.attributes["response_body"] == SECRET_FAMILY_OMITTED_MARKER
+    assert len(vendor_spans) == 1, "the trace should hold the vendor call"
+    span = vendor_spans[0]
+    assert span.attributes["body_recorded"] is False
+    assert span.attributes["request_body"] == SECRET_FAMILY_OMITTED_MARKER
+    assert span.attributes["response_body"] == SECRET_FAMILY_OMITTED_MARKER
     _assert_no_made_up_value("the stored trace", _as_text(spans))
 
     # The trace is still certain, so the agent gets its copy, without the bodies.
     assert trace.redaction_uncertain is False
     agent_copy = await _agent_copy(result)
-    for call in case.calls:
-        assert call.path in agent_copy, "the agent copy should hold the vendor call"
+    assert case.call.path in agent_copy, "the agent copy should hold the vendor call"
     _assert_no_made_up_value("the agent copy", agent_copy)
     stored = b"".join(result_store.client.values.values()).decode()
     _assert_no_made_up_value("the result store", stored)
@@ -546,7 +477,7 @@ async def _drop_the_tag(op_id: str) -> None:
         await s.commit()
 
 
-@pytest.mark.parametrize("case", _TAG_ONLY_CASES, ids=lambda case: case.op_id)
+@pytest.mark.parametrize("case", _CASES, ids=lambda case: case.op_id)
 @pytest.mark.asyncio
 async def test_without_the_tag_the_trace_would_hold_the_body(
     case: _Case, session: AsyncSession, result_store: MemoryResultStore

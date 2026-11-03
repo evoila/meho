@@ -51,13 +51,6 @@ from meho_backplane.connectors.mssql import session as mssql_session
 from meho_backplane.connectors.postgres import session as pg_session
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.connectors.secret import handoff as handoff_module
-from meho_backplane.connectors.vmware_rest import ovf_upload_tls
-from meho_backplane.connectors.vmware_rest._transfer import (
-    Destination,
-    SourceFile,
-    TransferError,
-    copy_files,
-)
 from meho_backplane.targets.ssrf_guard import (
     TARGET_SSRF_ALLOWLIST_ENV,
     TargetDestinationBlockedError,
@@ -717,39 +710,6 @@ async def test_supervisor_login_refuses_a_blocked_host() -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# OVF upload client (lease device host)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("_live")
-@pytest.mark.parametrize("thumbprint", [None, "ab" * 32])
-@pytest.mark.parametrize("url", ["https://10.0.0.9/nfc/disk-0", "https://gone.example.test/d"])
-async def test_ovf_upload_refuses_a_blocked_device_host(thumbprint: str | None, url: str) -> None:
-    target = types.SimpleNamespace(verify_tls=True)
-    async with ovf_upload_tls.upload_client(target, thumbprint) as http:
-        with pytest.raises(TargetDestinationBlockedError):
-            await http.put(url, content=b"x")
-
-
-@pytest.mark.asyncio
-async def test_ovf_upload_dials_only_the_checked_ip(_live: pytest.MonkeyPatch) -> None:
-    dialed: list[str] = []
-
-    async def _refuse(self: Any, host: str, port: int, **kwargs: Any) -> Any:
-        dialed.append(host)
-        raise httpcore.ConnectError("refused in test")
-
-    _live.setattr("httpcore.AnyIOBackend.connect_tcp", _refuse)
-    target = types.SimpleNamespace(verify_tls=True)
-    async with ovf_upload_tls.upload_client(target, "ab" * 32) as http:
-        with pytest.raises(httpx.ConnectError):
-            await http.put("https://public.example.test/nfc/disk-0", content=b"x")
-    assert dialed
-    assert set(dialed) <= {_PUBLIC_IP, _PUBLIC_IP_2}
-
-
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_live")
 async def test_k8s_probe_reports_a_blocked_host_as_not_reachable() -> None:
@@ -804,50 +764,5 @@ async def test_handoff_store_client_dials_only_the_checked_ip(_live: pytest.Monk
     async with handoff_module._build_store_client(_store(_live, "public.example.test")) as client:
         with pytest.raises(httpx.ConnectError):
             await client.post("/v1/sys/wrapping/unwrap", json={})
-    assert dialed
-    assert set(dialed) <= {_PUBLIC_IP, _PUBLIC_IP_2}
-
-
-async def _copy_to(base_url: str) -> None:
-    async def _noop() -> None:
-        return None
-
-    async with httpx.AsyncClient() as source_client:
-        await copy_files(
-            [SourceFile(name="disk-1.vmdk", url="https://vcenter.example.test/d", size=1)],
-            Destination(base_url=base_url, token_ref="tenants/t1/backup-store"),
-            operator=object(),  # type: ignore[arg-type]
-            target=types.SimpleNamespace(name="vc-1", host="vcenter.example.test"),
-            source_client=source_client,
-            source_headers={},
-            keep_alive=_noop,
-            cleanup=_noop,
-        )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("host", ["gone.example.test", "private.example.test"])
-async def test_file_copy_destination_refuses_before_connecting(
-    _live: pytest.MonkeyPatch, host: str
-) -> None:
-    dialed = _record_dials(_live)
-    _live.setattr(
-        "meho_backplane.connectors.vmware_rest._transfer._read_token",
-        AsyncMock(return_value="dest-token"),
-    )
-    with pytest.raises(TransferError):
-        await _copy_to(f"https://{host}/backups/")
-    assert dialed == []
-
-
-@pytest.mark.asyncio
-async def test_file_copy_destination_dials_only_the_checked_ip(_live: pytest.MonkeyPatch) -> None:
-    dialed = _record_dials(_live)
-    _live.setattr(
-        "meho_backplane.connectors.vmware_rest._transfer._read_token",
-        AsyncMock(return_value="dest-token"),
-    )
-    with pytest.raises(TransferError):
-        await _copy_to("https://public.example.test/backups/")
     assert dialed
     assert set(dialed) <= {_PUBLIC_IP, _PUBLIC_IP_2}

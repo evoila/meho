@@ -1,1 +1,0 @@
-docs/vks-9.0/vks-paths-from-vcenter.txt

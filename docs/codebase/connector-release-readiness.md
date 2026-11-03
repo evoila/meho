@@ -102,7 +102,7 @@ consumer correctly noted this as the "closest to parity" connector.
 now performs the live operator-context KV-v2 read via the shared
 [`load_basic_credentials`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py)
 helper; `shared_service_account` executes against a real vCenter.
-Operator recipe: [`vmware-rest-onboarding.md`](../cross-repo/vmware-rest-onboarding.md).
+Operator recipe: `vmware-rest-onboarding.md`.
 `k8s-1.x` joined this state via G3.10-T4
 [#948](https://github.com/evoila/meho/issues/948): its default loader
 [`load_kubeconfig_from_vault`](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py)

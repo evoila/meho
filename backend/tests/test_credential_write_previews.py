@@ -40,13 +40,6 @@ class _FakeDescriptor:
     op_id: str
 
 
-@dataclass
-class _FakeTarget:
-    name: str = "t"
-    version: str | None = None
-    fingerprint: dict[str, Any] | None = None
-
-
 def _operator() -> Operator:
     return Operator(
         sub="op-4850",
@@ -537,82 +530,3 @@ async def test_k8s_job_create_keeps_plain_flags_on_the_command_line() -> None:
     )
     (container,) = preview["spec"]["template"]["spec"]["containers"]
     assert container["command"] == command
-
-
-@pytest.mark.parametrize(
-    ("op_id", "action"),
-    [("sddc.host.validate", "validate"), ("sddc.host.commission", "commission")],
-)
-@pytest.mark.asyncio
-async def test_sddc_host_ops_show_hosts_not_passwords(op_id: str, action: str) -> None:
-    host = {
-        "fqdn": "esxi-01.example.invalid",
-        "username": "root",
-        "password": _SECRET,
-        "storageType": "NFS",
-        "networkPoolId": "pool-1",
-        "extraSecret": _SECRET,
-    }
-    second = {**host, "fqdn": "esxi-02.example.invalid"}
-    _, preview = await _preview(op_id, {"spec": [host, second]})
-    assert preview["resource"] == "esxi_hosts"
-    assert preview["action"] == action
-    assert preview["host_count"] == 2
-    assert preview["hosts"][0] == {
-        "fqdn": "esxi-01.example.invalid",
-        "username": "root",
-        "storageType": "NFS",
-        "networkPoolId": "pool-1",
-    }
-    assert preview["hosts"][1]["fqdn"] == "esxi-02.example.invalid"
-
-
-@pytest.mark.parametrize(("version", "verify_only"), [("9.0.2.0", False), ("9.1.0.0", True)])
-@pytest.mark.asyncio
-async def test_holodeck_router_patch_shows_patches_and_mode(
-    version: str, verify_only: bool
-) -> None:
-    _, preview = await _preview("holodeck.router.patch", {}, target=_FakeTarget(version=version))
-    assert preview["resource"] == "holorouter_modules"
-    assert preview["hr_version"] == version
-    assert preview["verify_only"] is verify_only
-    assert [patch["patch_id"] for patch in preview["patches"]] == ["C1", "C2", "C3"]
-    assert all(patch["file_path"].endswith(".psm1") for patch in preview["patches"])
-
-
-@pytest.mark.asyncio
-async def test_holodeck_router_patch_without_target_version() -> None:
-    _, preview = await _preview("holodeck.router.patch", {"stray": _SECRET})
-    assert preview["hr_version"] is None
-    assert preview["verify_only"] is False
-
-
-@pytest.mark.asyncio
-async def test_vmware_guest_file_read_shows_file_and_login_ref() -> None:
-    _, preview = await _preview(
-        "vmware.composite.vm.guest.file.read",
-        {
-            "vm": "vm-42",
-            "guest_path": "/etc/app/config.yaml",
-            "fetch_content": True,
-            "max_inline_bytes": 4096,
-            "guest_secret_ref": "targets/app-vm-01",
-            "password": _SECRET,
-        },
-    )
-    assert preview == {
-        "vm": "vm-42",
-        "guest_path": "/etc/app/config.yaml",
-        "fetch_content": True,
-        "max_inline_bytes": 4096,
-        "guest_secret_ref": "targets/app-vm-01",
-    }
-
-
-@pytest.mark.asyncio
-async def test_vmware_guest_file_read_metadata_only() -> None:
-    _, preview = await _preview(
-        "vmware.composite.vm.guest.file.read",
-        {"vm": "vm-42", "guest_path": "/etc/os-release", "max_inline_bytes": 4096},
-    )
-    assert preview == {"vm": "vm-42", "guest_path": "/etc/os-release", "fetch_content": False}

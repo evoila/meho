@@ -11,7 +11,7 @@
 #   - SSH (TCP 22) and ping, from the addresses in the set admin_network.
 # The machine itself may open any connection, and the replies come back.
 # Everything else from another machine is dropped, RKE2's own ports too:
-# TCP 6443, 9345, 10250, 2379, 2380, 2381, 9099, 30000-32767 and 8472/UDP.
+# TCP 6443, 9345, 10250, 2379, 2380, 2381, 9099, 8081, 9091, 30000-32767 and 8472/UDP.
 #
 # The chain prerouting does this filtering. The chains input, forward and
 # output hold the rules of the MEHO appliance, for traffic to this machine,

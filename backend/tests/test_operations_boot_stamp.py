@@ -59,7 +59,7 @@ from meho_backplane.operations.ingest.catalog import (
 )
 from meho_backplane.settings import get_settings
 
-_LOADER_MODULE = "meho_backplane.operations.ingest.boot_stamp.load_profile_resource"
+_LOADER_MODULE = "meho_backplane.operations.ingest.boot_stamp.load_entry_profile"
 
 
 @pytest.fixture(autouse=True)
@@ -183,7 +183,7 @@ async def test_boot_stamp_noops_on_triple_occupied_by_handrolled_class() -> None
 async def test_boot_stamp_shipped_catalog_registers_every_profile_row() -> None:
     """Against the real shipped catalog every profile-backed row stamps cleanly.
 
-    Runs the real ``load_profile_resource`` + ``ExecutionProfile`` parse +
+    Runs the real ``load_entry_profile`` + ``ExecutionProfile`` parse +
     class synthesis for the shipped fixture (``basic``) and meho-automation
     profiles. With a cleared registry no triple is occupied, so every profile
     row registers a profiled class.
@@ -257,7 +257,7 @@ async def test_boot_stamp_fails_closed_on_malformed_profile(
     with the same model and must never swallow a bad profile into a silently
     unregistered connector.
     """
-    monkeypatch.setattr(_LOADER_MODULE, lambda _resource: "product: x\nversion: '1.0'\n")
+    monkeypatch.setattr(_LOADER_MODULE, lambda _entry: "product: x\nversion: '1.0'\n")
     cat = ConnectorSpecCatalog(
         entries=(
             _profile_entry(
@@ -346,7 +346,7 @@ async def test_boot_stamped_profiled_connector_dispatches_end_to_end(
     Proves the registered class is not just present but dispatch-capable: the
     session-login round-trip mints a token and the op GET returns the payload.
     """
-    monkeypatch.setattr(_LOADER_MODULE, lambda _resource: _VRLI_PROFILE_YAML)
+    monkeypatch.setattr(_LOADER_MODULE, lambda _entry: _VRLI_PROFILE_YAML)
     cat = ConnectorSpecCatalog(
         entries=(
             _profile_entry(

@@ -34,11 +34,13 @@ engine. PG-real coverage of the search + BM25 ranking lives in
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -47,7 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document
-from meho_backplane.kb.schemas import KB_KIND_ENTRY, KB_SOURCE, InvalidKbSlugError
+from meho_backplane.kb.schemas import KB_KIND_ENTRY, KB_SOURCE, InvalidKbSlugError, KbEntry
 from meho_backplane.kb.service import KbIngestRootError, KbService
 from meho_backplane.retrieval.indexer import index_document
 from meho_backplane.retrieval.retriever import RetrievalHit
@@ -800,6 +802,213 @@ async def test_create_entry_overwrite_preserves_creator_updates_mutator(
     assert second.body == "B body"
     assert second.metadata["created_by_sub"] == "user-a"  # preserved
     assert second.metadata["last_updated_by_sub"] == "user-b"  # bumped
+
+
+@pytest.mark.asyncio
+async def test_create_entry_own_entries_only_refuses_another_principals_slug(
+    stub_embedding: AsyncMock,
+) -> None:
+    """With ``own_entries_only``, a slug another principal created is refused unchanged."""
+    from meho_backplane.kb.schemas import KbEntryNotOwnedError
+
+    tenant_id = uuid.uuid4()
+    service = KbService()
+    await service.create_entry(
+        tenant_id=tenant_id, slug="shared", body="A body", actor_sub="user-a"
+    )
+
+    with pytest.raises(KbEntryNotOwnedError) as info:
+        await service.create_entry(
+            tenant_id=tenant_id,
+            slug="shared",
+            body="B body",
+            actor_sub="user-b",
+            own_entries_only=True,
+        )
+    assert info.value.slug == "shared"
+    assert info.value.created_by_sub == "user-a"
+    kept = await service.get_entry(tenant_id, "shared")
+    assert kept is not None
+    assert kept.body == "A body"
+    assert kept.metadata["last_updated_by_sub"] == "user-a"
+
+
+@pytest.mark.asyncio
+async def test_create_entry_own_entries_only_refuses_an_unattributed_slug(
+    stub_embedding: AsyncMock,
+) -> None:
+    """An entry with no ``created_by_sub`` (a curated or legacy row) is not the caller's."""
+    from meho_backplane.kb.schemas import KbEntryNotOwnedError
+
+    tenant_id = uuid.uuid4()
+    service = KbService()
+    await service.create_entry(tenant_id=tenant_id, slug="curated", body="curated body")
+
+    with pytest.raises(KbEntryNotOwnedError) as info:
+        await service.create_entry(
+            tenant_id=tenant_id,
+            slug="curated",
+            body="changed",
+            actor_sub="user-b",
+            own_entries_only=True,
+        )
+    assert info.value.created_by_sub is None
+    kept = await service.get_entry(tenant_id, "curated")
+    assert kept is not None
+    assert kept.body == "curated body"
+
+
+@pytest.mark.asyncio
+async def test_create_entry_own_entries_only_allows_create_and_own_overwrite(
+    stub_embedding: AsyncMock,
+) -> None:
+    """The limited caller can create a new slug and change its own entry."""
+    tenant_id = uuid.uuid4()
+    service = KbService()
+    first, created = await service.create_entry(
+        tenant_id=tenant_id, slug="mine", body="v1", actor_sub="user-a", own_entries_only=True
+    )
+    assert created is True
+    second, created_again = await service.create_entry(
+        tenant_id=tenant_id, slug="mine", body="v2", actor_sub="user-a", own_entries_only=True
+    )
+    assert created_again is False
+    assert second.id == first.id
+    assert second.body == "v2"
+
+
+async def _create_while_another_principal_creates_first(
+    service: KbService,
+    tenant_id: uuid.UUID,
+    *,
+    own_entries_only: bool,
+) -> tuple[KbEntry, bool]:
+    """Let ``user-b`` read ``raced`` as unused, then let ``user-a`` create it first.
+
+    The second writer is paused right after its first read of the entry
+    (no row yet) and resumed after the first writer committed. Its
+    stale write is then run again against the entry ``user-a`` made.
+    Returns what the resumed write returned.
+    """
+    from meho_backplane.kb import revisions
+
+    second_read_done = asyncio.Event()
+    release_second = asyncio.Event()
+    real_read = revisions._read_snapshot
+    reads = 0
+
+    async def gated_read(tenant: uuid.UUID, slug: str) -> Any:
+        nonlocal reads
+        reads += 1
+        snapshot = await real_read(tenant, slug)
+        if reads == 1:
+            second_read_done.set()
+            await asyncio.wait_for(release_second.wait(), timeout=10)
+        return snapshot
+
+    with patch.object(revisions, "_read_snapshot", gated_read):
+        second = asyncio.create_task(
+            service.create_entry(
+                tenant_id=tenant_id,
+                slug="raced",
+                body="B body",
+                actor_sub="user-b",
+                own_entries_only=own_entries_only,
+            )
+        )
+        await asyncio.wait_for(second_read_done.wait(), timeout=10)
+        _first, created_first = await service.create_entry(
+            tenant_id=tenant_id, slug="raced", body="A body", actor_sub="user-a"
+        )
+        assert created_first is True
+        release_second.set()
+        return await asyncio.wait_for(second, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_create_entry_own_entries_only_refuses_a_concurrent_create_by_another_principal(
+    stub_embedding: AsyncMock,
+) -> None:
+    """Two principals see the same new slug as unused; the one that loses is refused.
+
+    The limited writer read no entry, so its first try is a create.
+    After the other principal's create commits, the rerun reads that
+    entry, sees another creator, and raises. The first entry keeps its
+    body and its creator.
+    """
+    from meho_backplane.kb.schemas import KbEntryNotOwnedError
+
+    tenant_id = uuid.uuid4()
+    service = KbService()
+    with pytest.raises(KbEntryNotOwnedError) as info:
+        await _create_while_another_principal_creates_first(
+            service, tenant_id, own_entries_only=True
+        )
+    assert info.value.slug == "raced"
+    assert info.value.created_by_sub == "user-a"
+
+    kept = await service.get_entry(tenant_id, "raced")
+    assert kept is not None
+    assert kept.body == "A body"
+    assert kept.metadata["created_by_sub"] == "user-a"
+    assert kept.metadata["last_updated_by_sub"] == "user-a"
+    assert kept.revision_id is not None
+    revision = await service.get_revision(tenant_id, kept.id, kept.revision_id)
+    assert revision is not None
+    assert revision.revision_number == 1
+
+
+@pytest.mark.asyncio
+async def test_create_entry_concurrent_create_by_a_tenant_admin_is_an_overwrite(
+    stub_embedding: AsyncMock,
+) -> None:
+    """An unlimited writer that loses the race overwrites, and reports it as one.
+
+    ``created`` comes from the read of the try that went through, so
+    the route answers 200, not 201, and the first creator is preserved.
+    """
+    tenant_id = uuid.uuid4()
+    service = KbService()
+    entry, created = await _create_while_another_principal_creates_first(
+        service, tenant_id, own_entries_only=False
+    )
+    assert created is False
+    assert entry.body == "B body"
+    assert entry.metadata["created_by_sub"] == "user-a"
+    assert entry.metadata["last_updated_by_sub"] == "user-b"
+
+
+@pytest.mark.asyncio
+async def test_create_entry_own_entries_only_refuses_curation_metadata_keys(
+    stub_embedding: AsyncMock,
+) -> None:
+    """``source_kind`` in caller metadata is refused for the limited caller, before any write."""
+    from meho_backplane.kb.schemas import CURATION_METADATA_KEYS, KbReservedMetadataError
+
+    assert "source_kind" in CURATION_METADATA_KEYS
+    tenant_id = uuid.uuid4()
+    service = KbService()
+    with pytest.raises(KbReservedMetadataError) as info:
+        await service.create_entry(
+            tenant_id=tenant_id,
+            slug="looks-curated",
+            body="body",
+            metadata={"source_kind": "evoila-distilled", "author": "me"},
+            actor_sub="user-a",
+            own_entries_only=True,
+        )
+    assert info.value.keys == frozenset({"source_kind"})
+    assert await service.get_entry(tenant_id, "looks-curated") is None
+
+    # The unlimited caller (a tenant admin) may set the key.
+    entry, _ = await service.create_entry(
+        tenant_id=tenant_id,
+        slug="looks-curated",
+        body="body",
+        metadata={"source_kind": "evoila-distilled"},
+        actor_sub="admin",
+    )
+    assert entry.metadata["source_kind"] == "evoila-distilled"
 
 
 @pytest.mark.asyncio

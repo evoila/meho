@@ -1512,13 +1512,14 @@ class Settings(BaseModel):
     gsm_wif_subject_token_type: str = Field(
         default="urn:ietf:params:oauth:token-type:jwt", min_length=1
     )
-    # Google Cloud projects whose Secret Manager secrets an operation may
-    # name in a parameter (for example ``password_secret_ref:
-    # gsm:<project>/<secret>``). Comma-separated project ids, whitespace
-    # ignored. Empty (the default) refuses every ``gsm:`` secret named in a
-    # parameter, and on a ``credentialBackend=gsm`` install every schemeless
-    # one too. A target's own ``secret_ref`` is not affected. Read through
-    # :attr:`gsm_param_allowed_project_set`. Set via
+    # Google Cloud projects whose Secret Manager secrets MEHO may read: a
+    # target's own ``gsm:<project>/<secret>`` login, and a ``gsm:`` ref an
+    # operation names in a parameter (for example ``password_secret_ref``).
+    # Comma-separated project ids, whitespace ignored. Empty (the default)
+    # refuses every ``gsm:`` secret, and on a ``credentialBackend=gsm``
+    # install every schemeless one too. A target whose login names another
+    # project is refused when it is saved and when its login is read. Read
+    # through :attr:`gsm_param_allowed_project_set`. Set via
     # ``GSM_PARAM_ALLOWED_PROJECTS``.
     gsm_param_allowed_projects: str = Field(default="")
     database_url: str = Field(min_length=1)

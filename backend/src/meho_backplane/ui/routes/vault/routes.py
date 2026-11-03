@@ -16,7 +16,9 @@ Why a session BFF and not the Bearer ``/api/v1/operations/call`` route
 The REST operation routes (``api/v1/operations.py``) are Bearer-gated
 over a verified JWT; a browser carrying only the BFF session cookie
 cannot authenticate them. So this module adds ``/ui/vault`` sub-routes
-that are ``require_ui_session``-gated and call the operation meta-tool
+that are ``require_ui_operator``-gated (``operator`` or ``tenant_admin``;
+``read_only`` gets ``403 operator_required``, the same floor the REST
+``/api/v1/operations/call`` route has) and call the operation meta-tool
 :func:`~meho_backplane.operations.meta_tools.call_operation` IN-PROCESS
 -- the exact pattern ``ui/routes/operations/routes.py`` uses for its
 dispatch (Run) surface. ``call_operation`` is complete and tested; no
@@ -123,7 +125,7 @@ from meho_backplane.connectors.vault.tenant_scope import rendered_tenant_prefix
 from meho_backplane.operations.ingest.list_connectors import list_ingested_connectors
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.settings import get_settings
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
@@ -168,8 +170,11 @@ _MAX_PATH_LENGTH: Final[int] = 1024
 _MAX_TARGET_LENGTH: Final[int] = 256
 
 #: Module-level ``Depends`` closure -- built once (rather than inline) to
-#: satisfy ruff B008, matching the operations / approvals routers.
-_require_session = Depends(require_ui_session)
+#: satisfy ruff B008, matching the operations / approvals routers. Every
+#: vault console page (index, list, read, versions, status, auth and the
+#: write confirm modals) declares the ``operator`` floor: a ``read_only``
+#: session gets ``403 operator_required`` before any dispatch.
+_require_operator = Depends(require_ui_operator)
 
 
 async def _resolve_operator(session: UISessionContext) -> Operator:
@@ -279,7 +284,7 @@ def build_vault_router() -> APIRouter:
     @router.get("/ui/vault/list", response_class=HTMLResponse)
     async def vault_list(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         target: str = Query(default="", max_length=_MAX_TARGET_LENGTH),
         mount: str = Query(default=_DEFAULT_MOUNT, max_length=_MAX_MOUNT_LENGTH),
         path: str = Query(default="", max_length=_MAX_PATH_LENGTH),
@@ -296,7 +301,7 @@ def build_vault_router() -> APIRouter:
     @router.get("/ui/vault/read", response_class=HTMLResponse)
     async def vault_read(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         target: str = Query(default="", max_length=_MAX_TARGET_LENGTH),
         mount: str = Query(default=_DEFAULT_MOUNT, max_length=_MAX_MOUNT_LENGTH),
         path: str = Query(default="", max_length=_MAX_PATH_LENGTH),
@@ -311,7 +316,7 @@ def build_vault_router() -> APIRouter:
     @router.get("/ui/vault/versions", response_class=HTMLResponse)
     async def vault_versions(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         target: str = Query(default="", max_length=_MAX_TARGET_LENGTH),
         mount: str = Query(default=_DEFAULT_MOUNT, max_length=_MAX_MOUNT_LENGTH),
         path: str = Query(default="", max_length=_MAX_PATH_LENGTH),
@@ -325,7 +330,7 @@ def build_vault_router() -> APIRouter:
     @router.get("/ui/vault", response_class=HTMLResponse)
     async def vault_index(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
     ) -> HTMLResponse:
         """Render the full-page KV browser: pickers + an empty key list."""
         return await _render_index(request, session)

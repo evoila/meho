@@ -1504,6 +1504,8 @@ def _enable_wif(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GSM_WIF_AUDIENCE", _WIF_AUDIENCE)
     monkeypatch.setenv("GSM_WIF_POOL_ID", "meho-pool")
     monkeypatch.setenv("GSM_WIF_PROVIDER_ID", "keycloak")
+    # The seeded targets log in from gsm:my-project/..., which must be allowed.
+    monkeypatch.setenv("GSM_PARAM_ALLOWED_PROJECTS", "my-project")
     get_settings.cache_clear()
 
 

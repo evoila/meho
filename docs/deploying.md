@@ -197,10 +197,19 @@ are left **blank** — the schema requires them only when the backend is
 (`vault.address` became optional on the gsm backend in #2277). MEHO runs
 under a GKE Workload Identity SA (no SA JSON keys);
 `config.gsmImpersonateSa` optionally impersonates a dedicated reader SA.
-Because the Vault tenant-scope guard does not apply to the GSM backend, a
-gsm `secret_ref` registers with **zero** `extraEnv` workaround (contrast
-the Vault path in the [version-specific notes](#version-specific-upgrade-notes)
-below — #2585). Full worked example:
+The Vault tenant-scope guard does not apply to the GSM backend, so a
+gsm `secret_ref` needs no `VAULT_KV_TENANT_SCOPE_PREFIX=""` `extraEnv`
+workaround (contrast the Vault path in the
+[version-specific notes](#version-specific-upgrade-notes) below — #2585).
+Instead, list the Google Cloud projects MEHO may read secrets from in
+`GSM_PARAM_ALLOWED_PROJECTS` (comma-separated project ids, through
+`extraEnv`): a target's `gsm:` login and a `gsm:` ref in an operation
+parameter are read only from a listed project. The list is empty by
+default, so without it every `gsm:` target is refused at registration and
+every stored one fails dispatch with
+`connector_error: GcpSecretManagerReadError`. The readiness probe's own
+secret (`gsm:<gsmProject>/meho-test-federation`) is not on this rule.
+Full worked example:
 [`../deploy/values-examples/values-gsm-example.yaml`](../deploy/values-examples/values-gsm-example.yaml).
 
 ```bash

@@ -29,7 +29,10 @@ Login
    runs the call once more; the next call logs in again.
 
 The read bodies live in :mod:`meho_backplane.connectors.freeipa.reads`, the
-write bodies in :mod:`meho_backplane.connectors.freeipa.writes`.
+host write bodies in :mod:`meho_backplane.connectors.freeipa.writes`. The
+sudo, access rule and password policy writes are methods of
+:class:`~meho_backplane.connectors.freeipa.access_writes.FreeipaAccessWriteOps`,
+which the connector inherits.
 ``docs/codebase/connectors-freeipa.md`` describes the whole flow.
 """
 
@@ -57,6 +60,7 @@ from meho_backplane.connectors._shared.vcf_auth import (
     session_establish_auth_error,
 )
 from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.freeipa.access_writes import FreeipaAccessWriteOps
 from meho_backplane.connectors.freeipa.rpc import (
     JSON_PATH,
     LOGIN_PATH,
@@ -129,8 +133,11 @@ def referer_for(target: FreeipaTargetLike) -> str:
     return f"https://{server_name}/ipa"
 
 
-class FreeipaConnector(HttpConnector):
+class FreeipaConnector(FreeipaAccessWriteOps, HttpConnector):
     """FreeIPA JSON-RPC connector: password login, session cookie, ``Referer``.
+
+    The handler methods of the sudo, access rule and password policy writes
+    come from :class:`FreeipaAccessWriteOps`.
 
     Registered as ``("freeipa", "4.x", "freeipa-jsonrpc")``, so the connector
     ID is ``freeipa-jsonrpc-4.x``, plus the ``("freeipa", "", "")`` row that

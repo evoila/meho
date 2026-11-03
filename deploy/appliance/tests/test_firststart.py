@@ -73,6 +73,7 @@ class FirstStartTests(FirstStartTestCase):
             "timedatectl show --property=NTPSynchronized --value",
             "install.sh --from-disk --hostname meho.example.com",
             "update-grub",
+            "aideinit --yes --force",
         ]
         calls = self.vm.calls()
         self.assertEqual(order, [call for call in calls if call in order])

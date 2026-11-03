@@ -508,6 +508,22 @@
           "type": "string",
           "minLength": 1,
           "description": "Kubernetes Secret name holding the DATABASE_URL value at key `url` — required."
+        },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The login of the running backplane, apart from the owner login in `credentialsSecret` that runs the migrations. Both keys empty = one login for everything.",
+          "properties": {
+            "role": {
+              "type": "string",
+              "pattern": "^([a-z_][a-z0-9_]{0,62})?$",
+              "description": "Name of the runtime role: a lower-case PostgreSQL role name. The migration grants it its rights (`DATABASE_RUNTIME_ROLE`)."
+            },
+            "credentialsSecret": {
+              "type": "string",
+              "description": "Kubernetes Secret holding the runtime login's DSN at key `url`. With your own PostgreSQL, `role` and this key go together. With the built-in PostgreSQL, leave it empty: the install makes `<release>-core-postgres-meho-app`, and the PostgreSQL pod reads only that Secret."
+            }
+          }
         }
       }
     },
@@ -1710,6 +1726,102 @@
     }
   },
   "allOf": [
+    {
+      "description": "A runtime login needs both keys: `postgres.runtime.credentialsSecret` names the Secret, `postgres.runtime.role` the role the migration grants. A Secret without a role would give the running backplane a login with no rights. The next rule checks the other direction.",
+      "if": {
+        "properties": {
+          "postgres": {
+            "properties": {
+              "runtime": {
+                "properties": { "credentialsSecret": { "minLength": 1 } },
+                "required": ["credentialsSecret"]
+              }
+            },
+            "required": ["runtime"]
+          }
+        },
+        "required": ["postgres"]
+      },
+      "then": {
+        "properties": {
+          "postgres": {
+            "properties": {
+              "runtime": {
+                "properties": { "role": { "minLength": 1 } },
+                "required": ["role"]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "With your own PostgreSQL a runtime role needs its Secret too: `postgres.runtime.role` without `postgres.runtime.credentialsSecret` would make the migration grant rights to a login the running backplane never uses, and the backplane would keep the owner login. With the built-in PostgreSQL the install makes the Secret, so `role: meho_app` alone is fine there.",
+      "if": {
+        "allOf": [
+          {
+            "not": {
+              "properties": {
+                "corePostgres": {
+                  "properties": { "enabled": { "const": true } },
+                  "required": ["enabled"]
+                }
+              },
+              "required": ["corePostgres"]
+            }
+          },
+          {
+            "properties": {
+              "postgres": {
+                "properties": {
+                  "runtime": {
+                    "properties": { "role": { "minLength": 1 } },
+                    "required": ["role"]
+                  }
+                },
+                "required": ["runtime"]
+              }
+            },
+            "required": ["postgres"]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "postgres": {
+            "properties": {
+              "runtime": {
+                "properties": { "credentialsSecret": { "minLength": 1 } },
+                "required": ["credentialsSecret"]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "With the built-in PostgreSQL the runtime role is `meho_app`, made by the install together with the Secret `<release>-core-postgres-meho-app`. `postgres.runtime.role` stays empty or `meho_app` there; another name would make the migration wait for a role the install never creates. `postgres.runtime.credentialsSecret` stays empty or names that Secret; the render checks it (`meho.postgres.runtimeSecretName`), because a schema cannot know the release name.",
+      "if": {
+        "properties": {
+          "corePostgres": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["corePostgres"]
+      },
+      "then": {
+        "properties": {
+          "postgres": {
+            "properties": {
+              "runtime": {
+                "properties": { "role": { "enum": ["", "meho_app"] } }
+              }
+            }
+          }
+        }
+      }
+    },
     {
       "description": "When `config.credentialBackend` is `vault` (the default), the deployment reads credentials + the health federation proof from Vault, so `vault.address` must be a non-empty `uri`. A `gsm` install skips this and may leave `vault.address` blank.",
       "if": {

@@ -76,6 +76,7 @@ _CORE_NAMES = [
     for kind in (
         "postgres-superuser",
         "postgres-meho",
+        "postgres-meho-app",
         "postgres-keycloak",
         "keycloak-bootstrap",
         "keycloak-admin",
@@ -192,7 +193,7 @@ def test_role_has_no_operator_rule_when_nothing_is_named() -> None:
     assert ("get",) not in verbs
 
 
-def test_postgres_plan_makes_the_three_database_secrets() -> None:
+def test_postgres_plan_makes_the_four_database_secrets() -> None:
     plan = _plan(
         _render(
             "--set",
@@ -205,12 +206,14 @@ def test_postgres_plan_makes_the_three_database_secrets() -> None:
     assert made == {
         f"{_RELEASE}-core-postgres-superuser": "postgres-superuser",
         f"{_RELEASE}-core-postgres-meho": "postgres-meho",
+        f"{_RELEASE}-core-postgres-meho-app": "postgres-meho-app",
         f"{_RELEASE}-core-postgres-keycloak": "postgres-keycloak",
         f"{_RELEASE}-core-approval-handoff": "approval-handoff",
         f"{_RELEASE}-core-broadcast-auth": "broadcast-auth",
     }
-    meho = next(e for e in plan.make if e.kind == "postgres-meho")
-    assert meho.host == f"{_RELEASE}-postgres"
+    for kind in ("postgres-meho", "postgres-meho-app"):
+        entry = next(e for e in plan.make if e.kind == kind)
+        assert entry.host == f"{_RELEASE}-postgres"
     assert plan.check == ()
 
 
@@ -227,6 +230,7 @@ def test_keycloak_plan_makes_the_bootstrap_and_three_client_secrets() -> None:
     assert set(made.values()) == {
         "postgres-superuser",
         "postgres-meho",
+        "postgres-meho-app",
         "postgres-keycloak",
         "keycloak-bootstrap",
         "keycloak-admin",

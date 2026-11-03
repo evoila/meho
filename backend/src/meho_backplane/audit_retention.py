@@ -67,7 +67,9 @@ byte. This sweeper's statement is of that kind. The trigger does not know
 which code runs the statement, so any role with ``UPDATE`` on ``audit_log``
 can do the same on any row; it still cannot change anything else or delete a
 row, unless it also has the ``TRIGGER`` or ``TRUNCATE`` right on the table
-(treat both like ownership; see migration ``0103``). If this statement ever
+(treat both like ownership; see migration ``0103``). The runtime role of the
+running backplane (:mod:`meho_backplane.db.runtime_role`) has ``UPDATE`` on
+the ``raw_payload`` column only, which is all this sweeper needs. If this statement ever
 starts to change another column, the trigger rejects it and every tick fails
 with ``audit_raw_payload_retention_tick_failed``. The Postgres tests in
 ``tests/migrations/test_migration_0103_audit_log_raw_payload_ageoff.py``

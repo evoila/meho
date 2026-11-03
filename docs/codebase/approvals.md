@@ -649,10 +649,11 @@ model, or resume endpoint):
      stamped `safety_level` counts as lower-risk.
 
    **How to audit a self-approval.** The `approval.decision` audit row
-   carries `self_approved` (true when requester and approver are the same
-   `sub`) and `approval_rule`: `sa_operator_self_approval`,
-   `break_glass_self_approval`, `sa_operator_or_admin` or `reviewer`.
-   The `approval.approved` add-on step event carries the same two fields.
+   carries `reviewed_by` (the approver's `sub`), `self_approved` (true
+   when requester and approver are the same `sub`) and `approval_rule`:
+   `sa_operator_self_approval`, `break_glass_self_approval`,
+   `sa_operator_or_admin` or `reviewer`. The `approval.approved` add-on
+   step event carries the same three fields.
    A break-glass self-approval also logs the WARNING event
    `approval_self_approval_break_glass` (with `approval_request_id`,
    `op_id`, `operator_sub`, `tenant_id`). Whether the deploy currently

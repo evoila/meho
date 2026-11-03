@@ -1704,8 +1704,10 @@ async def approve_request(
 
     * Flips the row to ``approved``, stamps ``reviewed_by`` + ``decided_at``.
     * Writes a synchronous "decision" audit row in the same transaction.
-      Its payload carries ``self_approved`` and ``approval_rule`` (the
-      :class:`ApprovalRule` that allowed the approval).
+      Its payload carries ``reviewed_by``, ``self_approved`` and
+      ``approval_rule`` (the :class:`ApprovalRule` that allowed the
+      approval). The ``approval.approved`` step event carries the same
+      three fields.
 
     The **re-dispatch** (executing the approved op) happens *after* the
     caller commits this transaction. The ``POST /api/v1/approvals/{id}/
@@ -3633,9 +3635,10 @@ async def record_approval_step_event(
     No Broadcast event is published (#3758). The stored approval row is
     what waiters, the approvals bell and the console read.
 
-    An ``approved`` event also carries ``self_approved`` and, when
-    :func:`approve_request` set it, ``approval_rule`` (#3328) -- the same
-    fields as the ``approval.decision`` audit row.
+    An ``approved`` event also carries ``reviewed_by`` (who approved),
+    ``self_approved`` and, when :func:`approve_request` set it,
+    ``approval_rule`` (#3328) -- the same fields as the
+    ``approval.decision`` audit row.
 
     A ``pending`` event of a request that shares its ``work_ref`` with
     other pending requests also carries ``chain_step`` / ``chain_total``
@@ -3651,6 +3654,7 @@ async def record_approval_step_event(
         "work_ref": request.work_ref,
     }
     if decision == "approved":
+        payload["reviewed_by"] = request.reviewed_by
         payload["self_approved"] = request.reviewed_by == request.principal_sub
         rule = getattr(request, "_approval_rule", None)
         if rule is not None:

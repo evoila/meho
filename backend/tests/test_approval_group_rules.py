@@ -160,6 +160,9 @@ async def test_the_step_event_of_a_self_approval_carries_the_same_fields() -> No
 
     payload = record.await_args.kwargs["payload"]
     assert record.await_args.kwargs["event_kind"] == "approval.approved"
+    audit_payload = await _decision_payload(request_id)
+    assert payload["reviewed_by"] == _REQUESTER
+    assert payload["reviewed_by"] == audit_payload["reviewed_by"]
     assert payload["self_approved"] is True
     assert payload["approval_rule"] == "sa_operator_self_approval"
 

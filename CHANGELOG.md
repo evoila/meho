@@ -94,21 +94,6 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Steps after the upgrade
-- Optional, existing Keycloak realm: the device login of `meho login`
-  now sends PKCE (`S256`). Once every person who logs in runs this CLI
-  version or later, you may set the PKCE method of the login client
-  (`meho-cli` by default) to required (`S256`), for example with the
-  operation `keycloak.client.update`. Older CLI versions send no PKCE,
-  and Keycloak refuses their `meho login` with "Missing parameter:
-  code_challenge_method". The built-in Keycloak realm and
-  `meho admin keycloak bootstrap-clients` keep the method empty
-  (#5624).
-
-### Changed
-- CLI: the device login of `meho login` sends PKCE (`S256`), so a realm
-  may require PKCE on the login client (#5624).
-
 ## [0.43.0] - 2026-11-02
 
 **This is the last release with the VMware connectors built into the

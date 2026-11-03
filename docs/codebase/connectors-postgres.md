@@ -14,10 +14,12 @@ under Initiative #2228). It establishes the DB-connector shape the mongodb
 sibling (#2237) reuses for a different wire driver.
 
 The connector is **read-only, doubly enforced**: every session is opened with
-`default_transaction_read_only=on` (server-enforced), and the free-form
-`postgres.query` op additionally runs its statement through a first-keyword
-allowlist before it reaches the wire. Auth is **optional** — a trust-auth
-instance (no `secret_ref`) connects with no password.
+`default_transaction_read_only=on` and a `statement_timeout` (server-enforced),
+and the free-form `postgres.query` op additionally runs its statement through a
+first-keyword allowlist and a deny list of server admin functions before it
+reaches the wire, and refuses to run as a superuser role unless the target
+allows it. Auth is **optional** — a trust-auth instance (no `secret_ref`)
+connects with no password.
 
 Source: `backend/src/meho_backplane/connectors/postgres/`.
 
@@ -33,8 +35,14 @@ Source: `backend/src/meho_backplane/connectors/postgres/`.
   metadata. `PG_OPS` is the tuple the registrar walks;
   `PG_WHEN_TO_USE_BY_GROUP` supplies the per-group `when_to_use` blurb.
 - **`connect_read_only` / `assert_read_only_sql` / `PostgresReadOnlyError`**
-  (`session.py`) — the wire-session factory (server-enforced read-only + the
-  optional-auth branch) and the pure first-keyword gate + its violation type.
+  (`session.py`) — the wire-session factory (server-enforced read-only +
+  statement timeout + the optional-auth branch) and the pure first-keyword
+  gate + its violation type.
+- **`assert_no_admin_functions` / `assert_not_superuser` /
+  `PostgresSuperuserError`** (`query_guard.py`) — the two extra guards of
+  `postgres.query`: the deny list of server admin functions
+  (`DENIED_FUNCTIONS` + `DENIED_FUNCTION_PREFIXES`) and the superuser refusal
+  with its target flag `extras["allow_superuser_query"]`.
 - **`queries.py`** — the SQL text, row-shaping, and the `_jsonable` normaliser
   that coerces asyncpg's rich types (`datetime`, `Decimal`, `UUID`, `inet`,
   `bytes`) to JSON-serialisable primitives.
@@ -72,7 +80,7 @@ Ops:
 | `postgres.activity` | `pg_stat_activity` | sessions; **query text omitted** (may hold literal secrets) |
 | `postgres.settings` | `pg_settings` | curated set by default; `names` filter overrides |
 | `postgres.replication` | `pg_stat_replication` + `pg_stat_wal_receiver` + `pg_is_in_recovery()` / `pg_last_xact_replay_timestamp()` | physical streaming replication health + standby lag; symmetric (standbys on the primary, `wal_receiver` on the standby); LSNs cast to canonical `X/Y` text, `*_lag` as float seconds; **`conninfo` omitted** (holds the primary DSN) |
-| `postgres.query` | any read-only statement | first-keyword allowlisted + server read-only; row-capped |
+| `postgres.query` | any read-only statement | first-keyword allowlisted + admin functions denied + no superuser role + server read-only; row-capped |
 
 Schemas/tables/indexes/query accept an optional `database` param (catalog stats
 are per-database); tables/indexes accept an optional `schema` filter.
@@ -96,6 +104,50 @@ are per-database); tables/indexes accept an optional `schema` filter.
 The two defences are independent: the allowlist is a fast, transport-free
 filter; the session flag is the authoritative backstop for the whole session
 (not just the free-form op).
+
+### Statement timeout
+
+Every session also sets `statement_timeout` as a startup parameter
+(`DEFAULT_STATEMENT_TIMEOUT_MS`, 30 seconds, in `session.py`). PostgreSQL ends
+a statement that runs longer, so one slow query cannot hold a backend open
+for the curated ops or for `postgres.query`. The value is fixed; a target
+cannot raise it.
+
+### Extra guards of `postgres.query` (`query_guard.py`)
+
+A read-only transaction stops writes to tables, but PostgreSQL still allows
+some server admin functions inside it, and what they do depends on the login
+role's rights. So the free-form op adds two checks:
+
+1. **Admin function deny list** — `assert_no_admin_functions` runs after the
+   first-keyword gate and before a connection is opened. It lower-cases every
+   identifier-like word in the raw statement text and refuses the statement
+   when a word is in `DENIED_FUNCTIONS` (server signalling such as
+   `pg_terminate_backend` / `pg_reload_conf`, `set_config`, server file access
+   such as `pg_read_file` / `lo_export`, backup and WAL control such as
+   `pg_switch_wal`, recovery control such as `pg_promote`, replication slot
+   and origin functions, statistics resets, `pg_notify`) or starts with a
+   prefix in `DENIED_FUNCTION_PREFIXES` (`pg_ls_`, `pg_logical_slot_`,
+   `pg_stat_reset`, `pg_sleep`, `dblink`, `postgres_fdw_`). The names are
+   pinned to the PostgreSQL 16 "System Administration Functions" page. The
+   scan does not strip comments or string literals first, so an unclosed
+   quote cannot hide a later call; a false hit (a column named `pg_sleep`)
+   only gives a clear refusal. Unicode-escaped identifiers (`U&"..."`) are
+   refused as a whole. The prefixes cover no catalog view or role name
+   (`pg_file_settings`, `pg_replication_origin_status`, `pg_read_all_data`
+   stay allowed).
+2. **No superuser role** — `assert_not_superuser` runs on the open connection
+   before the statement. It reads `pg_roles.rolsuper` for `current_user` and
+   lets the query run only on a clear `false`; a `true`, a missing row or an
+   odd value refuses with `PostgresSuperuserError`. A target that sets
+   `extras["allow_superuser_query"]` to the boolean `true` skips the check
+   (an operator's explicit choice for a lab or dev instance). The curated
+   ops are not affected: their SQL is fixed catalog reads, so they still run
+   as any role, including the trust-auth default `postgres`.
+
+Both errors are `ValueError` subclasses, so the dispatcher renders the
+message under `connector_error` and the caller sees which name or role was
+refused.
 
 ### Auth (optional)
 
@@ -146,6 +198,10 @@ operator-less probe path resolves here), `tcp_unreachable` (`OSError`), and
   (<https://www.postgresql.org/docs/13/monitoring-stats.html>). PostgreSQL 12 is
   EOL (2024-11-21), so `supported_version_range` starts at `13` rather than
   carrying a version-branched wal_receiver query.
+- **A user-defined function is not inspected.** The deny list matches names
+  in the statement text. A function a database owner wrote that calls an
+  admin function inside is not seen; what it can do is bounded by the login
+  role's rights, which is why `postgres.query` refuses a superuser role.
 - **TLS is not yet wired.** `connect_read_only` passes no `ssl` argument, so it
   connects unencrypted (fine for a trust-auth port-forward or an in-cluster
   instance). A `verify_tls` / SNI-aware SSL path is a follow-up when a
@@ -164,8 +220,12 @@ operator-less probe path resolves here), `tcp_unreachable` (`OSError`), and
   `pg_stat_user_indexes` / `pg_stat_replication` / `pg_stat_wal_receiver`):
   <https://www.postgresql.org/docs/current/monitoring-stats.html>
 - Recovery information functions (`pg_is_in_recovery` /
-  `pg_last_xact_replay_timestamp`, NULL outside recovery):
-  <https://www.postgresql.org/docs/current/functions-admin.html>
+  `pg_last_xact_replay_timestamp`, NULL outside recovery) and the admin
+  function families on the deny list:
+  <https://www.postgresql.org/docs/16/functions-admin.html>
+- `statement_timeout`:
+  <https://www.postgresql.org/docs/16/runtime-config-client.html>
+- `pg_roles.rolsuper`: <https://www.postgresql.org/docs/16/view-pg-roles.html>
 - Sibling read-only connector: `docs/codebase/connectors-loki.md`.
 - Task #2236; Initiative #2228 (data-tier + hypervisor connector coverage);
   establishes the DB-connector shape for mongodb (#2237).

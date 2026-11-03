@@ -19,8 +19,9 @@ uses, without reaching for ``psql`` against ``:5432``:
 
 Every op is ``safety_level="safe"`` + ``requires_approval=False`` and carries a
 ``read-only`` tag -- the connector registers no write/mutating op, and the
-free-form ``postgres.query`` is doubly gated (first-keyword allowlist +
-server-enforced ``default_transaction_read_only``). The dataclass + tuple shape
+free-form ``postgres.query`` is gated by a first-keyword allowlist, a deny
+list of server admin functions, a refusal to run as a superuser role, and the
+server-enforced ``default_transaction_read_only`` session. The dataclass + tuple shape
 mirrors the loki (#2235) and bind9 (#367) siblings so the registration walk
 reads identically.
 
@@ -415,9 +416,15 @@ _QUERY = PostgresOp(
         "of SELECT / SHOW / EXPLAIN / WITH / TABLE / VALUES -- it is "
         "allowlisted before execution -- and the session is server-enforced "
         "read-only (default_transaction_read_only=on), so a mutating statement "
-        "is refused twice over. Results are capped at 'max_rows' (default 1000) "
-        "with a 'truncated' flag. Pass 'database' to target a specific "
-        "database. safety_level=safe, read-only."
+        "is refused twice over. A statement that names a server admin, file, "
+        "backup, replication, wait or remote-connection function (for example "
+        "pg_terminate_backend, pg_reload_conf, pg_read_file, dblink, pg_sleep) "
+        "is refused before it reaches the server. The query runs only when the "
+        "login role is not a superuser, unless the target sets "
+        "extras.allow_superuser_query=true. Every statement has a 30 s server "
+        "timeout. Results are capped at 'max_rows' (default 1000) with a "
+        "'truncated' flag. Pass 'database' to target a specific database. "
+        "safety_level=safe, read-only."
     ),
     parameter_schema={
         "type": "object",
@@ -458,8 +465,11 @@ _QUERY = PostgresOp(
     llm_instructions={
         "when_to_use": (
             "Call only when no curated op fits. The statement must be a "
-            "read-only SELECT/SHOW/EXPLAIN/WITH/TABLE/VALUES; writes are "
-            "rejected before execution and by the server."
+            "read-only SELECT/SHOW/EXPLAIN/WITH/TABLE/VALUES; writes and calls "
+            "of server admin functions are rejected before execution, and the "
+            "server enforces read-only. The query is refused when the login "
+            "role is a superuser and the target does not allow it; use "
+            "postgres.activity / postgres.settings for those reads instead."
         ),
         "parameter_hints": {
             "sql": "A read-only SQL statement.",

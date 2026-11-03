@@ -326,7 +326,7 @@ async def test_decide_by_an_operator_is_refused_and_writes_nothing(
     _registered_topology_ops: None,
     _seeded_tenant: None,
 ) -> None:
-    """The approved write runs under the decider, whose role must be ``tenant_admin``."""
+    """The topology writes need ``tenant_admin``, so the decider needs it too."""
     await _seed_edge_endpoints()
     agent = _make_operator("agent:proposer", principal_kind=PrincipalKind.AGENT)
     parked = await _dispatch_topology(agent, TOPOLOGY_ANNOTATE_OP_ID, _ANNOTATE_PARAMS)
@@ -335,8 +335,12 @@ async def test_decide_by_an_operator_is_refused_and_writes_nothing(
 
     response = _decide(request_id, decider_sub="operator:decider", role=TenantRole.OPERATOR)
 
-    assert response.status_code == 200, response.text
-    assert response.json()["dispatch_status"] == "denied"
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"].startswith("role_floor_required: ")
+    assert "tenant_admin" in response.json()["detail"]
+    (row,) = await _fetch_approval_rows()
+    assert row.status == ApprovalRequestStatus.PENDING.value
+    assert row.reviewed_by is None
     assert await _fetch_edges() == []
 
 

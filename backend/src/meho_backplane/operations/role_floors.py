@@ -13,10 +13,13 @@ there as well:
 * in the policy gate (``_validate.py``), for a person whose call would
   otherwise run at once or wait for approval. The call is denied and the
   audit row says ``denied``. ``preview_operation`` shows the same verdict.
-* on the approve-and-run path (``dispatcher.py``), for the person who
-  approved and runs the call from an approvals surface. An agent's own
-  resume of an approved call (an agent principal, or a hosted agent run)
-  is not checked: the person's approval is the authorization, as before.
+* at the approval decision (``approval_queue.py``), for the person who
+  approves a parked call of an agent or a service login. An approver
+  below the floor is refused, the request stays pending, and nothing is
+  written. So every resume of an approved call, by the person from an
+  approvals surface or by the agent itself, runs a call that a person
+  with the role approved. The approve-and-run path (``dispatcher.py``)
+  checks the person who runs it from an approvals surface once more.
 
 The floor applies to people. An agent login parks or is refused by the
 policy gate as before, and a service login parks or runs under a grant a

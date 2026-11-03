@@ -15,8 +15,11 @@ checks it (:mod:`meho_backplane.operations.role_floors`).
   audit row says ``denied``. The preview says the same.
 * **A person at the floor** -- runs at once, as before.
 * **An agent** -- waits for approval, as before. A service login waits too.
-* **After approval** -- the approver's role counts when a person runs
-  the approved call: an ``operator`` approver is refused, a
+* **At the decision** -- an ``operator`` cannot approve an agent's parked
+  call; the request stays pending and nothing is written. A
+  ``tenant_admin`` approves it, and the agent's own resume then runs.
+* **After approval** -- the approver's role counts again when a person
+  runs the approved call: an ``operator`` approver is refused, a
   ``tenant_admin`` approver runs the call. An agent's own resume runs:
   the person's approval is the authorization.
 * **The topology writes** -- the same rule on all five.
@@ -57,6 +60,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, AuditLog, GraphNode, Tenant
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations.approval_queue import ApprovalRoleFloorError, approve_request
 from meho_backplane.operations.meta_tools import preview_operation
 from meho_backplane.operations.role_floors import role_floor_denial, role_floor_for
 from meho_backplane.settings import get_settings
@@ -126,7 +130,11 @@ async def _registered_ops() -> AsyncIterator[None]:
 
 
 def _person(
-    role: TenantRole, *, kind: PrincipalKind = PrincipalKind.USER, sub: str = "p-1"
+    role: TenantRole,
+    *,
+    kind: PrincipalKind = PrincipalKind.USER,
+    sub: str = "p-1",
+    approver: bool = False,
 ) -> Operator:
     return Operator(
         sub=sub,
@@ -136,6 +144,7 @@ def _person(
         tenant_id=_TENANT_ID,
         tenant_role=role,
         principal_kind=kind,
+        approver=approver,
     )
 
 
@@ -166,6 +175,24 @@ async def _audit_rows(op_id: str) -> list[AuditLog]:
     async with get_sessionmaker()() as session:
         rows = (await session.execute(select(AuditLog))).scalars().all()
     return [row for row in rows if (row.payload or {}).get("op_id") == op_id]
+
+
+async def _decision_audit_rows() -> list[AuditLog]:
+    async with get_sessionmaker()() as session:
+        rows = await session.execute(select(AuditLog).where(AuditLog.path == "approval.decision"))
+        return list(rows.scalars().all())
+
+
+async def _park_as_agent(agent: Operator) -> uuid.UUID:
+    parked = await _register(agent)
+    assert parked.status == "awaiting_approval", parked
+    return uuid.UUID(parked.extras["approval_request_id"])
+
+
+async def _approve(request_id: uuid.UUID, approver: Operator) -> None:
+    async with get_sessionmaker()() as session:
+        await approve_request(session, request_id, operator=approver, params=dict(_REGISTER_PARAMS))
+        await session.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +283,41 @@ async def test_a_service_login_still_waits_for_approval(_registered_ops: None) -
     assert result.status == "awaiting_approval", result
     assert len(await _approval_rows()) == 1
     assert await _target_rows() == []
+
+
+@pytest.mark.parametrize("role", [TenantRole.OPERATOR, TenantRole.READ_ONLY])
+async def test_a_person_below_the_floor_cannot_approve_the_parked_call(
+    _registered_ops: None, role: TenantRole
+) -> None:
+    """The approval is the authorization for every resume, so the approver needs the role."""
+    agent = _person(TenantRole.OPERATOR, kind=PrincipalKind.AGENT, sub="agent:a")
+    request_id = await _park_as_agent(agent)
+    # ``approver=True`` lets a ``read_only`` person decide requests at all.
+    approver = _person(role, sub="approver", approver=True)
+
+    with pytest.raises(ApprovalRoleFloorError, match="tenant_admin"):
+        await _approve(request_id, approver)
+
+    (row,) = await _approval_rows()
+    assert row.status == "pending"
+    assert row.reviewed_by is None
+    assert await _decision_audit_rows() == []
+    assert await _target_rows() == []
+
+
+async def test_a_tenant_admin_approves_and_the_agent_resume_runs(_registered_ops: None) -> None:
+    """A real approval by a ``tenant_admin``, then the agent's own resume of the call."""
+    agent = _person(TenantRole.OPERATOR, kind=PrincipalKind.AGENT, sub="agent:a")
+    request_id = await _park_as_agent(agent)
+
+    await _approve(request_id, _person(TenantRole.TENANT_ADMIN, sub="approver"))
+    result = await _register(agent, approved=True)
+
+    assert result.status == "ok", result
+    (row,) = await _approval_rows()
+    assert row.status == "approved"
+    assert row.reviewed_by == "approver"
+    assert len(await _target_rows()) == 1
 
 
 @pytest.mark.parametrize("role", [TenantRole.OPERATOR, TenantRole.READ_ONLY])

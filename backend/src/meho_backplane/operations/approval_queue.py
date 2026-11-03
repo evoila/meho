@@ -148,6 +148,7 @@ from meho_backplane.operations.approval_resume_checks import (
     target_changed_since_request,
 )
 from meho_backplane.operations.reducer import handle_owner_sub_var
+from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.version import running_release_id
 
 __all__ = [
@@ -162,6 +163,7 @@ __all__ = [
     "ApprovalRequestAlreadyDecidedError",
     "ApprovalRequestExpiredError",
     "ApprovalResultState",
+    "ApprovalRoleFloorError",
     "ApprovalRule",
     "ApprovalSignInReusedError",
     "ApprovalSignInTooOldError",
@@ -554,6 +556,33 @@ class NonHumanApprovalError(UnauthorizedApprovalError):
             f"principal {operator_sub!r} of kind {principal_kind!r} may not "
             "decide an approval request — approval is a human decision "
             "(v0.1-spec §7)",
+        )
+
+
+class ApprovalRoleFloorError(UnauthorizedApprovalError):
+    """The approver's role is below the role floor of the parked operation.
+
+    Raised by :func:`approve_request` when the operation needs a role from
+    the person who runs it (:mod:`meho_backplane.operations.role_floors`)
+    and the approver's ``tenant_role`` is below it. The approved call runs
+    with the approval as its authorization, on whichever resume path wins,
+    so the person who approves must hold the role the operation needs.
+    Checked before any state change: the request stays ``pending`` and no
+    decision audit row is written. Subclasses
+    :class:`UnauthorizedApprovalError`, so every handler of that error still
+    answers 403; the approve routes catch this one first to show its text.
+    """
+
+    def __init__(self, request_id: uuid.UUID, *, operator_sub: str, role: str, denial: str) -> None:
+        self.request_id = request_id
+        #: The plain refusal text, without ids, for the web interface.
+        self.reason_text = f"You cannot approve this change: {denial}."
+        super().__init__(
+            operator_sub=operator_sub,
+            role=role,
+            message=(
+                f"operator {operator_sub!r} may not approve approval_request {request_id}: {denial}"
+            ),
         )
 
 
@@ -1698,6 +1727,11 @@ async def approve_request(
        decision record; else 403, :class:`ApprovalGroupForbiddenError`.
        Checked before the hash check so the approver learns *why* they
        are refused rather than being told their params mismatch.
+       When the operation carries a role floor
+       (:mod:`meho_backplane.operations.role_floors`), the approver's role
+       must meet it; else 403, :class:`ApprovalRoleFloorError`. The
+       approved call runs with the approval as its authorization, so the
+       person who approves must hold the role the operation needs.
     5. If *params* is supplied, it matches the stored ``params_hash``
        (:func:`params_hash_matches`; else 422, :class:`ParamsMismatchError`).
        The hash check is **skipped** when *params* is ``None`` — the
@@ -1758,6 +1792,8 @@ async def approve_request(
         ApprovalGroupForbiddenError: Another person's ``dangerous`` or
             ``destructive`` change, and the approver is not in a group that
             may approve it (#3328).
+        ApprovalRoleFloorError: The operation needs a role from the person
+            who runs it, and the approver's role is below it.
         ParamsMismatchError: Hash of *params* != stored ``params_hash``
             (only raised when *params* is supplied).
         PreviewBindingMissingError: The row is ``destructive``-tier but
@@ -3405,6 +3441,27 @@ def _check_approver_group(operator: Operator, request: ApprovalRequest) -> Appro
     )
 
 
+def _check_approver_role_floor(operator: Operator, request: ApprovalRequest) -> None:
+    """Raise :class:`ApprovalRoleFloorError` when the approver is below the op's floor.
+
+    A parked ``targets.register`` or ``topology.*`` write needs the
+    ``tenant_admin`` role from the person who runs it
+    (:mod:`meho_backplane.operations.role_floors`). Once approved, the call
+    runs with the approval as its authorization: the agent's own resume
+    and the hosted-run resume do not look at who approved. So the role is
+    checked here, at the decision, before any state change. An operation
+    without a floor is not affected.
+    """
+    denial = role_floor_denial(request.op_id, operator.tenant_role)
+    if denial is not None:
+        raise ApprovalRoleFloorError(
+            request.id,
+            operator_sub=operator.sub,
+            role=operator.tenant_role.value,
+            denial=denial,
+        )
+
+
 async def _load_pending_for_approval(
     session: AsyncSession,
     request_id: uuid.UUID,
@@ -3417,9 +3474,10 @@ async def _load_pending_for_approval(
     Runs the full approve precondition ladder in order so callers learn
     the most specific reason first: role gate → tenant-scoped load (under a
     row lock) → pending guard → deadline guard (security F12 / #274) →
-    self-approval and group rule (#1401, #3328) → params-hash check (only
-    when *params* is supplied) → destructive preview-binding
-    re-verification (#3197). Returns the validated pending row and the
+    self-approval and group rule (#1401, #3328) → the op's role floor
+    (:func:`_check_approver_role_floor`) → params-hash check (only when
+    *params* is supplied) → destructive preview-binding re-verification
+    (#3197). Returns the validated pending row and the
     rule that allowed the approval; the caller flips status + writes the
     decision audit row.
 
@@ -3438,6 +3496,7 @@ async def _load_pending_for_approval(
     if _deadline_has_passed(request, _now(), _resolve_default_ttl()):
         raise ApprovalRequestExpiredError(request_id)
     rule = _check_approver_group(operator, request)
+    _check_approver_role_floor(operator, request)
     if params is not None and not params_hash_matches(params, request.params_hash):
         raise ParamsMismatchError(request_id)
     _check_destructive_preview_binding(request)

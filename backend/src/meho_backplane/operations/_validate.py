@@ -634,7 +634,7 @@ def _person_role_floor_denial(
     door; here it holds for ``call_operation``, the REST dispatch route
     and the CLI too. Agents and service logins are not checked: they park
     or run under a grant, and the person who approves is checked by the
-    dispatcher's approve-and-run path.
+    approval queue at the decision.
     """
     if not is_human_principal(operator):
         return None

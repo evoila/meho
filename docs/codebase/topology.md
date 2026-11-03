@@ -208,9 +208,9 @@ A person with a lower role is refused: all five writes carry the
 `tenant_admin` **per-op role floor** (`operations/role_floors.py`,
 registered at import by `connectors/topology/ops.py`), which the policy
 gate checks on every dispatch path (`call_operation`, the REST dispatch
-route, the CLI) and the dispatcher checks again for a person who
-approves a parked write and runs it from an approvals surface (an
-agent's own resume keeps the approval as the authorization). The REST
+route, the CLI) and the approval queue checks at the decision: a person
+below the floor cannot approve a parked write, so the approved write was
+approved by a `tenant_admin` whichever resume path runs it. The REST
 routes and MCP tools keep their own
 `tenant_admin` check at the door.
 The typed-op handlers unwrap params and call `annotate_edge_with_plan` /

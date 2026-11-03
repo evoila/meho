@@ -33,7 +33,7 @@ Approval posture — the load-bearing dial (#2537):
   :func:`~meho_backplane.operations.role_floors.register_role_floor`, so
   the policy gate refuses a person with a lower role on every path
   (``call_operation``, the REST dispatch route, the CLI), and the
-  approve-and-run path refuses an approver with a lower role.
+  approval queue refuses an approver with a lower role.
 * NOT ``requires_approval=True`` — that would park humans too (G11.7-T1
   #1401), which the task explicitly rejects.
 * NOT ``safety_level="dangerous"`` — that would DENY agents by default
@@ -126,7 +126,7 @@ TOPOLOGY_UNANNOTATE_OP_ID = "topology.unannotate"
 TOPOLOGY_BULK_IMPORT_OP_ID = "topology.bulk_import"
 
 # The policy gate checks the floor for a person on every path, and the
-# approve-and-run path checks it for the approver.
+# approval queue checks it for the approver.
 for _op_id in (
     TOPOLOGY_ANNOTATE_OP_ID,
     TOPOLOGY_CREATE_NODE_OP_ID,

@@ -40,10 +40,11 @@ checks the **per-op role floor** (`operations/role_floors.py`;
 lower role gets `denied`, nothing is written, and the audit row says
 `denied`. `preview_operation` shows the same verdict. An agent's call
 still waits for approval; a service login's call still waits or runs
-under a grant. When the person who approved runs the call from an
-approvals surface, it runs under them, and the dispatcher checks their
-role against the same floor. An agent's own resume of an approved call
-is not checked: the person's approval is the authorization.
+under a grant. The approval queue checks the approver against the same
+floor at the decision: a person below it cannot approve the request, so
+the approved call, run by the agent itself or by the person from an
+approvals surface, was approved by a `tenant_admin`. The dispatcher
+checks the person who runs it from an approvals surface once more.
 
 This document covers the two **list** paths, how `list_targets`
 bounds its response (#3858), how the single-target REST routes find a

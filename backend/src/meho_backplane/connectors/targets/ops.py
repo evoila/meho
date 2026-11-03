@@ -47,7 +47,7 @@ Approval posture — the load-bearing dial (mirrors ``topology.*`` #2537):
   :func:`~meho_backplane.operations.role_floors.register_role_floor`, so
   the policy gate refuses a person with a lower role on every path
   (``call_operation``, the REST dispatch route, the CLI), and the
-  approve-and-run path refuses an approver with a lower role.
+  approval queue refuses an approver with a lower role.
 * NOT ``requires_approval=True`` — that would park humans too.
 * NOT ``safety_level="dangerous"`` — that would DENY agents by default
   rather than park them. Target registration is reversible
@@ -334,7 +334,7 @@ _REMOVE_DESCRIPTION = (
 )
 
 # The policy gate checks the floor for a person on every path, and the
-# approve-and-run path checks it for the approver.
+# approval queue checks it for the approver.
 register_role_floor(TARGETS_REGISTER_OP_ID, TenantRole.TENANT_ADMIN)
 
 

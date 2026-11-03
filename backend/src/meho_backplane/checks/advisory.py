@@ -18,7 +18,7 @@ render only for non-ok statuses, so the advisory surfaces there through
 ``--json`` today (see ``docs/codebase/checks-advisory.md``).
 
 This is the second ``extras`` fragment beside the #2550
-``target_activity_advisory`` (:mod:`meho_backplane.broadcast.history`),
+``target_activity_advisory`` (:mod:`meho_backplane.broadcast.target_advisory`),
 and it deliberately diverges from that precedent in one way: it applies
 to **all** op classes, read dispatches included. The #2550 gate to
 write-class ops exists because that advisory is target-overlap-specific
@@ -79,7 +79,7 @@ __all__ = [
 _log = structlog.get_logger(__name__)
 
 #: The ``extras`` key the advisory rides on the ``OperationResult`` --
-#: sibling of :data:`meho_backplane.broadcast.history.ADVISORY_EXTRAS_KEY`.
+#: sibling of :data:`meho_backplane.broadcast.target_advisory.ADVISORY_EXTRAS_KEY`.
 CHECKS_ADVISORY_EXTRAS_KEY: Final[str] = "checks_alert_advisory"
 
 #: Memo states that surface. ``degraded`` / ``critical`` only -- ``ok``
@@ -95,7 +95,7 @@ _ADVISORY_STATES: Final[tuple[str, ...]] = ("degraded", "critical")
 #:
 #: Sized as an awareness nudge, not an audit: the rationale of the #2550
 #: precedent's
-#: :data:`~meho_backplane.broadcast.history._ADVISORY_MAX_ENTRIES`
+#: :data:`~meho_backplane.broadcast.target_advisory._ADVISORY_MAX_ENTRIES`
 #: (``5``), which is the constant this one plays the role of. Its
 #: sibling ``_ADVISORY_SCAN_LIMIT = 100`` bounds a single ``XREVRANGE``
 #: -- one round-trip whatever the count -- so its *value* carries no

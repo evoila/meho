@@ -278,7 +278,7 @@ async def _add_to_knowledge_handler(
             body=body,
             metadata=metadata,
             actor_sub=operator.sub,
-            own_entries_only=operator.tenant_role is not TenantRole.TENANT_ADMIN,
+            own_entries_only=operator.tenant_role != TenantRole.TENANT_ADMIN,
         )
     except InvalidKbSlugError as exc:
         raise McpInvalidParamsError(f"add_to_knowledge: {exc}") from exc

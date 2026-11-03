@@ -126,12 +126,15 @@ the REST and CLI answers of the same operations do not carry it.
 
 | Tool | Where the notice is added | Why the values are untrusted |
 |---|---|---|
-| `call_operation` (sync, async start, and check) | `mcp/tools/operations.py::_call_operation_handler` | `result` holds vendor text |
-| `result_query` (page and query mode) | `mcp/tools/result_query.py::_result_query_handler` | rows and values hold vendor text |
+| `call_operation` (sync, async start, and check) | `mcp/tools/operations.py::_call_operation_handler`; `operations/delivery_budget.py::measure_call_operation_bytes` counts the notice when the answer is bounded against the wire ceiling | `result` holds vendor text |
+| `result_query` (page and query mode) | `mcp/tools/result_query.py::_result_query_handler`; `operations/result_query.py::_check_wire_ceiling` measures the answer with the notice | rows and values hold vendor text |
 | `search_operations` (ranked and exact-op mode) | `mcp/tools/operations.py::_search_operations_handler` | `summary` / `description` come from an ingested spec |
 | `query_topology` (every kind) | `mcp/tools/topology.py::_query_topology_handler`; the bounded closure / history answers get it in `_topology_answer.py::_finished`, before the answer is measured against the wire ceiling | node names and `properties` are operator- or probe-written |
 
-Each tool's `outputSchema` lists the field. The `VENDOR_TEXT_RULE` band
+Each tool's `outputSchema` lists the field. Wherever an answer is measured
+against a wire ceiling, the notice is part of the measured answer, so the
+delivered answer never exceeds the ceiling by the notice's size. The
+`VENDOR_TEXT_RULE` band
 and the per-operation contract guidance (next section) stay as they
 were; the notice is the per-answer reminder of the same rule.
 

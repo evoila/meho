@@ -650,8 +650,12 @@ class ServicePrincipalGrantService:
     ) -> ServiceGrantRead:
         """Add one reviewed grant row to *session* and flush it; the caller commits.
 
-        A duplicate active grant raises :exc:`GrantValidationError` after
-        the session is rolled back, so a multi-row caller writes nothing.
+        A grant with the same key that has ended (``expires_at`` in the
+        past) but was never revoked does not count as a duplicate (#5424):
+        it is marked ``replaced_at`` in the same transaction, which takes
+        it out of the unique indexes. A duplicate grant that has not ended
+        raises :exc:`GrantValidationError` after the session is rolled
+        back, so a multi-row caller writes nothing.
         """
         is_selector = payload.target_product is not None or payload.target_name_pattern is not None
         row = model(
@@ -666,6 +670,7 @@ class ServicePrincipalGrantService:
             created_by_sub=created_by_sub,
             expires_at=payload.expires_at,
         )
+        await self._mark_ended_grants_replaced(session, tenant_id, payload, model)
         # Selector grants are not covered by a DB partial unique index
         # (the nullable selector columns make a portable NULL-safe unique
         # index awkward), so enforce "at most one active selector per
@@ -673,7 +678,11 @@ class ServicePrincipalGrantService:
         # same duplicate-refusal contract the targeted / targetless
         # indexes give.
         if is_selector:
-            await self._reject_duplicate_selector(session, tenant_id, payload, model)
+            try:
+                await self._reject_duplicate_selector(session, tenant_id, payload, model)
+            except GrantValidationError:
+                await session.rollback()
+                raise
         session.add(row)
         try:
             await session.flush()
@@ -805,6 +814,41 @@ class ServicePrincipalGrantService:
         return renewed
 
     @staticmethod
+    async def _mark_ended_grants_replaced(
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        payload: ServiceGrantCreate,
+        model: GrantModel,
+    ) -> None:
+        """Mark the ended, never revoked grants with this exact key as replaced (#5424).
+
+        An index cannot compare with the current time, so an ended grant
+        would still hold its key in ``uq_<table>_*``. Setting
+        ``replaced_at`` frees the key for the new row. The ended row keeps
+        its ``expires_at`` and ``revoked_at`` and stays in the list. The
+        key is matched NULL-safe on the target id and both selector
+        columns, so each grant shape only frees its own key.
+        """
+        now = datetime.now(UTC)
+        await session.execute(
+            update(model)
+            .where(
+                model.tenant_id == tenant_id,
+                model.principal_sub == payload.principal_sub,
+                model.op_id == payload.op_id,
+                model.connector_id == payload.connector_id,
+                model.target_id.is_not_distinct_from(payload.target_id),
+                model.target_product.is_not_distinct_from(payload.target_product),
+                model.target_name_pattern.is_not_distinct_from(payload.target_name_pattern),
+                model.revoked_at.is_(None),
+                model.replaced_at.is_(None),
+                model.expires_at.is_not(None),
+                model.expires_at <= now,
+            )
+            .values(replaced_at=now)
+        )
+
+    @staticmethod
     async def _reject_duplicate_selector(
         session: AsyncSession,
         tenant_id: uuid.UUID,
@@ -815,8 +859,10 @@ class ServicePrincipalGrantService:
 
         The CRUD-layer twin of the ``uq_<table>_*`` partial indexes for
         selector grants (which those indexes deliberately do not cover).
-        Matches an active (``revoked_at IS NULL``) selector row on the full
-        key plus the exact ``(target_product, target_name_pattern)`` pair.
+        Matches an active (``revoked_at IS NULL`` and ``replaced_at IS
+        NULL``) selector row on the full key plus the exact
+        ``(target_product, target_name_pattern)`` pair. Run it after
+        :meth:`_mark_ended_grants_replaced`, so an ended grant does not count.
         """
         existing = await session.execute(
             select(model.id)
@@ -833,6 +879,7 @@ class ServicePrincipalGrantService:
                 model.target_product.is_not_distinct_from(payload.target_product),
                 model.target_name_pattern.is_not_distinct_from(payload.target_name_pattern),
                 model.revoked_at.is_(None),
+                model.replaced_at.is_(None),
             )
             .limit(1)
         )

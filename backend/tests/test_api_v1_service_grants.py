@@ -21,25 +21,28 @@ Three contracts:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 import respx
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditLog, SandboxDeleteGrant, ServicePrincipalGrant
 from meho_backplane.main import app
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
 from ._oidc_jwt_helpers import make_rsa_keypair, mint_token, mock_discovery_and_jwks, public_jwks
+from ._sandbox_mode_helpers import turn_sandbox_mode_on
 
 _TENANT_A = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 _BASE = "/api/v1/service-principals/grants"
@@ -427,3 +430,119 @@ def test_revoke_rejects_empty_or_too_long_reason(client: TestClient, reason: str
         # The grant is still live: a rejected revoke changes nothing.
         after = client.get(f"{_BASE}/{grant_id}", headers=headers)
         assert after.json()["revoked_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# A grant that ended but was never revoked does not block a new one (#5424)
+# ---------------------------------------------------------------------------
+
+_SHAPE_BODIES: dict[str, dict[str, Any]] = {
+    "targetless": {},
+    "targeted": {"target_id": "00000000-0000-0000-0000-000000005424"},
+    "selector": {"target_name_pattern": "<target-name>"},
+}
+
+
+def _shape_body(shape: str, op_id: str) -> dict[str, Any]:
+    return {
+        "principal_sub": "svc:deploy-bot",
+        "op_id": op_id,
+        "connector_id": "vmware-rest-9.0",
+        "reason": "one-day test run",
+        "expires_at": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+        **_SHAPE_BODIES[shape],
+    }
+
+
+async def _end_grant(model: Any, grant_id: str) -> None:
+    """Move a grant's expiry into the past, as if its time ran out."""
+    async with get_sessionmaker()() as session, session.begin():
+        await session.execute(
+            update(model)
+            .where(model.id == uuid.UUID(grant_id))
+            .values(expires_at=datetime.now(UTC) - timedelta(days=1))
+        )
+
+
+def _assert_ended_grant_is_replaced(
+    client: TestClient, headers: dict[str, str], body: dict[str, Any], model: Any
+) -> None:
+    """Create, end, create again (201), then a live duplicate (422); both rows stay listed."""
+    first = client.post(_BASE, headers=headers, json=body)
+    assert first.status_code == 201, first.text
+    ended_id = first.json()["id"]
+    asyncio.run(_end_grant(model, ended_id))
+
+    again = client.post(_BASE, headers=headers, json=body)
+    assert again.status_code == 201, again.text
+    new_id = again.json()["id"]
+    assert new_id != ended_id
+
+    duplicate = client.post(_BASE, headers=headers, json=body)
+    assert duplicate.status_code == 422, duplicate.text
+    assert "already exists; revoke it first" in duplicate.json()["detail"]
+
+    history = client.get(
+        _BASE,
+        headers=headers,
+        params={"principal_sub": body["principal_sub"], "include_expired": "true"},
+    )
+    assert history.status_code == 200
+    by_id = {g["id"]: g for g in history.json()["grants"]}
+    assert {ended_id, new_id} <= set(by_id)
+    assert by_id[ended_id]["revoked_at"] is None
+    live = client.get(
+        _BASE,
+        headers=headers,
+        params={"principal_sub": body["principal_sub"], "include_expired": "false"},
+    )
+    assert ended_id not in {g["id"] for g in live.json()["grants"]}
+
+
+@pytest.mark.parametrize("shape", sorted(_SHAPE_BODIES))
+def test_ended_grant_does_not_block_a_new_grant(client: TestClient, shape: str) -> None:
+    """An ended, never revoked grant of each shape lets the same grant be made again."""
+    key = make_rsa_keypair(f"kid-ended-{shape}")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        _assert_ended_grant_is_replaced(
+            client,
+            headers,
+            _shape_body(shape, f"vmware.composite.vm.{shape}_again"),
+            ServicePrincipalGrant,
+        )
+
+
+def test_live_grant_still_blocks_a_second_one(client: TestClient) -> None:
+    """A grant whose expiry is still ahead answers 422 for the same grant again."""
+    key = make_rsa_keypair("kid-live-dup")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        body = _shape_body("targetless", "vmware.composite.vm.live_dup")
+        assert client.post(_BASE, headers=headers, json=body).status_code == 201
+        duplicate = client.post(_BASE, headers=headers, json=body)
+    assert duplicate.status_code == 422, duplicate.text
+    assert "already exists; revoke it first" in duplicate.json()["detail"]
+
+
+def test_ended_delete_grant_does_not_block_a_new_one(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sandbox mode, delete grants allowed over REST: an ended delete grant frees its key."""
+    turn_sandbox_mode_on(monkeypatch)
+    monkeypatch.setenv("MEHO_SANDBOX_DELETE_GRANTS_FROM_API", "true")
+    get_settings.cache_clear()
+    key = make_rsa_keypair("kid-ended-delete")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        token = mint_token(
+            key,
+            sub="op-admin",
+            tenant_role=TenantRole.TENANT_ADMIN.value,
+            tenant_id=str(_TENANT_A),
+        )
+        headers = {"Authorization": f"Bearer {token}"}
+        body = _shape_body("targetless", "vault.sys.policy.delete")
+        _assert_ended_grant_is_replaced(client, headers, body, SandboxDeleteGrant)

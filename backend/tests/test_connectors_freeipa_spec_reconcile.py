@@ -73,6 +73,17 @@ def test_freeipa_hand_coded_command_manifest_is_pinned() -> None:
         "host_del",
         "automember_add",
         "automember_add_condition",
+        "sudocmd_add",
+        "sudorule_add",
+        "sudorule_add_user",
+        "sudorule_add_host",
+        "sudorule_add_allow_command",
+        "hbacrule_add",
+        "hbacrule_add_user",
+        "hbacrule_add_host",
+        "hbacrule_add_service",
+        "hbacrule_disable",
+        "pwpolicy_mod",
     }
     assert (_rpc_module.LOGIN_PATH, _rpc_module.JSON_PATH) == (
         "/ipa/session/login_password",

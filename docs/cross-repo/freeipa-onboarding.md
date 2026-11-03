@@ -26,9 +26,10 @@ The engineering page is
 
 ## What you get
 
-Twenty-three operations, stored when MEHO starts. Nothing to ingest.
-Seventeen read. Six change hosts and host groups, and each of them waits until
-a second person approves.
+Thirty-four operations, stored when MEHO starts. Nothing to ingest.
+Seventeen read. Seventeen change hosts and host groups, sudo rules, access
+rules and password policies, and each of them waits until a second person
+approves.
 
 - `freeipa.about`: the server version, the API version, and the IPA user
   MEHO logs in as.
@@ -52,10 +53,37 @@ Changes of hosts and host groups:
 - `freeipa.host.delete` and `freeipa.hostgroup.delete`. The approval of a host
   delete shows the host and its host groups.
 
+Changes of sudo rules, access rules and password policies:
+
+- `freeipa.sudocmd.create`: make a sudo command (the full path of one
+  program). A sudo rule can allow only commands that exist as sudo commands.
+- `freeipa.sudorule.create`, then `freeipa.sudorule.user.add`,
+  `freeipa.sudorule.host.add` and `freeipa.sudorule.command.add`: who may run
+  which commands with sudo, on which hosts.
+- `freeipa.hbacrule.create`, then `freeipa.hbacrule.user.add`,
+  `freeipa.hbacrule.host.add` and `freeipa.hbacrule.service.add`: which users
+  may use which services (for example `sshd`) on which hosts.
+- `freeipa.hbacrule.disable`: turn an access rule off, also the default rule
+  `allow_all`.
+- `freeipa.pwpolicy.set`: change a group's password policy, or the global
+  one.
+
 When FreeIPA does not make all of a change (for example a host to add does
-not exist), the call fails and names what FreeIPA did not do. MEHO cannot yet
-change users, groups, sudo rules, access rules or password policy. Those
-writes come in later Tasks of Initiative #4772.
+not exist), the call fails and names what FreeIPA did not do. A sudo rule is
+the one exception: a user or host name that FreeIPA does not know is kept as
+an external name, and the answer lists it in `external`. MEHO cannot yet
+change users, groups or roles. Those writes come in a later Task of
+Initiative #4772.
+
+### What the approver sees
+
+- **Disabling `allow_all`.** `allow_all` lets every user use every service
+  on every host. The approval lists the other enabled access rules: after the
+  change, only they let users in. When the list is empty, the approval says
+  that no IPA user can log in to any host that uses IPA.
+- **The global password policy.** A change without a group is for the
+  global policy. The approval says so: it applies to every user whose groups
+  have no password policy of their own.
 
 ## Step 1: make an IPA user for MEHO
 
@@ -84,6 +112,9 @@ privileges. FreeIPA has them built in.
 | create a host group, add members, delete a host group | `Host Group Administrators` |
 | delete a host | `Host Administrators` (it may also revoke the host's certificates) |
 | delete a host that has services, for example `HTTP/web01.example.test` | also `Service Administrators`: FreeIPA deletes the services with the host |
+| sudo commands and sudo rules | `Sudo Administrator` |
+| access rules (HBAC), also disabling `allow_all` | `HBAC Administrator` |
+| password policies, the global one too | `Password Policy Administrator` |
 
 ```bash
 ipa role-add "MEHO host writes" --desc="Host writes of MEHO"
@@ -92,6 +123,17 @@ ipa role-add-privilege "MEHO host writes" \
   --privileges="Host Administrators" \
   --privileges="Service Administrators"
 ipa role-add-member "MEHO host writes" --users=meho-svc
+```
+
+For the sudo, access rule and password policy writes:
+
+```bash
+ipa role-add "MEHO access writes" --desc="Sudo, access rule and password policy writes of MEHO"
+ipa role-add-privilege "MEHO access writes" \
+  --privileges="Sudo Administrator" \
+  --privileges="HBAC Administrator" \
+  --privileges="Password Policy Administrator"
+ipa role-add-member "MEHO access writes" --users=meho-svc
 ```
 
 Automember rules: FreeIPA 4.13 has no built-in privilege that may change
@@ -202,6 +244,8 @@ Ask an agent, or run through the CLI:
 | `ACIError` on one read | the user may not read this kind of object | give the user a role with the read permission |
 | `ACIError` on a write | the user's roles do not allow this change | add the privilege from "Rights for the writes" |
 | `NotDone` on a write | FreeIPA did not make all of the change | the message names each member or condition and FreeIPA's reason, for example `no such entry` |
+| `EmptyModlist` on `freeipa.pwpolicy.set` | the policy has these values already | nothing to do |
+| `MutuallyExclusiveError` when you add members to a rule | the rule is for every user, host, service or command (category `all`), like `allow_all` | use another rule |
 
 ## References
 

@@ -7,6 +7,10 @@
   remote-connection function is refused before a connection is opened, in
   any spelling (upper case, schema-qualified, double-quoted, inside a
   comment or a string, or as a Unicode-escaped identifier).
+* A statement that names a built-in function that runs a SQL string
+  (``query_to_xml``, ``ts_stat``, ``ts_rewrite``, ``crosstab``,
+  ``connectby``) is refused too, so a denied name built from string pieces
+  cannot reach the server through such a function.
 * The query is refused when the login role is a superuser, or when the
   superuser flag cannot be read, unless the target sets
   ``extras["allow_superuser_query"] = true``.
@@ -174,6 +178,44 @@ def test_denied_function_is_found_in_any_spelling(sql: str, name: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("sql", "name"),
+    [
+        # The server would join the pieces into a denied name and run it.
+        (
+            "SELECT query_to_xml('SELECT pg_' || 'terminate_backend(pg_backend_pid())', "
+            "true, false, '')",
+            "query_to_xml",
+        ),
+        ("SELECT QUERY_TO_XMLSCHEMA('SELECT 1', true, false, '')", "query_to_xmlschema"),
+        (
+            "SELECT pg_catalog.query_to_xml_and_xmlschema('SELECT 1', true, false, '')",
+            "query_to_xml_and_xmlschema",
+        ),
+        ("SELECT cursor_to_xml('c', 10, true, false, '')", "cursor_to_xml"),
+        ("SELECT cursor_to_xmlschema('c', true, false, '')", "cursor_to_xmlschema"),
+        ("SELECT * FROM ts_stat('SELECT to_tsvector(pg_' || 'reload_conf()::text)')", "ts_stat"),
+        ("SELECT ts_rewrite('a'::tsquery, 'SELECT t, s FROM aliases')", "ts_rewrite"),
+        ("SELECT * FROM crosstab('SELECT 1, 2, 3') AS ct(a int, b int)", "crosstab"),
+        ("SELECT * FROM crosstab2('SELECT 1, 2, 3')", "crosstab2"),
+        ("SELECT * FROM crosstab_hash('SELECT 1', 'SELECT 2') AS ct(a int)", "crosstab_hash"),
+        (
+            "SELECT * FROM connectby('t', 'id', 'parent', '1', 0) AS c(id int, p int, l int)",
+            "connectby",
+        ),
+    ],
+)
+def test_sql_running_function_is_refused(sql: str, name: str) -> None:
+    """A built-in that runs a SQL string is refused before the wire.
+
+    The string could carry a denied name built from pieces, which the word
+    scan cannot see; the server would join and run it.
+    """
+    assert denied_function_in(sql) == name
+    with pytest.raises(PostgresReadOnlyError, match=name):
+        assert_no_admin_functions(sql)
+
+
+@pytest.mark.parametrize(
     "sql",
     [
         'SELECT U&"pg_\\0074erminate_backend"(1)',
@@ -200,6 +242,9 @@ def test_unicode_escaped_identifier_is_refused(sql: str) -> None:
         "SELECT pg_database_size('postgres')",
         "SHOW statement_timeout",
         "EXPLAIN SELECT * FROM orders",
+        # Takes a table name, not SQL text; shares a stem with query_to_xml.
+        "SELECT table_to_xml('orders', true, false, '')",
+        "SELECT to_tsvector('english', 'a fat cat'), ts_headline('a fat cat', 'cat'::tsquery)",
     ],
 )
 def test_plain_reads_pass_the_deny_list(sql: str) -> None:
@@ -216,15 +261,24 @@ def test_deny_list_entries_are_lower_case_and_prefixes_do_not_cover_reads() -> N
         assert denied_function_in(f"SELECT * FROM {name}") is None, name
 
 
+@pytest.mark.parametrize(
+    ("sql", "name"),
+    [
+        ("SELECT pg_terminate_backend(1)", "pg_terminate_backend"),
+        (
+            "SELECT query_to_xml('SELECT pg_' || 'terminate_backend(pg_backend_pid())', "
+            "true, false, '')",
+            "query_to_xml",
+        ),
+    ],
+)
 @pytest.mark.asyncio
 async def test_run_query_refuses_admin_function_before_opening_connection(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, sql: str, name: str
 ) -> None:
     mock = _patch_connection(monkeypatch, _Conn(superuser=False))
-    with pytest.raises(PostgresReadOnlyError, match="pg_terminate_backend"):
-        await PostgresConnector().run_query(
-            _operator(), _Target(), {"sql": "SELECT pg_terminate_backend(1)"}
-        )
+    with pytest.raises(PostgresReadOnlyError, match=name):
+        await PostgresConnector().run_query(_operator(), _Target(), {"sql": sql})
     mock.assert_not_awaited()
 
 

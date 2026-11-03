@@ -20,16 +20,28 @@ it. So ``postgres.query`` adds two checks:
   a clear refusal. Unicode-escaped identifiers (``U&"..."``) are refused as
   a whole, because they can spell a name letter by letter.
 
+  The list also holds every built-in function that runs a SQL string given
+  as an argument (``query_to_xml``, ``ts_stat``, ``ts_rewrite``, the
+  ``tablefunc`` functions ``crosstab`` and ``connectby``). Without them a
+  statement could build a denied name from pieces (``'pg_' ||
+  'terminate_backend(...)'``) and hand it to the server as a string, which
+  the word scan cannot see.
+
 * :func:`assert_not_superuser` refuses to run the statement when the login
   role is a superuser, unless the target sets
   ``extras["allow_superuser_query"] = true``. The curated operations keep
   running as any role: their SQL is fixed catalog reads.
 
-Function names are pinned to the PostgreSQL 16 documentation, section
+Function names are pinned to the PostgreSQL 16 documentation: section
 "System Administration Functions"
-(https://www.postgresql.org/docs/16/functions-admin.html), plus the
+(https://www.postgresql.org/docs/16/functions-admin.html); the SQL-running
+functions of "XML Functions"
+(https://www.postgresql.org/docs/16/functions-xml.html, "Mapping Tables to
+XML") and "Text Search Functions and Operators"
+(https://www.postgresql.org/docs/16/functions-textsearch.html); plus the
 ``dblink`` and ``postgres_fdw`` extension functions that open remote
-connections.
+connections and the ``tablefunc`` extension functions that run SQL text
+(https://www.postgresql.org/docs/16/tablefunc.html).
 """
 
 from __future__ import annotations
@@ -106,6 +118,11 @@ DENIED_FUNCTIONS: frozenset[str] = frozenset(
         # Statistics resets and notifications.
         "pg_stat_statements_reset",
         "pg_notify",
+        # Built-ins that run a SQL string given as an argument. They could
+        # run a denied name that the statement builds from pieces.
+        "ts_stat",
+        "ts_rewrite",
+        "connectby",
     }
 )
 
@@ -118,6 +135,9 @@ DENIED_FUNCTION_PREFIXES: tuple[str, ...] = (
     "pg_sleep",  # pg_sleep, pg_sleep_for, pg_sleep_until
     "dblink",  # the dblink extension: remote connections and queries
     "postgres_fdw_",  # postgres_fdw_disconnect, ..._disconnect_all, ...
+    "query_to_xml",  # query_to_xml, query_to_xmlschema, ..._and_xmlschema: run SQL text
+    "cursor_to_xml",  # cursor_to_xml, cursor_to_xmlschema: read a cursor
+    "crosstab",  # tablefunc crosstab, crosstab2..4, crosstab_N: run SQL text
 )
 
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -162,8 +182,9 @@ def assert_no_admin_functions(sql: str) -> None:
     if name is not None:
         raise PostgresReadOnlyError(
             f"postgres.query refuses the statement: it names {name!r}, a server "
-            "admin, file, backup, replication, wait or remote-connection function. "
-            "Only plain reads of tables and catalogs are accepted."
+            "admin, file, backup, replication, wait, remote-connection or "
+            "SQL-running function. Only plain reads of tables and catalogs are "
+            "accepted."
         )
 
 

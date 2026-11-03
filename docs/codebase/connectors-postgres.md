@@ -126,16 +126,23 @@ role's rights. So the free-form op adds two checks:
    `pg_terminate_backend` / `pg_reload_conf`, `set_config`, server file access
    such as `pg_read_file` / `lo_export`, backup and WAL control such as
    `pg_switch_wal`, recovery control such as `pg_promote`, replication slot
-   and origin functions, statistics resets, `pg_notify`) or starts with a
-   prefix in `DENIED_FUNCTION_PREFIXES` (`pg_ls_`, `pg_logical_slot_`,
-   `pg_stat_reset`, `pg_sleep`, `dblink`, `postgres_fdw_`). The names are
-   pinned to the PostgreSQL 16 "System Administration Functions" page. The
-   scan does not strip comments or string literals first, so an unclosed
-   quote cannot hide a later call; a false hit (a column named `pg_sleep`)
-   only gives a clear refusal. Unicode-escaped identifiers (`U&"..."`) are
-   refused as a whole. The prefixes cover no catalog view or role name
-   (`pg_file_settings`, `pg_replication_origin_status`, `pg_read_all_data`
-   stay allowed).
+   and origin functions, statistics resets, `pg_notify`, and the built-ins
+   that run a SQL string given as an argument: `ts_stat`, `ts_rewrite`,
+   `connectby`) or starts with a prefix in `DENIED_FUNCTION_PREFIXES`
+   (`pg_ls_`, `pg_logical_slot_`, `pg_stat_reset`, `pg_sleep`, `dblink`,
+   `postgres_fdw_`, `query_to_xml`, `cursor_to_xml`, `crosstab`). The names
+   are pinned to the PostgreSQL 16 pages "System Administration Functions",
+   "XML Functions" (mapping tables to XML), "Text Search Functions" and the
+   `tablefunc` extension. The SQL-running functions are on the list because
+   a statement could build a denied name from string pieces (`'pg_' ||
+   'terminate_backend(...)'`), which the word scan cannot see, and hand it
+   to such a function; the server would join and run it. The scan does not
+   strip comments or string literals first, so an unclosed quote cannot
+   hide a later call; a false hit (a column named `pg_sleep`) only gives a
+   clear refusal. Unicode-escaped identifiers (`U&"..."`) are refused as a
+   whole. The prefixes cover no catalog view or role name
+   (`pg_file_settings`, `pg_replication_origin_status`, `pg_read_all_data`,
+   `table_to_xml` stay allowed).
 2. **No superuser role** — `assert_not_superuser` runs on the open connection
    before the statement. It reads `pg_roles.rolsuper` for `current_user` and
    lets the query run only on a clear `false`; a `true`, a missing row or an
@@ -223,6 +230,10 @@ operator-less probe path resolves here), `tcp_unreachable` (`OSError`), and
   `pg_last_xact_replay_timestamp`, NULL outside recovery) and the admin
   function families on the deny list:
   <https://www.postgresql.org/docs/16/functions-admin.html>
+- SQL-running built-ins on the deny list: `query_to_xml` family
+  (<https://www.postgresql.org/docs/16/functions-xml.html>), `ts_stat` /
+  `ts_rewrite` (<https://www.postgresql.org/docs/16/functions-textsearch.html>),
+  `crosstab` / `connectby` (<https://www.postgresql.org/docs/16/tablefunc.html>)
 - `statement_timeout`:
   <https://www.postgresql.org/docs/16/runtime-config-client.html>
 - `pg_roles.rolsuper`: <https://www.postgresql.org/docs/16/view-pg-roles.html>

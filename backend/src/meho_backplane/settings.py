@@ -1607,6 +1607,13 @@ class Settings(BaseModel):
     #: ``mcp_session_start_limit_per_minute`` (same ``<tenant-uuid>=<int>``
     #: CSV shape). Set via ``MCP_SESSION_START_LIMIT_PER_MINUTE_OVERRIDES``.
     mcp_session_start_limit_per_minute_overrides: str = ""
+    #: Byte cap on every HTTP request body, enforced by
+    #: :class:`meho_backplane.request_body_limit.RequestBodyLimitMiddleware`
+    #: with a ``413`` answer. Sits above the largest body MEHO accepts on
+    #: purpose (the 20 MiB inline spec of the connector ingest route);
+    #: routes with a tighter cap of their own keep it. Set via
+    #: ``HTTP_MAX_REQUEST_BODY_BYTES``.
+    http_max_request_body_bytes: int = Field(default=32 * 1024 * 1024, ge=1024)
     #: Look-back window (minutes) for the dispatch-time target-activity
     #: advisory (#2550). A write-class dispatch on a target with peer
     #: activity inside this window carries a compact
@@ -2803,6 +2810,9 @@ def get_settings() -> Settings:
             "MCP_SESSION_START_LIMIT_PER_MINUTE_OVERRIDES",
             "",
         ).strip(),
+        http_max_request_body_bytes=int(
+            os.environ.get("HTTP_MAX_REQUEST_BODY_BYTES", str(32 * 1024 * 1024)),
+        ),
         dispatch_activity_advisory_window_minutes=int(
             os.environ.get("DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES", "30"),
         ),

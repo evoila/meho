@@ -309,6 +309,7 @@ def test_ready_with_empty_registry_returns_503(client: TestClient) -> None:
         "audit_replay",
         "approval_queue",
         "approval_custody",
+        "vault_tenant_scope",
         "mcp",
     }
 
@@ -336,6 +337,7 @@ def test_ready_with_all_passing_probes_returns_200(client: TestClient) -> None:
         "audit_replay",
         "approval_queue",
         "approval_custody",
+        "vault_tenant_scope",
         "mcp",
     }
 

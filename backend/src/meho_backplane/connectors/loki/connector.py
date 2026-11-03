@@ -68,7 +68,11 @@ from meho_backplane.connectors._shared.vault_creds import (
     load_vault_secret_data,
     strip_credential_value,
 )
-from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.adapters.http import (
+    HttpConnector,
+    ResponseTooLargeError,
+    _read_capped_json_response,
+)
 from meho_backplane.connectors.loki.ops import LOKI_OPS, LOKI_WHEN_TO_USE_BY_GROUP
 from meho_backplane.connectors.loki.read_only import assert_loki_read_only
 from meho_backplane.connectors.schemas import (
@@ -326,7 +330,9 @@ class LokiConnector(HttpConnector):
         )
         async def _do_get() -> httpx.Response:
             client = await self._http_client(target)
-            resp = await client.get(path)
+            # Streamed, byte-capped read: the probe body counts against
+            # the same response-body cap every curated op honours.
+            resp = await _read_capped_json_response(client, "GET", path)
             resp.raise_for_status()
             return resp
 
@@ -342,7 +348,7 @@ class LokiConnector(HttpConnector):
         try:
             resp = await self._unauth_get(target, _LABELS_PATH)
             payload = resp.json()
-        except (httpx.HTTPError, OSError, ValueError):
+        except (httpx.HTTPError, OSError, ValueError, ResponseTooLargeError):
             return None
         data = payload.get("data") if isinstance(payload, dict) else None
         return len(data) if isinstance(data, list) else None
@@ -364,7 +370,7 @@ class LokiConnector(HttpConnector):
         try:
             build_resp = await self._unauth_get(target, _BUILDINFO_PATH)
             buildinfo = build_resp.json()
-        except (httpx.HTTPError, OSError, ValueError) as exc:
+        except (httpx.HTTPError, OSError, ValueError, ResponseTooLargeError) as exc:
             return FingerprintResult(
                 vendor="grafana",
                 product="loki",
@@ -397,7 +403,7 @@ class LokiConnector(HttpConnector):
         """Return ``True`` when ``GET /ready`` reports the instance ready."""
         try:
             resp = await self._unauth_get(target, _READY_PATH)
-        except (httpx.HTTPError, OSError):
+        except (httpx.HTTPError, OSError, ResponseTooLargeError):
             return False
         return resp.status_code == 200 and "ready" in (resp.text or "").strip().lower()
 
@@ -421,7 +427,7 @@ class LokiConnector(HttpConnector):
 
         try:
             resp = await self._unauth_get(target, _READY_PATH)
-        except (httpx.HTTPError, OSError) as exc:
+        except (httpx.HTTPError, OSError, ResponseTooLargeError) as exc:
             return _result(False, f"{type(exc).__name__}: {exc}")
         if resp.status_code == 200 and "ready" in (resp.text or "").strip().lower():
             return _result(True, None)

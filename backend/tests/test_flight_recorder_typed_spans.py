@@ -68,6 +68,7 @@ from meho_backplane.redaction.flight_recorder import (
     SECRET_FAMILY_OMITTED_MARKER,
 )
 from meho_backplane.settings import get_settings
+from tests._ssh_fakes import FakeSshProcess
 
 
 @pytest.fixture(autouse=True)
@@ -329,9 +330,14 @@ class _FakeConn:
         self._result = result
         self.commands: list[str] = []
 
-    async def run(self, cmd: str, check: bool = False) -> _FakeSshResult:
+    def create_process(self, cmd: str, **_kwargs: Any) -> FakeSshProcess:
         self.commands.append(cmd)
-        return self._result
+        return FakeSshProcess(
+            command=cmd,
+            stdout=self._result.stdout,
+            stderr=self._result.stderr,
+            exit_status=self._result.exit_status,
+        )
 
 
 class _StubSshConnector(SshConnector):

@@ -251,6 +251,7 @@ _READY_ENTRY_FEATURE: dict[str, str] = {
     "audit_replay": "audit",
     "approval_queue": "approvals",
     "approval_custody": "approvals",
+    "vault_tenant_scope": "auth_tenancy",
 }
 
 
@@ -512,6 +513,23 @@ def _approval_custody_block(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _vault_tenant_scope_block(settings: Settings) -> dict[str, Any]:
+    """Whether the Vault tenant-scope prefix check is on.
+
+    ``VAULT_KV_TENANT_SCOPE_PREFIX`` is set by default; a deployment that
+    clears it turns the per-tenant path check off for every ``vault.kv.*``
+    call. Until now that state showed only in one startup log line. It is
+    reported here so ``/ready`` and ``meho_status`` carry it, and the
+    ``vault_tenant_scope_enforced`` gauge mirrors it for dashboards.
+    """
+    enforced = bool(settings.vault_kv_tenant_scope_prefix)
+    return {
+        "configured": enforced,
+        "missing_env": [] if enforced else ["VAULT_KV_TENANT_SCOPE_PREFIX"],
+        "docs": "docs/codebase/connectors-vault-tenant-scope.md",
+    }
+
+
 def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
     """Return the ``features`` block exposed under ``/ready``.
 
@@ -560,6 +578,9 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
                                "custody": "configured" | "missing" | "malformed",
                                "missing_env": [...], "docs": "docs/codebase/approvals.md",
                                "maturity": "ga"},
+          "vault_tenant_scope": {"configured": <bool>, "missing_env": [...],
+                                 "docs": "docs/codebase/connectors-vault-tenant-scope.md",
+                                 "maturity": "ga"},
           "mcp":            {"configured": true,   "protocol_version": "...", "missing_env": []}
         }
     """
@@ -569,6 +590,7 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
         "audit_replay": _audit_replay_block(settings),
         "approval_queue": _approval_queue_block(settings),
         "approval_custody": _approval_custody_block(settings),
+        "vault_tenant_scope": _vault_tenant_scope_block(settings),
         "mcp": _mcp_block(),
     }
     for entry_name, feature_key in _READY_ENTRY_FEATURE.items():

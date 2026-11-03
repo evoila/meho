@@ -73,7 +73,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
-from meho_backplane.connectors.adapters.ssh import SshConnector
+from meho_backplane.connectors.adapters.ssh import SshConnector, run_capped
 from meho_backplane.connectors.bind9.ops import BIND9_OPS
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
@@ -397,7 +397,7 @@ class Bind9Connector(SshConnector):
         cmd = _build_sudo_bash_remote_cmd(len(script_bytes))
         stdin_payload = f"{script}{sudo_password}\n"
         result = await asyncio.wait_for(
-            conn.run(cmd, input=stdin_payload, check=False),
+            run_capped(conn, cmd, target_name=getattr(target, "name", "?"), stdin=stdin_payload),
             timeout=timeout,
         )
         # Structured-logging discipline: cmd_len records the rendered

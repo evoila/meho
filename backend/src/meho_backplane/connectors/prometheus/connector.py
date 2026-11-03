@@ -337,15 +337,16 @@ class PrometheusConnector(PrometheusReadOps, HttpConnector):
         try:
             client = await self._http_client(target)
             headers = await self.auth_headers(target, operator)
-            resp = await client.request(
+            # Only the status code matters, so the body is never read.
+            async with client.stream(
                 "GET",
                 self._wire_path(target, _READY_PATH),
                 headers=headers,
                 extensions=self._request_extensions(target),
-            )
+            ) as resp:
+                return resp.status_code == 200
         except (httpx.HTTPError, OSError, VaultClientError, CredentialsReadError):
             return None
-        return resp.status_code == 200
 
     # ------------------------------------------------------------------
     # Flavour hint (operator-asserted)

@@ -120,7 +120,9 @@ unresolved credential.
 `branch`, `goVersion`), `GET /ready` (readiness flag), and a best-effort
 `GET /api/echo` (`echo_ok` query-path liveness boolean, `None` on transport
 failure). All three go through `_unauth_get`, which hits the pooled client
-directly (no auth, no tenant), so the fingerprint works on a freshly registered
+directly (no auth, no tenant) with the same streamed, byte-capped read the
+curated ops use (a body over the cap counts as a transport fault), so the
+fingerprint works on a freshly registered
 target before any secret exists — the loki `buildinfo` precedent. `vendor` is
 `grafana` (Tempo is a Grafana product, like loki). `probe()` uses the
 tenant-free `GET /ready` (`200 "ready"` → ok; `503`/transport error → not ok

@@ -103,7 +103,9 @@ preview_dispatch(operator, connector_id, op_id, target, params)
         │       error_code=target_required (same answer and order as /call, #4139)
         ├─ choose_catalog_for_target → sibling fits ? → use the sibling (#3600)
         │       → refused ? → status=error error_code=unqualified_target_version
-        │       (same reason and target fields as dispatch, no audit row, #4984)
+        │       (same reason and target fields as dispatch, no audit row, #4984;
+        │       a composite is refused here when the target is outside its
+        │       connector's composite_supported_version_range)
         ├─ not previewable (see _is_previewable: ingested, OR destructive,
         │       OR requires_approval AND not credential-class) ?
         │       → status=unavailable (not_ingested)     ◄── governed tiers pass (#3198/#3312)

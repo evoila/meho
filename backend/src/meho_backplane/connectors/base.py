@@ -143,6 +143,16 @@ class Connector(ABC):
     #: default keeps existing connectors and descriptor kinds unchanged.
     enforces_catalog_target_compatibility: bool = False
 
+    #: PEP 440 version spec (for example ``">=8.0,<9.0"``) of the target
+    #: versions every composite (multi-step) operation of this connector's
+    #: catalog works on. A composite runs its steps itself, so the catalog
+    #: check above never sees them. When this is set, the dispatcher refuses
+    #: a composite of this catalog with ``unqualified_target_version`` before
+    #: it runs, if the target's version is unknown or outside the range.
+    #: ``None`` (the default) means no check. The connector author owns the
+    #: range: it must hold for every step of every composite of the catalog.
+    composite_supported_version_range: str | None = None
+
     @classmethod
     def catalog_target_incompatibility(
         cls,

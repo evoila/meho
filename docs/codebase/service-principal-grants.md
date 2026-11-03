@@ -496,6 +496,13 @@ What the code does:
   so a `destructive` step or child stays refused. A delete below
   `destructive` needs no hash. With no delete grant the call falls through
   to the rules above, so an ordinary grant never changes its verdict.
+- **Role checks in a handler.** A service login has the `operator` role
+  on purpose. An op whose handler asks for `tenant_admin` must let a
+  service principal through when its call runs at once in sandbox mode,
+  or the delete grant cannot help. `targets.remove` does this (#5480): the
+  handler checks `sandbox_mode_active()`, the principal kind and the
+  gate's verdict (`policy_decision_var` is `auto-execute`). See
+  [`targets.md`](targets.md#removing-a-target-targetsremove).
 - **The grant-use row.** `payload.delete_grant = true`, plus
   `preview_hash` and `blast_radius` for a `destructive` call, or
   `proposed_effect` for a delete below it. A step's row names its

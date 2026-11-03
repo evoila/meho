@@ -31,12 +31,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.soap_fault import SoapFault, attach_soap_fault
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.base import ConnectorUpstreamError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
-from meho_backplane.connectors.vmware_rest.soap import SoapFault, attach_soap_fault
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches

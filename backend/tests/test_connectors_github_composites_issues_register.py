@@ -6,13 +6,15 @@
 Checks, for ``gh.composite.issue_search``, ``gh.composite.issue_view``,
 ``gh.composite.issue_create`` and ``gh.composite.issue_comment``:
 
-* the risk level and approval flag of each operation (the two reads run at
-  once; the two writes wait for approval);
+* the risk level and approval flag of each operation (all four run at
+  once; the two writes are ``safe`` ticket writes, limited to the target's
+  repository);
 * the ``issues`` group with its text;
 * every operation meets the operation contract rules of
   :mod:`tests.test_operation_contracts`;
-* a call through MEHO's dispatcher writes exactly one audit row, and the
-  writes wait for approval until they are approved.
+* a call through MEHO's dispatcher writes exactly one audit row, the
+  writes run at once with no approval, and a write to another repository
+  than the target's is refused with no call to GitHub.
 
 The connector is a session stub; no live GitHub. All names are made up.
 """
@@ -44,10 +46,11 @@ from tests.test_operation_contracts import OperationContract, check_operation
 _EXPECTED_POSTURE: dict[str, tuple[str, bool]] = {
     "gh.composite.issue_search": ("safe", False),
     "gh.composite.issue_view": ("safe", False),
-    "gh.composite.issue_create": ("caution", True),
-    "gh.composite.issue_comment": ("caution", True),
+    "gh.composite.issue_create": ("safe", False),
+    "gh.composite.issue_comment": ("safe", False),
 }
 _ISSUE_OP_IDS = tuple(_EXPECTED_POSTURE)
+_WRITE_OP_IDS = ("gh.composite.issue_create", "gh.composite.issue_comment")
 
 
 @pytest.fixture(autouse=True)
@@ -124,7 +127,7 @@ async def test_issue_ops_are_composites_in_the_issues_group(
 async def test_issue_ops_meet_the_operation_contract_rules(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Each operation passes the ten contract rules with no gap."""
+    """Each operation passes the contract rules with no gap."""
     await register_github_composite_operations(embedding_service=stub_embedding_service)
     rows, groups = await _registered_issue_ops()
     problems: dict[str, dict[str, list[str]]] = {}
@@ -166,7 +169,8 @@ class _FakeTarget:
         self.preferred_impl_id: str | None = None
         self.id: UUID = uuid.uuid4()
         self.name = "gh-target"
-        self.host = "api.github.com"
+        self.host = "api.github.com/repos/acme/widgets"
+        self.extras: dict[str, Any] = {}
         self.port = 443
         self.auth_model: str | None = "shared_service_account"
         self.secret_ref: str | None = None
@@ -253,11 +257,11 @@ async def test_each_call_writes_one_audit_row(
     op_id: str,
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """A read runs at once; a write runs once approved. Either way: one audit row."""
+    """Every call runs at once, with no approval, and writes one audit row."""
     await register_github_composite_operations(embedding_service=stub_embedding_service)
     register_connector_v2(product="gh", version="3", impl_id="gh-rest", cls=_StubGitHubConnector)
     _StubGitHubConnector.post_calls.clear()
-    needs_approval = _EXPECTED_POSTURE[op_id][1]
+    is_write = op_id in _WRITE_OP_IDS
 
     result = await dispatch(
         operator=_operator(),
@@ -265,20 +269,20 @@ async def test_each_call_writes_one_audit_row(
         op_id=op_id,
         target=_FakeTarget(),
         params=_CALLS[op_id],
-        _approved=needs_approval,
     )
 
     assert result.status == "ok", result.error
     assert await _audit_rows(op_id) == 1
-    assert len(_StubGitHubConnector.post_calls) == (1 if needs_approval else 0)
+    assert len(_StubGitHubConnector.post_calls) == (1 if is_write else 0)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("op_id", ["gh.composite.issue_create", "gh.composite.issue_comment"])
-async def test_the_writes_wait_for_approval(
+@pytest.mark.parametrize("op_id", _WRITE_OP_IDS)
+async def test_a_write_to_another_repository_is_refused(
     op_id: str,
     stub_embedding_service: AsyncMock,
 ) -> None:
+    """The target names acme/widgets; a write to acme/other never reaches GitHub."""
     await register_github_composite_operations(embedding_service=stub_embedding_service)
     register_connector_v2(product="gh", version="3", impl_id="gh-rest", cls=_StubGitHubConnector)
     _StubGitHubConnector.post_calls.clear()
@@ -288,8 +292,10 @@ async def test_the_writes_wait_for_approval(
         connector_id="gh-rest-3",
         op_id=op_id,
         target=_FakeTarget(),
-        params=_CALLS[op_id],
+        params={**_CALLS[op_id], "repo": "other"},
     )
 
-    assert result.status == "awaiting_approval", result.error
+    assert result.status == "error"
+    assert "not the repository of target" in str(result.extras)
     assert _StubGitHubConnector.post_calls == []
+    assert await _audit_rows(op_id) == 1

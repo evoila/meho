@@ -581,6 +581,31 @@ async def test_transition_mail_drops_only_the_refused_recipient(
 
 
 @pytest.mark.asyncio
+async def test_transition_mail_drops_a_recipient_whose_local_part_is_not_plain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A listed domain does not admit a local part outside letters, digits and ``. _ + -``.
+
+    The alert path never passes through the ``mail.send`` schema, so the
+    allowlist gate alone must refuse ``%`` and ``!`` in the local part. The
+    plain recipient still receives the mail.
+    """
+    fake = _install_transport(monkeypatch)
+    with capture_logs() as logs:
+        await notify_dashboard_transition(
+            _notice(
+                email="oncall@example.com,box%other.test@example.com,other.test!box@example.com"
+            )
+        )
+    assert len(fake.calls) == 1, "the plain recipient still receives the mail"
+    assert fake.calls[0]["to"] == ["oncall@example.com"]
+    assert [e["recipient"] for e in logs if e["event"] == "checks_notify_recipient_refused"] == [
+        "box%other.test@example.com",
+        "other.test!box@example.com",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_transition_mail_all_recipients_refused_sends_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

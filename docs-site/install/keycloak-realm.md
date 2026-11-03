@@ -70,7 +70,7 @@ In the realm that hosts `meho-backplane`, create a client with:
 | Client ID | `meho-cli` (suggested — any identifier works) | Must match `config.keycloakCliClientId` in your chart values. |
 | Client authentication | **Off** (public client) | The CLI has nowhere to store a secret; the device grant against a confidential client fails with `unauthorized_client`. |
 | Standard flow | **On** | Older `meho` CLI versions open the approval sign-in on this client. The current CLI uses `meho-cli-approve` (below). `meho login` uses the device flow. |
-| PKCE method (Advanced → Proof Key for Code Exchange) | (none) | Leave it empty. `meho login` uses the device flow and sends no PKCE, so a required method refuses every `meho login`. The approval sign-in of older CLI versions sends PKCE by itself. |
+| PKCE method (Advanced → Proof Key for Code Exchange) | (none) | `meho login` sends no PKCE, and Keycloak checks PKCE at the device login too. A required method refuses every `meho login`. The browser sign-in of older CLI versions still sends a challenge, and Keycloak accepts it. |
 | Direct access grants | Off | Password grant is out of scope by design. |
 | Implicit flow | Off | Deprecated by OAuth 2.1. |
 | Service accounts roles | Off | Public clients cannot hold credentials. |
@@ -163,8 +163,10 @@ upgrade (the realm finishing job adds a client that is missing, and sets
 the two token settings on an existing one). The job makes
 the login flow only when its account `meho-admin` has the
 `manage-realm` role, which it has when the company login is on.
-Otherwise create the flow by hand as above. Until the client exists,
-approve in the web interface.
+Otherwise add the flow through MEHO (see
+[Add the approval flow to a running realm through MEHO](#add-the-approval-flow-to-a-running-realm-through-meho))
+or by hand as above.
+Until the client exists, approve in the web interface.
 
 Two backplane settings control the check:
 
@@ -187,6 +189,44 @@ flow of the approval client must ask for the code at every sign-in:
 
 MEHO then records such an approval as a one-time code approval. The
 sign-in must still be recent: an `acr` value alone never approves.
+
+#### Add the approval flow to a running realm through MEHO
+
+The operation `keycloak.authflow.ensure_approval_flow` adds the flow
+`meho approval sign-in` to the realm of a Keycloak target (its managed
+realm) and makes it the browser flow of `meho-cli-approve`. A second
+person must approve it.
+
+```bash
+meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_flow \
+  --target <keycloak-target>
+```
+
+- The flow is missing: MEHO makes it with the steps above and binds it.
+- The flow is there with the same steps: MEHO changes nothing. When the
+  client already uses it, the result says `flow_created: false` and
+  `binding_changed: false`. So the call is safe to run twice.
+- The flow is there with other steps: MEHO stops, changes nothing, and
+  names the first difference. Fix the flow by hand, then run it again.
+- `meho-cli-approve` is missing: MEHO stops before it changes anything.
+  Create the client first.
+
+MEHO reads the client back after the change. `browser_flow_id` in the
+result is the flow the client now uses. Its other settings stay as they
+were.
+
+To check how people sign in to the realm through an outside login (a
+company login, for example), list the realm's identity providers:
+
+```bash
+meho operation call keycloak-admin-26.x keycloak.identity_provider.list \
+  --target <keycloak-target>
+```
+
+Each row has the alias, the type, whether it is on, whether it is hidden
+on the login page, and `redirect_flows`: the login flows that send people
+straight to it. The approval flow must not be in `redirect_flows`. The
+list never shows the provider's secret.
 
 ## Step 3 — Add the protocol mappers
 
@@ -516,9 +556,13 @@ set them once (see [A realm that already runs](#a-realm-that-already-runs)).
 | Realm settings → **Login** | Remember me | On |
 | Realm settings → **Sessions** | SSO Session Idle Remember Me | 30 days |
 | Realm settings → **Sessions** | SSO Session Max Remember Me | 30 days |
-| Authentication → Policies → **Webauthn Passwordless Policy** | Enable Passkeys | On |
+| Realm settings → **Login** → Login screen customization | Enable Passkeys | On |
 | Authentication → Policies → **Webauthn Passwordless Policy** | User verification requirement | Required (the device asks for a PIN or a fingerprint) |
-| Authentication → Policies → **Webauthn Passwordless Policy** | Require discoverable credential | Yes |
+| Authentication → Policies → **Webauthn Passwordless Policy** | Discoverable credential | Required |
+
+Keycloak 26.7 replaced the old setting **Require discoverable credential**
+(Yes or No) with **Discoverable credential**. Leave the old one at
+**Not specified**.
 
 ### What stays strict
 
@@ -538,7 +582,7 @@ set them once (see [A realm that already runs](#a-realm-that-already-runs)).
   [The web console session](#the-web-console-session)). Deny needs no new
   sign-in.
 - **The console keeps its own limit.** MEHO ends a console session after
-  `UI_SESSION_ABSOLUTE_LIFETIME_SECONDS` (12 hours by default). The longer
+  `UI_SESSION_ABSOLUTE_LIFETIME_SECONDS` (10 hours by default). The longer
   Keycloak login does not make it longer. After that limit the console
   sends the person to the login page. In a remembered browser, that login
   asks nothing, and the new session can read and deny, but not approve
@@ -594,7 +638,7 @@ already runs gets these settings once, in one of two ways:
       "ssoSessionMaxLifespanRememberMe": 2592000,
       "webAuthnPolicyPasswordlessPasskeysEnabled": true,
       "webAuthnPolicyPasswordlessUserVerificationRequirement": "required",
-      "webAuthnPolicyPasswordlessRequireResidentKey": "Yes"
+      "webAuthnPolicyPasswordlessResidentKey": "required"
     }
     ```
 
@@ -605,15 +649,42 @@ already runs gets these settings once, in one of two ways:
 - **By hand**, in the Keycloak admin console, with the table above.
 
 **A realm made before Keycloak 26.4.** Keycloak 26.4 added a step to the
-browser flow of new realms: **Condition - credential**, in the sub-flow
-**Browser - Conditional 2FA**. It skips the one-time code after a passkey
-login. An upgrade does not add it to an older realm. Without it, a passkey
-login still asks for the code. Check the browser flow under
-**Authentication**. If the step is missing, add it as Keycloak's
-[passkeys guide](https://www.keycloak.org/docs/latest/server_admin/index.html#passkeys_server_administration_guide)
-shows: a **Condition - credential** step, **Required**, for the credential
-type `webauthn-passwordless`. The built-in Keycloak of the chart started
-with a newer version, so its realm has the step.
+browser flow of new realms: **Condition - credential**. It skips the
+one-time code after a passkey login. An upgrade does not add it to an older
+realm. The built-in Keycloak of the chart started with a newer version, so
+its realm has the step. Without the step, a passkey replaces the password,
+but a person with a one-time code still types the code.
+
+Until MEHO has an operation for this
+([#5663](https://github.com/evoila/meho/issues/5663)), these steps run in the
+Keycloak admin console:
+
+1. **Check.** Open **Authentication → Flows** and the flow that is bound
+   as the browser flow (usually `browser`). In the sub-flow whose name
+   starts with **Browser - Conditional**, look for **Condition -
+   credential**. When it is there, you are done.
+2. **Copy the flow.** Keycloak does not let you add a step to its built-in
+   `browser` flow. So open `browser`, choose **Duplicate**, and give the
+   copy a name, for example `browser with passkeys`. When the realm already
+   uses its own copy of the flow, change that copy and skip this step.
+3. **Add the step.** In the copy's **Browser - Conditional ...** sub-flow,
+   add the condition **Condition - credential**. Set it to **Required**
+   and move it right after **Condition - user configured**. Open its
+   settings (the **Settings** icon) and set:
+    - **Credentials**: `webauthn-passwordless`
+    - **Included**: off
+
+    With **Included** off, the condition is true only when no passkey was
+    used. So the one-time code runs after a password login, and not after
+    a passkey login.
+
+4. **Use the copy.** In the copy's menu, choose **Bind flow** and pick
+   **Browser Flow**.
+5. **Test.** Log in with a passkey: Keycloak asks no one-time code. Log in
+   with the password: Keycloak still asks for the code.
+
+**The way back:** bind `browser` as the **Browser Flow** again. The copy
+then has no effect, and you can delete it.
 
 ## Wire it into Helm
 
@@ -682,6 +753,7 @@ usually appear:
 | Symptom | Cause | Fix |
 |---|---|---|
 | `unauthorized_client` at login start | The client is confidential, or the device grant is off | Step 2 — public client, device grant **On**. |
+| `meho login` fails at once with `invalid_request` and "Missing parameter: code_challenge_method" | The login client (`meho-cli`) requires a PKCE method. `meho login` sends no PKCE, and Keycloak checks PKCE at the device login too. A realm made with MEHO 0.40.0, 0.41.0 or 0.42.0 (the built-in Keycloak, or `meho admin keycloak bootstrap-clients`) set `S256` on it. | Clear the PKCE method on the login client: in the admin console (Advanced → Proof Key for Code Exchange, set it to empty), or with the operation `keycloak.client.update` and the representation `{"attributes": {"pkce.code.challenge.method": ""}}` (an empty value removes the attribute). Step 2. |
 | Token issued, every call 401s with `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` | Missing protocol mappers, or the person is in none of the five groups | Step 3 — add all the mappers; Step 5 — put the person in one group. Then log out and back in. |
 | Everyone gets the same role, whatever their group | A fixed-value (Hardcoded claim) `tenant_role` mapper is still on the client | Delete it, or re-run `meho admin keycloak bootstrap-clients`, which replaces it. |
 | Token issued, every call 401s with `invalid_token` or `missing_sub`; the decoded token has no `sub` | The `basic` scope is not a default scope on the client | Step 4 — assign it, re-login (existing tokens stay broken). |

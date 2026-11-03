@@ -43,9 +43,6 @@ from meho_backplane.connectors.vault.ops_auth_write_schemas import (
     VAULT_AUTH_USERPASS_UPDATE_PASSWORD_PARAMETER_SCHEMA,
     VAULT_AUTH_USERPASS_WRITE_PARAMETER_SCHEMA,
 )
-from meho_backplane.connectors.vmware_rest.composites.schemas import (
-    CONTENT_LIBRARY_SUBSCRIBED_CREATE_PARAMETER_SCHEMA,
-)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
@@ -272,18 +269,6 @@ _PASSWORD_OPS = [
         VAULT_AUTH_USERPASS_WRITE_PARAMETER_SCHEMA,
         {"username": "user-a", "mount": "userpass", "token_policies": ["reader"]},
         id="vault-userpass-write",
-    ),
-    pytest.param(
-        "vmware.composite.content_library.subscribed.create",
-        CONTENT_LIBRARY_SUBSCRIBED_CREATE_PARAMETER_SCHEMA,
-        {
-            "name": "library-a",
-            "subscription_url": "https://content.example.com/lib.json",
-            "datastore": "datastore-a",
-            "authentication_method": "BASIC",
-            "username": "reader",
-        },
-        id="content-library-subscribed-create",
     ),
 ]
 

@@ -1651,7 +1651,7 @@ fan-out composites (`vm.power.bulk`, `host.evacuate`,
 the same read-only listing helpers the handlers use — `{..., resolved,
 total_resolved}` with the list capped — and the single-entity
 composites echo their params; see
-[`connectors-vmware-rest.md`](connectors-vmware-rest.md) "Park-time
+`connectors-vmware-rest.md` "Park-time
 approval previews". The Keycloak write ops register bespoke builders in
 `connectors/keycloak/ops_write_preview.py` (#1857): `keycloak.realm.create`
 populates `{resource, realm, representation}`, `keycloak.user.create`
@@ -1692,7 +1692,7 @@ got one in #4850; `k8s.secret.update` came later with its own builder
 | `vault.auth.userpass.write` | every call | mount, username, `sets_password`, `token_policies` and whether they are replaced or kept | the password |
 | `k8s.secret.create` | every call | name, namespace, type, all key names, inline key names, the `labels` and `annotations` maps, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts | any value |
 | `k8s.secret.update` | every call | name, namespace, `mode`, the key names that are set, inline key names, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts, the key names the Secret has now, in `replace` mode the key names that are removed | any value |
-| `k8s.job.create` | every call | name, namespace, service account, per container: name, image, env var names, `envFrom` Secret / ConfigMap names, command size in bytes | env values, the command and args text |
+| `k8s.job.create` | every call | name, namespace and the whole Job `spec` as it will be created: Job settings (`backoffLimit`, ...), node choice (`nodeName`, `nodeSelector`, `tolerations`, `affinity`), `hostPID` / `hostNetwork` / `hostIPC`, service account, pod and container `securityContext`, image, `command`, `args`, `volumes`, `volumeMounts`, env var names, `envFrom` and `valueFrom` references (Secret or ConfigMap name and key) | every inline `env` value and probe `httpHeaders` value (the name stays); on `command` and `args`, read as one command line: the value of a `NAME=VALUE` or `--name=value` whose name holds a secret word (`PGPASSWORD=...`, `--password=...`, any length), the argument after a secret flag (`--password x`, `-p x`; also across the end of `command`), the password in `user:password` after `-u` / `--user`, the password in a URL, tokens with a known vendor prefix (`ghp_...`). A list item is one argument of the program, so such a value runs to the end of the item, spaces and shell operators included (`PGPASSWORD=x;tail` is hidden whole); only in the item after `-c` (alone or in a short option group such as `-ec` or `-lc`), a shell command string, is the value one shell word, quotes and escapes included, and an unquoted shell operator such as `;` or `&&` ends it, so the commands after it stay visible; secret-shaped text anywhere in the spec (JWTs, bearer tokens); the value of a field with a secret-shaped name (a `secret` volume, `imagePullSecrets`). A secret on a command line with no known shape is shown. |
 | `sddc.host.validate` | an agent's call | host count; per host: `fqdn`, `username`, `storageType`, `networkPoolId` | the ESXi password and any other spec field |
 | `sddc.host.commission` | every call | the same as `sddc.host.validate` | the same |
 | `holodeck.router.patch` | every call | HoloRouter version, whether the call only checks (`verify_only`, a 9.1 router), the patch ids and the module file each one edits | nothing secret exists; the op takes no params |
@@ -1919,7 +1919,7 @@ Requirement 1 of
 `vmware.composite.vm.destroy` (`safety_level="destructive"`,
 `requires_approval=True`; the dual-arm handler + blast-radius preview
 builder are documented in
-[`connectors-vmware-rest.md`](connectors-vmware-rest.md)). Wiring it in
+`connectors-vmware-rest.md`). Wiring it in
 surfaced — and this task closed — three gaps in the tier's *human*-side
 enforcement that #3196/#3197 left, plus one machinery limitation:
 
@@ -3380,7 +3380,10 @@ forbidden.
   waits for a person again.
 - With the mode on, the park reasons add that a delete grant made in the
   web console may cover the delete; with it off every reason text is
-  unchanged.
+  unchanged. The preview has already looked for the grant, so its reason
+  says either that a named delete grant covers the call (with the
+  preview hash) or that none does and the call waits (#5492, see
+  [`dispatch-request-preview.md`](dispatch-request-preview.md)).
 
 Details: [`service-principal-grants.md`](service-principal-grants.md#sandbox-mode-4622).
 

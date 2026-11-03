@@ -1,7 +1,9 @@
 # evoila's own connectors leave the public repository (decision)
 
 **Status:** decided by the program owner on 28 October 2026; changed on
-1 November 2026 (see "Who builds, signs and reviews")
+1 November 2026 (see "Who builds, signs and reviews"); the folder list was
+corrected on 2 November 2026 with the removal pull request (22 connector
+folders, `idb` included)
 **Date:** 2026-10-28
 **Applies to:** the removal Task [#3345](https://github.com/evoila/meho/issues/3345)
 and the connector packages Initiative [#5060](https://github.com/evoila/meho/issues/5060)
@@ -16,8 +18,9 @@ and the connector packages Initiative [#5060](https://github.com/evoila/meho/iss
   wheel (a built Python package file).
 - This repository keeps the backplane, the connector kit, the core
   connectors and the commodity connectors.
-- **First wave:** the 19 VMware connector folders, plus `salt`.
-  **Second wave:** `azure`. **Fortinet** connectors are built only in
+- **First wave:** the 21 VMware connector folders, plus `salt` (22
+  connector folders) and the VMware shared folder. **Second wave:**
+  `azure`. **Fortinet** connectors are built only in
   the private repository.
 - The public image stays. It runs without these connectors. evoila builds
   an overlay image: the public image, pinned by digest, plus the private
@@ -50,7 +53,7 @@ and the connector packages Initiative [#5060](https://github.com/evoila/meho/iss
 
 | Wave | Folders | Notes |
 |---|---|---|
-| 1 (VMware wheel) | `vmware_rest`, `nsx`, `sddc_manager`, `sddc_vcf5`, `vcf_automation`, `vra8`, `vcf_fleet`, `fleet_lcm`, `vcf_installer`, `vcf_cloud_builder`, `vcf_logs`, `vrli8`, `vcf_operations`, `vrops8`, `vcd`, `holodeck`, `hcx`, `srm`, `vr`, `vro` | Plus one VMware shared folder for the VMware-only modules of `_shared/`, the three VMware profile files, their tests and their docs pages. |
+| 1 (VMware wheel) | `vmware_rest`, `nsx`, `sddc_manager`, `sddc_vcf5`, `vcf_automation`, `vra8`, `vcf_fleet`, `fleet_lcm`, `vcf_installer`, `vcf_cloud_builder`, `vcf_logs`, `vrli8`, `vcf_operations`, `vrops8`, `vcd`, `holodeck`, `hcx`, `srm`, `vr`, `vro`, `idb` | Plus the VMware shared folder `vmware_shared` for the VMware-only modules of `_shared/`, the three VMware profile files, their tests and their docs pages. `idb` (VCF Identity Broker and Workspace ONE Access) landed after the first list and moves with the wave. |
 | 1 (VMware wheel) | `salt` | `salt-raas` is the API of VMware Aria Automation Config, so it moves with VMware. |
 | 2 | `azure` | After the VMware wave. |
 | Private only | Fortinet | Never built in this repository. The open FortiGate pull request #5169 is not merged here. |
@@ -112,8 +115,8 @@ The internal connector placement rule changes to match:
 
 - A hyperscaler API stays public, except Azure. Azure is evoila's own and
   moves after VMware. Google Cloud stays public.
-- The VMware list has 19 folders now: `hcx`, `srm`, `vr` and `vro` join.
-  `salt` moves with them.
+- The VMware list has 21 folders now: `hcx`, `srm`, `vr`, `vro` and `idb`
+  join. `salt` moves with them.
 - Fortinet connectors are evoila's own.
 
 ## What this changes

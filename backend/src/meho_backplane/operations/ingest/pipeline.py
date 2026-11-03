@@ -589,9 +589,10 @@ class IngestionPipelineService:
 
         Three guards in one pass:
 
-        1. Each spec's ``info.version`` is parsed via the lightweight
-           :func:`read_spec_info_version` helper (no DB hits, no full
-           parse — just enough to read the ``info`` block).
+        1. Each spec's ``info.version`` is read via
+           :func:`read_spec_info_version`. It has no DB hits, but it
+           downloads and parses the whole spec, so :meth:`ingest` calls
+           this method in a worker thread (``asyncio.to_thread``).
         2. Each parsed ``info.version`` is classified against the
            operator's label via :func:`_classify_version_match`. An
            ``incompatible`` outcome raises
@@ -783,8 +784,12 @@ class IngestionPipelineService:
         # dry-run path benefits from catching the mistake at the validate
         # boundary rather than letting an operator dry-run a spec that
         # belongs under a different version label and convince themselves
-        # the real ingest will work.
-        self._validate_spec_versions(
+        # the real ingest will work. It runs in a worker thread: reading
+        # each spec's ``info.version`` downloads and parses the whole
+        # spec, which would otherwise block the event loop (and every
+        # other request) for the whole download and parse.
+        await asyncio.to_thread(
+            self._validate_spec_versions,
             specs=specs,
             requested_version=version,
             log=log,

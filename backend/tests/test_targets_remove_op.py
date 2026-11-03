@@ -11,7 +11,9 @@
 * **Topology check** -- the shared delete service refuses a target that
   ``graph_node`` rows point at unless ``force`` is set.
 * **Role** -- like the REST route, only a ``tenant_admin`` login removes a
-  target; after approval, the approver's role counts.
+  target; after approval, the approver's role counts. One exception
+  (#5480): in sandbox mode a service principal whose call runs at once
+  under a delete grant needs no ``tenant_admin``.
 * **Policy** -- a person waits for a second person and cannot approve the
   own request; an agent login is refused, also in sandbox mode; a service
   principal waits and cannot get a standing grant (422); in sandbox mode a
@@ -293,10 +295,20 @@ async def test_topology_records_block_the_removal_unless_force() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("sandbox", [False, True])
+@pytest.mark.parametrize("kind", [PrincipalKind.USER, PrincipalKind.SERVICE])
 @pytest.mark.parametrize("role", [TenantRole.OPERATOR, TenantRole.READ_ONLY])
-async def test_a_caller_without_tenant_admin_is_refused(role: TenantRole) -> None:
+async def test_a_caller_without_tenant_admin_is_refused(
+    monkeypatch: pytest.MonkeyPatch, role: TenantRole, kind: PrincipalKind, sandbox: bool
+) -> None:
+    # A call that runs after approval keeps the role check, also for a
+    # service principal in sandbox mode (#5480).
+    if sandbox:
+        turn_sandbox_mode_on(monkeypatch)
+    else:
+        turn_sandbox_mode_off(monkeypatch)
     row = await _seed(f"role-{role.value}")
-    result = await _run_approved(_operator("op-person", role=role), row.id)
+    result = await _run_approved(_operator("op-person", kind=kind, role=role), row.id)
     assert result.status == "error", result
     assert "tenant_admin" in str(result.extras.get("exception_message"))
     assert await _is_removed(row.id) is False
@@ -385,11 +397,25 @@ async def test_an_agent_login_is_refused(monkeypatch: pytest.MonkeyPatch, sandbo
     assert await _audit_rows()
 
 
-async def test_a_service_principal_waits_for_a_person() -> None:
+@pytest.mark.parametrize("role", [TenantRole.OPERATOR, TenantRole.TENANT_ADMIN])
+async def test_a_service_principal_waits_for_a_person(
+    monkeypatch: pytest.MonkeyPatch, role: TenantRole
+) -> None:
+    # Outside sandbox mode a delete grant row is never read (#5480).
+    turn_sandbox_mode_off(monkeypatch)
     row = await _seed("service-asks")
-    call = await call_operation(_operator(_SERVICE_SUB, kind=PrincipalKind.SERVICE), _args(row.id))
+    await seed_delete_grant(
+        tenant_id=_TENANT_ID,
+        principal_sub=_SERVICE_SUB,
+        op_id=TARGETS_REMOVE_OP_ID,
+        connector_id=TARGETS_REGISTRY_CONNECTOR_ID,
+    )
+    call = await call_operation(
+        _operator(_SERVICE_SUB, kind=PrincipalKind.SERVICE, role=role), _args(row.id)
+    )
     assert call["status"] == "awaiting_approval", call
     assert await _is_removed(row.id) is False
+    assert await grant_use_rows() == []
     assert await _audit_rows()
 
 
@@ -414,10 +440,12 @@ def test_a_standing_grant_for_the_op_is_refused() -> None:
     assert "delete-shaped" in response.json()["detail"]
 
 
+@pytest.mark.parametrize("role", [TenantRole.OPERATOR, TenantRole.TENANT_ADMIN])
 @pytest.mark.parametrize("with_grant", [True, False])
 async def test_sandbox_mode_runs_a_service_call_only_under_a_delete_grant(
-    monkeypatch: pytest.MonkeyPatch, with_grant: bool
+    monkeypatch: pytest.MonkeyPatch, with_grant: bool, role: TenantRole
 ) -> None:
+    # A service login has the ``operator`` role; the delete grant is enough (#5480).
     turn_sandbox_mode_on(monkeypatch)
     row = await _seed("sandbox-target")
     grant_id = None
@@ -429,12 +457,19 @@ async def test_sandbox_mode_runs_a_service_call_only_under_a_delete_grant(
             connector_id=TARGETS_REGISTRY_CONNECTOR_ID,
         )
 
-    call = await call_operation(_operator(_SERVICE_SUB, kind=PrincipalKind.SERVICE), _args(row.id))
+    call = await call_operation(
+        _operator(_SERVICE_SUB, kind=PrincipalKind.SERVICE, role=role), _args(row.id)
+    )
     if with_grant:
         assert call["status"] == "ok", call
         assert call["result"]["status"] == "removed"
         assert await _is_removed(row.id) is True
-        assert len(await grant_use_rows(grant_id)) == 1
+        (use,) = await grant_use_rows(grant_id)
+        assert use.payload["delete_grant"] is True
+        assert use.payload["op_id"] == TARGETS_REMOVE_OP_ID
+        (audit,) = [r for r in await _audit_rows() if r.method == "DISPATCH"]
+        assert audit.policy_decision == "auto-execute"
+        assert audit.sandbox_mode is True
     else:
         assert call["status"] == "awaiting_approval", call
         assert await _is_removed(row.id) is False

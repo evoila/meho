@@ -396,7 +396,7 @@ STORAGE_OPS: tuple[WinsrvOp, ...] = (
             "unless ``force=true``, which then only provisions the disk's free "
             "space (it does NOT wipe; a true wipe would be a separate "
             "``dangerous`` op). safety_level=caution — the SQL-FCI shared-disk "
-            "provisioning step after ``iscsi.connect``."
+            "provisioning step after ``winsrv.storage.iscsi.connect``."
         ),
         parameter_schema={
             "type": "object",
@@ -453,7 +453,7 @@ STORAGE_OPS: tuple[WinsrvOp, ...] = (
         llm_instructions={
             "when_to_use": (
                 "Provision a newly-attached raw disk (e.g. after "
-                "``iscsi.connect``) into a formatted volume. Non-destructive "
+                "``winsrv.storage.iscsi.connect``) into a formatted volume. Non-destructive "
                 "— only unallocated space becomes the new volume; existing "
                 "partitions/data are untouched. Refuses a non-RAW disk unless "
                 "force=true (which still only uses free space). "

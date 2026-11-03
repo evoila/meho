@@ -319,10 +319,10 @@ class FromDiskTests(InstallTestCase):
     "helm is not on PATH; set MEHO_REQUIRE_HELM=1 to fail instead",
 )
 class ChartRenderTests(InstallTestCase):
-    def test_the_chart_accepts_the_two_values_files(self) -> None:
+    def render_chart(self) -> subprocess.CompletedProcess[str]:
+        """helm template with the two values files of install_core."""
         self.assert_succeeds(self.machine.run())
-
-        result = subprocess.run(
+        return subprocess.run(
             [
                 "helm",
                 "template",
@@ -343,11 +343,48 @@ class ChartRenderTests(InstallTestCase):
             timeout=120,
         )
 
+    def test_the_chart_accepts_the_two_values_files(self) -> None:
+        result = self.render_chart()
+
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("ingressClassName: traefik", result.stdout)
         self.assertIn("secretName: meho-core-tls", result.stdout)
         self.assertIn("meho-core-postgres-meho", result.stdout)
         self.assertIn('VAULT_ADDR: "http://meho-vault:8200"', result.stdout)
+
+    def test_the_backplane_gets_the_console_and_approval_hand_off_keys(self) -> None:
+        # Without them the console login answers 503 and MEHO refuses every
+        # credential write that must wait for an approval (#5630).
+        result = self.render_chart()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn('UI_KEYCLOAK_CLIENT_ID: "meho-web"', result.stdout)
+        for env, secret, key in (
+            ("UI_KEYCLOAK_CLIENT_SECRET", "meho-core-ui-auth", "client_secret"),
+            ("UI_SESSION_ENCRYPTION_KEY", "meho-core-ui-auth", "session_encryption_key"),
+            (
+                "APPROVAL_HANDOFF_ENCRYPTION_KEY",
+                "meho-core-approval-handoff",
+                "approval_handoff_encryption_key",
+            ),
+        ):
+            with self.subTest(env=env):
+                wired = (
+                    f"- name: {env}\n"
+                    "              valueFrom:\n"
+                    "                secretKeyRef:\n"
+                    f'                  name: "{secret}"\n'
+                    f'                  key: "{key}"\n'
+                )
+                self.assertTrue(wired in result.stdout, f"{env} is not read from {secret}")
+        # The secrets Job makes both Secrets on a fresh install: the values
+        # name the Job's own Secrets, so it checks none of the operator's.
+        plan_line = result.stdout.split("- name: MEHO_CORE_SECRETS_PLAN\n", 1)[1].splitlines()[0]
+        plan = json.loads(json.loads(plan_line.strip().removeprefix("value: ")))
+        self.assertEqual([], plan["check"])
+        made = [entry["name"] for entry in plan["make"]]
+        self.assertIn("meho-core-ui-auth", made)
+        self.assertIn("meho-core-approval-handoff", made)
 
 
 if __name__ == "__main__":

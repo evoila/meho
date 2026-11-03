@@ -309,91 +309,37 @@ def test_register_v2_wildcard_row_is_exempt() -> None:
     assert ("vcf-logs", "", "") in all_connectors_v2()
 
 
-def test_register_v2_vrli_alignment_does_not_raise() -> None:
-    """The real VcfLogsConnector, aligned to product=\"vrli\", registers cleanly.
-
-    Direct regression pin for the vRLI half of #1798: registering the
-    shipped connector under its (now canonical) triple must not raise,
-    proving the divergence the hard-fail catches is gone for vRLI.
-    """
-    from meho_backplane.connectors.vcf_logs import VcfLogsConnector
-
-    register_connector_v2(
-        product=VcfLogsConnector.product,
-        version=VcfLogsConnector.version,
-        impl_id=VcfLogsConnector.impl_id,
-        cls=VcfLogsConnector,
-    )
-
-    assert VcfLogsConnector.product == "vrli"
-    assert (VcfLogsConnector.product, VcfLogsConnector.version, VcfLogsConnector.impl_id) in (
-        all_connectors_v2()
-    )
-
-
 def test_realigned_splits_register_without_raising() -> None:
-    """The five formerly-split connectors now register WITHOUT raising.
+    """A realigned hand-coded connector registers under its real triple without raising.
 
-    #1814 (Initiative #1810) realigned sddc-manager → ``sddc``,
-    vcf-automation → ``vcfa``, vcf-fleet → ``fleet``, vcf-operations →
-    ``vrops`` and hetzner-robot → ``hetzner``, so each connector's
-    declared ``product`` now equals the token ``parse_connector_id``
-    derives from its ``impl_id``/``version``. Registering each real class
-    under its real triple must therefore NOT trip the hard-fail —
-    together with vRLI (#1798) the whole hand-coded family round-trips.
-    (Before #1814 these five diverged; under #1816's hard-fail a single
-    surviving divergence would crash this registration, so this test
-    doubles as the proof the realignment is complete.)
+    #1814 (Initiative #1810) realigned hetzner-robot → ``hetzner`` so the
+    connector's declared ``product`` equals the token ``parse_connector_id``
+    derives from its ``impl_id``/``version``. Registering the real class
+    under its real triple must therefore NOT trip the hard-fail.
 
-    Registering the real classes directly (rather than calling
+    Registering the real class directly (rather than calling
     :func:`_eager_import_connectors`, which is a ``sys.modules``-cached
     no-op after the session-scoped force-import in conftest) makes the
     assertion robust against import-history coupling.
     """
     from meho_backplane.connectors.hetzner_robot.connector import HetznerRobotConnector
-    from meho_backplane.connectors.sddc_manager import SddcManagerConnector
-    from meho_backplane.connectors.vcf_automation import VcfAutomationConnector
-    from meho_backplane.connectors.vcf_fleet import VcfFleetConnector
-    from meho_backplane.connectors.vcf_logs import VcfLogsConnector
-    from meho_backplane.connectors.vcf_operations import VcfOperationsConnector
 
-    realigned_classes = [
-        SddcManagerConnector,
-        VcfAutomationConnector,
-        VcfFleetConnector,
-        VcfOperationsConnector,
-        HetznerRobotConnector,
-    ]
+    assert HetznerRobotConnector.product == "hetzner"
 
-    # The short, dispatch-canonical tokens #1814 realigned each class to.
-    expected_products = {
-        "SddcManagerConnector": "sddc",
-        "VcfAutomationConnector": "vcfa",
-        "VcfFleetConnector": "fleet",
-        "VcfOperationsConnector": "vrops",
-        "HetznerRobotConnector": "hetzner",
-    }
-    for cls in realigned_classes:
-        assert cls.product == expected_products[cls.__name__], (
-            f"{cls.__name__} should register under {expected_products[cls.__name__]!r}, "
-            f"got {cls.product!r}"
-        )
+    register_connector_v2(
+        product=HetznerRobotConnector.product,
+        version=HetznerRobotConnector.version,
+        impl_id=HetznerRobotConnector.impl_id,
+        cls=HetznerRobotConnector,
+    )
 
-    # The hard-fail raises on any divergence, so a clean pass through the
-    # whole family is the assertion: every class round-trips.
-    for cls in (*realigned_classes, VcfLogsConnector):
-        register_connector_v2(
-            product=cls.product,
-            version=cls.version,
-            impl_id=cls.impl_id,
-            cls=cls,
-        )
-
-    # Every class registered.
     snapshot = all_connectors_v2()
-    for cls in (*realigned_classes, VcfLogsConnector):
-        assert snapshot[(cls.product, cls.version, cls.impl_id)] is cls
-    assert VcfLogsConnector.product == "vrli"
+    key = (
+        HetznerRobotConnector.product,
+        HetznerRobotConnector.version,
+        HetznerRobotConnector.impl_id,
+    )
+    assert snapshot[key] is HetznerRobotConnector
 
 
 def test_eager_import_connectors_boots_clean_with_all_connectors_aligned() -> None:
@@ -441,9 +387,9 @@ def test_eager_import_connectors_boots_clean_with_all_connectors_aligned() -> No
 
         tokens = registered_product_tokens()
         assert tokens, "expected connectors to self-register at import"
-        required = {"sddc", "vcfa", "fleet", "vrops", "hetzner", "vrli"}
+        required = {"harbor", "hetzner", "k8s", "vault"}
         missing = required - tokens
-        assert not missing, f"canonical split-family tokens missing: {sorted(missing)}"
+        assert not missing, f"canonical product tokens missing: {sorted(missing)}"
         print("BOOT_CLEAN_OK")
         """
     )
@@ -537,24 +483,6 @@ def test_all_connectors_v2_returns_copy() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_sddc_manager_connector_registered_under_v2_triple() -> None:
-    """SddcManagerConnector package registers under (sddc, 9.0, sddc-rest) at import.
-
-    Uses :func:`_ensure_registered_v2` so the test passes whether the
-    connector package was imported (and self-registered) before
-    ``_clean_registry`` cleared the registry, or fresh inside this test
-    body under subset isolation. See the helper's docstring for the
-    pytest-xdist subset-isolation rationale.
-    """
-    from meho_backplane.connectors.sddc_manager import SddcManagerConnector
-
-    _ensure_registered_v2(SddcManagerConnector)
-    snapshot = all_connectors_v2()
-    key = ("sddc", "9.0", "sddc-rest")
-    assert key in snapshot
-    assert snapshot[key] is SddcManagerConnector
-
-
 def test_harbor_connector_registered_under_v2_triple() -> None:
     """HarborConnector package registers under (harbor, 2.x, harbor-rest) at import.
 
@@ -614,69 +542,6 @@ def test_proxmox_connector_registered_under_v2_triple_and_wildcard() -> None:
     assert snapshot[wildcard] is ProxmoxConnector
 
 
-def test_vcf_automation_connector_registered_under_v2_triple() -> None:
-    """VcfAutomationConnector package registers under (vcfa, 9.0, vcfa-rest).
-
-    Same idempotent-registration pattern as the SDDC Manager / Harbor
-    tests above.
-    """
-    from meho_backplane.connectors.vcf_automation import VcfAutomationConnector
-
-    _ensure_registered_v2(VcfAutomationConnector)
-    snapshot = all_connectors_v2()
-    key = ("vcfa", "9.0", "vcfa-rest")
-    assert key in snapshot
-    assert snapshot[key] is VcfAutomationConnector
-
-
-def test_vcf_operations_connector_registered_under_v2_triple() -> None:
-    """VcfOperationsConnector package registers under (vrops, 9.0, vrops-rest).
-
-    Same idempotent-registration pattern as the SDDC Manager / Harbor /
-    VCF Automation tests above.
-    """
-    from meho_backplane.connectors.vcf_operations import VcfOperationsConnector
-
-    _ensure_registered_v2(VcfOperationsConnector)
-    snapshot = all_connectors_v2()
-    key = ("vrops", "9.0", "vrops-rest")
-    assert key in snapshot
-    assert snapshot[key] is VcfOperationsConnector
-
-
-def test_vcf_logs_connector_registered_under_v2_triple() -> None:
-    """VcfLogsConnector package registers under (vrli, 9.0, vrli-rest).
-
-    G0.26-T4 (#1798) aligned the registry product to the
-    dispatch-canonical ``"vrli"`` token (round-trips parse_connector_id),
-    retiring the historical ``"vcf-logs"`` split. Same idempotent-
-    registration pattern as the SDDC Manager / Harbor / VCF Automation
-    tests above.
-    """
-    from meho_backplane.connectors.vcf_logs import VcfLogsConnector
-
-    _ensure_registered_v2(VcfLogsConnector)
-    snapshot = all_connectors_v2()
-    key = ("vrli", "9.0", "vrli-rest")
-    assert key in snapshot
-    assert snapshot[key] is VcfLogsConnector
-
-
-def test_vcf_fleet_connector_registered_under_v2_triple() -> None:
-    """VcfFleetConnector package registers under (fleet, 9.0, fleet-rest).
-
-    Same idempotent-registration pattern as the SDDC Manager / Harbor /
-    VCF Automation tests above.
-    """
-    from meho_backplane.connectors.vcf_fleet import VcfFleetConnector
-
-    _ensure_registered_v2(VcfFleetConnector)
-    snapshot = all_connectors_v2()
-    key = ("fleet", "9.0", "fleet-rest")
-    assert key in snapshot
-    assert snapshot[key] is VcfFleetConnector
-
-
 def test_gcloud_connector_registered_under_v2_triple() -> None:
     """GcloudConnector package registers under (gcloud, 1.0, gcloud-rest) at import.
 
@@ -720,21 +585,6 @@ def test_hetzner_robot_connector_registered_under_v2_triple() -> None:
     key = ("hetzner", "2026.04", "hetzner-rest")
     assert key in snapshot
     assert snapshot[key] is HetznerRobotConnector
-
-
-def test_holodeck_connector_registered_under_v2_triple() -> None:
-    """HolodeckConnector package registers under (holodeck, 9.0, holodeck-ssh).
-
-    G3.8-T1 (#853) skeleton. Same idempotent-registration pattern as
-    the SDDC Manager / Harbor / pfSense tests above.
-    """
-    from meho_backplane.connectors.holodeck import HolodeckConnector
-
-    _ensure_registered_v2(HolodeckConnector)
-    snapshot = all_connectors_v2()
-    key = ("holodeck", "9.0", "holodeck-ssh")
-    assert key in snapshot
-    assert snapshot[key] is HolodeckConnector
 
 
 def test_keycloak_connector_registered_under_v2_triple() -> None:

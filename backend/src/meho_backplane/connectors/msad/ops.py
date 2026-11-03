@@ -312,8 +312,8 @@ _MSAD_ABOUT_OP = MsadOp(
         "parameter_hints": {},
         "output_shape": (
             "Flat dict; ``version`` carries the domain functional level (e.g. "
-            "``Windows2016Domain``), ``dns_root`` the domain DNS name (e.g. "
-            "``c1sql.lab``), ``forest`` the forest root, ``pdc_emulator`` the "
+            "``Windows2016Domain``), ``dns_root`` the domain DNS name, "
+            "``forest`` the forest root, ``pdc_emulator`` the "
             "PDC-emulator DC host name."
         ),
     },

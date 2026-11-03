@@ -7,8 +7,9 @@ Two things lose a whole shard's coverage while every check stays green:
 
 * The shard count is written in several places of ``ci.yml`` (matrix,
   job name, ``TOTAL`` in the pytest step, one download step per shard in
-  the combine job). A shard that the combine job does not download is
-  simply missing from ``coverage.xml``.
+  the combine job, and the test map step that needs every shard). A
+  shard that the combine job does not download is simply missing from
+  ``coverage.xml``.
 * The xdist worker writes its coverage data file at interpreter exit, and
   the controller kills a worker 10 seconds after it reports "finished".
   The session-finish hook in ``tests/conftest.py`` saves the data before
@@ -92,6 +93,13 @@ def test_coverage_shard_count_is_the_same_everywhere(ci_jobs: dict[str, Any]) ->
         if str(s.get("uses", "")).startswith("actions/download-artifact@")
     ]
     assert downloaded == [f"python-coverage-data-shard-{i}" for i in range(1, total + 1)]
+
+    # The test map (#5642) is made only when every shard delivered its data.
+    map_step = _step(combine_job, "Make the unit test map")
+    for i in range(1, total + 1):
+        assert f"steps.shard-{i}.outcome == 'success'" in map_step["if"]
+    assert f"steps.shard-{total + 1}." not in map_step["if"]
+    assert f'"${{#junit[@]}}" -ne {total} ]' in map_step["run"]
 
 
 @pytest.mark.parametrize("job_id", ["python-coverage", "python-coverage-combine"])

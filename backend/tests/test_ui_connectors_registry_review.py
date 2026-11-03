@@ -105,9 +105,9 @@ _OP_ADMIN = "op-admin"
 #: The hand-rolled connector triple the enable-reads REST suite uses; it
 #: resolves to ``VmwareRestConnector`` (priority 1) so enabling stays
 #: advisory-free -- the round-trip + RBAC + lazy tests use it.
-_PRODUCT = "vmware"
-_VERSION = "9.0"
-_IMPL_ID = "vmware-rest"
+_PRODUCT = "harbor"
+_VERSION = "2.x"
+_IMPL_ID = "harbor-rest"
 _CONNECTOR_ID = f"{_IMPL_ID}-{_VERSION}"
 
 #: A slash-containing natural op_id (``f"{method}:{path}"``) -- the
@@ -1037,7 +1037,7 @@ def test_op_route_uses_path_converter() -> None:
 def test_drawer_renders_kind_badge_for_typed() -> None:
     """The drawer header carries the authoring-mode kind badge (#1980).
 
-    ``vmware-rest`` is a hand-coded v2 class, so ``get_review_endpoint``
+    ``harbor-rest`` is a hand-coded v2 class, so ``get_review_endpoint``
     surfaces ``kind="typed"`` and the drawer badges it as typed (dispatchable).
     """
     _seed_tenant(_TENANT_A, "tenant-a")

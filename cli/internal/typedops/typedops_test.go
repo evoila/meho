@@ -8,16 +8,16 @@ import (
 	"testing"
 )
 
-// TestBackendOpIDsParsesVcfAutomation sanity-checks the parser against
-// a real registry: the vcf_automation connector must expose the #2839
-// deployment-list typed op and nothing that isn't a dotted op_id.
-func TestBackendOpIDsParsesVcfAutomation(t *testing.T) {
-	ids, err := BackendOpIDs("vcf_automation")
+// TestBackendOpIDsParsesHarbor sanity-checks the parser against a real
+// registry: the harbor connector must expose the robot-create typed op
+// and nothing that isn't a dotted op_id.
+func TestBackendOpIDsParsesHarbor(t *testing.T) {
+	ids, err := BackendOpIDs("harbor")
 	if err != nil {
 		t.Fatalf("BackendOpIDs: %v", err)
 	}
-	if !slices.Contains(ids, "vcfa.tenant.deployment.list") {
-		t.Errorf("expected vcfa.tenant.deployment.list in inventory; got %v", ids)
+	if !slices.Contains(ids, "harbor.robot.create") {
+		t.Errorf("expected harbor.robot.create in inventory; got %v", ids)
 	}
 	if !slices.IsSorted(ids) {
 		t.Errorf("inventory should be sorted; got %v", ids)

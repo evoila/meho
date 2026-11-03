@@ -538,7 +538,7 @@ provisioning run that deploys a services host, powers it on, and applies a
 couple of perimeter reach ops has proven only that the VM is *running* —
 not that its in-guest day-0 configuration succeeded. For a Tools-less host
 (outside the VMware-Tools guest-ops path — see
-[`connectors-vmware-rest-guest-ops.md`](connectors-vmware-rest-guest-ops.md)),
+`connectors-vmware-rest-guest-ops.md`),
 this connector is the only governed channel that can look inside. This
 recipe is the ordered sequence of T1 read ops a run (or an operator) issues
 **at the moment it would declare readiness**, so a silently-aborted

@@ -184,9 +184,9 @@ async def test_boot_stamp_shipped_catalog_registers_every_profile_row() -> None:
     """Against the real shipped catalog every profile-backed row stamps cleanly.
 
     Runs the real ``load_profile_resource`` + ``ExecutionProfile`` parse +
-    class synthesis for the shipped vmware (``session_login_basic``), sddc
-    (``session_login_token``) and fixture (``basic``) profiles. With a cleared registry no
-    triple is occupied, so every profile row registers a profiled class.
+    class synthesis for the shipped fixture (``basic``) and meho-automation
+    profiles. With a cleared registry no triple is occupied, so every profile
+    row registers a profiled class.
     """
     expected = sum(1 for e in load_catalog().entries if e.profile_resource is not None)
     assert expected >= 1  # guard the assertion against a catalog with zero profile rows
@@ -196,7 +196,7 @@ async def test_boot_stamp_shipped_catalog_registers_every_profile_row() -> None:
     assert count == expected
     registry = all_connectors_v2()
     assert ("fixture", "1.0", "fixture-rest") in registry
-    assert ("vmware", "9.0", "vmware-rest") in registry
+    assert ("mehoauto", "0.1.0", "mehoauto-rest") in registry
     for cls in registry.values():
         assert shim_kind(cls) == "profiled"
 

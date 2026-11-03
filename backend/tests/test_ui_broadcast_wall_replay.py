@@ -227,7 +227,9 @@ class TestWallMode:
             response = client.get("/ui/broadcast?wall=1")
         body = response.text
         # The same SSE bridge wiring as the in-chrome feed (reused fragment).
-        assert 'sse-connect="/ui/broadcast/stream"' in body
+        assert f'sse-connect="/ui/broadcast/stream?meho_tenant={_TENANT_A}"' in body
+        # The standalone page carries the page tenant marker too (#5240).
+        assert f'data-meho-tenant="{_TENANT_A}"' in body
         assert 'sse-swap="broadcast"' in body
         # Wall mode flips the controller's auto-scroll on + makes the list
         # scrollable (the feed fragment forwards ``wall=True``).

@@ -417,6 +417,13 @@ params={"target_id": "<target-uuid>"})`. It is the opposite of
   the same rule as the REST route. Any other role gets an error and the
   target stays. A call that waits for approval runs, once approved, under
   the login of the person who approved it, so that person's role counts.
+  One exception (#5480): in sandbox mode a service principal whose call
+  runs at once needs no `tenant_admin`. For this op that happens only under
+  a live delete grant. A service login has the `operator` role on purpose,
+  so without the exception the delete grant could never help. The handler
+  checks `sandbox_mode_active()`, the principal kind and the gate's verdict
+  (`policy_decision_var` is `auto-execute`). A call that ran after approval
+  keeps the role check.
 - **Approval.** `dangerous` with `requires_approval=True`; the name ends in
   `.remove`, so the delete rules apply. A second person must approve every
   call. See [`mcp.md`](mcp.md#admin-registry-writes-route-through-the-dispatcher).
@@ -427,6 +434,47 @@ params={"target_id": "<target-uuid>"})`. It is the opposite of
   The REST route keeps its own op id, `targets.delete`.
 - Code: `connectors/targets/ops.py` (handler, preview, registration) and
   `connectors/targets/schemas.py`. Tests: `tests/test_targets_remove_op.py`.
+
+## Detecting a target's product and version (`targets.probe`)
+
+An agent runs detection on a target with
+`call_operation(connector_id="targets-registry-1.x", op_id="targets.probe",
+params={"name": "<target-name>"})`. So a target the agent registered with
+`targets.register` gets its detected product and version without a person.
+
+- **One code path.** The op and `POST /api/v1/targets/{name}/probe` both
+  find the target with `resolve_route_target` (name, alias or id, in the
+  caller's tenant) and then call `probe_and_store_fingerprint`, both in
+  `api/v1/targets.py`. It picks the connector, asks the system, and stores
+  the answer in `targets.fingerprint`. When something fails, nothing is
+  stored and the last answer stays.
+- **Policy on the named target.** The op is targetless: the dispatcher's
+  policy gate runs with no target, so a grant that names one target does
+  not match there. The handler checks MEHO's policy for `targets.probe` on
+  the found target (`secondary_target_refusal`) before the system is
+  contacted. A deny grant for that target refuses the call, and nothing is
+  stored. Another target of the same agent is still probed.
+- **A call that waits for approval.** An agent with a `needs-approval`
+  grant parks the call; a reviewer runs the approved call as the reviewer.
+  So the park records who asked and the requester's policy on the named
+  target (`targets_probe_preflight`, through `requester_policy_preflight`),
+  and the approved run checks the requester again. A deny for the target
+  added while the request waited still stops it; nothing is stored then.
+- **Result.** `{target_id, name, vendor, product, version, build, edition,
+  reachable, probed_at, probe_method}`. The connector's `extras` are not in
+  the result. An unreachable system that the connector reports as
+  `reachable: false` is stored and returned like that; a connector that
+  raises gives an error.
+- **Errors.** An unknown target, a target of another tenant, a product
+  with no connector, or a failing connector give an error that names the
+  cause (the same cause the REST route gives as 404, 501, 409 or 500).
+- **Role.** Like the REST route, it needs the `operator` or `tenant_admin`
+  role. A `read_only` login is refused.
+- **Risk level.** `safe`, no approval: it reads the system and writes only
+  the detected fields of MEHO's own target row.
+- **Audit.** Every call writes an audit row with op id `targets.probe`.
+- Code: `connectors/targets/probe.py` (schemas, handler, registration).
+  Tests: `tests/test_targets_probe_op.py`.
 
 ## Dependencies
 

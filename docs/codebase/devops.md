@@ -1565,7 +1565,7 @@ incidents #634 / #697.
 Since #3251 the required unit lane is **sharded**: the required context
 `Python (ruff + mypy + pytest)` no longer maps to one monolithic job but
 to a **fan-in** (`python-unit-lane`) over a lint job (`python-lint`) and a
-5-way pytest matrix (`python-unit-shard`). The required-context
+6-way pytest matrix (`python-unit-shard`). The required-context
 _string_ is unchanged, so branch protection / the ruleset are untouched —
 see [Sharded unit lane (#3251)](#sharded-unit-lane-3251) below.
 
@@ -1742,7 +1742,7 @@ workflow files, this doc, and the changelog.
 | Job | Surface | Steps |
 | --- | --- | --- |
 | `python-lint` (`Python lint + typecheck (ruff + mypy)`) | `backend/src/` + `backend/tests/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict`. Non-required; whole-tree, unshardable-by-file, runs once on a GitHub-hosted runner (#3251, #4626). |
-| `python-unit-shard` (`Python unit shard N/5`) | `backend/` unit + acceptance subtree, split 5 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). A pull request that changes one connector runs one leg instead (`Python unit tests for connector <name>`, see [One-connector unit run](#one-connector-unit-run-5297)). |
+| `python-unit-shard` (`Python unit shard N/6`) | `backend/` unit + acceptance subtree, split 6 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). A pull request that changes one connector runs one leg instead (`Python unit tests for connector <name>`, see [One-connector unit run](#one-connector-unit-run-5297)). Another pull request may run one leg with the tests the test map picked (`Python unit tests picked by the test map`, see [Test map run](#test-map-run-5642)). |
 | `python-outside-backend` (`Python tests that read files outside backend`) | the backend tests that read files outside `backend/` | Runs only on a PR with no `backend/` change (`backend_python=false`) that is not docs-only. `pytest -n 3` over the fixed list in `backend/tests/_outside_backend_tests.py`, on a GitHub-hosted runner. Non-required; the fan-in requires it on that path (#5296). See [No-backend path (#5296)](#no-backend-path-5296). |
 | `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252); on a no-backend diff it requires `python-outside-backend` to pass (#5296). |
 | `python-integration-shard` (`Python integration shard N/4`) | `backend/tests/integration/` + the G0.7 vSphere canary module, split 4 ways | `uv sync --locked --all-groups` -> `pytest -x -rs` over a file set split by measured time, against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. No xdist inside a shard. Non-required matrix (#5384). |
@@ -1750,9 +1750,23 @@ workflow files, this doc, and the changelog.
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
 
-The five `python-unit-shard` legs run on `meho-runners-ci-heavy`
-(dedicated ARC scale set, 6000m requests=limits — #761 /
-rdc-gitops#55; the pool size lives outside this repo). The four
+The six `python-unit-shard` legs run on one of two heavy runner sets
+(ARC scale sets on the same machines; their sizes live outside this
+repo, #761). The set depends on the event:
+
+- `merge_group` only: `meho-runners-ci-heavy-queue` (6 runners, enough
+  for the six shards of one merge-queue run).
+- Every other event (pull requests, `push` to `main` and the nightly
+  run): `meho-runners-ci-heavy`.
+
+Why two sets: GitHub gives queued jobs to runners in queue order, with
+no priority for the merge queue. When many pull requests ran at once,
+their shards filled the heavy runners and the merge queue's shards
+waited behind them. Pushes to `main` stay on `meho-runners-ci-heavy`:
+otherwise every merged commit would run its shards on the 6 queue
+runners twice (merge-queue run, then push run), and the queue would
+merge only about half as fast. The nightly `python-coverage` shards
+stay on `meho-runners-ci-heavy`. The four
 `python-integration-shard` legs, `python-migration-tests` and the
 nightly `python-coverage-combine` run on the dense `meho-runners-ci` pool
 (4-core): they pull their test images from the internal image mirror or
@@ -1812,17 +1826,17 @@ shape (deterministic file-level matrix + fan-in):
   checks that cannot be split by test file and cost ~1-2 min, so they run
   **once** on the light pool rather than N times per shard. Only pytest
   fans out.
-- **`python-unit-shard`** — the pytest sweep as a **5-way matrix split by
+- **`python-unit-shard`** — the pytest sweep as a **6-way matrix split by
   measured file time**. Each shard lists the test files with `find tests
   -name 'test_*.py' -not -path 'tests/integration/*' -not -path
   'tests/migrations/*' | sort` and pipes the list into
-  `tests/_unit_shard_split.py --shard N --total 5`. The splitter reads the
+  `tests/_unit_shard_split.py --shard N --total 6`. The splitter reads the
   measured seconds per test file from `tests/_unit_shard_durations.json`,
   sorts the files slowest first, and gives each file to the shard with
   the least time so far (a file without a measurement counts as the
   median; every file also carries a small fixed cost for import and
   collection, so files whose tests all skip still spread out). The same
-  list always gives the same split, and the five shards partition the
+  list always gives the same split, and the six shards partition the
   file set **exactly** (union == full, pairwise disjoint;
   `tests/test_unit_shard_split.py` pins both). The splitter prints the
   file count and the predicted seconds per shard on stderr, so the shard
@@ -1860,9 +1874,17 @@ shape (deterministic file-level matrix + fan-in):
   busiest run near 850 s per shard, so #5433 refreshed the file times
   (now the mean of those seven runs) and raised the count to 5. In the
   busiest of those runs the slowest shard carried 2,497 s of test time
-  with the old split and would carry 1,924 s with the new one. To
-  change the count, edit the matrix and `TOTAL` in the pytest step
-  together; `tests/test_unit_shard_split.py` checks that they match. File-level sharding is
+  with the old split and would carry 1,924 s with the new one. Three
+  days later, on 2026-11-02, shard 4 ran past 900 s three times in one
+  morning in the merge queue, with every test passing (#5623). The unit
+  tests had grown by about 15% in two days, 132 test files had no
+  measured time, and in green runs the five shards took 600-890 s. The
+  file times are now the mean of eight green merge-queue runs of that
+  morning, and the count is 6. In the run that failed on time, the
+  slowest shard carried 2,568 s of test time (933 s). Fresh file times
+  with five shards would still leave 2,344 s (about 850 s); with six
+  shards it is 1,965 s (about 720 s). To change the count, edit the
+  matrix and `TOTAL` in the pytest step together; `tests/test_unit_shard_split.py` checks that they match. File-level sharding is
   strictly coarser than what xdist `--dist loadscope` already does across
   workers (whole modules stay together, conftest semantics identical to a
   full run), so an xdist-safe suite is shard-safe — proven live by the
@@ -1877,8 +1899,7 @@ shape (deterministic file-level matrix + fan-in):
   hang left no test name in the log). `signal`, not `thread`, because
   the thread method calls `os._exit()`, which xdist reads as a worker
   crash. The `tests/integration` /
-  `tests/migrations` exclusions and the `MEHO_SKIP_SPEC_INGEST_TESTS` G0.7
-  canary opt-out (#2980) are preserved on **every** shard. Every shard also
+  `tests/migrations` exclusions are preserved on **every** shard. Every shard also
   installs Helm v3.16.4 (the same pinned `azure/setup-helm` step as
   `chart.yml`) and sets `MEHO_REQUIRE_HELM=1`, so the `tests/test_chart_*.py`
   render tests really run there and fail, not skip, if helm is missing.
@@ -1979,12 +2000,21 @@ completes CI in minutes.
   against it also lists other PRs' files, which cost docs-only PRs the fast
   path (#4657). `--no-renames` makes a rename appear as delete(old) +
   add(new) so a code→`*.md` (or `*.md`→code) rename can never smuggle a
-  non-docs path past the allow-list. The step is written to always exit `0`
-  and emit both outputs — an unresolvable diff or an empty diff keeps the
-  fail-safe defaults (`docs_only=false`). `merge_group` and `push` NEVER
-  fast-path (a queue batch may mix docs + code; a `main` push must always run
-  the full matrix).
-- **What skips.** `python-lint`, the five `python-unit-shard` legs, and
+  non-docs path past the allow-list. The step always exits `0` and emits
+  every output. It is "full run unless proven": the outputs start at the
+  full run (`migrations=true`, `docs_only=false`, `backend_python=true`, no
+  `single_connector`), and a shorter run is taken only when every step of
+  the classification worked. The list of changed files is written to a file
+  under `RUNNER_TEMP` (not a here-string and not a pipe: both can fail
+  before `grep` runs, and that failure read as "no match"), each classifier
+  `grep` gets the file as an argument and must exit `0` (match) or `1` (no
+  match), and the connector selection runs after that. Anything else (the
+  list cannot be written, the diff fails or is empty, a quoted path, a
+  `grep` error, a failing selection tool) keeps the full run, with one log
+  line that says why. Tests: `backend/tests/test_ci_backend_python_skip.py`.
+  `merge_group` and `push` NEVER fast-path (a queue batch may mix docs +
+  code; a `main` push must always run the full matrix).
+- **What skips.** `python-lint`, the six `python-unit-shard` legs, and
   the four `python-integration-shard` legs gain `needs: changes` and an
   `if:` that skips them when `docs_only == 'true'` (same #2140 shape as the
   `python-migration-tests` gate). The required contexts `Python (ruff +
@@ -2015,15 +2045,17 @@ runs one short job instead.
 - **Classification (fail-closed).** The `changes` job has a third output,
   `backend_python`. It starts `true` and is `false` only when the event is
   `pull_request`, the diff could be computed, no changed path apart from
-  `.md` files is under `backend/`, and `.github/workflows/ci.yml` did not
-  change. `push` and `merge_group` always keep it `true`. It uses the same
+  `.md` files is under `backend/`, and neither `.github/workflows/ci.yml`
+  nor the spec-shelf lists (`ci/spec-shelf/`, `scripts/ci/spec_shelf.sh`)
+  changed. The shelf check runs only in the unit and integration shards,
+  so a new list file must not skip them. `push` and `merge_group` always keep it `true`. It uses the same
   `HEAD^1..HEAD` diff as `docs_only`. The diff runs with
   `core.quotePath=false`, so a path with non-ASCII characters (for example
   `café.json`) is printed as is and the `backend/` check sees it. Git still
   quotes a path that holds a double quote, a backslash or a control
   character; such a line keeps every fail-safe default (full run and
   migration gate on).
-- **What skips.** `python-lint`, the five `python-unit-shard` legs and
+- **What skips.** `python-lint`, the six `python-unit-shard` legs and
   the four `python-integration-shard` legs skip by their own `if:` when
   `backend_python` is `false`, the same way as on a docs-only PR. The
   `python-integration` fan-in accepts the skipped legs on this path.
@@ -2055,16 +2087,18 @@ runs one short job instead.
 ### One-connector unit run (#5297)
 
 A pull request that changes only one connector folder runs **one** unit
-job instead of the five `python-unit-shard` legs. The job is named
+job instead of the six `python-unit-shard` legs. The job is named
 `Python unit tests for connector <name>`. It runs that connector's tests
 plus a fixed contract set. The merge queue and pushes to `main` always run
-the five shards, so every test still runs before a change lands on `main`.
+the six shards, so every test still runs before a change lands on `main`.
 
 - **Who decides.** The `changes` job sets the output `single_connector`.
-  It pipes the changed files into
+  It gives its file of changed files to
   `python3 backend/tests/_unit_connector_select.py detect` (standard
-  library only, because the job installs nothing). Empty means the full
-  run. It is only computed on a `pull_request` that is not docs-only.
+  library only, because the job installs nothing) on standard input. Empty
+  means the full run. It is only computed on a `pull_request` that is not
+  docs-only, and only after every classifier gave an answer; when the tool
+  fails, the whole step keeps the full run.
 - **When it is set.** Every changed file that is not `.md` is in one folder
   `backend/src/meho_backplane/connectors/<name>/`, or is that connector's
   test file (`backend/tests/test_connectors_<name>_*.py`,
@@ -2097,6 +2131,92 @@ the five shards, so every test still runs before a change lands on `main`.
   `CONTRACT_TESTS` nor in its short list of tests that walk something else.
   So a new test that scans every connector cannot be left out of the
   short run by mistake.
+
+### Test map run (#5642)
+
+A pull request that would run all the `python-unit-shard` legs can run
+**one** unit job instead, with only the tests its change can break. The
+job is named `Python unit tests picked by the test map`. The merge queue
+and pushes to `main` always run all the shards, so every test still runs
+before a change lands on `main`. A wrong pick costs one failed merge-queue
+run, not a broken `main`.
+
+- **The map.** It says which tests run each source file. The nightly run
+  makes it. `backend/.coveragerc.ci` sets `dynamic_context = test_function`,
+  so the coverage data records which test function ran each line. That
+  needs the C tracer (`COVERAGE_CORE=ctrace`), which is slower, so the
+  coverage pytest step may take 45 minutes. Each coverage shard also writes
+  a pytest junit file with every test id. The combine job runs
+  `tests/_unit_test_map.py build` and uploads the artifact `unit-test-map`
+  (kept 8 days). It does this only on the `schedule` run, and only when all
+  eight shards delivered their data. A crashed worker leaves a junit file
+  but no coverage data (the worker writes its data only at the end of its
+  session), and the download of that shard still works. So the tool checks
+  each junit file: one that reports a crashed worker, or whose tests are
+  not in the coverage data, means no map that night. A pull request with
+  the `ci-coverage-validate` label never makes a map.
+- **Who decides.** The `changes` job, step `map`. It runs only on a pull
+  request that is not docs-only, has a backend change and is not a
+  one-connector run. It downloads the newest `unit-test-map` artifact of a
+  run of this repo on `main` (the job has `actions: read` for that). It
+  pipes the changed files into `python3 backend/tests/_unit_test_map.py pick`
+  (standard library only). The step `upload-selection` stores the picked
+  list as the artifact `unit-test-selection`. The output `test_map` is
+  `true` only when both worked.
+- **The rules.** A changed source file picks the tests that ran it. A
+  changed test file picks its own tests. A source file that no test ran
+  (its code runs only on import, like most `*_schemas.py` files) picks,
+  by import analysis, every test file that imports it directly or through
+  other modules, plus the tests that the map links to those modules. The
+  analysis does not follow `conftest.py` files; when a unit `conftest.py`
+  imports the changed file itself, all the shards run. Docs pick nothing.
+  Every other file means all the shards: a migration, a template or data
+  file, a `conftest.py` or test helper, `pyproject.toml`, `uv.lock`, a
+  workflow, the Go CLI, a source file the map does not know (a new one).
+  No map, a map older than 7 days, 2,000 or more picked tests, or any
+  error also means all the shards. Every selected run also runs
+  `CONTRACT_TESTS` from `backend/tests/_unit_connector_select.py`.
+- **How the tests are counted.** The map says how many test items each
+  test runs, and that count is used for a test id and for a test file the
+  pull request did not change. A test file the pull request changed, or
+  that the map does not know, is counted from its source: its test
+  functions and `Test*` classes, times the cases of each `parametrize`
+  list that is written out or named at module level (also one in
+  `pytestmark`), times the `params` of every fixture with `params` in the
+  file and in the `conftest.py` files above it, as if every test used
+  every such fixture. An empty list counts as one item, as pytest
+  collects one skipped test for it, so an unused fixture with an empty
+  `params` list never hides a file from the limit. The larger of that
+  count and the map's count is used, so a new or expanded test counts
+  fully, also when a shared fixture multiplies it. When the file's count
+  is uncertain (a
+  parametrize or params list built by code, a `pytestmark` that is not
+  one plain assignment at module level, `pytest_generate_tests`, a
+  `conftest.py` that names `pytest_plugins`, a test class with a base
+  from another file, or a bare decorator name from another file), all
+  the shards run. On 2026-11-02 the count was certain for 1,078 of the
+  1,235 unit test files: right for 1,074, and higher than pytest collects
+  for 4 files whose parametrized fixture only some tests use.
+- **Old test ids.** The map can be a few days old. A test id whose file is
+  gone is dropped. A test id that its file no longer defines picks the
+  whole file, so pytest never gets an id it cannot find.
+- **The log.** The step prints one line, also as a notice, for example
+  `test map from 2026-11-01 (commit abc1234): 940 of 24,112 tests` or
+  `full suite: a migration changed (backend/alembic/versions/0118_x.py)`.
+- **The required check.** The fan-in `python-unit-lane` is unchanged; the
+  required check `Python (ruff + mypy + pytest)` keeps its name and its
+  strict rule. A selected run does not upload its per-test times.
+- **What the map cannot see.** Coverage links a test only to the lines that
+  run inside the test function. Code that runs only in fixtures, at app
+  start or in background tasks gets no test, so the map can pick too few
+  tests for a change there. Tests that a decorator wraps (coverage names
+  them after the decorator, like `functools.test_x`) and tests added after
+  the map was made run only when their own file changes, and in the merge
+  queue.
+- **Tests.** `tests/test_unit_test_map.py` checks the rules on a small fake
+  tree, runs the real step script from `ci.yml` with a fake `gh`, and
+  checks the wiring. `tests/test_ci_coverage_shards.py` checks that the map
+  step waits for every coverage shard.
 
 ### Runner-CPU rule
 
@@ -2133,7 +2253,7 @@ repo. `ci.yml` provisions them at runtime, gated on a secret:
 - Both Python test jobs (`python-unit-shard` and
   `python-integration-shard` — every shard of each) carry a
   secret-gated "Checkout vendor vCenter spec-shelf" step: a cone-mode sparse
-  checkout of `docs/vcenter-9.0/` from the private
+  checkout of the listed shelf folders (for example `docs/vcenter-9.0/`) from the private
   `evoila-bosnia/claude-rdc-hetzner-dc` shelf repo into
   `$GITHUB_WORKSPACE/spec-shelf`, authenticated by the **`SPEC_SHELF_TOKEN`**
   repo secret (fine-grained PAT, Contents read-only, that single repo).
@@ -2141,29 +2261,29 @@ repo. `ci.yml` provisions them at runtime, gated on a secret:
   `$GITHUB_WORKSPACE/spec-shelf/docs` on both jobs. When the secret is absent
   (fork PRs, Dependabot runs, not-yet-provisioned repos) the checkout step
   skips, the directory doesn't exist, and the resolvers
-  (`backend/tests/_spec_shelf.py`, the product-agnostic #2980 harness the
-  vcenter-specific `backend/tests/acceptance/_vcenter_spec.py` delegates its
-  shelf-root branch to) return `None` → the lanes
+  (`backend/tests/_spec_shelf.py`, the product-agnostic #2980 harness)
+  return `None` → the lanes
   `pytest.skip()` exactly as before the wiring. When the secret exists, all
   five lanes run for real, and a fail-loud verify step turns any shelf-layout
   drift into a job failure instead of a silent regression to lane-skip.
 - Lane placement (#2980): the seconds-cheap reconcile lanes run armed in
-  the unit sweep; the canary's full-ingest tests run armed only in
-  `python-integration-shard` — its pytest step selects
-  `tests/acceptance/test_g07_vsphere_canary.py` explicitly, and the unit
-  sweep opts out via `MEHO_SKIP_SPEC_INGEST_TESTS=1` (a collection-time
-  `skipif` marker on the canary's full-ingest tests, backstopped in its
-  shared `_canary_corpus` fixture and its `vcenter_spec_path` fixture).
-  The armed cost is amortised: the ~164 s two-spec ingest runs ONCE per
-  module via the module-scoped `_canary_corpus` fixture (PR #2995 — the
-  original per-test-ingest shape was 25 ingests and timeout-killed the
-  60-min integration cap on its first armed run). Rationale + rule +
-  the shared-corpus pattern for future heavy lanes:
-  [`spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md)
-  §Lane placement.
+  the unit sweep. Full-ingest tests of a real vendor spec (minutes per
+  lane) belong in `python-integration-shard`, never in the unit sweep;
+  rule of record: `docs/decisions/spec-reconcile-guards-standard.md`.
+  The vSphere canary that first set this rule left with evoila's own
+  connectors (#3345) and runs in the private connector package.
+- The required shelf files are listed in `ci/spec-shelf/`, one small
+  `.txt` file per product version, one file path per line. The script
+  `scripts/ci/spec_shelf.sh` reads the lists: a step before the checkout
+  prints the shelf folders as its `paths` output (the checkout's
+  `sparse-checkout` input), and the verify step checks each file and
+  prints one line per file. A missing file fails the job with the
+  "Spec-shelf layout drift" error; a missing, empty or bad list fails it
+  too. `ci.yml` names no shelf file. Tests:
+  `backend/tests/test_ci_spec_shelf_lists.py`.
 - Per-vendor reconcile lanes beyond vCenter (#2981-#2993) extend the same
-  wiring — one `sparse-checkout` line + one verify line per product dir,
-  same `SPEC_SHELF_TOKEN`, never a new secret. Standard + extension
+  wiring — one new list file per product version, no change in
+  `ci.yml`, same `SPEC_SHELF_TOKEN`, never a new secret. Standard + extension
   mechanics + red-lane protocol:
   [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 - The `secrets` context is unavailable in step-level `if:`, so the gate is
@@ -2277,12 +2397,15 @@ coverage out of the required unit lane for good (the OOM story in
 push-only job, #3172 sharded that job, and #4910 moved it to the nightly
 run. The `quality-gate.yml` whole-job
 `continue-on-error` means a missing or late artefact never blocks a
-merge. `COVERAGE_CORE=sysmon` (#739) swaps coverage.py's default C
+merge. `COVERAGE_CORE=sysmon` (#739) swapped coverage.py's default C
 tracer for the PEP 669 `sys.monitoring` backend (Python 3.12+,
 supported by coverage.py 7.4+; the lockfile pins 7.14). Sysmon's
 event-driven model removes most of the per-line tracing tax; line
 counts matched the C tracer exactly (2913/11832 in both), so the
-SonarCloud signal is unaffected.
+SonarCloud signal is unaffected. Since #5642 the coverage shards use the C tracer
+again (`COVERAGE_CORE=ctrace`): they record which test ran each line for
+the test map, and sysmon cannot record that (see
+[Test map run](#test-map-run-5642)).
 
 ### Fork-PR guard
 

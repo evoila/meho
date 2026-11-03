@@ -31,7 +31,6 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import select
 
-from meho_backplane.connectors.vmware_rest.composites._register import _WHEN_TO_USE_BY_GROUP
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import OperationGroup
 from meho_backplane.operations.typed_register import run_typed_op_registrars
@@ -81,14 +80,6 @@ def test_the_checks_catch_a_whole_group_claim(text: str) -> None:
 def test_the_checks_let_a_claim_about_one_operation_pass(text: str) -> None:
     assert not WHOLE_GROUP_CLAIM.search(text)
     assert not CLASS_CLAIM.search(text)
-
-
-@pytest.mark.parametrize("group_key", sorted(_WHEN_TO_USE_BY_GROUP))
-def test_vmware_rest_group_text_names_a_level_only_next_to_an_operation(group_key: str) -> None:
-    text = _WHEN_TO_USE_BY_GROUP[group_key]
-    for check in (WHOLE_GROUP_CLAIM, CLASS_CLAIM):
-        match = check.search(text)
-        assert match is None, f"group {group_key!r} claims one level for many ops: {match!r}"
 
 
 @pytest.fixture

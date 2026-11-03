@@ -420,13 +420,15 @@ async def _resume_approved_or_already_resumed(
     :func:`_redispatch_approved`).
 
     Both kinds dispatch against the target the row saved by id
-    (:func:`~meho_backplane.operations.approval_queue.rehydrate_resume_target`,
+    (:func:`~meho_backplane.operations.approval_queue.refuse_resume_if_target_changed`,
     the operator surface's check), never the name in *call_arguments*: a
     target renamed, or deleted and re-created under the same name, while the
     request waited must not receive the approved write. A saved target that
     no longer resolves, or whose connection settings changed since the
-    request was made, fails closed with a ``denied`` envelope before the
-    claim. A per-call ``fqdn`` in the agent's original ``target`` dict is
+    request was made, fails closed with a ``denied`` envelope: the refusal
+    takes the one-resumer claim, drops the stored run input, writes one
+    audit row and is stored as the run result, like the release refusal.
+    A per-call ``fqdn`` in the agent's original ``target`` dict is
     applied to that loaded target again
     (:func:`~meho_backplane.operations.meta_tools.apply_target_fqdn_override`),
     as it was for the call that parked, so the approved call reaches the
@@ -450,7 +452,7 @@ async def _resume_approved_or_already_resumed(
         persist_resume_result,
         refuse_resume_if_preview_changed,
         refuse_resume_if_release_changed,
-        rehydrate_resume_target,
+        refuse_resume_if_target_changed,
     )
     from meho_backplane.operations.meta_tools import apply_target_fqdn_override
 
@@ -482,11 +484,16 @@ async def _resume_approved_or_already_resumed(
     # check the operator surface runs, not the name the agent used when it
     # parked: that name may point at another target by now. A saved target
     # that no longer resolves, or whose connection settings changed, fails
-    # closed here, before the claim, so the refused resume does not burn the
-    # one-resumer claim.
-    resolved_target, denied = await rehydrate_resume_target(operator, request)
-    if denied is not None:
-        return cast("dict[str, Any]", denied.model_dump(mode="json"))
+    # closed here. The refusal takes the one-resumer claim and is recorded
+    # like the release refusal above, so the request never runs later.
+    resolved_target, target_refusal = await refuse_resume_if_target_changed(operator, request)
+    if target_refusal is not None:
+        if target_refusal.status == "already_resumed":
+            return _build_already_resumed_envelope(
+                original_envelope=awaiting_envelope,
+                approval_request_id=approval_request_id,
+            )
+        return target_refusal.model_dump(mode="json")
     # The agent's call may name a per-call ``fqdn`` (the virtual host the
     # connector sends in the HTTP Host header and the TLS server name). The
     # park ran with it, so the approved run must too. Applied after the

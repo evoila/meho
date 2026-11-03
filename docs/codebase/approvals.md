@@ -150,6 +150,13 @@ the vendor gets no call:
    stored as the request's run result. So every read surface shows
    `result_state = "failed"` with that error code.
 
+The same three steps (`approval_queue._refuse_resume`) record a run
+refused because its target changed or no longer resolves
+(`refuse_resume_if_target_changed`, see
+[An approval covers one target and one preview](#an-approval-covers-one-target-and-one-preview)).
+The audit row then carries `result_status = "target_changed_since_approval"`
+or `"target_gone_since_approval"` and the `target_id`.
+
 This covers a request that was approved just before an update and had
 not run yet. A remote-write mint for a satellite runner checks the same
 rule: an approval from an older release mints nothing
@@ -173,9 +180,12 @@ not stored: only the start-up expiry ends a request before its deadline,
 so an `expired` row with `decided_at < expires_at` expired because the
 release changed. The console modal shows such a request with the time
 the update ended it (`decided_at`), not the deadline it never reached.
-For a run MEHO refused (error code `release_changed_while_waiting`), the
-console says MEHO was updated, the operation did not run, and the
-requester must ask again; it does not say the operation ran and failed.
+For a run MEHO refused before it ran, the console says why (MEHO was
+updated, the target changed, the target is gone, or the preview changed),
+that the operation did not run, and that the requester must ask again; it
+does not say the operation ran and failed. The sentences are in
+`ui/routes/approvals/render.py` (`RESUME_REFUSAL_MESSAGES`), keyed by the
+error code of the stored result.
 
 **During a rolling update.** For a short time old and new pods run side
 by side. A new pod ends the waiting requests it finds when it starts. A
@@ -209,9 +219,22 @@ per-call `fqdn` does not count (the agent waiter applies it again after
 the check, see below). `rehydrate_resume_target` loads the target
 by id as before and compares the hash. When it differs, the run is refused
 with `error_code = "target_changed_since_approval"` and nothing is sent.
+A target that no longer resolves (deleted or revoked after the request
+was made) refuses the run with `error_code = "target_gone_since_approval"`.
 The requester asks again. A rename, new aliases, notes, a new detected
 version or a new fingerprint do not change the hash. A request with no
 target, and a row saved before the column, has no hash and is not checked.
+
+Both resume paths call the check through
+`refuse_resume_if_target_changed`, which records a refusal the same way as
+the release refusal (see "Before an approved run" above): the one-resumer
+claim is taken, so the request never runs later; the stored run input is
+deleted and the secret-named params are hidden; one `approval.resume`
+audit row carries the error code as `result_status`; and the refusal is
+stored as the request's run result, so REST, MCP and the console show
+`result_state = "failed"` with that error code. The re-run after a failed
+run calls `rehydrate_resume_target` directly and records its own refusal
+(`approval.rerun`).
 
 **Preview.** A request with a `preview_hash` (every `destructive` request)
 builds the preview again with the target and params of the run
@@ -3151,10 +3174,12 @@ What the agent waiter does:
   deleted and a new one created with the same name. Loading by id means the
   approved write can only run against the original target. If the saved
   target no longer resolves (soft-deleted or revoked), or its connection
-  settings changed since the request was made (`target_changed_since_approval`,
+  settings changed since the request was made (`target_changed_since_approval`
+  or `target_gone_since_approval`,
   see [An approval covers one target and one preview](#an-approval-covers-one-target-and-one-preview)),
-  the waiter returns a `denied` envelope and runs nothing. This check runs
-  before the one-resumer claim, so a refused resume leaves the claim free.
+  the waiter returns a `denied` envelope and runs nothing. The refusal
+  takes the one-resumer claim, deletes the stored run input, writes one
+  audit row and is stored as the run result, like the release refusal.
   Covered by `test_composite_resume_uses_saved_target_when_name_was_reassigned`
   and `test_composite_resume_fails_closed_when_saved_target_deleted_and_name_reused`
   (unit) and the two `test_agent_waiter_composite_resume_*` tests (end to

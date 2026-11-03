@@ -2798,7 +2798,7 @@ def test_detail_modal_release_refusal_says_the_run_did_not_happen() -> None:
 
     assert response.status_code == 200, response.text
     body = response.text
-    assert 'data-testid="approval-release-refused"' in body
+    assert 'data-testid="approval-run-refused"' in body
     assert "MEHO was updated after this request was made" in body
     assert "The operation did not run." in body
     assert "The requester must ask again." in body
@@ -2845,6 +2845,84 @@ def test_approve_refused_by_release_change_says_nothing_ran() -> None:
     assert "was approved and ran" not in body
     assert "Request approved" not in body
     assert "release_changed_while_waiting" in body
+    assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
+
+
+#: The stored envelope of a run MEHO refused because the target changed.
+_TARGET_REFUSED_ENVELOPE: dict[str, object] = {
+    "status": "denied",
+    "op_id": "vsphere.vm.create",
+    "error": "target_changed_since_approval: the target changed.",
+    "duration_ms": 0.0,
+    "audit_id": _RUN_AUDIT_ID,
+    "extras": {
+        "error_code": "target_changed_since_approval",
+        "target_id": "11111111-1111-1111-1111-111111111111",
+    },
+}
+
+
+def test_detail_modal_target_refusal_says_the_run_did_not_happen() -> None:
+    """A run MEHO refused because the target changed is not described as a run."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_ran_request(op_id="refused.op", resume_result=_TARGET_REFUSED_ENVELOPE)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-testid="approval-run-refused"' in body
+    assert 'data-error-code="target_changed_since_approval"' in body
+    assert "The connection settings of the target changed" in body
+    assert "The operation did not run." in body
+    assert "The requester must ask again." in body
+    assert "The approved operation ran" not in body
+    assert "did not succeed" not in body
+    assert 'data-result-state="failed"' in body
+    assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
+
+
+def test_approve_refused_by_target_gone_says_nothing_ran() -> None:
+    """An approve MEHO refuses because the target is gone does not say the run failed."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    refused = SimpleNamespace(
+        status="denied",
+        op_id="vsphere.vm.create",
+        audit_id=uuid.UUID(_RUN_AUDIT_ID),
+        extras={"error_code": "target_gone_since_approval"},
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, AsyncMock(return_value=refused)),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                data={"reason": "looks safe"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Approved, but MEHO did not run it" in body
+    assert "The target of this request no longer exists" in body
+    assert "The operation did not run." in body
+    assert "Approved, but the run failed" not in body
+    assert "was approved and ran" not in body
+    assert "Request approved" not in body
+    assert "target_gone_since_approval" in body
     assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
 
 

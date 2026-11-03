@@ -76,8 +76,40 @@ RESULT_STATE_PILL: Final[dict[str, tuple[str, str]]] = {
 }
 
 
+#: What the console says for a run MEHO refused before it ran, by the error
+#: code of the stored result. Such a result reads as a failed run, but nothing
+#: ran and the vendor got no call. Each sentence says what happened, that the
+#: operation did not run, and that the requester must ask again.
+RESUME_REFUSAL_MESSAGES: dict[str, str] = {
+    "release_changed_while_waiting": (
+        "MEHO was updated after this request was made, so the approval does not "
+        "cover the running release. The operation did not run. The requester "
+        "must ask again."
+    ),
+    "target_changed_since_approval": (
+        "The connection settings of the target changed after this request was "
+        "made, so the approval does not cover the run. The operation did not "
+        "run. The requester must ask again."
+    ),
+    "target_gone_since_approval": (
+        "The target of this request no longer exists: it was deleted or revoked "
+        "after the request was made. The operation did not run. The requester "
+        "must ask again."
+    ),
+    "preview_changed_since_approval": (
+        "The preview of this request is not the one that was approved, so the "
+        "approval does not cover the run. The operation did not run. The "
+        "requester must ask again."
+    ),
+}
+
+
 def project_outcome(outcome: ResumeOutcome | None) -> dict[str, Any] | None:
-    """Project a run summary (#3543) into a template dict, with an audit link."""
+    """Project a run summary (#3543) into a template dict, with an audit link.
+
+    ``refused_message`` is set for a run MEHO refused before it ran
+    (:data:`RESUME_REFUSAL_MESSAGES`), and ``None`` for a run that happened.
+    """
     if outcome is None:
         return None
     audit_id = str(outcome.audit_id) if outcome.audit_id else None
@@ -88,6 +120,7 @@ def project_outcome(outcome: ResumeOutcome | None) -> dict[str, Any] | None:
         "audit_id": audit_id,
         "audit_href": f"/ui/audit?audit_id={audit_id}" if audit_id else None,
         "guidance": outcome.guidance,
+        "refused_message": RESUME_REFUSAL_MESSAGES.get(outcome.error_code or ""),
     }
 
 

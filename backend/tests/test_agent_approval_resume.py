@@ -1548,12 +1548,13 @@ async def test_composite_resume_uses_saved_target_when_name_was_reassigned(
 async def test_composite_resume_fails_closed_when_saved_target_deleted_and_name_reused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A deleted target whose name was reused: refuse, dispatch nothing, keep the claim.
+    """A deleted target whose name was reused: refuse, dispatch nothing, record it.
 
     The saved target was soft-deleted while the request waited and a new
     target now carries its old name. The re-entry must not run against the
-    new target. It returns a ``denied`` envelope and leaves the one-resumer
-    claim free, the same as the operator surface.
+    new target. It returns a ``denied`` envelope, takes the one-resumer
+    claim and stores the refusal as the run result, the same as the
+    operator surface.
     """
     import meho_backplane.operations.meta_tools as meta_tools_module
     from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
@@ -1588,10 +1589,12 @@ async def test_composite_resume_fails_closed_when_saved_target_deleted_and_name_
     )
 
     assert resumed["status"] == "denied"
-    assert resumed["extras"]["error_code"] == "denied"
+    assert resumed["extras"]["error_code"] == "target_gone_since_approval"
     assert str(original_id) in resumed["error"]
     assert calls == []
     async with get_sessionmaker()() as fresh:
         row = await fresh.get(ApprovalRequest, request.id)
     assert row is not None
-    assert row.resumed_at is None, "a refused resume must not burn the claim"
+    assert row.resumed_at is not None, "a refused resume takes the claim"
+    assert row.resume_result is not None
+    assert row.resume_result["extras"]["error_code"] == "target_gone_since_approval"

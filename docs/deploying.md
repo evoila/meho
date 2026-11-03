@@ -629,6 +629,18 @@ each lives inline in
   (#2784). Widen the value here rather than reading the refusal as a down
   host; see `docs/codebase/connectors-net-diagnostics.md` for the full
   contract.
+- **`metricsAuth.*`** → `METRICS_AUTH_TOKEN`. On by default: the chart
+  makes the Secret `<release>-metrics-auth` with a random token on the first
+  install and keeps it on upgrades. `/metrics` answers only a caller that
+  sends the token as a bearer, and `/ready` shows its `features` block only
+  to such a caller; the verdict and the checks on `/ready`, and `/healthz`,
+  stay open, so the probes need no header. The chart's ServiceMonitor sends
+  the token by itself. For your own scrape config, read the token from the
+  Secret; for your own token, set `metricsAuth.existingSecret`. See
+  `docs/codebase/metrics-ready-access.md`.
+- **`API_DOCS_ENABLED`** (via `extraEnv`) — the API docs pages
+  (`/openapi.json`, `/docs`, `/redoc`) are off unless this is `true`. They
+  need no login, so turn them on only on an instance where that is fine.
 - **`probes.startup`** — the first-boot startup probe (300s budget). Clear
   it to opt out on a fast cluster where op-catalog registration + fastembed
   preload finish inside the liveness `initialDelaySeconds`.

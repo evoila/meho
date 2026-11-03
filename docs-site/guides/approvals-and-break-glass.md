@@ -368,9 +368,10 @@ curl -s https://<your-backplane>/ready | jq .features.approval_queue.effective_p
 # "single_operator_break_glass"   → APPROVAL_ALLOW_SELF_APPROVAL=true is set
 ```
 
-If the deploy sets `METRICS_AUTH_TOKEN`, `/ready` only returns the
-`features` block when you send that token. Add
-`-H "Authorization: Bearer <metrics-token>"` to the `curl` call.
+`/ready` returns the `features` block only when you send the metrics
+token. Add `-H "Authorization: Bearer <metrics-token>"` to the `curl`
+call. A chart install makes the token on the first install; read it with
+`kubectl get secret <release>-metrics-auth -o jsonpath='{.data.token}' | base64 -d`.
 
 **Did a specific write self-approve?** Two signals:
 

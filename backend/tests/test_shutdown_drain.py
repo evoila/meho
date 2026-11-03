@@ -178,6 +178,32 @@ async def test_approved_resume_is_refused_before_the_claim(
     claim.assert_not_called()
 
 
+async def test_agent_approved_resume_is_refused_before_the_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
+    from meho_backplane.operations import approval_handoff
+
+    claim = MagicMock(side_effect=AssertionError("the claim must stay free"))
+    custody = MagicMock(side_effect=AssertionError("the custody row must stay"))
+    monkeypatch.setattr(approval_queue, "claim_resume", claim)
+    monkeypatch.setattr(approval_handoff, "consume", custody)
+    monkeypatch.setattr(approval_handoff, "discard", custody)
+    shutdown_drain.begin_drain()
+
+    result = await _resume_approved_or_already_resumed(
+        operator=_operator(),
+        call_arguments={"connector_id": "demo-1.0", "op_id": "demo.thing.change", "params": {}},
+        awaiting_envelope={"op_id": "demo.thing.change", "extras": {}},
+        approval_request_id=uuid.uuid4(),
+    )
+
+    assert result["op_id"] == "demo.thing.change"
+    assert result["extras"]["error_code"] == shutdown_drain.SHUTTING_DOWN_ERROR_CODE
+    claim.assert_not_called()
+    custody.assert_not_called()
+
+
 # -- letting running calls finish ---------------------------------------------
 
 

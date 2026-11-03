@@ -453,6 +453,14 @@ async def _resume_approved_or_already_resumed(
         rehydrate_resume_target,
     )
     from meho_backplane.operations.meta_tools import apply_target_fqdn_override
+    from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_result
+
+    # #5024: a stopping pod starts no new run. Refuse before the claim and
+    # before the custody row is touched, so the approved request can still
+    # run later.
+    if is_draining():
+        op_id = call_arguments.get("op_id") or awaiting_envelope.get("op_id") or ""
+        return shutting_down_result(str(op_id)).model_dump(mode="json")
 
     # Load the parked row (tenant-isolated). Its pre-generated
     # ``approval.request`` audit id is bound below so the resumed dispatch

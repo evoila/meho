@@ -34,9 +34,11 @@ Tests: `backend/tests/test_shutdown_drain.py`,
    - `dispatch()` refuses a new top-level call with the error code
      `meho_shutting_down` (`execution_outcome: not_started`,
      `retry: true`). Nothing was sent to a target;
-   - an approved request is not started (`resume_dispatch_after_approval`
-     returns the same error before it takes the run claim, so the claim
-     stays free);
+   - an approved request is not started. Both resume paths return the same
+     error before they take the run claim, so the claim stays free: the
+     operator path (`resume_dispatch_after_approval`) and the agent that
+     waits for the approval (`agent/approval_wait.py`, which also leaves
+     the stored run input of a credential write in place);
    - the sensor runner claims no sensor and the scheduler fires no trigger.
 
    Not refused, because it is part of work that already runs: a step of a

@@ -4,7 +4,7 @@
 """Ingested reads of licence keys stay off.
 
 A vendor API file can describe a read whose answer carries the product's
-licence keys in full: SDDC Manager's ``GET /v1/license-keys``, the vCenter
+licence keys unmasked: SDDC Manager's ``GET /v1/license-keys``, the vCenter
 licence manager's ``licenses`` property, an NSX ``/licenses`` list. The
 ingest gives such a read its risk level from the HTTP method, so it would
 be a ``safe`` read that runs at once. A licence key is a paid secret, so

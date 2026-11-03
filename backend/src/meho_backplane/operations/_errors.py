@@ -415,7 +415,7 @@ def result_target_required(op_id: str, duration_ms: float) -> OperationResult:
 def result_license_read_off(op_id: str, duration_ms: float) -> OperationResult:
     """An ingested read of licence keys; MEHO keeps it off.
 
-    The answer of such a read carries the product's licence keys in full,
+    The answer of such a read carries the product's licence keys unmasked,
     and the ingest would give it the ``safe`` level of its HTTP method. So
     ``call_operation`` and ``preview_operation`` refuse it before the
     catalog guard, the policy gate and any vendor call, also when an

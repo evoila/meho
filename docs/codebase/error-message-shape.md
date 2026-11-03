@@ -68,8 +68,9 @@ Examples in current use:
   pass a target name` — #1506, #4139)
 - `license_read_off` (`call_operation` and `preview_operation`: an
   ingested read whose path names licences; its answer would carry licence
-  keys in full, so MEHO keeps it off. Refused before the target check and
-  any vendor call, no audit row. Message: `license_read_off: MEHO keeps
+  keys unmasked, so MEHO keeps it off. Refused before the target check and
+  any vendor call, no audit row, when the row is off and when it was
+  turned on by hand. Message: `license_read_off: MEHO keeps
   this ingested read off because its answer carries licence keys; use the
   connector's hand-written licence read, which shows each key masked` —
   see `docs/codebase/spec-ingestion.md`, "Ingested licence reads stay

@@ -60,7 +60,10 @@ family patterns match. The patterns are case-sensitive ``fnmatchcase``
 globs over the exact op id, spelled to hit both raw HTTP ops
 (``METHOD:/path``, method upper-cased) and dotted typed ops
 (``vault.sys.auth.enable``) without case folding -- the same convention
-the delete-shaped patterns use.
+the delete-shaped patterns use. A vendor path keeps the vendor's own
+spelling (``/License-Keys``, ``/LicenseManager``), so the words in
+:data:`SECRET_FAMILY_WORDS` are matched case-insensitively instead: an op
+id that contains such a word in any case never records a body.
 
 Unplaceable op ids
 ------------------
@@ -84,6 +87,7 @@ from meho_backplane.delete_names import destructive_action_name_in_op_id
 __all__ = [
     "SECRET_FAMILY_PATTERNS",
     "SECRET_FAMILY_TAGS",
+    "SECRET_FAMILY_WORDS",
     "SECRET_OP_CLASSES",
     "BodyExclusion",
     "classify_body_exclusion",
@@ -139,10 +143,6 @@ SECRET_FAMILY_PATTERNS: Final[tuple[str, ...]] = (
     "*.keys.*",
     "*:*/key",
     "*:*/keys",
-    # licence keys: a licence read names licences in its path or its op
-    # id (``GET:/v1/license-keys``, ``sddc.license.list``). The stem
-    # covers license, licenses, licensing and licence.
-    "*licen*",
     # VCF deployment specs, logins and depot accounts. The typed operations
     # that send these bodies carry the ``credential`` tag. These globs give
     # the ingested copies of the same vendor calls the same result: SDDC
@@ -158,6 +158,15 @@ SECRET_FAMILY_PATTERNS: Final[tuple[str, ...]] = (
     "PUT:/v1/system/settings/depot",
     "PATCH:/v1/system/proxy-configuration",
 )
+
+#: Words that mark a secret-bearing op id in **any case**. Checked with
+#: ``word in op_id.lower()``, unlike the case-sensitive globs above,
+#: because a vendor path keeps the vendor's spelling (``/License-Keys``,
+#: ``/LicenseManager/{moId}/licenses``). ``licen`` is the stem of license,
+#: licenses, licensing and licence: a licence read names licences in its
+#: path or its op id (``GET:/v1/license-keys``, ``sddc.license.list``),
+#: and its answer carries the product's licence keys.
+SECRET_FAMILY_WORDS: Final[tuple[str, ...]] = ("licen",)
 
 #: Secret-bearing tag *tokens*. A descriptor tag is treated as
 #: secret-bearing when any of its tokens (split on non-alphanumerics)
@@ -263,6 +272,7 @@ def classify_body_exclusion(
     method: str | None = None,
     delete_shaped_patterns: tuple[str, ...] | None = None,
     secret_family_patterns: tuple[str, ...] = SECRET_FAMILY_PATTERNS,
+    secret_family_words: tuple[str, ...] = SECRET_FAMILY_WORDS,
 ) -> BodyExclusion:
     """Classify *op_id* for flight-recorder body exclusion.
 
@@ -319,6 +329,19 @@ def classify_body_exclusion(
                 reason=(
                     f"op {op_id!r} matches secret-bearing family pattern "
                     f"{pattern!r}; body never recorded"
+                ),
+            )
+
+    # --- secret-bearing: case-insensitive word net ---------------------
+    lowered = op_id.lower()
+    for word in secret_family_words:
+        if word in lowered:
+            return BodyExclusion(
+                excluded=True,
+                family="secret-bearing",
+                reason=(
+                    f"op {op_id!r} contains secret-bearing family word "
+                    f"{word!r} (any case); body never recorded"
                 ),
             )
 

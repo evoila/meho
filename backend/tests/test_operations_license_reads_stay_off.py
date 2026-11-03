@@ -4,16 +4,17 @@
 """Ingested reads of licence keys stay off.
 
 A vendor API file can describe a read whose answer carries licence keys
-in full. The ingest gives such a read the ``safe`` level of its HTTP
+unmasked. The ingest gives such a read the ``safe`` level of its HTTP
 method. MEHO keeps it off instead (``operations/license_reads.py``):
 
 * the rule: a ``GET`` or ``HEAD`` whose path names licences;
 * ``enable-reads`` leaves such a row off and turns the other reads on;
 * a call and a preview of such a read answer ``license_read_off`` before
-  any vendor call, also when the row was turned on by hand, so a made-up
-  key the vendor would return reaches nothing: not the result, not the
-  audit log;
-* the flight recorder never records the body of such a read.
+  any vendor call, when the row is off and when it was turned on by hand,
+  so a made-up key the vendor would return reaches nothing: not the
+  result, not the audit log; a row another tenant owns stays unknown;
+* the flight recorder never records the body of such a read, whatever
+  the case of the letters in its path.
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ from meho_backplane.redaction.flight_recorder import classify_body_exclusion
 from meho_backplane.settings import get_settings
 
 _TENANT: UUID = UUID("00000000-0000-0000-0000-00000000a560")
+_OTHER_TENANT: UUID = UUID("00000000-0000-0000-0000-00000000b560")
 _PRODUCT = "licfixture"
 _VERSION = "1"
 _IMPL_ID = "licfixture-rest"
@@ -125,7 +127,7 @@ class _FakeTarget:
 
 
 class _KeyReturningConnector(HttpConnector):
-    """A connector whose vendor answer carries the made-up key in full.
+    """A connector whose vendor answer carries the made-up key unmasked.
 
     Counts its calls: the dispatcher must never reach it for a licence read.
     """
@@ -322,14 +324,42 @@ async def test_bulk_enable_reads_leaves_licence_reads_off(session: AsyncSession)
 # ---------------------------------------------------------------------------
 
 
-async def _seed_enabled_licence_reads(session: AsyncSession, embedding: list[float]) -> None:
-    """Seed both licence reads turned on by hand, and register the connector."""
+async def _seed_licence_reads(
+    session: AsyncSession,
+    embedding: list[float],
+    *,
+    is_enabled: bool,
+    tenant_id: UUID | None = None,
+) -> None:
+    """Seed both licence reads and the hosts read, and register the connector."""
     _KeyReturningConnector.calls = 0
     register_connector_v2(
         product=_PRODUCT, version=_VERSION, impl_id=_IMPL_ID, cls=_KeyReturningConnector
     )
     for op_id in (_KEY_LIST, _KEY_ONE):
-        session.add(_descriptor(op_id=op_id, tenant_id=None, is_enabled=True, embedding=embedding))
+        session.add(
+            _descriptor(
+                op_id=op_id, tenant_id=tenant_id, is_enabled=is_enabled, embedding=embedding
+            )
+        )
+    session.add(
+        _descriptor(op_id=_HOSTS, tenant_id=tenant_id, is_enabled=True, embedding=embedding)
+    )
+    await session.commit()
+
+
+async def _seed_enabled_licence_reads(session: AsyncSession, embedding: list[float]) -> None:
+    """Seed both licence reads turned on by hand (built-in rows)."""
+    await _seed_licence_reads(session, embedding, is_enabled=True)
+
+
+async def _seed_ingested_licence_reads_after_enable_reads(
+    session: AsyncSession, embedding: list[float]
+) -> None:
+    """Seed the rows the way an ingest leaves them, then run ``enable-reads``."""
+    await _seed_licence_reads(session, embedding, is_enabled=False, tenant_id=_TENANT)
+    scope = ConnectorScope(product=_PRODUCT, version=_VERSION, impl_id=_IMPL_ID, tenant_id=_TENANT)
+    await bulk_enable_read_ops(session, scope)
     await session.commit()
 
 
@@ -406,13 +436,142 @@ async def test_preview_refuses_a_licence_read_the_same_way(
 
 
 # ---------------------------------------------------------------------------
+# A call and a preview of the row that is off give the same answer
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", [_KEY_LIST, _KEY_ONE])
+async def test_call_of_a_licence_read_that_is_off_answers_license_read_off(
+    op_id: str,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """After the ingest and ``enable-reads`` the row is off; the answer names the masked read."""
+    await _seed_ingested_licence_reads_after_enable_reads(
+        session, stub_embedding_service.encode_one.return_value
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id=op_id,
+        target=_FakeTarget(),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "license_read_off"
+    assert result.error is not None
+    assert "hand-written" in result.error
+    assert _KeyReturningConnector.calls == 0
+    assert _MADE_UP_KEY not in json.dumps(result.model_dump(mode="json"))
+    assert await _audit_rows_for(op_id) == []
+
+
+@pytest.mark.asyncio
+async def test_preview_of_a_licence_read_that_is_off_answers_license_read_off(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    await _seed_ingested_licence_reads_after_enable_reads(
+        session, stub_embedding_service.encode_one.return_value
+    )
+
+    out = await preview_dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id=_KEY_LIST,
+        target=_FakeTarget(),
+        params={},
+    )
+
+    assert out["status"] == "error"
+    assert out["extras"]["error_code"] == "license_read_off"
+    assert _KeyReturningConnector.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_a_licence_read_of_another_tenant_stays_unknown(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """The rows of another tenant are not visible, so the answer says nothing about them."""
+    await _seed_licence_reads(
+        session,
+        stub_embedding_service.encode_one.return_value,
+        is_enabled=False,
+        tenant_id=_OTHER_TENANT,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id=_KEY_LIST,
+        target=_FakeTarget(),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "unknown_op"
+    assert _KeyReturningConnector.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_an_absent_licence_read_stays_unknown(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """Only the other read is ingested: a licence read that has no row is ``unknown_op``."""
+    _KeyReturningConnector.calls = 0
+    register_connector_v2(
+        product=_PRODUCT, version=_VERSION, impl_id=_IMPL_ID, cls=_KeyReturningConnector
+    )
+    session.add(
+        _descriptor(
+            op_id=_HOSTS,
+            tenant_id=_TENANT,
+            is_enabled=True,
+            embedding=stub_embedding_service.encode_one.return_value,
+        )
+    )
+    await session.commit()
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id=_KEY_LIST,
+        target=_FakeTarget(),
+        params={},
+    )
+
+    assert result.extras["error_code"] == "unknown_op"
+
+
+# ---------------------------------------------------------------------------
 # The flight recorder never records the body of a licence read
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("op_id", [_KEY_LIST, _KEY_ONE, "GET:/LicenseManager/{moId}/licenses"])
+@pytest.mark.parametrize(
+    "op_id",
+    [
+        _KEY_LIST,
+        _KEY_ONE,
+        "GET:/LicenseManager/{moId}/licenses",
+        # the vendor's own spelling, in any case
+        "GET:/v1/License-Keys",
+        "POST:/v1/License-Keys",
+        "GET:/api/LICENSES",
+        "HEAD:/API/Licensing",
+    ],
+)
 def test_flight_recorder_records_no_body_for_a_licence_read(op_id: str) -> None:
     out = classify_body_exclusion(op_id)
     assert out.excluded is True
     assert out.family == "secret-bearing"
     assert out.uncertain is False
+
+
+def test_flight_recorder_keeps_the_body_of_a_read_that_names_no_licence() -> None:
+    assert classify_body_exclusion("GET:/v1/Hosts").excluded is False

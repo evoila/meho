@@ -562,6 +562,10 @@ _SECRET_FAMILY_OPS = [
     "GET:/v1/license-keys",
     "GET:/v1/license-keys/{key}",
     "sddc.license.list",
+    # the vendor's own spelling of a licence path, in any case
+    "POST:/v1/License-Keys",
+    "GET:/LicenseManager/{moId}/licenses",
+    "GET:/api/LICENSES",
 ]
 
 

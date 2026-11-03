@@ -98,7 +98,8 @@ preview_dispatch(operator, connector_id, op_id, target, params)
         │
         ├─ parse_connector_id → (product, version, impl_id)
         ├─ lookup_descriptor → None ? → status=error error_code=unknown_op
-        │       (or unknown_connector; op_miss_result, #4031)
+        │       (or unknown_connector; op_miss_result, #4031; a visible
+        │       ingested licence read that is off → license_read_off)
         ├─ ingested read whose path names licences ? → status=error
         │       error_code=license_read_off (same answer and order as /call;
         │       the read never runs, see spec-ingestion.md)

@@ -66,6 +66,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_chart_network_policy_extra_egress.py",
     "tests/test_chart_observability_scrape.py",
     "tests/test_chart_result_cache.py",
+    "tests/test_chart_safe_updates.py",
     "tests/test_chart_sandbox_mode.py",
     "tests/test_chart_vault_addr_optional.py",
     "tests/test_ci_backend_python_skip.py",

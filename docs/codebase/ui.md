@@ -1,5 +1,9 @@
 # `ui/` — Operator-console chassis
 
+> Looking for the rules rather than the mechanism? [`ui-conventions.md`](./ui-conventions.md) is the short list of
+> things not to get wrong when working on the console. This document is the
+> reference for how the chassis works.
+
 Initiative [#337](https://github.com/evoila/meho/issues/337) (G10.0
 Frontend chassis) introduces a server-rendered web UI inside the
 backplane FastAPI process at `/ui/*`. This doc covers the **chassis**

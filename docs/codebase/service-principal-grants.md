@@ -321,17 +321,21 @@ delete-shaped ops:
   `DELETE` verb, or a hand-authored `destructive` tag on a typed op.
 
 The first two signs need only the op id (`delete_shaped_refusal_reason`),
-so they also work for an op with no stored row. The action-name sign and
-`_delete_shaped_reason_by_descriptor` are consulted at **both** ends:
-create-time (above) and dispatch-time (`consult_and_record_grant`, so a
-stale grant predating an op's promotion into the `destructive` tier, or a
-grant row written for a VI-JSON delete, can never satisfy it). An inner
-step of a multi-step operation reaches the gate as an in-memory record with
-only its declared level — no method, no tags — so for it the op id is the
-only sign, and the action name is what catches `Destroy_Task`. That is what
-makes "a standing grant can never satisfy a destructive op" hold whether
-the grant is being created or consulted. A grant row that already exists
-for such an op stays in the list but never lets the op run; revoke it with
+so they also work for an op with no stored row. All three signs are one
+rule, `delete_grant_reason`, and it is consulted at **both** ends:
+create-time (above) and dispatch-time (`consult_and_record_grant`). So a
+grant row that is older than the sign can never satisfy the op: a grant
+made before a pattern joined the list (a release that adds one, or an
+operator who adds one to `SERVICE_GRANT_DELETE_SHAPED_PATTERNS`), a grant
+predating an op's promotion into the `destructive` tier, or a grant row
+written for a VI-JSON delete. An inner step of a multi-step operation
+reaches the gate as an in-memory record with only its declared level — no
+method, no tags — so for it the op id is the only sign: the action name is
+what catches `Destroy_Task`, and the pattern list is what catches an inner
+`DELETE:` step or a typed `*.delete`. That is what makes "a standing grant
+can never satisfy a destructive op" hold whether the grant is being created
+or consulted. A grant row that already exists for such an op stays in the
+list but never lets the op run; revoke it with
 `meho service-principals grants revoke <id>`. The one exception is an
 instance in sandbox mode; see [Sandbox mode](#sandbox-mode-4622) below.
 

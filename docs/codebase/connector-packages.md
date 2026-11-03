@@ -160,6 +160,9 @@ The folder's `__init__.py` does three things when MEHO imports it:
    `classify_op` in `broadcast/events.py` reads these declarations
    first. Core code lists no operation of a connector package. See
    [broadcast.md](broadcast.md), "Where an exact class comes from".
+5. **Bring catalog rows**, if MEHO should make operations from the
+   vendor's API file for the package's products. See "Bring catalog
+   rows" below.
 
 Nothing else runs at import. Other code that runs at import is a reason to
 refuse the package in the review (see "The review checklist").
@@ -231,6 +234,59 @@ for a long list. The handler returns plain data.
 Before you build, run MEHO's operation contract check
 (`backend/tests/test_operation_contracts.py`) with the package's folder in
 a MEHO checkout. The review for tier 2 asks for it too.
+
+### Bring catalog rows
+
+MEHO's connector catalog (`operations/ingest/catalog.yaml`, see
+[spec-ingestion.md](spec-ingestion.md)) has one row per product and
+version. A row says which vendor API file MEHO loads for
+`meho connector ingest --catalog <product>/<version>`, the ingest profile
+(how MEHO logs in and pages), and the safety overlay: the operations made
+from the file that get a higher risk level or an approval, for example a
+read whose answer holds credentials.
+
+A package brings such rows itself. It is the only way: the public catalog
+has no row for a product whose connector is not in the public tree.
+
+1. Put a YAML file with the same `entries` shape as `catalog.yaml` in the
+   connector folder, for example `catalog.yaml`. The `spec_resource` and
+   `profile_resource` of each row name files in the same folder, so give
+   the API file and the profile different names
+   (`example.spec.yaml`, `example.profile.yaml`).
+2. In the folder's `__init__.py`, call
+   `register_connector_catalog(__name__)` from the kit. The one optional
+   input is the file name, when it is not `catalog.yaml`. The call reads
+   nothing.
+
+   ```python
+   # meho_backplane/connectors/example_widget/__init__.py
+   import meho_connector_kit as kit
+
+   kit.register_connector_catalog(__name__)
+   ```
+
+3. When MEHO starts, it reads the file with its own `catalog.yaml`
+   (`load_catalog()` in `operations/ingest/catalog.py`) and runs the same
+   checks on the rows: the schema, the registry check of each
+   `(product, version, impl_id)`, and a dry run of the API file and the
+   profile. A wrong file, a missing file, or a row for a product and
+   version that the catalog already has stops the start with a
+   `CatalogError` that names the package.
+
+From then on the rows work like built-in rows: they are in
+`GET /api/v1/connectors/catalog` and `meho connector catalog list`,
+`ingest --catalog` loads the package's API file, and an ingest of the
+product applies the safety overlay (`safety_overlay_for()`). Each row
+says which package brought it (`ConnectorSpecEntry.source_package`);
+`load_entry_spec()` and `load_entry_profile()` read a row's files from
+the right place for either kind of row. When the package is removed,
+its rows are gone at the next start. The stored operations keep the
+risk level of their last ingest, as always.
+
+A test for a package checks that the rows are there, for example that
+`safety_overlay_for(product, version)` is not empty after the folder is
+imported. `backend/tests/test_connector_package_catalog.py` does this
+with a made-up package.
 
 **Which MEHO modules a package may import.** Only the connector kit,
 `meho_connector_kit` (see "The connector kit" below). Every other MEHO
@@ -746,6 +802,10 @@ connector package does not write its own.
   rows and groups.
 - `CONNECTOR_PACKAGES_FILE`, `BUILTIN_DISTRIBUTION` — the file path and
   the built-in distribution name.
+- `register_connector_catalog()`, `load_entry_spec()`,
+  `load_entry_profile()` and `ConnectorSpecEntry.source_package` in
+  `operations/ingest/catalog.py` — the catalog rows a package brings, and
+  where their files are read from.
 
 ## Secrets in an operation's answer
 
@@ -790,6 +850,8 @@ answer".
 - `backend/src/meho_backplane/connectors/phpipam/` — a small typed connector to copy from
 - `backend/tests/test_connector_packages.py`
 - `backend/tests/test_connector_package_owner.py`
+- `backend/tests/test_connector_package_catalog.py` — the catalog rows a
+  package brings
 - `backend/connector-kit/`, `backend/scripts/write_connector_kit_names.py`,
   `backend/tests/test_connector_kit.py` and
   `scripts/release/check_connector_kit_release.py` — the connector kit

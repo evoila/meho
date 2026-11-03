@@ -53,7 +53,7 @@ from meho_backplane.operations.ingest.catalog import (
     ConnectorSpecCatalog,
     ConnectorSpecEntry,
     load_catalog,
-    load_profile_resource,
+    load_entry_profile,
 )
 from meho_backplane.operations.ingest.connector_registration import synthesise_profiled_class
 from meho_backplane.operations.ingest.parser import parse_connector_id
@@ -105,7 +105,7 @@ async def _stamp_entry(service: ReviewService, entry: ConnectorSpecEntry) -> boo
     not round-trip (the ``_fixture`` mechanism row parses to ``fixture``).
     """
     assert entry.profile_resource is not None  # caller-guaranteed
-    raw = load_profile_resource(entry.profile_resource)
+    raw = load_entry_profile(entry)
     profile = ExecutionProfile.model_validate(yaml.safe_load(raw))
     connector_id = f"{entry.impl_id}-{entry.version}"
     product, version, impl_id = parse_connector_id(connector_id)

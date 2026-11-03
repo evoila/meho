@@ -1,5 +1,5 @@
 {
-  "kit_version": "1.0",
+  "kit_version": "1.1",
   "names": {
     "AuthModel": {
       "kind": "class"
@@ -203,6 +203,14 @@
       ],
       "kind": "function",
       "returns": "dict[str, object]"
+    },
+    "register_connector_catalog": {
+      "inputs": [
+        "package: str",
+        "resource: str = 'catalog.yaml'"
+      ],
+      "kind": "function",
+      "returns": "None"
     },
     "register_connector_v2": {
       "inputs": [

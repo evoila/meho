@@ -502,11 +502,12 @@ async def test_decide_redispatch_executes_move_once(
     key = make_rsa_keypair("kid-decider")
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
+        # An admin may approve another person's dangerous change (#3328).
         token = mint_token(
             key,
             fresh_sign_in=True,
             sub="operator:decider",  # different from the requester
-            tenant_role=TenantRole.OPERATOR.value,
+            tenant_role=TenantRole.TENANT_ADMIN.value,
             tenant_id=str(_TENANT_ID),
         )
         with TestClient(app) as client:

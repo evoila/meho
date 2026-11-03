@@ -329,7 +329,11 @@ async def _ask_and_approve(asker: Operator, approver: Operator, target_id: uuid.
 async def test_the_target_stays_when_an_operator_approves(asker_role: TenantRole) -> None:
     row = await _seed(f"asked-by-{asker_role.value}")
     asker = _operator("op-asker", role=asker_role)
-    approver = _operator("op-approver", role=TenantRole.OPERATOR)
+    # A MEHO-SA-Operator may approve the change (#3328), but the removal
+    # still needs the tenant_admin role when it runs.
+    approver = _operator("op-approver", role=TenantRole.OPERATOR).model_copy(
+        update={"self_approver": True}
+    )
 
     result = await _ask_and_approve(asker, approver, row.id)
     assert result.status == "error", result

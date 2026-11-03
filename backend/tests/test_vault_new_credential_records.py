@@ -78,6 +78,8 @@ def fake(monkeypatch: pytest.MonkeyPatch) -> _FakeClient:
 
 
 def _operator(sub: str) -> Operator:
+    # The person who approves is a MEHO-SA-Operator: only that group or an
+    # admin may approve another person's high-risk change (#3328).
     return Operator(
         sub=sub,
         name=None,
@@ -85,6 +87,7 @@ def _operator(sub: str) -> Operator:
         raw_jwt="fake.jwt.value",
         tenant_id=_TENANT_ID,
         tenant_role=TenantRole.OPERATOR,
+        self_approver=sub == "approver",
     )
 
 

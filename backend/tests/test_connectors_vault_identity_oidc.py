@@ -511,7 +511,9 @@ async def test_delete_waits_for_approval_then_runs_once_with_an_audit_row(
     assert fake.secrets.identity.oidc_role_delete_calls == []
     assert fake.secrets.identity.oidc_key_delete_calls == []
 
-    approver = _make_operator("op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+
+    approver = _make_operator("op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         approved = await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()

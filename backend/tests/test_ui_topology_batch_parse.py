@@ -12,12 +12,17 @@ banner before any service call.
 
 from __future__ import annotations
 
+import io
+
 import pytest
+from fastapi import UploadFile
 
 from meho_backplane.ui.routes.topology.batch_parse import (
     BULK_MAX_ROWS,
+    BULK_MAX_UPLOAD_BYTES,
     BulkParseError,
     parse_bulk_rows,
+    resolve_bulk_text,
 )
 
 
@@ -113,3 +118,28 @@ def test_parse_exceeds_row_cap_raises() -> None:
     )
     with pytest.raises(BulkParseError, match="too many rows"):
         parse_bulk_rows("edges:\n" + rows)
+
+
+# ---------------------------------------------------------------------------
+# resolve_bulk_text — upload size cap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_upload_under_cap_is_read() -> None:
+    upload = UploadFile(file=io.BytesIO(b"edges: []\n"), filename="rows.yaml")
+    assert await resolve_bulk_text(None, upload) == "edges: []\n"
+
+
+@pytest.mark.asyncio
+async def test_upload_over_cap_is_refused_with_a_parse_error() -> None:
+    upload = UploadFile(file=io.BytesIO(b"x" * (BULK_MAX_UPLOAD_BYTES + 1)), filename="rows.yaml")
+    with pytest.raises(BulkParseError, match="larger than 256 KiB"):
+        await resolve_bulk_text(None, upload)
+
+
+@pytest.mark.asyncio
+async def test_upload_wins_over_paste_and_paste_is_fallback() -> None:
+    assert await resolve_bulk_text("pasted", None) == "pasted"
+    upload = UploadFile(file=io.BytesIO(b"from-file"), filename="rows.yaml")
+    assert await resolve_bulk_text("pasted", upload) == "from-file"

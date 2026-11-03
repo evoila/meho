@@ -30,7 +30,7 @@ router before the detail router for that reason.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -72,7 +72,12 @@ async def _resolve_yaml_text(pasted: str | None, upload: UploadFile | None) -> s
     owns the operator-facing error message.
     """
     if upload is not None and upload.filename:
-        raw = await upload.read()
+        raw = await upload.read(_YAML_MAX_BYTES + 1)
+        if len(raw) > _YAML_MAX_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail=f"the uploaded file is larger than {_YAML_MAX_BYTES // 1024} KiB",
+            )
         return raw.decode("utf-8", errors="replace")
     return pasted or ""
 

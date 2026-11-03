@@ -95,7 +95,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
+from typing import Any, Final
 
 import asyncssh
 import structlog
@@ -270,6 +270,35 @@ def _record_ssh_span(
         )
     except Exception:
         logger.warning("flight_recorder_ssh_span_failed", exc_info=True)
+
+
+#: Cap on the characters of stdout plus stderr one SSH command may
+#: return. A command whose output crosses it fails with
+#: :class:`SshOutputTooLargeError` instead of handing the whole output to
+#: the connector, the flight recorder and the result path. Measured on the
+#: decoded text asyncssh returns, so it is a character count that bounds
+#: the memory held after the read.
+_MAX_OUTPUT_CHARS: Final[int] = 16 * 1024 * 1024
+
+
+class SshOutputTooLargeError(RuntimeError):
+    """A command's output crossed :data:`_MAX_OUTPUT_CHARS`."""
+
+    def __init__(self, target_name: str, size: int) -> None:
+        super().__init__(
+            f"ssh command output on {target_name!r} is {size} characters, "
+            f"above the {_MAX_OUTPUT_CHARS}-character cap"
+        )
+
+
+def _output_size(result: Any) -> int:
+    """Length of a completed process's stdout plus stderr, never raising."""
+    size = 0
+    for attr in ("stdout", "stderr"):
+        value = getattr(result, attr, None)
+        if isinstance(value, (str, bytes)):
+            size += len(value)
+    return size
 
 
 class SshTargetChangedError(RuntimeError):
@@ -543,6 +572,15 @@ class SshConnector(Connector):
             cmd_len=len(cmd),
             exit_code=result.exit_status,
         )
+        size = _output_size(result)
+        if size > _MAX_OUTPUT_CHARS:
+            logger.warning(
+                "ssh_command_output_too_large",
+                target=target.name,
+                output_chars=size,
+                max_chars=_MAX_OUTPUT_CHARS,
+            )
+            raise SshOutputTooLargeError(target.name, size)
         return result
 
     def _assert_reachable(self, result: FingerprintResult) -> None:

@@ -175,6 +175,18 @@ BACKGROUND_LOOP_INTERVAL_SECONDS: Gauge = Gauge(
 )
 
 
+#: ``1`` when the Vault tenant-scope prefix is set (the per-tenant path
+#: check runs on every ``vault.kv.*`` call), ``0`` when the deployment
+#: cleared ``VAULT_KV_TENANT_SCOPE_PREFIX`` and the check is off. Set once
+#: at startup so a dashboard can alert on an instance that runs without
+#: the check; ``/ready`` and ``meho_status`` show the same state under
+#: ``features.vault_tenant_scope``.
+VAULT_TENANT_SCOPE_ENFORCED: Gauge = Gauge(
+    "vault_tenant_scope_enforced",
+    "1 when the Vault tenant-scope prefix check is on, 0 when it is off.",
+)
+
+
 def note_loop_tick(loop: str, interval_seconds: float, *, now: float | None = None) -> None:
     """Stamp a completed background-loop tick and (re)publish its interval.
 

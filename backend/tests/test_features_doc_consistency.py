@@ -112,6 +112,11 @@ FEATURE_GATE_CONTRACT: dict[str, dict[str, Any]] = {
         "env_vars": ("APPROVAL_HANDOFF_ENCRYPTION_KEY",),
         "settings_attrs": ("approval_handoff_encryption_key",),
     },
+    "vault_tenant_scope": {
+        "docs": "docs/codebase/connectors-vault-tenant-scope.md",
+        "env_vars": ("VAULT_KV_TENANT_SCOPE_PREFIX",),
+        "settings_attrs": ("vault_kv_tenant_scope_prefix",),
+    },
 }
 
 

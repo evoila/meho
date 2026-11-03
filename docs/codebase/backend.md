@@ -617,6 +617,10 @@ this stage it exposes:
   exit — and that the fail-closed 500 still carries
   `RequestContextMiddleware`'s `X-Request-Id` response header so the
   operator has a correlation crumb on the failure path.
+  `RequestBodyLimitMiddleware` is registered last and so sits outside
+  all of them: a request body above `HTTP_MAX_REQUEST_BODY_BYTES`
+  (32 MiB by default) gets a `413` before anything reads it. See
+  `docs/codebase/request-body-limit.md`.
 
 * MCP Streamable HTTP transport entrypoint (Task #246, G0.5-T1) —
   `backend/src/meho_backplane/mcp/` is the new module hosting MEHO's

@@ -410,18 +410,50 @@ def test_features_block_carries_all_six_entries() -> None:
         "audit_replay",
         "approval_queue",
         "approval_custody",
+        "vault_tenant_scope",
         "mcp",
     }
 
 
 @pytest.mark.parametrize(
     "feature",
-    ["agent_runtime", "ui_surface", "audit_replay", "approval_queue", "approval_custody", "mcp"],
+    [
+        "agent_runtime",
+        "ui_surface",
+        "audit_replay",
+        "approval_queue",
+        "approval_custody",
+        "vault_tenant_scope",
+        "mcp",
+    ],
 )
 def test_every_feature_has_configured_bool(feature: str) -> None:
     """Each entry carries a ``configured: bool`` — the load-bearing field."""
     block = build_features_block(_settings_with())
     assert isinstance(block[feature]["configured"], bool)
+
+
+# ---------------------------------------------------------------------------
+# vault_tenant_scope
+# ---------------------------------------------------------------------------
+
+
+def test_vault_tenant_scope_configured_with_default_prefix() -> None:
+    """The default prefix keeps the per-tenant path check on."""
+    entry = build_features_block(_settings_with())["vault_tenant_scope"]
+    assert entry["configured"] is True
+    assert entry["missing_env"] == []
+    assert entry["docs"] == "docs/codebase/connectors-vault-tenant-scope.md"
+    assert entry["maturity"] == "ga"
+
+
+def test_vault_tenant_scope_unconfigured_with_empty_prefix() -> None:
+    """An emptied prefix shows as unconfigured and names the setting to restore."""
+    entry = build_features_block(_settings_with(vault_kv_tenant_scope_prefix=""))[
+        "vault_tenant_scope"
+    ]
+    assert entry["configured"] is False
+    assert entry["missing_env"] == ["VAULT_KV_TENANT_SCOPE_PREFIX"]
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +474,7 @@ READY_ENTRY_FEATURE_CONTRACT = {
     "audit_replay": "audit",
     "approval_queue": "approvals",
     "approval_custody": "approvals",
+    "vault_tenant_scope": "auth_tenancy",
 }
 
 _ISSUE_URL_RE = re.compile(r"^https://github\.com/evoila/meho/issues/\d+$")

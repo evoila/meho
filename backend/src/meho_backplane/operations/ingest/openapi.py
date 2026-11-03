@@ -393,6 +393,14 @@ _MAX_REDIRECTS = 5
 # pod memory.
 _MAX_SPEC_BYTES = 20 * 1024 * 1024  # 20 MiB
 
+#: Cap on the expanded node count of a YAML spec, per byte of input. YAML
+#: anchors and aliases let a small file stand for a document with many
+#: times more nodes once every alias is walked (the later full walks of
+#: the ingest pipeline do not share them). A document without aliases
+#: has fewer nodes than bytes, so a cap of this many nodes per byte never
+#: touches a real spec and bounds the walks to the size of the file.
+_MAX_SPEC_NODES_PER_BYTE = 2
+
 
 # Content-Type prefixes the upstream-fetch path accepts as spec-shaped.
 # OpenAPI specs are served as ``application/json`` (the modern default),
@@ -928,11 +936,37 @@ def _decode_spec(content: bytes) -> dict[str, Any]:
         parsed = json.loads(content)
     else:
         parsed = yaml.load(io.BytesIO(content), Loader=_SpecYamlLoader)
+        _assert_expanded_size(parsed, max_nodes=len(content) * _MAX_SPEC_NODES_PER_BYTE)
     if not isinstance(parsed, dict):
         raise InvalidSpecError(
             f"OpenAPI document must parse to a mapping, got {type(parsed).__name__}"
         )
     return parsed
+
+
+def _assert_expanded_size(parsed: Any, *, max_nodes: int) -> None:
+    """Refuse a parsed YAML document with more than *max_nodes* nodes once expanded.
+
+    Walks the document the way the ingest pipeline will: every alias is
+    visited again at each place it is used. The walk stops at the cap,
+    so its cost is bounded by *max_nodes* whatever the document holds.
+
+    Raises:
+        InvalidSpecError: The expanded document is over the cap.
+    """
+    count = 0
+    stack: list[Any] = [parsed]
+    while stack:
+        node = stack.pop()
+        count += 1
+        if count > max_nodes:
+            raise InvalidSpecError(
+                f"spec expands to more than {max_nodes} nodes (too many YAML aliases for its size)"
+            )
+        if isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
 
 
 def _validate_openapi_version(spec: dict[str, Any]) -> None:

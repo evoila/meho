@@ -278,6 +278,16 @@ advisory is silent. The behaviour is covered by
 (silent on default, silent when set, fires when explicitly emptied, never
 blocks boot).
 
+The same state is visible after startup, so it is not lost in the log:
+
+- `GET /ready` and `meho_status` carry a `features.vault_tenant_scope`
+  entry: `configured: true` when the prefix is set, `configured: false`
+  with `missing_env: ["VAULT_KV_TENANT_SCOPE_PREFIX"]` when it is empty
+  (`features._vault_tenant_scope_block`).
+- The Prometheus gauge `vault_tenant_scope_enforced` reads `1` or `0`,
+  set once at startup by the same advisory function, so a dashboard can
+  alert on an instance that runs without the check.
+
 ## Choosing a layout
 
 The guard is default-on (`secret/tenants/{tenant_id}/`), matching the

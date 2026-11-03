@@ -43,6 +43,7 @@ from meho_backplane.operations.ingest.openapi import (
     _INLINE_SPEC_ONRAMP_REMEDIATION,
     _MAX_REDIRECTS,
     _assert_fetchable_remote_url,
+    _decode_spec,
     _pin_fetch_addresses,
     _screen_fetch_host,
     _server_base_path,
@@ -2555,3 +2556,28 @@ def test_fetch_pins_and_blocks_resolver_flip_to_loopback() -> None:
         parse_openapi("https://spec.example.test/openapi.yaml")
     # Both the pre-fetch screen and the connect-time pin resolved the name.
     assert calls["n"] >= 2
+
+
+# ---------------------------------------------------------------------------
+# YAML alias expansion cap
+# ---------------------------------------------------------------------------
+
+_ALIAS_HEAVY_YAML = b"""\
+openapi: 3.0.0
+a: &a [x, x, x, x, x, x, x, x, x, x]
+b: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]
+c: &c [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]
+d: [*c, *c, *c, *c, *c, *c, *c, *c, *c, *c]
+"""
+
+
+def test_yaml_spec_with_many_aliases_is_refused() -> None:
+    """A small file that expands to many nodes through aliases is refused."""
+    with pytest.raises(InvalidSpecError, match="too many YAML aliases"):
+        _decode_spec(_ALIAS_HEAVY_YAML)
+
+
+def test_yaml_spec_without_aliases_passes_the_expansion_cap() -> None:
+    """A plain document always has fewer nodes than bytes, so it passes."""
+    parsed = _decode_spec(b"openapi: 3.0.0\ninfo: {title: t, version: '1'}\npaths: {}\n")
+    assert parsed["openapi"] == "3.0.0"

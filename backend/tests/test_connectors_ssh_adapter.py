@@ -56,6 +56,7 @@ from meho_backplane.connectors.adapters import SshConnector
 from meho_backplane.connectors.adapters.ssh import (
     _POOL_TTL_S,
     SshHostKeyUnpinnedError,
+    SshOutputTooLargeError,
     _known_hosts_from_secret,
     _pool_key,
     _secret_flag_is_true,
@@ -318,6 +319,27 @@ async def test_password_auth_connects_and_runs_command(
     assert result.stdout is not None
     assert "ok" in result.stdout
     await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_command_output_over_cap_is_refused(
+    ssh_server: Any,
+    vault_secrets: dict[str, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Output above the cap raises instead of reaching the caller."""
+    monkeypatch.setattr("meho_backplane.connectors.adapters.ssh._MAX_OUTPUT_CHARS", 8)
+    conn = _ConcreteSshConnector()
+    target = _password_target(host=ssh_server.host, port=ssh_server.port)
+
+    try:
+        with pytest.raises(SshOutputTooLargeError, match="above the 8-character cap"):
+            await conn._run_command(target, "echo 0123456789abcdef")
+        short = await conn._run_command(target, "echo ok")
+    finally:
+        await conn.aclose()
+
+    assert short.exit_status == 0
 
 
 @pytest.mark.asyncio

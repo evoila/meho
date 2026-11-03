@@ -418,7 +418,8 @@ features will work out of the box?":
     "ui_surface":     {"configured": false, "missing_env": ["UI_KEYCLOAK_CLIENT_ID", "..."], "docs": "..."},
     "audit_replay":   {"configured": true,  "capture_mode": "enforced", "missing_env": []},
     "approval_queue": {"configured": false, "depends_on": "agent_runtime", "effective_posture": "four_eyes_enforced"},
-    "approval_custody": {"configured": false, "custody": "missing", "missing_env": ["APPROVAL_HANDOFF_ENCRYPTION_KEY"], "docs": "docs/codebase/approvals.md"}
+    "approval_custody": {"configured": false, "custody": "missing", "missing_env": ["APPROVAL_HANDOFF_ENCRYPTION_KEY"], "docs": "docs/codebase/approvals.md"},
+    "vault_tenant_scope": {"configured": true, "missing_env": [], "docs": "docs/codebase/connectors-vault-tenant-scope.md"}
   }
 }
 ```

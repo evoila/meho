@@ -125,6 +125,10 @@ this stage it exposes:
     the Vault path guard, the audit tenant, result links) now sees the
     current tenant, with no change in those modules. Tests:
     `tests/test_auth_current_tenant.py`.
+  - A site with one tenant answers the same with and without the list:
+    `tests/integration/test_keycloak_one_tenant_unchanged.py` checks it
+    against a real Keycloak (answers, audit rows, Vault login role). The
+    admin guide is `docs-site/guides/several-tenants.md`.
 * RBAC primitive (Task #234, G0.1-T4) — `auth/rbac.py` ships
   `require_role(min_role: TenantRole)`, a function factory that
   returns a FastAPI dependency. The dependency runs after

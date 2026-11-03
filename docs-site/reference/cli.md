@@ -111,7 +111,7 @@ meho admin keycloak bootstrap-clients [flags]
 - `--cli-approve-client-id` — public client_id for the fresh browser sign-in of `meho approvals approve` (matches chart's `config.keycloakCliApproveClientId`)
 - `--cli-client-id` — public client_id for the device-code flow (matches chart's `config.keycloakCliClientId`)
 - `--cli-offline-access` — how many seconds an unused CLI login stays valid: assigns `offline_access` as an optional client scope on the device-code CLI client and sets its `client.offline.session.idle.timeout` attribute, so `meho login` gets a login that renews itself. Default 172800 seconds (48h). Use the equals form for another value, e.g. `--cli-offline-access=86400`. `--cli-offline-access=0` turns the long CLI login off and removes it from a client an earlier run set up. The refresh token is a long-lived secret on the operator's disk (OS keyring first)
-- `--dry-run` — print what would be provisioned without making any API calls
+- `--dry-run` — read the realm and print each change a real run would make, without changing anything (needs the admin login, for the reads)
 - `--insecure-skip-tls-verify` — escape hatch: skip TLS certificate AND hostname verification for every Keycloak request (sends the admin password + token over an unverified connection; prints a loud warning). Prefer --keycloak-ca-bundle
 - `--keycloak-base-url` — Keycloak base URL, e.g. https://keycloak.example.com
 - `--keycloak-ca-bundle` — path to a PEM CA bundle to verify the Keycloak server certificate against (keeps chain + hostname verification ON while trusting an internal realm CA). Preferred over --insecure-skip-tls-verify; the two are mutually exclusive

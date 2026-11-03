@@ -145,6 +145,18 @@ func newBootstrapClientsCmd() *cobra.Command {
 			"set `meho_tenant` on a person.\n\n" +
 			"Idempotent: re-runs detect existing resources, " +
 			"reconcile drift via PUT, and never duplicate. " +
+			"The command is for a new realm. On a realm that already " +
+			"works, it sets these values again and overwrites what an " +
+			"admin changed: on the three clients the redirect URIs, " +
+			"web origins, flow switches and named attributes; the eight " +
+			"mappers, also `tenant-id` and `tenant-role`; and the " +
+			"attributes of the role groups. It also adds the groups, " +
+			"scopes and admin user that are missing. To change one " +
+			"setting of one client, use the operation " +
+			"`keycloak.client.update` or the admin console. Run with " +
+			"`--dry-run` first: it reads the realm and prints each " +
+			"change, field by field, without changing anything. Each " +
+			"real run prints the same lines for what it changed.\n\n" +
 			"Confidential clients (e.g. `meho-backplane`) are " +
 			"explicitly refused — this verb provisions PUBLIC " +
 			"clients only.\n\n" +
@@ -316,7 +328,8 @@ func newBootstrapClientsCmd() *cobra.Command {
 			"Keycloak request (sends the admin password + token over an unverified "+
 			"connection; prints a loud warning). Prefer --keycloak-ca-bundle")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
-		"print what would be provisioned without making any API calls")
+		"read the realm and print each change a real run would make, without changing anything "+
+			"(needs the admin login, for the reads)")
 	cmd.Flags().IntVar(&cliOfflineSessionIdle, "cli-offline-access",
 		defaultCLIOfflineSessionIdleSeconds,
 		"how many seconds an unused CLI login stays valid: assigns "+
@@ -434,22 +447,36 @@ func readPassword(in io.Reader, errOut io.Writer, prompt string) (string, error)
 // events + the "set these in your chart" config keys.
 func printSummary(out io.Writer, opts BootstrapOptions, res *Result) {
 	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "==> realm reconciliation events")
+	if opts.DryRun {
+		fmt.Fprintln(out, "==> DRY RUN: the changes a real run would make (nothing was changed)")
+	} else {
+		fmt.Fprintln(out, "==> realm reconciliation events")
+	}
 	for _, line := range res.MapperEventsLog {
 		fmt.Fprintln(out, "    "+line)
 	}
 	if !opts.SkipUserProvisioning {
+		var line string
 		switch {
 		case res.AdminUserCreated:
-			fmt.Fprintf(out, "    [created] user %s (joined %s and %s)\n",
+			line = fmt.Sprintf("[created] user %s (joined %s and %s)",
 				opts.AdminUserUsername, adminGroupName, platformAdminGroupName)
 		case res.AdminUserJoined:
-			fmt.Fprintf(out, "    [updated] user %s (joined %s and %s; password not reset)\n",
+			line = fmt.Sprintf("[updated] user %s (joined %s and %s; password not reset)",
 				opts.AdminUserUsername, adminGroupName, platformAdminGroupName)
 		default:
-			fmt.Fprintf(out, "    [skip]    user %s (already exists; password not reset)\n",
+			line = fmt.Sprintf("[skip]    user %s (already exists; password not reset)",
 				opts.AdminUserUsername)
 		}
+		if opts.DryRun {
+			line = dryRunEvent(line)
+		}
+		fmt.Fprintln(out, "    "+line)
+	}
+	if opts.DryRun {
+		fmt.Fprintln(out, "")
+		fmt.Fprintln(out, "Nothing was changed. Run without --dry-run to make these changes.")
+		return
 	}
 	if opts.AddTenantName != "" && res.AddedTenantID != "" {
 		note := ""

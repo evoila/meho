@@ -30,9 +30,14 @@ sibling. It does not tell the caller to use the sibling, which would
 answer ``unknown_op``. The preview path uses the
 same choice (:func:`choose_catalog_for_target`, which writes no audit
 row), so a ``preview_hash`` taken with the named catalog matches the
-dispatch that runs on the sibling. Typed and composite
-descriptors never reach this code: the guard only applies to
-``source_kind == "ingested"``.
+dispatch that runs on the sibling. Typed descriptors never reach this
+code: the guard only applies to ``source_kind == "ingested"``.
+
+A composite descriptor gets one other check here: the target version range
+its connector states for composite operations
+(:mod:`~meho_backplane.operations._composite_version_guard`). Its steps do
+not pass the guard above, so that range is the only version check a
+composite gets. It has no sibling fallback.
 
 The fallback is for a fresh call only. An approval request stores the
 catalog that was checked by policy and shown to the approver. When that
@@ -62,6 +67,7 @@ from meho_backplane.connectors import (
 from meho_backplane.connectors.base import Connector
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations._audit import audit_rejection_safe, with_audit_receipt
+from meho_backplane.operations._composite_version_guard import composite_version_refusal
 from meho_backplane.operations._errors import result_unqualified_target_version
 from meho_backplane.operations._lookup import lookup_descriptor
 
@@ -121,7 +127,15 @@ async def choose_catalog_for_target(
     enabled, the refusal says so and points at ``search_operations`` on
     that sibling (#5069). It does not repeat the connector's own hint to
     use the sibling, because the sibling would answer ``unknown_op``.
+
+    A composite descriptor is checked against the target version range of
+    its connector instead, and is refused when the target is outside it.
     """
+    composite_reason = composite_version_refusal(descriptor, target)
+    if composite_reason is not None:
+        return CatalogRefusal(
+            composite_reason, _target_product(target), resolve_target_version(target)
+        )
     owner_class = _guarded_owner_class(
         product=descriptor.product,
         version=descriptor.version,
@@ -263,9 +277,7 @@ def _guarded_owner_class(
 def _check_target(owner_class: type[Connector], source_kind: str, target: Any) -> _TargetCheck:
     """Ask *owner_class* whether its catalog can serve *target*."""
     resolved_class, _label, _message = resolve_connector_or_label(target)
-    target_product = getattr(target, "product", None)
-    if not isinstance(target_product, str) or not target_product:
-        target_product = None
+    target_product = _target_product(target)
     target_version = resolve_target_version(target)
     incompatibility = owner_class.catalog_target_incompatibility(
         descriptor_source_kind=source_kind,
@@ -274,6 +286,14 @@ def _check_target(owner_class: type[Connector], source_kind: str, target: Any) -
         selected_target_connector=resolved_class,
     )
     return _TargetCheck(resolved_class, target_product, target_version, incompatibility)
+
+
+def _target_product(target: Any) -> str | None:
+    """The target's product name, or ``None`` when it has none."""
+    target_product = getattr(target, "product", None)
+    if not isinstance(target_product, str) or not target_product:
+        return None
+    return target_product
 
 
 def _qualified_sibling_class(

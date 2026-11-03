@@ -35,6 +35,7 @@ from meho_backplane.connectors._shared.system_operator import SYSTEM_OPERATOR_SU
 from meho_backplane.connectors._shared.vault_creds import OperatorTokenRequiredError
 from meho_backplane.connectors.adapters.ssh import _pool_key
 from meho_backplane.connectors.linux.connector import LinuxSshConnector
+from tests._ssh_fakes import FakeSshProcess
 
 _TENANT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 _SECRET_REF = "tenants/test/linux-host"
@@ -125,15 +126,8 @@ class _FakeLogin:
     async def wait_closed(self) -> None:
         return None
 
-    async def run(self, cmd: str, **_kwargs: Any) -> Any:
-        del cmd
-        return _Completed()
-
-
-class _Completed:
-    exit_status = 0
-    stdout = "ok\n"
-    stderr = ""
+    def create_process(self, cmd: str, **_kwargs: Any) -> FakeSshProcess:
+        return FakeSshProcess(command=cmd, stdout="ok\n")
 
 
 class _Harness:

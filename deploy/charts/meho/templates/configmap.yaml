@@ -211,6 +211,12 @@ data:
   # code step for an approve. The web interface is not affected.
   FRESH_SIGN_IN_MAX_AGE_SECONDS: {{ .Values.config.freshSignInMaxAgeSeconds | quote }}
   PER_ACTION_SIGN_IN_MAX_AGE_SECONDS: {{ .Values.config.perActionSignInMaxAgeSeconds | quote }}
+  # Per-person request limits on the operation path, and the per-tenant
+  # cap on new MCP sessions. On by default; "0" turns a limit off. See
+  # `docs/codebase/rate-limiting.md`.
+  DISPATCH_RATE_LIMIT_PER_MINUTE: {{ .Values.config.dispatchRateLimitPerMinute | quote }}
+  DISPATCH_MAX_CONCURRENT_OPS: {{ .Values.config.dispatchMaxConcurrentOps | quote }}
+  MCP_SESSION_START_LIMIT_PER_MINUTE: {{ .Values.config.mcpSessionStartLimitPerMinute | quote }}
   APPROVAL_ONE_TIME_CODE_ACR_VALUES: {{ .Values.config.approvalOneTimeCodeAcrValues | quote }}
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The

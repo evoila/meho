@@ -189,7 +189,8 @@ reference resolution).
 version signal) and best-effort augments it with `/-/ready`, the
 scrape-target count, the firing-alert count, and the rule-group count.
 Each augmentation is `None` when unavailable (Thanos Query has no scrape
-targets; Mimir exposes `/ready` rather than `/-/ready`).
+targets; Mimir exposes `/ready` rather than `/-/ready`). The `/-/ready`
+read keeps only the status code and never reads the body.
 
 ### Why the flavour is operator-asserted
 

@@ -20,7 +20,10 @@ phases the parent Initiative names:
    implementation that does must have the same op enabled; the dispatch
    then runs on that sibling
    (:mod:`meho_backplane.operations._catalog_guard`, #3600). Otherwise ->
-   structured ``unqualified_target_version`` error. Then validate
+   structured ``unqualified_target_version`` error. A composite op gets
+   the same error when its connector states a target version range for
+   composites and the target is outside it
+   (:mod:`meho_backplane.operations._composite_version_guard`). Then validate
    ``params`` against the chosen ``descriptor.parameter_schema`` via
    :class:`Draft202012Validator` (JSON Schema 2020-12, OpenAPI 3.1
    compatible) -- :func:`~meho_backplane.operations._validate.validate_params`.
@@ -3533,7 +3536,9 @@ async def dispatch(
     # switches: the approver saw and the gate checked the stored catalog,
     # and this path skips both. If the target's detected version moved
     # while the request waited, the resume is refused and the caller
-    # must make a new request.
+    # must make a new request. A composite op is checked here against the
+    # target version range its connector states for composites (one check
+    # for the whole composite; its steps are not checked again).
     selection = await select_catalog_for_target(
         operator=operator,
         descriptor=descriptor,

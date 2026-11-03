@@ -118,17 +118,15 @@ async def test_accepted_event_commits_outbox_and_audit_on_pg(pg_engine: None) ->
 async def test_duplicate_delivery_dedupes_on_pg_partial_unique(pg_engine: None) -> None:
     await _seed_source()
     body = json.dumps({"type": "alert"}).encode()
+    headers = _signed(body)
 
     async with _async_client() as client:
-        first = await client.post(
-            "/api/v1/events/ingest/prod-am", content=body, headers=_signed(body)
-        )
+        first = await client.post("/api/v1/events/ingest/prod-am", content=body, headers=headers)
         assert first.status_code == 202
-        # Same body -> same dedupe_key -> the PG partial unique index collides,
-        # the IntegrityError maps to an idempotent 200 with the original id.
-        second = await client.post(
-            "/api/v1/events/ingest/prod-am", content=body, headers=_signed(body)
-        )
+        # A redelivery repeats the same signed request -> same dedupe_key ->
+        # the PG partial unique index collides, the IntegrityError maps to an
+        # idempotent 200 with the original id.
+        second = await client.post("/api/v1/events/ingest/prod-am", content=body, headers=headers)
     assert second.status_code == 200
     assert second.json()["deduplicated"] is True
     assert second.json()["event_id"] == first.json()["event_id"]

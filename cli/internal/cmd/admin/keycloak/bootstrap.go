@@ -470,11 +470,12 @@ var cliRedirectURIs = []string{"http://127.0.0.1:*"}
 //
 // The standard (browser) flow is on with loopback redirect URIs only:
 // older CLI versions use it for the fresh sign-in an approval needs
-// (#3979). `meho login` uses the device flow, and it sends no PKCE.
-// Keycloak checks PKCE at the device login the same way as at the
-// browser sign-in, so a required PKCE method would refuse every
-// `meho login`. The client therefore requires no PKCE method; a
-// sign-in that sends a challenge is still accepted.
+// (#3979). `meho login` uses the device flow. CLI versions before
+// 0.44.0 send no PKCE there, and Keycloak checks PKCE at the device
+// login the same way as at the browser sign-in, so a required PKCE
+// method would refuse their `meho login`. The client therefore
+// requires no PKCE method; a login that sends a challenge is still
+// accepted (#5624).
 func (o BootstrapOptions) desiredCLIClient() *clientRep {
 	c := &clientRep{
 		ClientID:                  o.CLIClientID,

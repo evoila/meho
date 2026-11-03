@@ -1255,8 +1255,9 @@ func TestBootstrap_CLIClientHasDeviceGrantAttribute(t *testing.T) {
 	if cliClient.StandardFlowEnabled == nil || !*cliClient.StandardFlowEnabled {
 		t.Errorf("CLI client standardFlow should be on")
 	}
-	// `meho login` sends no PKCE, and Keycloak checks PKCE at the device
-	// login too. So the login client must not require a PKCE method.
+	// CLI versions before 0.44.0 send no PKCE at the device login, and
+	// Keycloak checks it there. So the login client must not require a
+	// PKCE method.
 	if got, ok := cliClient.Attributes["pkce.code.challenge.method"]; ok {
 		t.Errorf("CLI client PKCE method = %q, want none", got)
 	}

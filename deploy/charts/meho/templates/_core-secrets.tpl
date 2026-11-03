@@ -28,7 +28,7 @@ per line: the Secrets this Job makes, then the ones the realm stage (#4043:
 `first-login`, `console-admin`, `ci-login`) makes.
 */}}
 {{- define "meho.core.secretNames" -}}
-{{- range list "postgres-superuser" "postgres-meho" "postgres-keycloak" "keycloak-bootstrap" "keycloak-admin" "ui-auth" "check-runner" "approval-handoff" "broadcast-auth" "tls" "first-login" "console-admin" "ci-login" }}
+{{- range list "postgres-superuser" "postgres-meho" "postgres-meho-app" "postgres-keycloak" "keycloak-bootstrap" "keycloak-admin" "ui-auth" "check-runner" "approval-handoff" "broadcast-auth" "tls" "first-login" "console-admin" "ci-login" }}
 {{ printf "%s-core-%s" $.Release.Name . }}
 {{- end }}
 {{- end }}
@@ -48,6 +48,8 @@ the install.
 {{- $want = append $want (dict "kind" "postgres-superuser" "named" .Values.corePostgres.existingSecrets.superuser "valuesKey" "corePostgres.existingSecrets.superuser" "keys" (list "password")) -}}
 {{- /* The database Service is `<release>-postgres` (core design §1, #4039). */ -}}
 {{- $want = append $want (dict "kind" "postgres-meho" "named" .Values.postgres.credentialsSecret "valuesKey" "postgres.credentialsSecret" "keys" (list "password" "url") "host" (printf "%s-postgres" $rel)) -}}
+{{- /* The login of the running backplane; the owner login above stays for the migration. */ -}}
+{{- $want = append $want (dict "kind" "postgres-meho-app" "named" .Values.postgres.runtime.credentialsSecret "valuesKey" "postgres.runtime.credentialsSecret" "keys" (list "password" "url") "host" (printf "%s-postgres" $rel)) -}}
 {{- $want = append $want (dict "kind" "postgres-keycloak" "named" .Values.corePostgres.existingSecrets.keycloak "valuesKey" "corePostgres.existingSecrets.keycloak" "keys" (list "password")) -}}
 {{- end -}}
 {{- if .Values.coreKeycloak.enabled -}}

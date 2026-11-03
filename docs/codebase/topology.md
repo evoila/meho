@@ -388,6 +388,14 @@ python -m meho_backplane.topology.scope_repair show <manifest-id>
 python -m meho_backplane.topology.scope_repair cutover <manifest-id>
 ```
 
+`cutover` changes an index and a column, which only the owner of the
+tables may do. When the install gives the running backplane its own
+database login (`postgres.runtime.*`, or the built-in PostgreSQL), run
+`cutover` with the owner login: set `DATABASE_URL` to the `url` of
+`postgres.credentialsSecret` for that command. With the runtime login it
+refuses before it changes anything (`must be owner of table graph_node`).
+See `docs/codebase/migrations.md`, "The runtime role".
+
 **Stage** (`stage.py`). Calls `discover_topology` on every live target
 of every tenant (same call as a refresh, as `system:topology-scope-repair`)
 and never writes to the graph. It reads the graph, builds the plan

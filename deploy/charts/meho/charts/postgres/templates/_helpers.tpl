@@ -52,7 +52,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Names of the three Secrets. The install's secrets Job makes them with
+Names of the four Secrets. The install's secrets Job makes them with
 these names; `existingSecrets.*` names an operator-made Secret instead.
 */}}
 {{- define "corePostgres.superuserSecretName" -}}
@@ -61,6 +61,10 @@ these names; `existingSecrets.*` names an operator-made Secret instead.
 
 {{- define "corePostgres.mehoSecretName" -}}
 {{- printf "%s-core-postgres-meho" .Release.Name }}
+{{- end }}
+
+{{- define "corePostgres.mehoAppSecretName" -}}
+{{- printf "%s-core-postgres-meho-app" .Release.Name }}
 {{- end }}
 
 {{- define "corePostgres.keycloakSecretName" -}}

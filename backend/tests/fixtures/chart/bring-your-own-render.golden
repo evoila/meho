@@ -138,6 +138,21 @@ type: Opaque
 data:
   requirepass: "<random>"
 ---
+# Source: meho-chart/templates/metrics-auth-secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: test-metrics-auth
+  labels:
+    helm.sh/chart: meho-chart-0.1.0
+    app.kubernetes.io/name: meho
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+type: Opaque
+data:
+  token: "<random>"
+---
 # Source: meho-chart/charts/broadcast/templates/configmap.yaml
 apiVersion: v1
 kind: ConfigMap
@@ -386,6 +401,10 @@ spec:
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
         checksum/config: cd847854582c3b10a8812fd9f2f61a32ded1ac6eda84c644539492c65c1d22d8
+        # Roll the pod when the chart-made metrics token changes, so the
+        # token the pod checks is the one the Secret holds. On a cluster
+        # `lookup` keeps the value and the checksum stays stable.
+        checksum/metrics-auth: "<random>"
       labels:
         app.kubernetes.io/name: meho
         app.kubernetes.io/instance: test
@@ -433,6 +452,14 @@ spec:
                 secretKeyRef:
                   name: meho-postgres-url
                   key: url
+            # The metrics token (`metricsAuth`): `/metrics` and the
+            # `features` block of `/ready` answer only a caller that sends
+            # it. `secretKeyRef` only, never plaintext.
+            - name: METRICS_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: "test-metrics-auth"
+                  key: "token"
             # BROADCAST_REDIS_URL points the backplane at the in-cluster
             # broadcast store. The name must match the env var the
             # backplane actually reads (`Settings.broadcast_redis_url`

@@ -9,10 +9,12 @@
 #   1. new SSH host keys (the build removed the build VM's)
 #   2. the root file system grows to the disk, in case the admin made the
 #      disk bigger at the import
-#   3. the wizard fields: all are checked before anything changes. Then the
-#      host name, the network, the time servers, the admin account (the
-#      password must be changed at the first login), its SSH key, and the
-#      SSH rule (meho-host admin-network)
+#   3. the wizard fields: all are checked before anything changes. Without
+#      them (an import straight into an ESXi host), the same fields are asked
+#      on the VM console, and a wrong answer is asked again. Then the host
+#      name, the network, the time servers, the admin account (the password
+#      must be changed at the first login), its SSH key, and the SSH rule
+#      (meho-host admin-network)
 #   4. wait until the clock is synchronised
 #   5. the core: install.sh --from-disk --hostname <host name>. It starts
 #      RKE2 with this appliance's own keys, installs the core and writes the
@@ -27,7 +29,8 @@
 # to run twice, in case the power fails in the middle of one.
 #
 # The wizard values stay in this process's memory. None of them is written
-# to a log.
+# to a log. The console answers come on standard input, which the unit
+# connects to the VM console (tty1).
 #
 # Exit codes:
 #   0  first start is done
@@ -51,6 +54,7 @@ readonly NETPLAN_FILE=/etc/netplan/50-meho.yaml
 readonly TIMESYNCD_FILE=/etc/systemd/timesyncd.conf.d/50-meho.conf
 readonly GRUB_PASSWORD_SCRIPT=/etc/grub.d/01_meho-password
 readonly GRUB_LINUX_SCRIPT=/etc/grub.d/10_linux
+readonly GRUB_MENU_FILE=/etc/default/grub.d/90-meho-boot-menu.cfg
 readonly CONSOLE=/dev/tty1
 readonly ADMIN_USER=admin
 readonly MIN_PASSWORD_LENGTH=14
@@ -67,6 +71,7 @@ source "${HOST_ROOT}${DOWNLOAD_DIR}/lib/net.sh"
 source "${HOST_ROOT}${DOWNLOAD_DIR}/lib/checks.sh"
 
 CURRENT_STEP=""
+ANSWER=""
 declare -A FIELD=()
 
 ok() { printf '[ok]   %s\n' "$*"; }
@@ -195,13 +200,11 @@ for prop in root.iter(oe + "Property"):
 '
 }
 
+# read_wizard_fields <OVF environment>: keep each property in FIELD.
 read_wizard_fields() {
-    local env key value i
+    local key value i
     local -a pairs
-    env=$(read_ovf_env) ||
-        fail "This appliance has no wizard fields: it was imported without the vApp options of vCenter." \
-            "import the OVA through vCenter and fill in the wizard, or import it with ovftool and give every field with --prop:<key>=<value>."
-    mapfile -d '' -t pairs < <(printf '%s\n' "$env" | parse_ovf_env)
+    mapfile -d '' -t pairs < <(printf '%s\n' "$1" | parse_ovf_env)
     wait $! ||
         fail "The wizard fields cannot be read: the OVF environment is not valid XML." \
             "import the OVA again through vCenter."
@@ -215,57 +218,95 @@ read_wizard_fields() {
 
 field() { printf '%s' "${FIELD[$1]-}"; }
 
+# normalize_field <key>: the forms the wizard implies: a host name in lower
+# case, and static when the network field is empty.
+normalize_field() {
+    local value
+    value=$(field "$1")
+    case $1 in
+        hostname) FIELD[hostname]=${value,,} ;;
+        net.mode) FIELD[net.mode]=${value:-static} ;;
+    esac
+}
+
+# field_problem <key>: print why the field's value is wrong, or nothing when
+# it is right. The text never holds the value of a password.
+field_problem() {
+    local value item
+    value=$(field "$1")
+    case $1 in
+        hostname)
+            is_fqdn "$value" ||
+                printf '%s' "The host name '$value' is not a full DNS name such as meho.example.com."
+            ;;
+        net.mode)
+            [[ $value == static || $value == dhcp ]] ||
+                printf '%s' "The network field is '$value'; it must be static or dhcp."
+            ;;
+        net.ip)
+            is_ipv4_cidr "$value" ||
+                printf '%s' "The IP address '$value' is not an IPv4 address with a prefix such as 10.0.0.10/24."
+            ;;
+        net.gateway)
+            is_ipv4 "$value" ||
+                printf '%s' "The default gateway '$value' is not an IPv4 address."
+            ;;
+        net.dns)
+            if [[ -z $(split_list "$value") ]]; then
+                printf '%s' "No DNS server is given. A static address needs at least one."
+                return 0
+            fi
+            while read -r item; do
+                if ! is_ipv4 "$item"; then
+                    printf '%s' "The DNS server '$item' is not an IPv4 address."
+                    return 0
+                fi
+            done < <(split_list "$value")
+            ;;
+        net.ntp)
+            if [[ -z $(split_list "$value") ]]; then
+                printf '%s' "No time server is given."
+                return 0
+            fi
+            while read -r item; do
+                if [[ ! $item =~ ^[A-Za-z0-9.-]+$ ]]; then
+                    printf '%s' "The time server '$item' is not a host name or an IPv4 address."
+                    return 0
+                fi
+            done < <(split_list "$value")
+            ;;
+        net.admin_network)
+            is_ipv4 "$value" || is_ipv4_network "$value" ||
+                printf '%s' "The admin network '$value' is not an IPv4 range that starts at its first address, such as 10.0.50.0/24, or one address."
+            ;;
+        admin.password)
+            if ((${#value} < MIN_PASSWORD_LENGTH)); then
+                printf '%s' "The appliance admin password is shorter than $MIN_PASSWORD_LENGTH characters."
+            elif [[ $value == *$'\n'* ]]; then
+                printf '%s' "The appliance admin password holds a line break."
+            fi
+            ;;
+        admin.ssh_key)
+            if [[ -z $value || $value == *$'\n'* ]] || ! printf '%s\n' "$value" | ssh-keygen -l -f - >/dev/null 2>&1; then
+                printf '%s' "The admin SSH public key is missing or is not one public key in OpenSSH form (for example ssh-ed25519 AAAA... name)."
+            fi
+            ;;
+    esac
+}
+
 # check_wizard_fields: every check runs before anything changes, so a wrong
 # field leaves the machine as it was.
 check_wizard_fields() {
-    local hostname mode item key admin_network password
-    hostname=$(field hostname)
-    hostname=${hostname,,}
-    is_fqdn "$hostname" ||
-        fail "The host name '$hostname' is not a full DNS name such as meho.example.com." "$VAPP_FIX"
-    FIELD[hostname]=$hostname
-
-    mode=$(field net.mode)
-    mode=${mode:-static}
-    case $mode in
-        static)
-            is_ipv4_cidr "$(field net.ip)" ||
-                fail "The IP address '$(field net.ip)' is not an IPv4 address with a prefix such as 10.0.0.10/24." "$VAPP_FIX"
-            is_ipv4 "$(field net.gateway)" ||
-                fail "The default gateway '$(field net.gateway)' is not an IPv4 address." "$VAPP_FIX"
-            [[ -n $(split_list "$(field net.dns)") ]] ||
-                fail "No DNS server is given. A static address needs at least one." "$VAPP_FIX"
-            while read -r item; do
-                is_ipv4 "$item" ||
-                    fail "The DNS server '$item' is not an IPv4 address." "$VAPP_FIX"
-            done < <(split_list "$(field net.dns)")
-            ;;
-        dhcp) ;;
-        *) fail "The network field is '$mode'; it must be static or dhcp." "$VAPP_FIX" ;;
-    esac
-    FIELD[net.mode]=$mode
-
-    [[ -n $(split_list "$(field net.ntp)") ]] ||
-        fail "No time server is given." "$VAPP_FIX"
-    while read -r item; do
-        [[ $item =~ ^[A-Za-z0-9.-]+$ ]] ||
-            fail "The time server '$item' is not a host name or an IPv4 address." "$VAPP_FIX"
-    done < <(split_list "$(field net.ntp)")
-
-    admin_network=$(field net.admin_network)
-    is_ipv4 "$admin_network" || is_ipv4_network "$admin_network" ||
-        fail "The admin network '$admin_network' is not an IPv4 range that starts at its first address, such as 10.0.50.0/24, or one address." "$VAPP_FIX"
-
-    password=$(field admin.password)
-    ((${#password} >= MIN_PASSWORD_LENGTH)) ||
-        fail "The appliance admin password is shorter than $MIN_PASSWORD_LENGTH characters." "$VAPP_FIX"
-    [[ $password != *$'\n'* ]] ||
-        fail "The appliance admin password holds a line break." "$VAPP_FIX"
-
-    key=$(field admin.ssh_key)
-    if [[ -z $key || $key == *$'\n'* ]] || ! printf '%s\n' "$key" | ssh-keygen -l -f - >/dev/null 2>&1; then
-        fail "The admin SSH public key is missing or is not one public key in OpenSSH form (for example ssh-ed25519 AAAA... name)." "$VAPP_FIX"
-    fi
+    local key problem
+    local -a keys=(hostname net.mode)
+    normalize_field hostname
+    normalize_field net.mode
+    [[ $(field net.mode) != static ]] || keys+=(net.ip net.gateway net.dns)
+    keys+=(net.ntp net.admin_network admin.password admin.ssh_key)
+    for key in "${keys[@]}"; do
+        problem=$(field_problem "$key")
+        [[ -z $problem ]] || fail "$problem" "$VAPP_FIX"
+    done
 
     # install.sh --from-disk does not copy a join token, so RKE2 could not join.
     if [[ -n $(field cluster.join.address) || -n $(field cluster.join.token) ]]; then
@@ -273,6 +314,74 @@ check_wizard_fields() {
             "power the VM off, empty both join fields in the VM's vApp options in vCenter (Configure, vApp Options), and power it on."
     fi
     ok "the wizard fields are valid"
+}
+
+# read_answer [-s]: read one line from standard input, the VM console, into
+# ANSWER. With -s the console does not show what is typed.
+read_answer() {
+    if ! IFS= read -r "$@" ANSWER; then
+        printf '\n'
+        fail "The console setup ended before every field was given." \
+            "power the VM off and on; first start asks again."
+    fi
+    [[ ${1-} != -s ]] || printf '\n'
+}
+
+# ask_field <key> <question> [optional]: ask on the console until the answer
+# passes the wizard's check of the field. With optional, an empty answer is
+# taken as it is.
+ask_field() {
+    local key=$1 question=$2 problem
+    while true; do
+        printf '%s: ' "$question"
+        read_answer
+        FIELD[$key]=$ANSWER
+        normalize_field "$key"
+        if [[ -n ${3-} && -z $ANSWER ]]; then
+            return 0
+        fi
+        problem=$(field_problem "$key")
+        [[ -n $problem ]] || return 0
+        printf '%s Try again.\n' "$problem"
+    done
+}
+
+ask_password() {
+    local first problem
+    while true; do
+        printf 'Appliance admin password, for the console and sudo (at least %d characters): ' "$MIN_PASSWORD_LENGTH"
+        read_answer -s
+        first=$ANSWER
+        printf 'The same password again: '
+        read_answer -s
+        if [[ $ANSWER != "$first" ]]; then
+            printf 'The two passwords differ. Try again.\n'
+            continue
+        fi
+        FIELD[admin.password]=$ANSWER
+        problem=$(field_problem admin.password)
+        [[ -n $problem ]] || return 0
+        printf '%s Try again.\n' "$problem"
+    done
+}
+
+# ask_console_fields: the wizard fields, asked on the VM console, in the
+# wizard's order. The join fields stay empty: this version runs alone.
+ask_console_fields() {
+    printf '\nThis appliance has no wizard fields: it was imported without the vApp options of vCenter.\n'
+    printf 'Answer the questions below. A wrong answer is asked again.\n\n'
+    ask_field hostname 'Host name (the full DNS name, for example meho.example.com)'
+    ask_field net.ntp 'Time servers (comma-separated)'
+    ask_field net.mode 'Network: static or dhcp (empty: static)'
+    if [[ $(field net.mode) == static ]]; then
+        ask_field net.ip 'IP address with prefix (for example 10.0.0.10/24)'
+        ask_field net.gateway 'Default gateway'
+        ask_field net.dns 'DNS servers (comma-separated)'
+    fi
+    ask_field net.admin_network 'Admin network: the IPv4 range that may use SSH (for example 10.0.50.0/24)'
+    ask_password
+    ask_field admin.ssh_key 'Admin SSH public key, in one line (empty: SSH stays closed)' optional
+    ok "read the fields from the console"
 }
 
 write_network() {
@@ -312,14 +421,28 @@ set_up_admin() {
     passwd --expire "$ADMIN_USER" >/dev/null
     mkdir -p "$home/.ssh"
     chmod 0700 "$home/.ssh"
-    printf '%s\n' "$(field admin.ssh_key)" | write_root_file "/home/$ADMIN_USER/.ssh/authorized_keys" 0600
+    if [[ -n $(field admin.ssh_key) ]]; then
+        printf '%s\n' "$(field admin.ssh_key)" | write_root_file "/home/$ADMIN_USER/.ssh/authorized_keys" 0600
+    else
+        rm -f "$home/.ssh/authorized_keys"
+    fi
     chown -R "$ADMIN_USER:$ADMIN_USER" "$home/.ssh"
-    ok "the account $ADMIN_USER has the wizard password (to be changed at the first login) and the SSH key"
+    ok "the account $ADMIN_USER has its password (to be changed at the first login)"
+    if [[ -n $(field admin.ssh_key) ]]; then
+        ok "the account $ADMIN_USER has the SSH key"
+    else
+        note "no SSH key was given, so SSH stays closed. To open it, log in as $ADMIN_USER on the console and put your public key into ~/.ssh/authorized_keys (mode 0600)."
+    fi
 }
 
 apply_wizard_fields() {
-    read_wizard_fields
-    check_wizard_fields
+    local env
+    if env=$(read_ovf_env); then
+        read_wizard_fields "$env"
+        check_wizard_fields
+    else
+        ask_console_fields
+    fi
     hostnamectl hostname "$(field hostname)"
     ok "the host name is $(field hostname)"
     write_network
@@ -384,8 +507,12 @@ SCRIPT
     grep -q '^CLASS=".*--unrestricted"$' "${HOST_ROOT}${GRUB_LINUX_SCRIPT}" ||
         fail "$GRUB_LINUX_SCRIPT has no CLASS line in the form of Ubuntu 24.04, so the boot entries cannot be opened without the password." \
             "report this to evoila support with the file attached. The appliance runs; only the boot-menu password is not set."
+    # The cloud image hides the boot menu and waits 0 seconds, so only Shift
+    # held at the right moment would open it. The way back in needs the menu.
+    printf 'GRUB_TIMEOUT_STYLE=menu\nGRUB_TIMEOUT=5\nGRUB_RECORDFAIL_TIMEOUT=5\n' |
+        write_root_file "$GRUB_MENU_FILE" 0644
     update-grub
-    ok "the boot menu has this appliance's own password, in $BOOTLOADER_PASSWORD_FILE (root only)"
+    ok "the boot menu shows for 5 seconds at every boot and has this appliance's own password, in $BOOTLOADER_PASSWORD_FILE (root only)"
 }
 
 # --- Steps -----------------------------------------------------------------
@@ -404,6 +531,10 @@ run_step() {
 }
 
 main() {
+    # Standard input is the VM console, and bash opens it at its start, so
+    # the console becomes this script's terminal: Ctrl+C, Ctrl+\ or Ctrl+Z
+    # typed there would stop first start in the middle of a step.
+    trap '' INT QUIT TSTP
     # The progress shows on the VM console in vCenter as well as in the
     # journal. The unit's journal+console would go to the serial port, the
     # last console= of the cloud image's kernel line.

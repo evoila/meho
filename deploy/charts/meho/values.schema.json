@@ -144,6 +144,24 @@
         }
       }
     },
+    "metricsAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The metrics token. With `enabled: true` (default) the backplane gets `METRICS_AUTH_TOKEN` from a Secret: `existingSecret` when set, else the chart-made `<release>-metrics-auth`. `/metrics` answers only a caller that sends the token as a bearer; `/ready` shows its `features` block only to such a caller and gives every caller the verdict and the checks. The ServiceMonitor (when on) sends the token from the same Secret.",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "existingSecret": {
+          "type": "string",
+          "description": "Name of your own Secret holding the token under `secretKey`. Empty: the chart makes `<release>-metrics-auth`."
+        },
+        "secretKey": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Key in the Secret that holds the token."
+        }
+      }
+    },
     "prometheusRule": {
       "type": "object",
       "additionalProperties": false,

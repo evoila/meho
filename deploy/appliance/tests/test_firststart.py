@@ -17,6 +17,7 @@ from firststart_harness import (
     STATE,
     STATIC_FIELDS,
     STEPS,
+    FakeAppliance,
     FirstStartTestCase,
     ovf_env,
 )
@@ -104,19 +105,6 @@ class FirstStartTests(FirstStartTestCase):
         self.assert_succeeds(self.vm.run())
 
         self.assertEqual(f"admin:{PASSWORD}\n", (self.vm.fake / "chpasswd_input").read_text())
-
-    def test_no_wizard_fields_stops_at_step_3_and_changes_nothing(self) -> None:
-        self.vm.no_answer("guestinfo-ovfenv")
-
-        result = self.vm.run()
-
-        line = self.assert_fails_once(
-            result, "Step 3 (wizard-fields)", "no wizard fields", "ovftool"
-        )
-        self.assertEqual("ubuntu\n", self.vm.read("/etc/hostname"))
-        self.assertFalse(self.vm.host_path("/etc/netplan/50-meho.yaml").exists())
-        self.assertEqual(ALL_MARKERS[:2], self.vm.markers())
-        self.assertEqual(f"{line}\n", self.vm.read(f"{STATE}/failed"))
 
     def test_a_short_password_is_refused_before_anything_changes(self) -> None:
         self.vm.wizard({"admin.password": "only13letters"})
@@ -215,6 +203,10 @@ class FirstStartTests(FirstStartTestCase):
             'CLASS="--class gnu-linux --class gnu --class os --unrestricted"\n',
             self.vm.read("/etc/grub.d/10_linux"),
         )
+        self.assertEqual(
+            "GRUB_TIMEOUT_STYLE=menu\nGRUB_TIMEOUT=5\nGRUB_RECORDFAIL_TIMEOUT=5\n",
+            self.vm.read("/etc/default/grub.d/90-meho-boot-menu.cfg"),
+        )
 
     def test_an_unknown_10_linux_stops_step_6(self) -> None:
         self.vm.host_file("/etc/grub.d/10_linux", 'CLASS="--class something-else"\n')
@@ -300,6 +292,219 @@ class FirstStartTests(FirstStartTestCase):
 
         self.assert_fails_once(result, "Step 3 (wizard-fields)", "exit code 1")
         self.assertEqual(ALL_MARKERS[:2], self.vm.markers())
+
+
+def console(*answers: str) -> str:
+    """What an admin types on the VM console: one line per answer."""
+    return "".join(f"{answer}\n" for answer in answers)
+
+
+# The answers to the console questions, in their order, for the same
+# appliance as STATIC_FIELDS.
+STATIC_ANSWERS = {
+    "hostname": "MEHO.Example.com",
+    "net.ntp": "ntp1.example.com,10.0.0.4",
+    "net.mode": "static",
+    "net.ip": "10.0.0.10/24",
+    "net.gateway": "10.0.0.1",
+    "net.dns": "10.0.0.2, 10.0.0.3",
+    "net.admin_network": "10.0.50.0/24",
+    "admin.password": PASSWORD,
+    "admin.password again": PASSWORD,
+    "admin.ssh_key": SSH_KEY,
+}
+
+
+def with_passwords(*passwords: str) -> list[str]:
+    """The static answers, with these answers in place of the two passwords."""
+    answers = list(STATIC_ANSWERS.values())
+    start = list(STATIC_ANSWERS).index("admin.password")
+    answers[start : start + 2] = passwords
+    return answers
+
+
+class ConsoleSetupTests(FirstStartTestCase):
+    """An import without vCenter's vApp options: no OVF environment, so first
+    start asks for the fields on the VM console."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.vm.no_answer("guestinfo-ovfenv")
+
+    def test_the_console_setup_ends_like_a_wizard_import(self) -> None:
+        wizard = FakeAppliance()
+        self.addCleanup(wizard.close)
+        self.assert_succeeds(wizard.run())
+
+        result = self.vm.run(console(*STATIC_ANSWERS.values()))
+
+        self.assert_succeeds(result)
+        for path in (
+            "/etc/hostname",
+            "/etc/netplan/50-meho.yaml",
+            "/etc/systemd/timesyncd.conf.d/50-meho.conf",
+            "/home/admin/.ssh/authorized_keys",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(wizard.read(path), self.vm.read(path))
+                self.assertEqual(wizard.mode(path), self.vm.mode(path))
+        self.assertEqual(
+            (wizard.fake / "chpasswd_input").read_text(),
+            (self.vm.fake / "chpasswd_input").read_text(),
+        )
+
+        def commands(vm: FakeAppliance) -> list[str]:
+            # Only the search for the OVF environment differs.
+            search = ("vmtoolsd", "mount", "umount")
+            return [
+                call.replace(str(vm.root), "")
+                for call in vm.calls()
+                if call.split(" ", 1)[0] not in search
+            ]
+
+        self.assertEqual(commands(wizard), commands(self.vm))
+        self.assertEqual(ALL_MARKERS, self.vm.markers())
+        self.assertIn("no wizard fields", self.vm.read("/dev/tty1"))
+
+    def test_dhcp_asks_for_no_address(self) -> None:
+        answers = dict(STATIC_ANSWERS, **{"net.mode": "dhcp"})
+        for key in ("net.ip", "net.gateway", "net.dns"):
+            del answers[key]
+
+        result = self.vm.run(console(*answers.values()))
+
+        self.assert_succeeds(result)
+        self.assertNotIn("IP address with prefix", self.output(result))
+        self.assertIn("      dhcp4: true\n", self.vm.read("/etc/netplan/50-meho.yaml"))
+
+    def test_an_empty_network_answer_means_static(self) -> None:
+        answers = dict(STATIC_ANSWERS, **{"net.mode": ""})
+
+        self.assert_succeeds(self.vm.run(console(*answers.values())))
+
+        self.assertIn("addresses: [10.0.0.10/24]", self.vm.read("/etc/netplan/50-meho.yaml"))
+
+    def test_a_wrong_answer_is_asked_again(self) -> None:
+        wrong = {
+            "hostname": ("meho", "not a full DNS name"),
+            "net.ntp": ("ntp;reboot", "time server 'ntp;reboot'"),
+            "net.mode": ("manual", "must be static or dhcp"),
+            "net.ip": ("10.0.0.10", "with a prefix"),
+            "net.gateway": ("gateway", "default gateway"),
+            "net.dns": ("", "No DNS server"),
+            "net.admin_network": ("10.0.50.7/24", "admin network"),
+            "admin.ssh_key": ("not a key", "SSH public key"),
+        }
+        for key, (answer, fragment) in wrong.items():
+            with self.subTest(field=key):
+                answers = list(STATIC_ANSWERS.values())
+                position = list(STATIC_ANSWERS).index(key)
+                answers.insert(position, answer)
+                for marker in self.vm.host_path(STATE).glob("*"):
+                    marker.unlink()
+
+                result = self.vm.run(console(*answers))
+
+                self.assert_succeeds(result)
+                self.assertIn(fragment, self.output(result))
+                self.assertIn("Try again.", self.output(result))
+                self.assertEqual("meho.example.com\n", self.vm.read("/etc/hostname"))
+
+    def test_a_password_of_13_characters_is_asked_again(self) -> None:
+        answers = with_passwords("only13letters", "only13letters", PASSWORD, PASSWORD)
+
+        result = self.vm.run(console(*answers))
+
+        self.assert_succeeds(result)
+        self.assertIn("shorter than 14 characters. Try again.", self.output(result))
+        self.assertNotIn("only13letters", self.output(result))
+        self.assertEqual(f"admin:{PASSWORD}\n", (self.vm.fake / "chpasswd_input").read_text())
+
+    def test_two_different_passwords_are_asked_again(self) -> None:
+        answers = with_passwords(PASSWORD, PASSWORD + "x", PASSWORD, PASSWORD)
+
+        result = self.vm.run(console(*answers))
+
+        self.assert_succeeds(result)
+        self.assertIn("The two passwords differ. Try again.", self.output(result))
+        self.assertEqual(f"admin:{PASSWORD}\n", (self.vm.fake / "chpasswd_input").read_text())
+
+    def test_an_empty_ssh_key_leaves_ssh_closed(self) -> None:
+        answers = dict(STATIC_ANSWERS, **{"admin.ssh_key": ""})
+
+        result = self.vm.run(console(*answers.values()))
+
+        self.assert_succeeds(result)
+        self.assertFalse(self.vm.host_path("/home/admin/.ssh/authorized_keys").exists())
+        self.assertIn("SSH stays closed", self.output(result))
+        self.assertEqual(["meho-host admin-network 10.0.50.0/24"], self.vm.calls("meho-host"))
+
+    def test_an_empty_ssh_key_removes_the_key_of_an_earlier_try(self) -> None:
+        self.vm.host_file("/home/admin/.ssh/authorized_keys", f"{SSH_KEY}\n")
+        answers = dict(STATIC_ANSWERS, **{"admin.ssh_key": ""})
+
+        self.assert_succeeds(self.vm.run(console(*answers.values())))
+
+        self.assertFalse(self.vm.host_path("/home/admin/.ssh/authorized_keys").exists())
+
+    def test_input_that_ends_early_stops_step_3_and_changes_nothing(self) -> None:
+        for answered in (0, 3, 7):
+            with self.subTest(answered=answered):
+                result = self.vm.run(console(*list(STATIC_ANSWERS.values())[:answered]))
+
+                line = self.assert_fails_once(
+                    result,
+                    "Step 3 (wizard-fields)",
+                    "console setup ended",
+                    "power the VM off and on",
+                )
+                self.assertEqual("ubuntu\n", self.vm.read("/etc/hostname"))
+                self.assertEqual([], self.vm.calls("netplan"))
+                self.assertEqual([], self.vm.calls("chpasswd"))
+                self.assertEqual(ALL_MARKERS[:2], self.vm.markers())
+                self.assertEqual(f"{line}\n", self.vm.read(f"{STATE}/failed"))
+
+    def test_no_password_reaches_the_output_the_console_or_a_command_line(self) -> None:
+        answers = with_passwords(
+            "only13letters", "only13letters", PASSWORD, PASSWORD + "x", PASSWORD, PASSWORD
+        )
+
+        result = self.vm.run(console(*answers))
+
+        self.assert_succeeds(result)
+        places = {
+            "output": self.output(result),
+            "console": self.vm.read("/dev/tty1"),
+            "command lines": (self.vm.fake / "calls.log").read_text(),
+        }
+        for place, text in places.items():
+            for secret in ("only13letters", "Wizard&Pass"):
+                with self.subTest(place=place, secret=secret[:6]):
+                    self.assertNotIn(secret, text)
+
+    def test_ctrl_c_or_ctrl_backslash_on_the_console_does_not_stop_first_start(self) -> None:
+        # The console is the script's terminal, so a key's signal goes to its
+        # whole process group, the running command too: kill 0 does the same.
+        # Ctrl+Z cannot be tested this way: the kernel drops SIGTSTP for a
+        # process group whose parent is in another session.
+        for signal in ("INT", "QUIT"):
+            with self.subTest(signal=signal):
+                self.vm.stub("netplan", f"kill -{signal} 0\n")
+                for marker in self.vm.host_path(STATE).glob("*"):
+                    marker.unlink()
+
+                result = self.vm.run(console(*STATIC_ANSWERS.values()))
+
+                self.assert_succeeds(result)
+                self.assertEqual(ALL_MARKERS, self.vm.markers())
+
+    def test_a_wizard_import_still_needs_the_ssh_key(self) -> None:
+        self.vm.wizard({"admin.ssh_key": ""})
+
+        result = self.vm.run(console(*STATIC_ANSWERS.values()))
+
+        self.assert_fails_once(result, "Step 3 (wizard-fields)", "SSH public key", "vApp Options")
+        self.assertNotIn("no wizard fields", self.output(result))
 
 
 class BannerTests(FirstStartTestCase):

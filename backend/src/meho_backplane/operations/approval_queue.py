@@ -117,6 +117,7 @@ from meho_backplane.operations._audit import (
 from meho_backplane.operations._errors import (
     result_already_resumed,
     result_denied,
+    result_object_changed_since_approval,
     result_preview_changed_since_approval,
     result_release_changed_while_waiting,
     result_target_changed_since_approval,
@@ -138,6 +139,7 @@ from meho_backplane.operations.approval_handoff import (
 from meho_backplane.operations.approval_handoff import (
     store as store_handoff,
 )
+from meho_backplane.operations.approval_object_check import object_changed_since_request
 from meho_backplane.operations.approval_outcome import with_approval_guidance
 from meho_backplane.operations.approval_resume_checks import (
     park_time_target_hash,
@@ -2430,29 +2432,43 @@ async def refuse_resume_if_preview_changed(
     target: Any,
     params: dict[str, Any],
 ) -> OperationResult | None:
-    """Refuse an approved run whose preview is not the approved one.
+    """Refuse an approved run whose preview, or whose object, is not the approved one.
 
-    Returns ``None`` when the request stored no preview hash, or when a
-    preview built now for *target* and *params* has the stored hash. Else
-    the operation does not run: the refusal is stored as the request's run
-    result, so every read surface shows the run as failed with the
-    ``preview_changed_since_approval`` error code. The caller has already
+    Two checks, for a request that stored a preview hash. The preview built
+    now for *target* and *params* must have the stored hash. Then the
+    object the approval card named must still be the object the live
+    system has under the call's name
+    (:func:`~meho_backplane.operations.approval_object_check.object_changed_since_request`).
+    Returns ``None`` when both hold, or when the request stored no preview
+    hash. Else the operation does not run: the refusal is stored as the
+    request's run result, so every read surface shows the run as failed
+    with the ``preview_changed_since_approval`` or
+    ``object_changed_since_approval`` error code. The caller has already
     won the one-resumer claim, so the request cannot run later.
 
     Shared by both resume paths: the operator surfaces
     (:func:`resume_dispatch_after_approval`) and the in-process agent
     waiter (:mod:`meho_backplane.agent.approval_wait`).
     """
-    if not await preview_changed_since_request(operator, request, target, params):
-        return None
-    refusal = result_preview_changed_since_approval(request.op_id, approval_request_id=request.id)
-    _log().warning(
-        "approval_resume_preview_changed",
-        approval_request_id=str(request.id),
-        op_id=request.op_id,
-        connector_id=request.connector_id,
-        operator_sub=operator.sub,
-    )
+    refusal: OperationResult
+    if await preview_changed_since_request(operator, request, target, params):
+        refusal = result_preview_changed_since_approval(
+            request.op_id, approval_request_id=request.id
+        )
+        _log().warning(
+            "approval_resume_preview_changed",
+            approval_request_id=str(request.id),
+            op_id=request.op_id,
+            connector_id=request.connector_id,
+            operator_sub=operator.sub,
+        )
+    else:
+        reason = await object_changed_since_request(operator, request, target, params)
+        if reason is None:
+            return None
+        refusal = result_object_changed_since_approval(
+            request.op_id, approval_request_id=request.id, reason=reason
+        )
     await persist_resume_result(request.id, refusal, parked_op_id=request.op_id)
     return refusal
 

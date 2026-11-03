@@ -90,7 +90,10 @@ class FakeSshConnection:
 
     def create_process(self, cmd: str, **kwargs: object) -> FakeSshProcess:
         stdin = kwargs.get("input")
-        self.calls.append((cmd, stdin if isinstance(stdin, str) else None))
+        if isinstance(stdin, str):
+            # asyncssh refuses text stdin on a process opened without an encoding.
+            raise TypeError("string argument without an encoding")
+        self.calls.append((cmd, stdin.decode("utf-8") if isinstance(stdin, bytes) else None))
         return FakeSshProcess(
             command=cmd,
             stdout=self._stdout,

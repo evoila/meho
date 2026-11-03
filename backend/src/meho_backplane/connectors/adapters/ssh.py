@@ -328,7 +328,10 @@ async def run_capped(
             chunks.append(chunk)
         return b"".join(chunks)
 
-    async with conn.create_process(cmd, input=stdin, encoding=None) as process:
+    # The streams are opened without an encoding so the cap counts bytes;
+    # asyncssh then wants the stdin value as bytes too.
+    stdin_bytes = None if stdin is None else stdin.encode("utf-8")
+    async with conn.create_process(cmd, input=stdin_bytes, encoding=None) as process:
         try:
             async with asyncio.TaskGroup() as group:
                 stdout_task = group.create_task(drain(process.stdout))

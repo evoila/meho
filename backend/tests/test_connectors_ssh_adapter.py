@@ -153,6 +153,9 @@ async def _handle_process(process: Any) -> None:
     elif cmd == "flood":
         await _flood(process)
         process.exit(0)
+    elif cmd == "cat":
+        process.stdout.write(await process.stdin.read())
+        process.exit(0)
     elif cmd.startswith("sleep "):
         await asyncio.sleep(float(cmd.split()[1]))
         process.exit(0)
@@ -363,6 +366,24 @@ async def test_command_output_over_cap_is_refused(
         await conn.aclose()
 
     assert short.exit_status == 0
+
+
+@pytest.mark.asyncio
+async def test_run_command_writes_stdin_to_the_command(
+    ssh_server: Any,
+    vault_secrets: dict[str, dict[str, Any]],
+) -> None:
+    """The stdin value reaches the remote command's standard input."""
+    conn = _ConcreteSshConnector()
+    target = _password_target(host=ssh_server.host, port=ssh_server.port)
+
+    try:
+        result = await conn._run_command(target, "cat", stdin="first line\nsecond ä\n")
+    finally:
+        await conn.aclose()
+
+    assert result.stdout == "first line\nsecond ä\n"
+    assert result.exit_status == 0
 
 
 @pytest.mark.asyncio

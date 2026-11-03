@@ -3,8 +3,8 @@
 
 """Index ``agent_announcement`` by tenant, principal and time (#5005).
 
-Revision ID: 0120
-Revises: 0119
+Revision ID: 0134
+Revises: 0133
 Create Date: 2026-10-29
 
 Why
@@ -51,8 +51,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0120"
-down_revision: str | None = "0119"
+revision: str = "0134"
+down_revision: str | None = "0133"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

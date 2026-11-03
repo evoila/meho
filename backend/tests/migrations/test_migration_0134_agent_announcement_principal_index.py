@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0120_add_agent_announcement_principal_index`` (#5005).
+"""Tests for Alembic migration ``0134_add_agent_announcement_principal_index`` (#5005).
 
 The migration adds ``agent_announcement_tenant_principal_created_at_idx``
 for the caller's active-claim lookup. The tests check that ``upgrade``
@@ -13,7 +13,7 @@ in ``tests/integration/test_announce_claim_lookup_pg.py``.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -27,8 +27,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0120"
-_DOWN_REVISION = "0119"
+_REVISION = "0134"
+_DOWN_REVISION = "0133"
 _TABLE = "agent_announcement"
 _INDEX = "agent_announcement_tenant_principal_created_at_idx"
 
@@ -36,7 +36,7 @@ _INDEX = "agent_announcement_tenant_principal_created_at_idx"
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0120.db"
+    db_path = tmp_path / "migration_0134.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -64,9 +64,11 @@ def _indexes(sync_url: str) -> dict[str, dict[str, Any]]:
         eng.dispose()
 
 
-def test_upgrade_creates_the_index_in_filter_order(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_creates_the_index_in_filter_order(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     assert _INDEX not in _indexes(sync_url)
 
     command.upgrade(cfg, _REVISION)
@@ -75,9 +77,11 @@ def test_upgrade_creates_the_index_in_filter_order(alembic_cfg: tuple[Config, st
     assert not index["unique"]
 
 
-def test_downgrade_drops_only_this_index(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_drops_only_this_index(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     before = set(_indexes(sync_url))
     command.upgrade(cfg, _REVISION)
 

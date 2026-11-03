@@ -14,7 +14,7 @@ session:
 
 The lookup reads the ``agent_announcement`` archive, the same record
 ``meho_broadcast_recent`` reads. The index
-``agent_announcement_tenant_principal_created_at_idx`` (migration ``0120``,
+``agent_announcement_tenant_principal_created_at_idx`` (migration ``0134``,
 #5005) matches its filter, so the query reads only the caller's own rows.
 
 Moved here from :mod:`meho_backplane.broadcast.history` (#5005); the

@@ -129,6 +129,9 @@ func reconcileApprovalFlow(ctx context.Context, c *adminClient) (string, []strin
 		if _, err := c.flowCall(ctx, http.MethodPost, "authentication/flows", top, http.StatusCreated); err != nil {
 			return "", nil, err
 		}
+		if c.dryRun {
+			return dryRunNewID, []string{fmt.Sprintf("[created] login flow %q", approvalFlowAlias)}, nil
+		}
 		if id, err = c.findApprovalFlow(ctx); err != nil {
 			return "", nil, err
 		}
@@ -143,6 +146,9 @@ func reconcileApprovalFlow(ctx context.Context, c *adminClient) (string, []strin
 	changed, err := finishApprovalFlow(ctx, c, have)
 	if err != nil {
 		return "", nil, err
+	}
+	if changed && c.dryRun {
+		return id, []string{fmt.Sprintf("[updated] login flow %q: finished the steps an earlier run left out", approvalFlowAlias)}, nil
 	}
 	if changed {
 		if have, err = c.readApprovalFlowSteps(ctx); err != nil {

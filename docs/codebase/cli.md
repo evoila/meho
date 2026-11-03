@@ -2812,11 +2812,17 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
 
 Every step does a "does this exist?" check before mutating:
 
-- Clients: `GET /clients?clientId=<id>`; on hit, PUT to update; on
-  miss, POST to create.
+- Clients: `GET /clients?clientId=<id>`; on miss, POST to create; on
+  hit, compare each field the desired shape sets (`clientChanges` in
+  `client_diff.go`) and PUT only when one differs. Keycloak sets each
+  field the PUT sends and keeps each field it leaves out and each
+  attribute it does not name; the redirect URIs and web origins are
+  always sent, so they are replaced. The PUT does not change scope
+  assignments. The event names each changed field with the old and
+  the new value.
 - Mappers: `GET /clients/{uuid}/protocol-mappers/models`; missing
-  mapper → POST; existing-but-different → PUT; existing-and-equal →
-  skip.
+  mapper → POST; existing-but-different → PUT (the event names each
+  changed config key, `mapperChanges`); existing-and-equal → skip.
 - Default scopes: `GET /clients/{uuid}/default-client-scopes`;
   missing scope → PUT; already present → skip.
 - Realm client scopes (`mcp:*`): `GET /client-scopes`; missing by
@@ -2841,9 +2847,25 @@ Every step does a "does this exist?" check before mutating:
   in `reconcileUser`). Not yet in `MEHO-Admins` → join it (printed as
   `[updated] user …`).
 
-A clean re-run prints `[skip]` for every mapper, scope, group and the
-user, and exits 0. The two clients always print `[updated] client`:
-the client is PUT with the same settings on every run.
+A clean re-run prints `[skip]` for every client, mapper, scope, group
+and the user, and exits 0.
+
+The verb is for a new realm. On a realm that already works it
+overwrites what an admin changed on the three clients and the eight
+mappers, so the docs send people to `keycloak.client.update` there.
+
+### Dry run
+
+`--dry-run` logs in and runs the same steps against the realm, but the
+admin client's HTTP transport (`dryRunTransport` in `dryrun.go`) sends
+only reads (GET). It answers every other request itself: a create gets
+201 with the id `dry-run-new`, an update or delete gets 204, and a read
+below a `dry-run-new` id gets an empty list. So no write can leave the
+process, also not one a later change adds. The approval login flow
+stops early in a dry run, since a flow it would create cannot be read
+back. The events are printed with `[would create]`, `[would update]`,
+`[would add]` and `[would remove]`, and the summary ends with "Nothing
+was changed".
 
 ### Refusals
 
@@ -2932,7 +2954,11 @@ in-memory state maps) through these scenarios, among others:
   errors at the validation boundary.
 - Trailing-slash refusal: `--mcp-resource-uri .../mcp/` errors with
   a "trailing slash" message naming the recipe rule.
-- Dry-run: zero Keycloak calls, banner present in stdout.
+- Dry run (`bootstrap_dryrun_test.go`): no write reaches the realm and
+  the stored realm stays the same, on a fresh realm, on a realm an
+  admin tuned (the events name the redirect URI, front-channel logout
+  and mapper changes with old and new values), and on a half-made
+  login flow. A real re-run on a matching realm sends no client PUT.
 - Skip-user-provisioning: 2 clients land, 5 groups, 0 users.
 - Mandatory-flag validation: missing `--keycloak-base-url`,
   `--realm`, etc. each surface a flag-specific error.

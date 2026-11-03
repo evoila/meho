@@ -112,9 +112,9 @@ type BootstrapOptions struct {
 	// which is 30 days on a default Keycloak realm.
 	MCPOfflineSessionIdleSeconds int
 
-	// DryRun true → print every API call that would be made and exit
-	// 0 without mutating anything. Mirrors the reference shell
-	// script's `--dry-run`.
+	// DryRun true → log in, read the realm, and print each change a
+	// real run would make, without changing anything: every request
+	// other than a read is answered in the process (dryRunTransport).
 	DryRun bool
 
 	// Out / Err are where structured progress lines go. nil → stdout
@@ -679,9 +679,9 @@ func Bootstrap(
 	}
 
 	if opts.DryRun {
-		fmt.Fprintln(out, "==> DRY RUN — no admin token will be minted; "+
-			"no realm state will change.")
-		return dryRunSummary(opts, out)
+		fmt.Fprintln(out, "==> DRY RUN — reads the realm and changes nothing. "+
+			"The events at the end show each change a real run would make.")
+		dryRunSummary(opts, out)
 	}
 
 	fmt.Fprintf(out,
@@ -694,7 +694,11 @@ func Bootstrap(
 		return nil, fmt.Errorf("mint admin token: %w", err)
 	}
 
+	if opts.DryRun {
+		httpClient = dryRunHTTPClient(httpClient)
+	}
 	c := newAdminClient(httpClient, opts.KeycloakBaseURL, opts.Realm, token)
+	c.dryRun = opts.DryRun
 	res := &Result{}
 
 	// --- CLI device-code client ---------------------------------------------
@@ -849,14 +853,17 @@ func Bootstrap(
 	}
 
 	res.ConfigKeysToSet = buildConfigKeySummary(opts)
+	if opts.DryRun {
+		for i, line := range res.MapperEventsLog {
+			res.MapperEventsLog[i] = dryRunEvent(line)
+		}
+	}
 	return res, nil
 }
 
-// dryRunSummary prints what would change and returns a result whose
-// IDs are empty strings — callers must not pass the UUIDs onward.
-func dryRunSummary(
-	opts BootstrapOptions, out io.Writer,
-) (*Result, error) {
+// dryRunSummary prints the shape a run sets up. The changes against
+// the realm follow in the events of the dry run.
+func dryRunSummary(opts BootstrapOptions, out io.Writer) {
 	fmt.Fprintf(out, "==> would provision against %s realm=%s\n",
 		opts.KeycloakBaseURL, opts.Realm)
 	fmt.Fprintf(out, "==> CLI device-code client: %s\n", opts.CLIClientID)
@@ -917,17 +924,11 @@ func dryRunSummary(
 	} else {
 		fmt.Fprintln(out, "==> admin user skipped")
 	}
-	return &Result{
-		CLIClientID:     opts.CLIClientID,
-		ApproveClientID: opts.CLIApproveClientID,
-		MCPClientID:     opts.MCPClientID,
-		ConfigKeysToSet: buildConfigKeySummary(opts),
-	}, nil
 }
 
-// reconcileClient creates or PUT-updates a client to the desired
-// shape. Returns the client's UUID + an events log (one bullet line
-// per mutation, suitable for printing).
+// reconcileClient creates a missing client, or PUT-updates an existing
+// one when a field that desired sets differs. Returns the client's UUID
+// + an events log; an update names each changed field.
 func reconcileClient(
 	ctx context.Context, c *adminClient, desired *clientRep,
 ) (string, []string, error) {
@@ -946,20 +947,26 @@ func reconcileClient(
 				desired.ClientID, uuid))
 		return uuid, events, nil
 	}
-	// PUT-update with the existing UUID baked in, mirroring the
-	// shell script's `$existing * $desired` merge semantic: the
-	// desired shape wins for every key it sets, the existing wins
-	// for everything it doesn't set. Keycloak's PUT is a full
-	// replacement at the client-rep level, so we carry the UUID +
-	// the desired shape's full set of fields explicitly.
-	merged := *desired
-	merged.ID = existing.ID
-	if err := c.updateClient(ctx, existing.ID, &merged); err != nil {
+	// The PUT sends only the desired shape. Keycloak sets every field
+	// the PUT sends, so each value desired sets replaces the existing
+	// one, also one an admin changed on purpose: the name, the
+	// description, the flow switches, the redirect URIs, the web
+	// origins and the attributes desired names. Keycloak keeps a field
+	// the PUT leaves out and an attribute it does not name.
+	changes := clientChanges(existing, desired)
+	if len(changes) == 0 {
+		events = append(events,
+			fmt.Sprintf("[skip]    client %s (already matches)", desired.ClientID))
+		return existing.ID, events, nil
+	}
+	update := *desired
+	update.ID = existing.ID
+	if err := c.updateClient(ctx, existing.ID, &update); err != nil {
 		return "", nil, err
 	}
 	events = append(events,
-		fmt.Sprintf("[updated] client %s (uuid=%s)",
-			desired.ClientID, existing.ID))
+		fmt.Sprintf("[updated] client %s (uuid=%s): %s",
+			desired.ClientID, existing.ID, strings.Join(changes, "; ")))
 	return existing.ID, events, nil
 }
 
@@ -1006,14 +1013,15 @@ func reconcileMappers(
 		// Keycloak's PUT replaces the mapper type and config in place.
 		// On an older realm this turns the fixed-value tenant-id /
 		// tenant-role mappers into User Attribute mappers.
+		changes := strings.Join(mapperChanges(got, want), "; ")
 		if got.ProtocolMapper != want.ProtocolMapper {
 			events = append(events,
-				fmt.Sprintf("[updated] mapper %s (replaced %s with %s)",
-					want.Name, got.ProtocolMapper, want.ProtocolMapper))
+				fmt.Sprintf("[updated] mapper %s (replaced %s with %s): %s",
+					want.Name, got.ProtocolMapper, want.ProtocolMapper, changes))
 			continue
 		}
 		events = append(events,
-			fmt.Sprintf("[updated] mapper %s", want.Name))
+			fmt.Sprintf("[updated] mapper %s: %s", want.Name, changes))
 	}
 	return events, nil
 }

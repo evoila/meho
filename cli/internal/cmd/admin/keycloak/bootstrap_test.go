@@ -813,23 +813,6 @@ func TestBootstrap_RefusesTrailingSlashOnMCPURI(t *testing.T) {
 	}
 }
 
-func TestBootstrap_DryRunDoesNotCallKeycloak(t *testing.T) {
-	opts := fullOpts()
-	opts.DryRun = true
-	fake := newFakeKeycloak()
-	_, stdout, err := runBootstrapOnce(t, fake, opts)
-	if err != nil {
-		t.Fatalf("Bootstrap dry-run: %v", err)
-	}
-	if len(fake.calls) != 0 {
-		t.Errorf("dry-run made %d Keycloak calls, want 0: %v",
-			len(fake.calls), fake.calls)
-	}
-	if !strings.Contains(stdout, "DRY RUN") {
-		t.Errorf("dry-run stdout missing banner; got:\n%s", stdout)
-	}
-}
-
 // Skipping the user step still creates the five groups: they carry the
 // tenant and the role for people who come from a directory.
 func TestBootstrap_SkipUserProvisioningKeepsGroupsOmitsUser(t *testing.T) {

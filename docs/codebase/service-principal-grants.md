@@ -235,6 +235,23 @@ layer (`ServicePrincipalGrantService.create`, NULL-safe on the nullable
 selector columns) rather than by a partial index, sidestepping the awkward
 NULL-vs-NULL portability across Postgres / SQLite.
 
+**A grant that has ended does not block a new one (#5424).** A grant whose
+`expires_at` is in the past gives no rights, but an index cannot compare with
+the current time. So both indexes also carry `AND replaced_at IS NULL`
+(migration `0134`, on `service_principal_grant` and `sandbox_delete_grant`).
+When a grant is created, `_insert` first sets `replaced_at` on every ended,
+never revoked row with the exact same key (target id and both selector
+columns matched NULL-safe), in the same transaction. The selector check skips
+rows with `replaced_at` set too. Then:
+
+- the same grant can be made again without a revoke first;
+- a grant that has not ended still blocks a second one (422 "already exists;
+  revoke it first");
+- the ended row keeps its `expires_at` and `revoked_at`, so it stays in the
+  history and in the list with `include_expired=true`. `replaced_at` is not
+  part of the read shape;
+- a refused create is rolled back, so it marks nothing.
+
 ### Orphaned grants — the target was deleted or registered again (#3430)
 
 A grant with a concrete `target_id` matches only that exact target id. When

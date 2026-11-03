@@ -163,10 +163,10 @@ Resolved Kubernetes Secret name holding the Keycloak Admin client secret
 The database login of the running backplane (the runtime role), apart
 from the owner login that runs the migrations. With the built-in
 PostgreSQL it is the role `meho_app` and the Secret
-`<release>-core-postgres-meho-app`, both made by the install. With your
-own PostgreSQL it is `postgres.runtime.role` and
-`postgres.runtime.credentialsSecret`; both empty means one login for
-everything. The migration container gets the role name as
+`<release>-core-postgres-meho-app`, both made by the install; the values
+keys stay empty or hold these names. With your own PostgreSQL it is
+`postgres.runtime.role` and `postgres.runtime.credentialsSecret`, both or
+neither (values.schema.json); both empty means one login for everything. The migration container gets the role name as
 DATABASE_RUNTIME_ROLE and grants the role its rights
 (backend/src/meho_backplane/db/runtime_role.py).
 */}}
@@ -180,7 +180,12 @@ DATABASE_RUNTIME_ROLE and grants the role its rights
 
 {{- define "meho.postgres.runtimeSecretName" -}}
 {{- if .Values.corePostgres.enabled -}}
-{{- .Values.postgres.runtime.credentialsSecret | default (printf "%s-core-postgres-meho-app" .Release.Name) -}}
+{{- $want := printf "%s-core-postgres-meho-app" .Release.Name -}}
+{{- /* The PostgreSQL pod mounts the core name only. Another name would leave the core Secret unmade and the pod waiting forever (same check as the built-in Keycloak, _core-keycloak.tpl). */ -}}
+{{- if and .Values.postgres.runtime.credentialsSecret (ne .Values.postgres.runtime.credentialsSecret $want) -}}
+{{- fail (printf "postgres.runtime.credentialsSecret must be empty or %q while corePostgres.enabled is on: the built-in PostgreSQL reads only that Secret." $want) -}}
+{{- end -}}
+{{- $want -}}
 {{- else -}}
 {{- .Values.postgres.runtime.credentialsSecret -}}
 {{- end -}}

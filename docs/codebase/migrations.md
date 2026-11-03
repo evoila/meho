@@ -258,7 +258,8 @@ apart from the owner login that runs the migrations
   `<release>-core-postgres-meho-app` the secrets Job makes), with `LOGIN`, no
   superuser, no ownership, and `CONNECT` on `meho`. With your own PostgreSQL you
   create it the same way and name it in `postgres.runtime.role` and its DSN
-  Secret in `postgres.runtime.credentialsSecret`:
+  Secret in `postgres.runtime.credentialsSecret` (both keys, or neither;
+  the chart schema stops an install with one of them):
 
   ```sql
   CREATE ROLE meho_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD '<password>';

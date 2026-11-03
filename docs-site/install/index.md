@@ -154,9 +154,11 @@ postgres:
     credentialsSecret: meho-postgres-app
 ```
 
-The migration Job grants the role its rights on every install and
-upgrade, so create the role before the upgrade that first names it. The
-built-in PostgreSQL of the chart does all of this on its own.
+Name both keys, or neither: the install stops when one is missing. The
+migration Job grants the role its rights on every install and upgrade,
+so create the role before the upgrade that first names it. The built-in
+PostgreSQL of the chart does all of this on its own; leave both keys
+empty there.
 
 ## Step 4 — Set up the Keycloak realm
 

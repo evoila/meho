@@ -822,11 +822,13 @@ postgres:
   #
   # With the built-in PostgreSQL (`corePostgres.enabled`) the install makes
   # the role `meho_app` and the Secret `<release>-core-postgres-meho-app`;
-  # leave both keys empty there. With your own PostgreSQL, create the role
-  # yourself (LOGIN, no superuser, CONNECT on the database) and a Secret
-  # with its DSN at key `url`, then name both here. The migration waits
-  # for the role to exist, so create it before the upgrade. Both empty =
-  # one login for everything, as before.
+  # leave both keys empty there. The PostgreSQL pod reads only that Secret,
+  # so another Secret name stops the install. With your own PostgreSQL,
+  # create the role yourself (LOGIN, no superuser, CONNECT on the
+  # database) and a Secret with its DSN at key `url`, then name both here:
+  # one key without the other stops the install. The migration waits for
+  # the role to exist, so create it before the upgrade. Both empty = one
+  # login for everything, as before.
   runtime:
     # -- Name of the runtime role (a lower-case PostgreSQL role name).
     role: ""

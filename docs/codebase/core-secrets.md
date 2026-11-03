@@ -40,7 +40,7 @@ Names are `<release>-core-…`. "alnum 32" means 32 characters from
 |---|---|---|---|---|
 | `-core-postgres-superuser` | `password` | alnum 32 | `corePostgres.enabled` | `corePostgres.existingSecrets.superuser` |
 | `-core-postgres-meho` | `password`, `url` | alnum 32; `postgresql+asyncpg://meho:<password>@<release>-postgres:5432/meho` | `corePostgres.enabled` | `postgres.credentialsSecret` |
-| `-core-postgres-meho-app` | `password`, `url` | alnum 32; `postgresql+asyncpg://meho_app:<password>@<release>-postgres:5432/meho` (the login of the running backplane; `meho` above runs the migrations) | `corePostgres.enabled` | `postgres.runtime.credentialsSecret` |
+| `-core-postgres-meho-app` | `password`, `url` | alnum 32; `postgresql+asyncpg://meho_app:<password>@<release>-postgres:5432/meho` (the login of the running backplane; `meho` above runs the migrations) | `corePostgres.enabled` | `postgres.runtime.credentialsSecret` (must stay empty or name this Secret, see below) |
 | `-core-postgres-keycloak` | `password` | alnum 32 | `corePostgres.enabled` | `corePostgres.existingSecrets.keycloak` (not while `coreKeycloak.enabled` is on, see below) |
 | `-core-keycloak-bootstrap` | `client_id`, `client_secret` | alnum 32 | `coreKeycloak.enabled` | `coreKeycloak.existingSecrets.bootstrap` |
 | `-core-keycloak-admin` | `client_secret` | alnum 32 | `coreKeycloak.enabled` | `keycloakAdmin.clientSecret.secretName` (not while `coreKeycloak.enabled` is on, see below) |
@@ -106,6 +106,15 @@ Secret (#4591). To use your own value for one of these Secrets, create it
 with the `<release>-core-…` name before the install: the Job keeps a Secret
 that exists. Only `coreKeycloak.existingSecrets.bootstrap` may name another
 Secret, because the Keycloak subchart reads that key too.
+
+**With the built-in PostgreSQL.** The PostgreSQL pod mounts
+`<release>-core-postgres-meho-app`, the login of the running backplane, by
+that name only. While `corePostgres.enabled` is on,
+`postgres.runtime.credentialsSecret` must stay empty or name that Secret;
+another name would make the Job check your Secret instead of making the
+core one, and the database pod would wait forever. The render stops with
+one sentence that names the key and the expected Secret
+(`meho.postgres.runtimeSecretName` in `templates/_helpers.tpl`).
 
 ## Key types and files
 

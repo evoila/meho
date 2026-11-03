@@ -18,9 +18,12 @@ it its rights (``backend/src/meho_backplane/db/runtime_role.py``).
 * Built-in PostgreSQL: the install makes the role ``meho_app`` and the
   Secret ``<release>-core-postgres-meho-app``; the backplane uses it and
   the ``migrate`` init container gets the role name.
-* The schema refuses a runtime Secret without a role, a role name that is
-  not a plain lower-case identifier, and with the built-in PostgreSQL a
-  role other than ``meho_app``.
+* The schema refuses a runtime Secret without a role, with your own
+  PostgreSQL a role without a Secret, a role name that is not a plain
+  lower-case identifier, and with the built-in PostgreSQL a role other than
+  ``meho_app``. The render refuses, with the built-in PostgreSQL, a runtime
+  Secret other than ``<release>-core-postgres-meho-app``: the PostgreSQL
+  pod mounts only that name, and the secrets Job would not make it.
 
 Skips where ``helm`` is absent unless ``MEHO_REQUIRE_HELM=1``.
 """
@@ -207,6 +210,39 @@ def test_built_in_database_accepts_the_same_names_and_nothing_else() -> None:
     )
     assert other.returncode != 0
     assert "allOf" in other.stderr
+
+
+def test_built_in_database_refuses_another_runtime_secret() -> None:
+    """The PostgreSQL pod mounts ``<release>-core-postgres-meho-app`` only.
+
+    With another name the secrets Job would check that Secret instead of
+    making the core one, and the database pod would wait forever. The render
+    stops with one sentence that names the key and the expected Secret.
+    """
+    result = _run(
+        *_CORE_ON,
+        "--set",
+        "postgres.runtime.role=meho_app",
+        "--set",
+        "postgres.runtime.credentialsSecret=my-app-login",
+    )
+    assert result.returncode != 0
+    assert (
+        'postgres.runtime.credentialsSecret must be empty or "test-core-postgres-meho-app"'
+        in result.stderr
+    )
+
+    # The role name alone is the install's own default and renders.
+    docs = _render(*_CORE_ON, "--set", "postgres.runtime.role=meho_app")
+    assert _database_secret(_backplane_pod(docs)["containers"][0]) == "test-core-postgres-meho-app"
+
+
+def test_schema_refuses_a_role_without_a_secret_with_your_own_database() -> None:
+    """A role alone would get its rights while the backplane keeps the owner login."""
+    no_secret = _run(*_OWN_DB, "--set", "postgres.runtime.role=meho_app")
+    assert no_secret.returncode != 0
+    assert "postgres.runtime.credentialsSecret" in no_secret.stderr
+    assert "allOf" in no_secret.stderr
 
 
 def test_schema_refuses_a_secret_without_a_role_and_a_bad_role_name() -> None:

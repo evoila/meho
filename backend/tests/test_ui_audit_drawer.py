@@ -292,14 +292,46 @@ def _seed_run(*, tenant_id: uuid.UUID, template: str, state: str) -> uuid.UUID:
     return run_id
 
 
+# One keypair for the whole module. Every seeded session carries a real
+# ``operator`` JWT signed with it (unless a test passes its own token), and
+# the autouse fixture below serves its JWKS, so the console's operator gate
+# can lift the role on every request.
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    _KEYPAIR = _make_rsa_keypair("ui-audit-drawer-test-kid")
+_JWKS = _public_jwks(_KEYPAIR)
+
+
+@pytest.fixture(autouse=True)
+def _jwks_mock(_bff_env: None) -> Iterator[None]:
+    """Serve the module keypair's JWKS so the operator role lift succeeds."""
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, _JWKS)
+        yield
+
+
+def _operator_token(operator_sub: str, tenant_id: uuid.UUID) -> str:
+    """A real ``operator`` JWT for *operator_sub* signed with the module keypair."""
+    return _mint_token(
+        _KEYPAIR,
+        sub=operator_sub,
+        tenant_id=str(tenant_id),
+        tenant_role=TenantRole.OPERATOR.value,
+    )
+
+
 def _seed_session_sync(
     *,
     tenant_id: uuid.UUID,
     operator_sub: str = _OPERATOR_SUB,
-    access_token: str = "access-token-plaintext",
+    access_token: str | None = None,
     lifetime: timedelta = timedelta(hours=1),
 ) -> uuid.UUID:
-    """Create a ``web_session`` row carrying *access_token*; return its UUID."""
+    """Create a ``web_session`` row carrying *access_token*; return its UUID.
+
+    Without *access_token* the row carries a real ``operator`` JWT, so the
+    session passes the console's operator gate.
+    """
 
     async def _do() -> uuid.UUID:
         sessionmaker = get_sessionmaker()
@@ -308,7 +340,7 @@ def _seed_session_sync(
                 session,
                 operator_sub=operator_sub,
                 tenant_id=tenant_id,
-                access_token=access_token,
+                access_token=access_token or _operator_token(operator_sub, tenant_id),
                 refresh_token="refresh-token-plaintext",
                 lifetime=lifetime,
             )
@@ -331,12 +363,8 @@ def _role_session(
     tenant_id: uuid.UUID = _TENANT_A,
 ) -> tuple[uuid.UUID, dict[str, Any]]:
     """Seed a session whose access token is a real JWT carrying *role*."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        keypair = _make_rsa_keypair("ui-audit-drawer-test-kid")
-    jwks = _public_jwks(keypair)
     access_token = _mint_token(
-        keypair,
+        _KEYPAIR,
         sub=operator_sub,
         tenant_id=str(tenant_id),
         tenant_role=role.value,
@@ -344,7 +372,7 @@ def _role_session(
     session_id = _seed_session_sync(
         tenant_id=tenant_id, operator_sub=operator_sub, access_token=access_token
     )
-    return session_id, jwks
+    return session_id, _JWKS
 
 
 # ===========================================================================

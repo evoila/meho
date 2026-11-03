@@ -22,6 +22,12 @@ spec:
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if and .Values.metricsAuth.enabled (not .Values.metricsAuth.existingSecret) }}
+        # Roll the pod when the chart-made metrics token changes, so the
+        # token the pod checks is the one the Secret holds. On a cluster
+        # `lookup` keeps the value and the checksum stays stable.
+        checksum/metrics-auth: {{ include (print $.Template.BasePath "/metrics-auth-secret.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -80,6 +86,9 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.postgres.credentialsSecret }}
                   key: url
+            {{- with include "meho.postgres.runtimeRoleEnv" . }}
+            {{- . | nindent 12 }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -125,11 +134,26 @@ spec:
             # container (the image build does not know its chart release).
             - name: CHART_VERSION
               value: {{ .Chart.Version | quote }}
+            {{- /*
+            The running backplane logs in with its own, narrower login when
+            the install has one (`meho.postgres.backplaneSecretName`); the
+            migration above keeps the owner login.
+            */}}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.postgres.credentialsSecret }}
+                  name: {{ include "meho.postgres.backplaneSecretName" . }}
                   key: url
+            {{- if .Values.metricsAuth.enabled }}
+            # The metrics token (`metricsAuth`): `/metrics` and the
+            # `features` block of `/ready` answer only a caller that sends
+            # it. `secretKeyRef` only, never plaintext.
+            - name: METRICS_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "meho.metricsAuthSecretName" . | quote }}
+                  key: {{ .Values.metricsAuth.secretKey | quote }}
+            {{- end }}
             {{- if .Values.broadcast.enabled }}
             # BROADCAST_REDIS_URL points the backplane at the in-cluster
             # broadcast store. The name must match the env var the

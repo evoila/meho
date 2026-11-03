@@ -15,6 +15,8 @@ machine that runs them:
   need. Each stub writes its arguments to calls.log, never its input, so a
   password piped to chpasswd stays out of the log. vmtoolsd prints the OVF
   environment of the test; the mount stub puts it on the fake CD-ROM.
+- Standard input holds what an admin types on the VM console, empty unless
+  a test gives answers.
 """
 
 from __future__ import annotations
@@ -38,7 +40,15 @@ FAIL_LINE = re.compile(r"^\[FAIL\] .*$", re.MULTILINE)
 
 DOWNLOAD = "/opt/meho/appliance/download"
 STATE = "/var/lib/meho/firststart"
-STEPS = ("ssh-host-keys", "disk", "wizard-fields", "clock", "core", "bootloader-password")
+STEPS = (
+    "ssh-host-keys",
+    "disk",
+    "wizard-fields",
+    "clock",
+    "core",
+    "bootloader-password",
+    "aide-database",
+)
 UBUNTU_CLASS_LINE = 'CLASS="--class gnu-linux --class gnu --class os"\n'
 
 PASSWORD = "Wizard&Pass<word>\"1'"
@@ -137,6 +147,7 @@ STUBS = {
         printf 'PBKDF2 hash of your password is grub.pbkdf2.sha512.10000.FAKESALT.FAKEHASH\\n'
         """),
     "update-grub": "",
+    "aideinit": "",
     "sleep": "",
 }
 
@@ -221,6 +232,10 @@ class FakeAppliance:
     def no_answer(self, name: str) -> None:
         (self.fake / name).unlink(missing_ok=True)
 
+    def stub(self, command: str, body: str) -> None:
+        """Replace the stub of a command for one test."""
+        _write_script(self.stubs / command, body)
+
     def wizard(self, changes: dict[str, str]) -> None:
         """The wizard fields of the test: the static ones with these changes."""
         self.answer("guestinfo-ovfenv", ovf_env({**STATIC_FIELDS, **changes}))
@@ -249,7 +264,7 @@ class FakeAppliance:
         folder = self.host_path(STATE)
         return sorted(path.name for path in folder.glob("*.done")) if folder.is_dir() else []
 
-    def _run(self, script: Path) -> subprocess.CompletedProcess[str]:
+    def _run(self, script: Path, answers: str = "") -> subprocess.CompletedProcess[str]:
         env = {
             "PATH": f"{self.stubs}:{self.tools}",
             "MEHO_TEST_ROOT": str(self.root),
@@ -260,12 +275,22 @@ class FakeAppliance:
         # when its RUNPATH does not exist, as on a self-hosted runner.
         if "LD_LIBRARY_PATH" in os.environ:
             env["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
+        # A session of its own, as under systemd, so a stub can signal the
+        # script's process group the way a key on the console does.
         return subprocess.run(
-            [str(script)], capture_output=True, text=True, env=env, check=False, timeout=60
+            [str(script)],
+            input=answers,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+            timeout=60,
+            start_new_session=True,
         )
 
-    def run(self) -> subprocess.CompletedProcess[str]:
-        return self._run(FIRSTSTART_SH)
+    def run(self, answers: str = "") -> subprocess.CompletedProcess[str]:
+        """Run first start; the answers are what an admin types on the VM console."""
+        return self._run(FIRSTSTART_SH, answers)
 
     def banner(self) -> str:
         result = self._run(BANNER_SH)

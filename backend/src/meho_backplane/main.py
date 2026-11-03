@@ -834,11 +834,30 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             await _stop_background_tasks(tasks)
 
 
+def api_docs_enabled() -> bool:
+    """Return whether the API docs pages (``/openapi.json``, ``/docs``, ``/redoc``) are on.
+
+    They are off unless ``API_DOCS_ENABLED`` is set to a true value. They
+    need no login, so a production instance serves them only when the
+    deployment asks for it. The env var is read directly, like
+    ``MEHO_ENABLE_RBAC_TEST_ROUTE`` below: the app is built at import time,
+    before the chassis settings may have been pinned. The CLI's committed
+    ``cli/api/openapi.json`` snapshot is written from ``app.openapi()`` and
+    does not need the route.
+    """
+    return parse_bool_env(os.environ.get("API_DOCS_ENABLED"))
+
+
+_API_DOCS_ON: Final[bool] = api_docs_enabled()
+
 app: FastAPI = FastAPI(
     title=_APP_NAME,
     version=__version__,
     description="MEHO governance-layer backplane (chassis-only in v0.1).",
     lifespan=lifespan,
+    openapi_url="/openapi.json" if _API_DOCS_ON else None,
+    docs_url="/docs" if _API_DOCS_ON else None,
+    redoc_url="/redoc" if _API_DOCS_ON else None,
 )
 
 # Middleware registration order matters for ASGI: ``add_middleware``

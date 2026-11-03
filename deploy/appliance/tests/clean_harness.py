@@ -175,11 +175,17 @@ MACHINE_FILES = {
     "/opt/meho/appliance/firststart/banner.sh": "#!/usr/bin/env bash\n",
     "/etc/systemd/system/meho-firststart.service": "[Unit]\n",
     "/etc/systemd/system/meho-banner.service": "[Unit]\n",
+    "/opt/meho/appliance/cis/ssg-ubuntu2404-ds.xml": "<ds/>\n",
+    "/opt/meho/appliance/cis/tailoring.xml": "<Tailoring/>\n",
+    "/etc/nftables.conf": 'include "/etc/meho/firewall.nft"\n',
+    "/etc/systemd/system/nftables.service.d/meho-no-flush.conf": "[Service]\nExecStop=\n",
 }
 
-# The links systemctl enable makes for the two units of first start.
+# The links systemctl enable makes for the two units of first start, and
+# for nftables.service of the hardening.
 ENABLED_UNITS = ("meho-firststart.service", "meho-banner.service")
 WANTS = "/etc/systemd/system/multi-user.target.wants"
+NFTABLES_LINK = "/etc/systemd/system/sysinit.target.wants/nftables.service"
 
 
 def _write_script(path: Path, body: str) -> None:
@@ -214,6 +220,9 @@ class FakeBuildVM:
             link = self.host_path(f"{WANTS}/{unit}")
             link.parent.mkdir(parents=True, exist_ok=True)
             link.symlink_to(f"/etc/systemd/system/{unit}")
+        link = self.host_path(NFTABLES_LINK)
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to("/usr/lib/systemd/system/nftables.service")
         self.answer("secrets", SECRETS)
         self.answer("secrets_stick", "0")
         self.answer("secrets_get_rc", "0")

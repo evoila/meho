@@ -60,6 +60,10 @@ KEPT = (
     "/opt/meho/appliance/firststart/banner.sh",
     "/etc/systemd/system/meho-firststart.service",
     "/etc/systemd/system/meho-banner.service",
+    "/opt/meho/appliance/cis/ssg-ubuntu2404-ds.xml",
+    "/opt/meho/appliance/cis/tailoring.xml",
+    "/etc/nftables.conf",
+    "/etc/systemd/system/nftables.service.d/meho-no-flush.conf",
 )
 
 
@@ -386,10 +390,16 @@ class CheckTests(CleanTestCase):
             "/etc/cloud/cloud-init.disabled",
             "/opt/meho/appliance/firststart/firststart.sh",
             "/etc/systemd/system/meho-banner.service",
+            "/opt/meho/appliance/cis/ssg-ubuntu2404-ds.xml",
+            "/etc/nftables.conf",
         )
         link = "/etc/systemd/system/multi-user.target.wants/meho-firststart.service"
+        nftables = "/etc/systemd/system/sysinit.target.wants/nftables.service"
         expected = {path: f"{path} is missing; it must stay" for path in must_stay}
         expected[link] = f"{link} is missing, so first start would not run at the first boot"
+        expected[nftables] = (
+            f"{nftables} is missing, so nftables.service would not load the MEHO firewall at boot"
+        )
         for path, line in expected.items():
             with self.subTest(path=path):
                 target = self.vm.host_path(path)

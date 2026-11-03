@@ -21,7 +21,7 @@ Same rationale as the T1 KV browser (see
 :mod:`meho_backplane.ui.routes.vault.routes`): the REST operation routes
 are Bearer-gated over a verified JWT; a browser carrying only the BFF
 session cookie cannot authenticate them. So this module adds ``/ui/vault``
-sub-routes that are ``require_ui_session``-gated and call the operation
+sub-routes that are ``require_ui_operator``-gated and call the operation
 meta-tool :func:`~meho_backplane.operations.meta_tools.call_operation`
 IN-PROCESS -- the exact pattern ``ui/routes/operations/routes.py`` uses for
 its dispatch surface, and the one the T1 browser already follows. The
@@ -87,11 +87,11 @@ RBAC (OPERATOR tier)
 --------------------
 
 The four ``vault.sys.*`` reads are ``safety_level="safe"`` / operator-tier,
-so both routes are ``require_ui_session``-only with no ``TenantRole``
-dependency -- the same gate the T1 KV browser and the operations console
-read routes use. There is no tenant_admin step. (The only tenant_admin-
-gated vault surface is ``llm_instructions`` in an op-detail drawer, which
-this status glance does not surface.)
+so both routes are ``require_ui_operator``-gated -- the same ``operator``
+floor the T1 KV browser and the REST operation routes have; a ``read_only``
+session gets ``403 operator_required``. There is no tenant_admin step.
+(The only tenant_admin-gated vault surface is ``llm_instructions`` in an
+op-detail drawer, which this status glance does not surface.)
 
 Tenant isolation
 ----------------
@@ -116,7 +116,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.routes.vault.routes import (
-    _require_session,
+    _require_operator,
     _resolve_operator,
     _vault_connector_id,
 )
@@ -158,7 +158,7 @@ def build_vault_status_router() -> APIRouter:
     @router.get("/ui/vault/status", response_class=HTMLResponse)
     async def vault_status(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
     ) -> HTMLResponse:
         """Render the seal / health / mounts status panel.
 
@@ -172,7 +172,7 @@ def build_vault_status_router() -> APIRouter:
     @router.get("/ui/vault/auth", response_class=HTMLResponse)
     async def vault_auth(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
     ) -> HTMLResponse:
         """Render the auth-methods glance partial (``vault.sys.auth.list``).
 

@@ -37,6 +37,7 @@ and the re-run after a failure through
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Final
 
@@ -110,12 +111,25 @@ def object_identity(obj: Mapping[str, Any]) -> dict[str, Any] | None:
     for field in IDENTITY_FIELDS:
         if field in obj:
             value = obj[field]
-            return None if value is None or value == "" else {field: value}
-    return {
-        field: value
-        for field, value in obj.items()
-        if not isinstance(value, bool | int | float) and field != "present"
-    }
+            return None if value is None or value == "" else _as_stored({field: value})
+    return _as_stored(
+        {
+            field: value
+            for field, value in obj.items()
+            if not isinstance(value, bool | int | float) and field != "present"
+        }
+    )
+
+
+def _as_stored(identity: dict[str, Any]) -> dict[str, Any]:
+    """*identity* as it reads back from the stored card.
+
+    The stored card is JSON, the live card is fresh Python values. One
+    round trip through JSON gives both sides the same shape (a tuple reads
+    back as a list), so a same object never compares as different.
+    """
+    normalised: dict[str, Any] = json.loads(json.dumps(identity, default=str))
+    return normalised
 
 
 async def live_card(

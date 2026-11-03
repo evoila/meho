@@ -301,6 +301,15 @@ async def test_identity_without_id_is_the_card_fields_without_counts_and_flags()
     }
 
 
+async def test_identity_reads_like_the_stored_card() -> None:
+    """The stored card is JSON; a live tuple must equal its stored list."""
+    live = {"kind": "dns_record", "zone": "example.test", "values": ("a", "b")}
+    stored = {"kind": "dns_record", "zone": "example.test", "values": ["a", "b"]}
+
+    assert object_identity(live) == object_identity(stored)
+    assert object_identity({"kind": "x", "key": (1, 2)}) == {"key": [1, 2]}
+
+
 async def test_card_object_is_read_from_the_top_level_or_the_preview_body() -> None:
     top = {"blast_radius": {"object": _ALIAS_CARD}}
     nested = {"preview": {"blast_radius": {"object": _ALIAS_CARD}}}

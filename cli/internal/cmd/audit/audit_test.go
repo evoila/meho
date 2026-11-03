@@ -77,6 +77,7 @@ func TestNewRootCmdRegistersAllVerbs(t *testing.T) {
 	root := NewRootCmd()
 	want := map[string]bool{
 		"query":       false,
+		"count":       false,
 		"recent":      false,
 		"show":        false,
 		"who-touched": false,

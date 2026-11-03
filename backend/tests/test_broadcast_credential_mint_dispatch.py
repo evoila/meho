@@ -267,14 +267,15 @@ def _assert_credential_mint_row_has_no_secret(row: AuditLog, op_id: str) -> None
     """Assert *row* is the executed ``credential_mint`` audit row without the secret.
 
     The row's payload carries the class and the result status. The
-    whole serialised payload must contain none of the forbidden
-    secret-shaped sentinels.
+    whole serialised payload and the raw copy (``raw_payload``) must
+    contain none of the forbidden secret-shaped sentinels.
     """
     assert row.payload["op_id"] == op_id
     assert row.payload["op_class"] == "credential_mint"
     assert row.payload["result_status"] == "ok"
 
-    serialised = json.dumps(row.payload, default=str)
+    assert row.raw_payload is not None, "the raw copy keeps the non-secret fields"
+    serialised = json.dumps([row.payload, row.raw_payload], default=str)
     for forbidden in _FORBIDDEN_SUBSTRINGS:
         assert forbidden not in serialised, (
             f"credential_mint leak: {forbidden!r} reached the audit row "
@@ -285,7 +286,7 @@ def _assert_credential_mint_row_has_no_secret(row: AuditLog, op_id: str) -> None
 def _no_secret_in_any_row(rows: list[AuditLog]) -> None:
     """Assert the sentinel secret appears in none of *rows*."""
     for row in rows:
-        assert _SENTINEL_SECRET not in json.dumps(row.payload, default=str)
+        assert _SENTINEL_SECRET not in json.dumps([row.payload, row.raw_payload], default=str)
 
 
 def _mock_robot_create(mock: respx.MockRouter) -> None:
@@ -380,6 +381,7 @@ def _approve_via_decide(
     mock_discovery_and_jwks(mock, public_jwks(key))
     token = mint_token(
         key,
+        fresh_sign_in=True,
         sub=approver_sub,
         tenant_role=TenantRole.OPERATOR.value,
         tenant_id=str(_TENANT_ID),

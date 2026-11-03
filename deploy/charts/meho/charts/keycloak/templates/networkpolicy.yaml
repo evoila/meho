@@ -8,8 +8,9 @@ metadata:
 spec:
   # Selects the Keycloak pod and admits the Keycloak port only from the
   # backplane pods of this release, the release's core hook Jobs (the
-  # bootstrap Job finishes the realm through this port) and the peers in
-  # `extraFrom`. Egress is not limited here.
+  # bootstrap Job finishes the realm through this port), the built-in
+  # OpenBao and its `vault-init` Job, and the peers in `extraFrom`. Egress
+  # is not limited here.
   podSelector:
     matchLabels:
       {{- include "coreKeycloak.selectorLabels" . | nindent 6 }}
@@ -29,6 +30,16 @@ spec:
             matchLabels:
               app.kubernetes.io/instance: {{ .Release.Name }}
               app.kubernetes.io/component: core-bootstrap
+        # The built-in OpenBao fetches the realm's keys to check logins; its
+        # setup Job waits for the realm.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/name: openbao
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: vault-init
       ports:
         - port: http
           protocol: TCP

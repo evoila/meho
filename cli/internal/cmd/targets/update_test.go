@@ -230,3 +230,84 @@ func TestUpdateNotFoundRendersNearMisses(t *testing.T) {
 		t.Errorf("stderr should list near-misses; got:\n%s", stderr.String())
 	}
 }
+
+// TestUpdateSecretFieldAddsAndRemovesEntries pins that --secret-field
+// sends only the named entries (the server merges them) and that
+// `connector_field=` sends null to remove that entry (#3711).
+func TestUpdateSecretFieldAddsAndRemovesEntries(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
+	var f fakePatchServer
+	url := f.start(t, http.StatusOK, updatedTargetJSON)
+	_, stderr, err := runUpdateCmd(t, url, "ssh-01",
+		"--secret-field", "username=login", "--secret-field", "ssh_private_key=")
+	if err != nil {
+		t.Fatalf("update --secret-field: %v\nstderr=%s", err, stderr.String())
+	}
+	m, ok := f.body["secret_field_map"].(map[string]any)
+	if !ok || len(m) != 2 || m["username"] != "login" {
+		t.Fatalf("secret_field_map: raw body %s", f.raw)
+	}
+	if v, present := m["ssh_private_key"]; !present || v != nil {
+		t.Errorf("ssh_private_key must be a present JSON null; raw body %s", f.raw)
+	}
+}
+
+// TestUpdateClearSecretFieldSendsNull pins that `--clear secret-field`
+// sends `"secret_field_map": null`, which removes the whole map.
+func TestUpdateClearSecretFieldSendsNull(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
+	var f fakePatchServer
+	url := f.start(t, http.StatusOK, updatedTargetJSON)
+	_, stderr, err := runUpdateCmd(t, url, "ssh-01", "--clear", "secret-field")
+	if err != nil {
+		t.Fatalf("update --clear secret-field: %v\nstderr=%s", err, stderr.String())
+	}
+	if v, present := f.body["secret_field_map"]; !present || v != nil {
+		t.Errorf("secret_field_map must be a present JSON null; raw body %s", f.raw)
+	}
+}
+
+// TestUpdateSecretFieldAndClearConflict pins that one call cannot both
+// set and clear the map.
+func TestUpdateSecretFieldAndClearConflict(t *testing.T) {
+	t.Parallel()
+	_, stderr, err := runUpdateCmd(t, "", "ssh-01",
+		"--secret-field", "username=login", "--clear", "secret-field")
+	if err == nil || !strings.Contains(stderr.String(), "cannot be used together") {
+		t.Fatalf("expected a set-and-clear error; got %v\nstderr=%s", err, stderr.String())
+	}
+}
+
+// TestUpdateVPNRequiredSendsOnlyWhenGiven pins that --vpn-required=false
+// sends an explicit false (to clear the flag), --vpn-required sends
+// true, and an update without the flag leaves vpn_required out of the
+// body so the stored value stays as it is.
+func TestUpdateVPNRequiredSendsOnlyWhenGiven(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
+	cases := []struct {
+		name    string
+		args    []string
+		want    any
+		present bool
+	}{
+		{"set", []string{"--vpn-required"}, true, true},
+		{"clear", []string{"--vpn-required=false"}, false, true},
+		{"omitted", []string{"--note", "moved"}, nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var f fakePatchServer
+			url := f.start(t, http.StatusOK, updatedTargetJSON)
+			args := append([]string{"demo-vault"}, tc.args...)
+			_, stderr, err := runUpdateCmd(t, url, args...)
+			if err != nil {
+				t.Fatalf("update: %v\nstderr=%s", err, stderr.String())
+			}
+			v, present := f.body["vpn_required"]
+			if present != tc.present || (present && v != tc.want) {
+				t.Errorf("vpn_required: got %#v (present=%t); want %#v (present=%t); raw body %s",
+					v, present, tc.want, tc.present, f.raw)
+			}
+		})
+	}
+}

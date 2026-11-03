@@ -45,6 +45,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import structlog
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -52,7 +53,9 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from meho_backplane.auth.operator import Operator
+from meho_backplane import audit_cutover
+from meho_backplane.auth.current_tenant import bind_tenant_role_source
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.vault_creds import (
     VaultCredentialsReadError,
     load_basic_credentials,
@@ -1158,6 +1161,58 @@ async def test_abort_run_audit_row_inherits_work_ref(db_session: AsyncSession) -
     ).all()
     assert len(rows) == 1
     assert rows[0].work_ref == work_ref
+
+
+@pytest.mark.asyncio
+async def test_abort_run_audit_row_names_the_role_source(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The abort row says when the caller's role came from platform admin access (#5239).
+
+    The row is built from the caller's ``sub`` only, and with the wrapper
+    rows retired it is the only record of the request, so the marker
+    must reach it through the request context.
+    """
+    monkeypatch.setenv("REQUEST_USAGE_RETENTION_DAYS", "30")
+    monkeypatch.setenv("AUDIT_WRAPPER_ROWS_RETIRED", "true")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+    await _seed_published_template(tenant_id, "d", body=_two_step_template())
+    run_service = RunbookRunService()
+    start = await run_service.start_run(
+        tenant_id, OPERATOR, StartRunRequest(template_slug="d", target="n", params={})
+    )
+    assert isinstance(start, CurrentStepResponse)
+    admin = Operator(
+        sub=OPERATOR,
+        name=None,
+        email=None,
+        raw_jwt="<test-jwt>",
+        tenant_id=tenant_id,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+        role_from_platform_admin=True,
+    )
+
+    before = set(structlog.contextvars.get_contextvars())
+    scope = audit_cutover.open_classified_record_scope()
+    try:
+        bind_tenant_role_source(admin)
+        await run_service.abort_run(
+            tenant_id, OPERATOR, start.run_id, AbortRunRequest(reason="customer cancelled")
+        )
+    finally:
+        structlog.contextvars.unbind_contextvars(
+            *(set(structlog.contextvars.get_contextvars()) - before)
+        )
+        audit_cutover.close_classified_record_scope(scope)
+        get_settings.cache_clear()
+
+    rows = (
+        await db_session.scalars(select(AuditLog).where(AuditLog.path == "runbook.abort"))
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].payload["tenant_role_source"] == "platform_admin"
 
 
 @pytest.mark.asyncio

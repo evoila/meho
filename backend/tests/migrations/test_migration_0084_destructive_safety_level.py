@@ -24,7 +24,7 @@ only if the ids move in lockstep — which the orchestrator's re-point does.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -104,10 +104,12 @@ def _insert_descriptor(sync_url: str, safety_level: str, op_id: str) -> None:
         sync_eng.dispose()
 
 
-def test_upgrade_check_accepts_destructive(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_check_accepts_destructive(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0084`` widens the CHECK so a ``destructive`` row inserts."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     # The three pre-existing values still insert...
     for level in ("safe", "caution", "dangerous"):
@@ -116,31 +118,37 @@ def test_upgrade_check_accepts_destructive(alembic_cfg: tuple[Config, str]) -> N
     _insert_descriptor(sync_url, "destructive", "op.destroy")
 
 
-def test_upgrade_check_still_rejects_unknown_value(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_check_still_rejects_unknown_value(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """A value outside the widened four-set is still rejected by the CHECK."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     with pytest.raises(IntegrityError):
         _insert_descriptor(sync_url, "catastrophic", "op.bogus")
 
 
-def test_downgrade_refuses_when_destructive_rows_exist(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_refuses_when_destructive_rows_exist(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade 0079`` raises (not a silent DDL failure) when a
     ``destructive`` row would be orphaned by the narrowed CHECK."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     _insert_descriptor(sync_url, "destructive", "op.destroy")
 
     with pytest.raises(RuntimeError, match="destructive-tier"):
         command.downgrade(cfg, _DOWN_REVISION)
 
 
-def test_downgrade_narrows_check_when_no_destructive_rows(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_narrows_check_when_no_destructive_rows(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """With no ``destructive`` rows, ``downgrade 0079`` narrows the CHECK
     back to three values — a subsequent ``destructive`` insert is rejected."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     _insert_descriptor(sync_url, "dangerous", "op.dangerous")
 
     command.downgrade(cfg, _DOWN_REVISION)
@@ -149,11 +157,13 @@ def test_downgrade_narrows_check_when_no_destructive_rows(alembic_cfg: tuple[Con
         _insert_descriptor(sync_url, "destructive", "op.destroy")
 
 
-def test_upgrade_round_trips_after_clean_downgrade(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_round_trips_after_clean_downgrade(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0084`` → clean ``downgrade 0079`` → ``upgrade 0084`` again
     leaves the widened CHECK in place (idempotent constraint recreate)."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
     command.upgrade(cfg, _REVISION)
 

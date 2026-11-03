@@ -186,7 +186,7 @@ async def test_gate_blocks_enabled_write_caution_no_claim() -> None:
         new=AsyncMock(return_value=False),
     ):
         block = await announce_gate_blocks(
-            _operator(), op_id="vault.kv.delete", safety_level="caution", target_name="vault-1"
+            _operator(), op_class="write", safety_level="caution", target_name="vault-1"
         )
     assert block is not None
     assert "meho_broadcast_announce" in block
@@ -206,7 +206,7 @@ async def test_gate_blocks_enabled_write_destructive_no_claim() -> None:
         new=AsyncMock(return_value=False),
     ):
         block = await announce_gate_blocks(
-            _operator(), op_id="vault.kv.delete", safety_level="destructive", target_name="vault-1"
+            _operator(), op_class="write", safety_level="destructive", target_name="vault-1"
         )
     assert block is not None
     assert "meho_broadcast_announce" in block
@@ -220,7 +220,7 @@ async def test_gate_passes_when_claim_covers_op() -> None:
         new=AsyncMock(return_value=True),
     ):
         block = await announce_gate_blocks(
-            _operator(), op_id="vault.kv.delete", safety_level="caution", target_name="vault-1"
+            _operator(), op_class="write", safety_level="caution", target_name="vault-1"
         )
     assert block is None
 
@@ -233,7 +233,7 @@ async def test_gate_passes_for_disabled_tenant() -> None:
         "meho_backplane.broadcast.announce_gate.caller_has_active_announce_claim", new=claim
     ):
         block = await announce_gate_blocks(
-            _operator(), op_id="vault.kv.delete", safety_level="caution", target_name="vault-1"
+            _operator(), op_class="write", safety_level="caution", target_name="vault-1"
         )
     assert block is None
     # Short-circuited on enablement -- the claim scan never ran.
@@ -248,7 +248,7 @@ async def test_gate_passes_for_read_class_op() -> None:
         "meho_backplane.broadcast.announce_gate.caller_has_active_announce_claim", new=claim
     ):
         block = await announce_gate_blocks(
-            _operator(), op_id="vault.kv.list", safety_level="caution", target_name="vault-1"
+            _operator(), op_class="credential_read", safety_level="caution", target_name="vault-1"
         )
     assert block is None
     claim.assert_not_called()
@@ -262,7 +262,7 @@ async def test_gate_passes_for_safe_write_op() -> None:
         "meho_backplane.broadcast.announce_gate.caller_has_active_announce_claim", new=claim
     ):
         block = await announce_gate_blocks(
-            _operator(), op_id="vault.kv.delete", safety_level="safe", target_name="vault-1"
+            _operator(), op_class="write", safety_level="safe", target_name="vault-1"
         )
     assert block is None
     claim.assert_not_called()
@@ -279,7 +279,7 @@ async def test_gate_fails_open_on_claim_scan_error() -> None:
         patch("meho_backplane.broadcast.announce_gate._log") as mock_log,
     ):
         block = await announce_gate_blocks(
-            _operator(), op_id="vault.kv.delete", safety_level="caution", target_name="vault-1"
+            _operator(), op_class="write", safety_level="caution", target_name="vault-1"
         )
     assert block is None
     assert any(
@@ -410,6 +410,38 @@ async def test_dispatch_rejected_when_gate_enabled_and_no_claim(
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "denied"
     assert result.audit_id == rows[0].id
+
+
+async def test_dispatch_rejects_a_write_whose_last_word_is_unknown(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A ``caution`` op is gated as a write even when its last word is unknown.
+
+    ``vault.kv.purge`` ends in a word ``classify_op`` does not know. The
+    gate uses the class the audit row stores, which comes from the risk
+    level, so the op is still refused without an announce claim.
+    """
+    await _seed_tenant(enabled=True)
+    await _register_op("vault.kv.purge", stub_embedding_service)
+    claim = AsyncMock(return_value=False)
+    with (
+        patch(
+            "meho_backplane.broadcast.announce_gate.caller_has_active_announce_claim",
+            new=claim,
+        ),
+        _bound_session(_SESSION),
+    ):
+        result = await dispatch(
+            operator=_operator(),
+            connector_id="vault-1.x",
+            op_id="vault.kv.purge",
+            target=_FakeTarget(),
+            params={},
+        )
+    assert result.status == "denied"
+    assert result.extras["error_code"] == "announce_required"
+    assert claim.await_args is not None
+    assert claim.await_args.kwargs["op_class"] == "write"
 
 
 async def test_dispatch_executes_when_gate_disabled(

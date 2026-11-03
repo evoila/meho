@@ -21,7 +21,7 @@ so PG parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -102,17 +102,21 @@ def _insert_link(sync_url: str, *, extra_columns: str = "", extra_values: str = 
         sync_eng.dispose()
 
 
-def test_upgrade_adds_nullable_member_state(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_nullable_member_state(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0116`` lands the column, nullable."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     info = dict(_table_info(sync_url))
     assert _COLUMN in info, f"migration 0116 must add check_dashboard_sensors.{_COLUMN}"
     assert info[_COLUMN], "the memo is nullable -- NULL means not counted yet"
 
 
-def test_existing_link_backfills_null(alembic_cfg: tuple[Config, str]) -> None:
+def test_existing_link_backfills_null(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """A link row inserted at ``0115`` reads back with a NULL memo.
 
     The behaviour-preserving property: the first claim after the upgrade
@@ -120,7 +124,7 @@ def test_existing_link_backfills_null(alembic_cfg: tuple[Config, str]) -> None:
     that are already on the Dashboard.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     _insert_link(sync_url)
 
     command.upgrade(cfg, _REVISION)
@@ -142,24 +146,27 @@ def test_existing_link_backfills_null(alembic_cfg: tuple[Config, str]) -> None:
 
 def test_member_state_check_rejects_out_of_vocabulary(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """The CHECK admits the five states (and NULL) -- not an arbitrary word."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     _insert_link(sync_url, extra_columns=f", {_COLUMN}", extra_values=", 'critical'")
     with pytest.raises(IntegrityError):
         _insert_link(sync_url, extra_columns=f", {_COLUMN}", extra_values=", 'bogus'")
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0115"`` drops the column; ``upgrade "0116"`` restores it.
 
     Pinned to this migration's own revision on both legs (never ``head``) so a
     future head migration cannot break the round-trip.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _COLUMN in _columns(sync_url)
 
     command.downgrade(cfg, _DOWN_REVISION)

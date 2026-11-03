@@ -7,10 +7,13 @@
 
 * ``GET  /api/v1/targets``                — list, keyset-paginated. ``operator`` role.
 * ``GET  /api/v1/targets/discover``       — discover candidates. ``operator`` role.
-* ``GET  /api/v1/targets/{name}``         — describe (alias-aware). ``operator`` role.
+* ``GET  /api/v1/targets/{name}``         — describe (name, alias or id). ``operator`` role.
 * ``POST /api/v1/targets/{name}/probe``   — invoke connector probe. ``operator`` role.
 * ``POST /api/v1/targets``                — create. ``tenant_admin`` role.
 * ``PATCH /api/v1/targets/{name}``        — update (partial). ``tenant_admin`` role.
+  On both, the Vault login role keys of ``extras`` (``vault_role``,
+  ``vault_mount``) need ``platform_admin``; see
+  :mod:`meho_backplane.targets.vault_login_extras`.
 * ``DELETE /api/v1/targets/{name}``       — soft-delete. ``tenant_admin`` role.
 
 All routes are tenant-scoped via ``operator.tenant_id`` extracted from the
@@ -20,16 +23,20 @@ reads are impossible — the WHERE clause always includes ``tenant_id``.
 Alias resolution
 ----------------
 
-``GET /{name}`` and ``PATCH /{name}`` both pass the caller-supplied ``name``
-to :func:`~meho_backplane.targets.resolver.resolve_target`, which implements
-the 3-step algorithm: exact name → alias element-equality → near-miss 404.
-Callers can address a target by any of its aliases and get the same result.
+``GET``, ``PATCH``, ``POST .../probe`` and ``DELETE`` on ``/{name}`` pass the
+caller-supplied value to :func:`resolve_route_target`. It calls
+:func:`~meho_backplane.targets.resolver.resolve_target` (exact name → alias
+element-equality → near-miss 404) and, when that finds nothing and the value
+is a UUID, looks the target up by id. Callers can address a target by its
+name, any of its aliases or its id and get the same result. Other callers of
+``resolve_target`` (``call_operation`` and the rest) do not take an id.
 
 Audit enrichment
 ----------------
 
 Routes that call ``resolve_target`` get the resolved target's id bound
-into structlog contextvars at the resolver's single exit point;
+into structlog contextvars at the resolver's single exit point (an id
+lookup in :func:`resolve_route_target` binds the same keys);
 :class:`~meho_backplane.audit.AuditMiddleware` reads ``target_id`` via
 :func:`~meho_backplane.audit._resolve_target_id` and writes it to
 ``audit_log.target_id``. ``create_target`` does not call
@@ -58,9 +65,9 @@ the v1 :func:`~meho_backplane.connectors.registry.get_connector` lookup
 while dispatch consulted v2's
 :func:`~meho_backplane.connectors.resolve_connector`, producing
 disagreeing yes/no answers for the same target (consumer feedback
-signal 19 in ``claude-rdc-hetzner-dc#697`` — ``rdc-vcenter`` got 501
+signal 19 in ``claude-rdc-hetzner-dc#697`` — a target got 501
 from ``/probe`` while ``POST /operations/call`` resolved the same
-target's ``vmware-rest-9.0`` connector cleanly).
+target's connector cleanly).
 
 Resolver outcomes map to HTTP status as follows:
 
@@ -127,15 +134,16 @@ available is the strongest answer.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Any, Final, NoReturn
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -151,14 +159,21 @@ from meho_backplane.connectors.registry import (
 from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.connectors.schemas import AuthModel, CandidateHint, FingerprintResult
 from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
-from meho_backplane.connectors.vault.tenant_scope import rendered_tenant_prefix
+from meho_backplane.connectors.vault.tenant_scope import is_plain_kv_path, rendered_tenant_prefix
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.flight_recorder.config import invalidate_target_override_cache
-from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._handler_resolve import (
+    forget_target_in_connectors,
+    get_or_create_connector_instance,
+)
 from meho_backplane.settings import get_settings
-from meho_backplane.targets.resolver import resolve_target
+from meho_backplane.targets.resolver import (
+    TargetNotFoundError,
+    resolve_target,
+    resolve_target_by_id,
+)
 from meho_backplane.targets.schemas import (
     Target,
     TargetCreate,
@@ -166,8 +181,19 @@ from meho_backplane.targets.schemas import (
     TargetUpdate,
     project_target_to_summary,
 )
+from meho_backplane.targets.secret_field_map import (
+    check_secret_field_map_sources,
+    merge_secret_field_map,
+)
+from meho_backplane.targets.vault_login_extras import enforce_vault_login_extras_platform_admin
 
-__all__ = ["count_graph_node_refs", "router", "soft_delete_target"]
+__all__ = [
+    "count_graph_node_refs",
+    "probe_and_store_fingerprint",
+    "resolve_route_target",
+    "router",
+    "soft_delete_target",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -206,7 +232,7 @@ def _connector_id_for(cls: type[Connector]) -> str:
     """Build the canonical ``connector_id`` string for a resolved connector.
 
     Matches the dispatcher's ``connector_id`` form (e.g. ``"k8s-1.x"``,
-    ``"vmware-rest-9.0"``) — used in the ``fingerprint_failed`` 500
+    ``"harbor-rest-2.x"``) — used in the ``fingerprint_failed`` 500
     envelope (G0.15-T1 #1210) and the structured log line so operator-
     facing diagnostics name the *specific* impl that failed, not just
     the product slug. Falls back to the bare product token when
@@ -387,6 +413,7 @@ def _to_full(t: TargetORM) -> Target:
         verify_tls=t.verify_tls,
         tls_ca_pin=t.tls_ca_pin,
         tls_server_name=t.tls_server_name,
+        secret_field_map=t.secret_field_map or {},
         extras=t.extras,
         notes=t.notes,
         fingerprint=t.fingerprint,
@@ -396,6 +423,44 @@ def _to_full(t: TargetORM) -> Target:
         updated_at=t.updated_at,
         deleted_at=t.deleted_at,
     )
+
+
+_NO_TARGET_BY_ID_MESSAGE: Final[str] = "No target has this name, alias or id."
+
+
+async def resolve_route_target(
+    session: AsyncSession, tenant_id: uuid.UUID, value: str
+) -> TargetORM:
+    """Find one target for the describe, update, probe and delete routes.
+
+    Order: exact name, then alias (both through :func:`resolve_target`),
+    then id. The id step runs only when the name and alias steps found
+    nothing and *value* is a valid UUID, so a target named like a UUID
+    is still found by its name first. The id step loads only a live
+    target of *tenant_id*: the id of another tenant's target, or of a
+    deleted one, gives the same 404 as an unknown name.
+
+    :func:`resolve_target_by_id` does not bind ``target_id`` /
+    ``target_name`` for the audit row, so this helper binds them the
+    same way :func:`resolve_target` does. Other callers of
+    :func:`resolve_target` (``call_operation`` and the rest) keep the
+    name-or-alias-only lookup.
+    """
+    try:
+        return await resolve_target(session, tenant_id, value)
+    except TargetNotFoundError as not_found:
+        try:
+            target_id = uuid.UUID(value)
+        except ValueError:
+            raise not_found from None
+        t = await resolve_target_by_id(session, tenant_id, target_id)
+        if t is None:
+            raise TargetNotFoundError(
+                value, not_found.matches, message=_NO_TARGET_BY_ID_MESSAGE
+            ) from None
+    structlog.contextvars.bind_contextvars(target_id=str(t.id), target_name=t.name)
+    _log.info("target_resolved_by_id", target_id=str(t.id), name=t.name)
+    return t
 
 
 def _bind_tls_audit(
@@ -686,7 +751,7 @@ def _registered_impl_ids(product: str) -> set[str]:
     G0.16-T6 review-iter-1 B1 (#1312). The set is **product-scoped**.
     A global allowlist (the pre-B1 shape) accepted any impl_id
     registered for *any* product, so a ``k8s`` target could pass
-    validation with ``preferred_impl_id="vmware-rest-9.0"`` and the
+    validation with ``preferred_impl_id="harbor-rest-2.x"`` and the
     resolver would silently ignore it at dispatch time -- the exact
     foot-gun G0.15-T6 (#1215) was created to close. The filter is
     consulted at both POST (``body.product``) and PATCH (the
@@ -703,15 +768,15 @@ def _registered_impl_ids(product: str) -> set[str]:
     registry.
 
     G0.16-T6 Finding C (#1312). The set includes BOTH the base
-    ``impl_id`` (``"nsx-rest"``) AND the versioned form
-    ``"{impl_id}-{version}"`` (``"nsx-rest-4.2"``) for every triple
+    ``impl_id`` (``"harbor-rest"``) AND the versioned form
+    ``"{impl_id}-{version}"`` (``"harbor-rest-2.x"``) for every triple
     with a non-empty ``version``. The versioned form is the canonical
     shape per ``docs/codebase/api-shape-conventions.md`` §3 because
     it's more specific (disambiguates when multiple connector versions
     ship in one release) and it matches the ``connector_id`` string
     the dispatcher's ``parse_connector_id`` round-trips through. The
     base form stays accepted so existing operators / fixtures that
-    pin ``preferred_impl_id="nsx-rest"`` aren't broken. The resolver
+    pin ``preferred_impl_id="harbor-rest"`` aren't broken. The resolver
     (:func:`meho_backplane.connectors.resolver._run_tie_break_ladder`)
     normalizes both forms to the base ``impl_id`` before matching
     candidates, so picking either form selects the same connector
@@ -758,7 +823,7 @@ def _build_unknown_preferred_impl_detail(
             f"preferred_impl_id={preferred_impl_id!r} is not registered; "
             f"pick one of {valid_impl_ids!r} or register a connector for "
             f"it before retrying. The canonical form is versioned "
-            f"(e.g. 'nsx-rest-4.2'); the base form ('nsx-rest') stays "
+            f"(e.g. 'harbor-rest-2.x'); the base form ('harbor-rest') stays "
             f"accepted for backward compatibility. The resolver silently "
             f"ignores unknown impl_id overrides; this 422 surfaces the "
             f"foot-gun at write time. See "
@@ -777,7 +842,7 @@ def _validate_preferred_impl_id(preferred_impl_id: str | None, product: str) -> 
     always valid; a non-``None`` value must match an impl_id registered in
     the v2 connector registry **for the target's product** (G0.16-T6
     review-iter-1 B1 #1312 -- a cross-product allowlist let a ``k8s``
-    target pin ``vmware-rest-9.0`` and the resolver would silently ignore
+    target pin ``harbor-rest-2.x`` and the resolver would silently ignore
     it at dispatch). ``valid_impl_ids`` is empty when no connector is
     registered for the product (test isolation / pre-lifespan state, or a
     not-yet-registered product); validation is skipped in that case for
@@ -851,8 +916,14 @@ def _build_secret_ref_outside_tenant_scope_detail(
     secret_ref: str,
     tenant_prefix: str,
     expected_secret_ref: str,
+    plain_path: bool = True,
 ) -> dict[str, object]:
     """Build the T11-compliant ``secret_ref_outside_tenant_scope`` 422 detail.
+
+    ``plain_path=False`` means the ref holds a ``.`` / ``..`` segment, a
+    ``%`` or a backslash. The message then names that rule instead of the
+    tenant subtree, because that refusal does not depend on a prefix
+    (``tenant_prefix`` is empty when the prefix setting is empty).
 
     #2091 (Initiative #2150). Mirrors :func:`_build_unknown_product_detail`
     and the ``docs/codebase/error-message-shape.md`` convention: a stable
@@ -868,12 +939,20 @@ def _build_secret_ref_outside_tenant_scope_detail(
     write surfaces via :func:`_enforce_secret_ref_tenant_scope` so the
     two cannot drift on the constraint's diagnostic shape.
     """
-    return {
-        "kind": "secret_ref_outside_tenant_scope",
-        "secret_ref": secret_ref,
-        "tenant_prefix": tenant_prefix,
-        "expected_secret_ref": expected_secret_ref,
-        "message": (
+    if not plain_path:
+        message = (
+            f"secret_ref={secret_ref!r} has a '.' or '..' segment, a '%' or a "
+            f"backslash, which the backplane refuses in a KV path: Vault or "
+            f"the HTTP client could resolve it to a different place than the "
+            f"one written. Stage the credential at {expected_secret_ref!r} "
+            f"and re-run the import, or omit secret_ref to let the server "
+            f"derive that path. See "
+            f"docs/codebase/connectors-vault-tenant-scope.md for the path "
+            f"rules and docs/codebase/error-message-shape.md for the error "
+            f"convention."
+        )
+    else:
+        message = (
             f"secret_ref={secret_ref!r} is outside the operator's readable "
             f"tenant subtree {tenant_prefix!r}. At dispatch the backplane "
             f"resolves the target's credential on the {DEFAULT_KV_MOUNT!r} "
@@ -889,8 +968,47 @@ def _build_secret_ref_outside_tenant_scope_detail(
             f"namespace convention and "
             f"docs/codebase/error-message-shape.md for the error "
             f"convention."
-        ),
+        )
+    return {
+        "kind": "secret_ref_outside_tenant_scope",
+        "secret_ref": secret_ref,
+        "tenant_prefix": tenant_prefix,
+        "expected_secret_ref": expected_secret_ref,
+        "message": message,
     }
+
+
+def _tenant_prefix_or_empty(operator: Operator) -> str:
+    """Render *operator*'s tenant prefix, normalised; ``""`` when the prefix check is off.
+
+    An empty ``VAULT_KV_TENANT_SCOPE_PREFIX`` (mid-migration deploy) has no
+    subtree to enforce, so only the plain-path rule applies, as at
+    dispatch time.
+    """
+    template = get_settings().vault_kv_tenant_scope_prefix.strip()
+    if not template:
+        return ""
+    return rendered_tenant_prefix(operator, template=template).strip().strip("/")
+
+
+def _vault_kv_candidate(secret_ref: str) -> str | None:
+    """Return the normalised ``<mount>/<path>`` the Vault read of *secret_ref* addresses.
+
+    ``None`` when the ref resolves through a non-Vault store (explicit
+    ``gsm:`` scheme, or the deploy default on a GSM install): the Vault
+    tenant-subtree convention does not apply there. The path is the
+    scheme-stripped store ref, the same one the dispatch-time read sends
+    to Vault, so a ``vault:`` scheme on the ref cannot hide a ``.`` or
+    ``..`` in the first segment. Surrounding whitespace is cut before the
+    scheme is read, as the dispatch-time read cuts it, so a leading blank
+    cannot hide the scheme either.
+    """
+    kind, store_ref = split_credential_ref(
+        secret_ref.strip(), default_backend=get_settings().credential_backend
+    )
+    if kind != "vault":
+        return None
+    return f"{DEFAULT_KV_MOUNT}/{store_ref.strip('/')}"
 
 
 def _enforce_secret_ref_tenant_scope(
@@ -923,12 +1041,15 @@ def _enforce_secret_ref_tenant_scope(
       (:data:`~meho_backplane.connectors._shared.vault_creds.DEFAULT_KV_MOUNT`);
     * the operator's prefix is rendered from
       :attr:`~meho_backplane.settings.Settings.vault_kv_tenant_scope_prefix`
-      via :func:`~meho_backplane.connectors.vault.tenant_scope.rendered_tenant_prefix`;
+      (:func:`_tenant_prefix_or_empty`);
     * matching is on a path-segment boundary, so a ``tenants/<id>``
       prefix cannot be satisfied by ``tenants/<id>-evil/...``;
+    * a ref with a ``.`` / ``..`` segment, a ``%`` or a backslash is
+      refused with any prefix setting, also an empty one
+      (:func:`~meho_backplane.connectors.vault.tenant_scope.is_plain_kv_path`);
     * an **empty** template (``VAULT_KV_TENANT_SCOPE_PREFIX=""``, the
-      guard-disabled mid-migration state) makes this check a no-op —
-      there is no defined subtree to enforce.
+      mid-migration state) turns off only the prefix match: any plain
+      ref passes.
 
     Only an *explicitly supplied* ``secret_ref`` is checked. The
     server-derived default
@@ -946,30 +1067,26 @@ def _enforce_secret_ref_tenant_scope(
     ``CREDENTIAL_BACKEND=gsm`` deploy — has no Vault subtree to enforce
     and is passed through untouched. Backend resolution reuses
     :func:`~meho_backplane.connectors._shared.credential_backend.split_credential_ref`
-    with the deploy default, so the write-time gate's *applicability*
-    tracks the same backend dispatch resolves at read time
+    with the deploy default (:func:`_vault_kv_candidate`), so the
+    write-time gate's *applicability* and the path it checks track the
+    same backend and path dispatch resolves at read time
     (:func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`).
 
     Raises a structured 422 (``kind="secret_ref_outside_tenant_scope"``)
     on violation; returns ``None`` otherwise.
     """
-    kind, _ = split_credential_ref(secret_ref, default_backend=get_settings().credential_backend)
-    if kind != "vault":
-        # Ref resolves through a non-Vault store (explicit ``gsm:`` scheme,
-        # or the deploy default on a GSM install) — the Vault tenant-subtree
-        # convention does not apply, so there is nothing to enforce.
+    candidate = _vault_kv_candidate(secret_ref)
+    if candidate is None:
         return
 
-    template = get_settings().vault_kv_tenant_scope_prefix.strip()
-    if not template:
-        # Guard disabled (mid-migration deploy) — no defined subtree to
-        # enforce; preserve pre-#2091 behaviour exactly.
-        return
-
-    prefix = rendered_tenant_prefix(operator, template=template)
-    normalised_prefix = prefix.strip().strip("/")
-    candidate = f"{DEFAULT_KV_MOUNT}/{secret_ref.strip().strip('/')}"
-    if candidate == normalised_prefix or candidate.startswith(normalised_prefix + "/"):
+    plain_path = is_plain_kv_path(candidate)
+    normalised_prefix = _tenant_prefix_or_empty(operator)
+    in_prefix = (
+        not normalised_prefix
+        or candidate == normalised_prefix
+        or candidate.startswith(normalised_prefix + "/")
+    )
+    if in_prefix and plain_path:
         return
 
     try:
@@ -984,9 +1101,11 @@ def _enforce_secret_ref_tenant_scope(
         detail=_build_secret_ref_outside_tenant_scope_detail(
             secret_ref=secret_ref,
             # Re-append the trailing "/" for readability: the prefix names
-            # a subtree, and the rendered template carries it too.
-            tenant_prefix=normalised_prefix + "/",
+            # a subtree, and the rendered template carries it too. Empty
+            # when the prefix check is off.
+            tenant_prefix=normalised_prefix + "/" if normalised_prefix else "",
             expected_secret_ref=expected_secret_ref,
+            plain_path=plain_path,
         ),
     )
 
@@ -1145,14 +1264,39 @@ async def describe_target(
     operator: Operator = _require_operator,
     session: AsyncSession = Depends(get_session),
 ) -> Target:
-    """Describe a target by name or alias.
+    """Describe a target by name, alias or id.
 
-    Uses :func:`~meho_backplane.targets.resolver.resolve_target` so
-    callers can pass any alias instead of the canonical name. Returns
-    404 with near-misses when nothing matches.
+    Uses :func:`resolve_route_target`: exact name, then alias, then
+    id (only when the value is a UUID). Returns 404 with near-misses
+    when nothing matches.
     """
-    t = await resolve_target(session, operator.tenant_id, name)
+    t = await resolve_route_target(session, operator.tenant_id, name)
     return _to_full(t)
+
+
+def _raise_fingerprint_failed(
+    exc: Exception, *, cls: type[Connector], t: TargetORM, operator: Operator
+) -> NoReturn:
+    """Turn a probe failure into the structured ``fingerprint_failed`` 500.
+
+    G0.15-T1 #1210: a connector that raises mid-fingerprint used to bubble
+    past the route and surface as FastAPI's bare 500 with a ``text/plain``
+    body. Catch + convert to a structured 500 via
+    :func:`_build_fingerprint_failed_detail` (the builder mirrors the
+    dispatcher's ``connector_error`` envelope). Full stacktrace lands in
+    the structured log via :meth:`_log.exception`; only the capped
+    exception message reaches the response body.
+    """
+    detail = _build_fingerprint_failed_detail(exc=exc, cls=cls, target_name=t.name)
+    _log.exception(
+        "probe_fingerprint_failed",
+        target_id=str(t.id),
+        target_name=t.name,
+        tenant_id=str(operator.tenant_id),
+        connector_id=detail["connector_id"],
+        exception_class=detail["exception_class"],
+    )
+    raise HTTPException(status_code=500, detail=detail) from exc
 
 
 @router.post("/{name}/probe", response_model=FingerprintResult)
@@ -1186,14 +1330,31 @@ async def probe_target(
       boundary so probe + dispatch agree on the shape of a connector
       failure — sub-signal A of ``claude-rdc-hetzner-dc#753``).
 
-    No error branch writes to the DB row; the previously-cached
-    fingerprint survives. The outer ``async with session.begin()``
-    rolls back on every structured raise (nothing has been flushed by
-    that point), so the column always reflects the *last successful*
-    probe. The target must exist for the probe to fire — a
-    non-existent target returns 404 via ``resolve_target``.
+    No error branch writes to the DB row, so the column always
+    reflects the *last successful* probe. The path value is a name,
+    an alias or an id (:func:`resolve_route_target`); no match is 404.
+    The work is done by :func:`probe_and_store_fingerprint`, which the
+    ``targets.probe`` operation calls too.
     """
-    t = await resolve_target(session, operator.tenant_id, name)
+    t = await resolve_route_target(session, operator.tenant_id, name)
+    fp = await probe_and_store_fingerprint(session, t, operator=operator)
+    return fp
+
+
+async def probe_and_store_fingerprint(
+    session: AsyncSession, t: TargetORM, *, operator: Operator
+) -> FingerprintResult:
+    """Detect a target's product and version and store it on the target row.
+
+    The one code path behind ``POST /api/v1/targets/{name}/probe`` and the
+    ``targets.probe`` operation. *t* is the target row, found with
+    :func:`resolve_route_target`. The caller finds the row first, so the
+    operation can check MEHO's policy for that target before the system
+    is contacted. Returns the detected fingerprint. Raises
+    :class:`HTTPException` with the status codes :func:`probe_target`
+    lists. The caller owns the transaction: this function only
+    ``flush``-es.
+    """
     cls, label, exception_message = resolve_connector_or_label(t)
     if label == "no_connector":
         raise HTTPException(
@@ -1214,37 +1375,16 @@ async def probe_target(
     try:
         # Forward the route operator so the connector's fingerprint reads
         # per-target Vault credentials under the operator's identity, the
-        # same code path the dispatch surface uses. G0.16-T4 (#1306)
-        # converged probe + dispatch on this signature; pre-fix the
-        # probe path passed nothing (so the connector synthesised a
-        # system operator with a placeholder JWT) and Vault rejected
-        # the JWT/OIDC login as ``malformed jwt: must have three
-        # parts`` on the four connectors whose fingerprint authenticates
-        # via Vault (k8s-1.x, vmware-rest-9.0, sddc-rest-9.0,
-        # nsx-rest-4.2). The wider ABC widening (with
-        # ``operator: Operator | None = None``) keeps this call
-        # backwards-compatible: connectors whose fingerprint does not
-        # touch Vault accept the parameter and ignore it.
+        # same code path the dispatch surface uses (G0.16-T4 #1306).
+        # Connectors whose fingerprint does not touch Vault ignore it.
+        # #3711: a mis-mapped secret_field_map fails here with a 422 naming
+        # the missing source fields, not later in the middle of a dispatch.
+        await check_secret_field_map_sources(t, operator)
         fp = await cls().fingerprint(t, operator=operator)
+    except HTTPException:
+        raise
     except Exception as exc:
-        # G0.15-T1 #1210: a connector that raises mid-fingerprint used
-        # to bubble past the route and surface as FastAPI's bare 500
-        # with a ``text/plain`` body. Catch + convert to a structured
-        # 500 via :func:`_build_fingerprint_failed_detail` (the
-        # builder mirrors the dispatcher's ``connector_error``
-        # envelope). Full stacktrace lands in the structured log via
-        # :meth:`_log.exception`; only the capped exception message
-        # reaches the response body.
-        detail = _build_fingerprint_failed_detail(exc=exc, cls=cls, target_name=t.name)
-        _log.exception(
-            "probe_fingerprint_failed",
-            target_id=str(t.id),
-            target_name=t.name,
-            tenant_id=str(operator.tenant_id),
-            connector_id=detail["connector_id"],
-            exception_class=detail["exception_class"],
-        )
-        raise HTTPException(status_code=500, detail=detail) from exc
+        _raise_fingerprint_failed(exc, cls=cls, t=t, operator=operator)
     # ``model_dump(mode='json')`` produces a JSONB-safe dict (datetime
     # → ISO string, enum → value, UUID → str). Plain ``model_dump()``
     # would leak Python-native types into the JSON column, breaking
@@ -1288,6 +1428,34 @@ def _resolve_create_secret_ref(body: TargetCreate, operator: Operator) -> str | 
     return body.secret_ref
 
 
+def _validate_create_body_fields(body: TargetCreate, operator: Operator) -> str:
+    """Run the write-time validators for a target POST; return the product token.
+
+    Mirrors :func:`_validate_update_body_fields`. Three checks, all raising
+    before any row is built:
+
+    * **product** — G0.18-T2 (#1355) / G0.27 / T3 (#1817). Validate the
+      incoming product token against the registered set so a value copied
+      straight out of ``meho connector list`` is accept-equivalent here.
+      Every connector registers under the short, dispatch-canonical token
+      the listing emits, so the token is stored as-is (the write-time alias
+      bridge was retired by #1817). See
+      :func:`_canonicalise_and_validate_product`.
+    * **preferred_impl_id** — G0.15-T6 (#1215). Reject an unknown
+      ``preferred_impl_id`` at write time (the validated product token
+      scopes the valid set). See :func:`_validate_preferred_impl_id`.
+    * **extras** — the Vault login role keys (``vault_role`` /
+      ``vault_mount``) need a platform admin. See
+      :func:`~meho_backplane.targets.vault_login_extras.enforce_vault_login_extras_platform_admin`.
+    """
+    product = _canonicalise_and_validate_product(body.product)
+    _validate_preferred_impl_id(body.preferred_impl_id, product)
+    enforce_vault_login_extras_platform_admin(
+        operator, before=None, after=body.extras, target_name=body.name
+    )
+    return product
+
+
 @router.post("", response_model=Target, status_code=201)
 async def create_target(
     body: TargetCreate,
@@ -1325,17 +1493,9 @@ async def create_target(
     per-tenant default (#1723) and always passes; no-op when the guard
     is disabled. See :func:`_enforce_secret_ref_tenant_scope`.
     """
-    # G0.18-T2 (#1355) / G0.27 / T3 (#1817). Validate the incoming product
-    # token against the registered set so a value copied straight out of
-    # ``meho connector list`` is accept-equivalent here. Every connector
-    # now registers under the short, dispatch-canonical token the listing
-    # emits, so the token is stored as-is (the write-time alias bridge was
-    # retired by #1817). See :func:`_canonicalise_and_validate_product`.
-    product = _canonicalise_and_validate_product(body.product)
-    # G0.15-T6 (#1215). Reject an unknown ``preferred_impl_id`` at write
-    # time (the validated product token scopes the valid set). See
-    # :func:`_validate_preferred_impl_id`.
-    _validate_preferred_impl_id(body.preferred_impl_id, product)
+    # Write-time validators (product / impl-id / Vault login role keys) all
+    # raise before the row is built. See :func:`_validate_create_body_fields`.
+    product = _validate_create_body_fields(body, operator)
     now = datetime.now(UTC)
     create_fields = body.model_dump()
     # Persist the validated product token so the stored row matches the
@@ -1345,6 +1505,8 @@ async def create_target(
     # default; an explicit ``{"secret_ref": null}`` persists verbatim. See
     # :func:`_resolve_create_secret_ref`.
     create_fields["secret_ref"] = _resolve_create_secret_ref(body, operator)
+    # #3711: an empty map is stored as NULL ("no map").
+    create_fields["secret_field_map"] = body.secret_field_map or None
     t = TargetORM(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
@@ -1388,6 +1550,71 @@ async def create_target(
     return _to_full(t)
 
 
+#: PATCH fields that change how MEHO reaches or logs in to a target. Sending
+#: any of them makes connectors drop what they keep for the target (#3879).
+#: The check is "field sent", not "value changed": re-sending the same
+#: ``secret_ref`` is how an operator makes MEHO read a secret again after it
+#: was changed only in Vault.
+_CONNECTION_FIELDS = frozenset(
+    {
+        "product",
+        "version",
+        "preferred_impl_id",
+        "host",
+        "port",
+        "fqdn",
+        "secret_ref",
+        "auth_model",
+        "verify_tls",
+        "tls_ca_pin",
+        "tls_server_name",
+        "extras",
+    }
+)
+
+
+#: Post-commit drop tasks, kept here so the event loop does not lose them
+#: before they finish (``asyncio`` holds only weak references to tasks).
+_AFTER_COMMIT_DROP_TASKS: set[asyncio.Task[None]] = set()
+
+
+def _drop_again_after_commit(session: AsyncSession, t: TargetORM) -> None:
+    """Run :func:`forget_target_in_connectors` once more after *session* commits.
+
+    #3879. The handler does not commit on its own: the request's session
+    commits after the response is sent, and the UI import updates many
+    targets in one transaction. A dispatch that reads the target before that
+    commit still sees the old row and can keep a new login made with the old
+    values. A one-time ``after_commit`` listener drops the kept login again
+    once the new row is saved. SQLAlchemy session events are sync, so the
+    listener starts the drop as a task on the running event loop. A rollback
+    never fires the listener, and the session is closed at the end of the
+    request, so nothing is left behind.
+    """
+
+    @event.listens_for(session.sync_session, "after_commit", once=True)
+    def _schedule_drop(_session: Any) -> None:
+        task = asyncio.get_running_loop().create_task(forget_target_in_connectors(t))
+        _AFTER_COMMIT_DROP_TASKS.add(task)
+        task.add_done_callback(_AFTER_COMMIT_DROP_TASKS.discard)
+
+
+async def _drop_kept_logins_on_connection_change(
+    session: AsyncSession, t: TargetORM, updates: dict[str, Any]
+) -> None:
+    """Make connectors drop the login they keep for *t* after a connection change.
+
+    #3879. Runs only when the PATCH sent a field in :data:`_CONNECTION_FIELDS`.
+    Every connector drops the login and credentials it keeps for the target,
+    so the next dispatch logs in with the new values. The drop runs now, and
+    once more after the transaction commits (see
+    :func:`_drop_again_after_commit`).
+    """
+    if _CONNECTION_FIELDS.intersection(updates):
+        await forget_target_in_connectors(t)
+        _drop_again_after_commit(session, t)
+
+
 def _validate_update_body_fields(
     updates: dict[str, Any],
     t: TargetORM,
@@ -1397,7 +1624,7 @@ def _validate_update_body_fields(
 
     Extracted from :func:`update_target` so the handler stays within the
     function-size budget while the validation phase reads as one unit.
-    Three checks, all raising *before* the row is mutated:
+    Five checks, all raising *before* the row is mutated:
 
     * **product** — G0.14-T4 (#1145) / G0.18-T2 (#1355). Reject
       ``{"product": null}`` and validate a changed product against the
@@ -1413,11 +1640,27 @@ def _validate_update_body_fields(
       for an explicit non-null ``secret_ref``; an explicit null (clear)
       and an absent field pass through. See
       :func:`_enforce_secret_ref_tenant_scope`.
+    * **secret_field_map** — #3711. The sent entries are merged into the
+      stored map (``null`` entry removes, ``null`` map clears) and
+      ``updates`` is rewritten to the merged result; a merged map above
+      the entry limit is a 422. See :func:`merge_secret_field_map`.
+    * **extras** — a sent ``extras`` that adds, changes or removes the
+      Vault login role or auth mount (``vault_role`` / ``vault_mount``)
+      is a 403 unless the operator is a platform admin. See
+      :func:`~meho_backplane.targets.vault_login_extras.enforce_vault_login_extras_platform_admin`.
     """
     effective_product = _apply_product_patch(updates, t.product)
     _validate_preferred_impl_id(updates.get("preferred_impl_id"), effective_product)
     if updates.get("secret_ref") is not None:
         _enforce_secret_ref_tenant_scope(updates["secret_ref"], operator, t.name)
+    if "extras" in updates:
+        enforce_vault_login_extras_platform_admin(
+            operator, before=t.extras, after=updates["extras"], target_name=t.name
+        )
+    if "secret_field_map" in updates:
+        updates["secret_field_map"] = merge_secret_field_map(
+            t.secret_field_map, updates["secret_field_map"]
+        )
 
 
 @router.patch("/{name}", response_model=Target)
@@ -1439,14 +1682,14 @@ async def update_target(
     diagnostic at PATCH time that they would see at probe time.
     ``updated_at`` is always refreshed on a successful write.
 
-    #2091. An explicit non-null ``secret_ref`` outside the operator's
-    tenant subtree is rejected with a structured 422
-    (``kind="secret_ref_outside_tenant_scope"``) — the same write-time
-    gate as POST. An explicit ``{"secret_ref": null}`` (clear) and a
-    PATCH not sending the field are untouched; no-op when the guard is
-    disabled. See :func:`_enforce_secret_ref_tenant_scope`.
+    #2091. An explicit non-null ``secret_ref`` outside the operator's tenant subtree
+    is rejected with a structured 422 (``kind="secret_ref_outside_tenant_scope"``) — the
+    same write-time gate as POST. An explicit ``{"secret_ref": null}`` (clear) and a
+    PATCH not sending the field are untouched; no-op when the guard is disabled. See
+    :func:`_enforce_secret_ref_tenant_scope`. The path value is a name, an alias or an
+    id (:func:`resolve_route_target`).
     """
-    t = await resolve_target(session, operator.tenant_id, name)
+    t = await resolve_route_target(session, operator.tenant_id, name)
     updates = body.model_dump(exclude_unset=True)
     # T1 (#1780). Snapshot the pre-patch TLS-verification state *before*
     # the ``setattr`` loop below mutates the row, so the audit fold-in
@@ -1519,6 +1762,7 @@ async def update_target(
         _audit_flight_recorder_capture_write(
             t, tenant_id=operator.tenant_id, before=fr_capture_before
         )
+    await _drop_kept_logins_on_connection_change(session, t, updates)
     return _to_full(t)
 
 
@@ -1615,20 +1859,19 @@ async def delete_target(
     ``meho_connector_edit_*`` precedent so cross-tenant audit
     queries can filter by op id prefix).
 
-    Re-deletes collapse to 404 — the second DELETE goes through
-    :func:`~meho_backplane.targets.resolver.resolve_target`
-    which filters ``deleted_at IS NULL``, so the row no longer
-    resolves once the first DELETE flushes.
+    The path value is a name, an alias or an id (see
+    :func:`resolve_route_target`). Re-deletes collapse to 404 —
+    every lookup step filters ``deleted_at IS NULL``, so the row no
+    longer resolves once the first DELETE flushes.
 
-    ``tenant_admin`` role required (cross-tenant DELETE returns
-    the standard 404 conflation that :func:`resolve_target`
-    enforces).
+    ``tenant_admin`` role required (cross-tenant DELETE, by name or
+    by id, returns the standard 404).
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_DELETE_OP_ID,
         audit_op_class="write",
     )
-    t = await resolve_target(session, operator.tenant_id, name)
+    t = await resolve_route_target(session, operator.tenant_id, name)
     await soft_delete_target(session, t, operator=operator, force=force)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

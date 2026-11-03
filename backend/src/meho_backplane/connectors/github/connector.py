@@ -47,7 +47,7 @@ violation.
   passes through as the bearer credential. Documented but not
   first-class.
 
-Per-target cache scoping mirrors vmware-rest: keyed on the tenant-unique
+Per-target cache scoping is keyed on the tenant-unique
 ``(tenant_id, target.id)`` tuple (#1642/#1672) so two same-named targets
 in different tenants never share a cached token,
 serialised under a single :class:`asyncio.Lock` so two concurrent
@@ -101,6 +101,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import (
     CredentialsReadError,
@@ -124,6 +125,7 @@ from meho_backplane.connectors.github.session import (
     load_github_credentials_from_vault,
     mint_github_app_jwt,
 )
+from meho_backplane.connectors.github.workflow_check import ticket_event_workflow_check
 from meho_backplane.connectors.schemas import (
     AuthModel,
     FingerprintResult,
@@ -201,6 +203,8 @@ class GitHubRestConnector(HttpConnector):
         # token never expires from MEHO's side (the PAT carries its own
         # GitHub-set TTL). Caching keeps the Vault read off the hot path.
         self._pat_tokens: dict[tuple[str, str], str] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._token_lock = asyncio.Lock()
         # The injected http client is reserved for a future bring-your-
         # own-client test path; production uses the inherited per-target
@@ -303,12 +307,15 @@ class GitHubRestConnector(HttpConnector):
             now = time.monotonic()
             cached_app = self._installation_tokens.get(cache_key)
             if cached_app is not None and cached_app.expires_at_monotonic > now:
+                await self._ensure_read(target, operator)
                 return cached_app.token
             cached_pat = self._pat_tokens.get(cache_key)
             if cached_pat is not None:
+                await self._ensure_read(target, operator)
                 return cached_pat
 
             creds = await self._credentials_loader(target, operator)
+            self._readers.record(target, operator)
             if isinstance(creds, GitHubAppCredentials):
                 return await self._mint_and_cache_installation_token(target, creds)
             if isinstance(creds, GitHubPATCredentials):
@@ -326,6 +333,12 @@ class GitHubRestConnector(HttpConnector):
                 f"This is a loader-configuration bug. See "
                 f"docs/codebase/connectors-github.md."
             )
+
+    async def _ensure_read(self, target: GitHubTargetLike, operator: Operator) -> None:
+        """Run the caller's own Vault read of *target*'s secret, once per caller."""
+        await self._readers.ensure_read(
+            target, operator, lambda: self._credentials_loader(target, operator)
+        )
 
     async def _mint_and_cache_installation_token(
         self,
@@ -385,7 +398,9 @@ class GitHubRestConnector(HttpConnector):
           ``extras['installations_count']``.
         * ``api.github.com/repos/<owner>/<repo>`` →
           ``GET /repos/{owner}/{repo}`` returns the repo's metadata for
-          a targeted-repo fingerprint.
+          a targeted-repo fingerprint. MEHO then reads the repo's
+          ``.github/workflows/`` files and warns about each workflow that
+          a ticket write would start (:mod:`.workflow_check`).
 
         ``operator`` (optional, G0.16-T4 #1306) is forwarded to the
         credentials loader so the per-target Vault read happens under
@@ -437,7 +452,10 @@ class GitHubRestConnector(HttpConnector):
 
         if repo_path is None:
             return _fingerprint_from_installations(payload, probed_at, probe_method)
-        return _fingerprint_from_repo(payload, probed_at, probe_method)
+        workflows: dict[str, Any] = {}
+        if isinstance(payload, dict):
+            workflows = await ticket_event_workflow_check(self, target, eff_operator, repo_path)
+        return _fingerprint_from_repo(payload, probed_at, probe_method, workflows)
 
     async def probe(self, target: GitHubTargetLike) -> ProbeResult:
         """Lightweight reachability check.
@@ -492,11 +510,26 @@ class GitHubRestConnector(HttpConnector):
         """
         return None
 
+    async def invalidate_credentials(self, target: GitHubTargetLike) -> None:
+        """Drop the kept installation token and PAT for *target* (#2396, #3879).
+
+        The next call reads the secret from Vault again. The dispatcher calls
+        this after a failed login, and the target update route calls it after
+        a target change, so a new or narrower credential is used at once
+        instead of after the kept token expires.
+        """
+        cache_key = target_cache_key(target)
+        async with self._token_lock:
+            self._installation_tokens.pop(cache_key, None)
+            self._pat_tokens.pop(cache_key, None)
+            self._readers.forget(target)
+
     async def aclose(self) -> None:
         """Drop cached tokens + close the inherited httpx pool."""
         async with self._token_lock:
             self._installation_tokens.clear()
             self._pat_tokens.clear()
+            self._readers.clear()
         await super().aclose()
 
 
@@ -533,9 +566,8 @@ async def _default_loader(
 def _is_acceptable_auth_model(value: object) -> bool:
     """Return ``True`` iff *value* is the SHARED_SERVICE_ACCOUNT model or unset.
 
-    Mirrors the predicate :class:`VmwareRestConnector` uses at its
-    boundary (the vmware-rest precedent the G0.16-T2 reconciliation
-    aligned the gh-rest connector with). Accepts the enum member, the
+    The G0.16-T2 reconciliation set this predicate at the gh-rest
+    connector boundary. Accepts the enum member, the
     equivalent string, and ``None`` (the legacy-row sentinel for
     targets that predate the column-default backfill). Any other
     value (``"per_user"``, ``"impersonation"``, a typo, an int) is
@@ -626,13 +658,16 @@ def _fingerprint_from_repo(
     payload: Any,
     probed_at: datetime,
     probe_method: str,
+    workflows: dict[str, Any] | None = None,
 ) -> FingerprintResult:
     """Build a :class:`FingerprintResult` from ``GET /repos/{owner}/{repo}``.
 
     Returns the repo's identity (``full_name``, ``id``, ``private``)
     plus the owner's account type — sufficient for an operator to
     confirm "yes my App is installed on this repo" without a second
-    call. Inspired by vmware-rest's ``GET /api/about`` shape.
+    call. *workflows* is the result of
+    :func:`~meho_backplane.connectors.github.workflow_check.ticket_event_workflow_check`,
+    merged into ``extras`` so the target shows the ticket-write warning.
     """
     if not isinstance(payload, dict):
         return FingerprintResult(
@@ -658,6 +693,7 @@ def _fingerprint_from_repo(
             "owner_login": owner.get("login") if owner else None,
             "owner_type": owner.get("type") if owner else None,
             "default_branch": payload.get("default_branch"),
+            **(workflows or {}),
         },
     )
 

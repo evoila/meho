@@ -19,7 +19,7 @@ same DDL runs on PostgreSQL.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -108,9 +108,10 @@ def _columns(sync_url: str) -> set[str]:
 
 def test_old_rows_keep_audit_id_and_get_no_guessed_kind(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     audit_id = uuid.uuid4().hex
     row_id = _insert_old_row(sync_url, audit_id=audit_id)
 
@@ -122,9 +123,11 @@ def test_old_rows_keep_audit_id_and_get_no_guessed_kind(
     assert row["request_id"] is None
 
 
-def test_database_rejects_an_unknown_change_kind(alembic_cfg: tuple[Config, str]) -> None:
+def test_database_rejects_an_unknown_change_kind(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     eng = sa_create_engine(sync_url)
     try:
@@ -144,9 +147,11 @@ def test_database_rejects_an_unknown_change_kind(alembic_cfg: tuple[Config, str]
         eng.dispose()
 
 
-def test_downgrade_drops_the_columns_and_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_drops_the_columns_and_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     row_id = _insert_old_row(sync_url, audit_id=uuid.uuid4().hex)
 
     command.downgrade(cfg, _DOWN_REVISION)

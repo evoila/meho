@@ -9,12 +9,9 @@ Pure data only -- JSON Schema 2020-12 ``parameter_schema`` /
 ``response_schema`` documents and the structured ``llm_instructions``
 payload the meta-tools (G0.6-T8) inline verbatim.
 
-Secret-material discipline (#1412): the ``vault.token.create``
-**response** carries a freshly-minted client token. Redaction is at the
-classification layer -- :func:`meho_backplane.broadcast.events.classify_op`
-maps ``vault.token.create`` to ``credential_mint`` (aggregate-only
-broadcast, ``params_hash`` only in the audit row) -- not in these
-schemas. A token **accessor** (``revoke_accessor`` / ``lookup_accessor``
+Secret-material discipline: the ``vault.token.create`` handler drops the
+new client token from Vault's answer, so its response schema has only the
+accessor and the policies. A token **accessor** (``revoke_accessor`` / ``lookup_accessor``
 param, ``list_accessors`` response) is a reference handle, not the token
 secret -- deliberately not redacted. Vault also blanks the token ``id``
 in a ``lookup-accessor`` response, so the metadata read (#2844) exposes
@@ -108,15 +105,6 @@ VAULT_TOKEN_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
 VAULT_TOKEN_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "client_token": {
-            "type": "string",
-            "description": (
-                "The minted client token. SECRET MATERIAL: redacted from the "
-                "audit row (params_hash only) and the broadcast feed (this op "
-                "classifies credential_mint -> aggregate-only). Reaches only "
-                "the caller's OperationResult -- store it immediately."
-            ),
-        },
         "accessor": {
             "type": "string",
             "description": (
@@ -131,22 +119,22 @@ VAULT_TOKEN_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": "Policies attached to the minted token.",
         },
     },
-    "required": ["client_token", "accessor"],
+    "required": ["accessor"],
     "description": (
-        "The minted token plus its accessor and policies. The client_token "
-        "is secret and never reaches the audit row or broadcast feed."
+        "The new token's accessor and policies. MEHO never returns the new token itself."
     ),
 }
 
 VAULT_TOKEN_CREATE_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_use": (
-        "Mint a fresh Vault client token with explicit policies/TTL. "
-        "DANGEROUS, requires approval, and NON-IDEMPOTENT: every call "
-        "mints a distinct token. The client_token is SECRET -- it is "
-        "redacted from the audit row and the broadcast feed "
-        "(credential_mint) and reaches only the caller's OperationResult; "
-        "store it immediately. The accessor is a non-secret handle for "
-        "later revocation (vault.token.revoke_accessor)."
+        "Make a Vault client token with explicit policies/TTL and get "
+        "back only its accessor. DANGEROUS, requires approval, and "
+        "NON-IDEMPOTENT: every call makes a new token. MEHO never shows "
+        "the new token. To get a token you can use, call "
+        "vault.token.create_and_store instead: it makes an orphan token "
+        "and writes it to a Vault KV path or a Kubernetes Secret. The "
+        "accessor is a non-secret handle for vault.token.lookup_accessor "
+        "and vault.token.revoke_accessor."
     ),
     "parameter_hints": {
         "policies": "Optional. Policy names attached to the token (the privilege grant).",
@@ -160,9 +148,8 @@ VAULT_TOKEN_CREATE_LLM_INSTRUCTIONS: dict[str, Any] = {
         "entity_alias": "Optional. Entity alias name to associate.",
     },
     "output_shape": (
-        "On success: {'client_token': ..., 'accessor': ..., 'policies': "
-        "[...]} -- the client_token is secret (redacted from audit/"
-        "broadcast). On failure: a connector_error OperationResult."
+        "On success: {'accessor': ..., 'policies': [...]} -- no token. "
+        "On failure: a connector_error OperationResult."
     ),
 }
 

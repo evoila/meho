@@ -70,16 +70,16 @@ The read op exposes ``cat <file>`` on a remote nameserver; without a
 filter the agent could ask for ``/etc/passwd``. The same filter
 (``ensure_path_under_root``) is reused by ``apply_file`` to gate the
 target-path argument so an operator-typed value cannot deposit a
-file outside the bind config root.
+file outside the bind config root. That filter is lexical: it
+rejects ``../`` ladders and absolute paths outside the root.
 
-Why lexical, not realpath: a realpath check would require a second
-SSH round-trip to resolve symlinks server-side, doubling the wire
-cost. The threat model is operator-typed paths in agent prompts,
-not a hostile operator carefully placing a symlink to ``/etc/shadow``
-inside ``/etc/bind/`` -- if the latter exists, the operator already
-owns the server. The lexical check rejects ``../`` ladders and
-absolute paths outside the root, which is the right granularity
-for the agent-typed risk.
+The read runs without approval (#5132), so it has two more checks.
+``ensure_config_file_name`` lets it read only config files
+(``named.conf``, ``named.conf.*``, ``*.conf``) and refuses key files
+(``rndc.key``, ``*.key``, ``*.private``) and zone files. And so that a
+symlink cannot get around either check, the handler asks the
+nameserver for the real path (``realpath``) of the file and of the
+root, and runs both checks again on the real path before ``cat``.
 
 References
 ----------
@@ -135,6 +135,7 @@ __all__ = [
     "bind9_config_backup",
     "bind9_config_reload",
     "bind9_config_show",
+    "ensure_config_file_name",
     "ensure_path_under_root",
     "pack_views_tar",
 ]
@@ -171,8 +172,9 @@ def ensure_path_under_root(requested: str, allowed_root: str) -> str:
     input is degenerate.
 
     The check is lexical (uses :func:`posixpath.normpath` to collapse
-    ``..`` and ``.`` segments) -- the module docstring spells out why
-    we don't realpath-resolve via a second SSH round-trip.
+    ``..`` and ``.`` segments). ``bind9.config.show`` also runs it on
+    the server-side ``realpath`` of the file, so a symlink cannot get
+    around it there.
 
     POSIX-only: bind9 ships on Linux + the BSDs; ``ntpath`` cases never
     apply, and using :mod:`pathlib` would auto-detect the *local*
@@ -214,9 +216,59 @@ def ensure_path_under_root(requested: str, allowed_root: str) -> str:
     return candidate
 
 
+def ensure_config_file_name(path: str) -> str:
+    """Return *path* when its file name is a BIND config file, or raise.
+
+    ``bind9.config.show`` runs without approval, so it reads only config
+    files: ``named.conf``, names that start with ``named.conf.`` and names
+    that end in ``.conf``. Key files (``*.key``, ``*.private``) are refused
+    even when the rest of the name matches. Every other file -- for example
+    ``rndc.key``, ``bind.keys`` or a zone file -- is refused too; zone files
+    have their own read, ``bind9.zone.read``.
+
+    *path* must already be normalised (the output of
+    :func:`ensure_path_under_root` or a server-side ``realpath``), so a
+    ``..`` or ``.`` segment cannot hide the real file name.
+    """
+    name = posixpath.basename(path)
+    if name.endswith((".key", ".private")) or not (
+        name == "named.conf" or name.startswith("named.conf.") or name.endswith(".conf")
+    ):
+        raise ConfigPathRejectedError(
+            f"file {name!r} is not a BIND config file; bind9.config.show reads only "
+            "named.conf, named.conf.* and *.conf files (use bind9.zone.read for zones)"
+        )
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Handler
 # ---------------------------------------------------------------------------
+
+
+async def _real_paths(
+    connector: Bind9Connector,
+    target: Any,
+    root: str,
+    path: str,
+    operator: Operator | None,
+) -> tuple[str, str]:
+    """Ask the nameserver for the real path of *root* and of *path*.
+
+    ``realpath`` follows every symlink, so the caller can check where the
+    file really is before it reads it. Any doubt (an error, a missing
+    line) raises :class:`ConfigPathRejectedError`.
+    """
+    proc = await connector._run_command(
+        target,
+        f"realpath -- {shlex.quote(root)} {shlex.quote(path)}",
+        operator=operator,
+    )
+    stdout = getattr(proc, "stdout", None)
+    lines = stdout.splitlines() if isinstance(stdout, str) else []
+    if getattr(proc, "exit_status", None) != 0 or len(lines) != 2:
+        raise ConfigPathRejectedError(f"could not resolve the real path of {path!r}")
+    return lines[0], lines[1]
 
 
 async def bind9_config_show(
@@ -227,18 +279,22 @@ async def bind9_config_show(
 ) -> dict[str, Any]:
     """Handler for ``bind9.config.show``.
 
-    Two-step:
+    Steps:
 
     1. Fingerprint the target so the handler knows the bind config
        root. The SSH adapter's connection pool reuses a single TCP
        session, so this is a cheap pair of ``_run_command`` calls
        (``named -v`` + ``cat /etc/os-release``).
-    2. Run the path-safety filter against the operator-typed path,
-       then ``cat`` the resolved path.
+    2. Run the path-safety filter and the file-name rule
+       (:func:`ensure_config_file_name`) against the operator-typed path.
+    3. Ask the nameserver for the real path of the file and the root,
+       and run both checks again on the real path (symlinks).
+    4. ``cat`` the real path.
 
-    Returns ``{file, content}`` on success. The path-safety filter
-    raises :class:`ConfigPathRejectedError` (a :class:`ValueError`
-    subclass) for traversal attempts; the dispatcher's
+    Returns ``{file, content}`` on success. The checks raise
+    :class:`ConfigPathRejectedError` (a :class:`ValueError` subclass)
+    for traversal attempts and for files that are not config files
+    (key files, zone files); the dispatcher's
     ``connector_error`` branch maps that to a structured envelope with
     no file content leaked. A unit test (and an acceptance criterion
     on Issue #588) asserts the envelope carries no content payload on
@@ -259,13 +315,18 @@ async def bind9_config_show(
         )
     allowed_root = posixpath.dirname(named_conf_path) or "/etc/bind"
 
-    resolved = ensure_path_under_root(requested, allowed_root)
+    # Both checks run on the lexical path first, so an obvious refusal
+    # never reaches the wire, and again on the real path, so a symlink
+    # inside the root cannot point the read at a key file or outside it.
+    resolved = ensure_config_file_name(ensure_path_under_root(requested, allowed_root))
+    real_root, real_path = await _real_paths(connector, target, allowed_root, resolved, operator)
+    ensure_config_file_name(ensure_path_under_root(real_path, real_root))
 
     # shlex.quote handles any embedded special chars (single quotes,
     # spaces, ...); the ensure_path_under_root filter rejected control
     # bytes already, so the resulting quoted form is safe to splice
     # into the SSH command line.
-    proc = await connector._run_command(target, f"cat {shlex.quote(resolved)}", operator=operator)
+    proc = await connector._run_command(target, f"cat {shlex.quote(real_path)}", operator=operator)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     content = stdout if isinstance(stdout, str) else ""
 
@@ -285,13 +346,15 @@ BIND9_CONFIG_SHOW_PARAMETER_SCHEMA: dict[str, Any] = {
             "minLength": 1,
             "pattern": "\\S",
             "description": (
-                "Path to read. May be absolute (must be lexically under "
+                "Config file to read. May be absolute (must be under "
                 "the bind config root from fingerprint's "
                 "``extras.named_conf_path`` directory) or relative "
-                "(resolved against the same root). Traversal paths "
-                "(``../...``) and absolute paths outside the root are "
-                "rejected with a structured ``invalid_params`` error "
-                "carrying no file content. Examples: ``named.conf``, "
+                "(resolved against the same root). Only ``named.conf``, "
+                "``named.conf.*`` and ``*.conf`` files are read. Key "
+                "files (``rndc.key``, ``*.key``, ``*.private``), zone "
+                "files, traversal paths (``../...``) and paths outside "
+                "the root are rejected with a structured error carrying "
+                "no file content. Examples: ``named.conf``, "
                 "``views/external.conf``, ``/etc/bind/named.conf.local``."
             ),
         },
@@ -310,7 +373,12 @@ _BIND9_CONFIG_SHOW_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "content": {
             "type": "string",
-            "description": "File content verbatim, as bind9 sees it.",
+            "description": (
+                "File content as bind9 sees it, except that the value of "
+                "every ``secret`` and ``cookie-secret`` line, with or "
+                "without quotes, is replaced with "
+                "``[REDACTED:bind_key_secret]``."
+            ),
         },
     },
     "required": ["file", "content"],
@@ -321,13 +389,18 @@ _BIND9_CONFIG_SHOW_RESPONSE_SCHEMA: dict[str, Any] = {
 BIND9_CONFIG_SHOW_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_use": (
         "Call when the operator asks 'show me named.conf' or 'what's "
-        "in the views fragment X?'. Read-only. Path-safety is enforced "
-        "at the API boundary: paths outside the bind config root "
+        "in the views fragment X?', and before ``bind9.config.apply_file`` "
+        "to read the current file. Read-only; runs without approval. "
+        "Reads only config files: ``named.conf``, ``named.conf.*`` and "
+        "``*.conf``. Key files (``rndc.key``, ``*.key``, ``*.private``), "
+        "zone files and paths outside the bind config root "
         "(``extras.named_conf_path`` directory from the connector's "
-        "fingerprint) are refused with no file content leaked. Use "
-        "relative paths whenever possible -- they're inherently scoped "
-        "and the agent doesn't have to remember the absolute root "
-        "layout."
+        "fingerprint) are refused with no file content. For a zone "
+        "file, use ``bind9.zone.read``. Key secrets in the file "
+        "(the value of ``secret`` and ``cookie-secret``) come back as "
+        "``[REDACTED:bind_key_secret]``. Use relative paths whenever "
+        "possible -- they're inherently scoped and the agent doesn't "
+        "have to remember the absolute root layout."
     ),
     "parameter_hints": {
         "path": (
@@ -338,8 +411,8 @@ BIND9_CONFIG_SHOW_LLM_INSTRUCTIONS: dict[str, Any] = {
         ),
     },
     "output_shape": (
-        "On success: {'file': <resolved abs path>, 'content': <raw "
-        "text>}. On rejection: a connector_error OperationResult with "
+        "On success: {'file': <resolved abs path>, 'content': <file "
+        "text, key secrets redacted>}. On rejection: a connector_error OperationResult with "
         "extras.exception_class='ConfigPathRejectedError' and no "
         "``content`` key on the envelope."
     ),
@@ -1338,27 +1411,21 @@ CONFIG_OPS: tuple[Bind9Op, ...] = (
     Bind9Op(
         op_id="bind9.config.show",
         handler_attr="bind9_config_show",
-        summary="Read named.conf or an included fragment; path-safety-filtered.",
+        summary="Read named.conf or another config file; key secrets hidden.",
         description=(
-            "Reads a bind9 config file over SSH and returns its content. "
-            "Path-safety: only files under the bind config root "
-            "(``extras.named_conf_path`` directory from the connector's "
-            "fingerprint) are accessible. Traversal paths "
-            "(``../../etc/passwd``, absolute ``/etc/passwd``, etc.) "
-            "return a structured ``connector_error`` envelope with "
-            "``exception_class='ConfigPathRejectedError'`` and no file "
-            "content leaked. Use to inspect ``named.conf``, included "
-            "fragments (``named.conf.local``, ``named.conf.options``), "
-            "or per-view configuration the operator manages under "
-            "``views/``. Read-only; pairs with ``bind9.zone.list`` for "
-            "the operator question 'how is this nameserver configured?'."
+            "Reads one bind9 config file (``named.conf``, ``named.conf.*`` "
+            "or ``*.conf``) under the bind config root. Runs "
+            "without approval. Key files, zone files and paths outside "
+            "the root are refused with ``ConfigPathRejectedError`` and no "
+            "content. Key secrets come back as "
+            "``[REDACTED:bind_key_secret]``."
         ),
         parameter_schema=BIND9_CONFIG_SHOW_PARAMETER_SCHEMA,
         response_schema=_BIND9_CONFIG_SHOW_RESPONSE_SCHEMA,
         group_key="config",
         tags=("read-only", "config"),
-        safety_level="caution",
-        requires_approval=True,
+        safety_level="safe",
+        requires_approval=False,
         llm_instructions=BIND9_CONFIG_SHOW_LLM_INSTRUCTIONS,
     ),
     Bind9Op(

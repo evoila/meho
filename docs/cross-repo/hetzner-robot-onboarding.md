@@ -344,7 +344,7 @@ layer replaces. The migration:
 ## G3.7 Hetzner checklist (Goal #214)
 
 - [x] G3.7-T6 (#846): `HetznerRobotConnector` skeleton (HTTP Basic auth + 401-IP-block protection)
-- [x] G3.7-T7 (#847): G0.7 spec ingestion against `robot-api.yaml`
+- [x] G3.7-T7 (#847): G0.7 spec ingestion against the packaged spec `hetzner_robot_minimal.yaml` (Hetzner publishes no OpenAPI file)
 - [x] G3.7-T8 (#849): 10 core ops curated + enabled + `apply_robot_core_curation`
 - [x] G3.7-T9 (#852): CLI verbs + MCP review (401-IP-block warning) + dispatch smoke E2E + this doc
 

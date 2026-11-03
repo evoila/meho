@@ -43,6 +43,7 @@ from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import RunnerAssignmentRow, RunnerPrincipal, Tenant
+from meho_backplane.runner.package_set import EMPTY_PACKAGE_SET_DIGEST
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -130,6 +131,7 @@ def _seed_runner(
     revoked: bool = False,
     last_seen_ago: timedelta = timedelta(seconds=10),
     wire_version: str | None = None,
+    package_set_digest: str | None = None,
 ) -> uuid.UUID:
     """Insert a runner-principal ORM row directly (no Keycloak round-trip)."""
     runner_id = uuid.uuid4()
@@ -150,6 +152,7 @@ def _seed_runner(
                     created_by_sub="op-admin",
                     last_seen_at=last_seen,
                     wire_version=wire_version,
+                    package_set_digest=package_set_digest,
                 )
             )
 
@@ -313,6 +316,37 @@ def test_list_shows_wire_version_and_marks_a_mismatch() -> None:
     body = response.text
     assert "Wire version" in body
     assert "7 (central needs 1)" in body
+    assert body.count("badge-warning") == 1
+
+
+def test_list_shows_package_set_digest_and_marks_a_mismatch() -> None:
+    """Each runner's last package set digest renders; one that differs from central is marked.
+
+    Central here has no connector packages, so its digest is the empty-set
+    digest (#5038).
+    """
+    other = "sha256:" + "ab" * 32
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_runner(
+        tenant_id=_TENANT_A,
+        name="plain-runner",
+        wire_version="1",
+        package_set_digest=EMPTY_PACKAGE_SET_DIGEST,
+    )
+    _seed_runner(
+        tenant_id=_TENANT_A, name="overlay-runner", wire_version="1", package_set_digest=other
+    )
+    client, mock = _client_with_role(tenant_id=_TENANT_A)
+    try:
+        response = client.get("/ui/runners")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Connector packages" in body
+    assert f'title="{EMPTY_PACKAGE_SET_DIGEST}"' in body
+    assert f"{other[:19]}… (differs from central)" in body
+    assert f"runner {other}, central MEHO {EMPTY_PACKAGE_SET_DIGEST}" in body
     assert body.count("badge-warning") == 1
 
 

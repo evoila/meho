@@ -43,6 +43,8 @@ from meho_backplane.mcp import (
 )
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolAnnotations,
     _match_uri_template,
     _wire_safe_input_schema,
     all_resource_templates_for,
@@ -214,6 +216,39 @@ def test_to_wire_strips_top_level_combinators_but_keeps_them_on_input_schema() -
     assert defn.inputSchema["allOf"] == schema["allOf"]
     assert defn.inputSchema["oneOf"] == schema["oneOf"]
     assert defn.inputSchema["anyOf"] == schema["anyOf"]
+
+
+def test_to_wire_sends_annotations_and_meta_only_when_set() -> None:
+    """Tool hints and ``_meta`` reach the wire when set and are absent otherwise (#4202)."""
+    base: dict[str, Any] = {
+        "feature": None,
+        "name": "wire.hints",
+        "description": "probe",
+        "inputSchema": {"type": "object", "properties": {}},
+        "surface": ToolSurface.WORKING,
+    }
+    plain = ToolDefinition(**base).to_wire()
+    assert "annotations" not in plain
+    assert "_meta" not in plain
+
+    wire = ToolDefinition(
+        **base,
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+        meta={"anthropic/requiresUserInteraction": True},
+    ).to_wire()
+    assert wire["annotations"] == {"readOnlyHint": False, "destructiveHint": False}
+    assert wire["_meta"] == {"anthropic/requiresUserInteraction": True}
+    assert "meta" not in wire
+
+    assert ToolDefinition(**base, annotations=READ_ONLY).to_wire()["annotations"] == {
+        "readOnlyHint": True
+    }
+
+
+def test_tool_annotations_reject_unknown_hint() -> None:
+    """A typo in a hint name fails at construction instead of being dropped."""
+    with pytest.raises(ValueError, match="readOnlyHnit"):
+        ToolAnnotations(readOnlyHnit=True)  # type: ignore[call-arg]
 
 
 def test_wire_safe_input_schema_returns_same_object_when_nothing_to_strip() -> None:

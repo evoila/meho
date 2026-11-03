@@ -384,6 +384,8 @@ def test_drawer_renders_full_payload_for_read_row() -> None:
     body = response.text
     assert 'id="audit-drawer"' in body
     assert "vsphere.vm.list" in body
+    # The drawer names the row's tenant from the tenant table (#5238).
+    assert "<dd data-tenant>Tenant tenant-a</dd>" in body
     # The request payload section renders the non-internal params.
     assert "datacenter" in body
     assert "dc-1" in body

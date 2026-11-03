@@ -356,6 +356,32 @@ def _admin_session(tenant_id: uuid.UUID = _TENANT_A) -> tuple[uuid.UUID, dict[st
     return session_id, jwks
 
 
+def _operator_session(tenant_id: uuid.UUID = _TENANT_A) -> tuple[uuid.UUID, dict[str, Any]]:
+    """Seed a session whose access token is a real operator JWT for _OPERATOR_SUB.
+
+    The start POST sits on the ``require_ui_operator`` role floor, which
+    re-verifies the stored token, so a start test needs a real JWT and the
+    JWKS mock (``_mock_discovery_and_jwks``) -- not the plain-text token the
+    read tests get away with.
+    """
+    return _role_session(TenantRole.OPERATOR, tenant_id=tenant_id)
+
+
+def _role_session(
+    role: TenantRole, tenant_id: uuid.UUID = _TENANT_A
+) -> tuple[uuid.UUID, dict[str, Any]]:
+    """Seed a session whose access token is a real JWT carrying *role*."""
+    keypair, jwks = _make_keypair_and_jwks()
+    access_token = _mint_token(
+        keypair,
+        sub=_OPERATOR_SUB,
+        tenant_id=str(tenant_id),
+        tenant_role=role.value,
+    )
+    session_id = _seed_session_sync(tenant_id=tenant_id, access_token=access_token)
+    return session_id, jwks
+
+
 def _csrf_kwargs(token: str) -> dict[str, Any]:
     """Header + cookie kwargs that satisfy the double-submit CSRF check."""
     return {
@@ -675,9 +701,10 @@ def test_start_run_success_redirects_and_lands_row() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_template(tenant_id=_TENANT_A, slug="drain-node", body=_manual_body())
 
-    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    session_id, jwks = _operator_session()
     token = mint_csrf_token(str(session_id))
-    with respx.mock(assert_all_called=False):
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, jwks)
         client = _authenticated_client(session_id)
         response = client.post(
             "/ui/runbooks/runs",
@@ -709,9 +736,10 @@ def test_start_run_missing_params_renders_alert_not_500() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_template(tenant_id=_TENANT_A, slug="scale-deploy", body=_params_body())
 
-    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    session_id, jwks = _operator_session()
     token = mint_csrf_token(str(session_id))
-    with respx.mock(assert_all_called=False):
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, jwks)
         client = _authenticated_client(session_id)
         response = client.post(
             "/ui/runbooks/runs",
@@ -733,9 +761,10 @@ def test_start_run_missing_params_renders_alert_not_500() -> None:
 def test_start_run_unknown_template_renders_alert_not_500() -> None:
     """Starting a run on a non-existent slug renders the modal alert (200), not a 500."""
     _seed_tenant(_TENANT_A, "tenant-a")
-    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    session_id, jwks = _operator_session()
     token = mint_csrf_token(str(session_id))
-    with respx.mock(assert_all_called=False):
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, jwks)
         client = _authenticated_client(session_id)
         response = client.post(
             "/ui/runbooks/runs",
@@ -753,9 +782,10 @@ def test_start_run_invalid_params_json_returns_422() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_template(tenant_id=_TENANT_A, slug="drain-node", body=_manual_body())
 
-    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    session_id, jwks = _operator_session()
     token = mint_csrf_token(str(session_id))
-    with respx.mock(assert_all_called=False):
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, jwks)
         client = _authenticated_client(session_id)
         response = client.post(
             "/ui/runbooks/runs",
@@ -776,9 +806,10 @@ def test_start_run_passes_params_and_work_ref() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_template(tenant_id=_TENANT_A, slug="scale-deploy", body=_params_body())
 
-    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    session_id, jwks = _operator_session()
     token = mint_csrf_token(str(session_id))
-    with respx.mock(assert_all_called=False):
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, jwks)
         client = _authenticated_client(session_id)
         response = client.post(
             "/ui/runbooks/runs",
@@ -797,6 +828,34 @@ def test_start_run_passes_params_and_work_ref() -> None:
     run = rows[0]
     assert run.params == {"namespace": "prod"}
     assert run.work_ref == "gh:evoila/meho#9"
+
+
+def test_start_run_read_only_forbidden_403_no_run_row() -> None:
+    """A ``read_only`` session's start POST is 403 at the role floor; no run lands.
+
+    The POST clears the CSRF gate (valid token) but the real JWT carries
+    ``read_only``, so ``require_ui_operator`` refuses it before the handler
+    body runs: the same ``operator`` floor REST ``start_run`` has.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="drain-node", body=_manual_body())
+
+    session_id, jwks = _role_session(TenantRole.READ_ONLY)
+    token = mint_csrf_token(str(session_id))
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        response = client.post(
+            "/ui/runbooks/runs",
+            data={"template_slug": "drain-node", "target": "host-9"},
+            **_csrf_kwargs(token),
+        )
+
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "operator_required"}
+    # Not a CSRF rejection: the middleware stamps no reason header.
+    assert "x-csrf-rejection-reason" not in response.headers
+    assert _run_rows(_TENANT_A) == []
 
 
 # ---------------------------------------------------------------------------
@@ -854,8 +913,9 @@ def test_start_run_modal_token_satisfies_immediate_submit() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_template(tenant_id=_TENANT_A, slug="drain-node", body=_manual_body())
 
-    session_id = _seed_session_sync(tenant_id=_TENANT_A)
-    with respx.mock(assert_all_called=False):
+    session_id, jwks = _operator_session()
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, jwks)
         client = _authenticated_client(session_id)
         modal = client.get("/ui/runbooks/runs/start")
         cookie_token = _extract_csrf_cookie(modal)

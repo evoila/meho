@@ -90,14 +90,14 @@ from meho_backplane.operations.result_query import (
 #: rather than it living only in ``docs/cross-repo/connector-ingestion.md``.
 _CONNECTOR_ID_DESCRIPTION = (
     "Connector implementation id in `<impl_id>-<version>` form — e.g. "
-    "`vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product "
-    "name (`vault`, `vmware`): a bare product slug names no connector "
+    "`gh-rest-3`, `vault-1.x`, `k8s-1.x`. NOT the bare product "
+    "name (`vault`, `gh`): a bare product slug names no connector "
     "and returns 404. Discover valid ids via `GET /api/v1/connectors`."
 )
 _CONNECTOR_ID_EXAMPLES: dict[str, Example] = {
-    "vmware_rest": Example(
-        summary="vCenter REST (generic, ingested)",
-        value="vmware-rest-9.0",
+    "gh_rest": Example(
+        summary="GitHub REST (generic, ingested)",
+        value="gh-rest-3",
     ),
     "vault": Example(
         summary="HashiCorp Vault (typed)",
@@ -624,7 +624,7 @@ async def get_governed_subops(
         min_length=1,
         description=(
             "A composite op id whose governed child ops to enumerate — e.g. "
-            "`vmware.composite.vm.create`."
+            "`gh.composite.repo_create`."
         ),
     ),
     connector_id: str | None = Query(

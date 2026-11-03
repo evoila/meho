@@ -74,7 +74,12 @@ from typing import Any, Final
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.kb.schemas import InvalidKbSlugError, KbEntrySearchHit
 from meho_backplane.kb.service import KbService
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.resources.kb import read_kb_entry
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
@@ -278,6 +283,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="memory_knowledge",
         name="search_knowledge",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Search the tenant's knowledge base for distilled operator "

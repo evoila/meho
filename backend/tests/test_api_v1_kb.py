@@ -290,7 +290,7 @@ def test_kb_entry_create_slug_field_teaches_leading_letter_rule() -> None:
     # Positive example must round-trip through Pydantic v2's `examples=`
     # surface so Swagger UI / openapi.json carries it.
     examples = slug_field.get("examples") or []
-    assert "vcenter-9.0-snapshot-revert" in examples
+    assert "k8s-1.x-rollout-restart" in examples
 
 
 # ---------------------------------------------------------------------------

@@ -64,43 +64,45 @@ Every interaction through MEHO is:
 
 ## Why MEHO
 
-A governance seam in front of an MCP server is reproducible. What is not
-reproducible is **operating knowledge of the on-prem stack** the agent is
-acting on. MEHO's moat is the two together: a policy/credential/audit
-layer **and** connectors that encode how VCF, NSX, and vSphere are
-actually operated — not just thin API passthrough.
+A governance seam in front of an MCP server is reproducible. What makes
+MEHO useful is the whole backplane behind that seam: policy, just-in-time
+credentials, audit, broadcast, approvals, knowledge, memory, topology and
+versioned connectors, all behind one narrow set of agent tools. The agent
+never sees a vendor API. It picks a connector, lists operation groups,
+searches operations and calls one. MEHO does the rest.
 
-The VMware/VCF surface is the clearest example. Under
-[`backend/src/meho_backplane/connectors/`](./backend/src/meho_backplane/connectors/)
-the connectors are not 1:1 HTTP wrappers:
+The public repository ships the backplane and the connectors for common
+products under
+[`backend/src/meho_backplane/connectors/`](./backend/src/meho_backplane/connectors/):
+Kubernetes, Vault, Keycloak, Harbor, GitHub, Argo CD, Google Cloud, Azure,
+Hetzner Robot, Proxmox, Linux and Windows over SSH, Active Directory,
+DNS, SQL Server, PostgreSQL, MongoDB, RabbitMQ, Loki, Tempo, Prometheus,
+pfSense, phpIPAM and more. Each one is a governed operation surface, not a
+thin API wrapper: curated operation groups, risk levels, approval gates,
+and results reduced to what an agent can use.
 
-- **`vmware_rest` composites** encode real operational sequences as single
-  governed operations — `host.evacuate` (which orchestrates `vm.migrate`
-  under the hood), `cluster.drs_recommendations`, `vm.snapshot.revert`,
-  `host.detach_from_vds`, `cluster.patch` — each with pre-flight checks,
-  not a raw vCenter call the agent has to chain by hand.
-- **`nsx`** speaks the Policy API directly — Tier-0/Tier-1 gateways,
-  segments, and domain security-policies — the objects an NSX operator
-  reasons about, not bare REST paths.
-- **`vcf_operations`, `vcf_fleet`, `vcf_logs`, `vcf_automation`,
-  `sddc_manager`** cover the VCF management plane an operator lives in:
-  Operations alerts/symptoms/recommendations, SDDC Manager
-  domains/clusters/bundles, fleet and log surfaces.
+The connectors for the VMware and Broadcom estate (vSphere, NSX, VCF
+Operations, VCF Automation, SDDC Manager, VCF Installer, Cloud Director,
+HCX, Site Recovery Manager, vSphere Replication, Orchestrator, Aria
+Automation Config and the VCF Identity Broker) are evoila's own. They
+ship as a commercial enterprise pack: an overlay image built on this
+public image, with the VMware connectors installed as packages. Contact
+evoila for the enterprise pack. The public image runs without it.
 
-Public-cloud and Kubernetes connectors exist too, but they are
-commodity — many tools cover them. The defensible part is the deep VCF /
-on-prem operator fluency baked into the connectors, governed by the same
-policy + audit seam as everything else. That combination is the moat.
+Anyone can add a connector the same way: write a connector package
+against the connector kit and install it into your own build of MEHO
+(see [Writing a connector package](#writing-a-connector-package)).
 
 ### How MEHO compares
 
-| | MEHO | Teleport / StrongDM | Raw MCP gateway | `kubectl` / vCenter by hand |
+| | MEHO | Teleport / StrongDM | Raw MCP gateway | `kubectl` / vendor console by hand |
 | --- | --- | --- | --- | --- |
 | **Built for AI agents acting on infra** | Yes — MCP-native, agent is the first-class caller | No — human-session access (SSH/DB/k8s) | Partial — transport only, no policy/audit semantics | No — human at a terminal |
-| **VCF / NSX / vSphere operator depth** | Yes — connectors encode operational sequences (host evacuation, DRS, NSX policy) | No — protocol-level access, no domain ops | No — passthrough to whatever the upstream MCP exposes | Only what the operator knows + types |
+| **One narrow agent surface over many vendors** | Yes — the same few tools for every connector; vendor detail stays in operation ids | No — one protocol at a time | No — the upstream MCP's own tool list, per vendor | Only what the operator knows + types |
 | **Per-action policy gate + immutable audit** | Yes — every `tools/call` authorised + audited per principal | Session-level audit, not per-agent-action semantics | No — you build it | No structured audit by default |
 | **Just-in-time backend credentials** | Yes — Keycloak→Vault token exchange, agent never holds a secret | Yes (its own broker) | No — you wire your own secret handling | No — long-lived admin creds |
 | **Bring-your-own agent runtime** | Yes — governs any MCP client, runs no model | N/A | Yes | N/A |
+| **Extensible with connector packages** | Yes — open connector kit; evoila's enterprise pack adds the VMware estate | No | N/A | N/A |
 
 ## See it work
 
@@ -196,8 +198,9 @@ MEHO ships as three operator-facing artefacts:
   (`operation`, `connector`, `targets`, `audit`, `broadcast`,
   `retrieval`, `kb`, `runbook`, `memory`), agents + scheduling (`agent`,
   `agent-principal`, `approvals`, `scheduler`), per-vendor connector
-  aliases (`vmware`, `nsx`, `k8s`, `vault`, `harbor`, `keycloak`,
-  `argocd`, `gcloud`, `bind9`, `pfsense`, and more), and admin/migration
+  aliases (`k8s`, `vault`, `harbor`, `keycloak`, `argocd`, `gcloud`,
+  `bind9`, `pfsense`, and more; the `vmware` and `nsx` aliases need the
+  enterprise pack on the server), and admin/migration
   tooling (`admin`, `migrate`). Released as multi-platform tarballs
   (`linux/macOS × amd64/arm64`) on every `v*` tag, each individually
   cosign-signed. Full command reference:
@@ -214,8 +217,9 @@ contract — operators bring their own MCP client.
   real infrastructure, not just read about it.
 - You need every agent action policy-gated, credential-federated, and
   audited — for compliance, blast-radius control, or plain peace of mind.
-- You operate VMware/VCF, Kubernetes, network appliances, or cloud and
-  want one governed seam in front of all of them.
+- You operate Kubernetes, network appliances, cloud, or (with the
+  enterprise pack) VMware/VCF, and want one governed seam in front of
+  all of them.
 - You want to bring your own agent runtime and keep your audit trail in
   systems you control (Postgres, your own Keycloak + Vault).
 
@@ -410,6 +414,12 @@ Architecture references live under
 [`docs/architecture/`](./docs/architecture/) — topology, the operations
 substrate, audit, MCP surface, and the connector catalog.
 
+## Writing a connector package
+
+A connector package adds a connector to MEHO from a repository of your own.
+It imports MEHO only through the connector kit: one module, `meho_connector_kit`, with the names a package may use and its own version number.
+Read [Write a connector package](https://evoila.github.io/meho/latest/extend/connector-kit/) ([source](./docs-site/extend/connector-kit.md)), and start from the template folder [`templates/connector-package/`](./templates/connector-package/).
+
 ## FAQ
 
 **Do I need Vault + Keycloak to try it?**
@@ -428,8 +438,14 @@ Continue, custom) at the backplane and operate under your own identity.
 
 **Does MEHO replace Teleport / StrongDM?**
 No. Those broker *human* sessions (SSH/DB/k8s). MEHO governs *agent*
-actions per-call over MCP, with VCF/NSX/vSphere operator depth in the
-connectors. See [How MEHO compares](#how-meho-compares).
+actions per-call over MCP, through one narrow tool surface over many
+vendors. See [How MEHO compares](#how-meho-compares).
+
+**Where are the VMware connectors?**
+In evoila's enterprise pack: an overlay image built on the public image
+with the VMware connectors installed as packages. The public repository
+ships the backplane and the connectors for common products. See
+[Why MEHO](#why-meho).
 
 **Is there a hosted SaaS?**
 No — MEHO is self-hosted. You run the backplane, Postgres, Keycloak, and

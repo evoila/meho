@@ -5,7 +5,7 @@
 
 G-Node/RKE2-T1 (#2221) scaffold -- the read-only entry in the SSH
 node-OS-lifecycle family (Initiative #2172), built on the same
-approval-gated write-op mold as holodeck-ssh (G3.18 #2145). RKE2 nodes
+approval-gated write-op mold as the other SSH connectors (G3.18 #2145). RKE2 nodes
 expose no MEHO REST surface; the connector's only transport is plain SSH
 to the node OS over the shared
 :class:`~meho_backplane.connectors.adapters.ssh.SshConnector` adapter.

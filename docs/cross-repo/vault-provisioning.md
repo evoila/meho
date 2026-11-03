@@ -380,6 +380,27 @@ sensor check-runner's service principal) on a `credentialBackend: vault`
 install. **Do this first — enabling `checkRunner.*` without it widens what
 background dispatch can read.**
 
+**The backplane enforces it.** With a runner principal
+(`CHECK_RUNNER_CLIENT_ID` / `CHECK_RUNNER_CLIENT_SECRET`) and `VAULT_ADDR`
+set, the check runner does not start unless `VAULT_CHECK_RUNNER_ROLE`
+names a role of its own (not the same as `VAULT_OIDC_ROLE`). It logs
+`sensor_runner_refused` and no Sensor is evaluated. So use Option A below
+and set `VAULT_CHECK_RUNNER_ROLE` (for example through the chart's
+`extraEnv`), or turn `checkRunner.enabled` off. Each Vault read the runner
+makes is also checked against the sensor's tenant subtree
+(`VAULT_KV_TENANT_SCOPE_PREFIX`), so give each tenant's Sensor secrets a
+path under that tenant.
+
+**Event intake uses the same role.** The inbound event endpoint
+(`POST /api/v1/events/ingest/{source_slug}`) reads each event source's
+secret with the runner's token too, so it logs in under
+`VAULT_CHECK_RUNNER_ROLE` as well. The runner's policy must therefore
+cover the event source secrets. MEHO stores them at
+`tenants/<tenant_id>/event-sources/<slug>` under the `secret` mount, so
+the policy needs `read` on `secret/data/tenants/+/event-sources/*` (and
+the matching `secret/metadata/...` path). Without it, every event source
+with a secret answers 503 and the sender keeps retrying.
+
 Role `meho-mcp` above is deliberately loose: `user_claim=sub` with
 `bound_audiences` as its *only* binding and no `bound_subject` /
 `bound_claims`, paired with a policy that grants read on the whole
@@ -417,6 +438,14 @@ path "secret/data/meho/sensors/*" {
 path "secret/metadata/meho/sensors/*" {
   capabilities = ["read"]
 }
+# Event source secrets: the inbound event intake reads them under this
+# role too (see "Event intake uses the same role" above).
+path "secret/data/tenants/+/event-sources/*" {
+  capabilities = ["read"]
+}
+path "secret/metadata/tenants/+/event-sources/*" {
+  capabilities = ["read"]
+}
 EOF
 
 vault write auth/jwt/role/meho-check-runner \
@@ -428,12 +457,15 @@ vault write auth/jwt/role/meho-check-runner \
   token_ttl=1h
 ```
 
-Substitute the subtree your Sensors' `secret_ref`s actually live under. Then
+Substitute the subtree your Sensors' `secret_ref`s actually live under and
+keep the event source paths. Then
 set `VAULT_CHECK_RUNNER_ROLE=meho-check-runner` on the backplane (the runner
 already stores its service-account `sub` next to its secret, ready for the
 `bound_subject` line above). The backplane resolves this role **only** for
-the in-process check-runner's background dispatch (#2757); interactive and
-operator logins keep `VAULT_OIDC_ROLE` (`meho-mcp`) untouched. That removes
+the logins that present the runner's token: the in-process check-runner's
+background dispatch (#2757) and the inbound event intake's secret read.
+Interactive and operator logins keep `VAULT_OIDC_ROLE` (`meho-mcp`)
+untouched. That removes
 the old single-role tradeoff — the shared role never sees the runner, and the
 interactive path never sees the narrow role, so neither has to be widened for
 the other. Every mis-wiring fails closed: the runner token is rejected by
@@ -461,6 +493,10 @@ vault write auth/jwt/login role=meho-mcp jwt="$OPERATOR_TOKEN"
 #    read; expect a 403 permission-denied:
 vault write auth/jwt/login role=meho-check-runner jwt="$RUNNER_TOKEN"
 VAULT_TOKEN=<issued-runner-token> vault kv get secret/meho/targets/<a-target>
+
+# 4. Event intake still works under the scoped role. Send a signed event to
+#    an event source that has a secret and expect 202. A 503 means the
+#    policy does not cover `secret/data/tenants/+/event-sources/*`.
 ```
 
 **Option B — tighten `meho-mcp` so it does not accept the runner.** Vault's
@@ -503,14 +539,21 @@ kcadm.sh add-roles -r <realm> --uusername <operator> --rolename meho-operator
 # realm_access.roles too (default-roles-<realm>, offline_access, …), so the
 # claim's *presence* proves nothing; only this specific value does.
 
-vault write auth/jwt/role/meho-mcp \
-  role_type=jwt \
-  user_claim=sub \
-  bound_audiences=<keycloak-audience> \
-  bound_claims='{"/realm_access/roles":"meho-operator"}' \
-  policies=meho-mcp \
-  token_ttl=1h
+vault write auth/jwt/role/meho-mcp - <<'JSON'
+{
+  "role_type": "jwt",
+  "user_claim": "sub",
+  "bound_audiences": "<keycloak-audience>",
+  "bound_claims": {"/realm_access/roles": "meho-operator"},
+  "policies": "meho-mcp",
+  "token_ttl": "1h"
+}
+JSON
 ```
+
+The request goes in as JSON on stdin (the `-` argument). `bound_claims` is
+a map, and the `key=value` form of `vault write` can only send a string
+for it, which Vault rejects.
 
 Note what is deliberately **absent**: no `bound_claims_type`. Its default is
 `string`, under which bound values "will be treated as literals and must
@@ -525,8 +568,8 @@ clients, an exact `azp` allowlist is equivalent and needs no new role —
 (`JsonWebToken.issuedFor`), so it is `CHECK_RUNNER_CLIENT_ID` on the
 runner's token and the operator-facing client id on an operator's:
 
-```bash
-  bound_claims='{"azp":["<operator-facing-client-id>","<cli-client-id>"]}'
+```json
+  "bound_claims": {"azp": ["<operator-facing-client-id>", "<cli-client-id>"]},
 ```
 
 Either binding gates **every** `meho-mcp` login, not only the runner's —
@@ -620,11 +663,39 @@ vault write auth/jwt-meho/role/meho-teardown \
 # 3. Register a backplane target that selects the role. secret_ref is NULL
 #    (JWT-federated); version may be null (resolves via the connector's
 #    wildcard registration). The role/mount ride the target's extras.
+#    Only a platform admin may set or change `vault_role` and
+#    `vault_mount` (through REST, the UI import or `targets.register`).
 meho targets register vault-teardown \
   --product vault --host <vault-host> \
   --extra vault_role=meho-teardown \
   --extra vault_mount=jwt-meho
 ```
+
+**More than one tenant on the install?** Tie every extra role to one
+tenant, the same way the per-tenant roles of `VAULT_OIDC_ROLE_BY_TENANT`
+are tied. Add `bound_claims` with the tenant id to the role, so that only
+a login token of that tenant may use it. The request goes in as JSON on
+stdin, because `bound_claims` is a map and the `key=value` form of
+`vault write` cannot carry one:
+
+```bash
+vault write auth/jwt-meho/role/meho-teardown - <<'JSON'
+{
+  "role_type": "jwt",
+  "user_claim": "sub",
+  "bound_audiences": "<keycloak-audience>",
+  "bound_claims": {"tenant_id": "<tenant-id>"},
+  "policies": "meho-teardown",
+  "token_ttl": "1h"
+}
+JSON
+```
+
+`tenant_id` is the claim MEHO reads the tenant from
+(`JWT_TENANT_CLAIM_NAME`, default `tenant_id`). A role with
+`bound_audiences` only accepts every MEHO login token, from any tenant.
+Check first that every login that uses the role carries `tenant_id`, also
+the service logins.
 
 The reserved `extras` keys are the frozen contract:
 
@@ -632,6 +703,11 @@ The reserved `extras` keys are the frozen contract:
 |---|---|---|---|
 | `vault_role` | yes (on a teardown target) | JWT role to log in under | `settings.vault_oidc_role` (`meho-mcp`) |
 | `vault_mount` | optional | JWT auth-method mount the role lives on | `settings.vault_oidc_mount_path` |
+
+Both keys need `platform_admin` on the caller that sets or changes them. A
+`tenant_admin` may still update the target's other fields, and may re-send
+the same two values; a request that adds, changes or removes one of them
+gets HTTP 403 `vault_login_role_requires_platform_admin`.
 
 Fail-closed: if the role is denied (mis-scoped policy, wrong `bound_*`), the
 dispatch surfaces `VaultRoleDeniedError` — it never silently widens back to
@@ -641,6 +717,13 @@ Verified end-to-end in a lab deployment:
 policy `meho-teardown` + role `auth/jwt-meho/role/meho-teardown` soft-deleted a
 scratch KV version through the connector, was denied outside its two subtrees,
 and left `meho-mcp` byte-identical.
+
+**Tenant secrets.** The example policy above has no rule for
+`secret/tenants/`. To let a teardown role remove a finished tenant's
+secrets, add the tenant-folder rules from
+[`vault-remove-tenant.md`](./vault-remove-tenant.md) step 2. That page
+also says which role deletes the tenant's login role, policy and groups,
+and in which order.
 
 ## Verification
 

@@ -6,7 +6,7 @@
 An AI picks an operation from its summary, description, group text and
 safety level, and fills in the parameters from the field descriptions. This
 test checks every hand-written (typed and multi-step) operation that MEHO
-registers at start-up, of every connector, against ten rules:
+registers at start-up, of every connector, against twelve rules:
 
 1. ``summary`` -- a one-line summary (at most 120 characters) and a short
    description (at most 300 characters).
@@ -17,7 +17,10 @@ registers at start-up, of every connector, against ten rules:
 4. ``llm_instructions`` -- ``when_to_call``, ``output_shape`` and
    ``next_step``; a change (not ``safe``) also has ``preconditions``.
 5. ``examples`` -- at least one entry under ``examples`` in the parameter
-   schema, and each one validates against the schema.
+   schema, and each one validates against the schema. A placeholder value
+   such as ``<vm-id>`` marks a value the caller must look up, so it is not
+   held to the field's type, pattern or enum (only here; a real call with a
+   placeholder is still refused).
 6. ``no_ticket_numbers`` -- no ticket number (``#1234``) in the summary,
    description or guidance.
 7. ``requires_approval`` -- every operation that is not ``safe`` has
@@ -29,7 +32,19 @@ registers at start-up, of every connector, against ten rules:
     (``create``, ``delete``, ``set``, ``start``, ...; the list is
     :data:`meho_backplane.delete_names.WRITE_WORDS`). The real reads whose
     id holds such a word are in :data:`READS_WITH_A_WRITE_WORD`, each with
-    a reason.
+    a reason. The few writes that are ``safe`` on purpose are in
+    :data:`SAFE_WRITES_ON_PURPOSE`, each with its decision record.
+11. ``example_placeholders`` -- no example value looks real: no IP address
+    outside the documentation ranges, no host name with a real top-level
+    domain, no vendor-shaped id such as ``vm-42``, and no UUID other than the
+    all-zero one. A placeholder such as ``<vm-id>`` always passes. The value
+    checks are in :mod:`tests._operation_contract_placeholders`.
+12. ``named_operations_exist`` -- every operation id that ``llm_instructions``
+    names in backticks is registered. A backticked word counts as an
+    operation id when it has the shape of one (``k8s.pod.list``), whatever
+    its first part, so a wrong first part (``kubernetes.node.list``) is
+    caught. File names, field paths and API groups that only look like an
+    operation id are in :data:`NOT_OPERATION_IDS`, each with a reason.
 
 Today's gaps live in ``tests/data/operation_contract_gaps.yaml``. The test
 fails on a gap that is not in that list (a new gap) and on a listed gap that
@@ -44,7 +59,7 @@ be added here. The checker's own tests, with fake operations, are in
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -52,15 +67,18 @@ from unittest.mock import AsyncMock
 
 import pytest
 import yaml
+from jsonschema import Draft202012Validator
 from sqlalchemy import select
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.delete_names import write_word_in_op_id
+from meho_backplane.op_classes import is_safe_write
+from meho_backplane.operations._param_errors import describe_violation
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS
-from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.typed_register import run_typed_op_registrars
 from meho_backplane.settings import get_settings
+from tests._operation_contract_placeholders import PLACEHOLDER, example_value_problems
 
 GAPS_FILE: Final[Path] = Path(__file__).parent / "data" / "operation_contract_gaps.yaml"
 
@@ -75,15 +93,54 @@ RULES: Final[tuple[str, ...]] = (
     "group",
     "preview_builder",
     "write_name",
+    "example_placeholders",
+    "named_operations_exist",
 )
 
 #: Real reads whose id holds a write word, with the reason. The live test
 #: fails when an entry names an operation that no longer exists or is no
 #: longer ``safe``, so this list stays tidy.
 READS_WITH_A_WRITE_WORD: Final[Mapping[str, str]] = {
-    "installer.system.depot.sync-status": "reads the state of the depot sync; starts none",
     "mssql.ha.sync-health": "reads the health of the availability-group sync",
     "winsrv.system.pending-reboot": "reads whether a reboot is pending; reboots nothing",
+}
+
+#: Words in backticks that have the shape of an operation id but are none.
+#: The live test fails when an entry becomes a registered operation id, and
+#: when no guidance names it any more, so the list only holds what is needed.
+NOT_OPERATION_IDS: Final[Mapping[str, str]] = {
+    "apiregistration.k8s.io": "a Kubernetes API group",
+    "config.xml": "the file name of the pfSense configuration",
+    "config.yaml": "the file name of the RKE2 configuration",
+    "config.yaml.d": "the folder name of the RKE2 configuration snippets",
+    "existing.descr": "a field in the answer of the pfSense static route write",
+    "extras.named_conf_path": "a field of the bind9 target extras",
+    "graph_node.name": "a field of a topology graph node",
+    "metallb.io": "the API group of the MetalLB Kubernetes add-on",
+    "named.conf": "the file name of the bind9 main configuration",
+    "named.conf.local": "the file name of the bind9 zone list",
+    "named.conf.options": "the file name of the bind9 options",
+    "net.ipv4.ip_forward": "a Linux kernel setting (sysctl)",
+    "rke2.yaml": "the file name of the RKE2 kubeconfig",
+    "rndc.key": "the file name of the bind9 control key",
+    "token.redacted": "a field in the answer of the RKE2 posture read",
+}
+
+#: Writes that are ``safe`` on purpose: they need no approval. Each names the
+#: decision record that says why. Their connector marks them as safe writes
+#: (``meho_backplane.op_classes``), so no health check and no satellite runner
+#: takes them as reads. The live test fails when an entry is no longer a
+#: registered ``safe`` operation or is not marked as a safe write.
+_TICKET_WRITES_DECISION: Final[str] = (
+    "a GitHub ticket write inside the target's repository and board; "
+    "docs/decisions/2026-11-02-github-ticket-writes-are-safe.md"
+)
+SAFE_WRITES_ON_PURPOSE: Final[Mapping[str, str]] = {
+    "gh.composite.issue_create": _TICKET_WRITES_DECISION,
+    "gh.composite.issue_comment": _TICKET_WRITES_DECISION,
+    "gh.composite.sub_issue_add": _TICKET_WRITES_DECISION,
+    "gh.composite.project_item_add": _TICKET_WRITES_DECISION,
+    "gh.composite.project_item_set_field": _TICKET_WRITES_DECISION,
 }
 
 SUMMARY_MAX: Final[int] = 120
@@ -116,7 +173,7 @@ class OperationContract:
 
 
 # ---------------------------------------------------------------------------
-# The ten rules. Each returns a list of problems; an empty list means pass.
+# The twelve rules. Each returns a list of problems; an empty list means pass.
 # ---------------------------------------------------------------------------
 
 
@@ -209,6 +266,26 @@ def check_llm_instructions(op: OperationContract) -> list[str]:
     ]
 
 
+def example_problems(parameter_schema: Mapping[str, Any], example: Mapping[str, Any]) -> list[str]:
+    """What is wrong with *example* under *parameter_schema*: ``[]`` when nothing.
+
+    An example shows the shape of a call, with placeholders such as
+    ``<vm-id>`` where the caller must look a value up (never a value that
+    looks real, so a model does not copy it). A placeholder fails the
+    field's own type, pattern, enum or range, so a violation whose value is
+    a placeholder is left out here. Only here: the runtime check
+    (``validate_params``) is unchanged and refuses a placeholder.
+    """
+    validator = Draft202012Validator(dict(parameter_schema))
+    problems = []
+    for err in validator.iter_errors(dict(example)):
+        if isinstance(err.instance, str) and PLACEHOLDER.match(err.instance):
+            continue
+        described = describe_violation(err)
+        problems.append(f"{described['path']} expects {described['expected']}")
+    return problems
+
+
 def check_examples(op: OperationContract) -> list[str]:
     examples = op.parameter_schema.get("examples")
     if not isinstance(examples, list) or not examples:
@@ -218,10 +295,10 @@ def check_examples(op: OperationContract) -> list[str]:
         if not isinstance(example, Mapping):
             problems.append(f"example {index} is not an object")
             continue
-        for error in validate_params(dict(op.parameter_schema), dict(example)):
-            problems.append(
-                f"example {index} does not validate: {error['path']} expects {error['expected']}"
-            )
+        problems.extend(
+            f"example {index} does not validate: {problem}"
+            for problem in example_problems(op.parameter_schema, example)
+        )
     return problems
 
 
@@ -266,12 +343,49 @@ def check_preview_builder(op: OperationContract) -> list[str]:
 def check_write_name(op: OperationContract) -> list[str]:
     if op.safety_level != "safe" or op.op_id in READS_WITH_A_WRITE_WORD:
         return []
+    if op.op_id in SAFE_WRITES_ON_PURPOSE:
+        return []
     word = write_word_in_op_id(op.op_id)
     if word is None:
         return []
     return [
         f"the id says it writes ({word!r}) but the operation is 'safe'; make it a change, "
         "or add a real read to READS_WITH_A_WRITE_WORD with a reason"
+    ]
+
+
+def check_example_placeholders(op: OperationContract) -> list[str]:
+    examples = op.parameter_schema.get("examples")
+    if not isinstance(examples, list):
+        return []
+    return [
+        f"example {index}: {problem}"
+        for index, example in enumerate(examples)
+        if isinstance(example, Mapping)
+        for problem in example_value_problems(example)
+    ]
+
+
+_BACKTICKED: Final = re.compile(r"`([^`\s]+)`")
+_OPERATION_ID_SHAPE: Final = re.compile(r"^[a-z][a-z0-9_-]*(?:\.[a-z0-9_-]+)+$")
+
+
+def named_operation_ids(op: OperationContract) -> set[str]:
+    """The backticked words in the guidance of *op* that have the shape of an operation id."""
+    return {
+        word
+        for text in _texts(op.llm_instructions)
+        for word in _BACKTICKED.findall(text)
+        if _OPERATION_ID_SHAPE.match(word)
+    }
+
+
+def check_named_operations_exist(op: OperationContract, registered: Collection[str]) -> list[str]:
+    """The backticked operation ids in the guidance that are not in *registered*."""
+    known = {*registered, op.op_id, *NOT_OPERATION_IDS}
+    return [
+        f"guidance names {word!r}, which is no registered operation"
+        for word in sorted(named_operation_ids(op) - known)
     ]
 
 
@@ -286,14 +400,25 @@ CHECKS: Final[Mapping[str, Any]] = {
     "group": check_group,
     "preview_builder": check_preview_builder,
     "write_name": check_write_name,
+    "example_placeholders": check_example_placeholders,
 }
 
 
-def check_operation(op: OperationContract) -> dict[str, list[str]]:
-    """Return the problems of *op*, by rule. A rule with no problem is left out."""
+def check_operation(
+    op: OperationContract, registered: Collection[str] | None = None
+) -> dict[str, list[str]]:
+    """Return the problems of *op*, by rule. A rule with no problem is left out.
+
+    *registered* holds the ids of every registered operation. Rule 12 needs
+    them, so it runs only when they are given (the live check and
+    :func:`find_problems` give them).
+    """
     result: dict[str, list[str]] = {}
     for rule in RULES:
-        problems = CHECKS[rule](op)
+        if rule == "named_operations_exist":
+            problems = [] if registered is None else check_named_operations_exist(op, registered)
+        else:
+            problems = CHECKS[rule](op)
         if problems:
             result[rule] = problems
     return result
@@ -336,9 +461,10 @@ def compare_with_gaps(
 
 
 def find_problems(ops: list[OperationContract]) -> dict[Gap, list[str]]:
+    registered = {op.op_id for op in ops}
     found: dict[Gap, list[str]] = {}
     for op in ops:
-        for rule, problems in check_operation(op).items():
+        for rule, problems in check_operation(op, registered).items():
             found[(op.connector, op.op_id, rule)] = problems
     return found
 
@@ -406,7 +532,7 @@ async def _registered_operations() -> list[OperationContract]:
 
 @pytest.mark.asyncio
 async def test_operation_contracts_match_the_gap_list() -> None:
-    """Every hand-written operation meets the ten rules, or its gap is in the list."""
+    """Every hand-written operation meets the twelve rules, or its gap is in the list."""
     ops = await _registered_operations()
     assert ops, "no typed or multi-step operation was registered"
 
@@ -429,6 +555,34 @@ async def test_reads_with_a_write_word_are_registered_and_safe() -> None:
     safe_ops = {op.op_id for op in await _registered_operations() if op.safety_level == "safe"}
     stale = sorted(set(READS_WITH_A_WRITE_WORD) - safe_ops)
     assert not stale, f"not registered as a 'safe' operation; remove from the allow list: {stale}"
+
+
+@pytest.mark.asyncio
+async def test_not_operation_ids_are_named_and_not_registered() -> None:
+    """Each entry is still named by some guidance and is no operation id, so the list stays short.
+
+    An entry that became a real operation id must leave the list, so that
+    rule 12 checks it. An entry that no guidance names any more is dead.
+    """
+    ops = await _registered_operations()
+    registered = {op.op_id for op in ops}
+    stale = sorted(set(NOT_OPERATION_IDS) & registered)
+    assert not stale, f"now a registered operation; remove from NOT_OPERATION_IDS: {stale}"
+    named = set().union(*(named_operation_ids(op) for op in ops))
+    unused = sorted(set(NOT_OPERATION_IDS) - named)
+    assert not unused, f"no guidance names these any more; remove from NOT_OPERATION_IDS: {unused}"
+
+
+@pytest.mark.asyncio
+async def test_safe_writes_on_purpose_are_registered_safe_and_marked() -> None:
+    """Each safe write is a registered 'safe' operation that its connector marks as a safe write."""
+    safe_ops = {op.op_id for op in await _registered_operations() if op.safety_level == "safe"}
+    stale = sorted(set(SAFE_WRITES_ON_PURPOSE) - safe_ops)
+    assert not stale, f"not registered as a 'safe' operation; remove from the list: {stale}"
+    undeclared = sorted(op_id for op_id in SAFE_WRITES_ON_PURPOSE if not is_safe_write(op_id))
+    assert not undeclared, (
+        f"mark these with declare_safe_writes in the connector's op_classes: {undeclared}"
+    )
 
 
 def test_gap_list_names_only_known_rules() -> None:

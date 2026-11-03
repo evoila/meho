@@ -157,7 +157,7 @@ func addRefreshFailure(r *doctorReport, err error, backplaneURL string) {
 	case api.IsRefreshRejected(err):
 		r.add(authed("token", doctorFail, classRefreshRejected,
 			"the login expired: the identity provider rejected the refresh token",
-			"run `meho login "+backplaneURL+"` (add --offline for a login that lasts longer)"))
+			"run `meho login "+backplaneURL+"`"))
 	case api.IsNoRefreshToken(err):
 		r.add(authed("token", doctorFail, classNoRefreshToken,
 			"the token expired and no refresh token is stored",
@@ -206,6 +206,7 @@ func (s *mcpSession) post(ctx context.Context, body map[string]any) (*http.Respo
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+s.bearer())
 	api.SetWorkRefHeader(req)
+	api.SetTenantHeader(req)
 	if s.protocol != "" {
 		req.Header.Set("MCP-Protocol-Version", s.protocol)
 	}

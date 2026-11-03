@@ -21,11 +21,9 @@ names — see :func:`_contains_sa_key_fields`), ``auth_headers()`` raises
 :exc:`ValueError` with a clear message and no token is built.
 
 The only accepted credential material in ``secret_ref`` is:
-``{"gcp_impersonate_sa": "<sa-email>"}`` (the SA to impersonate).
-``gcp_project`` is read from the target, not from the Vault secret.
-
-Injecting ADC separately from the Vault secret lets unit tests mock the
-ADC source without requiring a real GCP environment.
+``{"gcp_impersonate_sa": "<sa-email>"}`` (the SA to impersonate), or an
+empty record. A target without a ``secret_ref`` has nothing to read: the
+loader answers ``{}`` and all auth comes from ADC + impersonation.
 
 Target shape
 ------------
@@ -33,24 +31,36 @@ Target shape
 ``GcloudTargetLike`` captures the fields the connector reads:
 
 * ``name`` — per-target cache key.
-* ``gcp_project`` — GCP project ID (replaces ``host`` which is unused).
-* ``gcp_impersonate_sa`` — SA email to impersonate.
 * ``secret_ref`` — Vault path for the credential record (the connector
-  validates the record does NOT carry SA-JSON-key fields).
+  validates the record does NOT carry SA-JSON-key fields). ``None`` means
+  there is no record.
 * ``auth_model`` — locked to ``AuthModel.IMPERSONATION`` or ``None``
   (pre-G0.3 sentinel).
+
+Two settings have no column on the ``Target`` row. A registered target
+carries them in ``extras``; a test stub may carry them as attributes:
+
+* ``gcp_project`` — GCP project ID (``host`` is unused).
+* ``gcp_impersonate_sa`` — SA email to impersonate.
+
+:func:`gcp_project` and :func:`gcp_impersonate_sa` read them from either
+place, so the same handler code runs for a database target (the normal
+CLI / MCP path) and for a stub.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol, runtime_checkable
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.vault_creds import load_vault_secret_data
 
 __all__ = [
     "GcloudCredentialsLoader",
     "GcloudTargetLike",
+    "gcp_impersonate_sa",
+    "gcp_project",
     "load_credentials_from_vault",
 ]
 
@@ -75,9 +85,12 @@ class GcloudTargetLike(Protocol):
     """Minimum target shape :class:`GcloudConnector` reads.
 
     Structural Protocol — the concrete ``Target`` model (G0.3 #224) satisfies
-    this unchanged. ``gcp_project`` + ``gcp_impersonate_sa`` drive the
-    connector; ``target.host`` is intentionally unused (GCP REST APIs are
-    reached via well-known public hostnames, not a per-target host field).
+    this unchanged. The project and the service account are not attributes
+    here: a database target keeps them in ``extras`` and a test stub may
+    keep them as attributes. Read them with :func:`gcp_project` and
+    :func:`gcp_impersonate_sa`. ``target.host`` is intentionally unused
+    (GCP REST APIs are reached via well-known public hostnames, not a
+    per-target host field).
 
     ``auth_model`` is checked at the boundary: only ``IMPERSONATION`` or
     ``None`` (pre-G0.3 sentinel) are accepted. Any other value raises a
@@ -92,26 +105,50 @@ class GcloudTargetLike(Protocol):
     id: object
     tenant_id: object
     name: str
-    gcp_project: str
-    gcp_impersonate_sa: str
-    secret_ref: str
+    host: str
+    secret_ref: str | None
     auth_model: str | None
+
+
+def _target_setting(target: GcloudTargetLike, key: str, what: str) -> str:
+    """Read *key* from the target: its attribute first, else ``extras[key]``."""
+    value = getattr(target, key, None)
+    if not value:
+        extras = getattr(target, "extras", None)
+        value = extras.get(key) if isinstance(extras, Mapping) else None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"Target {target.name!r} has no {what}. Set extras.{key} on the target "
+            f"(for example in targets.yaml: {key}: <value>) and try again."
+        )
+    return value.strip()
+
+
+def gcp_project(target: GcloudTargetLike) -> str:
+    """The Google project ID of *target* (``extras.gcp_project`` on a registered target)."""
+    return _target_setting(target, "gcp_project", "Google project ID (gcp_project)")
+
+
+def gcp_impersonate_sa(target: GcloudTargetLike) -> str:
+    """The service account *target* impersonates (``extras.gcp_impersonate_sa``)."""
+    return _target_setting(
+        target, "gcp_impersonate_sa", "service account to impersonate (gcp_impersonate_sa)"
+    )
 
 
 GcloudCredentialsLoader = Callable[[GcloudTargetLike, Operator], Awaitable[dict[str, Any]]]
 """Async callable resolving a target to its Vault-stored credential record.
 
 The ``operator`` authenticates the Vault read under the operator's identity
-(``vault_client_for_operator(operator)`` once the live loader lands, G3.10);
-it is NOT forwarded to GCP — IMPERSONATION auth drives GCP calls through the
+(:func:`~meho_backplane.auth.vault.vault_client_for_operator`); it is NOT
+forwarded to GCP — IMPERSONATION auth drives GCP calls through the
 google-auth chain, not the operator's OIDC JWT.
 
 The record is validated for SA-JSON-key fields before use. Expected shape for
 a compliant record: ``{}`` (empty — all auth is ADC-derived) or at most
-``{"gcp_impersonate_sa": "<sa-email>"}`` if the SA is stored per-secret
-rather than on the target row directly. In the v0.2 shape, the SA email comes
-from ``target.gcp_impersonate_sa`` and the secret is loaded only for the
-SA-JSON-key-refusal gate.
+``{"gcp_impersonate_sa": "<sa-email>"}``. The SA the connector impersonates
+comes from the target (:func:`gcp_impersonate_sa`); the record is loaded
+only for the SA-JSON-key-refusal gate.
 """
 
 
@@ -124,26 +161,17 @@ async def load_credentials_from_vault(
     target: GcloudTargetLike,
     operator: Operator,
 ) -> dict[str, Any]:
-    """Default credential loader — Vault read by ``target.secret_ref``.
+    """Default credential loader — the target's credential record.
 
-    The ``operator`` carries the identity the live loader will read Vault under
-    (G3.10); it is part of the stable signature so callers do not change when
-    the read is wired.
-
-    Deliberate stub: the operator-context per-target Vault credential read is
-    not yet wired for the GCloud connector. Raising :exc:`NotImplementedError`
-    here keeps the wiring shape stable — a production caller without an
-    override receives a clear error rather than a silent fallback or a
-    hallucinated credential. The supported workaround is to inject a custom
-    ``credentials_loader`` on ``GcloudConnector`` at construction time.
-    Tracked under open Goal #214 (Connector parity).
+    A target without a ``secret_ref`` has no record to read; the loader
+    answers ``{}`` without calling Vault, because the connector's auth
+    comes from ADC + impersonation and the record exists only for the
+    SA-JSON-key-refusal gate. A target with a ``secret_ref`` is read with
+    the shared operator-context reader
+    :func:`~meho_backplane.connectors._shared.vault_creds.load_vault_secret_data`,
+    so a system-initiated call without a person's token fails closed the
+    same way it does for every other connector.
     """
-    raise NotImplementedError(
-        "load_credentials_from_vault is a deliberate stub: the operator-context "
-        "per-target Vault credential read is not yet wired for the GCloud "
-        f"connector; target={target.name!r} secret_ref={target.secret_ref!r} "
-        f"operator={operator.sub!r}. "
-        "Workaround: inject a custom credentials_loader on GcloudConnector. "
-        "Tracked under open Goal #214 (Connector parity): "
-        "https://github.com/evoila/meho/issues/214"
-    )
+    if not target.secret_ref or not target.secret_ref.strip():
+        return {}
+    return dict(await load_vault_secret_data(target, operator))

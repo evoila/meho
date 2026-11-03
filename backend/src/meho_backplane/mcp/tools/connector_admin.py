@@ -102,7 +102,12 @@ from typing import Any, Final
 import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.tools._connector_shared import (
     _CONNECTOR_ID_DESCRIPTION,
     _OP_CLASS_READ,
@@ -175,10 +180,13 @@ def connector_review_status(item: ConnectorListItem) -> str:
     is one that ``status="staged"`` returns. Two more words: a connector
     with no operations yet is ``"registered"``, and one whose groups are
     partly enabled and partly disabled (none staged) is ``"mixed"``. No
-    filter except ``all`` returns a mixed row.
+    filter except ``all`` returns a mixed row. A connector whose
+    connector package is not installed is ``"package_not_installed"``
+    (#5560), and one whose code is not in this MEHO is
+    ``"code_not_installed"`` (#5585).
     """
-    if item.state == "registered":
-        return "registered"
+    if item.state in ("registered", "package_not_installed", "code_not_installed"):
+        return item.state
     if item.staged_group_count > 0:
         return "staged"
     if item.group_count > 0 and item.enabled_group_count == item.group_count:
@@ -383,12 +391,18 @@ async def _edit_op_handler(
         patch["requires_approval"] = arguments["requires_approval"]
     if "is_enabled" in arguments:
         patch["is_enabled"] = arguments["is_enabled"]
+    if "reason" in arguments:
+        patch["reason"] = arguments["reason"]
     service = ReviewService(operator)
     try:
+        # #4711: an AI client may make an operation stricter, never looser.
+        # ``tighten_only`` refuses ``requires_approval: false`` and any lower
+        # risk level with a message that names the console / CLI path.
         warnings = await service.edit_op(
             connector_id,
             op_id,
             tenant_id=tenant_id,
+            tighten_only=True,
             **patch,
         )
     except BuiltinConnectorWriteForbiddenError as exc:
@@ -543,6 +557,10 @@ async def _delete_handler(
     service = ReviewService(operator)
     try:
         result = await service.delete_connector(connector_id, tenant_id=tenant_id)
+    except BuiltinConnectorWriteForbiddenError as exc:
+        # Built-in rows + tenant_admin without platform_admin → -32602
+        # builtin_connector_write_forbidden, the same answer as enable.
+        raise_invalid_params_for_builtin_write_forbidden(exc)
     except ConnectorInUseError as exc:
         # #5027: something still uses the connector; nothing was deleted.
         raise_invalid_params_for_connector_in_use(exc)
@@ -579,6 +597,7 @@ async def _delete_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         name=CONNECTOR_LIST_NAME,
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         feature="typed_connector_reads",
         description=(
@@ -739,14 +758,20 @@ register_mcp_tool(
             "Edit one operation's per-op overrides (tenant_admin only). "
             "Editable fields: custom_description (operator-authored "
             "agent-facing description), safety_level (safe / caution / "
-            "dangerous), requires_approval (gate the operation behind "
-            "out-of-band approval), is_enabled (per-op enable/disable "
-            "that survives connector-level enable/disable cycles). Pass "
-            "at least one field; passing none is rejected. Use during "
-            "review (after meho_connector_review surfaces the op) when "
-            "an LLM-generated description is misleading or when a "
-            "DELETE-shaped op needs the safety_level promoted from "
-            "'dangerous' to require approval. is_enabled=false here "
+            "dangerous / destructive), requires_approval (gate the "
+            "operation behind out-of-band approval), is_enabled (per-op "
+            "enable/disable that survives connector-level enable/disable "
+            "cycles), reason (written to the audit row). Pass at least one "
+            "field; passing none is rejected. This tool can only make an "
+            "operation stricter: it refuses requires_approval=false and "
+            "any risk level lower than the current one. Turning approval "
+            "off is for a platform admin in the console or the CLI; "
+            "lowering a risk level needs a pull request. A raised risk "
+            "level or required approval survives restarts and re-ingest. "
+            "Use during review (after meho_connector_review surfaces the "
+            "op) when an LLM-generated description is misleading or when "
+            "a DELETE-shaped op needs a higher safety_level or approval. "
+            "is_enabled=false here "
             "STICKS: a subsequent meho_connector_enable will NOT "
             "clobber the operator's per-op disable. Do not use this "
             "to flip whole-connector state — pair with "
@@ -763,7 +788,9 @@ register_mcp_tool(
                 "op_id": {
                     "type": "string",
                     "minLength": 1,
-                    "description": ("Connector-side op_id (e.g. 'GET:/api/vcenter/cluster')."),
+                    "description": (
+                        "Connector-side op_id (e.g. 'GET:/repos/{owner}/{repo}/issues')."
+                    ),
                 },
                 "custom_description": {"type": ["string", "null"]},
                 "safety_level": {
@@ -772,6 +799,7 @@ register_mcp_tool(
                 },
                 "requires_approval": {"type": ["boolean", "null"]},
                 "is_enabled": {"type": ["boolean", "null"]},
+                "reason": {"type": ["string", "null"], "minLength": 1, "maxLength": 1024},
                 "tenant_id": _TENANT_ID_PROPERTY,
             },
             "required": ["connector_id", "op_id"],
@@ -929,8 +957,11 @@ register_mcp_tool(
             "operations, batch failed mid-way) or to remove an "
             "unwanted ingested connector outright. The tenant_id "
             "parameter controls the scope: omit it or pass null for "
-            "built-in / global connectors; pass the operator's own "
-            "tenant UUID for tenant-curated rows. The REST sibling "
+            "built-in / global connectors (platform_admin only: the "
+            "rows are shared by every tenant, so a tenant_admin "
+            "without platform_admin gets builtin_connector_write_forbidden); "
+            "pass the operator's own tenant UUID for tenant-curated "
+            "rows. The REST sibling "
             "DELETE /api/v1/connectors/{connector_id} does NOT expose "
             "this parameter and always scopes to the calling "
             "operator's tenant — for global rows use this tool. "

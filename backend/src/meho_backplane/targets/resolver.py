@@ -72,18 +72,26 @@ class TargetNotFoundError(HTTPException):
     ``matches`` is a list of :class:`TargetSummary` instances that are
     near-misses (prefix-ILIKE on name; on PG also on aliases). CLI
     verbs render these as suggestions; API routes serialise them via
-    ``detail["matches"]``.
+    ``detail["matches"]``. The optional ``message`` adds a plain-text
+    ``detail["message"]``; :func:`resolve_target` never sets it.
     """
 
-    def __init__(self, query: str, matches: list[TargetSummary]) -> None:
-        super().__init__(
-            status_code=404,
-            detail={
-                "error": "no_target",
-                "query": query,
-                "matches": [m.model_dump(mode="json") for m in matches],
-            },
-        )
+    def __init__(
+        self,
+        query: str,
+        matches: list[TargetSummary],
+        *,
+        message: str | None = None,
+    ) -> None:
+        detail: dict[str, object] = {
+            "error": "no_target",
+            "query": query,
+            "matches": [m.model_dump(mode="json") for m in matches],
+        }
+        if message is not None:
+            detail["message"] = message
+        super().__init__(status_code=404, detail=detail)
+        self.matches = matches
 
 
 class AmbiguousTargetError(HTTPException):

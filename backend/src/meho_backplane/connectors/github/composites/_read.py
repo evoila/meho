@@ -4,11 +4,9 @@
 """Read-only ``gh.composite.*`` handler functions: ``pr_status_summary`` and ``repo_view``.
 
 T4 (#1224) ships the first L1 composite for the gh-rest connector:
-``gh.composite.pr_status_summary``. The pattern mirrors the vmware-rest
-composites at
-:mod:`meho_backplane.connectors.vmware_rest.composites._read` -- module-
-level async functions that take the dispatcher's composite-branch
-keyword args.
+``gh.composite.pr_status_summary``. The handlers are module-level
+async functions that take the dispatcher's composite-branch keyword
+args.
 
 Why module-level functions
 --------------------------
@@ -31,8 +29,7 @@ catalog ingest** (the #2050 unbacked-composite dead-end is gone), so no
 gh-only backing machinery is needed here.
 
 Taking the direct path deliberately drops two of the four guarantees the
-old ``dispatch_child`` seam carried (documented on the vmware-rest
-precedent's "four reasons" note) and relocates the other two:
+old ``dispatch_child`` seam carried and relocates the other two:
 
 * **Bounded recursion is moot** -- a direct session call cannot re-enter
   the dispatcher, so there is no recursion to bound.
@@ -88,7 +85,7 @@ _log = structlog.get_logger(__name__)
 # GitHub REST wire paths, keyed with ``str.format`` placeholders. The
 # connector's ``_base_url`` mounts them under ``https://api.github.com``;
 # ``mount_op_path`` is identity for github today (a future GHES override
-# would remap here, matching the vmware-rest ``/api`` vs ``/rest`` mount).
+# would remap here).
 _PR_PATH = "/repos/{owner}/{repo}/pulls/{pull_number}"
 _CHECK_RUNS_PATH = "/repos/{owner}/{repo}/commits/{ref}/check-runs"
 _REVIEWS_PATH = "/repos/{owner}/{repo}/pulls/{pull_number}/reviews"
@@ -332,8 +329,7 @@ async def pr_status_summary_composite(
 
     Each path is routed through :meth:`connector.mount_op_path` before
     the wire call. That override is identity for github.com today; a
-    future GHES connector remaps the mount there, matching the
-    vmware-rest ``/api`` vs ``/rest`` precedent.
+    future GHES connector remaps the mount there.
 
     Returns
     -------

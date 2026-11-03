@@ -56,6 +56,10 @@ shipped and why it matters — not a dump of commit subjects.
     (the smallest concrete edit a v(N-1) client makes to keep working
     on v(N)). Surfaces above `Added` in the release section so
     adopters reading top-to-bottom see migrations before features.
+  - **Connector kit** — changes to `meho_connector_kit`, the MEHO
+    names a connector package may import. The section names the new
+    kit version; `scripts/release/check_connector_kit_release.py`
+    checks it at release time.
 
 **Connector release-notes convention.** Distinguish three connector
 ship states; release-notes / kb / Goal-tracker text must say which
@@ -89,6 +93,1202 @@ credentials. Mention the live auth-model set explicitly on every
 connector-related release-notes line.
 
 ## [Unreleased]
+
+## [0.43.0] - 2026-11-02
+
+**This is the last release with the VMware connectors built into the
+public image.** From the next release on, the VMware connectors ship as
+a separate connector package, built on top of the public image. The
+decision record
+[evoila's own connectors leave the public repository](https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-own-connectors-leave-the-public-tree.md)
+says which connectors move and why.
+
+MEHO 0.43.0 checks each caller before it hands them a cached login.
+Only a platform admin ingests or deletes built-in connectors and sets
+the Vault login role of a target. In the console, running an operation
+needs the operator role, as on REST and MCP. A decided approval request
+keeps no secret values. A new script builds the MEHO appliance for
+vSphere.
+
+The upgrade runs one database migration (`0132`). It adds no column. It
+hides the secret values in the stored params of decided approval
+requests. Read "Breaking changes" and "Steps after the upgrade" first.
+
+### Security
+- A connector hands a cached login, token or client to a caller only
+  after that caller's own Vault read of the target's secret passed once.
+  The first read fills the cache. Every later caller reads the secret
+  once too, under their own login, and then uses the cached entry with
+  no second login at the vendor. A caller whose read is refused gets the
+  refusal, also when the cache is warm. The check runner (the job that
+  runs Sensors) is its own caller, also when it runs a Sensor that a
+  person made. A change of the target clears the list of callers whose
+  read passed (#5619).
+- The SSH connection pool keeps one login per caller and target. A
+  caller gets a connection only after their own Vault read of the
+  target's secret passed, and reuses only the connections they opened.
+  The check runner, a call without a login token and MEHO's own system
+  calls each have their own place in the pool. A change of the target
+  closes every connection to it. So MEHO opens one SSH login per caller
+  and target, not one per target (#5603).
+- A waiting approval request keeps its params only until it runs or
+  ends. When the run starts, MEHO replaces each secret-named value in
+  the stored params with `[REDACTED:param_name]`, for example a
+  password or a licence key in a deployment spec. The run gets the real
+  values. The same happens when a request is rejected, withdrawn or
+  expires. The migration `0132` does this once for the requests that
+  were decided before (#5608).
+- A waiting approval is also bound to the connector packages of the
+  image: the name, version and file checksum of each package. An image
+  with a new, updated, rebuilt or removed connector package counts as
+  another release. So the requests that still wait end with the reason
+  `release_changed`, and an approved request from the earlier image is
+  refused before the vendor call. The plain public image has no
+  connector packages, so its release identity stays the same (#5602).
+- Ingesting a connector into the built-in scope (with no tenant id) and
+  deleting a built-in connector's rows need the `platform_admin` flag,
+  as enabling, disabling and editing them already did. Every tenant
+  shares these rows. A tenant admin without the flag is refused before
+  any API file is read or any row changes. A tenant admin can still
+  ingest a copy into their own tenant (#5607).
+- Only a platform admin sets, changes or removes the Vault login role
+  of a target (`vault_role` and `vault_mount` in its extras): on
+  create, on update and in `targets.register`. Another caller gets 403
+  `vault_login_role_requires_platform_admin`, and the target stays as
+  it was. Existing targets keep their role (#5609).
+- The console checks the login token of a session again on read pages
+  about every 5 minutes, however many sessions are active. A session
+  that this MEHO process has not checked yet is checked on its next
+  read. So a session that the login server no longer accepts is refused
+  within one check window (#5606).
+- In the console, running or previewing an operation, writing, deleting
+  or moving a Vault secret, and starting, advancing or stopping a
+  runbook run need the `operator` role, the same as on REST and MCP. A
+  `read_only` session gets 403 `operator_required`, and nothing runs or
+  changes (#5605).
+- The mail recipient allowlist accepts only a plain address: the part
+  before the `@` holds only letters, digits and `.`, `_`, `+` and `-`.
+  A recipient with any other character is refused before MEHO connects
+  to the mail relay, for `mail.send` and for the mails of checks.
+  `mail.send` answers such an address with `invalid_params` (#5604).
+
+### Breaking changes
+- A caller whose own Vault read of a target's secret is refused now
+  gets the refusal, also when another caller already logged in to that
+  target. This holds for the connector caches and for the SSH pool
+  (#5619, #5603). What to do: make sure that each caller of a target
+  may read its secret in Vault. This includes people, service logins
+  and the Vault role of the check runner.
+- Ingesting into the built-in scope and deleting a built-in connector's
+  rows need `platform_admin` (#5607). What to do: give `platform_admin`
+  to the account that runs built-in ingests, for example an update
+  routine, or ingest into your own tenant with its tenant id.
+- Setting, changing or removing `vault_role` or `vault_mount` in the
+  extras of a target needs `platform_admin` (#5609). What to do: let a
+  platform admin set these keys. Sending the same values again still
+  works, so an import that keeps them is not refused.
+- A re-run of a failed approved run
+  (`POST /api/v1/approvals/{request_id}/rerun`) needs the params again
+  when they held a secret-named value, for example a password or a
+  licence key, because the stored copy no longer has it (#5608). What
+  to do: send the params with the re-run.
+- A new, updated, rebuilt or removed connector package in the image
+  ends every approval request that still waits, as a MEHO upgrade does
+  (#5602). What to do: decide waiting requests before you roll out a
+  new overlay image, or ask the requesters to send them again.
+- A `read_only` person gets 403 `operator_required` in the console when
+  they run or preview an operation, write a Vault secret or drive a
+  runbook run (#5605). What to do: give the `operator` role to the
+  people who do these things.
+- A mail recipient whose part before the `@` holds another character,
+  for example `%` or `!`, is refused (#5604). What to do: use plain
+  addresses. A full address on the allowlist must be plain too, or it
+  never matches.
+
+### Steps after the upgrade
+- Back up the database first. The migration `0132` adds no column. In
+  every approval request that no longer waits, it replaces each
+  secret-named value of the stored params with
+  `[REDACTED:param_name]`. A rollback does not bring the values back
+  (#5608).
+- The upgrade ends every approval request that still waits, as every
+  upgrade since 0.39.0 does: a `pending` request expires with the
+  reason `release_changed`. Decide waiting requests first, or ask the
+  requesters to send them again.
+- Existing Keycloak realm: on each client that people use for
+  `meho login` (`meho-cli` by default), turn on the standard flow and
+  the redirect address `http://127.0.0.1:*`, for example with the
+  operation `keycloak.client.update`. Do not set the PKCE method to
+  required (`S256`) on these clients, and clear it where it is set:
+  the device login of `meho login` sends no PKCE, so a required method
+  refuses every command line login. The fresh sign-in for approvals
+  sends PKCE by itself. Do not run
+  `meho admin keycloak bootstrap-clients` for this: on an existing
+  realm it also rewrites the `meho-cli` and `meho-mcp` clients and
+  their tenant and role mappers, and it sets the PKCE method of
+  `meho-cli` to required. The 0.40.0 notes asked for PKCE `S256` on
+  these clients; they are corrected too (#5627).
+- Give `platform_admin` to the account that runs built-in connector
+  ingests, for example an update routine (#5607).
+- An install with more than one tenant: tie each extra Vault login role
+  that a target names to one tenant, with `bound_claims` on the
+  `tenant_id` claim, as section 8 of
+  `docs/cross-repo/vault-provisioning.md` says (#5609).
+- Optional: set your mail relay to the same rule for recipients. On
+  Postfix, set `allow_percent_hack = no` and `swap_bangpath = no`
+  (#5604).
+
+### Added
+- Appliance: `deploy/appliance/build.sh` builds the MEHO appliance
+  `meho-appliance-<version>.ova` for vSphere with `govc`, the vSphere
+  command line tool. It starts from the Ubuntu 24.04 cloud image and
+  runs the Linux server install (form 2) of a release. Then it removes
+  the keys, passwords, host keys, logs and other files that must differ
+  between appliances, checks that they are gone, and exports the OVA
+  with its wizard fields, a manifest and `SHA256SUMS`. A workflow that
+  a person starts runs the build. The appliance is not part of a
+  release yet: it does not set itself up at its first start yet, and
+  the release does not publish it (#5067).
+
+### Fixed
+- Linux server install (form 2): the console login and the approval
+  hand-off of credential writes work after the install. The values file
+  of the install turns both on with the Secrets that the install makes,
+  and an update turns them on too (#5647).
+
+### Changed
+- CI: the unit tests run in six shards with fresh times per test file,
+  so each shard stays under its limit of 900 seconds (#5625).
+
+### Documentation
+- The 0.40.0 Keycloak step no longer asks for PKCE `S256` on the
+  `meho login` clients. The same fix is in the 0.40.0 upgrade note, in
+  the realm guide on the docs site and in the login recipe in
+  `deploy/values-examples` (#5627).
+- Six docs and code comments that named tests or code that are gone now
+  say what the code does (#5622).
+
+## [0.42.0] - 2026-11-02
+
+MEHO 0.42.0 hides secret-named fields in every answer and asks for a
+recent sign-in for every approval, also in the web interface. On the
+command line, one approval sign-in covers 15 minutes and uses the new
+login client `meho-cli-approve`. Logins on the command line and in the
+Claude clients renew themselves. Connector packages get the connector
+kit. New typed operations cover vSphere hosts, VMs, vApps, templates
+and vSAN, HCX, fleet management, VCF Automation, VCF Operations 9.1,
+Orchestrator and Salt, and a new connector reads the Identity Broker.
+
+The upgrade runs one database migration (`0131`). It only adds a
+column. Read "Breaking changes" and "Steps after the upgrade" first.
+
+### Security
+- Every operation hides the value of each secret-named field in its
+  answer, for example `password`, `token`, `api_key` or
+  `client_secret`: in the inline result, in the sample rows and in the
+  rows behind a result handle. The audit row keeps a keyed fingerprint
+  in place of each hidden value. A person or a service principal gets
+  the values with `reveal_secret: true`, on any operation; an agent is
+  refused. A call that waits for approval keeps this choice for the
+  approved run. An operation that makes a new credential still returns
+  it to the caller. A connector declares fields that only look like
+  secrets, such as a date or a count, with `register_plain_fields`, and
+  they stay whole (#5567).
+- An approval in the web interface needs a recent sign-in, the same as
+  on the command line and REST: the sign-in behind the console session
+  is at most `FRESH_SIGN_IN_MAX_AGE_SECONDS` old (15 minutes by
+  default) and asked for the password. A `destructive` operation needs
+  a sign-in of its own, at most 5 minutes old, that approved nothing
+  else. When the sign-in is too old, the console shows **Sign in to
+  approve**. Deny needs no new sign-in. The audit row of a console
+  approval records the sign-in (#5583).
+- An agent run that a person starts acts with at most the agent's own
+  rights: the role is at most `operator`, and the approver,
+  self-approval and `platform_admin` flags are off. The person stays
+  the subject of each call, and child runs get the same limits (#5543).
+- An agent login starts only its own agent definition. For another
+  definition, REST answers 403 `agent_not_owned` and MCP answers with a
+  permission refusal. A person may start any definition of the tenant.
+  Setting which checks a runner runs needs the `tenant_admin` role
+  (`PUT /api/v1/checks/assignment/{runner}`) (#5597).
+- Every connector checks the target address again when it connects,
+  with the same rules and allowlist as when the target is saved. It
+  looks the name up once and connects only to an address it checked:
+  HTTP, SSH, PostgreSQL, MSSQL, MongoDB, Kubernetes (also a redirect or
+  a proxy host), the OVF disk upload, the secret handoff store and the
+  vCenter file copy. A spec fetch also refuses addresses that are not
+  globally routable, such as `100.64.0.0/10` (#5544).
+- A Vault KV path with a `.` or `..` segment, a `%` or a backslash is
+  refused with no call to Vault, also when
+  `VAULT_KV_TENANT_SCOPE_PREFIX` is empty. This holds for `vault.kv.*`
+  paths, secret refs in operation parameters and a target's
+  `secret_ref` (#5552).
+- `linux.file.read` and `linux.log.tail` also refuse the PostgreSQL
+  password file (`.pgpass`), Ceph keyrings, every backup of `shadow`
+  and `gshadow`, and every path that contains `secret` or
+  `credential`, in upper or lower case. The packaged redaction policies
+  hide Ceph keys (#5598).
+- The **Revoke** button of a session on the account page sends the
+  session id in the form body. The request path is the same for every
+  session, so the access log and the audit row hold no session id
+  (#5599).
+
+### Breaking changes
+- On the command line and over REST, only a token of the new approval
+  login client `meho-cli-approve` approves, and only when its sign-in
+  asked for the password (the `acr` claim). A `meho login` token or an
+  MCP token gets 401. An older `meho` CLI opens the approval sign-in on
+  `meho-cli`, so its approvals are refused (#5548). What to do: set up
+  the client (see "Steps after the upgrade") and install the 0.42.0
+  CLI. Until then, approve in the web interface.
+- `FRESH_SIGN_IN_MAX_AGE_SECONDS` (chart
+  `config.freshSignInMaxAgeSeconds`) is now the approval window, with
+  the default 900. Approving a `destructive` operation, turning approval
+  off for an operation and lowering its risk level read the new setting
+  `PER_ACTION_SIGN_IN_MAX_AGE_SECONDS` (chart
+  `config.perActionSignInMaxAgeSeconds`, default 300) (#5548). What to
+  do: if you set `FRESH_SIGN_IN_MAX_AGE_SECONDS` for these checks, set
+  `PER_ACTION_SIGN_IN_MAX_AGE_SECONDS` instead.
+- An approval in the web interface needs a recent sign-in that asked
+  for the password (#5583). What to do: click **Sign in to approve**
+  and sign in again. On a Keycloak that you run yourself, give the
+  `meho-web` client the `basic` and `acr` default scopes.
+- Every operation hides secret-named fields in its answer, not only
+  the secret reads (#5567). What to do: a script that needs such a
+  value runs as a person or a service principal and sends
+  `reveal_secret: true`. A connector package declares its fields that
+  only look like secrets with `register_plain_fields` from
+  `meho_backplane.operations`.
+- An agent run that a `tenant_admin` starts by hand cannot do tenant
+  admin work, for example `targets.remove` (#5543). What to do: do
+  tenant admin work as a person.
+- An agent login gets 403 `agent_not_owned` when it starts another
+  agent's definition, and an operator login gets 403
+  `insufficient_role` on `PUT /api/v1/checks/assignment/{runner}`
+  (#5597). What to do: start another agent's definition as a person,
+  and set runner assignments as a tenant admin.
+- At connect time, MEHO refuses a target host name that does not
+  resolve, unless the exact name is on the allowlist
+  (`MEHO_TARGET_SSRF_ALLOWLIST`, chart `config.targetSsrfAllowlist`).
+  A MongoDB target takes one host: a connection string or a list of
+  hosts is refused. A Kubernetes target behind a proxy must use TLS
+  (#5544). What to do: fix the DNS record, use an IP address, or put
+  the exact name on the allowlist. Give a MongoDB target one host.
+- A connector package must name the connector kit versions it fits.
+  The overlay build refuses a package without a range, and MEHO does
+  not start when a listed package has no range or a range that the kit
+  of the image does not fit (`connector_package_kit_mismatch`) (#5590).
+  What to do: add `meho-connector-kit>=1.0,<2` to the dependencies of
+  the package and build its wheel again.
+- `vcfa.tenant.deployment.delete` is `destructive`: only a person runs
+  it, first with `preview_operation`, then with the `preview_hash`
+  (#5466). What to do: a person deletes deployments.
+
+### Steps after the upgrade
+- Back up the database first. The migration `0131` only adds the
+  column `approval_request.reveal_secret`; requests made earlier get
+  `false` (#5567).
+- The upgrade ends every approval request that still waits, as every
+  upgrade since 0.39.0 does: a `pending` request expires with the
+  reason `release_changed`. Decide waiting requests first, or ask the
+  requesters to send them again.
+- Keycloak that ships with the MEHO chart: the upgrade adds the
+  approval client `meho-cli-approve`, the missing default scopes of
+  `meho-web`, and the renewing login of `meho-cli` (`offline_access`,
+  48 hours without use). It makes the login flow
+  `meho approval sign-in` of the approval client only when the company
+  login is on. Otherwise create the flow by hand, as
+  `docs-site/install/keycloak-realm.md` says (#5546, #5548, #5583).
+- A Keycloak that you run yourself: create the public client
+  `meho-cli-approve` by hand, as `docs-site/install/keycloak-realm.md`
+  says: the standard flow and the redirect address
+  `http://127.0.0.1:*`, no refresh tokens, an access token of 15
+  minutes, and its own login flow that always asks for the password.
+  Do not run `meho admin keycloak bootstrap-clients` for this: on an
+  existing realm it also rewrites the `meho-cli` and `meho-mcp` clients
+  and their tenant and role mappers. Give `meho-web` the `basic` and
+  `acr` default scopes, and give `meho-cli` the `offline_access` scope
+  as optional, with a 48-hour idle limit. Until the approval client
+  exists, approve in the web interface (#5546, #5548, #5583).
+- If you change `config.freshSignInMaxAgeSeconds`, set the same time as
+  the access token lifespan of `meho-cli-approve` (#5548).
+- Existing realm: set **SSO Session Idle** to 1 hour and **SSO Session
+  Max** to 10 hours once, by hand or with `keycloak.realm.update`, so
+  the console session does not end after 30 minutes without use. The
+  upgrade does not change realm settings (#5551).
+- Optional, on an existing realm: to remember the browser for 30 days
+  and to turn on passkeys, set the realm values that
+  `docs-site/install/keycloak-realm.md` lists under "A realm that
+  already runs" (#5550).
+- Install the 0.42.0 CLI. Claude Desktop: install
+  `meho-claude-desktop-0.42.0.mcpb` from the release. Claude Code: run
+  `claude plugin update meho@meho`, then restart Claude Code (#5548,
+  #5547).
+- Connector packages: add a kit range to each package, as "Breaking
+  changes" says, then build the overlay image again on the 0.42.0
+  image (#5590).
+
+### Connector kit
+- New: the connector kit, version 1.0. A connector package imports
+  MEHO only through the module `meho_connector_kit`, from the package
+  `meho-connector-kit`, and every MEHO image carries it. It holds 30
+  names, among them the new typed class `Target` with the six target
+  fields a connector may read: `name`, `host`, `extras`, `auth_model`,
+  `verify_tls` and `secret_ref`. Every other MEHO module is private and
+  can change in any release. `Connector.execute` has a default now, so
+  a package does not write its own (#5571).
+- A package names the kit versions it fits in its dependencies, for
+  example `meho-connector-kit>=1.0,<2`. The overlay build and the start
+  of MEHO check the range (#5590).
+- The folder `templates/connector-package/` holds a made-up connector
+  that imports MEHO only through the kit. A CI job tests it against
+  MEHO's own code (#5591). The docs page "Write a connector package"
+  lists every kit name (#5589).
+
+### Added
+The new operations below are tested with made-up answers in the
+vendor's format. Their live tests in the lab are still open. Every new
+operation that changes something waits for a person's approval.
+- Keycloak: a new realm of the chart remembers the browser for 30 days
+  when the person ticks "Remember me", and turns on passkeys with user
+  verification. The approval sign-in still asks every time (#5550).
+- Connector packages: `deploy/connector-overlay/build.sh --sign-key`
+  signs the overlay image with a key that cosign accepts, with no entry
+  in a transparency log (#5587).
+- Identity Broker: the new connectors `idb-wsa-3.3` (Workspace ONE
+  Access 3.3) and `idb-rest-9.0` (VCF Identity Broker 9.x) log in with
+  an OAuth client from Vault. On Workspace ONE Access they read the
+  version, identity providers, directories, users and groups, and
+  start a directory sync. On Identity Broker 9.x they find users and
+  groups and read the version (9.1 and newer); the other calls stop
+  with a message (#5495).
+- vSphere: read a host's NTP, DNS, syslog and other base settings, and
+  set NTP, DNS with the host name, and the syslog targets. The service
+  change `vmware.composite.host.service_control` also handles `snmpd`,
+  `sfcbd-watchdog` and `slpd` (#5443).
+- vSphere: add, move, reconnect, disconnect and remove ESXi hosts;
+  `vmware.task.info` follows a vCenter task (#5446).
+- vSphere: VM boot settings, hardware version and VMware Tools
+  upgrades, and VM advanced settings (#5449).
+- vSphere: `vmware.vm.list` lists every VM in one call,
+  `vmware.inventory.find` finds objects by name, pattern or path, and
+  two changes delete all snapshots of a VM or consolidate its disks.
+  `vmware.snapshot.list` can list the snapshots of every VM and filter
+  them by age, and `vmware.vm.info` also shows disks, network adapters
+  and guest file systems (#5450).
+- vSphere: six vSAN reads: cluster settings, capacity, performance,
+  resync, object health, and what maintenance mode of a host does to
+  vSAN data (#5462).
+- vSphere: read a host's advanced settings and firewall; set advanced
+  settings, firewall rule sets, lockdown mode and its exceptions, SNMP
+  and the core dump partition (#5469).
+- vSphere: list, create and delete a host's local users, set their
+  passwords from Vault, and join a host to Active Directory or take it
+  out (#5473).
+- vSphere: read, renew and install host certificates, make a signing
+  request on the host, and read TPM attestation (#5474).
+- vSphere: add and remove PCI passthrough devices, take a console
+  screenshot, and send special keys such as Ctrl+Alt+Del (#5487).
+- vSphere: create, power on and off and delete vApps, and set the start
+  order of their VMs (#5493).
+- vSphere: turn a VM into a template and back, register and unregister
+  a VM, and make an instant clone (#5494).
+- vSphere: list content libraries and their items, capture a VM into a
+  library, publish a library, and export a library item or a VM as OVF
+  files to a URL (#5496).
+- vSphere: connect and disconnect network adapters and CD drives, set
+  CPU and memory hot add and shares, and add serial ports (#5531).
+- vSphere: deploy, check out and check in VM templates of a content
+  library; list, read and delete guest customization specs (#5532).
+- HCX: check, start, list and cancel migrations, list and set mobility
+  groups, and set the switchover window (#5460).
+- HCX: compute and network profiles, site pairing with a login from
+  Vault, and certificate trust that a person confirms (#5470).
+- HCX: set up an HCX Manager: vCenter and SSO, NSX, location, role
+  mapping, activation and restart (#5471).
+- HCX: list, build and dissolve Network Extension HA groups (#5472).
+- Fleet management: list and map product binaries, check and start
+  product upgrades, and check, create and delete environments (#5463).
+- Fleet management: list and add locker passwords, list and import
+  locker certificates, and replace product certificates (#5465).
+- VCF Automation and Aria Automation 8.18: deployment and machine
+  day-2 actions, lease changes, machines and disks (#5466); approvals,
+  policies, ABX actions and event subscriptions (#5483); cloud
+  accounts, cloud zones, flavor, network and storage profiles, and
+  project members (#5484).
+- VCF Automation 9: connect vCenters and NSX managers, and set regions
+  and organization quotas on the provider plane (#5500); read and set
+  the provider's LDAP and each organization's LDAP and OIDC sign-in
+  (#5498).
+- VCF Operations 9.1: list VCF roles, find users and groups, and give
+  or remove their roles (#5477); list and replace fleet certificates,
+  list fleet password accounts and change a password from Vault
+  references (#5479).
+- Orchestrator: list actions, configuration elements and packages; run
+  a workflow (a person only, after a preview) and cancel a run (#5506).
+- Salt: accept, reject and delete minion keys, run a state or one
+  command, and cancel a job; `salt.job.result` shows the job state and
+  progress (#5507).
+
+### Fixed
+- Clients: the Claude Code plugin and the Claude Desktop bundle keep
+  the MEHO login through a failed renewal. They never delete the shared
+  login file, renew one at a time, try again for about 30 seconds after
+  a network or server error, and open one browser login for all
+  sessions on a computer. MEHO offers `offline_access` to MCP logins.
+  The plugin version is 0.32.0 (#5547).
+- Console: the session ends together with the login server's session,
+  after 1 hour without use and after 10 hours at most
+  (`UI_SESSION_ABSOLUTE_LIFETIME_SECONDS` now defaults to 36000). The
+  console then shows "Your session ended. Please sign in again." and
+  comes back to the same page after the login (#5551).
+- Connectors: a connector whose package was removed shows
+  `package_not_installed` with zero counts, and search names the
+  package to install again (#5569). A connector whose code is not in
+  this MEHO shows `code_not_installed`, and a call answers
+  `connector_code_not_installed` (#5588).
+
+### Changed
+- Approvals: on the command line, one fresh sign-in approves several
+  requests for 15 minutes. `meho approvals approve` takes several ids
+  and asks for `yes` for each one, and `--in-order` asks at every step
+  (#5548).
+- Login: `meho login` asks for a renewing login by default. It ends
+  after 48 hours without use, or after 7 days at most.
+  `--offline=false` turns it off. When the realm does not offer it, the
+  CLI logs in without it and prints how an admin fixes the realm
+  (#5546).
+- Connectors: each connector declares the class of its own operations
+  (credential read, credential mint, credential write, write) in its
+  own package. Every operation keeps its class (#5582).
+- vSphere: the composite and typed operation modules carry their own
+  rows and child calls, and the registration tests check rules, not
+  lists (#5557, #5558, #5570, #5572).
+- CI: a made-up test secret carries a skip comment on its own line,
+  and a new job scans every file of the checkout for secrets (#5594);
+  the rate check test of result reads pins its clock (#5553).
+
+### Documentation
+- Decision records: the connector kit (#5559), and one person reviews
+  each connector package version before it is signed (#5584).
+- How to write a connector package, and a throwaway install with the
+  built-in parts (#5568).
+- The code comment of `vault.token.create_and_store` says that
+  `vault.token.create` returns only the accessor and the policies
+  (#5596).
+
+## [0.41.0] - 2026-11-01
+
+MEHO 0.41.0 guards more vCenter 8.0 credential reads, the same as on
+vCenter 9.0, and reads the SA-Operators group from the login. No
+database migration.
+
+### Security
+- On a vCenter 8.0 target, the generic reads of a content library, a
+  local library, a subscribed library and a Supervisor container image
+  registry wait for a person's approval, and every secret field comes
+  back as `[REDACTED:param_name]`, the same as on vCenter 9.0. The
+  approval part applies after you load the connector again; see "Steps
+  after the upgrade" (#5541).
+- The Claude Code plugin and the Claude Desktop bundle ship `qs` 6.17.0,
+  with the upstream fix for CVE-2026-110816. The plugin version is
+  0.31.1. The backplane image, the chart and the CLI do not change
+  (#5150).
+
+### Steps after the upgrade
+- Load the generic vCenter connector `vmware-rest-8.0` again with
+  `meho connector ingest` and the same API files you used before, so
+  the approval of these reads takes effect. The small API file that
+  `--catalog vmware/8.0` loads does not have these reads: if you loaded
+  only that file, skip this step (#5541).
+- Claude Desktop: install `meho-claude-desktop-0.41.0.mcpb` from the
+  release. Claude Code: run `claude plugin update meho@meho`, then
+  restart Claude Code (#5150).
+
+### Added
+- Login: MEHO reads whether a person is in the SA-Operators group of
+  the current tenant. Approvals do not use this yet and work as before.
+  When the login has no tenant list (`meho_tenants`), MEHO looks for the
+  group in the login's `groups` list; the new setting
+  `JWT_SELF_APPROVER_GROUP` names the group (default
+  `MEHO-SA-Operators`). Agent, service and runner logins never count as
+  members (#5394).
+
+### Documentation
+- Two steps after the upgrade in the 0.40.0 notes are corrected: the
+  Keycloak step no longer runs `meho admin keycloak bootstrap-clients`
+  on an existing realm, and the vCenter step loads the same API files
+  as before (#5540).
+
+## [0.40.0] - 2026-11-01
+
+MEHO 0.40.0 keeps secret values hidden by default and runs an approved
+request only as it was approved. Agents work with operator rights, and
+secret refs in operation parameters stay inside the caller's tenant. A
+person in several tenants picks one tenant on the command line and in
+the MCP clients. New typed operations cover HCX, Site Recovery Manager,
+vSphere Replication, Cloud Director, the VCF Installer, Cloud Builder
+for VCF 5.x, fleet management, Azure networks, Google keyless access,
+GitHub issues and many vSphere tasks.
+
+The upgrade runs three database migrations (`0128` to `0130`). They only
+add columns. Read "Breaking changes" and "Steps after the upgrade"
+first.
+
+### Security
+- Secret reads show names, not values: `vault.kv.read` returns the key
+  names of a secret, `vmware.composite.vm.guest.env.read` returns the
+  variable names, and other credential reads also hide numbers under
+  secret-named keys. `reveal_secret: true` returns the values to a
+  person or a service principal only. The audit row keeps a keyed
+  fingerprint (HMAC-SHA256) in place of each hidden value, so equal
+  values still match (#5521).
+- The default redaction policy hides PEM private key blocks and finds
+  secret labels such as `DB_PASSWORD=` and `GITHUB_TOKEN=` in free text
+  (#5521).
+- An approved request runs only when the target's connection settings
+  and, for a request with a preview, the rebuilt preview still match
+  what the person approved. Otherwise MEHO sends nothing and answers
+  `target_changed_since_approval` or `preview_changed_since_approval`,
+  and the requester asks again. An agent's own resume runs on the target
+  saved with the request (#5520).
+- Agents act with operator rights. A new agent gets
+  `tenant_role=operator`, and MEHO reads `tenant_admin` in an agent
+  token as `operator`. People, service logins and runners keep the role
+  their token carries (#5508).
+- An agent token gets 403 `insufficient_role` when it changes or deletes
+  an agent definition or cancels a scheduled trigger. New tests pin this
+  (#5522).
+- A secret ref that an operation takes as a parameter must sit inside
+  the caller's tenant path. MEHO refuses a ref with a `.` or `..`
+  segment, a `%` or a backslash: in a parameter, in a `vault.kv.*` path
+  and in a target's `secret_ref`. A `gsm:` ref in a parameter is read
+  only from a project listed in the new setting
+  `GSM_PARAM_ALLOWED_PROJECTS` (#5511).
+- On a Vault install, the check runner starts only with a Vault role of
+  its own (`VAULT_CHECK_RUNNER_ROLE`), and each read it makes stays
+  inside the sensor's tenant path (#5511).
+- `vault.token.create` returns the accessor and the policies of the new
+  token. For an operation that makes a new credential, such as
+  `vault.auth.approle.generate_secret_id` or `harbor.robot.create`, the
+  raw copy in the audit row hides the new secret; the caller still gets
+  it. A stored run result is shown only to the person who started the
+  run (#5527).
+- The flight recorder stores no request or answer body for the ingested
+  copies of the VCF calls that send a deployment spec, a login or a
+  depot account, the same as for their typed twins. Status reads keep
+  their bodies (#5526).
+- Generic vCenter reads whose answer holds credentials (proxy settings,
+  identity providers, deployment specs, guest customization specs, host
+  IPMI settings and others) wait for a person's approval, and every
+  secret field comes back as `[REDACTED:param_name]`. The approval part
+  applies after the next catalog ingest (#5525).
+- The agent run console opens its live stream with a token that is
+  encrypted and signed with the console session key. The token holds
+  only a keyed digest of the session id and lasts 120 seconds (#5523).
+- `winsrv.power.reboot` and `winsrv.power.shutdown` accept a `message`
+  of at most 512 characters, with no double quotes, backslashes or
+  control characters, and with no whitespace, `/` or `-` at the start.
+  The agent hint names this rule (#5519).
+- `linux.file.read` and `linux.log.tail` check the real path of the file
+  the host opens, with every symlink followed. They read only under
+  `/etc`, `/var/log`, `/var/lib` and `/run`, and a few named system
+  files such as `/proc/meminfo` and `/usr/lib/os-release`. Key, token
+  and password files are refused even under these folders, for example
+  `/etc/shadow`, SSH host keys, TLS private keys, the credentials of
+  Kubernetes, RKE2 and K3s, mounted Kubernetes Secrets and `*.key`
+  files. The default redaction policy hides crypt(3) password hashes,
+  and it reads the rows of a text list as one text, so a private key
+  block that spans rows is hidden whole (#5524).
+- The image ships `pyasn1` 0.6.5 and `joserfc` 1.7.6, with the upstream
+  fixes for CVE-2026-119194, CVE-2026-119195, CVE-2026-119196,
+  CVE-2026-119197 and CVE-2026-119283 (#5476, #5432).
+
+### Breaking changes
+- An agent token gets 403 `insufficient_role` on every route that needs
+  `tenant_admin`: for example connectors, operation edits, targets,
+  event sources, agent definitions, grants and scheduler triggers
+  (#5508). What to do: do this work as a person or with a service login.
+- `vault.kv.read` and `vmware.composite.vm.guest.env.read` return names
+  without values, and an agent's `reveal_secret: true` gets `denied`
+  (#5521). What to do: a script that needs a value runs as a person or a
+  service principal and sends `reveal_secret: true`.
+- `vault.token.create` returns no token (#5527). What to do: use
+  `vault.token.create_and_store`. A stored run result is shown only to
+  the person who started the run; others get `result: null` (REST) or
+  `unknown_run` (MCP).
+- A secret ref in an operation parameter is refused with
+  `vault_credentials_read_error` when it is outside the caller's tenant
+  path, holds `.`, `..`, `%` or a backslash, is a `gsm:` ref of a
+  project that `GSM_PARAM_ALLOWED_PROJECTS` does not list (empty by
+  default), or uses another store kind such as `wrapped:` (#5511). A
+  target's own `gsm:` ref does not change. What to do: see "Steps after
+  the upgrade".
+- On a Vault install with `checkRunner.enabled: true`, no Sensor runs
+  until `VAULT_CHECK_RUNNER_ROLE` names a Vault role other than
+  `VAULT_OIDC_ROLE`; the backplane logs `sensor_runner_refused` (#5511).
+  What to do: see "Steps after the upgrade".
+- Approving on the command line or over REST needs a sign-in that is at
+  most `FRESH_SIGN_IN_MAX_AGE_SECONDS` old (default 300), and one
+  sign-in gives one approval. A long-lived token gets 401. The web
+  interface does not change (#5399). What to do: approve in the web
+  interface, or with `meho approvals approve`, which opens a browser
+  sign-in.
+- Connector `migration-assess-1.x` is now `inventory-1.x`, and the read
+  `migration.inventory.csv` is now `inventory.export` with
+  `format=azure-migrate-csv`. Field `csv_lines` is now `lines`
+  (`result_query` path `/lines`), and `csv_name` in `renamed` is now
+  `name_in_file` (#5407). What to do: use the new names.
+- `linux.file.read` and `linux.log.tail` refuse a path whose real path
+  is outside the read roots, most files under `/proc` and `/sys`, and
+  key, token and password files. On a host where `/var/log` or another
+  read root is a symlink, reads under it are refused (#5524). What to
+  do: read kernel parameters with `linux.sysctl.read`.
+
+### Deprecated
+- `--work-ref` on `meho audit query`, `meho approvals list`,
+  `meho scheduler list`, `meho runbook runs`, `meho agent run-list` and
+  `meho broadcast recent` still filters in this release and prints a
+  warning. Use `--filter-work-ref`. The next release drops the old use
+  (#5339).
+
+### Steps after the upgrade
+- Back up the database first. The three migrations only add columns:
+  `0128` adds `targets.secret_field_map` (#5209), `0129` adds
+  `approval_request.rerun_count` (#5421), `0130` adds
+  `approval_request.target_hash` (#5520). Requests made earlier have no
+  target hash; MEHO skips the target check for them.
+- The upgrade ends every approval request that still waits, as in
+  0.39.0: a `pending` request from 0.39.0 expires with the reason
+  `release_changed`. Decide waiting requests first, or ask the
+  requesters to send them again.
+- Vault install with `checkRunner.enabled: true`: create a Vault role
+  for the check runner and set `VAULT_CHECK_RUNNER_ROLE` to it through
+  `extraEnv`, or turn `checkRunner.enabled` off. The role's policy
+  covers the secrets your Sensors read and, because event intake logs in
+  with the same role, the event source secrets
+  (`secret/data/tenants/+/event-sources/*` and the matching
+  `secret/metadata/` path). Without these paths an event source with a
+  secret answers 503. Recipe: `docs/cross-repo/vault-provisioning.md`,
+  section 7 (#5511, #5529).
+- Secrets that operations name in parameters (for example `secret_env`,
+  `password_ref`, `guest_secret_ref`) belong under the caller's tenant
+  path, `tenants/<tenant_id>/` with the default prefix (#5511).
+- Operations that name `gsm:` secrets in parameters: list the allowed
+  Google projects in `GSM_PARAM_ALLOWED_PROJECTS`, comma-separated
+  (#5511).
+- Existing Keycloak realm: on each client that people use for
+  `meho login` (`meho-cli` by default), turn on the standard flow and
+  the redirect address `http://127.0.0.1:*`, for example with the
+  operation `keycloak.client.update`. Do not set the PKCE method to
+  required (`S256`) on these clients, and clear it where it is set:
+  the device login of `meho login` sends no PKCE, so a required method
+  refuses every command line login. The fresh sign-in for approvals
+  sends PKCE by itself. Do not run
+  `meho admin keycloak bootstrap-clients` for this: on an existing
+  realm it also rewrites the `meho-cli` and `meho-mcp` clients and
+  their tenant and role mappers, and it sets the PKCE method of
+  `meho-cli` to required. Until then, approve in the web interface
+  (#5399, #5538).
+- Load the generic vCenter connectors `vmware-rest-9.0` and
+  `vmware-rest-8.0` again with `meho connector ingest` and the same API
+  files you used before, so the new approval levels of generic vCenter
+  calls take effect. `--catalog vmware/9.0` and `--catalog vmware/8.0`
+  load only a small API file that ships with MEHO: use them only if you
+  loaded that file before (#5441, #5525).
+- Built-in OpenBao (`coreVault.enabled: true`) that you set up by hand:
+  first put a root token into the Secret `<release>-core-vault-init`
+  (key `token`). The new setup Job takes OpenBao over with it and then
+  revokes it (#5362).
+- A person in several tenants picks one with `meho tenants use <name>`,
+  or sets `MEHO_TENANT` for the Claude Code plugin or the "tenant"
+  setting of the Claude Desktop bundle. In this release the web
+  interface answers `tenant_not_chosen` for such a person (#5392, #5444,
+  #5445).
+- Install the 0.40.0 CLI: it has `meho tenants use`,
+  `meho approvals result` and the browser sign-in for approvals.
+
+### Added
+Most new operations below are tested with saved vendor answers; their
+live tests in the lab are still open.
+- Approvals: the requester can run an approved request again after its
+  run failed, when nothing changed:
+  `POST /api/v1/approvals/{request_id}/rerun` (#5421).
+- Approvals: `meho approvals approve --filter-work-ref REF --in-order`
+  and the console button "Approve group in order" approve the requests
+  of one change ticket in order and stop at the first failure (#5422).
+- CLI: `meho approvals result <id>` shows the output of an approved run
+  (#5395).
+- Operations: a run check can wait until the run ends, up to 50 seconds:
+  `wait_seconds` on `call_operation` and on
+  `GET /api/v1/operations/runs/{handle}` (#5420).
+- Audit: every audit answer shows `sandbox_mode` (#5419).
+- Tenants: a request names its tenant in the `Meho-Tenant` header.
+  Without it, a person in several tenants gets 400 `tenant_not_chosen`.
+  The role comes from the person's group in that tenant (#5392).
+- CLI: `meho tenants use <name|id>` stores the current tenant, and every
+  command sends it (#5444).
+- Clients: the Claude Code plugin and the Claude Desktop bundle send the
+  tenant from `MEHO_TENANT` (#5445).
+- Targets: `secret_field_map` maps the field names a connector reads to
+  the field names in the secret (`--secret-field` on the CLI) (#5209).
+- Secrets: `vault.kv.compare` and `k8s.secret.compare_to_ref` say
+  whether copies of one secret match, without showing it (#5355).
+- Secrets: `secret.handoff.export` and `secret.handoff.import` move a
+  login to another MEHO instance with a one-time handoff; each step
+  waits for approval (#5353).
+- Vault: `vault.token.create_and_store` makes a token from a token role
+  and writes it to Vault or a Kubernetes Secret without showing it
+  (#5327).
+- Keycloak: `keycloak.user.check_login` tests one login with a password
+  from Vault and answers only `accepted`, `refused` or `error` (#5352).
+- Active Directory: `msad.user.set-password` sets a user's password from
+  the secret store and enables the account (#5437).
+- vSphere: typed lists of networks (#5351), clusters (#5349), resource
+  pools (#5348) and folders (#5346), and all settings of one distributed
+  port group (#5354).
+- vSphere: six typed content library reads (#5347); create a local
+  content library and add a file from a URL (#5373); mount and unmount a
+  content-library ISO on a VM (#5202).
+- vSphere: change or delete a DRS group, and build a VM-Host rule on
+  groups that exist (#5356).
+- vSphere: `vmware.composite.datastore.orphan_dirs` lists the datastore
+  folders that no registered VM uses (#5403).
+- vSphere: install a new vCenter appliance from a JSON spec in two
+  steps, and follow the install (#5406).
+- VCF Installer: reuse checks for a running vCenter, SDDC Manager or VCF
+  Operations, cancel a bring-up, appliance info and the release list
+  (#5452); proxy, CEIP and system settings, certificate remove and
+  resource calculation (#5453).
+- Cloud Builder: the new connector `installer-cb-5.0` checks, starts,
+  follows and retries a VCF 5.0 to 5.2 bring-up with seven typed
+  operations (#5454).
+- Fleet management (Aria Suite Lifecycle 8.x and VCF 9.0): requests,
+  retry, environment, inventory sync, health and datacenters (#5461).
+- HCX: create, change, resync and delete service meshes (#5457); list,
+  extend and unextend networks, and set Mobility Optimized Networking
+  (#5459).
+- Site Recovery Manager: pairings, recovery plans, protection groups,
+  issues and run history (#5458).
+- vSphere Replication: pairings, replications, issues, VM checks and
+  tasks (#5456).
+- Cloud Director: read, create, change and delete organizations (#5455).
+- NSX: NSX 4.0 to 4.2 targets get their own implementation,
+  `nsx-rest-4.2`; NSX 9.x keeps `nsx-rest-9.0` (#5451).
+- Azure: ten read-only network operations: virtual networks, security
+  groups, load balancers, public IPs, gateways, ExpressRoute, route
+  tables and private DNS (#5166).
+- Google Cloud: create workload identity pools, OIDC providers and
+  service-account bindings, each with approval (#5438).
+- GitHub: search, read, file and comment on issues with four typed
+  operations (#5447).
+- Kubernetes: `k8s.pod.info` and `k8s.deployment.info` show image pull
+  secret names, and `k8s.logs` reads init containers (#5402).
+- Inventory: `inventory.export` turns stored inventories into a file;
+  the first format is `azure-migrate-csv` (#5407).
+- Chart: the built-in OpenBao sets itself up: unseal, Keycloak login
+  with one path per tenant, an admin login, and no root token left
+  (#5362).
+- Linux server: `meho-host check` shows the firewall, the CIS profile
+  and the console certificate (#5372); the download build can use an
+  overlay image with its own signer (#5391).
+
+### Fixed
+- Events: event intake logs in to Vault under the check runner's own
+  role when `VAULT_CHECK_RUNNER_ROLE` is set, like a Sensor check
+  (#5529).
+- vSphere: `vmware.composite.vcenter.install` and
+  `vmware.composite.vcenter.deployment.answer` send the setup spec under
+  a `spec` key (#5497).
+- vSphere: the approval preview of a CD drive change shows the new drive
+  setting, `requested_backing` (#5404).
+- vSphere: four port group operations refuse a name where a moid is
+  needed, at preview and at call time (#5397).
+- vSphere: on a vCenter 8.0.x target, the refusal of a call that only
+  `vmware-rest-9.0` has points at `search_operations` on
+  `vmware-rest-8.0` (#5393).
+- Targets: a change of a target's connection drops the login MEHO keeps
+  for it, so the next call logs in with the new values (#5250); the
+  describe, update, probe and delete routes also find a target by its id
+  (#5364).
+- Targets: the name and every alias of a new or changed target have no
+  space, control character or `/`, and its host and fqdn are a valid
+  IPv4 address, IPv6 address or DNS host name. A port or a path after
+  the host still works. Other values get 422, and the answer names the
+  field. Saved targets do not change (#5365).
+- Approvals: when an approved run fails and names a next step, the
+  request shows it as `guidance` (#5398).
+- Vault: `vault.kv.list` on an empty folder returns `{"keys": []}`
+  (#5363); the setup Job waits until OpenBao can read Keycloak's keys
+  and is active (#5426).
+- Network: `net.http_probe` answers `tls_error` for a certificate MEHO
+  does not trust (#5440).
+
+### Changed
+- vSphere: generic vCenter calls that stop, restart, disconnect,
+  remediate or open access are `dangerous` and wait for approval, after
+  the next catalog ingest (#5441).
+- Approvals: the fresh sign-in (see "Breaking changes") has the chart
+  values `config.freshSignInMaxAgeSeconds` and
+  `config.approvalOneTimeCodeAcrValues` (#5399).
+- Connector packages: signing an image for the appliance needs a
+  recorded review of each connector package
+  (`build.sh --sign --reviews DIR`) (#5390).
+- Inventory: the shared result shape has named assumptions, findings and
+  versioned JSON Schema files (#5408).
+- CI: one short unit job for a PR that changes one connector (#5304);
+  five unit shards (#5435); the nightly run at 02:17 UTC (#5430); the
+  bring-your-own PostgreSQL install in its own kind job (#5413); the
+  OpenBao test without DNS search domains (#5428); the VCF contract
+  manifest keeps no copy of the operation ids (#5509).
+- Tests: the Vault policy operations log in with the target's Vault role
+  (#5401).
+
+### Documentation
+- Ordered approvals (#5418); company login with authentik in front of
+  MEHO's Keycloak (#5405); `sudo meho doctor` checks root's login
+  (#5415); a vendor spec file is optional test data (#5416); the vSphere
+  connector doc keeps no operation counts (#5510).
+
+## [0.39.0] - 2026-10-30
+
+MEHO 0.39.0 makes approvals safer. The sender can now withdraw its own
+request, and an approval now covers one exact MEHO release. It prepares
+one person to work in several tenants, and a tenant admin can turn
+built-in operations on or off for their own tenant. A MEHO image can now
+carry connector packages from other repositories. The release adds the
+phpIPAM connector, Azure VMware Solution and Azure Arc reads, the steps
+that build a Windows domain controller, and new Kubernetes, vSphere,
+Vault, VCF Automation, Holodeck and pfSense operations. Error results
+and traces now hide secret fields. An admin's change to a risk level or
+an approval flag now stays after a restart, and an edit can only make an
+operation stricter.
+
+The upgrade runs nine database migrations (`0119` to `0127`). They
+only add tables and columns. The upgrade also ends every approval that
+still waits. Read "Breaking changes" and "Steps after the upgrade"
+before you upgrade.
+
+### Security
+- Error results, HTTP diagnostics and traces now hide the value of every
+  secret-named field (`password`, `sessionToken`, `licenseKey` and
+  similar), before the audit row is written. Before, vendor fields such
+  as the `errors[]` list of an HTTP 422 or the headers of an HTTP 403
+  could reach the caller and the audit row unchanged. A new test plants
+  secrets for every registered connector and checks the result, the
+  audit row, the logs and the trace. A second check fails when a saved
+  test capture in the repository holds a real-looking secret (#5206).
+- When a person approves a write that goes to a second target the agent
+  named (for example `vcfa.provider.api_token.create`, which writes the
+  new token to a Vault target), MEHO now also checks the policy of the
+  agent that asked. Before, only the approving person's policy was
+  checked on this path, so a deny for the agent did not stop the run.
+  The approval card shows the agent's verdict (#5263).
+- The older content-library operations now check that every library id
+  and item id is a UUID before it goes into a URL. The shared URL
+  builder also percent-encodes every value it puts into a path, so a
+  value with `/`, `?`, `#` or `..` can no longer change which vCenter
+  path is called (#5262).
+
+### Breaking changes
+- `list_targets` with a `connector_id` filter that matches no connector
+  the caller can see now answers with the unknown-connector error
+  (`-32602`) and up to five close connector ids, not an empty list
+  (#5181). A known product with no targets still gives an empty list.
+  What to do: a script that read an empty list as "unknown connector"
+  must handle the error.
+- `call_operation` and `preview_operation` for an operation that needs
+  a target, sent with no target, now answer `target_required`, not
+  `no_connector` (#5190). What to do: a script that matched
+  `no_connector` for this case must accept `target_required`.
+- In a vCenter multi-step operation, MEHO now checks each write step
+  against the standing grants of the connector the target uses:
+  `vmware-rest-8.0` for a vCenter 8.0.x target, `vmware-rest-9.0` for
+  9.x (#5222). What to do: a step grant for a vCenter 8.0.x target that
+  names `vmware-rest-9.0` stops matching. Write it again with
+  `vmware-rest-8.0`. Grants on the operation itself do not change.
+- The Vault policy operations (`vault.sys.policy.*`, #5290), the
+  identity operations and the token operations (#5328) now log in with
+  the target's `vault_role`, like the key-value operations. A target
+  without `vault_role` works as before. When Vault refuses the target's
+  role, the call fails, and MEHO does not try the deployment-wide role.
+  What to do: give the target's role the rights these calls need, or
+  call them on a target without a `vault_role`.
+- A content-library `library_id` or `library_item` that is not a UUID is
+  now refused (#5262). Real vCenter ids are always UUIDs.
+- The Valkey and busybox images of the chart are now pinned by digest,
+  and `docker.io/busybox` now maps to `<registry>/library/busybox` when
+  `global.imageRegistry` is set (#5299). What to do: with your own image
+  registry, copy every line of the new `images.txt` (see Added).
+- An edit of an operation's risk level or approval flag can now only
+  make the operation stricter (#5260). A lower risk level than the one
+  in code is refused; that change needs a pull request. Turning approval
+  off needs `platform_admin`, a reason, and a person: the console, or a
+  REST call with a fresh sign-in (at most `FRESH_SIGN_IN_MAX_AGE_SECONDS`
+  old, default 300). It is never allowed for a destructive operation.
+  The MCP tool `meho_connector_edit_op` can no longer turn approval off
+  or lower a level. A service principal, an agent, or a token with an
+  older sign-in gets 401 `insufficient_user_authentication`. What to do:
+  a script that turned approval off with a plain API token or through
+  MCP must use the console, or the CLI right after `meho login`.
+
+### Steps after the upgrade
+- Back up the database first. The nine migrations only add tables and
+  columns:
+  - `0119` adds the approval status `withdrawn` and two columns for it
+    (#5004);
+  - `0120` adds the table `tenant_operation_setting` (#5172);
+  - `0121` adds the table `ingested_auth_profile` (#5152);
+  - `0122` adds the table `operation_catalog_state` (#5183);
+  - `0123` adds the column `operation_group.code_text_hash` (#5369);
+  - `0124` adds the connector package set column for runners (#5314);
+  - `0125` adds the column `endpoint_descriptor.owner_package` (#5308);
+  - `0126` adds the column `approval_request.release_id` (#5170);
+  - `0127` adds the table `operation_policy_override` (#5260).
+
+  One limit applies to a rollback to 0.38.0. 0.38.0 does not know the
+  approval status `withdrawn` (#5004). Once any request has been
+  withdrawn, 0.38.0 answers with a server error when it reads that
+  request (`meho approvals show`) and when it lists all approvals
+  (`status=all`, `meho approvals list --status all`). A list of one
+  status, such as `pending`, still works.
+- The upgrade ends every approval request that still waits (#5170). At
+  start-up, each `pending` request from an older release becomes
+  `expired` with the reason `release_changed`. An approved request from
+  an older release that has not run yet is refused before any vendor
+  call. What to do: decide waiting requests before the upgrade, or ask
+  the requesters to send them again after it.
+- Run the catalog ingest of `vi-json.yaml` again for `vmware/9.0` and
+  `vmware/8.0` (#5255). Only then do the older-API VM power, clone,
+  revert and migrate calls wait for approval (see Fixed).
+- Ingest once more, with the same `--auth-scheme`, every connector you
+  made from an API file with a login type before this release (#5152).
+  Only then does its login survive a restart.
+- With the built-in PostgreSQL, run `helm install` and `helm upgrade`
+  with `--wait` (#5248). The migration now runs in the MEHO pod, so
+  without `--wait` Helm can report success while the pod still fails.
+- Apply again, once, every stricter risk level or approval edit you made
+  before this release, with `meho connector edit-op` (#5260). Those edits
+  were written to the operation row, so the next start or re-ingest puts
+  the value from code back. Then check
+  `meho connector overrides --reduced-approval`.
+- If you copied the `meho-tenant-admin` Vault policy example, add
+  `update` on `secret/delete/tenants/...` (#5290). Without it, Vault
+  refuses `vault.kv.delete`.
+- Bring-your-own Keycloak: run `meho admin keycloak bootstrap-clients`
+  again to add the `meho_tenant` group attribute and the `meho-tenants`
+  token mapper (#5258). The built-in Keycloak adds them at the upgrade.
+  MEHO does not use the tenant list for access yet, so this step can
+  wait until a later release needs it.
+
+### Added
+- Approvals: the sender of a waiting request can withdraw it with
+  `POST /api/v1/approvals/{request_id}/withdraw` or
+  `meho approvals withdraw <id> [--reason TEXT]`. Anyone else gets 403.
+  A withdrawn request never runs, writes one `approval.withdraw` audit
+  row and has its own tab in the console. There is no MCP tool for it
+  (#5004).
+- Approvals: each request saves the MEHO release it was made under. A
+  request from another release never runs (#5170, see Steps after the
+  upgrade).
+- Approvals: when two or more requests of one change ticket wait, the
+  bell panel and the Pending tab show them oldest first, with "Step k of
+  N", and the console asks once more before an out-of-order approve.
+  `GET /api/v1/approvals` takes `order=oldest|newest` (default newest),
+  and `meho approvals list --order` is oldest first by default with
+  `--work-ref` (#5338).
+- Tenants: a tenant admin turns a built-in connector's operations or
+  groups on or off for their own tenant only, through
+  `GET /api/v1/connectors/{connector_id}/tenant-settings`, two `PUT`
+  routes and `meho connector tenant-setting show | set | set-group`.
+  Each change writes an audit row. Risk levels and approval flags do not
+  change (#5172).
+- Tenants, first steps for one person in several tenants: Keycloak puts
+  every tenant of a person into the `meho_tenants` token claim; new
+  values `coreKeycloak.tenantName` and `coreKeycloak.tenants`, and new
+  flags `--tenant-name`, `--add-tenant` and `--add-tenant-id` for
+  `meho admin keycloak bootstrap-clients` (#5258). MEHO reads the list
+  into the login, with the new setting `JWT_TENANTS_CLAIM_NAME`, but
+  does not use it yet (#5253). The audit views, `meho audit` and the
+  approvals page show the tenant (#5261).
+- Connector packages: a build for an overlay image, the public MEHO
+  image plus connector packages, with strict checks of every package
+  (#5306). `GET /version`, `GET /api/v1/health`, `meho status`,
+  `meho version` and the console show the installed packages (#5307).
+  Each operation row records the package that wrote it; the rows of a
+  package that is not installed are hidden, and a call answers
+  `connector_package_not_installed` (#5308). The satellite runner sends
+  its package set, and MEHO gives it only work it can run (#5314).
+- Connectors: MEHO refuses to delete a connector while a sensor, runbook,
+  hosted agent, schedule, approval or run still uses it, and lists each
+  user (REST 409 `connector_in_use`) (#5158). New group texts from the
+  code now reach running installs; a text an operator changed stays
+  (#5369).
+- Targets: `targets.remove` through `call_operation`, by target UUID,
+  `dangerous` and approved by a second person (#5256). `meho targets
+  delete <name>` with `--confirm` and `--force` (#5288). `targets.register`
+  and `meho targets add` / `update --vpn-required` record whether a
+  target needs a VPN; MEHO does not act on it (#5340).
+- Grants: on a sandbox instance, the new boot setting
+  `MEHO_SANDBOX_DELETE_GRANTS_FROM_API` (chart
+  `sandboxMode.deleteGrantsFromApi`, off by default) lets a tenant admin
+  create a delete grant through REST and the CLI (#5270).
+- Result handles: an operation can ask for a handle also for a small
+  result (#5205). `migration.inventory.csv` also takes whole inventories
+  inline.
+- MCP: read-only tools carry the MCP `readOnlyHint`, so clients stop
+  asking before every list and search (#5188). The server text and each
+  operation's guidance tell the model that text from vendor systems is
+  data, not instructions (#5197).
+- CLI: `meho connector ingest` converts a Swagger 2.0 file to OpenAPI 3
+  on the operator's machine; `--save-converted` keeps the copy (#5160).
+  `meho operation subops` and `meho audit count` (#5337). On a form-2
+  Linux server, `meho doctor` run as root also runs `meho-host check` and
+  shows its lines (#5265).
+- Chart: `images.txt` lists every image of the chart except MEHO's own,
+  pinned by digest, with its path in your registry, for an install with
+  no internet (#5299). `coreKeycloak.companyLogin` connects a company
+  login (an OpenID Connect server) to the built-in Keycloak: people log
+  in there, and their company group decides their MEHO group. An install
+  whose first start had the company login off must give `meho-admin` two
+  more Keycloak roles once; the bootstrap Job names them (#5322).
+- Install form 2: a run of `install.sh` on an installed machine now
+  updates it, and `--os-packages <file>` installs signed OS updates with
+  no network (#5287). `meho-host uninstall` removes the kernel settings
+  file and the `etcd` user and group that the install made. On a machine
+  installed before this release, the `etcd` user and group stay, and a
+  note names the commands that remove them (#5414).
+- phpIPAM connector (`phpipam-rest-1.x`, hand-written operations):
+  `phpipam.subnet.list`, `phpipam.subnet.free_addresses`,
+  `phpipam.address.reserve` (waits for approval) and
+  `phpipam.address.release` (waits for approval) (#5332). State: login
+  with an API app token or a user from the Vault secret; no live proof
+  on a real phpIPAM yet.
+- Azure: Azure VMware Solution reads, `azure.avs.privatecloud.list`,
+  `cluster.list`, `host.list` and `quota.show`; MEHO never reads the
+  vCenter and NSX passwords (#5186). Azure Arc machines, stored patching
+  results, and `azure.patching.assessment.start`, a patch check that
+  waits for approval (#5189). State: the reads run through the
+  dispatcher with the Vault secret; no live tenant proof yet.
+- Windows: 13 operations for the steps that build a domain controller,
+  on the `msad`, `windns` and `winsrv` connectors (DNS zone settings,
+  forwarders, password rules, time source, join limit, OU access, new
+  group). Every change waits for approval and reads the result back
+  (#5305). State: tested with the connectors' fake transport only; not
+  yet run on a real Windows server.
+- Kubernetes: `k8s.apply` returns the API server's warnings (#5208) and
+  its approval request shows the manifest, with secret values hidden
+  (#5225); `k8s.secret.create` takes labels and annotations (#5199);
+  `k8s.cr.list` and `k8s.cr.info` read core-group objects, and new
+  `k8s.auth.can_i`, `k8s.auth.rules` and `k8s.admission_webhook.list`
+  (#5221); custom resource reads show annotations, version, uid and a
+  short status (#5226); `k8s.secret.list` and `k8s.secret.info` show key
+  names, never values (#5341); `k8s.logs` reads an older time window
+  with `since_time` and `until_time` (#5329).
+- Google Cloud: list workload identity pools and their providers, read a
+  service account's access policy, and, after approval, delete a pool or
+  remove one member from one role (#5326).
+- VMware: `vmware.composite.datastore.file.list` lists a datastore
+  folder, also on standalone ESXi (#5195);
+  `vmware.content_library.find` and `vmware.content_library.item.find`
+  (#5196); `vmware.host.datastores` (#5191);
+  `vmware.composite.datastore.vsan.folder.list` lists vSAN folders and
+  their files (#5320); `vmware.datacenter.list` lists the datacenters of
+  a vCenter with their cluster, host and datastore counts (#5345).
+- SDDC Manager: `sddc.domain.validation.get` and
+  `sddc.host.validation.get` read a check's result by id (#5194).
+- VCF Automation: `vcfa.provider.role.create` refuses a VM Apps org
+  before it writes, and new `vcfa.provider.role.delete` (#5247);
+  `vcfa.provider.feature_flag.list` and `vcfa.provider.feature_flag.set`
+  (#5249).
+- Vault: JWT/OIDC login role reads and `vault.auth.jwt.role.write`
+  (#5200); `vault.kv.folder.delete` deletes many secrets under one
+  folder with one approval, with the new setting
+  `VAULT_KV_FOLDER_MAX_KEYS` (default 500) (#5266); list, read and
+  delete for identity token roles and keys (#5318).
+- Holodeck: `holodeck.instance.remove` deletes a nested lab instance
+  after approval (#5257); `holodeck.dns.host.list`, `add` and `remove`
+  for the router's DNS names (#5319). The DNS operations have not run
+  on a real router yet.
+- pfSense: an optional description on route and gateway adds, and
+  `pfsense.diag.ping` from the firewall (#5301).
+
+### Fixed
+- MCP: an unknown connector id gets up to five close ids ("did you
+  mean") (#5181); a read tool with no arguments ignores extra arguments
+  (#5182); a missing target gets one clear `target_required` line
+  (#5190); tool and group texts no longer hold issue numbers or planning
+  codes (#5193); a failed `call_operation` or `preview_operation` is
+  recorded as failed in the audit log, not with status 200 (#5334).
+- VMware: generic older-API VM power, clone, revert and migrate calls
+  are now `dangerous` and wait for approval, after the re-ingest in
+  Steps after the upgrade (#5255); `vmware.object.collect` names every
+  requested path that vCenter did not return (#5210); the boot disk is
+  matched only on an exact name (#5175); the power approval card shows
+  the VM name and power state (#5289); the `vmware-rest` group texts
+  name a safety level only next to a named operation (#5389).
+- Connectors: targets that share one credential share one login token,
+  so they no longer end each other's session (#5201).
+- Operations: the preview refuses a target that the call refuses
+  (#5198); a start that fails no longer changes the shared operation
+  rows, and `GET /api/v1/health` shows which release wrote them (#5183).
+- Result handles keep the objects and lists next to the rows of a large
+  answer (#5203).
+- Ingest: leftover operations get more rounds to find a group, and the
+  rest are named (#5204); the login type of an ingested connector
+  survives a restart (#5152); a group text that claims an approval or a
+  risk level its operations do not have loses that sentence (#5207).
+- Chart: with the built-in PostgreSQL, a fresh `helm install` now
+  finishes, because the migration runs in the MEHO pod's `migrate` init
+  container and waits for the database (new setting
+  `MIGRATION_DB_WAIT_SECONDS`, default 300) (#5248).
+- Hetzner Robot: the curation finishes on the shipped spec, and the
+  preview says "A second person must approve it." only when that is
+  true (#5325).
+- Console: the Issue grant form shows why it was refused (#5268).
+- CLI: writes that answer 204 print their audit receipt, from the new
+  `Meho-Audit-Id` header (#5336).
+- Audit: hand-written operations get the class `read` or `write` from
+  their risk level, not `other`, so `meho audit query --op-class read`
+  finds them. Old audit rows stay as they are (#5335).
+- Tests: the readiness pill test counts probe calls instead of timing
+  page loads (#5284); the three-faces docs tests stop their background
+  loops (#5386); the Postgres connector gets its logger on every call
+  (#5387).
+
+### Changed
+- Operations: an admin's change to a risk level or an approval flag is
+  stored apart from the value in code, so it stays after a restart and a
+  re-ingest. MEHO uses the stricter of the two. A tenant admin's change
+  to a built-in operation applies to their tenant only. A new report
+  lists operations that run with less approval than in code:
+  `meho connector overrides --reduced-approval` and a console page
+  (#5260, see Breaking changes).
+- bind9: `bind9.config.show` no longer waits for approval. It reads only
+  config files (`named.conf`, `named.conf.*`, `*.conf`), refuses key
+  files and zone files, also behind a symlink, and still hides key
+  secrets (#5342).
+- Connectors: the SOAP fault reader moved to the shared connector code
+  (#5302), and the VMware-only shared modules moved to
+  `connectors/vmware_shared` (#5303). No behaviour change.
+- CI: runs of dropped merge-queue groups are cancelled in every workflow
+  (#5293); the integration tests run in 4 parallel shards (#5388); a pull
+  request that changes no backend file skips the Python lanes (#5310); a
+  script measures a test-to-code map (#5316); the chart workflow's kind
+  jobs run on Ubuntu 24.04 (#5324, shipped in 0.38.0, line added here).
+- Tests: each migration test start database is built once and copied
+  per test (#5309); `vault.kv.metadata.delete` is tested against a real
+  Vault (#5300).
+
+### Documentation
+- Decisions: who may approve and what waits for approval (#5252); sandbox
+  mode allows a scoped login on a shared vCenter (#5267).
+- Releasing: `v*` release tags are protected (#5280).
+- Auth: a guide to add a tenant, and a clearer `missing_tenant_claim`
+  error (#5254).
+- Vault: the grant `k8s.secret.read_to_ref` needs (#5224); steps to
+  remove a tenant from Vault (#5290).
+- Core code examples use public connectors, not VMware ones (#5311).
 
 ## [0.38.0] - 2026-10-28
 

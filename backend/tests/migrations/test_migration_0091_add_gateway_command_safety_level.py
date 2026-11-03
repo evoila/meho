@@ -21,7 +21,7 @@ generic DDL, so PG parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -75,22 +75,26 @@ def _columns(sync_url: str) -> set[str]:
     return {str(row[1]) for row in rows}
 
 
-def test_upgrade_adds_safety_level_column(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_safety_level_column(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0091`` adds the ``safety_level`` column."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     assert _COLUMN in _columns(sync_url)
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0088"`` drops the column; ``upgrade "0091"`` re-adds it.
 
     Pinned to this migration's own revision on both legs (never ``head``) so
     a future head migration cannot break the round-trip.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _COLUMN in _columns(sync_url)
 
     command.downgrade(cfg, _DOWN_REVISION)
@@ -100,7 +104,9 @@ def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> 
     assert _COLUMN in _columns(sync_url)
 
 
-def test_safety_level_is_not_null_with_safe_default(alembic_cfg: tuple[Config, str]) -> None:
+def test_safety_level_is_not_null_with_safe_default(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """The NOT NULL ``safety_level`` ADD COLUMN lands on the empty table.
 
     A raw insert that omits ``safety_level`` succeeds via its constant
@@ -110,7 +116,7 @@ def test_safety_level_is_not_null_with_safe_default(alembic_cfg: tuple[Config, s
     read (never a remote-write the revocation filter would refuse).
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     sync_eng = sa_create_engine(sync_url)
     try:

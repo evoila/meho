@@ -57,7 +57,7 @@ class EndpointDescriptorProto(BaseModel):
 
     op_id: str
     """Connector-side natural key — ``f"{method.upper()}:{path}"`` for
-    ingested OpenAPI rows (e.g. ``"GET:/api/vcenter/cluster"``)."""
+    ingested OpenAPI rows (e.g. ``"GET:/repos/{owner}/{repo}/issues"``)."""
 
     method: str
     """Upper-cased HTTP verb (``"GET"`` / ``"POST"`` / ``"PUT"`` /

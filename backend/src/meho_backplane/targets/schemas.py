@@ -31,9 +31,9 @@ The G0.3-T1.5 (#477) amendment added two fields to :class:`Target`:
   fabricated values.
 * ``preferred_impl_id`` — operator override for the G0.6 resolver's
   tie-break ladder. Acceptable on both write schemas. The canonical
-  form is **versioned** (``"nsx-rest-4.2"``) per
+  form is **versioned** (``"harbor-rest-2.x"``) per
   ``docs/codebase/api-shape-conventions.md`` §3 (Enum vocabulary
-  discipline); the base form (``"nsx-rest"``) stays accepted on both
+  discipline); the base form (``"harbor-rest"``) stays accepted on both
   ``TargetCreate`` and ``TargetUpdate`` for backward compatibility,
   and the resolver normalizes both to the same connector
   (G0.16-T6 Finding C #1312).
@@ -47,19 +47,30 @@ from __future__ import annotations
 import ssl
 from collections.abc import Mapping
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from meho_backplane.connectors.schemas import AuthModel
+from meho_backplane.targets.field_rules import check_target_host, check_target_name
 from meho_backplane.targets.ssrf_guard import assert_public_destination
 
 if TYPE_CHECKING:
     from meho_backplane.db.models import Target as TargetORM
 
 __all__ = [
+    "SECRET_FIELD_MAP_MAX_ENTRIES",
     "AuthModel",
+    "SecretFieldName",
     "Target",
     "TargetCreate",
     "TargetListResponse",
@@ -68,6 +79,16 @@ __all__ = [
     "project_target_to_summary",
     "validate_ca_pin_pem",
 ]
+
+#: One field name in a ``secret_field_map`` (#3711): a key in the target's
+#: secret. Names only, never a value.
+SecretFieldName = Annotated[
+    str, StringConstraints(min_length=1, max_length=200, strip_whitespace=True)
+]
+
+#: Most entries one ``secret_field_map`` may hold. A connector reads a
+#: handful of fields, so this is a sanity bound, not a real limit.
+SECRET_FIELD_MAP_MAX_ENTRIES = 50
 
 
 def validate_ca_pin_pem(value: str | None) -> str | None:
@@ -173,6 +194,9 @@ class TargetSummary(BaseModel):
     # production projections pass it through
     # :func:`project_target_to_summary`.
     tls_server_name: str | None = None
+    # #3711. Secret field names map (see :class:`Target`); listed so the list
+    # row doesn't silently mask the detail field (api-shape-conventions §5).
+    secret_field_map: Mapping[str, str] = Field(default_factory=dict)
     fingerprint: Mapping[str, Any] | None
     preferred_impl_id: str | None
     # #3272. Per-target capture tri-state (see :class:`Target`); listed so the
@@ -283,6 +307,11 @@ class Target(BaseModel):
     # Defaults to ``None`` so legacy hand-constructed instances stay
     # valid; production read paths go through :func:`_to_full`.
     tls_server_name: str | None = None
+    # #3711. ``{connector_field: source_field}``: when a connector reads field
+    # ``X`` from the target's secret, the credential reader returns the
+    # secret's ``map.get(X, X)`` field. Field names only, never a value.
+    # Empty = no map (read every field by its own name, as before).
+    secret_field_map: Mapping[str, str] = Field(default_factory=dict)
     extras: Mapping[str, Any]
     notes: str | None
     fingerprint: Mapping[str, Any] | None
@@ -319,7 +348,7 @@ class TargetCreate(BaseModel):
 
     ``version`` is accepted as an optional operator-asserted product
     version (G0.15-T6 #1215). Operators who know the version up-front
-    (e.g. ``"9.0"`` for a vCenter Hetzner-DC target the consumer just
+    (e.g. ``"2.11.0"`` for a Harbor target the consumer just
     deployed) can pass it at create time so the very first probe
     dispatches against the versioned connector without round-tripping
     through PATCH. Fresh targets still default to ``None`` and resolve
@@ -364,6 +393,12 @@ class TargetCreate(BaseModel):
     # ``host`` (a hostname/FQDN, not a URL). No mutual-exclusion validator
     # -- it composes cleanly with ``verify_tls`` / ``tls_ca_pin``.
     tls_server_name: str | None = Field(default=None, max_length=512)
+    # #3711. Optional ``{connector_field: source_field}`` map so an existing
+    # secret whose keys differ from the ones the connector reads can back
+    # the target. Field names only.
+    secret_field_map: dict[SecretFieldName, SecretFieldName] = Field(
+        default_factory=dict, max_length=SECRET_FIELD_MAP_MAX_ENTRIES
+    )
     extras: dict[str, Any] = Field(default_factory=dict)
     notes: str | None = None
     preferred_impl_id: str | None = Field(default=None, max_length=200)
@@ -378,10 +413,19 @@ class TargetCreate(BaseModel):
     def _validate_ca_pin(cls, value: str | None) -> str | None:
         return validate_ca_pin_pem(value)
 
+    @field_validator("name", "aliases")
+    @classmethod
+    def _check_names(cls, value: str | list[str], info: ValidationInfo) -> str | list[str]:
+        for item in [value] if isinstance(value, str) else value:
+            check_target_name(item, str(info.field_name))
+        return value
+
     @field_validator("host", "fqdn")
     @classmethod
-    def _reject_non_public_destination(cls, value: str | None) -> str | None:
+    def _reject_non_public_destination(cls, value: str | None, info: ValidationInfo) -> str | None:
         """SSRF guard (evoila-bosnia/meho-internal#153).
+
+        :func:`check_target_host` runs first and refuses a malformed host.
 
         A non-public destination (private / loopback / link-local /
         metadata / CGNAT — any non-globally-routable address) is a
@@ -394,6 +438,7 @@ class TargetCreate(BaseModel):
         re-checks the *resolved* address before every dispatch).
         """
         if value is not None:
+            check_target_host(value, str(info.field_name))
             assert_public_destination(value)
         return value
 
@@ -497,6 +542,12 @@ class TargetUpdate(BaseModel):
     # mutual-exclusion validator -- orthogonal to ``verify_tls`` /
     # ``tls_ca_pin``.
     tls_server_name: str | None = Field(default=None, max_length=512)
+    # #3711. Entries are merged into the stored map: a string value adds or
+    # replaces that entry, a ``null`` value removes it. An explicit
+    # ``{"secret_field_map": null}`` clears the whole map. Absent = untouched.
+    secret_field_map: dict[SecretFieldName, SecretFieldName | None] | None = Field(
+        default=None, max_length=SECRET_FIELD_MAP_MAX_ENTRIES
+    )
     extras: dict[str, Any] | None = None
     notes: str | None = None
     preferred_impl_id: str | None = Field(default=None, max_length=200)
@@ -514,9 +565,16 @@ class TargetUpdate(BaseModel):
     def _validate_ca_pin(cls, value: str | None) -> str | None:
         return validate_ca_pin_pem(value)
 
+    @field_validator("aliases")
+    @classmethod
+    def _check_aliases(cls, value: list[str] | None) -> list[str] | None:
+        for item in value or []:
+            check_target_name(item, "aliases")
+        return value
+
     @field_validator("host", "fqdn")
     @classmethod
-    def _reject_non_public_destination(cls, value: str | None) -> str | None:
+    def _reject_non_public_destination(cls, value: str | None, info: ValidationInfo) -> str | None:
         """SSRF guard (evoila-bosnia/meho-internal#153) — same as create.
 
         ``None`` is the PATCH absent-marker and passes untouched; a
@@ -525,6 +583,7 @@ class TargetUpdate(BaseModel):
         existing target into private space.
         """
         if value is not None:
+            check_target_host(value, str(info.field_name))
             assert_public_destination(value)
         return value
 
@@ -590,6 +649,7 @@ def project_target_to_summary(t: TargetORM) -> TargetSummary:
         verify_tls=t.verify_tls,
         tls_ca_pin=t.tls_ca_pin,
         tls_server_name=t.tls_server_name,
+        secret_field_map=t.secret_field_map or {},
         fingerprint=t.fingerprint,
         preferred_impl_id=t.preferred_impl_id,
         flight_recorder_capture=t.flight_recorder_capture,

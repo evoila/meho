@@ -247,7 +247,7 @@ class ParentRef:
 
     id: str | None
     href: str | None
-    #: Labelled lineage line, e.g. ``vsphere.vm.create on lab-vcenter``.
+    #: Labelled lineage line, e.g. ``k8s.namespace.create on prod-k8s``.
     summary_line: str | None
 
     @property

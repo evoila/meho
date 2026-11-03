@@ -63,15 +63,19 @@ global):
      persisted ``summary`` / ``description`` / ``custom_description``
      / ``tags`` matches the incoming hash) -- **skip the embedding
      compute**, UPDATE non-embedding fields (parameter_schema,
-     response_schema, safety_level, requires_approval,
-     llm_instructions, handler_ref, group_id, tags-when-unchanged)
-     when changed, advance ``updated_at``. The "skip re-embed"
+     response_schema, llm_instructions, handler_ref, group_id,
+     tags-when-unchanged) when changed, advance ``updated_at``.
+     ``safety_level`` and ``requires_approval`` only move up: a
+     stricter value saved on the row (for example by an operator,
+     #5037) stays. The "skip re-embed"
      branch is the operationally critical path for connector init
      speed on restart -- a connector with 50 typed ops avoids 50
      ONNX inferences (~500-2500 ms total CPU) every pod restart
      when descriptions are unchanged.
    * **Existing row, body changed** -- compute the embedding,
-     UPDATE every body-derived field plus ``embedding``.
+     UPDATE every body-derived field plus ``embedding``. The same
+     only-move-up rule applies to ``safety_level`` and
+     ``requires_approval``.
 
 6. Commit (helper-owned session) or flush (caller-owned session).
 
@@ -126,19 +130,25 @@ fail-fast deployment shape the chassis tasks already established.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
+from meho_backplane.connector_packages import connector_package_of
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations._handler_resolve import import_handler
+from meho_backplane.operations.catalog_release import record_catalog_release
 from meho_backplane.operations.composite_invariant import (
     assert_registered_composites_have_no_ingested_dispatch,
 )
@@ -162,6 +172,7 @@ __all__ = [
     "clear_typed_op_registrars",
     "clear_typed_op_snapshot",
     "derive_handler_ref",
+    "operation_catalog_write",
     "register_composite_operation",
     "register_typed_op_registrar",
     "register_typed_operation",
@@ -266,18 +277,38 @@ def clear_typed_op_snapshot() -> None:
     _TYPED_OP_SNAPSHOT = None
 
 
+#: The group keys ``(product, version, impl_id, group_key)`` already handled
+#: in the running registrar pass. Some connectors hand a different
+#: ``when_to_use`` to the same group from different ops. Only the first
+#: text of a pass is the group's code text, the same text a fresh install
+#: writes, so later calls in the pass leave the row alone. ``None`` outside
+#: a pass: then every call counts as the first.
+_GROUPS_SEEN_IN_PASS: ContextVar[set[tuple[str, str, str, str]] | None] = ContextVar(
+    "_GROUPS_SEEN_IN_PASS", default=None
+)
+
+
+def code_text_hash(text: str) -> str:
+    """Return the SHA-256 hex digest of a group text, as stored in ``code_text_hash``."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 async def _run_registrars(
     *,
     embedding_service: EmbeddingService | None,
 ) -> None:
     """Invoke every registered registrar in order (the real, un-amortized pass)."""
     log = structlog.get_logger(__name__)
-    for registrar in _TYPED_OP_REGISTRARS:
-        log.info(
-            "typed_op_registrar_running",
-            registrar=f"{registrar.__module__}.{registrar.__qualname__}",
-        )
-        await registrar(embedding_service=embedding_service)
+    token = _GROUPS_SEEN_IN_PASS.set(set())
+    try:
+        for registrar in _TYPED_OP_REGISTRARS:
+            log.info(
+                "typed_op_registrar_running",
+                registrar=f"{registrar.__module__}.{registrar.__qualname__}",
+            )
+            await registrar(embedding_service=embedding_service)
+    finally:
+        _GROUPS_SEEN_IN_PASS.reset(token)
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:
@@ -327,7 +358,7 @@ async def _capture_typed_op_snapshot(session: AsyncSession, fingerprint: tuple[s
     )
 
 
-async def _replay_typed_op_snapshot(snapshot: _TypedOpSnapshot) -> None:
+async def _replay_typed_op_snapshot(session: AsyncSession, snapshot: _TypedOpSnapshot) -> None:
     """Bulk-insert the cached snapshot into the boot's DB. The amortized path.
 
     Two ``INSERT ... VALUES (...)`` statements (groups first so the
@@ -343,25 +374,22 @@ async def _replay_typed_op_snapshot(snapshot: _TypedOpSnapshot) -> None:
     natural-key-lookup short-circuit the un-amortized path already has.
     """
     _fingerprint, group_rows, descriptor_rows = snapshot
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        already_present = (
-            await session.execute(
-                select(EndpointDescriptor.id)
-                .where(
-                    EndpointDescriptor.tenant_id.is_(None),
-                    EndpointDescriptor.source_kind.in_(("typed", "composite")),
-                )
-                .limit(1)
+    already_present = (
+        await session.execute(
+            select(EndpointDescriptor.id)
+            .where(
+                EndpointDescriptor.tenant_id.is_(None),
+                EndpointDescriptor.source_kind.in_(("typed", "composite")),
             )
-        ).first()
-        if already_present is not None:
-            return
-        if group_rows:
-            await session.execute(insert(OperationGroup), group_rows)
-        if descriptor_rows:
-            await session.execute(insert(EndpointDescriptor), descriptor_rows)
-        await session.commit()
+            .limit(1)
+        )
+    ).first()
+    if already_present is not None:
+        return
+    if group_rows:
+        await session.execute(insert(OperationGroup), group_rows)
+    if descriptor_rows:
+        await session.execute(insert(EndpointDescriptor), descriptor_rows)
 
 
 async def run_typed_op_registrars(
@@ -438,34 +466,124 @@ async def run_typed_op_registrars(
     fails with ``handler_unreachable``. Rows the list does not name are
     kept even when their handler does not import here, so an older server
     sharing the database cannot delete ops a newer release owns.
+
+    All or nothing (#5019)
+    ----------------------
+
+    Every step above runs in **one** database transaction, and the
+    transaction commits only after the last step passed. The registrars
+    write through that transaction (see :func:`_bind_catalog_session`). In
+    the same transaction, :func:`~meho_backplane.operations.catalog_release.record_catalog_release`
+    stores this release as the writer of the rows. When any step fails
+    (one registrar, the retirement sweep or the invariant sweep), the
+    transaction rolls back: no operation row changes, and a pod of the
+    previous release that still serves keeps its own settings.
+
+    This function commits as soon as the last step passed. The lifespan
+    uses :func:`operation_catalog_write` instead, which holds the
+    transaction open until the rest of the start (the background loops)
+    succeeded too.
     """
-    await _run_typed_op_registrars(embedding_service=embedding_service)
-    await retire_dead_handler_rows()
-    await assert_registered_composites_have_no_ingested_dispatch()
+    async with operation_catalog_write(embedding_service=embedding_service):
+        pass
+
+
+@asynccontextmanager
+async def operation_catalog_write(
+    *,
+    embedding_service: EmbeddingService | None = None,
+) -> AsyncIterator[None]:
+    """Write the built-in operation rows; commit when the ``with`` block ends well.
+
+    On entry, every step of :func:`run_typed_op_registrars` runs in one
+    transaction: the registrars, the retirement sweep, the invariant
+    sweep and the release stamp. The transaction then stays open while
+    the ``with`` block runs, and commits only when the block ends without
+    an exception. The lifespan puts the start of its background loops in
+    the block, so a start that fails at any step, also after the rows
+    were written, changes no operation row and no release stamp (#5019).
+
+    When a step or the block fails, the session closes without a commit,
+    which rolls everything back, and the log says
+    ``operation_catalog_unchanged``.
+    """
+    try:
+        async with get_sessionmaker()() as session:
+            async with _bind_catalog_session(session):
+                await _populate_catalog(session, embedding_service=embedding_service)
+                await retire_dead_handler_rows(session=session)
+                await assert_registered_composites_have_no_ingested_dispatch(session=session)
+                await record_catalog_release(session)
+            yield
+            await session.commit()
+    except Exception as exc:
+        structlog.get_logger(__name__).error(
+            "operation_catalog_unchanged",
+            reason="start-up registration failed; no operation row was changed",
+            error_class=type(exc).__name__,
+        )
+        raise
+
+
+#: The session of the start-up registration transaction while
+#: :func:`_bind_catalog_session` is open. :func:`register_typed_operation`
+#: and :func:`register_composite_operation` write through it when the
+#: caller passes no session, so every registrar's rows land in one
+#: transaction without each registrar threading a session.
+_CATALOG_SESSION: ContextVar[AsyncSession | None] = ContextVar(
+    "meho_operation_catalog_session", default=None
+)
+
+
+@asynccontextmanager
+async def _bind_catalog_session(session: AsyncSession) -> AsyncIterator[None]:
+    """Bind ``session`` for the registration helpers while the block runs.
+
+    The binding ends with the block, before the caller commits, so a
+    task the caller starts afterwards does not inherit a session that is
+    about to close. Nothing here commits; the caller owns the session.
+    """
+    token = _CATALOG_SESSION.set(session)
+    try:
+        yield
+    finally:
+        _CATALOG_SESSION.reset(token)
 
 
 async def _run_typed_op_registrars(
     *,
     embedding_service: EmbeddingService | None = None,
 ) -> None:
+    """Write the registrars' rows in one transaction, without the sweeps. Test seam."""
+    async with get_sessionmaker()() as session:
+        async with _bind_catalog_session(session):
+            await _populate_catalog(session, embedding_service=embedding_service)
+        await session.commit()
+
+
+async def _populate_catalog(
+    session: AsyncSession,
+    *,
+    embedding_service: EmbeddingService | None = None,
+) -> None:
     """Populate descriptor rows via a real registrar pass or the amortized replay.
 
-    Split from :func:`run_typed_op_registrars` so the two-world invariant
-    sweep runs on every path regardless of which branch produced the rows.
+    Runs inside :func:`_bind_catalog_session`; nothing here commits. Split
+    from :func:`run_typed_op_registrars` so the sweeps run on every path
+    regardless of which branch produced the rows.
     """
     if get_settings().test_amortize_typed_op_registrars:
         fingerprint = _registrar_fingerprint()
         snapshot = _TYPED_OP_SNAPSHOT
         if snapshot is not None and snapshot[0] == fingerprint:
-            await _replay_typed_op_snapshot(snapshot)
+            await _replay_typed_op_snapshot(session, snapshot)
             return
         # First call this process (or the registrar set changed since
         # capture): run for real, then capture the built-in rows so later
         # boots with the same registrar set replay the snapshot.
         await _run_registrars(embedding_service=embedding_service)
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            await _capture_typed_op_snapshot(session, fingerprint)
+        await session.flush()
+        await _capture_typed_op_snapshot(session, fingerprint)
         return
 
     await _run_registrars(embedding_service=embedding_service)
@@ -507,8 +625,10 @@ type CompositeOpHandler = Callable[..., Awaitable[dict[str, Any] | OperationResu
 # on :attr:`EndpointDescriptor.safety_level` so the helper rejects
 # invalid values at the Python boundary rather than at commit time
 # (where the IntegrityError message names the constraint, not the
-# field that produced it).
-_VALID_SAFETY_LEVELS: frozenset[str] = frozenset({"safe", "caution", "dangerous", "destructive"})
+# field that produced it). The rank orders the levels from least to
+# most strict.
+_SAFETY_RANK: dict[str, int] = {"safe": 0, "caution": 1, "dangerous": 2, "destructive": 3}
+_VALID_SAFETY_LEVELS: frozenset[str] = frozenset(_SAFETY_RANK)
 
 
 class HandlerRefError(ValueError):
@@ -770,6 +890,21 @@ def _validate_op_id(op_id: str) -> str:
     return op_id
 
 
+def _raise_saved_settings(
+    existing: EndpointDescriptor, *, safety_level: str, requires_approval: bool
+) -> None:
+    """Move the row's risk level and approval flag up, never down (#5037).
+
+    A saved row may carry a stricter value than the registrar's default,
+    for example one an operator set. Registration keeps it. A registrar
+    that wants a lower value cannot lower it here; the operator edits the
+    op instead.
+    """
+    if _SAFETY_RANK[safety_level] > _SAFETY_RANK[existing.safety_level]:
+        existing.safety_level = safety_level
+    existing.requires_approval = existing.requires_approval or requires_approval
+
+
 def _validate_safety_level(safety_level: str) -> str:
     """Validate ``safety_level`` is one of the bounded enum values.
 
@@ -877,15 +1012,16 @@ async def _resolve_or_create_group(
     default at this boundary makes the structural gap impossible to
     silently re-introduce.
 
-    First-write-wins on the existing-row branch: a caller-supplied
-    ``when_to_use`` is **not** written back to a row that already
-    exists. Curation iteration in normal flow happens during code
-    review (the string lives in source; the row is recreated on a
-    fresh database, which #731's required-kwarg gate ensures every
-    new deployment hits). The earlier UPDATE-on-different-string
-    branch this helper carried was dropped in T4b iter-2 to match
-    sibling PR #757 (T4a)'s explicitly-documented first-write-wins
-    contract -- the two designs cannot both ship.
+    Text refresh on the existing-row branch (#4332): the row keeps the
+    SHA-256 of the code text MEHO last wrote (``code_text_hash``). When
+    the row's text still matches that hash, no operator changed it, so a
+    new code text replaces it. When an operator edited the text
+    (``meho connector edit-group``), the hash no longer matches and the
+    row stays as the operator wrote it, also when a later code text
+    happens to equal the operator's text. The write is a conditional
+    ``UPDATE``: it only lands when the row still holds the text and hash
+    read above, so an operator edit saved through another instance in
+    between is kept. See :func:`_refresh_code_text`.
 
     Concurrency note: two concurrent connectors registering against
     the same ``group_key`` race here. The partial unique index
@@ -907,11 +1043,14 @@ async def _resolve_or_create_group(
         )
     )
     existing = result.scalar_one_or_none()
+    seen = _GROUPS_SEEN_IN_PASS.get()
+    key = (product, version, impl_id, group_key)
+    first_in_pass = seen is None or key not in seen
+    if seen is not None:
+        seen.add(key)
     if existing is not None:
-        # First-write-wins: a caller-supplied ``when_to_use`` is not
-        # written back to an existing row (see docstring). Curation
-        # iteration happens through code review + redeploy on a fresh
-        # database, not by re-running registrations on a live DB.
+        if first_in_pass:
+            await _refresh_code_text(session, existing, when_to_use, now)
         return existing.id
 
     # Title-case the dotted key for the default name -- ``"vm-lifecycle"``
@@ -928,6 +1067,7 @@ async def _resolve_or_create_group(
         group_key=group_key,
         name=name,
         when_to_use=when_to_use,
+        code_text_hash=code_text_hash(when_to_use),
         review_status="enabled",
         created_at=now,
         updated_at=now,
@@ -936,6 +1076,74 @@ async def _resolve_or_create_group(
     # Flush so ``group.id`` is populated for the descriptor's FK.
     await session.flush()
     return group.id
+
+
+async def _refresh_code_text(
+    session: AsyncSession, group: OperationGroup, code_text: str, now: datetime
+) -> None:
+    """Bring an existing group row up to the current code text, unless an operator edited it.
+
+    * The row's hash is set and does not match its text: an operator
+      edited the text. Leave the row alone, also when ``code_text`` now
+      equals the operator's text. Storing that hash would make the row
+      look like MEHO wrote it, and the next code text would overwrite
+      the operator's choice.
+    * The row already holds ``code_text``: only store its hash, so a later
+      code change can refresh the row.
+    * The row's text matches its stored hash: MEHO wrote it and no
+      operator changed it. Write ``code_text`` and its hash.
+    * Otherwise (no hash and a text MEHO cannot prove it shipped): leave
+      the row alone.
+
+    The write is a conditional ``UPDATE`` on the text and hash the row
+    held when it was read. During a rolling update an operator can save
+    an edit through another instance between that read and this write.
+    The ``UPDATE`` then matches no row, and the edit is kept.
+    """
+    old_text = group.when_to_use
+    old_hash = group.code_text_hash
+    new_hash = code_text_hash(code_text)
+    if old_hash is not None and old_hash != code_text_hash(old_text):
+        return
+    if old_text == code_text:
+        if old_hash == new_hash:
+            return
+        values: dict[str, Any] = {"code_text_hash": new_hash}
+    elif old_hash is None:
+        return
+    else:
+        values = {"when_to_use": code_text, "code_text_hash": new_hash, "updated_at": now}
+    unchanged_hash = (
+        OperationGroup.code_text_hash.is_(None)
+        if old_hash is None
+        else OperationGroup.code_text_hash == old_hash
+    )
+    result = await session.execute(
+        update(OperationGroup)
+        .where(
+            OperationGroup.id == group.id,
+            OperationGroup.when_to_use == old_text,
+            unchanged_hash,
+        )
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
+    log = structlog.get_logger(__name__).bind(
+        product=group.product,
+        version=group.version,
+        impl_id=group.impl_id,
+        group_key=group.group_key,
+    )
+    # ``rowcount`` is typed only on the concrete ``CursorResult`` the
+    # runtime returns, as in ``checks/repository.py``.
+    rowcount: int = result.rowcount  # type: ignore[attr-defined]
+    if rowcount != 1:
+        log.info("operation_group_text_refresh_skipped", reason="row changed since read")
+        return
+    for column, value in values.items():
+        set_committed_value(group, column, value)
+    if "when_to_use" in values:
+        log.info("operation_group_text_refreshed")
 
 
 # Pre-existing G0.6-T4 #395 public-API helper; G0.9-T4a #731 adds only the
@@ -1055,8 +1263,10 @@ async def register_typed_operation(
     session
         Optional caller-owned :class:`AsyncSession`. When provided
         the helper does **not** commit -- the caller controls
-        transaction boundaries. When ``None`` the helper opens its
-        own session, commits, and closes.
+        transaction boundaries. When ``None`` and the start-up
+        registration transaction is open (:func:`run_typed_op_registrars`),
+        the helper writes through that transaction and does not commit
+        (#5019). Otherwise it opens its own session, commits, and closes.
     embedding_service
         Optional caller-supplied :class:`EmbeddingService`. Test
         seam; production callers leave ``None`` so the helper
@@ -1125,6 +1335,8 @@ async def register_typed_operation(
 
     tags_list = list(tags) if tags is not None else []
 
+    if session is None:
+        session = _CATALOG_SESSION.get()
     if session is not None:
         await _register_in_session(
             session,
@@ -1219,7 +1431,7 @@ async def register_composite_operation(
         :func:`register_typed_operation`. ``op_id`` is the dotted
         identifier composites are surfaced under -- by convention
         ``"<product>.composite.<verb>.<noun>"`` (e.g.
-        ``"vmware.composite.vm.create"``); the dispatcher treats it
+        ``"gh.composite.repo_create"``); the dispatcher treats it
         as opaque.
     handler
         The async callable the dispatcher routes the composite to.
@@ -1248,8 +1460,8 @@ async def register_composite_operation(
         cluster patching, host evacuation -- and the safe-by-default
         for the operator is the assume-dangerous posture. Per-op
         overrides at the call site for read-only composites
-        (``vmware.composite.vm.info``,
-        ``vmware.composite.performance.summary``).
+        (``gh.composite.repo_view``,
+        ``gh.composite.pr_status_summary``).
     requires_approval
         Defaults to ``True`` (vs. typed's ``False`` default). Same
         rationale: composites' blast radius is larger by construction
@@ -1325,6 +1537,8 @@ async def register_composite_operation(
 
     tags_list = list(tags) if tags is not None else []
 
+    if session is None:
+        session = _CATALOG_SESSION.get()
     if session is not None:
         await _register_in_session(
             session,
@@ -1433,6 +1647,10 @@ async def _register_in_session(
 
     log = structlog.get_logger()
     now = datetime.now(UTC)
+    # #5037: the connector package whose folder holds the handler, or None
+    # for a built-in op. Written on every path, so the row always names
+    # the code that wrote it last.
+    owner_package = connector_package_of(handler_ref)
 
     # Compose the embedding text + hash from the incoming args; the
     # same composer applies to the persisted row's text below for
@@ -1524,11 +1742,13 @@ async def _register_in_session(
             # the same values back would needlessly invalidate any
             # ORM identity-map sharing.
             existing.handler_ref = handler_ref
+            existing.owner_package = owner_package
             existing.parameter_schema = parameter_schema
             existing.response_schema = response_schema
             existing.llm_instructions = llm_instructions
-            existing.safety_level = safety_level
-            existing.requires_approval = requires_approval
+            _raise_saved_settings(
+                existing, safety_level=safety_level, requires_approval=requires_approval
+            )
             existing.group_id = group_id
             existing.updated_at = now
             await session.flush()
@@ -1551,6 +1771,7 @@ async def _register_in_session(
             service=embedding_service,
         )
         existing.handler_ref = handler_ref
+        existing.owner_package = owner_package
         existing.summary = summary
         existing.description = description
         existing.custom_description = custom_description
@@ -1558,8 +1779,9 @@ async def _register_in_session(
         existing.parameter_schema = parameter_schema
         existing.response_schema = response_schema
         existing.llm_instructions = llm_instructions
-        existing.safety_level = safety_level
-        existing.requires_approval = requires_approval
+        _raise_saved_settings(
+            existing, safety_level=safety_level, requires_approval=requires_approval
+        )
         existing.group_id = group_id
         existing.embedding = embedding
         existing.updated_at = now
@@ -1606,6 +1828,7 @@ async def _register_in_session(
         embedding=embedding,
         custom_description=custom_description,
         custom_notes=None,
+        owner_package=owner_package,
         created_at=now,
         updated_at=now,
     )

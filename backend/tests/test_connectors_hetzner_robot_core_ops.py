@@ -42,6 +42,7 @@ from meho_backplane.connectors.hetzner_robot import (
     ROBOT_IMPL_ID,
     ROBOT_PRODUCT,
     ROBOT_VERSION,
+    RobotCoreOpsMissingError,
     apply_robot_core_curation,
     classify_robot_op,
 )
@@ -282,6 +283,7 @@ async def _seed_curated_groups_and_ops(
     *,
     tenant_id: uuid.UUID,
     extra_ops_per_group: int = 0,
+    skip_op_ids: frozenset[str] = frozenset(),
 ) -> dict[str, uuid.UUID]:
     """Seed every :data:`ROBOT_CORE_GROUPS` entry + its child ops.
 
@@ -293,6 +295,9 @@ async def _seed_curated_groups_and_ops(
     When *extra_ops_per_group* > 0, also seeds *N* non-curated ops per
     curated group with deterministic op_ids so the test can assert
     :func:`apply_robot_core_curation` correctly disables them.
+
+    Curated ops in *skip_op_ids* are not seeded, as if the ingested spec
+    lacked them.
     """
     sessionmaker = get_sessionmaker()
     group_ids: dict[str, uuid.UUID] = {}
@@ -314,6 +319,8 @@ async def _seed_curated_groups_and_ops(
             group_ids[group.group_key] = group_row.id
 
         for op in ROBOT_CORE_OPS:
+            if op.op_id in skip_op_ids:
+                continue
             method, path = op.op_id.split(":", 1)
             session.add(
                 EndpointDescriptor(
@@ -537,3 +544,53 @@ async def test_apply_robot_core_curation_emits_audit_rows() -> None:
     assert len(audit_rows) >= len(ROBOT_CORE_GROUPS), (
         f"expected ≥{len(ROBOT_CORE_GROUPS)} audit rows from curation; got {len(audit_rows)}"
     )
+
+
+async def test_apply_robot_core_curation_changes_nothing_when_core_ops_are_missing() -> None:
+    """Missing curated ops: one error names them all, and nothing changes (#4963).
+
+    Without the check, the group cascade would switch on curated ops whose
+    agent guidance is never written.
+    """
+    tenant_id = uuid.uuid4()
+    operator = _make_operator(tenant_id=tenant_id)
+    missing = frozenset({"GET:/ip", "GET:/key"})
+    await _seed_curated_groups_and_ops(
+        tenant_id=tenant_id, extra_ops_per_group=1, skip_op_ids=missing
+    )
+
+    with pytest.raises(RobotCoreOpsMissingError) as excinfo:
+        await apply_robot_core_curation(ReviewService(operator=operator), tenant_id=tenant_id)
+
+    assert excinfo.value.missing_op_ids == ("GET:/ip", "GET:/key")
+    for op_id in missing:
+        assert op_id in str(excinfo.value)
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        group_stmt = select(OperationGroup).where(OperationGroup.tenant_id == tenant_id)
+        groups = (await session.execute(group_stmt)).scalars().all()
+        ops = (
+            (
+                await session.execute(
+                    select(EndpointDescriptor).where(EndpointDescriptor.tenant_id == tenant_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        audit_rows = (
+            (await session.execute(select(AuditLog).where(AuditLog.tenant_id == tenant_id)))
+            .scalars()
+            .all()
+        )
+
+    assert len(groups) == len(ROBOT_CORE_GROUPS)
+    for group in groups:
+        assert group.review_status == "staged"
+        assert group.name == f"Placeholder name for {group.group_key}"
+    assert len(ops) == len(ROBOT_CORE_OPS) - len(missing) + len(ROBOT_CORE_GROUPS)
+    for op in ops:
+        assert op.is_enabled is False, op.op_id
+        assert op.llm_instructions is None, op.op_id
+    assert audit_rows == []

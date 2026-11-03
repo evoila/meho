@@ -114,6 +114,112 @@ boundary redaction:
     or agent context (the governed add-on launch path).
 - **`secret_move`** + **`register_secret_broker_operations`**
   (`ops.py`) — the module-level handler and its lifespan registrar.
+- **`resolve_secret_endpoint`** (`endpoints.py`) — turns a parsed
+  `<kind>:<ref>` into an endpoint through the registry. Shared by
+  `secret.move` and the two handoff steps.
+- **`secret_handoff_export`** / **`secret_handoff_import`**
+  (`handoff.py`), their registrar `register_secret_handoff_operations`
+  (`handoff_ops.py`) and their approval previews (`handoff_preview.py`)
+  — the two steps that move a secret to another MEHO instance. See the
+  next section.
+
+## Move a secret to another MEHO instance (handoff)
+
+`secret.move` works inside one MEHO: both sides use this instance's own
+Vault (`settings.vault_addr`). To move a target's login from instance A
+to instance B, the value must cross into B's store. Two approved steps
+do that, and nobody sees the value:
+
+1. **On A: `secret.handoff.export`.** Params: `from` (`<kind>:<ref>`),
+   optional `ttl_seconds` (60 to 86400, default 3600), `reason`. The
+   handler reads the value through the source adapter (so `vault:` keeps
+   the tenant check), then calls `sys/wrapping/wrap` on A's own Vault,
+   logged in as the operator. Vault returns a **response-wrapping
+   token**: a token that works once, has a short life, and does not hold
+   the value — the value stays in A's store. The result is
+   `{status: "exported", value_sha256, length, handoff_token,
+   handoff_ttl_seconds}`.
+2. **On B: `secret.handoff.import`.** Params: `handoff_token`, `store`
+   (the name of a target on B, product `vault`, whose host is A's Vault
+   or OpenBao), `to` (`<kind>:<ref>` sink on B), optional
+   `expect_sha256`, `reason`. The handler:
+   - builds the sink and runs its write check first
+     (`VaultKvSecretEndpoint.check_write_allowed`, the tenant check), so
+     a wrong sink path does not use up the handoff;
+   - resolves the `store` target tenant-scoped and builds its URL
+     (`https` unless `extras.scheme` says `http`; `verify_tls` is kept;
+     a `tls_ca_pin` is refused for now);
+   - calls `sys/wrapping/unwrap` at that URL with the handoff as the
+     only credential. The call is one HTTP `POST` over an `httpx` client
+     on the shared address-pinning transport
+     (`connectors/_shared/pinned_transport.py`) with the target
+     destination guard (`targets/ssrf_guard.py`) as its resolver, the
+     same screen every other target dial gets. The host is screened
+     before the request and again when the socket opens, and the socket
+     dials only an address that passed. A store whose DNS answer changed
+     after registration is refused, and nothing is sent. The client
+     follows no redirect: a `3xx` answer is reported as an error. Seam:
+     `handoff._build_store_client`;
+   - checks `expect_sha256` when it is set, and writes nothing on a
+     mismatch;
+   - writes the value through the sink (for `vault:`, B's own Vault,
+     only under B's tenant path) and returns
+     `{status: "imported", value_sha256, length}`.
+
+Both ops are `dangerous` with `requires_approval=True`, so each waits
+until a second person approves it on its own instance.
+
+**Why this way, and not a second Vault as a `secret.move` sink.** The
+other way would let A write straight into B's store. It needs a login on
+A that B's store accepts (for example an AppRole kept in A's Vault), and
+A would have to know B's tenant path. B's MEHO would not see the move, so
+only A would write an audit record. With the handoff, each instance runs
+its own step under its own operator, its own tenant check and its own
+approval, and each writes its own audit record. No instance needs a
+long-lived login for the other's store: the handoff token is the only
+credential, and it works once. Vault's default policy allows
+`sys/wrapping/wrap` and `sys/wrapping/unwrap`; OpenBao has the same API.
+
+**What carries the SHA-256.** Each side's dispatch audit row stores the
+handler's result in `raw_payload`. Both results carry the same
+`value_sha256`, so an auditor can match A's export row to B's import row.
+
+**Where the handoff token goes.** It is not the value, but it can fetch
+the value once, so it is handled as a credential:
+
+- `secret.handoff.export` is pinned `credential_mint` and
+  `secret.handoff.import` is pinned `credential_write` in
+  `broadcast/events.py`. While the import waits for approval its params
+  (with the token) are stored encrypted (`approval_handoff.py`), not on
+  the approval row.
+- The import's approval preview (`handoff_preview.py`) shows the store
+  target, the sink and `expect_sha256`, never the token.
+- The export result returns the token to the caller, and A's audit row
+  keeps the result like any other result.
+
+**Errors** (`handoff.py`, all subclasses of `SecretHandoffError`). Each
+message names the store, the Vault path and the next step, never the
+value, the token, or text from the store, the sink or a client library.
+Both ops send a secret, so the dispatcher withholds the raised message
+(`extras.exception_message`) from the error result
+(`operations/_vendor_text.py`). Every error therefore sets `remediation`
+to the same MEHO-written text, and that is what the caller reads in
+`extras.remediation`. The source and sink adapters raise their own
+errors, which carry no remediation. So the export maps what the source
+read raises (a refused login, an unreachable store, a denied tenant
+path, a missing field) into a handoff error naming the source address,
+and the import maps a denied sink tenant path the same way, before the
+handoff is used.
+
+| Error | When |
+|---|---|
+| `SecretHandoffUnreachableError` | the store cannot be reached (wrong address, network, TLS): A's own store on the source read or the wrap, the store target on the unwrap |
+| `SecretHandoffDestinationBlockedError` | the store target is, or now resolves to, an address this MEHO does not dial; nothing was sent, the handoff is still usable |
+| `SecretHandoffRefusedError` | the store refused the login or the call, or the source or sink path is outside the operator's tenant path |
+| `SecretHandoffInvalidError` | the handoff was already used, expired, or was made by another store |
+| `SecretHandoffDigestMismatchError` | the value's SHA-256 is not `expect_sha256`; nothing was written |
+| `SecretHandoffSinkWriteError` | the handoff was used but the sink write failed; make a new handoff |
+| `SecretHandoffStoreError` | a bad store target (not product `vault`, a pinned CA), a redirect, another HTTP status, a malformed reply, or a source path or field that cannot be read |
 
 ## Ops example — move a Keycloak client secret into Vault
 
@@ -232,6 +338,8 @@ the posture and relies on the existing gate). The policy refinement
 
 ## Known issues / scope boundaries
 
+- The handoff import does not support a store target with a pinned CA
+  (`tls_ca_pin`) yet; it refuses such a target with a plain error.
 - vault-kv (source+sink) and keycloak (user-password sink #1578 +
   client-secret source #3619, dual-dispatched under the one kind) are the
   registered adapter kinds; further kinds are separate tasks reusing the
@@ -261,11 +369,15 @@ the posture and relies on the existing gate). The policy refinement
 - `backend/src/meho_backplane/connectors/secret/vault_endpoint.py`
 - `backend/src/meho_backplane/connectors/secret/ops.py`
 - `backend/src/meho_backplane/connectors/secret/move_preview.py`
+- `backend/src/meho_backplane/connectors/secret/handoff.py`
+- `backend/src/meho_backplane/connectors/secret/handoff_ops.py`
+- `backend/src/meho_backplane/connectors/secret/handoff_preview.py`
 - `backend/src/meho_backplane/connectors/secret/__init__.py`
 - `backend/src/meho_backplane/connectors/keycloak/secret_endpoint.py`
 - `backend/tests/test_connectors_secret_broker.py`
 - `backend/tests/test_secret_broker_keycloak_sink.py`
 - `backend/tests/test_secret_broker_keycloak_client_secret_source.py`
 - `backend/tests/test_secret_move_approval.py`
+- `backend/tests/test_secret_broker_handoff.py`
 - Initiative #581 (G0.22 Secret broker), Goal #221; #1578 (keycloak
   user-password sink); #3619 (keycloak client-secret source).

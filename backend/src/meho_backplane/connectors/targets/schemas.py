@@ -18,10 +18,8 @@ constraints the service enforces: required ``name`` / ``product`` /
 ``host``; the documented optional set; ``additionalProperties: false`` so
 the two server-managed inputs the create body forbids —
 ``fingerprint`` (probe-written) and ``tenant_id`` (JWT-derived) — are
-rejected at the schema layer before the handler runs. ``vpn_required`` is
-deliberately not exposed on the agent surface (it is a network-topology
-concern, not an onboarding parameter); an omitted value takes the
-``TargetCreate`` default.
+rejected at the schema layer before the handler runs. An omitted optional
+takes the ``TargetCreate`` default.
 """
 
 from __future__ import annotations
@@ -145,6 +143,14 @@ TARGETS_REGISTER_PARAMETER_SCHEMA: dict[str, Any] = {
                 "from `host` (for an appliance whose cert pins an FQDN-CN "
                 "while it only accepts `Host: <IP>`). Omitted derives it "
                 "from `host`."
+            ),
+        },
+        "vpn_required": {
+            "type": "boolean",
+            "description": (
+                "Whether a VPN must be up to reach the target. Default "
+                "`false`. A record for the people and agents that read the "
+                "target; dispatch does not act on it."
             ),
         },
         "extras": {

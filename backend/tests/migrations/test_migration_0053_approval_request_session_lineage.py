@@ -23,7 +23,7 @@ parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -86,10 +86,12 @@ def _column_is_nullable(sync_url: str, column: str) -> bool:
     raise AssertionError(f"column {column!r} not present on approval_request")
 
 
-def test_upgrade_adds_both_lineage_columns(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_both_lineage_columns(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade head`` lands both nullable lineage columns."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     columns = _approval_request_columns(sync_url)
     for column in _LINEAGE_COLUMNS:
@@ -100,10 +102,12 @@ def test_upgrade_adds_both_lineage_columns(alembic_cfg: tuple[Config, str]) -> N
         )
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0052"`` drops both columns; ``upgrade head`` restores them."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     assert set(_LINEAGE_COLUMNS) <= _approval_request_columns(sync_url)
 
     command.downgrade(cfg, "0052")

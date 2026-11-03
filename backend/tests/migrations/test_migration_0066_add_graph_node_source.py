@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -187,10 +187,11 @@ def _select_source(sync_url: str, node_id: str) -> str:
 
 def test_backfill_marks_seeded_rows_curated_and_probe_rows_auto(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """The 0066 backfill keys on the ``properties.seeded_by`` stamp."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     tenant_id = _seed_tenant(sync_url)
     seeded_id = _insert_node_pre_0066(
         sync_url,
@@ -217,10 +218,11 @@ def test_backfill_marks_seeded_rows_curated_and_probe_rows_auto(
 
 def test_post_upgrade_insert_defaults_to_auto(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A post-0066 insert omitting ``source`` gets ``'auto'`` from the default."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     tenant_id = _seed_tenant(sync_url)
     _insert_node_post_0066(sync_url, tenant_id, name="defaulted")
 
@@ -237,10 +239,11 @@ def test_post_upgrade_insert_defaults_to_auto(
 
 def test_check_rejects_unknown_source(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``ck_graph_node_source`` rejects values outside (auto, curated)."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     tenant_id = _seed_tenant(sync_url)
 
     with pytest.raises(IntegrityError):
@@ -252,6 +255,7 @@ def test_check_rejects_unknown_source(
 
 def test_sibling_kind_check_survives_batch_rebuild(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``ck_graph_node_kind`` still rejects a malformed kind post-0066.
 
@@ -261,7 +265,7 @@ def test_sibling_kind_check_survives_batch_rebuild(
     (mirror of migration ``0063``'s edge-side pin).
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     tenant_id = _seed_tenant(sync_url)
 
     with pytest.raises(IntegrityError):
@@ -270,6 +274,7 @@ def test_sibling_kind_check_survives_batch_rebuild(
 
 def test_downgrade_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``downgrade 0065`` drops the column; ``upgrade 0066`` replays the backfill.
 
@@ -278,7 +283,7 @@ def test_downgrade_then_upgrade_round_trips(
     the column drop, so the replayed backfill lands ``curated`` again.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     tenant_id = _seed_tenant(sync_url)
     seeded_id = _insert_node_pre_0066(
         sync_url,

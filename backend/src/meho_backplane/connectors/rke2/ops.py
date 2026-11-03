@@ -139,10 +139,7 @@ def _rke2_ops() -> tuple[Rke2Op, ...]:
     ``rke2.node.service.restart`` / ``rke2.node.config.update`` (T3 #2430))
     + ``SNAPSHOT_OPS`` (the safe, non-gated ``rke2.etcd-snapshot.save``
     (T4 #2431) + ``rke2.etcd-snapshot.list`` (#2853)). This layers the
-    write + snapshot tiers onto the read surface
-    exactly as
-    :func:`meho_backplane.connectors.holodeck.ops._holodeck_ops` layers its
-    ``WRITE_OPS`` on.
+    write + snapshot tiers onto the read surface.
 
     Implemented as a function call rather than a module-level literal so
     the import order stays linear: ``ops.py`` defines :class:`Rke2Op` +

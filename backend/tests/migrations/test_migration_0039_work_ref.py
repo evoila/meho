@@ -15,7 +15,7 @@ driver and the migration uses only generic DDL, so PG parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -87,10 +87,12 @@ def _audit_log_indexes(sync_url: str) -> set[str]:
     return {str(row[1]) for row in rows}
 
 
-def test_upgrade_adds_work_ref_column_and_index(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_work_ref_column_and_index(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade head`` lands the nullable column + its named index."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     assert "work_ref" in _audit_log_columns(sync_url), (
         "migration 0039 must add audit_log.work_ref on upgrade head"
@@ -103,10 +105,12 @@ def test_upgrade_adds_work_ref_column_and_index(alembic_cfg: tuple[Config, str])
     )
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0037"`` drops column + index; ``upgrade head`` restores them."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     assert "work_ref" in _audit_log_columns(sync_url)
     assert "audit_log_work_ref_idx" in _audit_log_indexes(sync_url)
 
@@ -121,10 +125,12 @@ def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> 
     assert "audit_log_work_ref_idx" in _audit_log_indexes(sync_url)
 
 
-def test_prior_audit_columns_untouched(alembic_cfg: tuple[Config, str]) -> None:
+def test_prior_audit_columns_untouched(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """The pre-existing soft-FK columns + indexes survive 0039."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     columns = _audit_log_columns(sync_url)
     # A representative slice of the prior soft-FK columns 0039 sits beside.

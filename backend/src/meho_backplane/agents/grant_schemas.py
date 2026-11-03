@@ -22,7 +22,7 @@ Pattern validation
 
 ``op_pattern`` is a fnmatch glob string. The only hard constraint is
 that it must be non-empty; the shape (``"*"``, ``"vault.kv.*"``,
-``"GET:/api/vcenter/*"``) is validated by the service layer using
+``"GET:/repos/*"``) is validated by the service layer using
 :func:`fnmatch.fnmatch`. No pre-parse is done here to keep the schema
 focused on type/presence, not semantics.
 

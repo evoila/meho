@@ -76,6 +76,7 @@ writes are the separate follow-up #1452).
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
@@ -94,6 +95,8 @@ __all__ = [
     "PREVIEW_REASON_CREDENTIAL_REDACTED",
     "PREVIEW_REASON_NOT_POPULATED",
     "PreviewContext",
+    "approved_preview",
+    "approved_preview_var",
     "blast_radius_missing_reason",
     "build_permission_preflight",
     "build_proposed_effect",
@@ -145,6 +148,33 @@ _PREVIEW_ERROR_MAX_LEN: int = 500
 #: unavailable; only the message is withheld. Returning the raw text
 #: instead would be the leak this redaction exists to close.
 _PREVIEW_ERROR_WITHHELD: str = "<message withheld: redaction unavailable>"
+
+#: The park-time preview of the request that is being re-run after its
+#: approval, as ``(op_id, preview)``: *op_id* is the parked op and *preview*
+#: the dict its builder returned (``{}`` when the park stored no computed
+#: preview). Bound by
+#: :func:`~meho_backplane.operations.approval_queue.composite_resume_binding`
+#: on both resume paths for the whole re-run, so a handler that resolves a
+#: name at park time can act on the object the approver saw instead of
+#: looking the name up again (#5202). ``None`` for every ordinary dispatch.
+approved_preview_var: ContextVar[tuple[str, dict[str, Any]] | None] = ContextVar(
+    "approved_preview",
+    default=None,
+)
+
+
+def approved_preview(op_id: str) -> dict[str, Any] | None:
+    """The preview the approver saw for *op_id*, during the approved re-run of that op.
+
+    ``None`` on an ordinary dispatch and when the re-run is for a different
+    op (a sub-op park re-runs its parent composite; the parent must not read
+    the sub-op's preview as its own). An empty dict means the call was
+    approved but its park stored no computed preview.
+    """
+    bound = approved_preview_var.get()
+    if bound is None or bound[0] != op_id:
+        return None
+    return bound[1]
 
 
 def preview_failure_reason(exc: Exception) -> str:
@@ -649,7 +679,10 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     per-document summary (resource identity + ``resourceVersion`` +
     ``uid``) is the diff-preview the reviewer reads. The handler echoes
     no Secret ``data`` -- it operates on the manifest's GVK + metadata --
-    so the summary is identity-only and redaction-safe.
+    so the summary is identity-only and redaction-safe. On top of that
+    summary the builder adds the redacted manifest and a ``subject`` line
+    (:func:`_k8s_apply_manifest_echo`, #3877), so the reviewer sees what
+    the apply sets, not only which objects it touches.
 
     Returns ``None`` when no connector instance resolved (a k8s.apply
     without a target can't dry-run) so the caller falls back to the
@@ -677,12 +710,47 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     # the preview must never persist, even if the parked call itself was
     # a real apply (dry_run="none").
     preview_params = {**ctx.params, "dry_run": "server"}
-    return await k8s_apply(
+    result = await k8s_apply(
         ctx.connector_instance,
         ctx.target,
         ctx.operator,
         preview_params,
     )
+    return {**result, **_k8s_apply_manifest_echo(ctx, result)}
+
+
+def _k8s_apply_manifest_echo(ctx: PreviewContext, result: dict[str, Any]) -> dict[str, Any]:
+    """The ``subject`` and ``manifest`` keys the k8s.apply preview adds (#3877).
+
+    The dry-run summary names each object but not what the apply sets on
+    it. ``manifest`` is the applied manifest, one dict per document, with
+    Secret values and ``env`` values hidden by the connector, then run
+    through the same two-pass redaction as the generic params echo. The
+    connector applies its size limit after that redaction, so the stored
+    echo is what is measured. ``subject`` names the objects for the
+    reviewer context.
+    """
+    from meho_backplane.connectors.kubernetes.ops_write_preview import (
+        apply_manifest_echo,
+        apply_subject,
+    )
+
+    tenant = str(ctx.operator.tenant_id) if ctx.operator.tenant_id is not None else None
+
+    def _redact(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        redacted = _redact_echoed_params(
+            {"manifest": docs},
+            connector_id=ctx.connector_id,
+            tenant=tenant,
+            op_id=ctx.descriptor.op_id,
+        )
+        return [doc for doc in redacted.get("manifest", []) if isinstance(doc, dict)]
+
+    echo: dict[str, Any] = {"manifest": apply_manifest_echo(ctx.params["manifest"], redact=_redact)}
+    subject = apply_subject(result.get("applied"))
+    if subject is not None:
+        echo["subject"] = subject
+    return echo
 
 
 async def _vault_kv_write_preflight(ctx: PreviewContext) -> dict[str, Any] | None:

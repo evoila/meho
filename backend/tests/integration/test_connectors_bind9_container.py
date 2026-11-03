@@ -458,6 +458,21 @@ async def test_config_show_against_real_bind9_refuses_traversal_with_no_content(
         await connector.aclose()
 
 
+@pytest.mark.asyncio
+async def test_config_show_against_real_bind9_refuses_rndc_key(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """``rndc.key`` is not a config file, so the read refuses it (#5132)."""
+    from meho_backplane.connectors.bind9.ops_config import ConfigPathRejectedError
+
+    connector = Bind9Connector()
+    try:
+        with pytest.raises(ConfigPathRejectedError, match="not a BIND config file"):
+            await connector.bind9_config_show(bind9_container_target, {"path": "rndc.key"})
+    finally:
+        await connector.aclose()
+
+
 # ---------------------------------------------------------------------------
 # T3 record-write group -- bind9.record.add / bind9.record.remove + rollback
 # proof against the seeded zone in the same container.

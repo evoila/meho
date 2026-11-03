@@ -610,6 +610,8 @@ async def test_policy_write_ops_are_approval_gated_on_dispatch(
 ) -> None:
     """DoD: a write/delete dispatch parks as ``awaiting_approval`` (handler never runs)."""
     fake = install_fake_client(monkeypatch)
+    # The delete's park-time check (#3945) needs ``delete`` on the policy path.
+    fake.sys.capabilities_by_path = {"sys/policy/app-ro": ["delete"]}
     result = await _dispatch_vault(op_id, params)
 
     assert result.status == "awaiting_approval", result.error

@@ -135,6 +135,9 @@ The realm still needs the public `meho-mcp` client and its loopback
 redirect URI, exactly as the manual path below (see
 [Keycloak realm setup](../install/keycloak-realm.md)).
 
+If your login has several tenants, also set `MEHO_TENANT` — see
+[Work in one tenant](#work-in-one-tenant).
+
 ### How long the plugin login lasts
 
 The plugin asks for `offline_access` by default (default scopes:
@@ -144,10 +147,26 @@ with the [recommended realm setting](../install/keycloak-realm.md#how-long-an-mc
 Using MEHO renews the login. `MEHO_MCP_SCOPES` replaces the whole list, so
 keep `offline_access` in it when you set it.
 
-When the login has expired, the next MEHO call fails at once with "Your
-MEHO login has expired. Run /mcp, pick meho, and reconnect to log in
-again." A login that nobody finishes stops after 5 minutes. No MEHO call
-waits for a login. See
+All Claude Code sessions on one computer share one saved login. The
+plugin keeps that login when one renewal fails:
+
+- A renewal that fails because of the network or a server error is tried
+  again for about 30 seconds. If the login server still does not answer,
+  the call fails with "The MEHO login server did not answer", and the
+  login is kept. Try the call again later.
+- When the login server refuses a renewal, the plugin first checks whether
+  another session has saved a newer login, and uses it. Otherwise it asks
+  the login server once more before it gives the login up.
+- A failed renewal never deletes the saved login, so other sessions keep
+  working.
+- Only one browser login runs at a time on the computer. Another session
+  that starts meanwhile waits and then uses the new login.
+
+When the login has really ended (not used for the idle limit, or ended by
+an admin in Keycloak), the next MEHO call fails at once with "Your MEHO
+login has expired. Run /mcp, pick meho, and reconnect to log in again." A
+login that nobody finishes stops after 5 minutes. No MEHO call waits for a
+login. See
 [troubleshooting](troubleshooting.md#a-meho-call-says-your-meho-login-has-expired-claude-code-plugin).
 
 Claude Code does not update plugins from this marketplace on its own,
@@ -176,7 +195,7 @@ at session start; restart the session after edits:
       "oauth": {
         "clientId": "meho-mcp",
         "callbackPort": 8456,
-        "scopes": "mcp:read mcp:execute"
+        "scopes": "mcp:read mcp:execute offline_access"
       }
     }
   }
@@ -190,6 +209,41 @@ at session start; restart the session after edits:
 - **`callbackPort`** fixes the loopback port the authorization-code
   callback returns to. It must match a registered redirect URI on the
   `meho-mcp` client (next section).
+- **`offline_access`** in `scopes` gives a long login that renews
+  itself: it ends after 48 hours without use, or after 7 days at most.
+  Without it, the login ends after 30 minutes without use (the realm's
+  default). See
+  [How long each login lasts](../install/keycloak-realm.md#how-long-each-login-lasts).
+
+## Work in one tenant
+
+A Claude Code session works in one MEHO tenant from start to end. If your
+login has only one tenant, set nothing. If it has several, name the tenant
+before the session starts. MEHO reads it from the `Meho-Tenant` header (a
+tenant name or ID). Without it, the session may only call `meho_status`,
+which lists your tenants.
+
+- **With the plugin:** set `MEHO_TENANT` in your shell profile or in the
+  plugin config file. The plugin sends it as the `Meho-Tenant` header.
+
+    ```bash
+    # ~/.config/meho/plugin.env
+    MEHO_TENANT="tenant-b"
+    ```
+
+- **Without the plugin:** add the header to the `meho` server in
+  `.mcp.json`, next to `oauth`:
+
+    ```json
+    "headers": {
+      "Meho-Tenant": "tenant-b"
+    }
+    ```
+
+To work in another tenant, change the value and start a new Claude Code
+session. The first session in a tenant opens a browser login once more.
+More in
+[MCP surface and scopes](mcp-surface-and-scopes.md#which-tenant-a-session-works-in).
 
 ## One-time realm redirect URI
 

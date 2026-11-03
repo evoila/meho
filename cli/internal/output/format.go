@@ -253,6 +253,7 @@ func InsufficientBudget(detail string) *StructuredError {
 // also sets SilenceErrors=true: cobra sees a non-nil error and
 // flips to a non-zero return without re-emitting any text.
 func RenderError(stderrW io.Writer, err *StructuredError, jsonOut bool) error {
+	err = withTenantNotChosenHint(err)
 	if jsonOut {
 		// JSON path: serialise the envelope to stderr ourselves.
 		body := jsonError{
@@ -331,6 +332,16 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 	identity := formatOperatorIdentity(resp.Operator)
 	fmt.Fprintf(stdoutW, "Logged in as %s\n", identity)
 
+	// The person's tenants and the role in each (#5239). A login with
+	// several tenants that chose none gets only this list, the hint and
+	// the DB line: the backplane did no tenant work for it.
+	fmt.Fprint(stdoutW, formatTenants(resp.Operator))
+	if tenantNotChosen(resp.Operator) {
+		fmt.Fprintln(stdoutW, "  No tenant chosen. Choose one with `meho tenants use <name>`.")
+		fmt.Fprintf(stdoutW, "  DB:    %s\n", formatDB(resp.Db))
+		return nil
+	}
+
 	// Vault subsystem. reachable + read_ok plus optional detail.
 	fmt.Fprintf(stdoutW, "  Vault: %s\n", formatVault(resp.Vault))
 
@@ -352,13 +363,85 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 		}
 	}
 
+	// Connector packages the image carries (#5036). An older backplane
+	// sends no field; the line is skipped then.
+	if resp.ConnectorPackages != nil {
+		fmt.Fprint(stdoutW, FormatConnectorPackages("  ", *resp.ConnectorPackages))
+	}
+
 	// Sandbox mode (#4622): one line when it is on, nothing when it is
 	// off. Older backplanes send no field; the generated decoder leaves
 	// it nil or empty, which reads as off.
 	if resp.SandboxMode != nil && *resp.SandboxMode == "on" {
 		fmt.Fprintln(stdoutW, "  Sandbox mode: on (a standing grant made in the web console may cover deletes by service principals)")
 	}
+
+	// Operation settings (#5019): one line when another release wrote the
+	// shared operation rows, nothing otherwise. Older backplanes send no
+	// field.
+	if line := formatOperationCatalog(resp.OperationCatalog); line != "" {
+		fmt.Fprintln(stdoutW, line)
+	}
 	return nil
+}
+
+// tenantNotChosen reports a status answer for a login with several
+// tenants that named none (#5239): no current tenant, but a list.
+func tenantNotChosen(op api.OperatorIdentity) bool {
+	return op.TenantId == nil && op.Tenants != nil && len(*op.Tenants) > 0
+}
+
+// formatTenants renders the person's tenants, one per line, with the
+// role and a mark on the current one. Empty when the backplane sends
+// no list (a login without a tenant list, or an older backplane).
+func formatTenants(op api.OperatorIdentity) string {
+	if op.Tenants == nil || len(*op.Tenants) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("  Tenants:\n")
+	for _, t := range *op.Tenants {
+		mark := ""
+		if t.Current {
+			mark = "  (current)"
+		}
+		fmt.Fprintf(&b, "    %s  %s%s\n", t.Name, t.TenantRole, mark)
+	}
+	return b.String()
+}
+
+// formatOperationCatalog returns the warning line for operation rows
+// written by another release, or "" when this release wrote them, no
+// release is recorded yet, or the backplane sends no field.
+func formatOperationCatalog(c *api.OperationCatalogStatus) string {
+	if c == nil || c.State != "other_release" {
+		return ""
+	}
+	writer := "unknown"
+	if c.WrittenByRelease != nil && *c.WrittenByRelease != "" {
+		writer = *c.WrittenByRelease
+	}
+	return fmt.Sprintf(
+		"  Operation settings: written by release %s, this server runs %s (see docs/acceptance/rollback.md)",
+		writer, c.ThisRelease,
+	)
+}
+
+// FormatConnectorPackages renders the connector packages an image
+// carries (#5036): "Connector packages: none" for the plain public
+// image, otherwise a header plus one line per package with its version
+// and wheel digest. Every line starts with indent and ends with a
+// newline. `meho status` and `meho version` both use it.
+func FormatConnectorPackages(indent string, pkgs []api.ConnectorPackage) string {
+	if len(pkgs) == 0 {
+		return indent + "Connector packages: none\n"
+	}
+	var b strings.Builder
+	b.WriteString(indent + "Connector packages:\n")
+	for _, p := range pkgs {
+		fmt.Fprintf(&b, "%s  %s %s (%s)\n", indent, p.Name, p.Version, p.WheelDigest)
+	}
+	return b.String()
 }
 
 // formatOperatorIdentity collapses the OperatorIdentity model into a

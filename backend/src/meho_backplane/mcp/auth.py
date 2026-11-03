@@ -50,11 +50,13 @@ from __future__ import annotations
 import structlog
 from fastapi import Depends, Header, HTTPException, status
 
-from meho_backplane.auth.jwt import verify_jwt_for_audience
+from meho_backplane.auth.current_tenant import TENANT_HEADER, bind_tenant_role_source
+from meho_backplane.auth.jwt import header_value, verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
+    "MCP_SCOPES_SUPPORTED",
     "mcp_resource_uri",
     "verify_mcp_jwt",
     "verify_mcp_jwt_and_bind",
@@ -62,6 +64,15 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
+
+# The scopes MEHO advertises to MCP clients: in ``scopes_supported`` of the
+# protected-resource document and in the ``scope`` of the 401 challenge.
+# MCP 2025-11-25 "Scope Selection Strategy": a client asks for the challenge
+# ``scope`` first, then for ``scopes_supported``. ``offline_access`` is in
+# the list so a client gets a login that renews itself instead of one that
+# ends at the login server's short idle limit. ``mcp:admin`` is not listed:
+# a client must ask for it on purpose.
+MCP_SCOPES_SUPPORTED: tuple[str, ...] = ("mcp:read", "mcp:execute", "offline_access")
 
 
 def mcp_resource_uri(settings: Settings | None = None) -> str:
@@ -106,7 +117,12 @@ def www_authenticate_header(settings: Settings | None = None) -> str:
 
     Shape per spec example::
 
-        Bearer resource_metadata="https://meho.example/.well-known/oauth-protected-resource"
+        Bearer resource_metadata="https://meho.example/.well-known/oauth-protected-resource",
+               scope="mcp:read mcp:execute offline_access"
+
+    The ``scope`` parameter (RFC 6750 §3) lists
+    :data:`MCP_SCOPES_SUPPORTED`. MCP 2025-11-25 says a server SHOULD send
+    it, and clients use it first when they pick the scopes for a login.
 
     The metadata URL is rooted at ``backplane_url`` because RFC 9728
     §3 hosts the document at ``/.well-known/oauth-protected-resource``
@@ -121,11 +137,13 @@ def www_authenticate_header(settings: Settings | None = None) -> str:
     if not base:
         return "Bearer"
     metadata_url = f"{base}/.well-known/oauth-protected-resource"
-    return f'Bearer resource_metadata="{metadata_url}"'
+    scope = " ".join(MCP_SCOPES_SUPPORTED)
+    return f'Bearer resource_metadata="{metadata_url}", scope="{scope}"'
 
 
 async def verify_mcp_jwt(
     authorization: str | None = Header(default=None),
+    meho_tenant: str | None = Header(default=None, alias=TENANT_HEADER, include_in_schema=False),
 ) -> Operator:
     """FastAPI dependency: validate the Bearer token for the MCP audience.
 
@@ -141,8 +159,15 @@ async def verify_mcp_jwt(
     discovery flow.
 
     A 401 is preserved verbatim — same detail token, same status code.
-    Non-401 status codes from the chassis chain (none today, reserved
-    for future cases) propagate without the header injection.
+    Non-401 status codes from the chassis chain (400 ``tenant_not_chosen``
+    is not one of them here, see below; 403 ``tenant_not_member`` /
+    ``tenant_not_found``) propagate without the header injection.
+
+    Current tenant (#5239): the ``Meho-Tenant`` header names the tenant
+    the MCP session works in. A login with several tenants and no header
+    is let through with ``tenant_chosen=False``; the dispatcher then
+    allows only the connection start and ``meho_status``
+    (:mod:`meho_backplane.mcp.tenant_gate`).
     """
     settings = get_settings()
     expected_audience = mcp_resource_uri(settings)
@@ -150,6 +175,8 @@ async def verify_mcp_jwt(
         return await verify_jwt_for_audience(
             authorization,
             expected_audience=expected_audience,
+            requested_tenant=header_value(meho_tenant),
+            allow_unchosen=True,
         )
     except HTTPException as exc:
         if exc.status_code != 401:
@@ -193,6 +220,11 @@ async def verify_mcp_jwt_and_bind(
     JSON-renderer reason the chassis wrapper documents — see
     :func:`~meho_backplane.middleware.verify_jwt_and_bind`.
 
+    A login with several tenants and no ``Meho-Tenant`` header (#5239)
+    arrives with ``tenant_chosen=False``. Nothing is bound for it: the
+    chassis audit middleware then writes no row and the usage collector
+    no event, so the placeholder tenant in its fields is never recorded.
+
     Runner cage (Initiative #2415, #2502)
     -------------------------------------
     A ``principal_kind=runner`` token is fail-closed 403'd here. The REST
@@ -210,8 +242,14 @@ async def verify_mcp_jwt_and_bind(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="runner_scope_violation",
         )
+    if not operator.tenant_chosen:
+        # #5239: a session with no current tenant binds nothing, as the
+        # REST status route does. The tenant fields hold a placeholder,
+        # so no audit row, usage event or log line may name it.
+        return operator
     structlog.contextvars.bind_contextvars(
         operator_sub=operator.sub,
         tenant_id=str(operator.tenant_id),
     )
+    bind_tenant_role_source(operator)
     return operator

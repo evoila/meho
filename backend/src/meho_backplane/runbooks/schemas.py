@@ -212,7 +212,7 @@ class OperationCallStep(BaseModel):
     """A step the agent dispatches via the operation registry.
 
     :attr:`op_id` is the registry operation id (e.g.
-    ``vmware.composite.vm.create``); :attr:`params` is the call payload,
+    ``gh.composite.repo_create``); :attr:`params` is the call payload,
     which may contain ``${...}`` substitutions resolved at advance time.
     :attr:`body` is operator-readable Markdown context (may also contain
     substitutions). :attr:`verify` gates advance to the next step.

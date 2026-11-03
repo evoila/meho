@@ -41,10 +41,14 @@ carries none, so the ``__ingest__`` operator reuses the backplane's existing
 background-dispatch service-principal token
 (:func:`~meho_backplane.auth.runner_identity.check_runner_jwt`) -- the same
 "MEHO's own in-process dispatch, outward" identity the sensor check-runner
-uses. It carries ``check_runner_dispatch=False`` so the Vault login uses the
-standard ``vault_oidc_role`` (the check-runner's bounded role is scoped to
-target secrets, not event-source secrets). When that principal is
-unconfigured the token is empty, the Vault read fails, and ingest fails
+uses. It carries ``check_runner_dispatch=True`` too, so the Vault login uses
+the runner's own role (``vault_check_runner_role``) when one is set. The two
+must agree: once an operator gives the runner client its own audience, as the
+Vault recipe says, the shared ``vault_oidc_role`` no longer accepts the
+runner's token, and a login under it would refuse every event. The runner's
+policy therefore has to cover the event-source secrets as well
+(``docs/cross-repo/vault-provisioning.md``, section 7). When that principal
+is unconfigured the token is empty, the Vault read fails, and ingest fails
 closed -- the correct posture.
 """
 
@@ -140,7 +144,12 @@ class IngestOutcome:
 
 
 async def _build_ingest_operator(tenant_id: uuid.UUID) -> Operator:
-    """Build the synthetic ``__ingest__`` operator for the outward Vault read."""
+    """Build the synthetic ``__ingest__`` operator for the outward Vault read.
+
+    The token is the check runner's, so the Vault login must use the check
+    runner's role as well: ``check_runner_dispatch=True`` routes it to
+    ``vault_check_runner_role`` (see the module docstring).
+    """
     return Operator(
         sub=INGEST_OPERATOR_SUB,
         name=None,
@@ -148,6 +157,7 @@ async def _build_ingest_operator(tenant_id: uuid.UUID) -> Operator:
         raw_jwt=await check_runner_jwt(),
         tenant_id=tenant_id,
         tenant_role=TenantRole.OPERATOR,
+        check_runner_dispatch=True,
     )
 
 

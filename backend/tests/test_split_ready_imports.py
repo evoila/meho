@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""No public module imports a connector folder that leaves in the split (#5272).
+"""No public module imports a connector folder that left in the split (#5272).
 
-The VMware connector folders and ``salt`` move out of this repository into
-their own packages. After that move the public code must still import and
-run. So no module outside those folders may import one of them.
+The VMware connector folders and ``salt`` moved out of this repository into
+their own package (#3345). The public code must import and run without
+them. So no module may import one of them, and none of the folders may
+come back by accident.
 
 The test reads every module under ``meho_backplane`` with :mod:`ast`. It
 does not import them. It checks plain imports, ``from`` imports and
@@ -19,7 +20,7 @@ from pathlib import Path
 
 import meho_backplane
 
-#: The connector folders that leave the public tree in the split.
+#: The connector folders that left the public tree in the split.
 LEAVING_FOLDERS: frozenset[str] = frozenset(
     {
         "vmware_rest",
@@ -31,6 +32,7 @@ LEAVING_FOLDERS: frozenset[str] = frozenset(
         "vcf_fleet",
         "fleet_lcm",
         "vcf_installer",
+        "vcf_cloud_builder",
         "vcf_logs",
         "vrli8",
         "vcf_operations",
@@ -42,25 +44,18 @@ LEAVING_FOLDERS: frozenset[str] = frozenset(
         "vr",
         "vro",
         "salt",
+        "idb",
     }
 )
 
-#: Shared VMware folders that leave with the connector folders. They are
-#: new, so they may not exist yet, and ``test_leaving_folders_exist`` does
-#: not check them. The scan skips them like the folders above.
+#: The shared VMware folder that left with the connector folders.
 LEAVING_SHARED_FOLDERS: frozenset[str] = frozenset({"vmware_shared"})
 
 _ALL_LEAVING: frozenset[str] = LEAVING_FOLDERS | LEAVING_SHARED_FOLDERS
 
-#: Public modules that still import a leaving folder today, as paths under
-#: ``meho_backplane/``. The Task that moves the VMware-only modules out of
-#: ``connectors/_shared/`` (#5273) moves this file away. Once both changes
-#: are on main, empty this list.
-KNOWN_EXCEPTIONS: frozenset[str] = frozenset(
-    {
-        "connectors/_shared/vcfa_session.py",
-    }
-)
+#: Public modules that may still import a leaving folder, as paths under
+#: ``meho_backplane/``. Empty since the removal; keep it empty.
+KNOWN_EXCEPTIONS: frozenset[str] = frozenset()
 
 _PACKAGE_ROOT = Path(meho_backplane.__file__).parent
 _PACKAGE_NAME = "meho_backplane"
@@ -142,11 +137,14 @@ def _all_violations() -> dict[str, list[str]]:
     return result
 
 
-def test_leaving_folders_exist() -> None:
-    """Every listed folder is a real connector folder, so a typo cannot hide one."""
+def test_leaving_folders_are_gone() -> None:
+    """None of the folders that left is back in the public tree."""
     connectors = _PACKAGE_ROOT / "connectors"
-    missing = sorted(name for name in LEAVING_FOLDERS if not (connectors / name).is_dir())
-    assert missing == []
+    present = sorted(name for name in _ALL_LEAVING if (connectors / name).exists())
+    assert present == [], (
+        "These connector folders left the public tree in the split and ship in "
+        f"evoila's private connector package; do not add them back here: {present}"
+    )
 
 
 def test_no_public_module_imports_a_leaving_folder() -> None:

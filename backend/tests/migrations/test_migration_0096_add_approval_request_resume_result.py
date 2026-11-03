@@ -25,7 +25,7 @@ parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -90,10 +90,12 @@ def _column_is_nullable(sync_url: str, column: str) -> bool:
     raise AssertionError(f"column {column!r} not present on approval_request")
 
 
-def test_upgrade_adds_nullable_resume_result(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_nullable_resume_result(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0096`` lands the nullable ``resume_result`` column."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     columns = _approval_request_columns(sync_url)
     assert _RESULT_COLUMN in columns, f"migration 0096 must add approval_request.{_RESULT_COLUMN}"
@@ -104,14 +106,16 @@ def test_upgrade_adds_nullable_resume_result(alembic_cfg: tuple[Config, str]) ->
     )
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0095"`` drops the column; ``upgrade "0096"`` restores it.
 
     Pinned to this migration's own revision on both legs (never ``head``)
     so a future head migration cannot break the round-trip.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _RESULT_COLUMN in _approval_request_columns(sync_url)
 
     command.downgrade(cfg, _DOWN_REVISION)

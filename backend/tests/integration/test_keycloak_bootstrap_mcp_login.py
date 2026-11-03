@@ -37,12 +37,27 @@ prove, against a real Keycloak:
   ``tenant-role`` mappers), a run replaces the fixed mappers, and a
   second run changes nothing.
 
+For several tenants (docs/decisions/2026-10-28-several-tenants-per-person.md)
+the role groups also carry ``meho_tenant``, the ``meho-tenants`` mapper
+lists them in the ``meho_tenants`` claim, and ``--add-tenant`` makes the
+five groups of one more tenant. The tests prove:
+
+- a person in ``MEHO-Readers`` and ``MEHO-lab-b-Operators`` gets both
+  tenants in ``meho_tenants``;
+- a person in one group gets one entry, and the same ``tenant_id``,
+  ``tenant_role`` and ``approver`` as before;
+- a person only in ``MEHO-lab-b-*`` groups gets no ``tenant_id``;
+- the first admin is in ``MEHO-Platform-Admins`` and gets
+  ``platform_admin``;
+- a second run with ``--add-tenant`` changes nothing.
+
 Skips when ``MEHO_TEST_KEYCLOAK_IMAGE`` is unset, when Docker is missing,
 or when the Go toolchain is missing (CI provides all three).
 """
 
 from __future__ import annotations
 
+import ast
 import base64
 import hashlib
 import html
@@ -79,6 +94,13 @@ _OPERATOR_USER = "operator-4002"
 _OPERATOR_PASSWORD = "operator-pass-4002"
 _GROUP_USER_PASSWORD = "group-user-pass-4590"
 _UPGRADE_REALM = "meho-upgrade"
+_OPT_OUT_REALM = "meho-opt-out"
+_LAB_B_ID = "5d0f7a3e-1c2b-4e8d-9f6a-7b3c2d1e0f9a"
+# Keycloak on a busy CI runner needs more than the httpx default of 5 seconds,
+# most of all to create a realm (it also makes the realm's default roles,
+# clients and keys). Every httpx call in this file passes this timeout; the
+# last test in this file checks that.
+_HTTP_TIMEOUT = httpx.Timeout(60.0)
 
 # The five role groups and what a member must get (docs/decisions/login-role-groups.md).
 _ROLE_GROUPS = {
@@ -106,6 +128,7 @@ def _admin_token(base_url: str) -> str:
             "username": _KC_ADMIN_USER,
             "password": _KC_ADMIN_PASSWORD,
         },
+        timeout=_HTTP_TIMEOUT,
     )
     resp.raise_for_status()
     return str(resp.json()["access_token"])
@@ -124,6 +147,7 @@ def _create_realm_per_docs(base_url: str, realm: str = _REALM) -> None:
         f"{base_url}/admin/realms",
         headers=headers,
         json={"realm": realm, "enabled": True, "sslRequired": "none"},
+        timeout=_HTTP_TIMEOUT,
     ).raise_for_status()
     httpx.post(
         f"{base_url}/admin/realms/{realm}/clients",
@@ -134,6 +158,7 @@ def _create_realm_per_docs(base_url: str, realm: str = _REALM) -> None:
             "standardFlowEnabled": False,
             "directAccessGrantsEnabled": False,
         },
+        timeout=_HTTP_TIMEOUT,
     ).raise_for_status()
 
 
@@ -147,7 +172,7 @@ def _build_meho_cli(out_dir: Path) -> Path:
     return binary
 
 
-def _run_bootstrap(binary: Path, base_url: str, realm: str = _REALM) -> str:
+def _run_bootstrap(binary: Path, base_url: str, realm: str = _REALM, *extra: str) -> str:
     """Run ``bootstrap-clients`` against *realm*; return its stdout."""
     env = {
         **os.environ,
@@ -174,6 +199,7 @@ def _run_bootstrap(binary: Path, base_url: str, realm: str = _REALM) -> str:
             _OPERATOR_USER,
             "--admin-user-email",
             f"{_OPERATOR_USER}@example.com",
+            *extra,
         ],
         env=env,
         stdin=subprocess.DEVNULL,
@@ -190,6 +216,7 @@ def _client_uuid(base_url: str, realm: str, client_id: str) -> str:
         f"{base_url}/admin/realms/{realm}/clients",
         headers=_admin_headers(base_url),
         params={"clientId": client_id},
+        timeout=_HTTP_TIMEOUT,
     )
     resp.raise_for_status()
     return str(resp.json()[0]["id"])
@@ -200,6 +227,7 @@ def _client_mappers(base_url: str, realm: str, client_id: str) -> dict[str, dict
     resp = httpx.get(
         f"{base_url}/admin/realms/{realm}/clients/{uuid}/protocol-mappers/models",
         headers=_admin_headers(base_url),
+        timeout=_HTTP_TIMEOUT,
     )
     resp.raise_for_status()
     return {m["name"]: m for m in resp.json()}
@@ -210,13 +238,14 @@ def _group_id(base_url: str, realm: str, name: str) -> str:
         f"{base_url}/admin/realms/{realm}/groups",
         headers=_admin_headers(base_url),
         params={"search": name},
+        timeout=_HTTP_TIMEOUT,
     )
     resp.raise_for_status()
     return str(next(g["id"] for g in resp.json() if g["name"] == name))
 
 
-def _create_user(base_url: str, username: str, group: str | None) -> str:
-    """Create a user with a password (and a full profile); put it in *group*."""
+def _create_user(base_url: str, username: str, group: str | None, *more: str) -> str:
+    """Create a user with a password (and a full profile); put it in *group* and *more*."""
     headers = _admin_headers(base_url)
     httpx.post(
         f"{base_url}/admin/realms/{_REALM}/users",
@@ -232,19 +261,22 @@ def _create_user(base_url: str, username: str, group: str | None) -> str:
                 {"type": "password", "value": _GROUP_USER_PASSWORD, "temporary": False}
             ],
         },
+        timeout=_HTTP_TIMEOUT,
     ).raise_for_status()
     found = httpx.get(
         f"{base_url}/admin/realms/{_REALM}/users",
         headers=headers,
         params={"username": username, "exact": "true"},
+        timeout=_HTTP_TIMEOUT,
     )
     found.raise_for_status()
     user_id = str(found.json()[0]["id"])
-    if group is not None:
+    for name in ([group] if group is not None else []) + list(more):
         httpx.put(
             f"{base_url}/admin/realms/{_REALM}/users/{user_id}/groups/"
-            f"{_group_id(base_url, _REALM, group)}",
+            f"{_group_id(base_url, _REALM, name)}",
             headers=headers,
+            timeout=_HTTP_TIMEOUT,
         ).raise_for_status()
     return user_id
 
@@ -261,6 +293,7 @@ def _example_access_token(base_url: str, client_id: str, user_id: str) -> dict:
         "/evaluate-scopes/generate-example-access-token",
         headers=_admin_headers(base_url),
         params={"userId": user_id, "scope": "openid"},
+        timeout=_HTTP_TIMEOUT,
     )
     resp.raise_for_status()
     return dict(resp.json())
@@ -315,7 +348,7 @@ def _browser_login(
         jar.update(resp.cookies.items())
         return resp
 
-    with httpx.Client(follow_redirects=False) as client:
+    with httpx.Client(follow_redirects=False, timeout=_HTTP_TIMEOUT) as client:
         page = send(
             client,
             "GET",
@@ -435,10 +468,11 @@ async def test_plugin_login_succeeds_on_bootstrapped_realm(
 
     assert {"mcp:read", "mcp:execute"} <= operator.scopes
     assert ("mcp:admin" in operator.scopes) is add_admin
-    # The admin user bootstrap made is in MEHO-Admins.
+    # The admin user bootstrap made is in MEHO-Admins and MEHO-Platform-Admins.
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role.value == "tenant_admin"
     assert operator.approver is False
+    assert operator.platform_admin is True
 
 
 @pytest.mark.asyncio
@@ -458,6 +492,10 @@ async def test_role_group_gives_tenant_and_role(
     claims = _example_access_token(fresh_keycloak, "meho-cli", user_id)
     assert claims.get("tenant_id") == _TENANT_ID
     assert claims.get("tenant_role") == want_role
+    # One group, one tenant in the list.
+    role = group.removeprefix("MEHO-")
+    assert claims.get("meho_tenants") == [f"{_TENANT_ID}:main:{role}"]
+    assert "platform_admin" not in claims
     if want_approver:
         assert claims.get("approver") is True
     else:
@@ -492,7 +530,8 @@ async def test_user_in_no_group_is_refused(
     with pytest.raises(HTTPException) as refused:
         await _verify(fresh_keycloak, access_token, monkeypatch)
     assert refused.value.status_code == 401
-    assert refused.value.detail == "missing_tenant_claim"
+    assert refused.value.detail.startswith("missing_tenant_claim: ")
+    assert "role group" in refused.value.detail
 
 
 def _old_fixed_mapper(name: str, claim: str, value: str) -> dict:
@@ -531,11 +570,13 @@ def test_upgrade_replaces_fixed_mappers_and_second_run_changes_nothing(
                     _old_fixed_mapper("tenant-role", "tenant_role", "tenant_admin"),
                 ],
             },
+            timeout=_HTTP_TIMEOUT,
         ).raise_for_status()
     httpx.post(
         f"{fresh_keycloak}/admin/realms/{_UPGRADE_REALM}/groups",
         headers=headers,
         json={"name": "meho-admins"},
+        timeout=_HTTP_TIMEOUT,
     ).raise_for_status()
 
     first = _run_bootstrap(meho_binary, fresh_keycloak, _UPGRADE_REALM)
@@ -557,3 +598,132 @@ def test_upgrade_replaces_fixed_mappers_and_second_run_changes_nothing(
         if re.search(r"\[(created|updated)\] (mapper|group|user|client scope)", line)
     ]
     assert changed == [], f"second run changed the realm:\n{second}"
+
+
+def _cli_sign_in_request(base_url: str, realm: str, scope: str) -> httpx.Response:
+    """Open the browser sign-in of ``meho-cli`` (the fresh sign-in of an approval).
+
+    Keycloak checks the scope on this first request: it shows the login
+    page when the client offers every scope, and sends the browser back
+    to the CLI with ``error=invalid_scope`` when it does not. The device
+    login of ``meho login`` on Keycloak 26.0 checks the scope only later,
+    after the person has logged in, so it cannot be checked without a
+    browser here.
+    """
+    verifier = secrets.token_urlsafe(48)
+    challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    )
+    return httpx.get(
+        f"{base_url}/realms/{realm}/protocol/openid-connect/auth",
+        params={
+            "client_id": "meho-cli",
+            "response_type": "code",
+            "redirect_uri": _REDIRECT_URI,
+            "scope": scope,
+            "state": "s5516",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        },
+        follow_redirects=False,
+        timeout=_HTTP_TIMEOUT,
+    )
+
+
+def test_cli_offline_access_zero_removes_the_long_login(
+    fresh_keycloak: str,
+    meho_binary: Path,
+) -> None:
+    """``--cli-offline-access=0`` takes a long login away that a default run gave."""
+    _create_realm_per_docs(fresh_keycloak, _OPT_OUT_REALM)
+    long_login = "openid offline_access"
+
+    _run_bootstrap(meho_binary, fresh_keycloak, _OPT_OUT_REALM)
+    accepted = _cli_sign_in_request(fresh_keycloak, _OPT_OUT_REALM, long_login)
+    assert accepted.status_code == 200, accepted.headers.get("location", accepted.text)
+
+    out = _run_bootstrap(meho_binary, fresh_keycloak, _OPT_OUT_REALM, "--cli-offline-access=0")
+    assert "[removed] optional scope offline_access" in out, out
+    refused = _cli_sign_in_request(fresh_keycloak, _OPT_OUT_REALM, long_login)
+    assert refused.status_code == 302, refused.text
+    assert "error=invalid_scope" in refused.headers["location"], refused.headers["location"]
+    short_login = _cli_sign_in_request(fresh_keycloak, _OPT_OUT_REALM, "openid")
+    assert short_login.status_code == 200, short_login.headers.get("location", short_login.text)
+    cli_uuid = _client_uuid(fresh_keycloak, _OPT_OUT_REALM, "meho-cli")
+    cli = httpx.get(
+        f"{fresh_keycloak}/admin/realms/{_OPT_OUT_REALM}/clients/{cli_uuid}",
+        headers=_admin_headers(fresh_keycloak),
+        timeout=_HTTP_TIMEOUT,
+    ).json()
+    assert "client.offline.session.idle.timeout" not in cli["attributes"]
+
+
+@pytest.fixture(scope="module")
+def lab_b_runs(fresh_keycloak: str, meho_binary: Path) -> tuple[str, str]:
+    """Add the tenant ``lab-b`` twice; return the output of both runs."""
+    extra = ("--add-tenant", "lab-b", "--add-tenant-id", _LAB_B_ID)
+    first = _run_bootstrap(meho_binary, fresh_keycloak, _REALM, *extra)
+    second = _run_bootstrap(meho_binary, fresh_keycloak, _REALM, *extra)
+    return first, second
+
+
+def test_add_tenant_twice_changes_nothing_the_second_time(lab_b_runs: tuple[str, str]) -> None:
+    first, second = lab_b_runs
+    assert "[created] group MEHO-lab-b-Operators" in first, first
+    changed = [
+        line
+        for line in second.splitlines()
+        if re.search(r"\[(created|updated)\] (mapper|group|user|client scope)", line)
+    ]
+    assert changed == [], f"second run changed the realm:\n{second}"
+
+
+def test_person_in_two_tenants_gets_both_in_meho_tenants(
+    fresh_keycloak: str, lab_b_runs: tuple[str, str]
+) -> None:
+    user_id = _create_user(
+        fresh_keycloak, "user-two-tenants", "MEHO-Readers", "MEHO-lab-b-Operators"
+    )
+    for client_id in ("meho-cli", "meho-mcp"):
+        claims = _example_access_token(fresh_keycloak, client_id, user_id)
+        assert sorted(claims["meho_tenants"]) == sorted(
+            [f"{_TENANT_ID}:main:Readers", f"{_LAB_B_ID}:lab-b:Operators"]
+        ), client_id
+        # The claims MEHO reads today still come from the first tenant's group.
+        assert claims.get("tenant_id") == _TENANT_ID
+        assert claims.get("tenant_role") == "read_only"
+
+
+def test_person_only_in_extra_tenant_gets_no_tenant_id(
+    fresh_keycloak: str, lab_b_runs: tuple[str, str]
+) -> None:
+    user_id = _create_user(fresh_keycloak, "user-lab-b-only", "MEHO-lab-b-Admins")
+    claims = _example_access_token(fresh_keycloak, "meho-cli", user_id)
+    assert claims.get("meho_tenants") == [f"{_LAB_B_ID}:lab-b:Admins"]
+    for name in ("tenant_id", "tenant_role", "approver", "platform_admin"):
+        assert name not in claims, name
+
+
+def _is_long_timeout(kw: ast.keyword) -> bool:
+    return kw.arg == "timeout" and isinstance(kw.value, ast.Name) and kw.value.id == "_HTTP_TIMEOUT"
+
+
+def test_every_keycloak_call_in_this_file_uses_the_long_timeout() -> None:
+    """A new httpx call without ``timeout=_HTTP_TIMEOUT`` fails here, not on a busy runner.
+
+    The calls made through the ``httpx.Client`` of the browser login
+    inherit its timeout, so only the module-level ``httpx.*`` calls and
+    the client itself are checked.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    offenders = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "httpx"
+        and node.func.attr in {"get", "post", "put", "patch", "delete", "request", "Client"}
+        and not any(_is_long_timeout(kw) for kw in node.keywords)
+    ]
+    assert offenders == [], f"httpx calls without timeout=_HTTP_TIMEOUT at lines {offenders}"

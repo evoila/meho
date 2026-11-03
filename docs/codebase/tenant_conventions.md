@@ -369,7 +369,7 @@ Who uses them:
   `dropped_slugs`, `oversize_slugs`, `conventions_tokens`,
   `conventions_max_tokens`, and `instructions_tokens` (the estimate
   for the whole `instructions` text: broadcast, conventions,
-  priming, catalogue, maturity bands). Only the conventions band is
+  priming, catalogue, vendor-text, maturity bands). Only the conventions band is
   held to the 600-token budget; the whole-text number is reported
   on its own line, not charged to it.
 

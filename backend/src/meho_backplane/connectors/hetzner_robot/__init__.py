@@ -38,6 +38,7 @@ from meho_backplane.connectors.hetzner_robot.core_ops import (
     ROBOT_VERSION,
     RobotCoreGroup,
     RobotCoreOp,
+    RobotCoreOpsMissingError,
     apply_robot_core_curation,
     classify_robot_op,
 )
@@ -82,6 +83,7 @@ __all__ = [
     "HetznerRobotTargetLike",
     "RobotCoreGroup",
     "RobotCoreOp",
+    "RobotCoreOpsMissingError",
     "SessionCredentials",
     "apply_robot_core_curation",
     "classify_robot_op",

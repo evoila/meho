@@ -69,6 +69,7 @@ def test_auth_config_returns_keycloak_issuer_audience_and_cli_client_id(
         "keycloak_issuer": "https://keycloak.evba.lab/realms/evba",
         "audience": "meho-backplane",
         "cli_client_id": "meho-cli",
+        "cli_approve_client_id": "meho-cli-approve",
     }
 
 

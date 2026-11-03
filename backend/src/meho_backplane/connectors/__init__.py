@@ -10,7 +10,10 @@ root.
 
 from pathlib import Path
 
-from meho_backplane.connector_packages import check_connector_folders
+from meho_backplane.connector_packages import (
+    check_connector_folders,
+    record_installed_connector_packages,
+)
 
 # This must stay the first thing this package does. Python runs this
 # ``__init__`` before any ``connectors.<folder>`` module, whoever imports
@@ -20,7 +23,7 @@ from meho_backplane.connector_packages import check_connector_folders
 # folder added under ``connectors/`` would shadow a module of the same
 # name here, and Python would run it in place of the check. See
 # ``docs/codebase/connector-packages.md``.
-check_connector_folders(Path(next(iter(__path__))))
+record_installed_connector_packages(check_connector_folders(Path(next(iter(__path__)))))
 
 from meho_backplane.connectors.base import Connector, ShimKind, shim_kind  # noqa: E402
 from meho_backplane.connectors.profile import (  # noqa: E402

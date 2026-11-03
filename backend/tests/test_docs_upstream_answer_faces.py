@@ -134,9 +134,49 @@ _SEARCH_CHUNK = CorpusChunk(
 )
 
 
+#: The opt-out flags of the background loops the app start runs (#4966).
+_BACKGROUND_LOOP_FLAGS = (
+    "MEMORY_EXPIRY_ENABLED",
+    "TOPOLOGY_HISTORY_PRUNE_ENABLED",
+    "BROADCAST_ANNOUNCEMENT_PRUNE_ENABLED",
+    "CHECKS_EVIDENCE_PRUNE_ENABLED",
+    "RAW_PAYLOAD_PRUNE_ENABLED",
+    "GRANT_EXPIRY_ENABLED",
+    "APPROVAL_EXPIRY_ENABLED",
+    "SCHEDULER_ENABLED",
+    "SENSOR_RUNNER_ENABLED",
+    "AGENT_RUN_REAPER_ENABLED",
+    "OPERATION_RUN_REAPER_ENABLED",
+    "FLIGHT_RECORDER_REAPER_ENABLED",
+    "EVENT_DRAIN_ENABLED",
+    "GATEWAY_DEADMAN_ENABLED",
+    "GATEWAY_UNREPORTED_MINT_ENABLED",
+)
+
+
+def _idle_topology_refresh() -> asyncio.Task[None]:
+    """Stand-in for the topology refresh loop: a task that only waits to be cancelled."""
+    return asyncio.create_task(asyncio.Event().wait(), name="topology-refresh-scheduler")
+
+
 @pytest.fixture(autouse=True)
 def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Pin the chassis, MCP and BFF env every face needs, with clean caches."""
+    """Pin the chassis, MCP and BFF env every face needs, with clean caches.
+
+    The MCP face starts the full app, and the app start runs background
+    loops that read the test database. Shutdown can cancel a loop in the
+    middle of a query. The cancelled query then keeps a read lock on the
+    SQLite file until the garbage collector runs, and the next write (the
+    UI face's session row) fails with ``database is locked`` (#4966). These
+    tests need none of the loops, so they are off: the flagged ones by their
+    settings flag, and the topology refresh loop, which has no flag, by an
+    idle stand-in.
+    """
+    for flag in _BACKGROUND_LOOP_FLAGS:
+        monkeypatch.setenv(flag, "false")
+    monkeypatch.setattr(
+        "meho_backplane.main.start_topology_refresh_scheduler", _idle_topology_refresh
+    )
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", ISSUER)
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", AUDIENCE)
     monkeypatch.setenv("KEYCLOAK_JWKS_CACHE_TTL_SECONDS", "300")

@@ -21,12 +21,14 @@ This module adds an operator-tier Account page at ``/ui/account``:
   "revoke all other sessions" action.
 
 * ``POST /ui/account/sessions/revoke-others`` -- revoke every active
-  session for this operator **except** the current one. Registered
-  **before** the parametrised single-revoke route so the literal
-  ``revoke-others`` segment is never captured as a ``{session_id}``.
+  session for this operator **except** the current one.
 
-* ``POST /ui/account/sessions/{session_id}/revoke`` -- revoke one
-  session. Ownership (``operator_sub`` AND ``tenant_id``) is enforced
+* ``POST /ui/account/sessions/revoke`` -- revoke one session. The
+  session id travels in the form body (field ``session_id``), never in
+  the URL: the request path is the same for every row, so neither the
+  ingress access log nor the audit row's ``path`` ever holds a live
+  session id (the console session id is the session cookie value).
+  Ownership (``operator_sub`` AND ``tenant_id``) is enforced
   **server-side** from the validated session context before
   :func:`~meho_backplane.ui.auth.session_store.revoke_session` runs
   (that helper does no ownership check); a non-owned / cross-tenant id
@@ -42,8 +44,11 @@ another operator's sessions" surface; the listing and both revoke
 actions are scoped to the caller's own ``operator_sub`` from the
 session, never a form field.
 
-Out of scope (Keycloak-owned / future): role editing, tenant switching
-(a slot is left in the template), password / MFA / token rotation.
+The page also lists the person's tenants with the role in each (#5240);
+switching happens on the tenant picker (:mod:`meho_backplane.ui.routes.tenant`).
+
+Out of scope (Keycloak-owned / future): role editing, password / MFA /
+token rotation.
 """
 
 from __future__ import annotations
@@ -53,7 +58,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -69,8 +74,10 @@ from meho_backplane.ui.auth.session_store import (
     revoke_other_sessions,
     revoke_session,
 )
+from meho_backplane.ui.auth.tenant import TenantChangedError, TenantRemovedError
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.connectors.operator import _lift_operator
+from meho_backplane.ui.routes.tenant import TenantChoice, tenant_choices
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_account_router"]
@@ -105,30 +112,26 @@ class _SessionRowView:
     is_current: bool
 
 
-async def _lift_role_value(session_ctx: UISessionContext) -> str:
-    """Return the live ``tenant_role`` value from the freshly-verified token.
+async def _lift_identity(session_ctx: UISessionContext) -> tuple[str, list[TenantChoice]]:
+    """Return the live role and the person's tenants from the freshly-verified token.
 
-    Lifts the full :class:`~meho_backplane.auth.operator.Operator` through
-    the shared JWT re-verify path
-    (:func:`~meho_backplane.ui.routes.connectors.operator._lift_operator`)
-    so a same-session role demotion shows up immediately -- the role is
-    never read from a value cached on the session row. Fails **soft**: a
-    JWT-validation hiccup (session row gone, JWKS unreachable, token
-    swapped) degrades the rendered role to ``"unknown"`` rather than
-    5xx-ing the read-only account page. No security gate hangs off this
-    value; the page only displays it.
+    The tenants carry the role in each (#5240). Fails soft like the role:
+    an empty list when the token cannot be lifted.
     """
     try:
         operator = await _lift_operator(session_ctx)
+    except (TenantChangedError, TenantRemovedError):
+        raise
     except Exception as exc:
         _log.info(
             "ui_account_role_lift_unavailable",
             session_id=str(session_ctx.session_id),
             reason=type(exc).__name__,
         )
-        return _ROLE_UNKNOWN
+        return _ROLE_UNKNOWN, []
     role = operator.tenant_role
-    return role.value if isinstance(role, TenantRole) else str(role)
+    role_value = role.value if isinstance(role, TenantRole) else str(role)
+    return role_value, await tenant_choices(operator, include_all=False)
 
 
 def _project_session_row(row: ActiveSessionRow, *, current_id: uuid.UUID) -> _SessionRowView:
@@ -165,7 +168,7 @@ async def _render_page(
     db_session: AsyncSession,
 ) -> HTMLResponse:
     """Render ``GET /ui/account`` -- the full account page."""
-    role_value = await _lift_role_value(session_ctx)
+    role_value, tenants = await _lift_identity(session_ctx)
     expires_at = await _load_expires_at(db_session, session_ctx)
     rows = await list_active_sessions(
         db_session,
@@ -179,6 +182,7 @@ async def _render_page(
         "active_surface": "account",
         "operator_sub": session_ctx.operator_sub,
         "role_value": role_value,
+        "tenants": tenants,
         "expires_at": expires_at,
         "sessions": session_views,
         "current_session_id": str(session_ctx.session_id),
@@ -253,11 +257,12 @@ async def _do_revoke_one(
 ) -> HTMLResponse:
     """Revoke one session after enforcing server-side ownership.
 
-    Ownership is asserted from the validated ``session_ctx`` -- never a
-    form field: the target row's ``operator_sub`` AND ``tenant_id`` must
-    match the caller's. A malformed id, a missing row, or a
+    *raw_session_id* is the ``session_id`` form field. Ownership is
+    asserted from the validated ``session_ctx`` -- never a form field:
+    the target row's ``operator_sub`` AND ``tenant_id`` must match the
+    caller's. A missing or malformed id, a missing row, or a
     non-owned / cross-tenant row all return 404 so another operator's
-    session id is never confirmed (a 403 would leak existence).
+    session id is never confirmed (a 403 would reveal existence).
     """
     try:
         session_id = uuid.UUID(raw_session_id)
@@ -314,13 +319,9 @@ async def _do_revoke_others(
 def build_account_router() -> APIRouter:
     """Construct the Account surface :class:`APIRouter`.
 
-    Registration order is **load-bearing**: the literal
-    ``POST /ui/account/sessions/revoke-others`` route is registered
-    **before** the parametrised
-    ``POST /ui/account/sessions/{session_id}/revoke`` so the
-    first-match-wins lookup binds ``revoke-others`` as the literal route
-    rather than capturing ``session_id="revoke-others"`` (mirrors the
-    connectors surface's literal-before-param discipline).
+    Both revoke routes are literal paths; the single revoke reads the
+    target session id from the form body so no route under
+    ``/ui/account/sessions/`` carries a session id in its path.
     """
     router = APIRouter(tags=["ui-account"])
 
@@ -342,11 +343,11 @@ def build_account_router() -> APIRouter:
 
     async def _revoke_one(
         request: Request,
-        session_id: str,
+        session_id: str = Form(default=""),
         session_ctx: UISessionContext = _require_ui_session_dep,
         db_session: AsyncSession = _get_session_dep,
     ) -> HTMLResponse:
-        """``POST /ui/account/sessions/{session_id}/revoke``."""
+        """``POST /ui/account/sessions/revoke`` -- the id is a form field."""
         return await _do_revoke_one(
             request,
             raw_session_id=session_id,
@@ -361,7 +362,6 @@ def build_account_router() -> APIRouter:
         name="ui_account",
         response_class=HTMLResponse,
     )
-    # Literal route BEFORE the parametrised one -- first-match-wins.
     router.add_api_route(
         "/ui/account/sessions/revoke-others",
         _revoke_others,
@@ -370,7 +370,7 @@ def build_account_router() -> APIRouter:
         response_class=HTMLResponse,
     )
     router.add_api_route(
-        "/ui/account/sessions/{session_id}/revoke",
+        "/ui/account/sessions/revoke",
         _revoke_one,
         methods=["POST"],
         name="ui_account_revoke_session",
@@ -378,8 +378,9 @@ def build_account_router() -> APIRouter:
         responses={
             404: {
                 "description": (
-                    "Session id is malformed, does not exist, or belongs to "
-                    "another operator / tenant. Collapsed to 404 so another "
+                    "The session_id form field is missing or malformed, the "
+                    "session does not exist, or it belongs to another "
+                    "operator / tenant. Collapsed to 404 so another "
                     "operator's session id is never confirmed."
                 ),
                 "content": {"text/html": {}},

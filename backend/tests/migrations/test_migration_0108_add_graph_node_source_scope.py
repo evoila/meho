@@ -33,7 +33,7 @@ Every step targets this migration's own revision (``0108``) and its
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -191,10 +191,11 @@ def _legacy_view(sync_url: str) -> list[tuple[Any, ...]]:
 
 def test_upgrade_backfills_only_target_nodes_and_keeps_legacy_rows(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Only ``kind='target'`` rows get ``global``; other rows stay unresolved."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     ids = _seed_legacy_graph(sync_url)
     before = _legacy_view(sync_url)
 
@@ -216,10 +217,11 @@ def test_upgrade_backfills_only_target_nodes_and_keeps_legacy_rows(
 
 def test_upgrade_records_snapshot_with_schema_version(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """The snapshot holds one row per node, keyed by node id."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     ids = _seed_legacy_graph(sync_url)
     command.upgrade(cfg, _REVISION)
 
@@ -244,10 +246,12 @@ def test_upgrade_records_snapshot_with_schema_version(
     assert all(row.captured_at is not None for row in rows.values())
 
 
-def test_upgrade_keeps_old_tenant_kind_name_key(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_keeps_old_tenant_kind_name_key(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """Scoped duplicates stay impossible while the old key exists."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     ids = _seed_legacy_graph(sync_url)
     command.upgrade(cfg, _REVISION)
 
@@ -282,9 +286,10 @@ def test_upgrade_keeps_old_tenant_kind_name_key(alembic_cfg: tuple[Config, str])
 def test_check_accepts_documented_scope_forms(
     alembic_cfg: tuple[Config, str],
     scope: str | None,
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     ids = _seed_legacy_graph(sync_url)
     command.upgrade(cfg, _REVISION)
 
@@ -312,9 +317,10 @@ def test_check_accepts_documented_scope_forms(
 def test_check_rejects_malformed_scope_forms(
     alembic_cfg: tuple[Config, str],
     scope: str,
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     ids = _seed_legacy_graph(sync_url)
     command.upgrade(cfg, _REVISION)
 
@@ -322,10 +328,12 @@ def test_check_rejects_malformed_scope_forms(
         _insert_scoped_node(sync_url, ids["tenant"], "fresh-name", scope)
 
 
-def test_downgrade_keeps_rows_and_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_keeps_rows_and_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``0108 -> 0107 -> 0108`` keeps every row and the snapshot; replays the backfill."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     ids = _seed_legacy_graph(sync_url)
     before = _legacy_view(sync_url)
     command.upgrade(cfg, _REVISION)
@@ -371,6 +379,7 @@ def test_downgrade_keeps_rows_and_round_trips(alembic_cfg: tuple[Config, str]) -
 
 def test_downgrade_keeps_the_snapshot_when_the_target_moved(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A refresh that moves ``target_id`` after the upgrade must not rewrite the input.
 
@@ -378,7 +387,7 @@ def test_downgrade_keeps_the_snapshot_when_the_target_moved(
     snapshot the *new* target and lose the one the row had at the cut.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     ids = _seed_legacy_graph(sync_url)
     command.upgrade(cfg, _REVISION)
     other_target = _insert_target(sync_url, ids["tenant"], "cluster-b")
@@ -423,10 +432,11 @@ def test_downgrade_refuses_scope_values_it_did_not_write(
     alembic_cfg: tuple[Config, str],
     scope: str,
     provenance: str | None,
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Data the old schema cannot hold blocks the downgrade; roll forward instead."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     ids = _seed_legacy_graph(sync_url)
     command.upgrade(cfg, _REVISION)
     _execute(

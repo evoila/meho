@@ -50,8 +50,11 @@ from meho_backplane.connectors.registry import register_connector_v2
 # import side-effect that wires the park-time proposed_effect previews for
 # vault.kv.put / patch / delete — #2332 — and metadata.delete — #3424).
 # Same side-effect for the userpass password writes (#4850).
+# Importing ops_kv_folder registers the preview and the permission check
+# for vault.kv.folder.delete.
 from meho_backplane.connectors.vault import (
     kv_write_preview,  # noqa: F401
+    ops_kv_folder,  # noqa: F401
     userpass_write_preview,  # noqa: F401
 )
 from meho_backplane.connectors.vault.connector import VaultConnector
@@ -68,6 +71,7 @@ from meho_backplane.connectors.vault.ops_auth import (
     VaultAuthBackendNotMountedError,
     register_vault_auth_operations,
 )
+from meho_backplane.connectors.vault.ops_auth_jwt import register_vault_auth_jwt_operations
 from meho_backplane.connectors.vault.ops_identity_token import (
     register_vault_identity_token_operations,
 )
@@ -116,10 +120,15 @@ register_typed_op_registrar(register_vault_sys_typed_operations)
 # Importing the registrar also imports ops_token_role, which registers
 # the park-time permission preflight for vault.token.role.write.
 register_typed_op_registrar(register_vault_identity_token_operations)
+# The JWT/OIDC login-role ops (#3694) join the ``auth`` group, which
+# register_vault_typed_operations creates first. Importing the module also
+# registers the park-time permission preflight for vault.auth.jwt.role.write.
+register_typed_op_registrar(register_vault_auth_jwt_operations)
 
 __all__ = [
     "VaultAuthBackendNotMountedError",
     "VaultConnector",
+    "register_vault_auth_jwt_operations",
     "register_vault_auth_operations",
     "register_vault_identity_token_operations",
     "register_vault_sys_typed_operations",

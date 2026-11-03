@@ -30,6 +30,7 @@ var clearableFields = map[string]string{
 	"tls-server-name": "tls_server_name",
 	"preferred-impl":  "preferred_impl_id",
 	"note":            "notes",
+	"secret-field":    "secret_field_map",
 }
 
 // emptyableFields maps the `--clear` values for the two collection
@@ -58,9 +59,11 @@ type updateFlags struct {
 	verifyTLS     bool
 	tlsCaPin      string
 	tlsServerName string
+	vpnRequired   bool
 	preferredImpl string
 	note          string
 	extras        []string
+	secretFields  []string
 	clear         []string
 }
 
@@ -68,11 +71,12 @@ type updateFlags struct {
 //
 // CLI shape:
 //
-//	meho targets update <name|alias> [--product p] [--host h] \
+//	meho targets update <name, alias or id> [--product p] [--host h] \
 //	  [--alias a ...] [--version v] [--port n] [--fqdn f] \
 //	  [--secret-ref <ref>] [--auth-model <m>] [--verify-tls=false] \
-//	  [--tls-ca-pin <pin>] [--tls-server-name <sni>] \
+//	  [--tls-ca-pin <pin>] [--tls-server-name <sni>] [--vpn-required=bool] \
 //	  [--preferred-impl <id>] [--note <n>] [--extra key=value ...] \
+//	  [--secret-field <connector_field>=<source_field> ...] \
 //	  [--clear <field> ...] [--json] [--backplane <url>]
 //
 // It sends one PATCH /api/v1/targets/{name} (TargetUpdate). Only the
@@ -91,7 +95,7 @@ func newUpdateCmd() *cobra.Command {
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
-		Use:   "update <name|alias>",
+		Use:   "update <name, alias or id>",
 		Short: "Change fields on an existing target",
 		Long: "update changes one target via PATCH /api/v1/targets/{name}. " +
 			"Only the flags you pass are sent; every other field keeps its " +
@@ -105,6 +109,13 @@ func newUpdateCmd() *cobra.Command {
 			"`--clear secret-ref --extra scheme=http` turns a target into " +
 			"a plain-HTTP target with no credential, and `--clear alias` " +
 			"removes every alias.\n\n" +
+			"Re-sending `--secret-ref` with the same path makes MEHO read " +
+			"the secret again, for example after you changed it in Vault.\n\n" +
+			"`--secret-field <connector_field>=<source_field>` (repeatable) " +
+			"adds or replaces one entry of the target's secret field map and " +
+			"keeps the other entries. `--secret-field <connector_field>=` " +
+			"(nothing after `=`) removes that entry, and `--clear " +
+			"secret-field` removes the whole map.\n\n" +
 			"All validation is server-side; a 422 body is printed as is. " +
 			"On success the updated target is shown in the same shape as " +
 			"`meho targets describe` (use `--json` for the raw Target).",
@@ -144,11 +155,15 @@ func registerUpdateFlags(cmd *cobra.Command, f *updateFlags) {
 	fs.StringVar(&f.tlsCaPin, "tls-ca-pin", "", "PEM CA bundle to pin for this target")
 	fs.StringVar(&f.tlsServerName, "tls-server-name", "",
 		"TLS SNI / certificate-verification hostname, decoupled from --host")
+	fs.BoolVar(&f.vpnRequired, "vpn-required", false,
+		"mark that a VPN must be up to reach the target; pass --vpn-required=false to clear it")
 	fs.StringVar(&f.preferredImpl, "preferred-impl", "",
 		"connector impl_id override for the resolver's tie-break")
 	fs.StringVar(&f.note, "note", "", "free-form operator note stored on the target")
 	fs.StringArrayVar(&f.extras, "extra", nil,
 		"key=value for the target's extras map, e.g. scheme=http (repeatable; replaces the whole map)")
+	fs.StringArrayVar(&f.secretFields, "secret-field", nil,
+		"connector_field=source_field to add or replace in the secret field map; connector_field= removes it (repeatable)")
 	fs.StringArrayVar(&f.clear, "clear", nil,
 		"field to remove (repeatable; sends null, or an empty list for alias and an empty map for extra): "+
 			strings.Join(clearableFieldNames(), ", "))
@@ -174,6 +189,7 @@ func buildUpdateBody(cmd *cobra.Command, f *updateFlags) (map[string]any, *outpu
 		"verify-tls":      f.verifyTLS,
 		"tls-ca-pin":      f.tlsCaPin,
 		"tls-server-name": f.tlsServerName,
+		"vpn-required":    f.vpnRequired,
 		"preferred-impl":  f.preferredImpl,
 		"note":            f.note,
 	}
@@ -188,6 +204,13 @@ func buildUpdateBody(cmd *cobra.Command, f *updateFlags) (map[string]any, *outpu
 			return nil, perr
 		}
 		body["extras"] = parsed
+	}
+	if fs.Changed("secret-field") {
+		parsed, perr := parseSecretFieldFlags(f.secretFields, true)
+		if perr != nil {
+			return nil, perr
+		}
+		body["secret_field_map"] = parsed
 	}
 	for _, name := range f.clear {
 		field, value, ok := clearValue(name)

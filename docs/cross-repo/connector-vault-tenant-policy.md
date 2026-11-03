@@ -65,7 +65,7 @@ the single source of truth in
 | --- | --- | --- | --- |
 | `read_only` | `meho-tenant-read-only` | `read`, `list` | — |
 | `operator` | `meho-tenant-operator` | `read`, `list` | `+ create,update` on the rotation sub-path `secret/data/tenants/<id>/rotation/*` |
-| `tenant_admin` | `meho-tenant-admin` | `create`, `read`, `update`, `delete`, `list` (full CRUD) | `+ full CRUD` on the break-glass sub-path `secret/data/tenants/<id>/privileged/*` |
+| `tenant_admin` | `meho-tenant-admin` | `create`, `read`, `update`, `delete`, `list` (full CRUD) | `+ full CRUD` on the break-glass sub-path `secret/data/tenants/<id>/privileged/*`; `+ update` on `secret/delete/tenants/<id>/*` (the version soft-delete) |
 
 Notes:
 
@@ -76,16 +76,29 @@ Notes:
   ([`connector-vault-policy.md`](./connector-vault-policy.md) §2).
 - **`list` is granted on `secret/metadata/...`**, not `secret/data/...`:
   KV-v2 authorises a LIST against the metadata path.
+- **The version soft-delete (`vault.kv.delete`) needs `update` on
+  `secret/delete/...`.** It posts to `<mount>/delete/<path>`, which Vault
+  authorises on that path, not on `/data/` (evoila/meho#3274). Only the
+  `tenant_admin` policy grants it. The permanent delete
+  (`vault.kv.metadata.delete`) needs `read` and `delete` on
+  `secret/metadata/...`, which the same policy already grants.
 - **Admin break-glass lives under `privileged/`** and is reachable by the
-  `tenant_admin` policy *alone* — `read_only`/`operator` policies never
-  template that sub-path, so a non-admin operator cannot reach it even
-  within their own tenant.
+  `tenant_admin` policy *alone*. The `read_only` and `operator` wildcards
+  `tenants/<id>/*` cover `privileged/` too, so these two policies deny it
+  explicitly: the more specific path wins, so a non-admin cannot read or
+  list it even within their own tenant.
 - The trailing `/*` is a **literal glob in the static portion** of the
   path, after the templated `{{...}}` segment. A glob must **never** be
   placed *inside* the `{{identity.entity.metadata.tenant_id}}` segment —
   Vault forbids it, and it is what keeps one tenant's rendered path from
   matching another's
   ([policy templating constraints](https://developer.hashicorp.com/vault/docs/concepts/policies)).
+- **`k8s.secret.read_to_ref` writes to the tenant subtree.** The op writes a
+  kubeconfig to `secret/data/tenants/<id>/<register_as>`. Of the three
+  policies, only `meho-tenant-admin` grants `create` + `update` there.
+  The person who calls the op and the person who approves it both need
+  the grant
+  ([`connector-vault-policy.md`](./connector-vault-policy.md) §6.6).
 
 ## 2. The three policy bodies
 
@@ -104,6 +117,13 @@ path "secret/data/tenants/{{identity.entity.metadata.tenant_id}}/*" {
 path "secret/metadata/tenants/{{identity.entity.metadata.tenant_id}}/*" {
   capabilities = ["read", "list"]
 }
+# The admin-only break-glass path: the wildcards above cover it too.
+path "secret/data/tenants/{{identity.entity.metadata.tenant_id}}/privileged/*" {
+  capabilities = ["deny"]
+}
+path "secret/metadata/tenants/{{identity.entity.metadata.tenant_id}}/privileged/*" {
+  capabilities = ["deny"]
+}
 ```
 
 ### 2.2 `meho-tenant-operator`
@@ -119,6 +139,13 @@ path "secret/metadata/tenants/{{identity.entity.metadata.tenant_id}}/*" {
 }
 path "secret/data/tenants/{{identity.entity.metadata.tenant_id}}/rotation/*" {
   capabilities = ["create", "read", "update"]
+}
+# The admin-only break-glass path: the wildcards above cover it too.
+path "secret/data/tenants/{{identity.entity.metadata.tenant_id}}/privileged/*" {
+  capabilities = ["deny"]
+}
+path "secret/metadata/tenants/{{identity.entity.metadata.tenant_id}}/privileged/*" {
+  capabilities = ["deny"]
 }
 ```
 
@@ -136,7 +163,17 @@ path "secret/metadata/tenants/{{identity.entity.metadata.tenant_id}}/*" {
 path "secret/data/tenants/{{identity.entity.metadata.tenant_id}}/privileged/*" {
   capabilities = ["create", "read", "update", "delete", "list"]
 }
+# The version soft-delete (vault.kv.delete) posts to <mount>/delete/<path>.
+# Vault authorises it with `update` on that /delete/ path, not on /data/.
+path "secret/delete/tenants/{{identity.entity.metadata.tenant_id}}/*" {
+  capabilities = ["update"]
+}
 ```
+
+A test reads this block and checks that `vault.kv.delete` and
+`vault.kv.metadata.delete` pass MEHO's permission check under it
+(`backend/tests/test_vault_tenant_admin_policy_doc.py`). If you change the
+block, run that test.
 
 Write each via the approval-gated op
 ([`ops_sys_policy.py`](../../backend/src/meho_backplane/connectors/vault/ops_sys_policy.py),
@@ -272,6 +309,10 @@ vault kv get -mount=secret "tenants/<other-tenant-uuid>/<target>"
 # 4. Capability probe for an operator's rotation write (operator role).
 vault token capabilities "secret/data/tenants/<tenant-uuid>/rotation/<target>"
 # Expect for operator: create read update
+
+# 5. Capability probe for a tenant admin's version soft-delete.
+vault token capabilities "secret/delete/tenants/<tenant-uuid>/<target>"
+# Expect for tenant_admin: update
 ```
 
 A `permission denied` on step 2 means either the entity metadata is
@@ -279,6 +320,12 @@ missing/mismatched (§3) or the group binding is absent (§4) — fix the
 identity wiring, not the connector. A **success** on step 3 means a glob
 leaked into the templated segment (§1) — every tenant could read every
 secret; fix the policy body immediately.
+
+## Removing a tenant
+
+To remove a finished tenant from Vault (its secrets, its login role, its
+policy and its groups), follow
+[`vault-remove-tenant.md`](./vault-remove-tenant.md).
 
 ## References
 

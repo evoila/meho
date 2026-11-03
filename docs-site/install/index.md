@@ -150,6 +150,13 @@ step-by-step recipe, including the non-obvious Keycloak 25+ `basic`
 scope gotcha that otherwise costs hours. Come back when the realm
 verification block at the end of that page passes.
 
+!!! tip "People log in with their company account"
+
+    To let people log in with their authentik account, and let their
+    authentik group decide their MEHO role, follow
+    [Company login with authentik](company-login-authentik.md) after
+    the realm works. It also covers the built-in Keycloak of the chart.
+
 ## Step 5 — Decide ingress, TLS, and trust
 
 The backplane serves one hostname (set as `ingress.host`), and that
@@ -489,6 +496,8 @@ operator.**
   (Claude Desktop, Claude Code) and the rest of the CLI story.
 - **[Do real work](../guides/index.md)** — register targets and
   secrets, run first operations.
+- **[Company login with authentik](company-login-authentik.md)** — let
+  people log in with their company account and MFA.
 - **[Upgrades](upgrades.md)** — how `helm upgrade` behaves, the Helm 4
   field-ownership caveat, and per-version upgrade notes. Backup/restore
   and observability guides land with MEHO's disaster-recovery work.

@@ -23,8 +23,9 @@ With every built-in part off (bring-your-own), the chart renders none of the
 new objects, so existing installs render byte for byte as before.
 
 Pointing MEHO's own pods at these Secrets (the backplane, Valkey, the
-Ingress) and moving the database migration into the backplane pod are the
-work of the wiring Task (#4047) and the PostgreSQL Task (#4039). Until then
+Ingress) is the work of the wiring Task (#4047). With the built-in
+PostgreSQL on, the database migration already runs in the backplane pod, as
+its `migrate` init container (#5233). Until #4047 lands
 an install can point at a made Secret by name, for example
 `approvalHandoff.secretName: <release>-core-approval-handoff` (see
 "Use your own Secret" below).
@@ -65,7 +66,8 @@ pair with their own certificate by setting `ingress.tls.secretName`.
 - The `meho-backplane` client secret: Keycloak makes it at realm import, and
   it never leaves Keycloak.
 - `-core-vault-unseal`, `-core-vault-init`, `-core-vault-snapshot`,
-  `-core-vault-scheduler`: the `vault-init` Job (#4044).
+  `-core-vault-scheduler`: the `vault-init` Job (#4044,
+  docs/codebase/core-vault-init.md).
 - `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `MAIL_SMTP_PASSWORD`,
   `METRICS_AUTH_TOKEN`, `CORPUS_SERVICE_TOKEN`, `VCF_PAIF_OIDC_CLIENT_SECRET`:
   the operator gives them; they are never generated.
@@ -130,8 +132,8 @@ Helm order on `helm install` and `helm upgrade`:
 | -40 | ServiceAccount, Role, RoleBinding `<release>-core-bootstrap` | pre-install, pre-upgrade, post-install, post-upgrade |
 | -30 | Job `<release>-core-secrets` | pre-install, pre-upgrade |
 | -20 | the backplane ConfigMap (unchanged) | pre-install, pre-upgrade |
-| -10 | migration Job (unchanged) | pre-install, pre-upgrade |
-| 0 | release resources (Deployment, Services, …) | install, upgrade |
+| -10 | migration Job, bring-your-own PostgreSQL only (unchanged) | pre-install, pre-upgrade |
+| 0 | release resources (Deployment with the `migrate` init container when `corePostgres` is on, Services, …) | install, upgrade |
 
 Rules of `reconcile`:
 
@@ -160,18 +162,16 @@ One namespaced Role, nothing cluster-wide:
 - `create` on Secrets. Kubernetes cannot limit `create` to names; creating a
   name that exists fails with 409 and changes nothing, so an operator's
   Secret is never overwritten.
-- `get` and `patch` only on the sixteen `<release>-core-*` names (the ten
-  above, `-core-first-login` and `-core-ci-login` of the realm stage, and the
-  four `-core-vault-*` Secrets).
+- `get` and `patch` only on the twelve `<release>-core-*` names (the ten
+  above, and `-core-first-login` and `-core-ci-login` of the realm stage).
 - `get` only on the Secrets the operator named in values, to check their
   keys.
-- `delete` only on `<release>-core-vault-init` (the `vault-init` Job of #4044
-  deletes its short-lived Secret).
 - No `list`, no `watch`, no access to the chart's own ServiceAccount.
 
 The ServiceAccount mounts no token by default. Only the Job pods set
-`automountServiceAccountToken: true`. The `bootstrap` (#4043) and
-`vault-init` (#4044) Jobs use the same account.
+`automountServiceAccountToken: true`. The `bootstrap` Job (#4043) uses the
+same account. The `vault-init` Job (#4044) has its own account and Role
+(docs/codebase/core-vault-init.md).
 
 The Job pod does not carry the backplane's selector labels, because the
 backplane NetworkPolicy allows no egress to the Kubernetes API.

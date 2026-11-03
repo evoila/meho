@@ -21,7 +21,9 @@ G3.2-T3 ships its production-grade resolver.
 Multi-container pods without ``--container`` short-circuit to a
 structured error carrying the available container names so the caller
 can retry with an explicit container. Single-container pods auto-pick
-the only container.
+the only container. Init containers can be named too (for example to
+read the logs of a failed migration step); they are listed in the error
+but never auto-picked.
 
 The 1MB body cap is applied client-side. The k8s API exposes
 ``limit_bytes`` for a server-side cap, but it terminates the response
@@ -32,6 +34,18 @@ from the tail, and drop the leading lines that push the response past
 1 MiB. ``truncated_byte_count`` in extras records how much was dropped
 so the operator can decide whether to retry with a smaller ``--tail``
 or a tighter ``--since``.
+
+Time windows (#5071): ``since_time`` / ``until_time`` read one window of
+the log, oldest line first, so a caller can page through a log that is
+longer than the 1 MiB cap. In this mode the handler asks Kubernetes for
+``timestamps=true`` (every line starts with its RFC 3339 time), keeps
+the *oldest* lines that fit in the cap, and reports ``next_since_time``
+(the time of the first line that did not fit) so the next call can
+start there with no repeat and no gap. ``kubernetes_asyncio`` 36 does not
+expose the API's ``sinceTime`` query parameter on
+``read_namespaced_pod_log``, so this mode calls the same ``/log`` path
+through :meth:`ApiClient.call_api` and reads the body as a stream,
+stopping once the page is full (see :mod:`.ops_logs_window`).
 
 References
 ----------
@@ -49,6 +63,17 @@ from typing import TYPE_CHECKING, Any
 
 from kubernetes_asyncio import client
 
+from meho_backplane.connectors.kubernetes.ops_logs_window import (
+    RFC3339_PATTERN,
+    LogLineTooLargeError,
+    LogWindowError,
+    WindowPage,
+    parse_rfc3339,
+    read_pod_log_window,
+    window_from_params,
+    window_query,
+)
+
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
@@ -60,10 +85,13 @@ __all__ = [
     "K8S_LOGS_RESPONSE_SCHEMA",
     "MAX_BODY_BYTES",
     "MAX_TAIL_LINES",
+    "LogLineTooLargeError",
+    "LogWindowError",
     "MultiContainerAmbiguityError",
     "PodNotFoundError",
     "k8s_logs",
     "parse_duration",
+    "parse_rfc3339",
     "resolve_pod_and_container",
     "truncate_lines_to_byte_cap",
 ]
@@ -116,7 +144,7 @@ K8S_LOGS_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Container name within the pod. Required when the pod "
                 "has more than one container; auto-selected when there "
-                "is only one."
+                "is only one. An init container name is accepted too."
             ),
         },
         "tail": {
@@ -149,6 +177,25 @@ K8S_LOGS_PARAMETER_SCHEMA: dict[str, Any] = {
                 "``previous=true`` flag."
             ),
         },
+        "since_time": {
+            "type": "string",
+            "pattern": RFC3339_PATTERN,
+            "description": (
+                "Exact start time, RFC 3339 (e.g. '2026-08-01T00:00:00Z'). "
+                "Reads the log forward from this time, oldest line "
+                "first, and every line starts with its timestamp. "
+                "Cannot be combined with 'since'."
+            ),
+        },
+        "until_time": {
+            "type": "string",
+            "pattern": RFC3339_PATTERN,
+            "description": (
+                "Exact end time, RFC 3339. Lines after this time are "
+                "dropped by MEHO (Kubernetes has no end filter). Needs "
+                "'since_time'."
+            ),
+        },
     },
     "required": ["pod_name", "namespace"],
     "additionalProperties": False,
@@ -169,6 +216,8 @@ K8S_LOGS_RESPONSE_SCHEMA: dict[str, Any] = {
         "line_count": {"type": "integer", "minimum": 0},
         "byte_count": {"type": "integer", "minimum": 0},
         "truncated_byte_count": {"type": "integer", "minimum": 0},
+        "truncated_end": {"type": "string", "enum": ["end"]},
+        "next_since_time": {"type": "string"},
     },
     "required": ["pod", "namespace", "container", "lines", "truncated"],
     "additionalProperties": False,
@@ -200,25 +249,62 @@ K8S_LOGS_LLM_INSTRUCTIONS: dict[str, Any] = {
         "namespace": "Required.",
         "container": (
             "Required for multi-container pods. The handler returns a "
-            "structured error listing the pod's containers when this "
-            "is omitted and the pod has more than one."
+            "structured error listing the pod's containers (app "
+            "containers first, then init containers) when this is "
+            "omitted and the pod has more than one. Pass an init "
+            "container name to read its logs, e.g. a failed migration."
         ),
         "tail": (
             f"Defaults to 100; capped at {MAX_TAIL_LINES}. Prefer "
             "'since' over very large tails -- the response is capped "
             f"at {MAX_BODY_BYTES // (1024 * 1024)} MiB and oversize "
-            "responses truncate from the front."
+            "responses truncate from the front. With 'since_time', "
+            "leave 'tail' unset: a tail picks the newest lines, so "
+            "an older window would come back empty."
         ),
         "since": (
             "Duration string (e.g. '5m', '1h', '24h', '7d'). Server-"
             "side filter. Combine with a moderate tail for time-"
-            "bounded slices."
+            "bounded slices. Cannot be combined with 'since_time'."
         ),
         "previous": (
             "Set true to fetch the previous container instance's logs "
             "(after a crash + restart). Defaults to false."
         ),
+        "since_time": (
+            "RFC 3339 start time. Use it to read an older part of a "
+            "long log, one window per call. The answer holds the "
+            "oldest lines from that time, at most "
+            f"{MAX_BODY_BYTES // (1024 * 1024)} MiB. When the window "
+            "is bigger, 'truncated' is true, 'truncated_end' is "
+            "'end' and 'next_since_time' is the time of the first line "
+            "that did not fit: call again with since_time set to that "
+            "value to get the next lines. A page ends only at a time "
+            "boundary, so the next call repeats no line and skips "
+            "none. Repeat until 'truncated' is false."
+        ),
+        "until_time": (
+            "RFC 3339 end time; needs 'since_time'. Lines after it are "
+            "left out. Use since_time + until_time for a fixed window "
+            "such as '1 August to 10 August'."
+        ),
     },
+    "limits": (
+        f"At most {MAX_TAIL_LINES} lines with 'tail' and "
+        f"{MAX_BODY_BYTES // (1024 * 1024)} MiB per call. To read past "
+        "the newest MiB, page back in time with since_time (and "
+        "until_time). Kubernetes keeps only part of a log: the node "
+        "rotates old log files away, and MEHO cannot read what "
+        "Kubernetes no longer serves. Kubernetes takes since_time in "
+        "whole seconds only; MEHO drops the lines before since_time "
+        "itself, so paging goes on with no gap, also when a lot is "
+        "written within one second. One log line larger than "
+        f"{MAX_BODY_BYTES // (1024 * 1024)} MiB cannot be returned, and "
+        "neither can several lines with the same timestamp that are "
+        "larger than that together: the call fails with a plain error "
+        "that names the time. Set since_time to a later time to "
+        "continue behind it."
+    ),
     "output_shape": (
         "Flat dict: {'pod': <resolved-name>, 'namespace', 'container', "
         "'lines': [<str>], 'truncated': <bool>}. ``lines`` is "
@@ -226,7 +312,10 @@ K8S_LOGS_LLM_INSTRUCTIONS: dict[str, Any] = {
         "window is the most-recent log line). When truncated is true, "
         "extras carries 'line_count', 'byte_count', and "
         "'truncated_byte_count' so callers can render an 'X KiB "
-        "dropped from the front' hint. A large ``lines`` collection is "
+        "dropped from the front' hint. With 'since_time', each line "
+        "starts with its RFC 3339 time and a cut window instead "
+        "carries 'truncated_end': 'end', 'line_count' and "
+        "'next_since_time'. A large ``lines`` collection is "
         "reduced to a JSONFlux handle whose inline ``sample`` shows the "
         "most-recent lines (not the oldest) -- see ``result_ordering`` "
         "below."
@@ -324,6 +413,8 @@ async def resolve_pod_and_container(
     namespace: str,
     pod_name: str,
     container: str | None,
+    *,
+    include_init_containers: bool = False,
 ) -> tuple[str, str]:
     """Resolve ``pod_name`` prefix + ``container`` against the cluster.
 
@@ -334,8 +425,15 @@ async def resolve_pod_and_container(
       prefix. ``candidates`` carries the matched names so the caller
       can surface a "did-you-mean".
     * :class:`MultiContainerAmbiguityError` -- pod has multiple
-      containers and ``container`` is ``None``. ``containers`` carries
-      the candidate list.
+      containers and ``container`` is ``None``, or ``container`` names
+      no container of the pod. ``containers`` carries the candidate
+      list.
+
+    With ``include_init_containers=True`` the pod's init containers are
+    valid ``container`` values and appear after the app containers in
+    the candidate list. Auto-pick still looks only at the app
+    containers, so a pod with one app container and some init
+    containers keeps resolving to the app container.
     * :class:`kubernetes_asyncio.client.ApiException` -- API-side
       errors (RBAC denial, namespace missing). Propagated unchanged.
 
@@ -365,14 +463,17 @@ async def resolve_pod_and_container(
 
     pod = matches[0]
     container_names: list[str] = [c.name for c in (pod.spec.containers or [])]
+    valid_names = list(container_names)
+    if include_init_containers:
+        valid_names += [c.name for c in (pod.spec.init_containers or [])]
     if container is not None:
-        if container not in container_names:
-            raise MultiContainerAmbiguityError(pod.metadata.name, container_names)
+        if container not in valid_names:
+            raise MultiContainerAmbiguityError(pod.metadata.name, valid_names)
         return pod.metadata.name, container
 
     if len(container_names) == 1:
         return pod.metadata.name, container_names[0]
-    raise MultiContainerAmbiguityError(pod.metadata.name, container_names)
+    raise MultiContainerAmbiguityError(pod.metadata.name, valid_names)
 
 
 def truncate_lines_to_byte_cap(lines: list[str], cap_bytes: int) -> tuple[list[str], int]:
@@ -435,10 +536,16 @@ async def k8s_logs(
     * :class:`PodNotFoundError` -- prefix matched zero or many pods.
     * :class:`MultiContainerAmbiguityError` -- multi-container pod
       missing ``--container``.
+    * :class:`LogWindowError` -- unusable ``since_time`` /
+      ``until_time`` (bad time, or combined with ``since``).
+    * :class:`LogLineTooLargeError` -- one line inside the window, or
+      the lines at one timestamp together, are larger than
+      :data:`MAX_BODY_BYTES`, so they can never be returned.
     * :class:`kubernetes_asyncio.client.ApiException` -- API errors
       (RBAC, missing namespace, container not running yet for
       ``previous=true``).
     """
+    window = window_from_params(params)
     pod_name = params["pod_name"]
     namespace = params["namespace"]
     # ``tail`` is schema-defaulted to 100 but the dispatcher passes
@@ -458,8 +565,25 @@ async def k8s_logs(
     v1 = client.CoreV1Api(api_client)
 
     exact_name, container_name = await resolve_pod_and_container(
-        v1, namespace, pod_name, container_param
+        v1, namespace, pod_name, container_param, include_init_containers=True
     )
+
+    if window is not None:
+        query = window_query(
+            window,
+            container=container_name,
+            previous=previous,
+            tail_lines=tail if "tail" in params else None,
+        )
+        page = await read_pod_log_window(
+            api_client,
+            name=exact_name,
+            namespace=namespace,
+            query=query,
+            window=window,
+            cap_bytes=MAX_BODY_BYTES,
+        )
+        return _window_result(exact_name, namespace, container_name, page)
 
     # ``kubernetes_asyncio`` accepts every parameter as a kwarg; pass
     # only the ones with non-default values so the wire request stays
@@ -478,7 +602,11 @@ async def k8s_logs(
         kwargs["since_seconds"] = since_seconds
 
     body: str = await v1.read_namespaced_pod_log(**kwargs)
+    return _newest_result(exact_name, namespace, container_name, body)
 
+
+def _newest_result(pod: str, namespace: str, container: str, body: str) -> dict[str, Any]:
+    """Build the ``k8s.logs`` answer for the default read (newest lines)."""
     # ``read_namespaced_pod_log`` returns the body as a single string;
     # an empty cluster log returns "" (no trailing newline). Split on
     # \n and drop the trailing empty token the split produces when
@@ -496,9 +624,9 @@ async def k8s_logs(
         truncated = True
 
     result: dict[str, Any] = {
-        "pod": exact_name,
+        "pod": pod,
         "namespace": namespace,
-        "container": container_name,
+        "container": container,
         "lines": lines,
         "truncated": truncated,
     }
@@ -506,4 +634,26 @@ async def k8s_logs(
         result["line_count"] = len(lines)
         result["byte_count"] = byte_count
         result["truncated_byte_count"] = truncated_byte_count
+    return result
+
+
+def _window_result(pod: str, namespace: str, container: str, page: WindowPage) -> dict[str, Any]:
+    """Build the ``k8s.logs`` answer for a ``since_time`` read.
+
+    The page holds the oldest lines of the window that fit in
+    :data:`MAX_BODY_BYTES`. When a line did not fit, the window goes on
+    after this page: the answer says where it was cut and the time of
+    the first line that did not fit, so the next call can start there.
+    """
+    result: dict[str, Any] = {
+        "pod": pod,
+        "namespace": namespace,
+        "container": container,
+        "lines": page.lines,
+        "truncated": page.truncated,
+    }
+    if page.truncated:
+        result["truncated_end"] = "end"
+        result["line_count"] = len(page.lines)
+        result["next_since_time"] = page.next_time
     return result

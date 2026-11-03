@@ -80,6 +80,81 @@ func TestRenderHumanHealth_SandboxMode(t *testing.T) {
 	}
 }
 
+// TestRenderHumanHealth_OperationCatalog: one extra line when another
+// release wrote the operation rows (#5019); nothing new when this
+// release wrote them, none is recorded, or the field is missing.
+func TestRenderHumanHealth_OperationCatalog(t *testing.T) {
+	base := func(c *api.OperationCatalogStatus) *api.HealthResponse {
+		return &api.HealthResponse{
+			Operator:         api.OperatorIdentity{Sub: "alice-sub-id"},
+			Vault:            api.VaultStatus{Reachable: true, ReadOk: true},
+			Db:               api.DbStatus{Migrated: ptrBool(true)},
+			OperationCatalog: c,
+		}
+	}
+	render := func(resp *api.HealthResponse) string {
+		var buf bytes.Buffer
+		if err := PrintHealth(&buf, resp); err != nil {
+			t.Fatalf("PrintHealth: %v", err)
+		}
+		return buf.String()
+	}
+	other := render(base(&api.OperationCatalogStatus{
+		State:            "other_release",
+		ThisRelease:      "aaa111",
+		WrittenByRelease: ptrStr("bbb222"),
+	}))
+	if !strings.Contains(other, "Operation settings: written by release bbb222, this server runs aaa111") {
+		t.Errorf("expected the operation settings line, got:\n%s", other)
+	}
+	missing := render(base(nil))
+	for _, state := range []string{"same_release", "not_recorded"} {
+		got := render(base(&api.OperationCatalogStatus{State: state, ThisRelease: "aaa111"}))
+		if got != missing {
+			t.Errorf("state %s must print like no field:\n%s\n---\n%s", state, got, missing)
+		}
+	}
+	if strings.Count(other, "\n") != strings.Count(missing, "\n")+1 {
+		t.Errorf("another release adds exactly one line:\n%s\n---\n%s", other, missing)
+	}
+}
+
+// TestRenderHumanHealth_ConnectorPackages: `meho status` lists the
+// connector packages the image carries (#5036), prints "none" for the
+// plain public image, and prints nothing when an older backplane sends
+// no field.
+func TestRenderHumanHealth_ConnectorPackages(t *testing.T) {
+	base := func(pkgs *[]api.ConnectorPackage) *api.HealthResponse {
+		return &api.HealthResponse{
+			Operator:          api.OperatorIdentity{Sub: "alice-sub-id"},
+			Vault:             api.VaultStatus{Reachable: true, ReadOk: true},
+			Db:                api.DbStatus{Migrated: ptrBool(true)},
+			ConnectorPackages: pkgs,
+		}
+	}
+	render := func(resp *api.HealthResponse) string {
+		var buf bytes.Buffer
+		if err := PrintHealth(&buf, resp); err != nil {
+			t.Fatalf("PrintHealth: %v", err)
+		}
+		return buf.String()
+	}
+	digest := "sha256:" + strings.Repeat("a", 64)
+	listed := render(base(&[]api.ConnectorPackage{
+		{Name: "example-connectors", Version: "1.2.0", WheelDigest: digest, Folders: []string{"example_widget"}},
+	}))
+	if !strings.Contains(listed, "  Connector packages:\n    example-connectors 1.2.0 ("+digest+")\n") {
+		t.Errorf("expected the package line, got:\n%s", listed)
+	}
+	none := render(base(&[]api.ConnectorPackage{}))
+	if !strings.Contains(none, "  Connector packages: none\n") {
+		t.Errorf("expected none for the plain image, got:\n%s", none)
+	}
+	if older := render(base(nil)); strings.Contains(older, "Connector packages") {
+		t.Errorf("no line when the backplane sends no field, got:\n%s", older)
+	}
+}
+
 // TestFormatDB pins the DB line for a database at the expected
 // revision, behind it, ahead of it (normal after a rollback), with no
 // revision, and for the failure and old-backplane shapes (#4830).
@@ -351,5 +426,55 @@ func TestExitCodes(t *testing.T) {
 				t.Errorf("ExitCode() = %d, want %d", c.err.ExitCode(), c.want)
 			}
 		})
+	}
+}
+
+// TestRenderHumanHealth_Tenants: the person's tenants are listed with
+// the role in each, and a login with several tenants that chose none
+// gets the list, a hint and the DB line only (#5239).
+func TestRenderHumanHealth_Tenants(t *testing.T) {
+	tenantA := api.TenantEntry{Name: "lab-a", TenantRole: api.TenantRoleReadOnly}
+	tenantB := api.TenantEntry{Name: "lab-b", TenantRole: api.TenantRoleOperator}
+	render := func(resp *api.HealthResponse) string {
+		var buf bytes.Buffer
+		if err := PrintHealth(&buf, resp); err != nil {
+			t.Fatalf("PrintHealth: %v", err)
+		}
+		return buf.String()
+	}
+
+	unchosen := render(&api.HealthResponse{
+		Operator: api.OperatorIdentity{Sub: "alice", Tenants: &[]api.TenantEntry{tenantA, tenantB}},
+		Vault:    api.VaultStatus{Detail: ptrStr("tenant_not_chosen")},
+		Db:       api.DbStatus{Migrated: ptrBool(true)},
+	})
+	for _, want := range []string{
+		"  Tenants:\n    lab-a  read_only\n    lab-b  operator\n",
+		"No tenant chosen. Choose one with `meho tenants use <name>`.",
+		"DB:    migrated",
+	} {
+		if !strings.Contains(unchosen, want) {
+			t.Errorf("missing %q in output:\n%s", want, unchosen)
+		}
+	}
+	if strings.Contains(unchosen, "Vault:") {
+		t.Errorf("unchosen output must not show the Vault line:\n%s", unchosen)
+	}
+
+	tenantB.Current = true
+	chosen := render(&api.HealthResponse{
+		Operator: api.OperatorIdentity{
+			Sub:      "alice",
+			TenantId: &tenantB.TenantId,
+			Tenants:  &[]api.TenantEntry{tenantA, tenantB},
+		},
+		Vault: api.VaultStatus{Reachable: true, ReadOk: true},
+		Db:    api.DbStatus{Migrated: ptrBool(true)},
+	})
+	if !strings.Contains(chosen, "    lab-b  operator  (current)\n") {
+		t.Errorf("current tenant not marked:\n%s", chosen)
+	}
+	if !strings.Contains(chosen, "Vault: reachable") || strings.Contains(chosen, "No tenant chosen") {
+		t.Errorf("chosen output wrong:\n%s", chosen)
 	}
 }

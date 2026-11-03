@@ -23,13 +23,13 @@ import (
 //
 // CLI shape:
 //
-//	meho targets describe <name|alias> \
+//	meho targets describe <name, alias or id> \
 //	  [--json]                                 # machine-readable output
 //	  [--backplane <url>]                      # override the backplane URL
 //
-// The query accepts either the target's canonical name or any of its
-// aliases — alias resolution happens server-side via the resolver
-// (backend/src/meho_backplane/targets/resolver.py).
+// The query accepts the target's canonical name, any of its aliases,
+// or its id — the lookup happens server-side (name, then alias, then
+// id; see backend/src/meho_backplane/api/v1/targets.py).
 //
 // Exit codes:
 //   - 0   target rendered cleanly
@@ -44,11 +44,11 @@ func newDescribeCmd() *cobra.Command {
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
-		Use:   "describe <name-or-alias>",
-		Short: "Describe a single target (alias-aware)",
+		Use:   "describe <name, alias or id>",
+		Short: "Describe a single target by name, alias or id",
 		Long: "describe calls GET /api/v1/targets/{name} and renders the " +
 			"full Target row. The supplied argument can be the target's " +
-			"canonical name or any of its aliases — resolution happens " +
+			"canonical name, any of its aliases, or its id — resolution happens " +
 			"server-side. On a 404 the CLI surfaces the near-miss " +
 			"suggestions the resolver computed so the operator can fix " +
 			"a typo in one shot. --json emits the raw API response.",
@@ -80,7 +80,7 @@ func runDescribe(cmd *cobra.Command, opts describeOptions) error {
 	if opts.Query == "" {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
-			output.Unexpected("describe requires a non-empty <name-or-alias> argument"),
+			output.Unexpected("describe requires a non-empty <name, alias or id> argument"),
 			opts.JSONOut,
 		)
 	}
@@ -149,6 +149,9 @@ func printTargetSummary(w io.Writer, t *api.Target) {
 	if t.SecretRef != nil && *t.SecretRef != "" {
 		fmt.Fprintf(w, "%-18s %s\n", "secret_ref:", *t.SecretRef)
 	}
+	if t.SecretFieldMap != nil && len(*t.SecretFieldMap) > 0 {
+		fmt.Fprintf(w, "%-18s %s\n", "secret_field_map:", formatSecretFieldMap(*t.SecretFieldMap))
+	}
 	if t.PreferredImplId != nil && *t.PreferredImplId != "" {
 		fmt.Fprintf(w, "%-18s %s\n", "preferred_impl_id:", *t.PreferredImplId)
 	} else {
@@ -166,6 +169,21 @@ func printTargetSummary(w io.Writer, t *api.Target) {
 	// view show byte-identical strings.
 	fmt.Fprintf(w, "%-18s %s\n", "created_at:", t.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	fmt.Fprintf(w, "%-18s %s\n", "updated_at:", t.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"))
+}
+
+// formatSecretFieldMap renders the secret field map as a sorted
+// `connector_field=source_field, ...` list (field names only).
+func formatSecretFieldMap(m map[string]string) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = k + "=" + m[k]
+	}
+	return strings.Join(parts, ", ")
 }
 
 // formatFingerprint renders the cached fingerprint as a one-line

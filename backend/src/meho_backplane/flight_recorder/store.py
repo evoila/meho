@@ -52,7 +52,8 @@ class SpanInput:
     #: One of ``vendor_call`` / ``composite_step`` / ``jsonflux_reduction`` /
     #: ``typed`` / ``opaque`` (the decision's enumerated span kinds).
     span_kind: str
-    #: Human label (``"GET /rest/vm"``, ``"jsonflux.reduce"``, a sub-step name).
+    #: Human label (``"GET /repos/{owner}/{repo}"``, ``"jsonflux.reduce"``, a
+    #: sub-step name).
     name: str
     #: Span start time (UTC).
     started_at: datetime

@@ -91,7 +91,7 @@ import hashlib
 import uuid
 from datetime import timedelta
 from typing import Annotated, Final
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
 import httpx2
@@ -120,18 +120,24 @@ from meho_backplane.ui.auth.session_store import (
     create_session,
     revoke_session,
 )
+from meho_backplane.ui.auth.tenant import TENANT_PICKER_PATH, can_switch_tenant
+from meho_backplane.ui.templating import get_templates
 
 __all__ = [
     "AUTHORIZATION_STATE_EXPIRED_DETAIL",
+    "FRESH_SIGN_IN_QUERY",
     "LOGIN_BINDING_COOKIE_PREFIX",
     "LOGIN_PATH",
     "SESSION_COOKIE_NAME",
+    "SESSION_ENDED_REASON",
     "SESSION_TTL_MARGIN_SECONDS",
     "build_router",
     "clear_login_binding_cookie",
     "clear_session_cookie",
     "compute_redirect_uri",
     "login_binding_cookie_name",
+    "login_location",
+    "page_from_htmx_current_url",
     "set_login_binding_cookie",
     "set_session_cookie",
 ]
@@ -158,6 +164,18 @@ SESSION_COOKIE_NAME: Final[str] = "meho_session"
 #: same margin when it recomputes the session lifetime from a
 #: refreshed token's ``expires_in``.
 SESSION_TTL_MARGIN_SECONDS: Final[int] = 60
+
+#: Value of the login route's ``?reason=`` parameter when a session the
+#: browser still holds has ended (idle limit, ten-hour limit, or a failed
+#: renewal at the login server). The login route then shows one plain
+#: line and a "Sign in" button instead of going straight to Keycloak.
+SESSION_ENDED_REASON: Final[str] = "session_ended"
+
+#: Name of the login route's query parameter that asks Keycloak for a new
+#: sign-in with credentials (``prompt=login`` and ``max_age=0``), also in a
+#: browser that Keycloak remembers. The approvals console sends a person
+#: here when their sign-in is too old to approve.
+FRESH_SIGN_IN_QUERY: Final[str] = "fresh_sign_in"
 
 #: Default landing path when no ``?return_to`` is supplied on
 #: ``/ui/auth/login``. T5 (#866) lands the dashboard at ``/ui/``.
@@ -306,6 +324,44 @@ def _safe_return_to(raw: str | None) -> str:
     return candidate
 
 
+def login_location(
+    return_to: str, *, session_ended: bool = False, fresh_sign_in: bool = False
+) -> str:
+    """Build ``/ui/auth/login?return_to=<path>``, plus the optional flags.
+
+    *return_to* is percent-encoded wholesale; the login route checks it
+    again with :func:`_safe_return_to` before it uses it. *session_ended*
+    adds ``reason=session_ended``. *fresh_sign_in* adds
+    ``fresh_sign_in=1``: the login then asks for the credentials again,
+    also in a remembered browser (the approvals console uses it).
+    """
+    location = f"{LOGIN_PATH}?return_to={quote(return_to, safe='')}"
+    if session_ended:
+        location = f"{location}&reason={SESSION_ENDED_REASON}"
+    if fresh_sign_in:
+        location = f"{location}&{FRESH_SIGN_IN_QUERY}=1"
+    return location
+
+
+def page_from_htmx_current_url(current_url: str | None) -> str | None:
+    """Return the console page the person is on, from ``HX-Current-URL``.
+
+    htmx sends the browser's current URL with every request. For a part
+    of a page that loads in the background, the request path is the
+    fragment, not the page, so the login must come back to this URL
+    instead. Only the path and query are kept, and only under ``/ui``;
+    anything else gives ``None`` and the caller falls back to the
+    request path.
+    """
+    if not current_url:
+        return None
+    parts = urlsplit(current_url.strip())
+    path = parts.path
+    if path != "/ui" and not path.startswith("/ui/"):
+        return None
+    return f"{path}?{parts.query}" if parts.query else path
+
+
 def set_session_cookie(response: RedirectResponse, session_id: uuid.UUID) -> None:
     """Attach the ``meho_session`` cookie to *response* with the BFF flags.
 
@@ -385,8 +441,11 @@ def _build_end_session_url(
 
 
 async def _handle_login(
+    request: Request,
     return_to: Annotated[str | None, Query()] = None,
-) -> RedirectResponse:
+    reason: Annotated[str | None, Query()] = None,
+    fresh_sign_in: Annotated[str | None, Query()] = None,
+) -> Response:
     """Mint a PKCE authorization URL and 302 the browser to Keycloak.
 
     ``?return_to=<path>`` is the originally-requested path the
@@ -394,13 +453,34 @@ async def _handle_login(
     a typed FastAPI ``Query`` parameter so the OpenAPI document
     reflects the real query-string contract; the value is validated
     via :func:`_safe_return_to` to block open-redirect abuse.
+
+    ``?reason=session_ended`` is set when a session the browser still
+    held has ended. Then the route answers with a small page: one plain
+    line ("Your session ended. Please sign in again.") and a "Sign in"
+    button that starts the normal login with the same ``return_to``.
+    Any other ``reason`` value is ignored.
+
+    ``?fresh_sign_in=1`` asks Keycloak for a new sign-in with
+    credentials (``prompt=login`` and ``max_age=0``), also in a browser
+    that Keycloak remembers. An approval in the console needs such a
+    recent sign-in. Any other value is ignored.
     """
     log = structlog.get_logger(__name__)
     return_to = _safe_return_to(return_to)
+    force_sign_in = fresh_sign_in == "1"
+    if reason == SESSION_ENDED_REASON:
+        page = get_templates().TemplateResponse(
+            request,
+            "auth/session_ended.html",
+            {"sign_in_url": login_location(return_to)},
+        )
+        page.headers["cache-control"] = "no-store"
+        return page
     try:
         url, state, browser_binding = await build_authorization_request(
             redirect_uri=compute_redirect_uri(),
             return_to=return_to,
+            fresh_sign_in=force_sign_in,
         )
     except OAuthFlowConfigurationError:
         log.warning("ui_auth_oauth_not_configured", route="login")
@@ -418,7 +498,9 @@ async def _handle_login(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="upstream_auth_provider_unreachable",
         ) from exc
-    log.info("ui_auth_login_redirect", state=state, return_to=return_to)
+    log.info(
+        "ui_auth_login_redirect", state=state, return_to=return_to, fresh_sign_in=force_sign_in
+    )
     response = RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
     # Hand the initiating browser its login-binding cookie so the
     # callback can prove this same browser completes the flow (F10 #272).
@@ -506,12 +588,16 @@ async def _exchange_or_translate(
 
 async def _persist_session_from_tokens(
     tokens: TokenExchangeResult,
-) -> tuple[uuid.UUID, str, uuid.UUID]:
+) -> tuple[uuid.UUID, str, uuid.UUID, bool]:
     """Validate the access token + write the encrypted session row.
 
-    Returns ``(session_id, operator_sub, tenant_id)`` -- the values
-    the calling handler needs to log + redirect, without holding the
-    plaintext tokens any longer than necessary.
+    Returns ``(session_id, operator_sub, tenant_id, tenant_chosen)`` --
+    the values the calling handler needs to log + redirect, without
+    holding the plaintext tokens any longer than necessary.
+
+    A person with several tenants (#5240) gets a session with
+    ``tenant_chosen=False``: the web interface shows the tenant picker
+    first. Until then the row holds the token's first tenant.
     """
     settings = get_settings()
     # Validate the access token through the chassis JWT chain so the
@@ -520,6 +606,7 @@ async def _persist_session_from_tokens(
     operator = await verify_jwt_for_audience(
         f"Bearer {tokens.access_token}",
         expected_audience=settings.keycloak_audience,
+        allow_unchosen=True,
     )
     lifetime = timedelta(seconds=max(tokens.expires_in - SESSION_TTL_MARGIN_SECONDS, 60))
     sessionmaker = get_sessionmaker()
@@ -531,8 +618,10 @@ async def _persist_session_from_tokens(
             access_token=tokens.access_token,
             refresh_token=tokens.refresh_token,
             lifetime=lifetime,
+            tenant_chosen=operator.tenant_chosen,
+            can_switch_tenant=can_switch_tenant(operator),
         )
-    return decrypted.id, operator.sub, operator.tenant_id
+    return decrypted.id, operator.sub, operator.tenant_id, operator.tenant_chosen
 
 
 async def _handle_callback(
@@ -577,18 +666,18 @@ async def _handle_callback(
         authorization_response=str(request.url),
         browser_binding=browser_binding,
     )
-    session_id, operator_sub, tenant_id = await _persist_session_from_tokens(tokens)
+    session_id, operator_sub, tenant_id, tenant_chosen = await _persist_session_from_tokens(tokens)
     log.info(
         "ui_auth_session_created",
         operator_sub=operator_sub,
         tenant_id=str(tenant_id),
+        tenant_chosen=tenant_chosen,
         return_to=tokens.return_to,
         session_id=str(session_id),
     )
-    response = RedirectResponse(
-        url=tokens.return_to or _DEFAULT_RETURN_TO,
-        status_code=status.HTTP_302_FOUND,
-    )
+    # A person with several tenants picks one first (#5240).
+    location = (tokens.return_to or _DEFAULT_RETURN_TO) if tenant_chosen else TENANT_PICKER_PATH
+    response = RedirectResponse(url=location, status_code=status.HTTP_302_FOUND)
     set_session_cookie(response, session_id)
     # Single-use: the binding is consumed, so clear its cookie now that
     # the flow has completed (F10, #272). ``state`` is non-None on any

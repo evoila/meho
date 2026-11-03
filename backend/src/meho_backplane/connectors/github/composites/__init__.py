@@ -16,15 +16,16 @@ has walked every ``connectors/<product>/`` subpackage, so the
 ``endpoint_descriptor`` upsert for the T4 composite lands before any
 dispatch can fire.
 
-Layout mirrors the vmware-rest composites package: ``__init__`` wires
+Layout: ``__init__`` wires
 the registrar; ``_register.py`` carries per-composite registration
 metadata; ``_read.py`` / ``_board.py`` / ``_sub_issues.py`` carry handler
 implementations; ``_repos.py`` carries the repository write;
-``_graphql.py`` carries the shared GraphQL transport helper;
+``_issues.py`` carries the issue search, read, file and comment
+handlers; ``_graphql.py`` carries the shared GraphQL transport helper;
 ``schemas.py`` carries the JSON Schema 2020-12 parameter + response
 contracts.
 
-Scope (10 composites): ``gh.composite.pr_status_summary`` (T4 #1224,
+Scope (14 composites): ``gh.composite.pr_status_summary`` (T4 #1224,
 read); ``gh.composite.repo_view`` (one repository, read);
 ``gh.composite.repo_create`` (one repository in an organization, write,
 waits for approval); and the #2081
@@ -36,7 +37,10 @@ the #2081 set makes a board-complete ticket filable through MEHO without
 a ``gh`` CLI fallback. The ``git`` group (``gh.composite.git_ref_view``,
 ``gh.composite.git_tree_view``, ``gh.composite.branch_commit_files``)
 reads a branch and a file tree and commits files to a branch in one
-approved step; see :mod:`._git`.
+approved step; see :mod:`._git`. The four issue composites
+(``gh.composite.issue_search``, ``issue_view``, ``issue_create``,
+``issue_comment``) search, read, file and comment on issues; see
+:mod:`._issues`.
 """
 
 from meho_backplane.connectors.github.composites._board import (
@@ -48,6 +52,12 @@ from meho_backplane.connectors.github.composites._git import (
     branch_commit_files_composite,
     git_ref_view_composite,
     git_tree_view_composite,
+)
+from meho_backplane.connectors.github.composites._issues import (
+    issue_comment_composite,
+    issue_create_composite,
+    issue_search_composite,
+    issue_view_composite,
 )
 from meho_backplane.connectors.github.composites._read import (
     pr_status_summary_composite,
@@ -77,6 +87,10 @@ __all__ = [
     "branch_commit_files_composite",
     "git_ref_view_composite",
     "git_tree_view_composite",
+    "issue_comment_composite",
+    "issue_create_composite",
+    "issue_search_composite",
+    "issue_view_composite",
     "pr_status_summary_composite",
     "project_item_add_composite",
     "project_item_set_field_composite",

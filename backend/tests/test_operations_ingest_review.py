@@ -48,7 +48,12 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
+from meho_backplane.db.models import (
+    AuditLog,
+    EndpointDescriptor,
+    OperationGroup,
+    OperationPolicyOverride,
+)
 from meho_backplane.operations._lookup import lookup_descriptor
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
@@ -451,8 +456,8 @@ async def _add_stored_write(
 async def test_review_payload_reports_stored_deletes_below_destructive() -> None:
     """#3827: stored deletes that an earlier ingest left too weak are listed with a fix.
 
-    Rows persisted before the parser and floor changes keep their old
-    posture until the next ingest. The review report shows every stored
+    Rows persisted before the parser change keep their old posture until
+    the next ingest. The review report shows every stored
     ingested delete-shaped row below ``destructive`` next to what a fresh
     ingest would assign, and flags the rows that are weaker than that.
     """
@@ -462,13 +467,6 @@ async def test_review_payload_reports_stored_deletes_below_destructive() -> None
     await _add_stored_write(
         tenant_id=tenant_id,
         op_id="DELETE:/api/cis/tagging/category/{category_id}",
-        safety_level="caution",
-        requires_approval=False,
-    )
-    # A tag detach stored at caution: a POST the floor now treats as a removal.
-    await _add_stored_write(
-        tenant_id=tenant_id,
-        op_id="POST:/api/cis/tagging/tag-association?action=detach",
         safety_level="caution",
         requires_approval=False,
     )
@@ -509,22 +507,15 @@ async def test_review_payload_reports_stored_deletes_below_destructive() -> None
         "DELETE:/api/cis/tagging/category/{category_id}",
         "DELETE:/vcenter/datastore/{datastore}",
         "DELETE:/vcenter/folder/{folder}",
-        "POST:/api/cis/tagging/tag-association?action=detach",
     ]
-    assert payload.delete_ops_needing_correction_count == 3
+    assert payload.delete_ops_needing_correction_count == 2
 
     category = rows["DELETE:/api/cis/tagging/category/{category_id}"]
     assert category.safety_level == "caution"
     assert category.requires_approval is False
-    assert category.expected_safety_level == "destructive"
+    assert category.expected_safety_level == "dangerous"
     assert category.expected_requires_approval is True
     assert category.needs_correction is True
-    assert "a fresh ingest gives destructive" in category.reason
-
-    detach = rows["POST:/api/cis/tagging/tag-association?action=detach"]
-    assert detach.method == "POST"
-    assert detach.expected_safety_level == "destructive"
-    assert detach.needs_correction is True
 
     datastore = rows["DELETE:/vcenter/datastore/{datastore}"]
     assert datastore.expected_safety_level == "dangerous"
@@ -1125,9 +1116,14 @@ async def test_edit_op_updates_overrides_and_writes_audit() -> None:
         result = await session.execute(stmt)
         op_row = result.scalar_one()
         assert op_row.custom_description == "A safer summary."
-        assert op_row.safety_level == "dangerous"
-        assert op_row.requires_approval is True
+        # #4711: risk level and approval are an override; the row keeps
+        # the classification.
+        assert op_row.safety_level == "safe"
+        assert op_row.requires_approval is False
         assert op_row.is_enabled is False
+        override = (await session.execute(select(OperationPolicyOverride))).scalar_one()
+        assert (override.tenant_id, override.op_id) == (tenant_id, target_op)
+        assert (override.safety_level, override.requires_approval) == ("dangerous", True)
 
     assert await _count_audit_rows(op_id="meho_connector_edit_op") == 1
     row = await _latest_audit_row(op_id="meho_connector_edit_op")
@@ -1137,6 +1133,12 @@ async def test_edit_op_updates_overrides_and_writes_audit() -> None:
         ["custom_description", "safety_level", "requires_approval", "is_enabled"],
     )
     assert payload["is_enabled_set_to"] is False
+    assert payload["changes"] == {
+        "safety_level": {"old": "safe", "new": "dangerous"},
+        "requires_approval": {"old": False, "new": True},
+        "is_enabled": {"old": False, "new": False},
+    }
+    assert payload["scope"] == "tenant"
 
 
 @pytest.mark.asyncio
@@ -2916,6 +2918,99 @@ async def test_group_advisory_prose_mismatch_checks_all_ops_when_none_enabled() 
     assert len(advisory.flags) == 1
     assert "read-only" in advisory.flags[0]
     assert "No op is enabled yet" in advisory.flags[0]
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_flags_approval_claim_without_all() -> None:
+    """Flag "Write operations are approval-required." when most changes run at once."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="Manage virtual machines. Write operations are approval-required.",
+        ops=[
+            ("GET:/vcenter/vm", "List virtual machines", "safe", False, True),
+            ("POST:/vcenter/vm", "Create a virtual machine", "caution", False, True),
+            ("PATCH:/vcenter/vm/{vm}", "Update a virtual machine", "caution", False, True),
+            ("DELETE:/vcenter/vm/{vm}", "Delete a virtual machine", "dangerous", True, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert advisory.flags == [
+        "The text says changes need approval, but 2 of 3 change op(s) do not."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_change_approval_claim_is_true_with_a_safe_read() -> None:
+    """The change claim is about the write only, so no flag."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="Manage virtual machines. Every change requires approval.",
+        ops=[
+            ("GET:/vcenter/vm", "List virtual machines", "safe", False, True),
+            ("POST:/vcenter/vm", "Create a virtual machine", "caution", True, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert advisory.flags == []
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_all_ops_approval_claim_is_false_with_a_safe_read() -> None:
+    """The all-ops claim counts the read, so it is flagged."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="Manage virtual machines. All operations are approval-required.",
+        ops=[
+            ("GET:/vcenter/vm", "List virtual machines", "safe", False, True),
+            ("POST:/vcenter/vm", "Create a virtual machine", "caution", True, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert advisory.flags == ["The text says all ops need approval, but 1 op(s) do not."]
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_approval_claim_that_names_reads_counts_the_read() -> None:
+    """A claim that names reads and writes is about the read too, so it is flagged."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="Manage virtual machines. All read and write operations require approval.",
+        ops=[
+            ("GET:/vcenter/vm", "List virtual machines", "safe", False, True),
+            ("POST:/vcenter/vm", "Create a virtual machine", "caution", True, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert advisory.flags == ["The text says all ops need approval, but 1 op(s) do not."]
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_all_approval_claim_is_flagged_once() -> None:
+    """An "all ... require approval" sentence gives one flag, not two."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="All virtual machine operations require approval.",
+        ops=[
+            ("POST:/vcenter/vm", "Create a virtual machine", "caution", False, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert advisory.flags == ["The text says all ops need approval, but 1 op(s) do not."]
 
 
 # ---------------------------------------------------------------------------

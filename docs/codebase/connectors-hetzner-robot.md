@@ -31,8 +31,8 @@ server to a vSwitch, or remove it, through MEHO. What changed:
 - Every Robot write now goes out as **form fields**, the only body format
   Robot reads (see "Form-encoded writes" below).
 - Every vSwitch write **waits for a human approval**, for every kind of
-  login. A standing grant cannot skip the wait (see "Approval for vSwitch
-  writes" below).
+  login. A standing grant cannot skip the wait, except on an instance in
+  sandbox mode (see "Approval for vSwitch writes" below).
 - The two vSwitch ops the spec described wrongly now say what they really
   do. `POST:/vswitch/{vswitch-id}` renames the vSwitch or changes its VLAN
   ID. `DELETE:/vswitch/{vswitch-id}` cancels the whole vSwitch. Both stay
@@ -164,7 +164,16 @@ lowered it with `meho connector edit-op`. What each login gets:
   agents.
 - **Service login:** waits for approval. A standing grant cannot skip the
   wait: the default grant patterns refuse `DELETE:*` and, since #3973,
-  `POST:/vswitch/*`.
+  `POST:/vswitch/*`. One exception: on an instance in sandbox mode, a
+  tenant admin can give a service login a delete grant in the web console,
+  and a delete grant can cover these writes (see
+  [Sandbox mode](service-principal-grants.md#sandbox-mode-4622)).
+- **Flight recorder:** it never stores the body of these writes. The flight
+  recorder (MEHO's stored record of each vendor request) skips the body of
+  every op on the same grant pattern list
+  (`redaction/flight_recorder/families.py` reads the same setting). So a
+  trace of an add, a remove or a rename has no server list or new name.
+  `preview_operation` still shows the server list before the call.
 - An approved change runs at most once: a second resume of the same approval
   returns `already_resumed` and sends nothing.
 - `preview_operation` shows `requires_approval: true`, the safety level, the
@@ -173,7 +182,8 @@ lowered it with `meho connector edit-op`. What each login gets:
 
 The rename and cancel ops stay switched off. Even if someone switches the
 cancel op on, it cannot wait for approval: a `destructive` op needs a
-blast-radius statement, and this ingested op has none, so the dispatcher
+statement of what else is affected (`blast_radius`), and this ingested op
+has none, so the dispatcher
 refuses it (`blast_radius_required`) before Robot is called.
 
 ### Webservice user
@@ -238,15 +248,23 @@ fills the `endpoint_descriptor` table. Because the Robot Webservice publishes
 no OpenAPI document, MEHO ships a hand-authored minimal spec as package data:
 
 - **`operations/ingest/specs/hetzner_robot_minimal.yaml`** — OpenAPI 3.0
-  covering list/get servers, vSwitch get + membership add/remove + rename +
-  cancel, per-server firewall get/set, reverse DNS, and the `server_addon`
-  order. The four vSwitch writes declare `application/x-www-form-urlencoded`
+  covering list/get servers, the IP, subnet, failover IP and SSH key lists,
+  vSwitch get + membership add/remove + rename + cancel, per-server firewall
+  get/set, reverse DNS, and the `server_addon` order. The four vSwitch writes declare `application/x-www-form-urlencoded`
   bodies and match the vendor reference (#3973; before that, the rename and
   cancel routes were described as membership add and remove). Each of these spec GET
-  op_ids (`GET:/server`, `GET:/server/{server-ip}`, `GET:/vswitch`,
-  `GET:/vswitch/{vswitch-id}`, `GET:/firewall/{server-ip}`, `GET:/rdns`) is
-  curated in `ROBOT_CORE_OPS`, so the ingested rows and the curated read core
-  agree on the same strings. `GET:/firewall/{server-ip}` was ingested from this
+  op_ids (`GET:/server`, `GET:/server/{server-ip}`, `GET:/ip`, `GET:/subnet`,
+  `GET:/vswitch`, `GET:/vswitch/{vswitch-id}`, `GET:/failover`,
+  `GET:/firewall/{server-ip}`, `GET:/rdns`, `GET:/key`) is curated in
+  `ROBOT_CORE_OPS`, so the ingested rows and the curated read core agree on
+  the same strings. The IP, subnet, failover and SSH key lists joined the
+  spec in #4963. Before that, an install that ingested only this spec could
+  not finish the curation: it switched on the curated groups, then stopped
+  at `GET:/ip` before it wrote the guidance of the later ops, the two
+  vSwitch writes included. Now `apply_robot_core_curation` first checks
+  that every curated op was ingested. If any is missing it raises
+  `RobotCoreOpsMissingError`, which names all of them, before it changes
+  anything. `GET:/firewall/{server-ip}` was ingested from this
   spec from the start but only joined the curated core in #2848; before that it
   was ingested-but-uncurated (`is_enabled=False`, no `llm_instructions`) and
   unreachable through `search_operations` / `call_operation`. (`GET:/rdns/{ip}`
@@ -284,10 +302,6 @@ no OpenAPI document, MEHO ships a hand-authored minimal spec as package data:
   add-ons) are manual by policy: a person does them in the Hetzner portal.
   The `server_addon` order in the spec stays off; its body uses `product`,
   but Robot wants `product_id`.
-- The curated reads `GET:/ip`, `GET:/subnet`, `GET:/failover` and `GET:/key`
-  are not in the shipped minimal spec, so an install that ingests only this
-  spec has no rows for them, and `apply_robot_core_curation` stops at the
-  first missing one.
 - Hetzner Cloud (the second Hetzner product): out of scope.
 
 ## References

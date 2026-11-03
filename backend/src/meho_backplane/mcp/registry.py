@@ -322,6 +322,30 @@ def _wire_safe_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in schema.items() if key not in _WIRE_FORBIDDEN_TOPLEVEL_KEYS}
 
 
+class ToolAnnotations(BaseModel):
+    """MCP tool hints (``Tool.annotations`` in the MCP 2025-06-18 schema).
+
+    Clients use these hints to decide whether to ask the user before a call.
+    For example, a client may run a tool with ``readOnlyHint=True`` without
+    asking. They are hints only: the spec says a client must not trust them
+    from an untrusted server, and MEHO's own role, grant and approval checks
+    stay in force whatever a tool declares. A field left ``None`` is not sent,
+    so the spec default applies (``readOnlyHint`` false, ``destructiveHint``
+    true, ``idempotentHint`` false, ``openWorldHint`` true).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    readOnlyHint: bool | None = None  # noqa: N815 — wire field is camelCase per MCP spec
+    destructiveHint: bool | None = None  # noqa: N815
+    idempotentHint: bool | None = None  # noqa: N815
+    openWorldHint: bool | None = None  # noqa: N815
+
+
+#: Hints for a tool that only reads and changes nothing (#4202).
+READ_ONLY: Final[ToolAnnotations] = ToolAnnotations(readOnlyHint=True)
+
+
 class ToolDefinition(BaseModel):
     """MCP tool definition + MEHO-internal RBAC metadata.
 
@@ -403,6 +427,12 @@ class ToolDefinition(BaseModel):
     hit) lists it here. The audit row is unaffected (it stores only the
     arguments' hash). Empty by default. MEHO-internal: dropped from the wire
     shape like the RBAC fields.
+
+    ``annotations`` (#4202) are the MCP tool hints, see
+    :class:`ToolAnnotations`. A tool that only reads passes
+    :data:`READ_ONLY`. ``meta`` is the MCP ``_meta`` object of the tool, for
+    keys a client reads (for example ``anthropic/requiresUserInteraction``).
+    Both are sent on the wire only when set.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -419,6 +449,8 @@ class ToolDefinition(BaseModel):
     required_capability: str | None = None
     required_addon_family: str | None = None
     broadcast_omit_args: frozenset[str] = frozenset()
+    annotations: ToolAnnotations | None = None
+    meta: dict[str, Any] | None = None
 
     @field_validator("feature")
     @classmethod
@@ -443,7 +475,8 @@ class ToolDefinition(BaseModel):
         """Serialise to the MCP wire shape, dropping MEHO-internal fields.
 
         Spec fields kept: ``name``, ``description``, ``inputSchema``,
-        optional ``title`` / ``outputSchema``. MEHO fields dropped:
+        optional ``title`` / ``outputSchema`` / ``annotations`` / ``_meta``
+        (the last from :attr:`meta`). MEHO fields dropped:
         ``required_role``, ``op_class``, ``required_capability``,
         ``surface``, ``required_addon_family``. The drop is deliberate —
         clients don't need server-side RBAC / capability / surface /
@@ -467,6 +500,10 @@ class ToolDefinition(BaseModel):
             out["title"] = self.title
         if self.outputSchema is not None:
             out["outputSchema"] = self.outputSchema
+        if self.annotations is not None:
+            out["annotations"] = self.annotations.model_dump(exclude_none=True)
+        if self.meta is not None:
+            out["_meta"] = self.meta
         return out
 
 

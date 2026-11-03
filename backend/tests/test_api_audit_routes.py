@@ -213,6 +213,7 @@ def _make_entry(
         work_ref=None,
         policy_decision=policy_decision,
         event_class="legacy_request",
+        sandbox_mode=False,
         broadcast_event_id=None,
     )
 

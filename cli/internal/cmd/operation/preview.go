@@ -138,7 +138,8 @@ func newPreviewCmd() *cobra.Command {
 			"approval request.\n\n" +
 			"Every other preview whose op resolved also says the risk level and what " +
 			"MEHO would do with this call for you and this target: run it at " +
-			"once, wait for a second person's approval, or refuse it. The " +
+			"once, wait for approval, or refuse it. For a dangerous or " +
+			"destructive call it adds that a second person must approve. The " +
 			"decision is made the same way `meho operation call` makes it, but " +
 			"nothing is written. With --json the fields are `safety_level`, " +
 			"`requires_approval`, `policy_verdict` and `policy_reason`.",
@@ -330,10 +331,10 @@ func printPreviewResult(w io.Writer, connectorID, opID string, r *PreviewResult)
 
 // policyLine is the one plain line that says the risk level and what MEHO
 // would do with this call (#4923): "Risk level: dangerous. This call waits
-// for approval." It is empty when the backplane sent no risk level (the op
-// did not resolve, or an older backplane). Without a policy_verdict (an
-// older backplane that only sent requires_approval, #3973) the line falls
-// back to the approval flag.
+// for approval. A second person must approve it." It is empty when the
+// backplane sent no risk level (the op did not resolve, or an older
+// backplane). Without a policy_verdict (an older backplane that only sent
+// requires_approval, #3973) the line falls back to the approval flag.
 func policyLine(r *PreviewResult) string {
 	if r.SafetyLevel == "" {
 		return ""
@@ -343,7 +344,7 @@ func policyLine(r *PreviewResult) string {
 	case "auto-execute":
 		return line + " This call runs at once."
 	case "needs-approval":
-		return line + " This call waits for approval."
+		return line + waitsForApproval(r.SafetyLevel)
 	case "deny":
 		if r.PolicyReason != nil && *r.PolicyReason != "" {
 			return line + " This call is refused: " + *r.PolicyReason
@@ -351,9 +352,22 @@ func policyLine(r *PreviewResult) string {
 		return line + " This call is refused."
 	}
 	if r.RequiresApproval != nil && *r.RequiresApproval {
-		return line + " This call waits for approval."
+		return line + waitsForApproval(r.SafetyLevel)
 	}
 	return line
+}
+
+// waitsForApproval says that the call waits for approval, and adds that a
+// second person must approve only where that is always true (#4963). The
+// requester can never approve a dangerous or destructive call. At a lower
+// risk level the requester may approve their own call when self-approval
+// is turned on (APPROVAL_ALLOW_SELF_APPROVAL), so the line does not say it.
+func waitsForApproval(safetyLevel string) string {
+	switch safetyLevel {
+	case "dangerous", "destructive":
+		return " This call waits for approval. A second person must approve it."
+	}
+	return " This call waits for approval."
 }
 
 // printPrettyOrRaw pretty-prints a JSON fragment, falling back to the

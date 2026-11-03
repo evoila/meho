@@ -35,6 +35,13 @@ type BootstrapOptions struct {
 	// CLI's auth-config discovery resolves it.
 	CLIClientID string
 
+	// CLIApproveClientID is the public client of the fresh browser
+	// sign-in of `meho approvals approve` (#5515); defaults to
+	// "meho-cli-approve". Must match the chart's
+	// keycloakCliApproveClientId: only a token made for this client can
+	// approve on the command line or REST.
+	CLIApproveClientID string
+
 	// MCPClientID is the public authorization-code+PKCE client name
 	// used by browser-flow MCP clients — the mcp-remote stdio shim
 	// (Claude Desktop), MCP Inspector, and Claude Code / Cursor
@@ -51,13 +58,24 @@ type BootstrapOptions struct {
 	// slash form the backplane normalises to.
 	MCPResourceURI string
 
-	// TenantID is the tenant UUID written as the `tenant_id` attribute
-	// on the five MEHO role groups (see roleGroups). One site has one
-	// tenant for now.
+	// TenantID is the first tenant's UUID, written as the `tenant_id`
+	// attribute on the five MEHO role groups (see roleGroups).
 	TenantID string
 
+	// TenantName is the first tenant's short name (default "main"). The
+	// five role groups carry it in `meho_tenant`.
+	TenantName string
+
+	// AddTenantName / AddTenantID add one more tenant: its five groups
+	// `MEHO-<name>-<Role>` (see extraTenantGroups). Empty name = no extra
+	// tenant. Empty id = reuse the id the groups already carry, else make
+	// a new UUID.
+	AddTenantName string
+	AddTenantID   string
+
 	// AdminUserUsername / AdminUserEmail / AdminUserPassword provision
-	// the first admin user and put it in MEHO-Admins. When
+	// the first admin user and put it in MEHO-Admins and
+	// MEHO-Platform-Admins. When
 	// SkipUserProvisioning is true the user step is skipped (people come
 	// from a directory or another login system). The five groups are
 	// created either way: they carry the tenant and the role.
@@ -74,19 +92,16 @@ type BootstrapOptions struct {
 	MCPRedirectURIs []string
 	MCPWebOrigins   []string
 
-	// CLIOfflineSessionIdleSeconds opts the device-code CLI client into
-	// the long-lived offline-token path (#2902). When > 0, bootstrap
-	// assigns the realm-built-in `offline_access` scope to the CLI
-	// client as an *optional* scope (so `meho login --offline` can mint
-	// a refresh token that survives the SSO idle timeout) and sets the
-	// per-client `client.offline.session.idle.timeout` attribute to
-	// this many seconds, bounding how long an unused offline token
-	// stays valid. Zero (the default) preserves the historical posture:
-	// no offline_access on the CLI client at all — a stolen device-code
-	// refresh token has worse blast-radius than re-running the device
-	// dance, so the offline path is strictly opt-in and off by default.
-	// Mirrors the opt-in shape #912 gave the MCP client, bounded for
-	// CLI use.
+	// CLIOfflineSessionIdleSeconds gives the device-code CLI client a
+	// long login. When > 0, bootstrap assigns the realm-built-in
+	// `offline_access` scope to the CLI client as an *optional* scope
+	// (so `meho login` can get a refresh token that outlives the SSO
+	// idle timeout) and sets the per-client
+	// `client.offline.session.idle.timeout` attribute to this many
+	// seconds, which bounds how long an unused login stays valid. Zero
+	// removes offline_access and the idle limit from the CLI client,
+	// also when an earlier run assigned them. The `--cli-offline-access`
+	// flag defaults to 48h; `=0` turns it off.
 	CLIOfflineSessionIdleSeconds int
 
 	// MCPOfflineSessionIdleSeconds sets the per-client
@@ -120,6 +135,9 @@ func (o BootstrapOptions) withDefaults() BootstrapOptions {
 	if o.CLIClientID == "" {
 		o.CLIClientID = "meho-cli"
 	}
+	if o.CLIApproveClientID == "" {
+		o.CLIApproveClientID = "meho-cli-approve"
+	}
 	if o.MCPClientID == "" {
 		o.MCPClientID = "meho-mcp"
 	}
@@ -128,6 +146,9 @@ func (o BootstrapOptions) withDefaults() BootstrapOptions {
 	}
 	if o.TenantID == "" {
 		o.TenantID = "00000000-0000-0000-0000-000000000000"
+	}
+	if o.TenantName == "" {
+		o.TenantName = defaultTenantName
 	}
 	if o.MCPOfflineSessionIdleSeconds == 0 {
 		o.MCPOfflineSessionIdleSeconds = defaultMCPOfflineSessionIdleSeconds
@@ -181,7 +202,8 @@ func (o BootstrapOptions) validate() error {
 				"(MEHO normalises MCP_RESOURCE_URI server-side; the " +
 				"audience claim in the token must match the no-slash form)")
 	}
-	if o.CLIClientID == "meho-backplane" || o.MCPClientID == "meho-backplane" {
+	if o.CLIClientID == "meho-backplane" || o.MCPClientID == "meho-backplane" ||
+		o.CLIApproveClientID == "meho-backplane" {
 		return errors.New(
 			"refusing to provision a client named meho-backplane: " +
 				"that is the realm's confidential resource-server " +
@@ -205,16 +227,15 @@ func (o BootstrapOptions) validate() error {
 	}
 	if o.CLIOfflineSessionIdleSeconds < 0 {
 		return errors.New(
-			"--cli-offline-access seconds must be a positive number of " +
-				"seconds (omit the flag to leave the CLI client " +
-				"offline-token-free)")
+			"--cli-offline-access must be a positive number of " +
+				"seconds, or 0 to turn the long CLI login off")
 	}
 	if o.MCPOfflineSessionIdleSeconds < 0 {
 		return errors.New(
 			"--mcp-offline-session-idle must be a positive number of " +
 				"seconds (omit the flag to use the 48h default)")
 	}
-	return nil
+	return o.validateTenants()
 }
 
 // roleGroup is one of the five MEHO role groups. A person is in exactly
@@ -222,6 +243,7 @@ func (o BootstrapOptions) validate() error {
 // role: the User Attribute mappers below read them into the token.
 type roleGroup struct {
 	Name       string
+	Role       string // the role part of the name and of `meho_tenant`
 	TenantRole string
 	Approver   bool
 }
@@ -232,24 +254,30 @@ const adminGroupName = "MEHO-Admins"
 // roleGroups are the five MEHO role groups, see
 // docs/decisions/login-role-groups.md.
 var roleGroups = []roleGroup{
-	{Name: "MEHO-Readers", TenantRole: "read_only"},
-	{Name: "MEHO-Operators", TenantRole: "operator"},
-	{Name: "MEHO-SA-Operators", TenantRole: "operator"},
-	{Name: adminGroupName, TenantRole: "tenant_admin"},
-	{Name: "MEHO-Approvers", TenantRole: "read_only", Approver: true},
+	{Name: "MEHO-Readers", Role: "Readers", TenantRole: "read_only"},
+	{Name: "MEHO-Operators", Role: "Operators", TenantRole: "operator"},
+	{Name: "MEHO-SA-Operators", Role: "SA-Operators", TenantRole: "operator"},
+	{Name: adminGroupName, Role: "Admins", TenantRole: "tenant_admin"},
+	{Name: "MEHO-Approvers", Role: "Approvers", TenantRole: "read_only", Approver: true},
 }
 
-// roleGroupAttributeKeys are the group attributes this command owns.
+// roleGroupAttributeKeys are the role-group attributes this command owns.
 // It sets them on every run and leaves every other attribute alone.
-var roleGroupAttributeKeys = []string{"tenant_id", "tenant_role", "approver"}
+var roleGroupAttributeKeys = []string{"tenant_id", "tenant_role", "approver", "meho_tenant"}
+
+// attributeDisplayOrder fixes the order of attributes in progress lines.
+var attributeDisplayOrder = append(slices.Clone(roleGroupAttributeKeys), "platform_admin")
 
 // desiredAttributes returns the attributes the command owns on g.
 // `approver` is set only on MEHO-Approvers; on the other groups it must
-// be absent.
-func (g roleGroup) desiredAttributes(tenantID string) map[string][]string {
+// be absent. `tenant_id` keeps the text of --tenant-id as given, since
+// the `tenant_id` claim must stay as it was; `meho_tenant` takes the
+// UUID's standard form, so its three colon-separated parts hold.
+func (g roleGroup) desiredAttributes(tenantID, tenantName string) map[string][]string {
 	attrs := map[string][]string{
 		"tenant_id":   {tenantID},
 		"tenant_role": {g.TenantRole},
+		"meho_tenant": {mehoTenantValue(standardUUID(tenantID), tenantName, g.Role)},
 	}
 	if g.Approver {
 		attrs["approver"] = []string{"true"}
@@ -281,7 +309,7 @@ func userAttributeMapper(mapperName, name, jsonType string) protocolMapperRep {
 	}
 }
 
-// desiredMappers returns the six protocol mappers the recipe pins on
+// desiredMappers returns the eight protocol mappers the recipe pins on
 // both public clients. Mappers are matched by name, so a re-run updates
 // them in place. The names `tenant-id` and `tenant-role` are kept from
 // the older fixed-value mappers: a run on an older realm turns those
@@ -320,6 +348,8 @@ func (o BootstrapOptions) desiredMappers() []protocolMapperRep {
 		userAttributeMapper("tenant-id", "tenant_id", "String"),
 		userAttributeMapper("tenant-role", "tenant_role", "String"),
 		userAttributeMapper("approver", "approver", "boolean"),
+		userAttributeMapper("platform-admin", "platform_admin", "boolean"),
+		tenantsMapper(),
 		{
 			Name:           "groups-claim",
 			Protocol:       "openid-connect",
@@ -390,15 +420,11 @@ func mcpClientScopes() []clientScopeRep {
 // `offline_access` in their scope parameter should mint a refresh
 // token. Listing it as a default would mint refresh tokens into every
 // browser-flow login regardless of whether the client asked for one.
-// The CLI device-code client (`meho-cli`) gets `offline_access` only
-// when a deployment opts in via
-// BootstrapOptions.CLIOfflineSessionIdleSeconds (the
-// `--cli-offline-access` flag) — off by default, and paired with a
-// tight per-client offline-session idle timeout when on (#2902). A
-// stolen device-code refresh token has worse blast-radius than a fresh
-// dance prompt, so the offline path stays opt-in and bounded rather
-// than the always-on default; see requiredCLIOptionalScopes and
-// desiredCLIClient.
+// The CLI device-code client (`meho-cli`) gets `offline_access` when
+// BootstrapOptions.CLIOfflineSessionIdleSeconds is > 0 (the
+// `--cli-offline-access` flag, 48h by default), always paired with a
+// per-client offline-session idle timeout; see
+// requiredCLIOptionalScopes and desiredCLIClient.
 func requiredMCPOptionalScopes() []string {
 	scopes := []string{"offline_access"}
 	for _, s := range mcpClientScopes() {
@@ -408,28 +434,47 @@ func requiredMCPOptionalScopes() []string {
 }
 
 // requiredCLIOptionalScopes returns the optional client-scopes pinned
-// on the device-code CLI client. Empty unless the deployment opted
-// into the offline-token path (CLIOfflineSessionIdleSeconds > 0), in
-// which case it is the realm-built-in `offline_access` scope — the
-// same opt-in shape #912 gave the MCP client, but off by default for
-// the CLI and paired with a bounded offline-session idle timeout (see
-// desiredCLIClient). Optional, never default: a refresh token is
-// minted only when `meho login --offline` explicitly requests it.
+// on the device-code CLI client: the realm-built-in `offline_access`
+// scope when CLIOfflineSessionIdleSeconds > 0, paired with a bounded
+// offline-session idle timeout (see desiredCLIClient), else none.
+// Optional, never default: a refresh token that outlives the SSO idle
+// timeout is minted only when `meho login` asks for `offline_access`
+// (it does by default; `--offline=false` stops it).
 func (o BootstrapOptions) requiredCLIOptionalScopes() []string {
 	if o.CLIOfflineSessionIdleSeconds > 0 {
-		return []string{"offline_access"}
+		return append([]string{}, cliOfflineScopes...)
 	}
 	return nil
 }
+
+// cliOfflineScopes are the optional scopes that make up the long CLI
+// login. `--cli-offline-access=0` removes them from the CLI client.
+var cliOfflineScopes = []string{"offline_access"}
 
 // boolPtr / strSlice are tiny helpers to make the desired-client
 // builders readable.
 func boolPtr(b bool) *bool { return &b }
 
+// cliRedirectURIs are the loopback callbacks of the CLI's fresh
+// browser sign-in for an approval (#3979, RFC 8252 §7.3). The CLI
+// listens on 127.0.0.1 with a random port, so the port is a wildcard.
+// localhost is not listed: the CLI uses the IP literal only.
+var cliRedirectURIs = []string{"http://127.0.0.1:*"}
+
 // desiredCLIClient builds the ClientRepresentation for the public
 // device-code client. Mirrors the reference shell script verbatim
 // (including the "Description" string pattern so re-runs against a
-// shell-script-created client don't churn the field).
+// shell-script-created client don't churn the field). Keycloak stores
+// the description in a 255-character column; a longer one fails the
+// create with HTTP 500.
+//
+// The standard (browser) flow is on with loopback redirect URIs only:
+// older CLI versions use it for the fresh sign-in an approval needs
+// (#3979). `meho login` uses the device flow, and it sends no PKCE.
+// Keycloak checks PKCE at the device login the same way as at the
+// browser sign-in, so a required PKCE method would refuse every
+// `meho login`. The client therefore requires no PKCE method; a
+// sign-in that sends a challenge is still accepted.
 func (o BootstrapOptions) desiredCLIClient() *clientRep {
 	c := &clientRep{
 		ClientID:                  o.CLIClientID,
@@ -437,24 +482,26 @@ func (o BootstrapOptions) desiredCLIClient() *clientRep {
 		Description:               "Public OAuth client for RFC 8628 device-code flow used by `meho login` and any MCP-OAuth-2.1 client targeting <backplane-url>/mcp. Audience-mapped to " + o.BackplaneAudience + ". Provisioned by `meho admin keycloak bootstrap-clients` (#791).",
 		Enabled:                   boolPtr(true),
 		PublicClient:              boolPtr(true),
-		StandardFlowEnabled:       boolPtr(false),
+		StandardFlowEnabled:       boolPtr(true),
 		ImplicitFlowEnabled:       boolPtr(false),
 		DirectAccessGrantsEnabled: boolPtr(false),
 		ServiceAccountsEnabled:    boolPtr(false),
 		FrontchannelLogout:        boolPtr(false),
 		Attributes: map[string]string{
+			// An empty value makes Keycloak drop a PKCE method that an
+			// earlier run (0.40.0, 0.41.0) set on this client.
+			"pkce.code.challenge.method":                  "",
 			"oauth2.device.authorization.grant.enabled":   "true",
 			"use.refresh.tokens":                          "true",
 			"client.use.lightweight.access.token.enabled": "false",
 		},
-		RedirectURIs:        []string{},
+		RedirectURIs:        append([]string{}, cliRedirectURIs...),
 		WebOrigins:          []string{},
 		DefaultClientScopes: append([]string{"profile", "email"}, requiredDefaultScopes()...),
 	}
-	// Opt-in offline-token path (#2902): assign offline_access as an
-	// OPTIONAL scope on the CLI client and bound the per-client
-	// offline-session idle timeout. Off by default — see
-	// requiredCLIOptionalScopes. The actual scope assignment is done by
+	// Long CLI login: assign offline_access as an OPTIONAL scope on the
+	// CLI client and bound the per-client offline-session idle timeout.
+	// On by default through the flag — see requiredCLIOptionalScopes. The actual scope assignment is done by
 	// reconcileOptionalScopes in Bootstrap; setting the field here keeps
 	// the representation consistent with a subsequent GET/PUT.
 	if scopes := o.requiredCLIOptionalScopes(); len(scopes) > 0 {
@@ -465,8 +512,61 @@ func (o BootstrapOptions) desiredCLIClient() *clientRep {
 		// realm value stays the upper bound.
 		c.Attributes["client.offline.session.idle.timeout"] =
 			strconv.Itoa(o.CLIOfflineSessionIdleSeconds)
+	} else {
+		// An empty value makes Keycloak drop the attribute on update,
+		// so a limit set by an earlier run does not stay behind.
+		c.Attributes["client.offline.session.idle.timeout"] = ""
 	}
 	return c
+}
+
+// desiredApproveMappers returns the mappers of the approval client: the
+// mappers of desiredMappers without `meho-mcp-audience`. The token of
+// an approval sign-in is only for the approve call, not for /mcp.
+func (o BootstrapOptions) desiredApproveMappers() []protocolMapperRep {
+	var mappers []protocolMapperRep
+	for _, m := range o.desiredMappers() {
+		if m.Name != "meho-mcp-audience" {
+			mappers = append(mappers, m)
+		}
+	}
+	return mappers
+}
+
+// approvalTokenLifespan is how long, in seconds, the access token of the
+// approval sign-in lasts: the default approval window of 15 minutes.
+const approvalTokenLifespan = "900"
+
+// desiredCLIApproveClient builds the ClientRepresentation for the public
+// client of the approval sign-in (#5515): browser sign-in with PKCE on a
+// 127.0.0.1 loopback redirect only, no device flow and no
+// offline_access, no refresh token. MEHO accepts an approve on the
+// command line or REST only with a token made for this client.
+func (o BootstrapOptions) desiredCLIApproveClient() *clientRep {
+	return &clientRep{
+		ClientID:                  o.CLIApproveClientID,
+		Name:                      "MEHO CLI approvals",
+		Description:               "Public client for the fresh browser sign-in of `meho approvals approve` (loopback, PKCE). Only its tokens can approve on the command line or REST. Provisioned by `meho admin keycloak bootstrap-clients`.",
+		Enabled:                   boolPtr(true),
+		PublicClient:              boolPtr(true),
+		StandardFlowEnabled:       boolPtr(true),
+		ImplicitFlowEnabled:       boolPtr(false),
+		DirectAccessGrantsEnabled: boolPtr(false),
+		ServiceAccountsEnabled:    boolPtr(false),
+		FrontchannelLogout:        boolPtr(false),
+		Attributes: map[string]string{
+			"pkce.code.challenge.method":                "S256",
+			"oauth2.device.authorization.grant.enabled": "false",
+			// No refresh token: the access token from the sign-in is the
+			// only one. It lasts as long as the approval window.
+			"use.refresh.tokens":                          "false",
+			"access.token.lifespan":                       approvalTokenLifespan,
+			"client.use.lightweight.access.token.enabled": "false",
+		},
+		RedirectURIs:        append([]string{}, cliRedirectURIs...),
+		WebOrigins:          []string{},
+		DefaultClientScopes: append([]string{"profile", "email"}, requiredDefaultScopes()...),
+	}
 }
 
 // desiredMCPClient builds the ClientRepresentation for the public
@@ -505,13 +605,19 @@ func (o BootstrapOptions) desiredMCPClient() *clientRep {
 // Used by the cobra command to print the "set these in your chart"
 // summary, and by tests for assertions.
 type Result struct {
-	CLIClientID      string // clientId (not UUID) of the device-code client
-	CLIClientUUID    string // internal UUID, useful for downstream debugging
-	MCPClientID      string // clientId of the MCP browser-flow client
-	MCPClientUUID    string
-	AdminGroupUUID   string // UUID of MEHO-Admins
-	AdminUserCreated bool
-	AdminUserJoined  bool // this run added the user to MEHO-Admins
+	CLIClientID       string // clientId (not UUID) of the device-code client
+	CLIClientUUID     string // internal UUID, useful for downstream debugging
+	ApproveClientID   string // clientId of the approval sign-in client
+	ApproveClientUUID string
+	MCPClientID       string // clientId of the MCP browser-flow client
+	MCPClientUUID     string
+	AdminGroupUUID    string // UUID of MEHO-Admins
+	AdminUserCreated  bool
+	AdminUserJoined   bool // this run added the user to MEHO-Admins or MEHO-Platform-Admins
+	// AddedTenantID is the id of the --add-tenant tenant; AddedTenantIDNew
+	// is true when this run made it.
+	AddedTenantID    string
+	AddedTenantIDNew bool
 	AdminUserUUID    string
 	MapperEventsLog  []string // human-readable bullet list (one line per client / mapper / scope / group event)
 	ConfigKeysToSet  []string // chart values + env vars the operator must set
@@ -521,22 +627,28 @@ type Result struct {
 // idempotently reconciles the realm against the recipe shape:
 //
 //  1. Public CLI device-code client (`meho-cli`)
-//  2. 6 protocol mappers: two audiences, the groups claim, and three
-//     User Attribute mappers (tenant_id, tenant_role, approver)
+//  2. 8 protocol mappers: two audiences, the groups claim, four
+//     User Attribute mappers (tenant_id, tenant_role, approver,
+//     platform_admin) and meho-tenants (the meho_tenants list)
 //  3. 4 default client scopes (basic / roles / web-origins / acr)
+//     3a. Public approval sign-in client (`meho-cli-approve`, #5515) with
+//     the same mappers minus `meho-mcp-audience` and the same 4 default
+//     scopes, bound to its own login flow `meho approval sign-in`
+//     (password form, then the one-time code when the person has one;
+//     made when missing)
 //  4. Public MCP browser-flow client (`meho-mcp`)
-//  5. Same 6 mappers + 4 default scopes on the MCP client, **plus**
+//  5. Same 8 mappers + 4 default scopes on the MCP client, **plus**
 //     `offline_access`, `mcp:read`, `mcp:execute` and `mcp:admin` as
 //     *optional* client scopes (the three `mcp:*` scopes are created in
 //     the realm first if missing). The CLI
-//     device-code client gets the same optional scope only when a
-//     deployment opts in via --cli-offline-access (off by default,
-//     #2902); see RDC Wall W7 in deploy/values-examples/README.md.
+//     device-code client gets `offline_access` too, with a 48h idle
+//     limit, unless --cli-offline-access=0, which removes the scope.
 //     The MCP client also gets `client.offline.session.idle.timeout`
 //     (48h unless --mcp-offline-session-idle says otherwise).
-//  6. The five MEHO role groups with their attributes (roleGroups)
-//  7. Admin user, set password, join MEHO-Admins (skipped with
-//     SkipUserProvisioning)
+//  6. The five MEHO role groups with their attributes (roleGroups),
+//     MEHO-Platform-Admins, and the five groups of --add-tenant
+//  7. Admin user, set password, join MEHO-Admins and
+//     MEHO-Platform-Admins (skipped with SkipUserProvisioning)
 //
 // The operator-facing progress output (one line per step + a final
 // summary block) goes to opts.Out / opts.Err.
@@ -608,10 +720,10 @@ func Bootstrap(
 		return nil, fmt.Errorf("reconcile CLI default scopes: %w", err)
 	}
 	res.MapperEventsLog = append(res.MapperEventsLog, scopeEvents...)
-	// Opt-in only (#2902): the CLI client gets offline_access as an
-	// optional scope solely when a deployment set --cli-offline-access.
-	// When off (the default) this call is skipped entirely, so the
-	// default provisioning path makes no extra Keycloak API calls.
+	// The CLI client gets offline_access as an optional scope unless
+	// --cli-offline-access=0. With =0 an assignment left by an earlier
+	// run is removed: a client PUT never changes scope assignments, so
+	// the opt-out needs its own call.
 	if cliOptional := opts.requiredCLIOptionalScopes(); len(cliOptional) > 0 {
 		cliOptionalEvents, oerr := reconcileOptionalScopes(
 			ctx, c, cliUUID, cliOptional)
@@ -619,7 +731,46 @@ func Bootstrap(
 			return nil, fmt.Errorf("reconcile CLI optional scopes: %w", oerr)
 		}
 		res.MapperEventsLog = append(res.MapperEventsLog, cliOptionalEvents...)
+	} else {
+		cliRemovedEvents, oerr := removeOptionalScopes(
+			ctx, c, cliUUID, cliOfflineScopes)
+		if oerr != nil {
+			return nil, fmt.Errorf("remove CLI optional scopes: %w", oerr)
+		}
+		res.MapperEventsLog = append(res.MapperEventsLog, cliRemovedEvents...)
 	}
+
+	// --- Approval sign-in client (#5515) ------------------------------------
+
+	flowID, flowEvents, err := reconcileApprovalFlow(ctx, c)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile login flow %q: %w", approvalFlowAlias, err)
+	}
+	res.MapperEventsLog = append(res.MapperEventsLog, flowEvents...)
+	desiredApprove := opts.desiredCLIApproveClient()
+	if flowID != "" {
+		desiredApprove.AuthenticationFlowBindingOverrides = map[string]string{"browser": flowID}
+	}
+	approveUUID, approveEvents, err := reconcileClient(ctx, c, desiredApprove)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"reconcile approval client %q: %w", opts.CLIApproveClientID, err)
+	}
+	res.ApproveClientID = opts.CLIApproveClientID
+	res.ApproveClientUUID = approveUUID
+	res.MapperEventsLog = append(res.MapperEventsLog, approveEvents...)
+	approveMapperEvents, err := reconcileMappers(
+		ctx, c, approveUUID, opts.desiredApproveMappers())
+	if err != nil {
+		return nil, fmt.Errorf("reconcile approval client mappers: %w", err)
+	}
+	res.MapperEventsLog = append(res.MapperEventsLog, approveMapperEvents...)
+	approveScopeEvents, err := reconcileDefaultScopes(
+		ctx, c, approveUUID, requiredDefaultScopes())
+	if err != nil {
+		return nil, fmt.Errorf("reconcile approval client default scopes: %w", err)
+	}
+	res.MapperEventsLog = append(res.MapperEventsLog, approveScopeEvents...)
 
 	// --- MCP browser-flow client --------------------------------------------
 
@@ -659,7 +810,16 @@ func Bootstrap(
 
 	// --- Role groups + first admin user ------------------------------------
 
-	groupUUIDs, groupEvents, err := reconcileRoleGroups(ctx, c, opts.TenantID)
+	specs := append(opts.firstTenantGroups(), platformAdminGroup())
+	if opts.AddTenantName != "" {
+		id, isNew, ierr := resolveAddTenantID(ctx, c, opts)
+		if ierr != nil {
+			return nil, ierr
+		}
+		res.AddedTenantID, res.AddedTenantIDNew = id, isNew
+		specs = append(specs, extraTenantGroups(id, opts.AddTenantName)...)
+	}
+	groupUUIDs, groupEvents, err := reconcileGroups(ctx, c, specs)
 	if err != nil {
 		return nil, err
 	}
@@ -673,7 +833,8 @@ func Bootstrap(
 				Email:         opts.AdminUserEmail,
 				Enabled:       boolPtr(true),
 				EmailVerified: boolPtr(true),
-			}, opts.AdminUserPassword, res.AdminGroupUUID,
+			}, opts.AdminUserPassword,
+			[]string{res.AdminGroupUUID, groupUUIDs[platformAdminGroupName]},
 		)
 		if uerr != nil {
 			return nil, fmt.Errorf(
@@ -699,17 +860,31 @@ func dryRunSummary(
 	fmt.Fprintf(out, "==> would provision against %s realm=%s\n",
 		opts.KeycloakBaseURL, opts.Realm)
 	fmt.Fprintf(out, "==> CLI device-code client: %s\n", opts.CLIClientID)
+	fmt.Fprintf(out, "==> approval sign-in client: %s (the mappers below "+
+		"without meho-mcp-audience; no device flow, no offline_access)\n",
+		opts.CLIApproveClientID)
+	fmt.Fprintf(out, "==> login flow of the approval sign-in client: %q "+
+		"(always asks for the password; made if missing)\n", approvalFlowAlias)
 	fmt.Fprintf(out, "==> MCP browser-flow client: %s\n", opts.MCPClientID)
-	fmt.Fprintln(out, "==> protocol mappers (each on both clients):")
+	fmt.Fprintln(out, "==> protocol mappers (each on the CLI and MCP clients):")
 	for _, m := range opts.desiredMappers() {
 		fmt.Fprintf(out, "    - %s (%s)\n", m.Name, m.ProtocolMapper)
 	}
-	fmt.Fprintln(out, "==> role groups (top-level, with attributes):")
-	for _, g := range roleGroups {
-		fmt.Fprintf(out, "    - %s: %s\n",
-			g.Name, formatAttributes(g.desiredAttributes(opts.TenantID)))
+	fmt.Fprintln(out, "==> groups (top-level, with attributes):")
+	specs := append(opts.firstTenantGroups(), platformAdminGroup())
+	if opts.AddTenantName != "" {
+		id := standardUUID(opts.AddTenantID)
+		if id == "" {
+			id = "<id>"
+			fmt.Fprintf(out, "==> tenant %s: <id> is the id its groups "+
+				"already carry, or a new UUID\n", opts.AddTenantName)
+		}
+		specs = append(specs, extraTenantGroups(id, opts.AddTenantName)...)
 	}
-	fmt.Fprintln(out, "==> default client scopes (each on both clients):")
+	for _, s := range specs {
+		fmt.Fprintf(out, "    - %s: %s\n", s.Name, formatAttributes(s.Attrs))
+	}
+	fmt.Fprintln(out, "==> default client scopes (each on all three clients):")
 	for _, s := range requiredDefaultScopes() {
 		fmt.Fprintf(out, "    - %s\n", s)
 	}
@@ -727,23 +902,24 @@ func dryRunSummary(
 		opts.MCPOfflineSessionIdleSeconds)
 	if cliOptional := opts.requiredCLIOptionalScopes(); len(cliOptional) > 0 {
 		fmt.Fprintf(out, "==> optional client scopes on the CLI device-code "+
-			"client (--cli-offline-access opt-in; offline idle bound %ds):\n",
+			"client (offline idle bound %ds; --cli-offline-access=0 turns it off):\n",
 			opts.CLIOfflineSessionIdleSeconds)
 		for _, s := range cliOptional {
 			fmt.Fprintf(out, "    - %s\n", s)
 		}
 	} else {
-		fmt.Fprintln(out, "==> CLI device-code client: offline_access not "+
-			"assigned (opt in with --cli-offline-access)")
+		fmt.Fprintln(out, "==> CLI device-code client: offline_access "+
+			"removed when assigned (--cli-offline-access=0)")
 	}
 	if !opts.SkipUserProvisioning {
-		fmt.Fprintf(out, "==> admin user: %s (member of %s)\n",
-			opts.AdminUserUsername, adminGroupName)
+		fmt.Fprintf(out, "==> admin user: %s (member of %s and %s)\n",
+			opts.AdminUserUsername, adminGroupName, platformAdminGroupName)
 	} else {
 		fmt.Fprintln(out, "==> admin user skipped")
 	}
 	return &Result{
 		CLIClientID:     opts.CLIClientID,
+		ApproveClientID: opts.CLIApproveClientID,
 		MCPClientID:     opts.MCPClientID,
 		ConfigKeysToSet: buildConfigKeySummary(opts),
 	}, nil
@@ -997,18 +1173,54 @@ func reconcileOptionalScopes(
 	return events, nil
 }
 
-// reconcileRoleGroups makes sure the five MEHO role groups exist as
-// top-level groups with the attributes the command owns
-// (roleGroupAttributeKeys). A missing group is created; a group whose
-// owned attributes differ is updated. Other attributes on the group are
-// kept. Returns the group UUIDs by name plus one event line per group.
-func reconcileRoleGroups(
-	ctx context.Context, c *adminClient, tenantID string,
-) (map[string]string, []string, error) {
-	uuids := make(map[string]string, len(roleGroups))
+// removeOptionalScopes takes every named scope off the client's
+// optional scopes when it is assigned. The reverse of
+// reconcileOptionalScopes; used for `--cli-offline-access=0`, which
+// must undo an assignment an earlier run made.
+func removeOptionalScopes(
+	ctx context.Context, c *adminClient,
+	clientUUID string, names []string,
+) ([]string, error) {
+	existing, err := c.listClientOptionalScopes(ctx, clientUUID)
+	if err != nil {
+		return nil, err
+	}
+	assignedIDByName := make(map[string]string, len(existing))
+	for _, s := range existing {
+		assignedIDByName[s.Name] = s.ID
+	}
 	var events []string
-	for _, g := range roleGroups {
-		want := g.desiredAttributes(tenantID)
+	for _, name := range names {
+		id, ok := assignedIDByName[name]
+		if !ok {
+			events = append(events,
+				fmt.Sprintf("[skip]    optional scope %s (not assigned)",
+					name))
+			continue
+		}
+		if err := c.removeClientOptionalScope(
+			ctx, clientUUID, id); err != nil {
+			return nil, fmt.Errorf(
+				"remove optional scope %s: %w", name, err)
+		}
+		events = append(events,
+			fmt.Sprintf("[removed] optional scope %s", name))
+	}
+	return events, nil
+}
+
+// reconcileGroups makes sure every group in specs exists as a top-level
+// group with the attributes the command owns (groupSpec.Owned). A
+// missing group is created; a group whose owned attributes differ is
+// updated. Other attributes on the group are kept. Returns the group
+// UUIDs by name plus one event line per group.
+func reconcileGroups(
+	ctx context.Context, c *adminClient, specs []groupSpec,
+) (map[string]string, []string, error) {
+	uuids := make(map[string]string, len(specs))
+	var events []string
+	for _, g := range specs {
+		want := g.Attrs
 		found, err := c.findGroup(ctx, g.Name)
 		if err != nil {
 			return nil, nil, fmt.Errorf("find group %s: %w", g.Name, err)
@@ -1029,7 +1241,7 @@ func reconcileRoleGroups(
 		if err != nil {
 			return nil, nil, fmt.Errorf("read group %s: %w", g.Name, err)
 		}
-		merged, changed := mergeOwnedAttributes(existing.Attributes, want)
+		merged, changed := mergeOwnedAttributes(existing.Attributes, want, g.Owned)
 		if !changed {
 			events = append(events, fmt.Sprintf(
 				"[skip]    group %s (already matches)", g.Name))
@@ -1051,14 +1263,14 @@ func reconcileRoleGroups(
 // an owned key in want is set, an owned key not in want is removed, and
 // every other key is kept. changed reports whether anything differs.
 func mergeOwnedAttributes(
-	existing, want map[string][]string,
+	existing, want map[string][]string, owned []string,
 ) (map[string][]string, bool) {
 	merged := make(map[string][]string, len(existing)+len(want))
 	for k, v := range existing {
 		merged[k] = v
 	}
 	changed := false
-	for _, k := range roleGroupAttributeKeys {
+	for _, k := range owned {
 		wantVal, keep := want[k]
 		gotVal, has := existing[k]
 		switch {
@@ -1076,8 +1288,8 @@ func mergeOwnedAttributes(
 // formatAttributes renders the owned attributes in a fixed order for
 // progress lines, e.g. "tenant_id=<uuid> tenant_role=operator".
 func formatAttributes(attrs map[string][]string) string {
-	parts := make([]string, 0, len(roleGroupAttributeKeys))
-	for _, k := range roleGroupAttributeKeys {
+	parts := make([]string, 0, len(attributeDisplayOrder))
+	for _, k := range attributeDisplayOrder {
 		if v, ok := attrs[k]; ok {
 			parts = append(parts, k+"="+strings.Join(v, ","))
 		}
@@ -1086,15 +1298,16 @@ func formatAttributes(attrs map[string][]string) string {
 }
 
 // reconcileUser ensures a user with the given username exists and
-// belongs to the group groupUUID (MEHO-Admins). If the user already exists the
+// belongs to every group in groupUUIDs (MEHO-Admins and
+// MEHO-Platform-Admins). If the user already exists the
 // password is **not** reset (silent password rotation on a re-run is
 // strictly worse than the "set it once at create time" rule).
 //
 // Returns (created, joined, uuid): joined is true when this run added
-// the user to the group.
+// the user to a group.
 func reconcileUser(
 	ctx context.Context, c *adminClient,
-	desired *userRep, password, groupUUID string,
+	desired *userRep, password string, groupUUIDs []string,
 ) (bool, bool, string, error) {
 	existing, err := c.findUserByUsername(ctx, desired.Username)
 	if err != nil {
@@ -1119,20 +1332,22 @@ func reconcileUser(
 		userUUID = existing.ID
 	}
 
-	// Join the group, skipping if the user is already in it.
+	// Join each group, skipping the ones the user is already in.
 	memberships, err := c.listUserGroups(ctx, userUUID)
 	if err != nil {
 		return created, false, userUUID, err
 	}
-	for _, g := range memberships {
-		if g.ID == groupUUID {
-			return created, false, userUUID, nil
+	joined := false
+	for _, groupUUID := range groupUUIDs {
+		if slices.ContainsFunc(memberships, func(g groupRep) bool { return g.ID == groupUUID }) {
+			continue
 		}
+		if err := c.joinUserToGroup(ctx, userUUID, groupUUID); err != nil {
+			return created, joined, userUUID, err
+		}
+		joined = true
 	}
-	if err := c.joinUserToGroup(ctx, userUUID, groupUUID); err != nil {
-		return created, false, userUUID, err
-	}
-	return created, true, userUUID, nil
+	return created, joined, userUUID, nil
 }
 
 // buildConfigKeySummary names the chart values + env vars the
@@ -1144,6 +1359,9 @@ func buildConfigKeySummary(opts BootstrapOptions) []string {
 		"  (env: KEYCLOAK_CLI_CLIENT_ID=" + opts.CLIClientID + ")",
 		"# Surfaced via GET /api/v1/auth-config as `cli_client_id`;",
 		"# `meho login` resolves it automatically.",
+		"config.keycloakCliApproveClientId: " + opts.CLIApproveClientID,
+		"  (env: KEYCLOAK_CLI_APPROVE_CLIENT_ID=" + opts.CLIApproveClientID + ")",
+		"# Surfaced as `cli_approve_client_id`; `meho approvals approve` signs in with it.",
 		"",
 		"MCP browser-flow client_id (paste into your MCP client config — mcp-remote shim / MCP Inspector / Claude Code): " + opts.MCPClientID,
 	}

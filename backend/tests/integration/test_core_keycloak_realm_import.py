@@ -17,6 +17,8 @@ environment values the subchart's StatefulSet sets. Then:
    environment, so Keycloak filled the placeholders. ``meho-admin`` can read
    the realm's clients; ``meho-check-runner`` tokens carry only their own
    audience, not ``meho-backplane``.
+4. A device login on ``meho-cli`` starts without PKCE, as ``meho login``
+   starts it, and gets a device code.
 
 The login uses the password grant, switched on for ``meho-cli`` by this test
 only (people use the device flow); the client's mappers and scopes are the
@@ -30,6 +32,8 @@ container cannot start.
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import secrets
 import time
@@ -37,6 +41,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -133,6 +138,7 @@ def _run_keycloak(**extra_env: str) -> Iterator[_Keycloak]:
         .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_SECRET", kc.bootstrap_secret)
         .with_env("MEHO_REALM_PUBLIC_URL", _PUBLIC_URL)
         .with_env("MEHO_REALM_TENANT_ID", _TENANT_ID)
+        .with_env("MEHO_REALM_TENANT_NAME", "main")
         .with_env("MEHO_REALM_ADMIN_CLIENT_SECRET", kc.client_secrets["meho-admin"])
         .with_env("MEHO_REALM_WEB_CLIENT_SECRET", kc.client_secrets["meho-web"])
         .with_env("MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET", kc.client_secrets["meho-check-runner"])
@@ -265,6 +271,37 @@ async def test_approver_gets_the_approver_flag(
     assert operator.approver is True
 
 
+def _token_claims(access_token: str) -> dict[str, Any]:
+    payload = access_token.split(".")[1]
+    claims: dict[str, Any] = json.loads(
+        base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+    )
+    return claims
+
+
+def test_one_tenant_login_lists_one_tenant(keycloak: _Keycloak) -> None:
+    """The ``meho-tenants`` mapper lists the one tenant; the old claims stay."""
+    password = _add_person(keycloak, "operator-one", "MEHO-Operators")
+    _allow_password_grant_on_cli(keycloak)
+    resp = _token(
+        keycloak.base_url,
+        "meho",
+        {
+            "grant_type": "password",
+            "client_id": "meho-cli",
+            "username": "operator-one",
+            "password": password,
+            "scope": "openid",
+        },
+    )
+    resp.raise_for_status()
+    claims = _token_claims(resp.json()["access_token"])
+    assert claims["meho_tenants"] == [f"{_TENANT_ID}:main:Operators"]
+    assert claims["tenant_id"] == _TENANT_ID
+    assert claims["tenant_role"] == "operator"
+    assert "approver" not in claims
+
+
 def test_confidential_clients_use_the_secrets_from_the_environment(keycloak: _Keycloak) -> None:
     introspect = f"{keycloak.base_url}/realms/meho/protocol/openid-connect/token/introspect"
 
@@ -312,6 +349,52 @@ def test_confidential_clients_use_the_secrets_from_the_environment(keycloak: _Ke
     audience = claims["aud"] if isinstance(claims["aud"], list) else [claims["aud"]]
     assert "meho-check-runner" in audience
     assert "meho-backplane" not in audience
+
+
+def test_device_login_on_the_cli_client_needs_no_pkce(keycloak: _Keycloak) -> None:
+    """``meho login`` starts a device login without PKCE and gets a device code.
+
+    Keycloak checks PKCE at the device login the same way as at the browser
+    sign-in. A required PKCE method on ``meho-cli`` refuses the request with
+    ``invalid_request`` ("Missing parameter: code_challenge_method").
+    """
+    resp = httpx.post(
+        f"{keycloak.base_url}/realms/meho/protocol/openid-connect/auth/device",
+        data={"client_id": "meho-cli", "scope": "openid"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["device_code"]
+    assert body["user_code"]
+    assert body["verification_uri"]
+
+
+def test_imported_realm_remembers_the_browser_and_offers_passkeys(keycloak: _Keycloak) -> None:
+    """Keycloak reads the remember-me and passkey settings of the realm file.
+
+    The browser flow of a new realm has the step that skips the one-time code
+    after a passkey login, and people can add a passkey themselves.
+    """
+    headers = _bootstrap_headers(keycloak)
+    admin = f"{keycloak.base_url}/admin/realms/meho"
+    realm = httpx.get(admin, headers=headers).json()
+    assert realm["rememberMe"] is True
+    assert realm["ssoSessionIdleTimeoutRememberMe"] == 30 * 24 * 3600
+    assert realm["ssoSessionMaxLifespanRememberMe"] == 30 * 24 * 3600
+    assert realm["webAuthnPolicyPasswordlessPasskeysEnabled"] is True
+    assert realm["webAuthnPolicyPasswordlessUserVerificationRequirement"] == "required"
+    assert realm["webAuthnPolicyPasswordlessResidentKey"] == "required"
+
+    executions = httpx.get(
+        f"{admin}/authentication/flows/browser/executions", headers=headers
+    ).json()
+    assert "conditional-credential" in {e.get("providerId") for e in executions}
+
+    register = httpx.get(
+        f"{admin}/authentication/required-actions/webauthn-register-passwordless",
+        headers=headers,
+    ).json()
+    assert register["enabled"] is True
 
 
 async def test_backplane_reaches_keycloak_through_the_service_address(

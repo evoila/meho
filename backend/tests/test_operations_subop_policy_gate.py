@@ -40,6 +40,7 @@ from meho_backplane.db.models import (
     ApprovalRequestStatus,
     EndpointDescriptor,
 )
+from meho_backplane.operations._preview import approved_preview
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
     ResumeRequester,
@@ -675,6 +676,44 @@ async def test_resume_binding_hands_the_saved_state_to_the_parent_only() -> None
         resume_parent={"op_id": _PARENT_OP_ID, "params": _PARENT_PARAMS},
     ):
         assert composite_resume_state_var.get() is None
+
+
+def test_resume_binding_hands_the_approved_preview_to_the_parked_op() -> None:
+    """``composite_resume_binding`` binds the park-time preview for the approved op (#5202)."""
+    preview = {"vm": "vm-1", "library_item": "li-1"}
+    # A direct park: the parked op reads its own preview, nothing else does.
+    with composite_resume_binding(
+        subop_op_id=_PARENT_OP_ID,
+        subop_params_hash="h",
+        resume_parent=None,
+        proposed_effect={"op_class": "write", "preview": preview, "safety_level": "caution"},
+    ) as parent_call:
+        assert parent_call is None
+        assert approved_preview(_PARENT_OP_ID) == preview
+        assert approved_preview("vmware.composite.vm.create") is None
+    assert approved_preview(_PARENT_OP_ID) is None
+
+    # A sub-op park binds the sub-op's preview, so the parent composite reads none.
+    with composite_resume_binding(
+        subop_op_id=_RENAME_OP_ID,
+        subop_params_hash="h",
+        resume_parent={"op_id": _PARENT_OP_ID, "params": _PARENT_PARAMS},
+        proposed_effect={"op_class": "write", "preview": {"params": {"name": "x"}}},
+    ):
+        assert approved_preview(_RENAME_OP_ID) == {"params": {"name": "x"}}
+        assert approved_preview(_PARENT_OP_ID) is None
+        assert composite_resume_var.get() == (_RENAME_OP_ID, "h")
+    assert approved_preview(_RENAME_OP_ID) is None
+
+    # A park without a computed preview binds an empty one: approved, nothing shown.
+    for effect in (None, {"op_class": "write", "preview_unavailable": True}):
+        with composite_resume_binding(
+            subop_op_id=_PARENT_OP_ID,
+            subop_params_hash="h",
+            resume_parent=None,
+            proposed_effect=effect,
+        ):
+            assert approved_preview(_PARENT_OP_ID) == {}
 
 
 # ===========================================================================

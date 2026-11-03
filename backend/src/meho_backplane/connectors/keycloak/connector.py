@@ -93,6 +93,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.vault_creds import (
     CredentialsReadError,
     VaultCredentialsReadError,
@@ -356,6 +357,8 @@ class KeycloakConnector(HttpConnector):
         # (``target_cache_key``) so two same-named targets in different
         # tenants never share a cached admin token (#1642/#1672).
         self._admin_tokens: dict[tuple[str, str], _CachedToken] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._token_lock = asyncio.Lock()
         self._credentials_loader: KeycloakAdminCredentialsLoader = (
             credentials_loader
@@ -417,8 +420,13 @@ class KeycloakConnector(HttpConnector):
             now = time.monotonic()
             cached = self._admin_tokens.get(cache_key)
             if cached is not None and cached.is_fresh(now):
+                # The caller's own Vault read, once per caller and target.
+                await self._readers.ensure_read(
+                    target, operator, lambda: self._credentials_loader(target, operator)
+                )
                 return cached.token
             token, ttl = await self._mint_admin_token(target, operator)
+            self._readers.record(target, operator)
             self._admin_tokens[cache_key] = _CachedToken(token, now + ttl)
             return token
 
@@ -1094,6 +1102,34 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_logout(self, operator, target, params)
 
+    async def user_check_login(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.check_login``."""
+        from meho_backplane.connectors.keycloak.ops_login_check import keycloak_user_check_login
+
+        return await keycloak_user_check_login(self, operator, target, params)
+
+    async def authflow_ensure_approval_flow(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.authflow.ensure_approval_flow``."""
+        from meho_backplane.connectors.keycloak.ops_authflow import (
+            keycloak_authflow_ensure_approval_flow,
+        )
+
+        return await keycloak_authflow_ensure_approval_flow(self, operator, target, params)
+
+    async def identity_provider_list(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.identity_provider.list``."""
+        from meho_backplane.connectors.keycloak.ops_identity_provider import (
+            keycloak_identity_provider_list,
+        )
+
+        return await keycloak_identity_provider_list(self, operator, target, params)
+
     # -- typed-op registrar (G3.13-T2 #1394 fills the read-op walk) ------
 
     @classmethod
@@ -1123,12 +1159,26 @@ class KeycloakConnector(HttpConnector):
         walk — every write registers ``requires_approval=True``. #3944 adds
         the destructive ``user.delete`` / ``group.delete`` /
         ``client.delete``. #3851 adds ``user.logout``; #3886 adds ``realm.delete``.
+        ``user.check_login`` (one login test) rides the same walk, and so do
+        ``authflow.ensure_approval_flow`` and ``identity_provider.list``.
         """
         # Lazy imports: the operations package pulls in the embedding
         # pipeline (ONNX runtime + a 100 MB+ model on first touch) that a
         # pure-fingerprint / pure-probe unit test should not pay. Lifespan
         # callers already have the embedding service warmed by the time
         # this runs.
+        from meho_backplane.connectors.keycloak.ops_authflow import (
+            APPROVAL_FLOW_OPS,
+            WHEN_TO_USE_AUTHFLOW_BY_GROUP,
+        )
+        from meho_backplane.connectors.keycloak.ops_identity_provider import (
+            IDENTITY_PROVIDER_OPS,
+            WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP,
+        )
+        from meho_backplane.connectors.keycloak.ops_login_check import (
+            LOGIN_CHECK_OPS,
+            WHEN_TO_USE_LOGIN_CHECK_BY_GROUP,
+        )
         from meho_backplane.connectors.keycloak.ops_read import (
             READ_OPS,
             WHEN_TO_USE_BY_GROUP,
@@ -1142,10 +1192,22 @@ class KeycloakConnector(HttpConnector):
         # The two when_to_use maps are disjoint by group_key suffix
         # (read groups are bare nouns; write groups carry a ``_write``
         # suffix) so a merge never clobbers a read blurb with a write one.
-        when_to_use_by_group = {**WHEN_TO_USE_BY_GROUP, **WHEN_TO_USE_WRITE_BY_GROUP}
+        when_to_use_by_group = {
+            **WHEN_TO_USE_BY_GROUP,
+            **WHEN_TO_USE_WRITE_BY_GROUP,
+            **WHEN_TO_USE_LOGIN_CHECK_BY_GROUP,
+            **WHEN_TO_USE_AUTHFLOW_BY_GROUP,
+            **WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP,
+        }
 
         bindings: list[tuple[Any, Any]] = []
-        for op in (*READ_OPS, *WRITE_OPS):
+        for op in (
+            *READ_OPS,
+            *WRITE_OPS,
+            *LOGIN_CHECK_OPS,
+            *APPROVAL_FLOW_OPS,
+            *IDENTITY_PROVIDER_OPS,
+        ):
             handler = getattr(cls, op.handler_attr, None)
             if handler is None:
                 raise AttributeError(
@@ -1239,6 +1301,16 @@ class KeycloakConnector(HttpConnector):
             params=params,
         )
 
+    async def invalidate_credentials(self, target: KeycloakTargetLike) -> None:
+        """Drop the kept admin token for *target* (#2396, #3879).
+
+        The next call reads the admin credential from Vault again and logs in
+        with it. Called after a failed login and after a target change.
+        """
+        async with self._token_lock:
+            self._admin_tokens.pop(target_cache_key(target), None)
+            self._readers.forget(target)
+
     async def aclose(self) -> None:
         """Clear cached admin tokens then tear down the httpx pool.
 
@@ -1251,6 +1323,7 @@ class KeycloakConnector(HttpConnector):
         """
         async with self._token_lock:
             self._admin_tokens.clear()
+            self._readers.clear()
         await super().aclose()
 
 

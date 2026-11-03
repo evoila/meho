@@ -59,7 +59,7 @@ DBOS rebase swaps only the loop module.
     a CR id) the trigger works under. Set at create time (triggers have
     no UPDATE path); inherited end-to-end by every dispatched run — see
     "work_ref inheritance" under Dispatch. Indexed
-    `(tenant_id, work_ref)` for the list `--work-ref` exact-match filter.
+    `(tenant_id, work_ref)` for the list `--filter-work-ref` exact-match filter.
 - `ScheduledTriggerKind`, `ScheduledTriggerStatus` — closed StrEnums
   kept in lock-step with the DB-layer `CHECK (... IN (...))` constraints
   via migrations `0020` (T1 substrate) and `0025` (T2 dispatcher

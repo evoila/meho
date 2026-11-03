@@ -35,6 +35,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from multidict import CIMultiDict, CIMultiDictProxy
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.kubernetes import KubernetesConnector
@@ -199,6 +200,51 @@ class _StatusFailureResponse:
                 "message": self._message,
             }
         )
+
+
+class _DryRunWithWarningResponse:
+    """A 200 dry-run answer that carries one API-server ``Warning`` header."""
+
+    status = 200
+    reason = "OK"
+    headers = CIMultiDictProxy(
+        CIMultiDict([("Warning", '299 - "apps/v1beta1 Deployment is deprecated"')])
+    )
+
+    async def text(self) -> str:
+        return json.dumps({"kind": "Deployment", "metadata": {"name": "web"}})
+
+
+@pytest.mark.asyncio
+async def test_k8s_apply_preview_shows_api_server_warnings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The approval preview carries the dry-run's ``Warning`` header texts (#3842)."""
+    dyn = MagicMock()
+    dyn.resources.get = AsyncMock(return_value=MagicMock())
+    dyn.server_side_apply = AsyncMock(return_value=_DryRunWithWarningResponse())
+
+    async def _dynamic_client(_api_client: Any) -> Any:
+        return dyn
+
+    monkeypatch.setattr(
+        "meho_backplane.connectors.kubernetes.ops_write_dangerous.DynamicClient",
+        _dynamic_client,
+    )
+    connector = KubernetesConnector(kubeconfig_loader=None)  # type: ignore[arg-type]
+    monkeypatch.setattr(connector, "_get_api_client", AsyncMock(return_value=MagicMock()))
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="k8s.apply"),  # type: ignore[arg-type]
+        connector_instance=connector,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params={"manifest": _SINGLE_MANIFEST, "dry_run": "none"},
+    )
+
+    effect = await build_proposed_effect(ctx)
+
+    assert effect is not None
+    assert effect["preview"]["applied"][0]["warnings"] == ["apps/v1beta1 Deployment is deprecated"]
 
 
 async def _k8s_apply_preview_denied_with(
@@ -369,20 +415,36 @@ async def test_k8s_apply_preview_none_without_connector() -> None:
     assert await build_proposed_effect(ctx) is None
 
 
+#: A credential-class op with no bespoke preview builder and no permission
+#: preflight. Declared by the fixture below, not by a shipped connector, so
+#: the tests here do not depend on which connectors the public tree has.
+_BUILDERLESS_CREDENTIAL_OP = "acme.user.set_password"
+
+
+@pytest.fixture
+def _builderless_credential_op(monkeypatch: pytest.MonkeyPatch) -> str:
+    from meho_backplane import op_classes
+
+    monkeypatch.setitem(op_classes._DECLARED, _BUILDERLESS_CREDENTIAL_OP, "credential_write")
+    return _BUILDERLESS_CREDENTIAL_OP
+
+
 @pytest.mark.asyncio
-async def test_no_builder_credential_class_op_yields_none() -> None:
+async def test_no_builder_credential_class_op_yields_none(
+    _builderless_credential_op: str,
+) -> None:
     """A credential-class op with no builder still parks with no preview.
 
     Since #1856 a no-builder op gets the generic params-echo default, but
     the credential-class suppression runs *first*:
-    ``vmware.composite.vm.guest.env.read`` is ``credential_write`` with no
+    ``acme.user.set_password`` is ``credential_write`` with no
     bespoke builder, so it collapses to the identifier-only default (caller
     fallback) rather than echoing its params. (The userpass writes got
     bespoke builders in #4850; this ``safe`` read never waits for approval,
     so it is a still-builderless credential op.)
     """
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="vmware.composite.vm.guest.env.read"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id=_BUILDERLESS_CREDENTIAL_OP),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),
@@ -700,18 +762,20 @@ async def test_builder_failure_reason_is_truncated_and_message_less_safe() -> No
 
 
 @pytest.mark.asyncio
-async def test_credential_class_op_generic_echo_suppressed() -> None:
+async def test_credential_class_op_generic_echo_suppressed(
+    _builderless_credential_op: str,
+) -> None:
     """A credential-class op with NO bespoke builder gets no generic echo.
 
     The generic params-echo default (#1856) can only do generic key-name /
     value-shape redaction and is not trusted to scrub a connector-specific
     secret shape, so an op classifying credential-class (here
-    ``vmware.composite.vm.guest.env.read`` → ``credential_write``) with no
+    ``acme.user.set_password`` → ``credential_write``) with no
     registered builder collapses to the identifier-only default -- the
     durable approval row must not carry secret material.
     """
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="vmware.composite.vm.guest.env.read"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id=_BUILDERLESS_CREDENTIAL_OP),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),
@@ -721,7 +785,9 @@ async def test_credential_class_op_generic_echo_suppressed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_credential_class_op_bespoke_builder_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_credential_class_op_bespoke_builder_runs(
+    monkeypatch: pytest.MonkeyPatch, _builderless_credential_op: str
+) -> None:
     """A *bespoke* builder runs even for a credential-class op (#1857).
 
     Unlike the generic echo, a registered builder is trusted to own its
@@ -743,9 +809,9 @@ async def test_credential_class_op_bespoke_builder_runs(monkeypatch: pytest.Monk
 
     # setitem, not register_preview_builder: the stub must not stay in the
     # process-wide registry after this test.
-    monkeypatch.setitem(_PREVIEW_BUILDERS, "vmware.composite.vm.guest.env.read", _scrubbed)
+    monkeypatch.setitem(_PREVIEW_BUILDERS, _BUILDERLESS_CREDENTIAL_OP, _scrubbed)
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="vmware.composite.vm.guest.env.read"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id=_BUILDERLESS_CREDENTIAL_OP),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),
@@ -765,12 +831,12 @@ async def test_credential_class_op_bespoke_builder_runs(monkeypatch: pytest.Monk
 
 @pytest.mark.asyncio
 async def test_permission_preflight_runs_for_credential_class_op(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, _builderless_credential_op: str
 ) -> None:
     """A permission preflight runs even when the op classifies credential-class.
 
     This is the whole point of the separate hook:
-    ``vmware.composite.vm.guest.env.read`` IS ``credential_write`` with no
+    ``acme.user.set_password`` IS ``credential_write`` with no
     bespoke preview builder (so its
     *preview* is suppressed), yet its capability-only *permission* check
     must still run — it carries no secret material, and a credential write
@@ -786,9 +852,9 @@ async def test_permission_preflight_runs_for_credential_class_op(
         ran = True
         return {"check": "vault.capabilities-self", "will_be_denied": True}
 
-    monkeypatch.setitem(_PERMISSION_PREFLIGHTS, "vmware.composite.vm.guest.env.read", _preflight)
+    monkeypatch.setitem(_PERMISSION_PREFLIGHTS, _BUILDERLESS_CREDENTIAL_OP, _preflight)
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="vmware.composite.vm.guest.env.read"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id=_BUILDERLESS_CREDENTIAL_OP),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),

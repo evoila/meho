@@ -25,7 +25,7 @@ import contextlib
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import httpx
@@ -242,14 +242,34 @@ def test_importing_package_registers_against_v2_registry() -> None:
     assert registry[key] is GcloudConnector
 
 
-def test_default_credentials_loader_raises_until_g03_lands() -> None:
+def test_default_credentials_loader_answers_empty_without_secret_ref() -> None:
+    """A target without a secret_ref has no record: no Vault read, an empty record."""
     from meho_backplane.connectors.gcloud.session import load_credentials_from_vault
 
-    async def _check() -> None:
-        with pytest.raises(NotImplementedError, match=r"Goal #214"):
-            await load_credentials_from_vault(_TARGET_A, _OPERATOR)
+    target = _StubTarget(
+        name="gcloud-no-secret",
+        gcp_project="my-project-123",
+        gcp_impersonate_sa="svc@my-project-123.iam.gserviceaccount.com",
+        secret_ref="",
+    )
+    with patch("meho_backplane.connectors.gcloud.session.load_vault_secret_data") as read_secret:
+        assert asyncio.run(load_credentials_from_vault(target, _OPERATOR)) == {}
+    read_secret.assert_not_called()
 
-    asyncio.run(_check())
+
+def test_default_credentials_loader_reads_secret_ref_under_the_operator() -> None:
+    """A target with a secret_ref is read with the shared operator-context reader."""
+    from meho_backplane.connectors.gcloud.session import load_credentials_from_vault
+
+    with patch(
+        "meho_backplane.connectors.gcloud.session.load_vault_secret_data",
+        new=AsyncMock(
+            return_value={"gcp_impersonate_sa": "svc@my-project-123.iam.gserviceaccount.com"}
+        ),
+    ) as read_secret:
+        record = asyncio.run(load_credentials_from_vault(_TARGET_A, _OPERATOR))
+    assert record == {"gcp_impersonate_sa": "svc@my-project-123.iam.gserviceaccount.com"}
+    read_secret.assert_awaited_once_with(_TARGET_A, _OPERATOR)
 
 
 # ---------------------------------------------------------------------------

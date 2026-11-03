@@ -72,6 +72,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import AuditLog
+from meho_backplane.operations._secret_values import fingerprinted_paths
 from meho_backplane.redaction.engine import RedactionManifestEntry, redact
 from meho_backplane.redaction.resolver import find_policy_by_id
 
@@ -244,14 +245,9 @@ async def replay_policy(
             policy_id=policy_id,
         )
 
-    # Re-run the engine with the same labels the middleware passed at
-    # write time, so any scope-filtered rules behave identically. The
-    # ``connector_id`` / ``op`` labels live on the audit row's
-    # payload; the ``tenant`` label comes off the row itself (string-
-    # coerced to match the resolver's
-    # ``Annotated[str | None]`` field shape, the same coercion the
-    # dispatcher's ``_apply_redaction_middleware`` applies on the hot
-    # path).
+    # Re-run the engine with the labels the middleware passed at write time
+    # (``connector_id`` / ``op`` from the payload, the tenant as a string,
+    # as in the dispatcher's ``_apply_redaction_middleware``).
     payload = row.payload if isinstance(row.payload, dict) else {}
     connector_id = _maybe_str(payload.get("connector_impl_id"))
     op_id = _maybe_str(payload.get("op_id"))
@@ -264,7 +260,7 @@ async def replay_policy(
         op=op_id,
     )
 
-    recorded_manifest = _coerce_recorded_manifest(row.redaction_manifest)
+    recorded_manifest = _comparable_recorded_manifest(row)
     replayed_manifest = result.manifest
     missing, extra = _diff_manifests(recorded_manifest, replayed_manifest)
     status = PolicyReplayStatus.MATCH if not missing and not extra else PolicyReplayStatus.DIVERGED
@@ -306,6 +302,25 @@ def _maybe_str(value: object) -> str | None:
     keeps the policy-replay sense robust against payload-shape drift.
     """
     return value if isinstance(value, str) and value else None
+
+
+def _comparable_recorded_manifest(row: AuditLog) -> tuple[RedactionManifestEntry, ...]:
+    """The recorded manifest entries the replay can reproduce.
+
+    A value the redaction hid is stored as a keyed fingerprint, not as the
+    raw value, so the replay cannot fire on it again. Entries at those
+    paths, and at paths inside them (a whole subtree can be stored as one
+    fingerprint), are left out of the comparison.
+    """
+    stored_as_fingerprint = fingerprinted_paths(row.raw_payload)
+    if "" in stored_as_fingerprint:
+        return ()
+    inside = tuple(f"{path}." for path in stored_as_fingerprint)
+    return tuple(
+        entry
+        for entry in _coerce_recorded_manifest(row.redaction_manifest)
+        if entry.path not in stored_as_fingerprint and not entry.path.startswith(inside)
+    )
 
 
 def _coerce_recorded_manifest(

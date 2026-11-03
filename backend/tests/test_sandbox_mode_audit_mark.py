@@ -12,7 +12,8 @@ the model reads the process flag, so no writer names it. This file proves:
 * a row built through the model reads ``true`` with the mode on and
   ``false`` with it off, through the shared writers too;
 * a row inserted without the column, as an older build writes it, reads
-  ``false``.
+  ``false``;
+* the audit answers show the mark of each row (#5312).
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select, text
 
+from meho_backplane.audit_query import AuditQueryFilters, query_audit
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor
@@ -88,9 +90,10 @@ async def _marks() -> dict[str, bool]:
     return {row.operator_sub: bool(row.sandbox_mode) for row in rows}
 
 
-def _row(sub: str) -> AuditLog:
+def _row(sub: str, *, work_ref: str | None = None) -> AuditLog:
     return AuditLog(
         id=uuid.uuid4(),
+        work_ref=work_ref,
         event_class=AuditEventClass.OPERATION_EXECUTION,
         occurred_at=datetime.now(UTC),
         operator_sub=sub,
@@ -168,3 +171,32 @@ async def test_row_written_without_the_column_reads_false(monkeypatch: pytest.Mo
         )
         await session.commit()
     assert await _marks() == {"older-build": False}
+
+
+@pytest.mark.asyncio
+async def test_audit_answers_show_the_mark(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each audit answer carries the mark of its row (#5312).
+
+    The REST routes (query, show, by work reference, who touched, my
+    recent) and the MCP tool all build their rows through ``query_audit``.
+    """
+    turn_sandbox_mode_off(monkeypatch)
+    off_row = _row("off", work_ref="CHG-5312")
+    async with get_sessionmaker()() as session:
+        session.add(off_row)
+        await session.commit()
+    turn_sandbox_mode_on(monkeypatch)
+    on_row = _row("on", work_ref="CHG-5312")
+    async with get_sessionmaker()() as session:
+        session.add(on_row)
+        await session.commit()
+
+    async def _answer(filters: AuditQueryFilters) -> dict[str, bool]:
+        async with get_sessionmaker()() as session:
+            result = await query_audit(filters, tenant_id=_TENANT, session=session)
+        return {entry.principal_sub: entry.sandbox_mode for entry in result.rows}
+
+    assert await _answer(AuditQueryFilters()) == {"off": False, "on": True}
+    assert await _answer(AuditQueryFilters(work_ref="CHG-5312")) == {"off": False, "on": True}
+    assert await _answer(AuditQueryFilters(audit_id=on_row.id, limit=1)) == {"on": True}
+    assert await _answer(AuditQueryFilters(audit_id=off_row.id, limit=1)) == {"off": False}

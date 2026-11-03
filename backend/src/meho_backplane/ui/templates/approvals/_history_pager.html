@@ -27,6 +27,8 @@
     requests    -- list[dict]: this page's rows (its length closes the range)
     next_offset -- int: offset for the next "Load more" fetch
     has_more    -- bool: whether a further page exists
+    order       -- str: the order in use, kept on the Load-more URL so the
+                   next page continues the same order (#3596)
     oob         -- bool: render as an hx-swap-oob replacement (default false)
 -#}
 <div
@@ -41,7 +43,7 @@
     <button
       type="button"
       class="btn btn-sm btn-ghost"
-      hx-get="/ui/approvals/list?tab={{ active_tab }}&offset={{ next_offset }}&partial=rows"
+      hx-get="/ui/approvals/list?tab={{ active_tab }}&order={{ order }}&offset={{ next_offset }}&partial=rows"
       hx-target="#approvals-history-rows"
       hx-swap="beforeend"
       hx-include="[name='work_ref']"

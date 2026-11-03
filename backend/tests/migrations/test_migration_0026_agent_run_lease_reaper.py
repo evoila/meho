@@ -36,7 +36,7 @@ Same synchronous-pattern + tmp-path-DB shape as
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -149,10 +149,11 @@ def _seed_tenant(sync_url: str) -> str:
 
 def test_upgrade_adds_lease_columns_and_index(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``upgrade head`` adds the three columns and the partial index."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     columns = _table_columns(sync_url, "agent_run")
     assert {"lease_owner", "lease_expires_at", "in_flight_policy"} <= columns
@@ -161,10 +162,12 @@ def test_upgrade_adds_lease_columns_and_index(
     assert "agent_run_lease_expires_at_idx" in indexes
 
 
-def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
+def test_column_nullability(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``in_flight_policy`` is NOT NULL; the lease columns are nullable."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     assert _column_is_nullable(sync_url, "agent_run", "lease_owner")
     assert _column_is_nullable(sync_url, "agent_run", "lease_expires_at")
@@ -173,6 +176,7 @@ def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
 
 def test_in_flight_policy_default_is_fail_into_audit(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A row inserted post-upgrade picks up ``'fail_into_audit'`` from the server default.
 
@@ -181,7 +185,7 @@ def test_in_flight_policy_default_is_fail_into_audit(
     against an existing table without a separate backfill UPDATE.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     tenant_hex = _seed_tenant(sync_url)
 
     sync_eng = sa_create_engine(sync_url)
@@ -211,10 +215,11 @@ def test_in_flight_policy_default_is_fail_into_audit(
 
 def test_in_flight_policy_check_rejects_unknown(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """An ``in_flight_policy`` outside the closed enum raises :class:`IntegrityError`."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     tenant_hex = _seed_tenant(sync_url)
 
     sync_eng = sa_create_engine(sync_url)
@@ -235,6 +240,7 @@ def test_in_flight_policy_check_rejects_unknown(
 
 def test_downgrade_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``downgrade "0024"`` drops the new columns / index; ``upgrade head`` restores them.
 
@@ -242,7 +248,7 @@ def test_downgrade_then_upgrade_round_trips(
     drop-then-create symmetry every later migration in this chain follows.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     assert {"lease_owner", "lease_expires_at", "in_flight_policy"} <= _table_columns(
         sync_url, "agent_run"
     )

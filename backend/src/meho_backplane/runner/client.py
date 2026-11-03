@@ -19,7 +19,9 @@ module is exercised against :class:`httpx.MockTransport` here.
 
 Every request carries ``Authorization: Bearer <MEHO_RUNNER_TOKEN>``, the
 runner's wire version (:data:`~meho_backplane.runner.wire.SCHEMA_VERSION`
-in the :data:`~meho_backplane.runner.wire.WIRE_VERSION_HEADER` header) and
+in the :data:`~meho_backplane.runner.wire.WIRE_VERSION_HEADER` header), the
+digest of its connector packages (in the
+:data:`~meho_backplane.runner.package_set.PACKAGE_SET_HEADER` header, #5038) and
 a bounded timeout so a hung central cannot stall a tick indefinitely. When
 central refuses the wire version, both calls raise
 :class:`RunnerWireVersionMismatchError` with central's text, which names
@@ -34,6 +36,7 @@ import httpx
 import structlog
 
 from meho_backplane.runner import wire
+from meho_backplane.runner.package_set import PACKAGE_SET_HEADER, local_package_set
 from meho_backplane.runner.wire import RunnerAssignment, RunnerResultBatch
 
 __all__ = [
@@ -115,6 +118,7 @@ class RunnerClient:
             headers={
                 "Authorization": f"Bearer {token}",
                 wire.WIRE_VERSION_HEADER: wire.SCHEMA_VERSION,
+                PACKAGE_SET_HEADER: local_package_set().digest,
             },
             timeout=httpx.Timeout(timeout),
             transport=transport,

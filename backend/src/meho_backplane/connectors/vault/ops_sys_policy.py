@@ -33,12 +33,19 @@ the repository's 600-line size budget; the ``register_typed_operation``
 calls stay in ``ops_sys.py`` so the whole ``sys`` group registers from
 one place. The handlers follow the exact shape of the authenticated sys
 read ops: ``(operator, target, params)``, the operator JWT forwarded via
-:func:`~meho_backplane.auth.vault.vault_client_for_operator`, and the
+:func:`~meho_backplane.connectors.vault.target_auth.vault_client_for_target`
+(so the target's ``extras["vault_role"]`` decides which Vault role runs
+the call, #3945), and the
 synchronous hvac call offloaded with :func:`asyncio.to_thread` because
 hvac is ``requests``-based and FastAPI does not auto-offload blocking I/O
 inside an ``async def``. Handlers **raise** on failure; the dispatcher's
 ``connector_error`` branch records the exception class in
 ``extras["exception_class"]`` (no raw traceback to the agent).
+
+``policy.delete`` also registers a park-time permission preflight: before
+MEHO asks for approval, ``sys/capabilities-self`` must grant ``delete`` on
+``sys/policy/<name>`` to the target's role. When it does not, the call is
+refused with ``write_capability_denied`` and no approval request is made.
 """
 
 from __future__ import annotations
@@ -46,10 +53,13 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.vault.ops import vault_capability_preflight
+from meho_backplane.connectors.vault.target_auth import vault_client_for_target
+from meho_backplane.operations._preview import PreviewContext, register_permission_preflight
 
 __all__ = [
+    "POLICY_DELETE_CAPABILITIES",
     "VAULT_SYS_POLICY_DELETE_LLM_INSTRUCTIONS",
     "VAULT_SYS_POLICY_DELETE_PARAMETER_SCHEMA",
     "VAULT_SYS_POLICY_DELETE_RESPONSE_SCHEMA",
@@ -63,6 +73,7 @@ __all__ = [
     "VAULT_SYS_POLICY_WRITE_PARAMETER_SCHEMA",
     "VAULT_SYS_POLICY_WRITE_RESPONSE_SCHEMA",
     "vault_sys_policy_delete",
+    "vault_sys_policy_delete_capability_preflight",
     "vault_sys_policy_list",
     "vault_sys_policy_read",
     "vault_sys_policy_write",
@@ -333,7 +344,7 @@ async def vault_sys_policy_read(
         Any error hvac raises from the policy read.
     """
     name: str = str(params["name"]).strip()
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         response = await asyncio.to_thread(client.sys.read_policy, name=name)
         return {"name": name, "rules": _extract_rules(response)}
 
@@ -355,7 +366,7 @@ async def vault_sys_policy_list(
         Any error hvac raises from the policy list.
     """
     _ = params  # schema-validated empty object; no inputs to extract.
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         response = await asyncio.to_thread(client.sys.list_policies)
         return {"policies": _extract_policy_names(response)}
 
@@ -382,7 +393,7 @@ async def vault_sys_policy_write(
     """
     name: str = str(params["name"]).strip()
     policy: str = params["policy"]
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         await asyncio.to_thread(
             client.sys.create_or_update_policy,
             name=name,
@@ -409,6 +420,44 @@ async def vault_sys_policy_delete(
         Any error hvac raises from the policy delete.
     """
     name: str = str(params["name"]).strip()
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         await asyncio.to_thread(client.sys.delete_policy, name=name)
         return {"name": name, "deleted": True}
+
+
+#: Op-id of the policy delete, keyed in the permission-preflight registry.
+POLICY_OP_DELETE = "vault.sys.policy.delete"
+
+#: ``DELETE /v1/sys/policy/<name>`` needs the ``delete`` capability on that
+#: path (Vault maps the HTTP verb to the capability).
+POLICY_DELETE_CAPABILITIES: frozenset[str] = frozenset({"delete"})
+
+
+async def vault_sys_policy_delete_capability_preflight(
+    operator: Operator, params: dict[str, Any], target: Any = None
+) -> dict[str, Any] | None:
+    """Check whether the target's role may delete ``sys/policy/<name>``.
+
+    Runs at approval-park time through the shared
+    :func:`~meho_backplane.connectors.vault.ops.vault_capability_preflight`
+    probe, under the same role the delete will use. Returns the probe's
+    summary (capability names only), or ``None`` when the probe fails.
+    """
+    name = str(params.get("name", "")).strip()
+    return await vault_capability_preflight(
+        operator,
+        POLICY_OP_DELETE,
+        f"sys/policy/{name}",
+        POLICY_DELETE_CAPABILITIES,
+        target,
+    )
+
+
+async def _policy_delete_preflight(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Permission preflight hook for ``vault.sys.policy.delete``."""
+    return await vault_sys_policy_delete_capability_preflight(
+        ctx.operator, ctx.params, target=ctx.target
+    )
+
+
+register_permission_preflight(POLICY_OP_DELETE, _policy_delete_preflight)

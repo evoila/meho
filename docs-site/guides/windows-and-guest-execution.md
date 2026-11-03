@@ -3,9 +3,11 @@
 MEHO governs the Windows half of a datacenter — Windows Server, Active
 Directory, DNS, failover clustering, SQL Server, and Hyper-V — through
 the same **discover → list groups → search → preview → call** ladder you
-learned in [Run your first operations](first-operations.md). It also
-governs a harder thing: running a program *inside* a virtual machine's
-guest OS, with a human approving the risky ones. This guide covers both.
+learned in [Run your first operations](first-operations.md). With
+evoila's enterprise pack it also governs a harder thing: running a
+program *inside* a virtual machine's guest OS, with a human approving the
+risky ones. This guide covers the Windows connectors in full and the
+in-guest path in short.
 
 These connectors are recent additions. The honest status is **shipped**:
 each one is registered, has a live operation surface, and rides the full
@@ -44,23 +46,29 @@ by its `connector_id`, exactly as in the first-operations ladder.
 
 **Windows Server (`winsrv`).** System facts, service start/stop/restart,
 Windows feature install and removal, reboot and shutdown, local users,
-and disk / iSCSI-initiator storage. The reboot, shutdown, feature-removal,
-and local-user-delete operations park for a human; everything else is a
-read or a recoverable write.
+disk / iSCSI-initiator storage, and the server's NTP time source. The
+reboot, shutdown, feature-removal, local-user-delete and time-source
+operations wait for a person to approve them; everything else is a read or
+a recoverable write.
 
 **Active Directory (`msad`).** Domain, forest, and DC topology reads, AD
 replication metadata, plus guarded day-2 writes over users, groups,
 computers, and organizational units. The SSH target *is* the domain
 controller — the AD cmdlets contact the local directory. Object deletes
 (`user.delete`, `group.delete`, `computer.delete`) park; a computer
-"unjoin" is a recoverable disable, not a delete.
+"unjoin" is a recoverable disable, not a delete. For building a new domain
+there are a read of the password rules and the join limit, and changes that
+wait for a person to approve them: create a group, set the password rules,
+set the join limit, and let a group create computers in an OU (and undo it).
 
 **Windows DNS (`windns`).** Read the zones on an AD-integrated DNS server,
 read records, add A and CNAME records, and remove a record set. The
 record removal is a permanent delete. You preview it first to get a
 preview hash. The preview does not list the records. MEHO reads them
 when you send the call, and the approver sees them on the approval
-request before it runs.
+request before it runs. You can also read a zone's settings and the
+server's forwarders, and change them. Those changes wait for a person to
+approve them.
 
 **Failover Clustering (`wsfc`).** Cluster, node, clustered-role, resource,
 and quorum state, plus cluster validation and guarded role moves. The
@@ -151,8 +159,8 @@ describes for every other credential.
 ### In-guest execution: the VM's own target
 
 Running a program inside a guest (below) does not need a new target. It
-runs against the **VMware target** the VM lives on, through the
-`vmware-rest-9.0` connector, and reads the guest-OS login from that
+runs against the **vCenter target** the VM lives on, through the vSphere
+connector of the enterprise pack, and reads the guest-OS login from that
 target's secret as `guest_username` / `guest_password`. The guest
 credential is resolved at dispatch time and never travels in an operation
 parameter.
@@ -248,57 +256,18 @@ operator break-glass — are the
 
 Sometimes the governed operation you need is "run this program inside that
 VM" — promote a domain controller, form a cluster, verify a service on a
-first-boot appliance that has no network route back to MEHO. MEHO governs
-this through `vmware.composite.vm.guest.program.run` on the
-`vmware-rest-9.0` connector, so it replaces the out-of-band
-`govc guest.run` / SSH-into-the-guest habit with something audited.
+first-boot appliance that has no network route back to MEHO. The vSphere
+connector of evoila's enterprise pack governs this with a guest-operations
+family on the VM's vCenter target: list guest processes, read a guest file
+or environment variable, show the guest network state, write a guest file,
+and run a program. It rides VMware Tools guest operations, so it needs no
+new network path to the guest.
 
-It rides **VMware Tools guest operations** — vCenter to ESXi to the Tools
-agent inside the guest — so it needs no new network path to the guest and
-works even for a VM with no route back to MEHO. There is a read family
-alongside it, all on the same connector:
-
-| Operation | What it does | Tier |
-|---|---|---|
-| `vmware.composite.vm.guest.process.list` | List running guest processes | `safe` |
-| `vmware.composite.vm.guest.file.read` | Read a guest file (metadata; opt-in byte fetch via `fetch_content`, capped/refused over `max_inline_bytes`) | `caution` (byte fetch reads as the in-guest login; auto-parks for agents/service) |
-| `vmware.composite.vm.guest.env.read` | Read a guest environment variable | `safe` |
-| `vmware.composite.vm.guest.net.show` | Guest NIC / IP state (Tools-reported, no guest login) | `safe` |
-| `vmware.composite.vm.guest.file.write` | Write a guest file | `dangerous` + approval |
-| `vmware.composite.vm.guest.program.run` | Run a program in the guest | `dangerous` + approval |
-
-`program.run` runs against the VM's VMware target. It takes an explicit
-`program_path`, optional `arguments` and `env`, and a `wait` flag; with
-`wait: true` it polls for the exit code and start/end times instead of
-returning the moment the process starts.
-
-```bash
-meho operation call vmware-rest-9.0 vmware.composite.vm.guest.program.run \
-  --target lab-vcenter \
-  --params '{"vm": "<vm-name-or-id>", "program_path": "C:\\Windows\\System32\\cmd.exe",
-             "arguments": "/c ipconfig /all", "wait": true}'
-```
-
-### What makes it governed
-
-- **It parks for a human.** The operation is `dangerous` +
-  `requires_approval`. Calling it stores a durable approval request and
-  returns `awaiting_approval`; a human approves or rejects on the console
-  or CLI, never from an agent. The policy gate runs *first* — a parked or
-  denied call resolves no guest credential and starts nothing.
-- **The guest login never travels in a parameter.** It is read from the
-  VM target's secret at dispatch time and lives only in the request to
-  the Tools agent — never in a parameter, a result, an audit row, or a log.
-- **The decision surfaces are kept clean.** The approval park preview
-  shows the VM, the program path, the working directory, the `wait` flag,
-  the *byte size* of `arguments`, and the *names* of `env` variables —
-  never their values. The policy gate, the operation result, and the
-  broadcast feed are the same: values are held back so a reviewer's
-  decision is made on structure, not secrets.
-- **The whole call is audited synchronously.** The operation does not
-  return success until an append-only audit row commits, naming the
-  operation, the VM, and the outcome. Raw parameters are stored as a hash,
-  never in the clear.
+The write operations park for a human like every other `dangerous`
+operation in this guide. The guest login is read from the VM target's
+secret at dispatch time and never travels in a parameter, a result, an
+audit row, or a log. The approval preview shows the program path and the
+*names* of environment variables, never their values.
 
 !!! warning "Do not put a bare secret in `arguments` or `env`"
 
@@ -308,17 +277,11 @@ meho operation call vmware-rest-9.0 vmware.composite.vm.guest.program.run \
     [flight recorder](flight-recorder.md) records the underlying vendor
     request. So a password typed straight into `arguments` or `env` is
     retained on those surfaces. Where a program needs a secret, pass the
-    *name* of an environment variable and stage the value guest-side (a
-    file the guest user reads, a templated env file), the same way the
-    guest login itself is resolved from the secret store rather than a
-    parameter.
+    *name* of an environment variable and stage the value guest-side.
 
-Capturing a program's output is a two-step compose, by design:
-`program.run` cannot capture stdout on its own, so redirect the output to
-a file in `arguments`, then read it back with `guest.file.read`
-(`fetch_content=true` to pull the bytes inline; large output returns a
-`result_query` handle). Keeping capture out of the single operation keeps
-its blast radius and audited surface small.
+The operation ids, parameters and worked example ship with the enterprise
+pack's documentation. The public image answers an in-guest call with
+"unknown connector".
 
 ## Honest limits
 
@@ -340,7 +303,8 @@ its blast radius and audited surface small.
   to plan and seed a migration onto VMware; it does not create or delete
   VMs on Hyper-V, and `Export-VM` is a guarded, long-running seed, not a
   routine verb.
-- **In-guest execution needs VMware Tools.** A guest without Tools has no
+- **In-guest execution needs the enterprise pack and VMware Tools.** The
+  public image has no vSphere connector. A guest without Tools has no
   guest-operations channel at all; reaching one would be separate future
   work.
 - **Live-hardware validation is still landing.** These connectors are

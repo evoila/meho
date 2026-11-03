@@ -16,6 +16,10 @@ Op surface (mirrors bind9's read + record-write groups):
 * ``windns.about``        [safe]    — identity canary: hostname +
   ``DnsServer`` module presence / version.
 * ``windns.zone.list``    [safe]    — ``Get-DnsServerZone``.
+* ``windns.zone.get``     [safe]    — one zone's settings + SOA timers.
+* ``windns.zone.set``     [caution + approval] — dynamic update / SOA minimum TTL.
+* ``windns.forwarder.list`` [safe]  — ``Get-DnsServerForwarder``.
+* ``windns.forwarder.set``  [caution + approval] — ``Set-DnsServerForwarder``.
 * ``windns.record.get``   [safe]    — ``Get-DnsServerResourceRecord``.
 * ``windns.record.add``   [caution] — ``Add-DnsServerResourceRecordA`` /
   ``Add-DnsServerResourceRecordCName``.
@@ -24,8 +28,9 @@ Op surface (mirrors bind9's read + record-write groups):
 The safety-level assignment mirrors bind9 exactly: reads are ``safe``,
 record mutations are ``caution`` (a DNS change is global — no per-caller
 scoping — but recoverable; the production-path gate is G7/G10 policy
-territory keyed on this value). ``requires_approval`` is ``False`` on
-every op, matching bind9's record ops.
+territory keyed on this value). The server-setting writes (zone settings,
+forwarders) wait for a person to approve them, because they change how the
+whole server answers.
 
 The dataclass + tuple shape mirrors
 :mod:`~meho_backplane.connectors.bind9.ops` and
@@ -154,8 +159,10 @@ def _windows_dns_ops() -> tuple[WindowsDnsOp, ...]:
     """Return the merged registration tuple.
 
     Composition: ``windns.about`` (identity canary) + ``ZONE_OPS``
-    (``windns.zone.list``) + ``RECORD_OPS`` (``windns.record.get`` +
-    ``windns.record.add`` + ``windns.record.remove``). Five ops total.
+    (``windns.zone.list``) + ``ZONE_SETTINGS_OPS`` (``windns.zone.get`` +
+    ``windns.zone.set``) + ``RECORD_OPS`` (``windns.record.get`` +
+    ``windns.record.add`` + ``windns.record.remove``) + ``FORWARDER_OPS``
+    (``windns.forwarder.list`` + ``windns.forwarder.set``). Nine ops total.
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
@@ -164,10 +171,12 @@ def _windows_dns_ops() -> tuple[WindowsDnsOp, ...]:
     on :class:`WindowsDnsOp` plus its own helpers). Mirrors
     :func:`meho_backplane.connectors.bind9.ops._bind9_ops`.
     """
+    from meho_backplane.connectors.windows_dns.ops_forwarder import FORWARDER_OPS
     from meho_backplane.connectors.windows_dns.ops_record import RECORD_OPS
     from meho_backplane.connectors.windows_dns.ops_zone import ZONE_OPS
+    from meho_backplane.connectors.windows_dns.ops_zone_settings import ZONE_SETTINGS_OPS
 
-    return (_WINDNS_ABOUT_OP, *ZONE_OPS, *RECORD_OPS)
+    return (_WINDNS_ABOUT_OP, *ZONE_OPS, *ZONE_SETTINGS_OPS, *RECORD_OPS, *FORWARDER_OPS)
 
 
 #: The ops :class:`WindowsDnsConnector` registers at lifespan startup —

@@ -3,69 +3,46 @@
 
 """Typed operations exposed by :class:`KubernetesConnector`.
 
-G0.6 refactor (#391) of the G3.2-T1 (#321) skeleton. The skeleton
-shipped with an empty op surface and an ``unknown_op``-returning
-``execute()``; this module hosts the metadata rows the connector
-registers against the G0.6 substrate via
+This module holds :class:`KubernetesOp` (the shape of one registration
+row) and :data:`KUBERNETES_OPS`. It keeps **no list of operations**.
+
+Each ``ops_<feature>.py`` module in this package exports its own rows as
+``OPS``: a tuple of :class:`KubernetesOp`. :func:`collect_ops` walks the
+package with :mod:`pkgutil` (the way :mod:`meho_backplane.connectors.registry`
+finds connector subpackages), imports every ``ops_*`` module, and joins the
+rows sorted by op id. A module without ``OPS`` is a helper and adds
+nothing. A row that is not a :class:`KubernetesOp`, or an op id that two
+rows share, fails at import. So a pull request that adds an op adds its
+own module (or changes its feature's module) and no shared list here. The
+guard test ``test_connectors_k8s_ops_collect.py`` fails when a module's
+rows are not collected.
+
+The connector's ``register_operations()`` classmethod walks
+:data:`KUBERNETES_OPS` once per process at lifespan startup and upserts
+the descriptors through
 :func:`~meho_backplane.operations.typed_register.register_typed_operation`.
+The handler is a bound method on :class:`KubernetesConnector`, named by
+the row's ``handler_attr``. The ``when_to_use`` text of each group stays
+hand-written in ``connector.py`` (``_WHEN_TO_USE_BY_GROUP``), one entry
+per group.
 
-The shipped op surface today:
-
-* ``k8s.about`` -- product-flavour + version snapshot built from
-  :meth:`kubernetes_asyncio.client.VersionApi.get_code`. Mirrors what
-  :meth:`KubernetesConnector.fingerprint` returns but goes through the
-  dispatcher so callers see the same envelope (``OperationResult``)
-  every other op produces. Landed with #391's refactor of the T1
-  skeleton.
-* ``k8s.ls`` / ``k8s.namespace.list`` / ``k8s.node.list`` -- the core
-  inventory surface (G3.2-T2 #322). Metadata + helper functions live in
-  :mod:`~meho_backplane.connectors.kubernetes.ops_core`; this module
-  re-exports the merged tuple so registration walks a single list.
-* ``k8s.pod.{list,info}`` / ``k8s.deployment.{list,info}`` -- the
-  workload surface (G3.2-T3 #323). Metadata + helpers + handlers live
-  in :mod:`~meho_backplane.connectors.kubernetes.ops_workload`;
-  :func:`_kubernetes_ops` splats ``WORKLOAD_OPS`` into the merged tuple.
-* ``k8s.service.list`` / ``k8s.ingress.list`` -- network ops
-  (G3.2-T4 #324). Metadata + helpers in
-  :mod:`~meho_backplane.connectors.kubernetes.ops_network`.
-* ``k8s.configmap.list`` (keys-only) / ``k8s.configmap.info``
-  (full data) -- config ops (G3.2-T4 #324). Metadata + helpers in
-  :mod:`~meho_backplane.connectors.kubernetes.ops_config`.
-* ``k8s.event.list`` -- observability op (G3.2-T4 #324). Metadata +
-  helpers in :mod:`~meho_backplane.connectors.kubernetes.ops_events`
-  (split out of ops_config to fit the 600-line code-quality cap).
-* ``k8s.logs`` -- non-streaming pod-log fetch (G3.2-T5 #325). Metadata
-  schemas + handler live in
-  :mod:`~meho_backplane.connectors.kubernetes.ops_logs`; this module
-  builds the registration row from those exports inside
-  :func:`_kubernetes_ops`.
-
-Each op is declared in :data:`KUBERNETES_OPS` as a typed-metadata row.
-The connector's ``register_operations()`` classmethod walks the list
-once per process at lifespan startup and upserts the descriptors
-through :func:`register_typed_operation`. The handler itself is a
-bound method on :class:`KubernetesConnector` so the descriptor's
-``handler_ref`` round-trips through the dispatcher's
-:func:`~meho_backplane.operations._handler_resolve.import_handler`
-walk -- the same shape every G3.x typed connector will adopt.
-
-References
-----------
-* Parent Initiative: #388 G0.6 work item 11 (refactor shipped Vault +
-  K8s connectors to ``register_typed_operation()``).
-* G3.2-T1 #321 (skeleton this builds on).
-* G3.2 #320 (the full K8s op surface that consumes this pattern).
-* :data:`~meho_backplane.connectors.kubernetes.connector.KubernetesConnector.product`
-  (``"k8s"`` per the registry v2 entry; the v1 entry under
-  ``"kubernetes"`` is kept for backward compat with the chassis route).
+The feature modules import :class:`KubernetesOp` from here, and this
+module imports them back while collecting. So the collection runs at the
+bottom of this file, after :class:`KubernetesOp` exists.
 """
 
 from __future__ import annotations
 
+import importlib
+import pkgutil
 from dataclasses import dataclass
+from types import ModuleType
 from typing import Any, Literal
 
-__all__ = ["KUBERNETES_OPS", "KubernetesOp"]
+__all__ = ["KUBERNETES_OPS", "OPS_MODULE_PREFIX", "KubernetesOp", "collect_ops"]
+
+#: Feature modules of this package start with this prefix.
+OPS_MODULE_PREFIX = "ops_"
 
 
 @dataclass(frozen=True)
@@ -101,228 +78,35 @@ class KubernetesOp:
     llm_instructions: dict[str, Any] | None
 
 
-#: The ops :class:`KubernetesConnector` registers at lifespan startup.
-#:
-#: ``k8s.about`` is the canary op the G0.6 refactor (#391) lands against.
-#: It returns a flat dict shaped like
-#: :class:`~meho_backplane.connectors.schemas.FingerprintResult` but
-#: goes through the dispatcher path so callers exercise the
-#: register_typed_operation -> dispatch -> reduce -> audit pipeline
-#: end-to-end. The G3.2-T2 (#322) core inventory ops (``k8s.ls`` /
-#: ``k8s.namespace.list`` / ``k8s.node.list``) extend the tuple from
-#: :mod:`~meho_backplane.connectors.kubernetes.ops_core`. The remaining
-#: K8s read surface (workload / network / config / events / logs) lands
-#: in #320's T3..T5 against this same registration pattern.
-_K8S_ABOUT_OP = KubernetesOp(
-    op_id="k8s.about",
-    handler_attr="about",
-    summary="Return the cluster's product flavour, version, and platform.",
-    description=(
-        "Hits the Kubernetes API server's ``GET /version`` endpoint via "
-        "``kubernetes_asyncio.client.VersionApi.get_code`` and returns a "
-        "flat dict with the cluster's product slug (rke2 / k3s / eks / "
-        "gke / aks / vanilla derived from the gitVersion suffix), full "
-        "git_version, build date, and platform string. Use to identify "
-        "the cluster before issuing higher-level ops or to populate "
-        "operator dashboards. No params; works against any target whose "
-        "kubeconfig the operator's tenant can read."
-    ),
-    parameter_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
-    response_schema={
-        "type": "object",
-        "properties": {
-            "product": {"type": "string"},
-            "git_version": {"type": "string"},
-            "build_date": {"type": "string"},
-            "major": {"type": "string"},
-            "minor": {"type": "string"},
-            "platform": {"type": "string"},
-            "go_version": {"type": "string"},
-            "git_commit": {"type": "string"},
-            "git_tree_state": {"type": "string"},
-        },
-        "required": ["product", "git_version"],
-        "additionalProperties": True,
-    },
-    group_key="cluster",
-    tags=("read-only", "cluster", "identity"),
-    safety_level="safe",
-    requires_approval=False,
-    llm_instructions={
-        "when_to_use": (
-            "Call when the operator wants to identify the K8s cluster "
-            "behind a target before issuing a higher-level op (pod list, "
-            "deployment scale, etc.), or when the agent needs to pick a "
-            "version-flavoured doc page from the knowledge base."
-        ),
-        "parameter_hints": {},
-        "output_shape": (
-            "Flat dict; the ``product`` field is the canonical slug "
-            "(``rke2`` / ``k3s`` / ``eks`` / ``gke`` / ``aks`` / "
-            "``vanilla``). ``git_version`` carries the full v-prefixed "
-            "string including distribution suffix."
-        ),
-    },
-)
+def collect_ops(package: ModuleType) -> tuple[KubernetesOp, ...]:
+    """Collect ``OPS`` from every ``ops_*`` module of *package*, sorted by op id.
+
+    A module without ``OPS`` adds nothing. A row that is not a
+    :class:`KubernetesOp` raises :class:`TypeError`, and an op id that two
+    rows share raises :class:`ValueError`, so a wrong module fails at
+    start-up and not at dispatch.
+    """
+    rows: dict[str, tuple[str, KubernetesOp]] = {}
+    for info in sorted(pkgutil.iter_modules(package.__path__), key=lambda m: m.name):
+        if info.ispkg or not info.name.startswith(OPS_MODULE_PREFIX):
+            continue
+        module = importlib.import_module(f"{package.__name__}.{info.name}")
+        for op in getattr(module, "OPS", ()):
+            if not isinstance(op, KubernetesOp):
+                raise TypeError(
+                    f"{module.__name__}.OPS holds a {type(op).__name__}, not a KubernetesOp"
+                )
+            if op.op_id in rows:
+                raise ValueError(
+                    f"kubernetes op {op.op_id!r} is in {rows[op.op_id][0]} and in {module.__name__}"
+                )
+            rows[op.op_id] = (module.__name__, op)
+    return tuple(rows[op_id][1] for op_id in sorted(rows))
 
 
 def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
-    """Return the merged registration tuple.
-
-    Composition: ``k8s.about`` (T1 canary) + ``CORE_OPS`` (T2 inventory:
-    ``k8s.ls`` / ``k8s.namespace.list`` / ``k8s.node.list``) +
-    ``WORKLOAD_OPS`` (T3 workload: ``k8s.pod.{list,info}`` /
-    ``k8s.deployment.{list,info}``) + ``JOB_OPS`` (``k8s.job.{list,info}``)
-    + ``WORKLOAD_SET_OPS`` (``k8s.workload.list``) + ``NETWORK_OPS`` (T4 network:
-    ``k8s.service.list`` / ``k8s.ingress.list``) + ``CONFIG_OPS`` (T4
-    config: ``k8s.configmap.list`` keys-only / ``k8s.configmap.info``
-    full data) + ``EVENT_OPS`` (T4 observability: ``k8s.event.list``)
-    + ``STORAGE_OPS`` (#2830 storage: ``k8s.storageclass.list`` /
-    ``k8s.persistentvolume.list`` / ``k8s.persistentvolumeclaim.list``)
-    + ``CUSTOM_RESOURCE_OPS`` (#2830 generic CR reads: ``k8s.crd.list``
-    / ``k8s.cr.list`` / ``k8s.cr.info``) + ``k8s.logs`` (T5) +
-    ``k8s.exec`` + the write ops + ``CRONJOB_OPS`` (``k8s.cronjob.run``:
-    start a CronJob's job now) + ``SECRET_READ_OPS`` (#3496 governed
-    guest-cluster kubeconfig read: ``k8s.secret.read_to_ref``) +
-    ``SECRET_WRITE_OPS`` (``k8s.secret.update`` / ``k8s.secret.delete``).
-
-    Implemented as a function call rather than a literal-and-splat at
-    module level so the import order stays linear: ``ops.py`` defines
-    :class:`KubernetesOp` + ``_K8S_ABOUT_OP``, then imports the op tuples
-    from their ``ops_*`` modules. The arrangement keeps the canary op's
-    metadata co-located with the dataclass definition while letting
-    the larger surfaces live in their own modules next to their
-    helpers.
-    """
-    from meho_backplane.connectors.kubernetes.ops_config import CONFIG_OPS
-    from meho_backplane.connectors.kubernetes.ops_core import CORE_OPS
-    from meho_backplane.connectors.kubernetes.ops_cronjob import CRONJOB_OPS
-    from meho_backplane.connectors.kubernetes.ops_customresource import CUSTOM_RESOURCE_OPS
-    from meho_backplane.connectors.kubernetes.ops_events import EVENT_OPS
-    from meho_backplane.connectors.kubernetes.ops_job import JOB_OPS
-    from meho_backplane.connectors.kubernetes.ops_logs import (
-        K8S_LOGS_LLM_INSTRUCTIONS,
-        K8S_LOGS_PARAMETER_SCHEMA,
-        K8S_LOGS_RESPONSE_SCHEMA,
-    )
-    from meho_backplane.connectors.kubernetes.ops_network import NETWORK_OPS
-    from meho_backplane.connectors.kubernetes.ops_secret_read import SECRET_READ_OPS
-    from meho_backplane.connectors.kubernetes.ops_secret_write import SECRET_WRITE_OPS
-    from meho_backplane.connectors.kubernetes.ops_storage import STORAGE_OPS
-    from meho_backplane.connectors.kubernetes.ops_workload import WORKLOAD_OPS
-    from meho_backplane.connectors.kubernetes.ops_workload_set import WORKLOAD_SET_OPS
-    from meho_backplane.connectors.kubernetes.ops_write_meta import (
-        WRITE_CAUTION_OPS,
-        WRITE_DANGEROUS_OPS,
-    )
-
-    logs_op = KubernetesOp(
-        op_id="k8s.logs",
-        handler_attr="logs",
-        summary="Fetch a chunk of pod logs as a single non-streaming response.",
-        description=(
-            "Reads container stdout/stderr via the Kubernetes API's "
-            "``GET /api/v1/namespaces/{namespace}/pods/{name}/log`` route "
-            "and returns the lines in one response. Honours the standard "
-            "kubectl-style knobs -- ``--tail`` (default 100, capped at "
-            "5000), ``--container`` (required for multi-container pods), "
-            "``--since`` (duration string -- '5m', '1h', '24h', '7d'), "
-            "and ``--previous`` (logs from the prior container "
-            "instance after a restart). Pod name resolution accepts an "
-            "exact match or a unique prefix within the namespace. The "
-            "response body is capped at 1 MiB serialised; oversize "
-            "payloads are truncated line-boundary from the front (most-"
-            "recent lines kept) and ``truncated=true`` is set on the "
-            "result with ``truncated_byte_count`` carrying the dropped "
-            "byte count. Streaming (``kubectl logs -f``) is out of "
-            "scope for v0.2 -- operators following live logs continue "
-            "using the kubectl-vcf.sh fallback."
-        ),
-        parameter_schema=K8S_LOGS_PARAMETER_SCHEMA,
-        response_schema=K8S_LOGS_RESPONSE_SCHEMA,
-        group_key="logs",
-        tags=("read-only", "pod", "logs"),
-        safety_level="safe",
-        requires_approval=False,
-        llm_instructions=K8S_LOGS_LLM_INSTRUCTIONS,
-    )
-
-    return (
-        _K8S_ABOUT_OP,
-        *CORE_OPS,
-        *WORKLOAD_OPS,
-        *JOB_OPS,
-        *WORKLOAD_SET_OPS,
-        *NETWORK_OPS,
-        *CONFIG_OPS,
-        *EVENT_OPS,
-        *STORAGE_OPS,
-        *CUSTOM_RESOURCE_OPS,
-        logs_op,
-        _exec_op(),
-        *WRITE_CAUTION_OPS,
-        *CRONJOB_OPS,
-        *WRITE_DANGEROUS_OPS,
-        *SECRET_READ_OPS,
-        *SECRET_WRITE_OPS,
-    )
-
-
-def _exec_op() -> KubernetesOp:
-    """Build the ``k8s.exec`` registration row (G3.14-T2 #1404).
-
-    Split out of :func:`_kubernetes_ops` to keep that function under the
-    code-quality size cap; the metadata schemas + handler live in
-    :mod:`~meho_backplane.connectors.kubernetes.ops_exec`.
-    """
-    from meho_backplane.connectors.kubernetes.ops_exec import (
-        DEFAULT_TIMEOUT_SECONDS,
-        K8S_EXEC_LLM_INSTRUCTIONS,
-        K8S_EXEC_PARAMETER_SCHEMA,
-        K8S_EXEC_RESPONSE_SCHEMA,
-        MAX_TIMEOUT_SECONDS,
-    )
-
-    return KubernetesOp(
-        op_id="k8s.exec",
-        handler_attr="exec_command",
-        summary="Run a bounded argv command in a container; capture stdout/stderr + exit code.",
-        description=(
-            "Executes an explicit ``argv`` command inside a running "
-            "container over the Kubernetes API's pod-exec websocket "
-            "transport (``v4.channel.k8s.io`` sub-protocol via "
-            "``kubernetes_asyncio.stream.WsApiClient``) and returns the "
-            "captured stdout / stderr plus the process exit code parsed "
-            "from the channel-3 status frame. DANGEROUS and "
-            "approval-gated -- a command can mutate container state. "
-            "Command-and-capture only: the command runs to completion "
-            "or a bounded timeout (default "
-            f"{DEFAULT_TIMEOUT_SECONDS}s, capped at "
-            f"{MAX_TIMEOUT_SECONDS}s); on timeout the socket is closed "
-            "and partial output is returned with ``timed_out=true``. "
-            "Each stream is capped at 1 MiB and truncated from the "
-            "front when oversize. Pod name resolution accepts an exact "
-            "match or a unique prefix within the namespace; "
-            "multi-container pods require ``--container``. Interactive "
-            "exec (``kubectl exec -it`` -- a live PTY/shell) is "
-            "deliberately out of scope: the dispatcher returns a single "
-            "response with no incremental stdin/stdout envelope, the "
-            "same deferral ``k8s.logs -f`` took. Output bytes are never "
-            "written to the audit log (only the request params are "
-            "hashed)."
-        ),
-        parameter_schema=K8S_EXEC_PARAMETER_SCHEMA,
-        response_schema=K8S_EXEC_RESPONSE_SCHEMA,
-        group_key="exec",
-        tags=("write", "exec", "pod", "dangerous"),
-        safety_level="dangerous",
-        requires_approval=True,
-        llm_instructions=K8S_EXEC_LLM_INSTRUCTIONS,
-    )
+    """Return the rows of every feature module of this package."""
+    return collect_ops(importlib.import_module(__name__.rpartition(".")[0]))
 
 
 KUBERNETES_OPS: tuple[KubernetesOp, ...] = _kubernetes_ops()

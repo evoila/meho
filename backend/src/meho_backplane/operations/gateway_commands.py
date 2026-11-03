@@ -62,9 +62,11 @@ import structlog
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.runner_write_allowlist import load_runner_allowlist
 from meho_backplane.db.models import (
+    ApprovalRequest,
     AuditEventClass,
     AuditLog,
     EndpointDescriptor,
@@ -86,9 +88,10 @@ from meho_backplane.operations._validate import (
     policy_gate,
     validate_params,
 )
-from meho_backplane.operations.approval_handoff import discard as discard_handoff
 from meho_backplane.operations.approval_queue import (
+    approval_release_changed,
     consume_remote_write_approval,
+    end_run_input,
     find_remote_write_approval,
 )
 from meho_backplane.runner.satellite_tier import (
@@ -345,7 +348,7 @@ async def _write_gateway_audit_row(
         status_code=status_code,
         request_id=None,
         duration_ms=Decimal(str(round(duration_ms, 2))),
-        payload=payload,
+        payload={**payload, **tenant_role_source_payload(operator)},
     )
     session.add(row)
     await session.flush()
@@ -469,7 +472,7 @@ async def mint_gateway_command(
     # the single source of truth shared with the edge executor and the
     # assignment materialiser (defence in depth), before the policy gate so a
     # refused op is never parked.
-    tier = classify_satellite_tier(descriptor.safety_level)
+    tier = classify_satellite_tier(descriptor.safety_level, op_id=op_id)
     if tier is SatelliteMintTier.EXCLUDED:
         # dangerous / destructive — never minted (composes with #3183).
         structlog.get_logger(__name__).warning(
@@ -483,7 +486,7 @@ async def mint_gateway_command(
         return _refused(
             MintRefusalCode.OP_NOT_SAFE,
             f"op {op_id!r} has safety_level {descriptor.safety_level!r}; "
-            "dangerous/destructive ops are never minted to a satellite",
+            "dangerous/destructive ops and safe writes are never minted to a satellite",
         )
     if tier is SatelliteMintTier.REMOTE_WRITE:
         # Revocation hardening (#3192, the Stage-3 gate): a revoked runner
@@ -565,6 +568,27 @@ async def mint_gateway_command(
     )
 
 
+def _approval_refusal_reason(approval: ApprovalRequest | None, op_id: str) -> str | None:
+    """Why *approval* cannot bind a remote-write mint, or ``None`` when it can.
+
+    No approval matches the call (mechanism 1, #3189), or the approval was
+    made under an older MEHO release (#5030): an approval covers one exact
+    release, so the requester asks again.
+    """
+    if approval is None:
+        return (
+            f"remote-write op {op_id!r} refused: no committed, unconsumed approval "
+            "binding for this (op, target, params); the caution tier mints only "
+            "against a human-approved ApprovalRequest (mechanism 1)"
+        )
+    if approval_release_changed(approval):
+        return (
+            f"remote-write op {op_id!r} refused: approval {approval.id} was made "
+            "under an older MEHO release; MEHO was updated, so ask again"
+        )
+    return None
+
+
 async def _screen_remote_write(
     session: AsyncSession,
     *,
@@ -605,15 +629,14 @@ async def _screen_remote_write(
         target_id=target_id,
         params=params,
     )
-    if approval is None:
+    approval_refusal = _approval_refusal_reason(approval, op_id)
+    if approval_refusal is not None:
         return (
             None,
             None,
             _refuse_remote_write(
                 MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED,
-                f"remote-write op {op_id!r} refused: no committed, unconsumed approval "
-                "binding for this (op, target, params); the caution tier mints only "
-                "against a human-approved ApprovalRequest (mechanism 1)",
+                approval_refusal,
                 op_id=op_id,
                 operator=operator,
                 runner_id=runner_id,
@@ -712,8 +735,9 @@ async def _mint_remote_write(
         )
 
     # Keep custody cleanup in the caller-owned mint transaction: a rollback
-    # restores both the approval claim and its encrypted execution input.
-    await discard_handoff(session, approval.id, approval.tenant_id)
+    # restores the approval claim, its encrypted execution input and the
+    # secret fields of its stored params.
+    await end_run_input(session, approval)
 
     return await _finalize_mint(
         session,

@@ -47,6 +47,7 @@ from kubernetes_asyncio.client import (
 
 from meho_backplane.connectors.hyperv import HYPERV_OPS, HypervConnector
 from meho_backplane.connectors.hyperv.ops_guest import hyperv_vms_guest_list
+from meho_backplane.connectors.inventory.source_k8s import build_workload_record
 from meho_backplane.connectors.kubernetes import ops_workload_set
 from meho_backplane.connectors.kubernetes.ops import KUBERNETES_OPS
 from meho_backplane.connectors.kubernetes.ops_core import node_row
@@ -54,7 +55,6 @@ from meho_backplane.connectors.kubernetes.ops_workload_set import (
     k8s_workload_list,
     workload_set_row,
 )
-from meho_backplane.connectors.migration.source_k8s import build_workload_record
 from meho_backplane.connectors.winsrv import WINSRV_OPS, WinsrvConnector
 from meho_backplane.connectors.winsrv.ops_hardware import winsrv_hardware
 from meho_backplane.operations._validate import validate_params

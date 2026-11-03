@@ -57,7 +57,12 @@ from __future__ import annotations
 from typing import Any
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools._call_operation_async import poll_call, submit_async_call
 from meho_backplane.operations.meta_tools import (
@@ -71,6 +76,7 @@ from meho_backplane.operations.meta_tools import (
     preview_operation,
     search_operations,
 )
+from meho_backplane.operations.operation_run_service import MAX_RUN_WAIT_SECONDS
 
 __all__: list[str] = []
 
@@ -149,19 +155,28 @@ async def _call_operation_handler(
 ) -> dict[str, Any]:
     """Shim over :func:`call_operation`, plus async mode (#3695).
 
-    ``async`` and ``run_id`` are MCP controls, not dispatch arguments, so
-    they are taken out before the call reaches :func:`call_operation`.
+    ``async``, ``run_id`` and ``wait_seconds`` are MCP controls, not
+    dispatch arguments, so they are taken out before the call reaches
+    :func:`call_operation`.
     """
     call_arguments = dict(arguments)
     run_async = bool(call_arguments.pop("async", False))
     run_id = call_arguments.pop("run_id", None)
+    wait_seconds = call_arguments.pop("wait_seconds", None)
+    if wait_seconds is not None and run_id is None:
+        raise McpInvalidParamsError(
+            "`wait_seconds` only works with `run_id` (when you check a call)",
+            data={"reason": "wait_without_run_id"},
+        )
     if run_id is not None:
         if run_async:
             raise McpInvalidParamsError(
                 "send either `async: true` (start a call) or `run_id` (check a call), not both",
                 data={"reason": "async_with_run_id"},
             )
-        return await poll_call(operator, call_arguments, str(run_id))
+        return await poll_call(
+            operator, call_arguments, str(run_id), wait_seconds=wait_seconds or 0
+        )
     if run_async:
         return await submit_async_call(operator, call_arguments)
     return await call_operation(operator, call_arguments)
@@ -184,16 +199,19 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="list_operation_groups",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "List enabled operation groups for a connector. Each group "
             "carries a `when_to_use` blurb explaining what the group is "
             "for so you can pick the right group before searching its "
-            "operations. Call this FIRST when you don't know which "
+            "operations. A group can hold reads and writes. Check each "
+            "operation's `safety_level` in the `search_operations` results. "
+            "Call this FIRST when you don't know which "
             "operation to invoke -- it narrows the search space from "
             "hundreds of operations to a handful of relevant ones. "
             "Argument: `connector_id` in `<impl_id>-<version>` form "
-            '(e.g. "vmware-rest-9.0", "vault-1.x") -- NOT the bare '
+            '(e.g. "k8s-1.x", "vault-1.x") -- NOT the bare '
             "product name. Returns groups in `group_key` order. An "
             "UNKNOWN connector_id is an error (no such connector, "
             "`-32602` with `data.reason=unknown_connector`); a "
@@ -219,7 +237,7 @@ register_mcp_tool(
                     "type": "string",
                     "description": (
                         "Connector identifier in the form "
-                        '`<impl_id>-<version>` (e.g. "vmware-rest-9.0", '
+                        '`<impl_id>-<version>` (e.g. "k8s-1.x", '
                         '"vault-1.x") -- NOT the bare product name. A '
                         "value naming no registered connector is an error."
                     ),
@@ -427,6 +445,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="search_operations",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Hybrid BM25 + cosine retrieval over a connector's enabled "
@@ -460,9 +479,14 @@ register_mcp_tool(
             "first), `no_match` (nothing matched; do "
             "not call an operation this search did not return), "
             "`unknown_group` (the group does not exist; `narrowing` lists "
-            "valid group keys), or `zero_enabled_operations` (nothing on "
+            "valid group keys), `zero_enabled_operations` (nothing on "
             "this connector is enabled; do not call it, an operator must "
-            "enable operations). `advisory` explains any outcome other than "
+            "enable operations), `package_not_installed` (the "
+            "connector package the operations come from is not installed; "
+            "do not call it, the advisory names the package to install), "
+            "or `code_not_installed` (the code of this connector is not in "
+            "this MEHO; do not call it; also the answer in exact-op mode). "
+            "`advisory` explains any outcome other than "
             "`matched`; `narrowing` lists next steps."
         ),
         inputSchema={
@@ -561,7 +585,9 @@ register_mcp_tool(
             "not call it again. For a long call (a deploy, a multi-step "
             'operation) pass `async: true`: you get `status="pending"` and '
             "`extras.run_id`; call again with the same `connector_id`, "
-            "`op_id` and that `run_id` to check it."
+            "`op_id` and that `run_id` to check it. Add `wait_seconds` to "
+            "the check so it waits for the call to end instead of checking "
+            "again and again."
         ),
         inputSchema={
             "type": "object",
@@ -572,7 +598,7 @@ register_mcp_tool(
                     "minLength": 1,
                     "description": (
                         "Operation id from `search_operations`, e.g. "
-                        '"vault.kv.read" or "GET:/api/vcenter/cluster".'
+                        '"vault.kv.read" or "GET:/repos/{owner}/{repo}/issues".'
                     ),
                 },
                 "target": {
@@ -598,9 +624,11 @@ register_mcp_tool(
                     "type": "object",
                     "description": (
                         "The operation's parameters. Unknown fields are "
-                        "refused. A credential read hides secret values by "
-                        "default; add `reveal_secret: true` only when you "
-                        "must pass the raw value on (the reveal is audited)."
+                        "refused. Secret-named fields are hidden by default, "
+                        "and a secret read hides every value. "
+                        "`reveal_secret: true` returns the values to a "
+                        "person or a service login only (audited); an agent "
+                        "is refused."
                     ),
                 },
                 "work_ref": {
@@ -642,6 +670,17 @@ register_mcp_tool(
                     "description": (
                         "Check a call started with `async: true` (send its "
                         "`extras.run_id`). Nothing is run again."
+                    ),
+                },
+                "wait_seconds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": MAX_RUN_WAIT_SECONDS,
+                    "default": 0,
+                    "description": (
+                        "Only with `run_id`. Wait up to this many seconds for "
+                        "the call to end, then answer. The answer comes as "
+                        "soon as the call ends. 0 answers at once."
                     ),
                 },
             },
@@ -747,6 +786,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="preview_operation",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Preview an operation WITHOUT running it. Resolves the same "
@@ -796,7 +836,7 @@ register_mcp_tool(
                     "description": (
                         "Operation id as returned by `search_operations`. "
                         'Examples: "POST:/repos/{owner}/{repo}/issues", '
-                        '"GET:/api/vcenter/cluster".'
+                        '"GET:/repos/{owner}/{repo}/pulls".'
                     ),
                 },
                 "target": {

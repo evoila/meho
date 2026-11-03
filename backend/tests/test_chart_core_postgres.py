@@ -307,16 +307,19 @@ def test_network_policy_admits_backplane_and_keycloak_on_5432_only() -> None:
         {"app.kubernetes.io/name": "keycloak", "app.kubernetes.io/instance": "test"},
     ]
 
-    # The helm test pod and the migration Job pod carry the backplane labels,
-    # so the policy lets them reach the database.
+    # The helm test pod and the backplane pod carry the backplane labels, so
+    # the policy lets them reach the database. In this mode the migration
+    # runs in the backplane pod, as its `migrate` init container (#5233).
     backplane = selectors[0]
     test_labels = _test_pod(docs)["metadata"]["labels"]
     assert all(test_labels.get(k) == v for k, v in backplane.items())
-    migrate = next(
-        d for d in docs if d["kind"] == "Job" and d["metadata"]["name"].endswith("-migrate")
+    deployment = next(
+        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "test-meho"
     )
-    job_labels = migrate["spec"]["template"]["metadata"]["labels"]
-    assert all(job_labels.get(k) == v for k, v in backplane.items())
+    pod_labels = deployment["spec"]["template"]["metadata"]["labels"]
+    assert all(pod_labels.get(k) == v for k, v in backplane.items())
+    init = deployment["spec"]["template"]["spec"]["initContainers"]
+    assert [c["name"] for c in init] == ["migrate"]
 
 
 def test_network_policy_can_be_turned_off() -> None:

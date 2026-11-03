@@ -7,7 +7,8 @@ The file ``deploy/charts/meho/charts/keycloak/files/meho-realm.json`` is what
 Keycloak imports at its first start. These checks pin the realm the product
 owner decided (``docs/decisions/login-role-groups.md``): five role groups that
 carry ``tenant_id`` and ``tenant_role`` (plus ``approver`` on MEHO-Approvers),
-the platform group that carries only ``platform_admin`` (#4043), the six
+the platform group that carries only ``platform_admin`` (#4043), the
+``meho_tenant`` attribute and ``meho-tenants`` mapper for several tenants, the six
 clients, the mappers ``meho admin keycloak bootstrap-clients`` puts on the
 clients people log in with, and no secret or host name written into the
 file.
@@ -24,6 +25,8 @@ from typing import Any
 
 import pytest
 
+from meho_backplane.settings import Settings
+
 _REALM_FILE = (
     Path(__file__).resolve().parents[2]
     / "deploy"
@@ -36,9 +39,12 @@ _REALM_FILE = (
 )
 
 _HUMAN_CLIENTS = ("meho-cli", "meho-mcp", "meho-web")
+#: Every client a person signs in with, including the approval sign-in (#5515).
+_PERSON_CLIENTS = (*_HUMAN_CLIENTS, "meho-cli-approve")
 _PLACEHOLDERS = {
     "MEHO_REALM_PUBLIC_URL",
     "MEHO_REALM_TENANT_ID",
+    "MEHO_REALM_TENANT_NAME",
     "MEHO_REALM_ADMIN_CLIENT_SECRET",
     "MEHO_REALM_WEB_CLIENT_SECRET",
     "MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET",
@@ -61,9 +67,45 @@ def test_realm_name_and_session_limits(realm: dict[str, Any]) -> None:
     assert realm["realm"] == "meho"
     assert realm["enabled"] is True
     assert realm["registrationAllowed"] is False
-    # An offline login (the MCP clients' long login) ends after 7 days at most.
+    # An offline login (the long login of the CLI and the MCP clients) ends
+    # after 7 days at most.
     assert realm["offlineSessionMaxLifespanEnabled"] is True
     assert realm["offlineSessionMaxLifespan"] == 7 * 24 * 3600
+
+
+def test_browser_is_remembered_for_30_days(realm: dict[str, Any]) -> None:
+    # With "Remember me" ticked, a new login in the same browser asks nothing
+    # for 30 days. The fresh sign-in for an approval still asks every time.
+    thirty_days = 30 * 24 * 3600
+    assert realm["rememberMe"] is True
+    assert realm["ssoSessionIdleTimeoutRememberMe"] == thirty_days
+    assert realm["ssoSessionMaxLifespanRememberMe"] == thirty_days
+
+
+def test_passkeys_are_on_and_need_user_verification(realm: dict[str, Any]) -> None:
+    # A passkey replaces password plus code. The device must check the
+    # person (a PIN or a fingerprint), and the key must be one the browser
+    # can offer without a user name first.
+    assert realm["webAuthnPolicyPasswordlessPasskeysEnabled"] is True
+    assert realm["webAuthnPolicyPasswordlessUserVerificationRequirement"] == "required"
+    assert realm["webAuthnPolicyPasswordlessResidentKey"] == "required"
+
+
+def test_passkeys_do_not_use_the_old_discoverable_credential_field(
+    realm: dict[str, Any],
+) -> None:
+    # Keycloak 26.7 replaced "Require discoverable credential" (Yes/No) with
+    # "Discoverable credential". The old field logs a warning when set, and a
+    # later Keycloak may remove it.
+    assert "webAuthnPolicyPasswordlessRequireResidentKey" not in realm
+    assert "webAuthnPolicyRequireResidentKey" not in realm
+
+
+def test_browser_session_limits_match_the_console(realm: dict[str, Any]) -> None:
+    # The login server keeps a browser session for 1 hour without use and
+    # 10 hours at most: the same as the console's own session (#5518).
+    assert realm["ssoSessionIdleTimeout"] == 3600
+    assert realm["ssoSessionMaxLifespan"] == 10 * 3600
 
 
 def test_no_company_login_yet(realm: dict[str, Any]) -> None:
@@ -72,29 +114,38 @@ def test_no_company_login_yet(realm: dict[str, Any]) -> None:
     assert realm["identityProviderMappers"] == []
 
 
+def _meho_tenant(role: str) -> list[str]:
+    return [f"${{MEHO_REALM_TENANT_ID}}:${{MEHO_REALM_TENANT_NAME}}:{role}"]
+
+
 def test_role_groups_with_tenant_attributes_and_the_platform_group(realm: dict[str, Any]) -> None:
     groups = {g["name"]: g["attributes"] for g in realm["groups"]}
     assert groups == {
         "MEHO-Readers": {
             "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
             "tenant_role": ["read_only"],
+            "meho_tenant": _meho_tenant("Readers"),
         },
         "MEHO-Operators": {
             "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
             "tenant_role": ["operator"],
+            "meho_tenant": _meho_tenant("Operators"),
         },
         "MEHO-SA-Operators": {
             "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
             "tenant_role": ["operator"],
+            "meho_tenant": _meho_tenant("SA-Operators"),
         },
         "MEHO-Admins": {
             "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
             "tenant_role": ["tenant_admin"],
+            "meho_tenant": _meho_tenant("Admins"),
         },
         "MEHO-Approvers": {
             "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
             "tenant_role": ["read_only"],
             "approver": ["true"],
+            "meho_tenant": _meho_tenant("Approvers"),
         },
         # Not a role group: it carries no tenant and no role, only the right
         # to act across tenants. The bootstrap Job puts the first admin here.
@@ -106,6 +157,7 @@ def test_clients(realm: dict[str, Any]) -> None:
     assert {c["clientId"] for c in realm["clients"]} == {
         "meho-backplane",
         "meho-cli",
+        "meho-cli-approve",
         "meho-mcp",
         "meho-web",
         "meho-admin",
@@ -123,6 +175,7 @@ def test_human_clients_read_claims_from_groups(realm: dict[str, Any], client_id:
         "tenant-role",
         "approver",
         "platform-admin",
+        "meho-tenants",
         "groups-claim",
     }
     for name, attribute, json_type in (
@@ -144,6 +197,21 @@ def test_human_clients_read_claims_from_groups(realm: dict[str, Any], client_id:
         assert config["access.token.claim"] == "true"
         assert config["id.token.claim"] == "false"
         assert config["userinfo.token.claim"] == "true"
+    # One person may be in role groups of several tenants: this mapper lists
+    # the meho_tenant value of every group of the person.
+    tenants = mappers["meho-tenants"]
+    assert tenants["protocolMapper"] == "oidc-usermodel-attribute-mapper"
+    assert tenants["config"] == {
+        "user.attribute": "meho_tenant",
+        "claim.name": "meho_tenants",
+        "jsonType.label": "String",
+        "aggregate.attrs": "true",
+        "multivalued": "true",
+        "id.token.claim": "false",
+        "access.token.claim": "true",
+        "introspection.token.claim": "true",
+        "userinfo.token.claim": "true",
+    }
     assert mappers["groups-claim"]["protocolMapper"] == "oidc-group-membership-mapper"
     assert mappers["audience-meho-backplane"]["config"]["included.client.audience"] == (
         "meho-backplane"
@@ -159,7 +227,7 @@ def test_no_fixed_tenant_or_role_on_any_client(realm: dict[str, Any]) -> None:
             assert mapper["protocolMapper"] != "oidc-hardcoded-claim-mapper", client["clientId"]
 
 
-@pytest.mark.parametrize("client_id", _HUMAN_CLIENTS)
+@pytest.mark.parametrize("client_id", _PERSON_CLIENTS)
 def test_human_clients_default_scopes(realm: dict[str, Any], client_id: str) -> None:
     client = _client(realm, client_id)
     assert set(client["defaultClientScopes"]) == {
@@ -175,10 +243,29 @@ def test_human_clients_default_scopes(realm: dict[str, Any], client_id: str) -> 
 def test_cli_client_uses_device_flow(realm: dict[str, Any]) -> None:
     client = _client(realm, "meho-cli")
     assert client["publicClient"] is True
-    assert client["standardFlowEnabled"] is False
     assert client["directAccessGrantsEnabled"] is False
     assert client["attributes"]["oauth2.device.authorization.grant.enabled"] == "true"
-    assert client["optionalClientScopes"] == []
+
+
+def test_cli_client_requires_no_pkce(realm: dict[str, Any]) -> None:
+    """`meho login` sends no PKCE, and Keycloak checks PKCE at the device login too.
+
+    The clients without a device login keep the PKCE method.
+    """
+    client = _client(realm, "meho-cli")
+    assert "pkce.code.challenge.method" not in client["attributes"]
+    for client_id in ("meho-cli-approve", "meho-mcp", "meho-web"):
+        other = _client(realm, client_id)
+        assert other["attributes"]["pkce.code.challenge.method"] == "S256"
+        assert other["attributes"]["oauth2.device.authorization.grant.enabled"] == "false"
+
+
+def test_cli_client_offers_a_long_login(realm: dict[str, Any]) -> None:
+    """`meho login` asks for offline_access; it ends after 48 hours without use."""
+    client = _client(realm, "meho-cli")
+    assert client["optionalClientScopes"] == ["offline_access"]
+    assert "offline_access" not in client["defaultClientScopes"]
+    assert client["attributes"]["client.offline.session.idle.timeout"] == str(48 * 3600)
 
 
 def test_mcp_client_browser_login(realm: dict[str, Any]) -> None:
@@ -261,3 +348,83 @@ def test_no_secret_or_host_written_in_the_file(realm: dict[str, Any]) -> None:
     # public-URL placeholder.
     for url in re.findall(r"https?://[^\"\s]+", _REALM_FILE.read_text()):
         assert url.startswith(("http://localhost:", "http://127.0.0.1:")), url
+
+
+def test_cli_client_allows_the_fresh_sign_in_for_an_approval(realm: dict[str, Any]) -> None:
+    """``meho approvals approve`` signs in again in the browser (#3979).
+
+    The browser flow is on with a 127.0.0.1 loopback redirect only;
+    ``meho login`` keeps the device flow. Same as the bootstrap recipe.
+    """
+    client = _client(realm, "meho-cli")
+    assert client["standardFlowEnabled"] is True
+    assert client["attributes"]["oauth2.device.authorization.grant.enabled"] == "true"
+    assert client["redirectUris"] == ["http://127.0.0.1:*"]
+    assert client["webOrigins"] == []
+
+
+def test_approval_sign_in_client(realm: dict[str, Any]) -> None:
+    """The fresh sign-in of ``meho approvals approve`` has its own client (#5515).
+
+    Browser sign-in with PKCE on a 127.0.0.1 loopback redirect only, no
+    device login, no ``offline_access``, no refresh token. Its access token
+    lasts as long as the approval window. It has the claim mappers of
+    ``meho-cli`` (so the token names the person, tenant and role) and the
+    backplane audience, but not the MCP audience: the token is only for
+    the approve call.
+    """
+    client = _client(realm, "meho-cli-approve")
+    assert client["publicClient"] is True
+    assert client["standardFlowEnabled"] is True
+    assert client["implicitFlowEnabled"] is False
+    assert client["directAccessGrantsEnabled"] is False
+    assert client["serviceAccountsEnabled"] is False
+    assert client["attributes"]["pkce.code.challenge.method"] == "S256"
+    assert client["attributes"]["oauth2.device.authorization.grant.enabled"] == "false"
+    assert client["redirectUris"] == ["http://127.0.0.1:*"]
+    assert client["webOrigins"] == []
+    # No refresh token; the access token lasts as long as the approval window.
+    assert client["attributes"]["use.refresh.tokens"] == "false"
+    window = Settings.model_fields["fresh_sign_in_max_age_seconds"].default
+    assert client["attributes"]["access.token.lifespan"] == str(window)
+    assert client["optionalClientScopes"] == []
+    assert "offline_access" not in client["defaultClientScopes"]
+    cli_mappers = {
+        m["name"]: m
+        for m in _client(realm, "meho-cli")["protocolMappers"]
+        if m["name"] != "meho-mcp-audience"
+    }
+    assert {m["name"]: m for m in client["protocolMappers"]} == cli_mappers
+
+
+def test_approval_client_has_its_own_sign_in_flow(realm: dict[str, Any]) -> None:
+    """``meho-cli-approve`` signs in with a flow that always asks for the password.
+
+    The flow has the password form and the one-time code step (when the
+    person has set one up), and no other step: no step that signs a person
+    in without the form.
+    """
+    flows = {flow["alias"]: flow for flow in realm["authenticationFlows"]}
+    flow = flows["meho approval sign-in"]
+    assert flow["topLevel"] is True
+    assert flow["builtIn"] is False
+    assert _client(realm, "meho-cli-approve")["authenticationFlowBindingOverrides"] == {
+        "browser": flow["id"]
+    }
+    steps = [
+        (step.get("authenticator") or step["flowAlias"], step["requirement"])
+        for step in flow["authenticationExecutions"]
+    ]
+    assert steps == [
+        ("auth-username-password-form", "REQUIRED"),
+        ("meho approval sign-in - one-time code", "CONDITIONAL"),
+    ]
+    code = flows["meho approval sign-in - one-time code"]
+    assert code["topLevel"] is False
+    assert [(s["authenticator"], s["requirement"]) for s in code["authenticationExecutions"]] == [
+        ("conditional-user-configured", "REQUIRED"),
+        ("auth-otp-form", "REQUIRED"),
+    ]
+    # Only the approval client has a flow of its own.
+    bound = [c["clientId"] for c in realm["clients"] if c.get("authenticationFlowBindingOverrides")]
+    assert bound == ["meho-cli-approve"]

@@ -61,6 +61,7 @@ from fastapi.templating import Jinja2Templates
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 from starlette.requests import Request
 
+from meho_backplane.connector_packages import installed_connector_packages
 from meho_backplane.sandbox_mode import sandbox_mode_active
 from meho_backplane.ui.maturity import surface_maturity
 from meho_backplane.ui.paths import templates_dir
@@ -122,6 +123,9 @@ def get_jinja_env() -> Environment:
         # every page shows the banner when the mode is on and nothing when
         # it is off. No per-route context threading.
         _ENV.globals["sandbox_mode_active"] = sandbox_mode_active
+        # Installed connector packages (#5036): the same list GET /version
+        # shows, rendered next to the deployed version on the dashboard.
+        _ENV.globals["connector_packages"] = installed_connector_packages
     return _ENV
 
 
@@ -140,7 +144,7 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
     The context processor exposes two variables to every Jinja render:
 
     * ``session_tenant`` -- a ``dict`` carrying ``id`` / ``slug`` /
-      ``name``, or ``None`` when the request hit a surface where the
+      ``name`` / ``can_switch``, or ``None`` when the request hit a surface where the
       session middleware hasn't bound a context (the auth surfaces
       themselves, e.g. ``/ui/auth/login`` -- the operator is by
       definition not signed in there). ``base.html``'s header chip
@@ -201,6 +205,10 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
             "id": str(session_ctx.tenant_id),
             "slug": session_ctx.tenant_slug,
             "name": session_ctx.tenant_name,
+            # #5240: the sidebar tenant box links to the tenant picker
+            # when the person has more than one tenant or is a platform
+            # admin.
+            "can_switch": session_ctx.can_switch_tenant,
         },
         # The Keycloak ``sub`` of the signed-in operator, surfaced into the
         # sidebar account chip (G10.11-T1 #1892) to replace the hardcoded

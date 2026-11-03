@@ -28,6 +28,7 @@ the fixture-injection indirection.
 from __future__ import annotations
 
 import time
+import uuid
 import warnings
 from typing import Any
 
@@ -40,6 +41,9 @@ with warnings.catch_warnings():
 
 ISSUER: str = "https://keycloak.test/realms/meho"
 AUDIENCE: str = "meho-backplane"
+#: The client of the approval sign-in (#5515), the default of
+#: ``KEYCLOAK_CLI_APPROVE_CLIENT_ID``.
+APPROVAL_CLIENT_ID: str = "meho-cli-approve"
 DISCOVERY_URL: str = f"{ISSUER}/.well-known/openid-configuration"
 JWKS_URL: str = f"{ISSUER}/protocol/openid-connect/certs"
 
@@ -80,6 +84,7 @@ def mint_token(
     principal_kind: str | None = None,
     runner_id: str | None = None,
     extra_claims: dict[str, Any] | None = None,
+    fresh_sign_in: bool = False,
 ) -> str:
     """Mint a happy-path JWT signed by *private_key*.
 
@@ -119,6 +124,13 @@ def mint_token(
     ``tenant_role="read_only"`` to mint a dedicated approver principal that
     can decide approvals but cannot dispatch.
 
+    ``fresh_sign_in`` adds ``auth_time`` (now), a new random ``sid``,
+    ``azp`` = the approval client (``meho-cli-approve``) and ``acr`` ``"1"``:
+    a person who just signed in with the approval sign-in and typed their
+    password. An approve over REST needs it
+    (#3979, #5515). Each call gives a new ``sid``, so each token is a new
+    sign-in.
+
     ``extra_claims`` merges arbitrary claims into the payload last (so a
     caller can add ``azp`` / ``client_id`` to mint a client-credentials
     token, #3446). ``None`` leaves the payload unchanged.
@@ -153,6 +165,11 @@ def mint_token(
             payload["principal_kind"] = principal_kind
         if runner_id is not None:
             payload["runner_id"] = runner_id
+        if fresh_sign_in:
+            payload["auth_time"] = now
+            payload["sid"] = str(uuid.uuid4())
+            payload["azp"] = APPROVAL_CLIENT_ID
+            payload["acr"] = "1"
         if extra_claims is not None:
             payload.update(extra_claims)
         header = {"alg": "RS256", "kid": private_key.as_dict()["kid"], "typ": "JWT"}

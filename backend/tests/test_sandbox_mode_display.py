@@ -29,8 +29,7 @@ from meho_backplane.main import app
 from meho_backplane.operations.governed_subops import (
     build_governed_subops_response,
     classify_subop_grantability,
-    governed_subops_for,
-    registered_governed_subop_surfaces,
+    register_governed_subops,
     reset_governed_subop_registry,
 )
 from meho_backplane.settings import get_settings
@@ -205,51 +204,25 @@ def test_classify_keeps_todays_answers_with_the_mode_off(monkeypatch: pytest.Mon
     assert "delete-shaped" in (delete_leg.ungrantable_reason or "")
 
 
-def test_vmware_wiring_is_derived_from_manifests_with_the_mode_on(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Copy of ``test_vmware_wiring_is_derived_from_manifests``: delete legs become grantable."""
-    from meho_backplane.connectors.vmware_rest.composites import _write
-    from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
-        register_vmware_governed_subops,
-    )
-
-    turn_sandbox_mode_on(monkeypatch)
-    register_vmware_governed_subops()
-    surfaces = registered_governed_subop_surfaces()
-    assert "vmware.composite.vm.create" in surfaces
-    assert "vmware.composite.vm.destroy" in surfaces
-
-    vm_create = governed_subops_for("vmware.composite.vm.create")
-    assert vm_create is not None
-    assert set(_write._SUB_OPS_VM_CREATE) <= set(vm_create.sub_op_ids)
-    assert "DELETE:/vcenter/vm/{vm}" in vm_create.sub_op_ids
-    assert all(classify_subop_grantability(c).grantable for c in vm_create.sub_op_ids)
-
-    vm_destroy = governed_subops_for("vmware.composite.vm.destroy")
-    assert vm_destroy is not None
-    assert all(classify_subop_grantability(c).grantable for c in vm_destroy.sub_op_ids)
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["off", "on"])
 async def test_step_list_response_follows_the_mode(
     monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
-    from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
-        register_vmware_governed_subops,
-    )
-
     if mode == "on":
         turn_sandbox_mode_on(monkeypatch)
     else:
         turn_sandbox_mode_off(monkeypatch)
-    register_vmware_governed_subops()
+    register_governed_subops(
+        composite_op_id="demo.composite.vm.destroy",
+        connector_id="demo-rest-1.0",
+        sub_op_ids=("GET:/demo/vm/{vm}", "DELETE:/demo/vm/{vm}"),
+    )
     response = await build_governed_subops_response(
-        tenant_id=_TENANT, op_id="vmware.composite.vm.destroy"
+        tenant_id=_TENANT, op_id="demo.composite.vm.destroy"
     )
     assert response is not None
     by_op = {child.op_id: child for child in response.governed_subops}
-    destroy = by_op["POST:/VirtualMachine/{moId}/Destroy_Task"]
+    destroy = by_op["DELETE:/demo/vm/{vm}"]
     assert destroy.grantable is (mode == "on")
     assert (destroy.ungrantable_reason is None) is (mode == "on")

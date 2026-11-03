@@ -34,7 +34,7 @@ so the test functions stay sync.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Final
 from uuid import UUID, uuid4
@@ -216,6 +216,7 @@ def _read_updated_at(sync_url: str, table: str, row_id: UUID) -> str:
 
 def test_epoch_versioned_ingested_rows_reaped(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A built-in ``fleet-rest-probe-<epoch>`` descriptor + group are reaped.
 
@@ -224,7 +225,7 @@ def test_epoch_versioned_ingested_rows_reaped(
     are cleared.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     epoch_descriptor = _insert_descriptor_row(
         sync_url,
@@ -255,6 +256,7 @@ def test_epoch_versioned_ingested_rows_reaped(
 
 def test_stable_version_rows_preserved(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A legitimate stable-version connector survives untouched.
 
@@ -263,7 +265,7 @@ def test_stable_version_rows_preserved(
     on impl_id or product.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     stable_descriptor = _insert_descriptor_row(
         sync_url,
@@ -296,6 +298,7 @@ def test_stable_version_rows_preserved(
 
 def test_tenant_scoped_epoch_rows_reaped(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """The #2977 sharpening: tenant-scoped epoch rows ARE reaped.
 
@@ -304,7 +307,7 @@ def test_tenant_scoped_epoch_rows_reaped(
     tenant-scope-inclusive.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     tenant_id = uuid4()
     tenant_descriptor = _insert_descriptor_row(
@@ -336,6 +339,7 @@ def test_tenant_scoped_epoch_rows_reaped(
 
 def test_typed_epoch_descriptor_preserved(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``source_kind`` guard: a typed descriptor is never reaped.
 
@@ -345,7 +349,7 @@ def test_typed_epoch_descriptor_preserved(
     impossible case a typed row's version were all-digits.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     typed_descriptor = _insert_descriptor_row(
         sync_url,
@@ -366,6 +370,7 @@ def test_typed_epoch_descriptor_preserved(
 
 def test_short_integer_version_preserved(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A short integer version (< 9 digits) is not an epoch and survives.
 
@@ -374,7 +379,7 @@ def test_short_integer_version_preserved(
     over-reach onto plausible integer versions.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     short_descriptor = _insert_descriptor_row(
         sync_url,
@@ -394,6 +399,7 @@ def test_short_integer_version_preserved(
 
 def test_re_running_migration_is_idempotent(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Replaying ``upgrade()`` on a cleaned DB deletes nothing further.
 
@@ -401,7 +407,7 @@ def test_re_running_migration_is_idempotent(
     (``stamp("0074") -> upgrade("0075")``), never ``head``.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     epoch = _insert_descriptor_row(
         sync_url,
@@ -440,6 +446,7 @@ def test_re_running_migration_is_idempotent(
 
 def test_downgrade_is_a_clean_noop(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``downgrade()`` runs without error and touches nothing.
 
@@ -448,7 +455,7 @@ def test_downgrade_is_a_clean_noop(
     unchanged across the up/down cycle.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     survivor = _insert_descriptor_row(
         sync_url,

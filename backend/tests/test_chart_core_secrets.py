@@ -67,7 +67,7 @@ _CORE_ON = [
     "--set",
     "coreKeycloak.hostname=meho.test",
     "--set",
-    "coreKeycloak.firstTenantId=3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c",
+    "coreKeycloak.firstTenantId=3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c",  # gitleaks:allow
 ]
 
 _HOOK_PHASES = "pre-install,pre-upgrade,post-install,post-upgrade"
@@ -86,10 +86,6 @@ _CORE_NAMES = [
         "tls",
         "first-login",
         "ci-login",
-        "vault-unseal",
-        "vault-init",
-        "vault-snapshot",
-        "vault-scheduler",
     )
 ]
 
@@ -176,14 +172,14 @@ def test_role_grants_exactly_the_designed_rights() -> None:
     rules = _core_objects(docs)["Role"]["rules"]
 
     by_verbs = {tuple(rule["verbs"]): rule for rule in rules}
-    assert set(by_verbs) == {("create",), ("get", "patch"), ("get",), ("delete",)}
+    # The vault-init Job's rights are on its own Role (#4044).
+    assert set(by_verbs) == {("create",), ("get", "patch"), ("get",)}
     for rule in rules:
         assert rule["apiGroups"] == [""]
         assert rule["resources"] == ["secrets"]
     assert "resourceNames" not in by_verbs[("create",)]
     assert by_verbs[("get", "patch")]["resourceNames"] == _CORE_NAMES
     assert by_verbs[("get",)]["resourceNames"] == ["meho-postgres", "my-handoff"]
-    assert by_verbs[("delete",)]["resourceNames"] == [f"{_RELEASE}-core-vault-init"]
     assert not any(
         kind in {"ClusterRole", "ClusterRoleBinding"} for kind in [d["kind"] for d in docs]
     )

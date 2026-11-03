@@ -4,7 +4,8 @@
 #
 # Step 3 of install.sh: install RKE2 from the download, start it, and wait
 # until the node is Ready and the default storage class works (form-2 design,
-# section 5, step 3). This file is sourced, not run.
+# section 5, step 3). The update runs RKE2's installer again and restarts
+# RKE2 (section 7). This file is sourced, not run.
 
 readonly RKE2_WAIT_SECONDS=900
 readonly RKE2_POLL_SECONDS=5
@@ -29,6 +30,33 @@ start_rke2() {
     systemctl enable --now --no-block rke2-server.service ||
         fail "systemd could not start rke2-server." "see RKE2's log: $RKE2_LOG_COMMAND"
     ok "started rke2-server"
+}
+
+# rke2_invocation_id: the id that systemd gives each run of rke2-server. A
+# restart gives a new one.
+rke2_invocation_id() {
+    systemctl show --property=InvocationID --value rke2-server.service 2>/dev/null || true
+}
+
+# restart_rke2: the update restarts RKE2 after its installer ran (RKE2's
+# manual upgrade page). The restart also renews every RKE2 certificate that
+# has fewer than 120 days left. It is only queued (--no-block), for the
+# reason above start_rke2. wait_for_rke2 then waits for the new run.
+restart_rke2() {
+    systemctl restart --no-block rke2-server.service ||
+        fail "systemd could not restart rke2-server." "see RKE2's log: $RKE2_LOG_COMMAND"
+    ok "restarted rke2-server"
+}
+
+# rke2_runs_again <invocation id before the restart>: true when a new run of
+# rke2-server is active. The unit has Type=notify, so "active" means that the
+# new RKE2 told systemd it is ready. The pods keep running while RKE2
+# restarts (KillMode=process), so the node may still look Ready to the old
+# API server; this check comes first for that reason.
+rke2_runs_again() {
+    local now
+    now=$(rke2_invocation_id)
+    [[ -n $now && $now != "$1" ]] && systemctl is-active --quiet rke2-server.service
 }
 
 # RKE2 unpacks its own kubectl when it starts, so it is missing before that.
@@ -77,9 +105,14 @@ wait_until() {
     ok "$what"
 }
 
+# wait_for_rke2 [invocation id before a restart]: after a restart, wait
+# for the new run of rke2-server first.
 wait_for_rke2() {
     RKE2_DEADLINE=$((SECONDS + RKE2_WAIT_SECONDS))
     note "waiting for RKE2, at most $((RKE2_WAIT_SECONDS / 60)) minutes. To follow it: journalctl -u rke2-server -f"
+    if (($# > 0)); then
+        wait_until "the new run of rke2-server is active" rke2_runs_again "$1"
+    fi
     wait_until "the node is Ready" node_is_ready
     wait_until "local-path is the default storage class" default_storage_class_exists
     wait_until "the storage provisioner runs" storage_provisioner_runs

@@ -102,7 +102,12 @@ from meho_backplane.broadcast import (
     watch_announcements,
 )
 from meho_backplane.broadcast.announcement_claims import Phase
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 
 __all__: list[str] = []
@@ -198,6 +203,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="broadcast",
         name="meho_broadcast_recent",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Read the agent announcements in your tenant: what other "
@@ -862,6 +868,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="broadcast",
         name="meho_broadcast_watch",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Wait for new agent announcements in your tenant after "

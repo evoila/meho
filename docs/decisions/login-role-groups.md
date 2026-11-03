@@ -102,14 +102,27 @@ values of the person and all their groups, and then still puts only
 one of them into the token. That is not better, only harder to
 explain.
 
-## Later: more than one tenant
+## More than one tenant
 
-Each new tenant gets its own five groups with its own `tenant_id`, for
-example `MEHO-<tenant>-Readers`, `MEHO-<tenant>-Operators`,
-`MEHO-<tenant>-SA-Operators`, `MEHO-<tenant>-Admins` and
-`MEHO-<tenant>-Approvers`. The client mappers do not change: they read
-whatever group the person is in. One person in several tenants is a
-separate topic ([#3978](https://github.com/evoila/meho/issues/3978)).
+The design is in
+[2026-10-28-several-tenants-per-person.md](2026-10-28-several-tenants-per-person.md)
+([#3978](https://github.com/evoila/meho/issues/3978)). In short:
+
+- Every role group also carries `meho_tenant` =
+  `<tenant-uuid>:<tenant>:<Role>`. A second mapper, `meho-tenants`
+  (Multivalued and Aggregate on), lists the values of all the person's
+  groups in the `meho_tenants` claim.
+- Each extra tenant gets its own five groups `MEHO-<tenant>-Readers`,
+  `MEHO-<tenant>-Operators`, `MEHO-<tenant>-SA-Operators`,
+  `MEHO-<tenant>-Admins` and `MEHO-<tenant>-Approvers`. They carry
+  **only** `meho_tenant`, so an older MEHO refuses a person who is only
+  in these groups.
+- The rule becomes "one role group per tenant". The five groups of the
+  first tenant keep `tenant_id`, `tenant_role` and `approver`, so a site
+  with one tenant works as before.
+- `meho admin keycloak bootstrap-clients --add-tenant <name>` and the
+  chart value `coreKeycloak.tenants` make the extra groups. Nobody sets
+  `meho_tenant` on a person.
 
 ## Why not the other ways
 

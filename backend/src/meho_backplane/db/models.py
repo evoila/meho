@@ -311,6 +311,7 @@ __all__ = [
     "GraphNode",
     "GraphNodeHistory",
     "IdentityBudget",
+    "IngestedAuthProfile",
     "KbRevision",
     "OperationGroup",
     "RequestUsageEvent",
@@ -570,10 +571,10 @@ class AuditLog(Base):
     )
     # Connector-boundary redaction middleware (G11.4-T2 #1071). The
     # dispatcher captures the raw connector response, hands it to the
-    # redaction engine, and stores the raw payload here verbatim so an
-    # auditor can reconstruct the pre-redaction view (the trust boundary
-    # is the API surface, not the audit log — internal incident response
-    # needs the raw record). ``redaction_manifest`` carries one entry
+    # redaction engine, and stores the raw payload here so an auditor can
+    # reconstruct the pre-redaction view. Each value the redaction hides is
+    # stored as a keyed fingerprint, not in clear text
+    # (``operations/_secret_values.py``). ``redaction_manifest`` carries one entry
     # per rule firing (``rule`` / ``pattern`` / ``action`` / ``count`` /
     # ``span`` / ``reason`` / ``path``) plus the resolved ``policy_id``;
     # the C1-d round-trip CI gate (#1073) replays the manifest against
@@ -1295,6 +1296,16 @@ class Target(Base):
     # backfill. The dispatch path that consumes it lives in
     # :mod:`meho_backplane.connectors.adapters.http`.
     tls_server_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Per-target secret field names (#3711): ``{connector_field: source_field}``.
+    # When a connector reads field ``X`` from the target's secret, the
+    # credential reader returns the secret's ``map.get(X, X)`` field instead.
+    # Field names only, never a value. ``NULL`` means no map. Added by
+    # migration ``0128``; nullable, so no backfill.
+    secret_field_map: Mapped[dict[str, str] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
     extras: Mapped[dict[str, object]] = mapped_column(
         _PORTABLE_JSON,
         nullable=False,
@@ -1402,7 +1413,7 @@ class OperationGroup(Base):
     ``list_operation_groups`` meta-tool (T8 #399) returns verbatim so
     the agent can pick the right group before calling
     ``search_operations`` against it. Examples per connector:
-    ``vmware-rest/9.0`` → ``vm-lifecycle`` / ``cluster`` / ``network``;
+    ``k8s/1.x`` → ``workload`` / ``inventory`` / ``network``;
     ``vault/1.x`` → ``kv`` / ``sys`` / ``auth``.
 
     ``tenant_id`` is NULL for built-in / global groups (shipped by spec
@@ -1449,6 +1460,11 @@ class OperationGroup(Base):
     group_key: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     when_to_use: Mapped[str] = mapped_column(Text, nullable=False)
+    # SHA-256 hex of the ``when_to_use`` MEHO's code last wrote (#4332).
+    # NULL for texts from spec ingestion and for rows MEHO cannot prove it
+    # wrote. A row whose text still matches this hash gets the new code
+    # text at start-up; an operator edit breaks the match and is kept.
+    code_text_hash: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     review_status: Mapped[str] = mapped_column(
         Text,
         nullable=False,
@@ -1677,9 +1693,9 @@ class EndpointDescriptor(Base):
 
     ``op_id`` is the connector-side natural key. Examples:
 
-    * Ingested HTTP — ``"GET:/api/vcenter/cluster"`` (method + path).
+    * Ingested HTTP — ``"GET:/repos/{owner}/{repo}/issues"`` (method + path).
     * Typed — ``"vault.kv.read"`` / ``"k8s.pod.list"`` (dotted handle).
-    * Composite — ``"vmware.composite.vm.create"`` (dotted handle).
+    * Composite — ``"gh.composite.repo_create"`` (dotted handle).
 
     The ``method`` / ``path`` columns are populated for ingested rows
     and NULL for typed/composite; ``handler_ref`` (a Python dotted
@@ -1871,6 +1887,13 @@ class EndpointDescriptor(Base):
     )
     custom_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     custom_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # #5037: the connector package that wrote this row at start. NULL means
+    # the op is built into MEHO (or ingested). When the package is not
+    # installed, discovery hides the row and dispatch refuses it with
+    # ``connector_package_not_installed``. The row and the operator's
+    # settings on it stay, so they come back with the package. See
+    # ``docs/codebase/connector-packages.md``.
+    owner_package: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -1921,6 +1944,127 @@ class EndpointDescriptor(Base):
         sa.CheckConstraint(
             "safety_level IN ('safe', 'caution', 'dangerous', 'destructive')",
             name="ck_endpoint_descriptor_safety_level",
+        ),
+    )
+
+
+class OperationPolicyOverride(Base):
+    """An operator's stricter risk level or approval flag for one operation (#4711).
+
+    The value in code (typed operations) or in the API description
+    (ingested operations) stays on :class:`EndpointDescriptor`. The
+    operator's choice lives here, in its own row, so a start (typed
+    registration) or a new ingest never overwrites it. Calls, previews,
+    search and the approval check use the stricter of the two; see
+    :mod:`meho_backplane.operations.op_policy`.
+
+    ``tenant_id`` is the scope: a tenant UUID for a tenant admin's change
+    (it applies to that tenant only), ``NULL`` for a platform admin's
+    change (it applies to the whole install). The row is keyed on the
+    operation's name ``(product, version, impl_id, op_id)``, not on a
+    descriptor id, so it survives a re-ingest that deletes and re-creates
+    descriptor rows.
+
+    ``safety_level`` ``NULL`` means "no risk level change in this scope".
+    ``requires_approval`` ``True`` means "require approval", ``False``
+    means "a platform admin turned approval off" (only allowed with a
+    ``reason``, never for a destructive operation), ``NULL`` means "no
+    change". A row with both fields ``NULL`` is deleted.
+    """
+
+    __tablename__ = "operation_policy_override"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
+    product: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    impl_id: Mapped[str] = mapped_column(Text, nullable=False)
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    safety_level: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    requires_approval: Mapped[bool | None] = mapped_column(
+        sa.Boolean(), nullable=True, default=None
+    )
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    set_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    set_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "operation_policy_override_install_idx",
+            "product",
+            "version",
+            "impl_id",
+            "op_id",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NULL"),
+            sqlite_where=sa.text("tenant_id IS NULL"),
+        ),
+        Index(
+            "operation_policy_override_tenant_idx",
+            "tenant_id",
+            "product",
+            "version",
+            "impl_id",
+            "op_id",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NOT NULL"),
+            sqlite_where=sa.text("tenant_id IS NOT NULL"),
+        ),
+        sa.CheckConstraint(
+            "safety_level IS NULL OR safety_level IN "
+            "('safe', 'caution', 'dangerous', 'destructive')",
+            name="ck_operation_policy_override_safety_level",
+        ),
+    )
+
+
+class TenantOperationSetting(Base):
+    """One tenant's own on/off choice for one built-in operation (#5029).
+
+    A built-in :class:`EndpointDescriptor` row (``tenant_id IS NULL``) is
+    shared by every tenant, so its ``is_enabled`` flag is the install
+    default. A row here lets one tenant turn that operation on or off for
+    itself only. No row means the tenant uses the install default.
+
+    The row is keyed on the operation's natural key
+    ``(product, version, impl_id, op_id)``, not on the descriptor ``id``.
+    Start-up registration and spec ingest only write ``endpoint_descriptor``
+    rows, so a restart or an update never changes this table.
+
+    Only built-in operations get a row. A connector the tenant imported for
+    itself has its own descriptor rows, and their ``is_enabled`` flag is
+    the switch. Dispatch, ``search_operations``, ``list_operation_groups``
+    and the console read the effective value through
+    :func:`meho_backplane.operations._lookup.enabled_for_tenant_clause`.
+
+    ``tenant_id`` is a soft reference, no FK, the same discipline as
+    :attr:`EndpointDescriptor.tenant_id`.
+    """
+
+    __tablename__ = "tenant_operation_setting"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    product: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    impl_id: Mapped[str] = mapped_column(Text, nullable=False)
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(sa.Boolean(), nullable=False)
+    set_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "tenant_id",
+            "product",
+            "version",
+            "impl_id",
+            "op_id",
+            name="uq_tenant_operation_setting_op",
         ),
     )
 
@@ -2016,6 +2160,69 @@ class SpecProvenance(Base):
         sa.CheckConstraint(
             "origin IN ('fetched', 'inline', 'shipped')",
             name="ck_spec_provenance_origin",
+        ),
+    )
+
+
+class IngestedAuthProfile(Base):
+    """The login type an operator chose when ingesting a connector (#5016).
+
+    ``meho connector ingest --auth-scheme <name>`` builds a
+    :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector` from
+    the chosen login type and registers it in the in-memory connector
+    table. This row saves that choice so every start of the backplane (and
+    every replica) can build the same class again
+    (:func:`~meho_backplane.operations.ingest.ingest_auth_store.restore_ingested_profiled_connectors`).
+    Without it the connector has no class after a restart and every call
+    fails with ``no_connector``.
+
+    Only the choice is stored: the named scheme and the secret field
+    **names**. Never secret values, and no free-form login config.
+
+    One row per connector scope: ``(tenant_id, product, version,
+    impl_id)``, with ``tenant_id IS NULL`` for a built-in connector. Two
+    partial unique indexes enforce it, the same shape as
+    :class:`SpecProvenance`. A re-ingest with a login type replaces the
+    row. A connector delete removes it.
+    """
+
+    __tablename__ = "ingested_auth_profile"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
+    product: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    impl_id: Mapped[str] = mapped_column(Text, nullable=False)
+    auth_scheme: Mapped[str] = mapped_column(Text, nullable=False)
+    secret_fields: Mapped[list[str]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False
+    )
+    operator_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "ingested_auth_profile_global_idx",
+            "product",
+            "version",
+            "impl_id",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NULL"),
+            sqlite_where=sa.text("tenant_id IS NULL"),
+        ),
+        Index(
+            "ingested_auth_profile_tenant_idx",
+            "tenant_id",
+            "product",
+            "version",
+            "impl_id",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NOT NULL"),
+            sqlite_where=sa.text("tenant_id IS NOT NULL"),
         ),
     )
 
@@ -3255,7 +3462,16 @@ class WebSession(Base):
       discipline: no FK to ``tenant.id``, matching the audit-log
       pattern (``audit_log.tenant_id``). Tenant deletion is a major
       ops operation that scrubs dependent sessions explicitly before
-      removing the tenant row.
+      removing the tenant row. Since #5240 it is the session's
+      **current** tenant: a switch in the web interface changes it.
+
+    * ``tenant_chosen`` -- ``False`` while a person with several
+      tenants has not picked one yet after login (migration ``0130``).
+      The web interface then shows only the tenant picker.
+
+    * ``can_switch_tenant`` -- ``True`` when the person has more than
+      one tenant or is a platform admin (migration ``0130``). Only a
+      hint for the sidebar; the switch itself checks the token.
 
     * ``access_token`` / ``refresh_token`` -- Fernet-encrypted bytes.
       ``LargeBinary`` -> ``bytea`` on PG, ``BLOB`` on SQLite. The
@@ -3331,6 +3547,18 @@ class WebSession(Base):
         DateTime(timezone=True),
         nullable=True,
         default=None,
+    )
+    tenant_chosen: Mapped[bool] = mapped_column(
+        Boolean(),
+        nullable=False,
+        default=True,
+        server_default=sa.true(),
+    )
+    can_switch_tenant: Mapped[bool] = mapped_column(
+        Boolean(),
+        nullable=False,
+        default=False,
+        server_default=sa.false(),
     )
 
     __table_args__ = (
@@ -4665,6 +4893,10 @@ class RunnerPrincipal(Base):
     # the version does not match, so an operator can see which runner is on
     # another version. ``NULL`` until the runner calls after migration 0118.
     wire_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # #5038: the digest of the runner's connector packages, sent with each
+    # call (the runner list shows it). ``NULL`` until the runner calls after
+    # migration 0124.
+    package_set_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         Index(
@@ -4741,8 +4973,8 @@ class RunnerWriteAllowlistEntry(Base):
         nullable=False,
     )
     # A glob over ``op_id`` (``fnmatch`` semantics): an exact op-class for a
-    # minimal Stage-1 allowlist (``vmware.vm.tag_set``) or a prefix
-    # (``vmware.vm.*``). Matched by the shared, DB-free gate
+    # minimal Stage-1 allowlist (``k8s.label``) or a prefix
+    # (``k8s.secret.*``). Matched by the shared, DB-free gate
     # (:func:`~meho_backplane.runner.satellite_tier.evaluate_remote_write_gate`).
     op_pattern: Mapped[str] = mapped_column(Text, nullable=False)
     # A target-scope cap: ``*`` (any target in the tenant), or a concrete
@@ -5448,7 +5680,7 @@ class AgentPermission(Base):
     ``principal_kind=agent`` (see :mod:`meho_backplane.auth.permissions`).
 
     **op_pattern is an fnmatch glob string.** Examples: ``"*"`` (every
-    op), ``"GET:/api/vcenter/*"`` (all vCenter GET ops), ``"vault.kv.*"``
+    op), ``"GET:/repos/*"`` (all GitHub repo GET ops), ``"vault.kv.*"``
     (all vault kv ops). The resolver scores patterns by the literal
     prefix before the first glob metacharacter and prefers the most
     specific match; ties fold to the most-restrictive verdict
@@ -5606,7 +5838,7 @@ class _StandingGrantColumns:
     # reference (no FK) -- same discipline as AgentPermission.principal_sub.
     principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
     # Exactly one operation id (no glob). Raw HTTP ops are ``"POST:/path"``;
-    # typed / composite ops are dotted (``"vmware.composite.vm.create"``).
+    # typed / composite ops are dotted (``"gh.composite.repo_create"``).
     op_id: Mapped[str] = mapped_column(Text, nullable=False)
     # The ``"<impl_id>-<version>"`` connector string the dispatcher resolves
     # (same shape as ApprovalRequest.connector_id).
@@ -5863,6 +6095,26 @@ class SandboxModeState(Base):
     stored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (sa.CheckConstraint("id = 1", name="ck_sandbox_mode_state_single_row"),)
+
+
+class OperationCatalogState(Base):
+    """Which release last wrote the built-in operation rows: one row (#5019).
+
+    Written by :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
+    in the same transaction as the typed and composite
+    :class:`EndpointDescriptor` rows, so it changes only when those rows
+    change. ``written_by_release`` is the commit hash of the build
+    (``GIT_SHA``, as ``GET /version`` reports it). A pod compares it with
+    its own release to notice rows written by another release.
+    """
+
+    __tablename__ = "operation_catalog_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    written_by_release: Mapped[str] = mapped_column(Text, nullable=False)
+    written_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (sa.CheckConstraint("id = 1", name="ck_operation_catalog_state_single_row"),)
 
 
 class ScheduledTriggerKind(StrEnum):
@@ -6467,7 +6719,11 @@ class ApprovalRequest(Base):
       request id, not the params — can re-dispatch with the stored params
       rather than only recording the decision. Nullable so pre-0036 rows
       remain valid. Internal re-dispatch input; never serialised onto a
-      read view or broadcast frame.
+      read view or broadcast frame. Each secret-named value in it (a
+      password or a licence key inside a deployment spec) is replaced by a
+      marker as soon as the run claim is won or the request ends without a
+      run (``approval_queue.claim_resume`` / ``end_run_input``); migration
+      ``0132`` did the same for the rows that were already decided.
 
     * ``proposed_effect`` -- JSON (JSONB on PG). Human-readable summary of
       what the op would do if approved; populated at queue time; JSONB for
@@ -6543,7 +6799,8 @@ class ApprovalRequest(Base):
       ``GET /api/v1/approvals/{id}/result`` to resume by poll instead of a
       second submit. It is the same reduced envelope the approver already
       sees inline: a set-shaped response rides a JSONFlux ``handle``
-      (v0.1-spec §4), never a raw body. NULL until captured — a pending /
+      (v0.1-spec §4), never a raw body, plus the ``extras.approval_guidance``
+      stamp the store adds for the run summary (#5377). NULL until captured — a pending /
       rejected / expired row, an agent-run request resumed in-process (which
       does not route through the shared operator resume path), and every
       pre-0096 row keep NULL. Internal to the ``/result`` surface only; like
@@ -6579,6 +6836,34 @@ class ApprovalRequest(Base):
       the unchanged generic re-dispatch of ``op_id`` — and on pre-0099 rows.
       Internal resume input only; like ``params`` it is never projected onto a
       read view or a broadcast frame. Added by migration ``0099``.
+
+    * ``release_id`` -- Text nullable. The MEHO release the request was
+      made under (#5030): the full ``GIT_SHA`` plus the ``CHART_VERSION``
+      when set (:func:`~meho_backplane.version.running_release_id`). A
+      person approves one exact release. At start-up a ``pending`` request
+      from another release expires, and an approved request from another
+      release is refused before it runs. NULL on rows saved before this
+      column (they count as an older release) and on rows made by a build
+      with no release identity (local development). Added by migration
+      ``0120``.
+
+    * ``target_hash`` -- Text nullable. A SHA-256 over the target's
+      connection settings (host, port, credentials path, TLS settings,
+      extras and the other fields that decide where and how MEHO
+      connects) when the request was made
+      (:func:`~meho_backplane.operations.approval_queue.compute_target_hash`).
+      An approved run checks it against the target as it is now and
+      refuses to run when it differs. NULL for a request with no target
+      and on rows saved before this column. Added by migration ``0130``.
+
+    * ``reveal_secret`` -- Boolean NOT NULL DEFAULT ``false``. The requester
+      asked for the hidden values of the answer (``reveal_secret: true``;
+      an agent is refused before the call waits). It is not a parameter of
+      the operation: it is not in ``params``, not in the encrypted payload
+      of a credential write, and not part of ``params_hash``. Every
+      approved run reads it here, also the re-run of a failed credential
+      write, whose encrypted input the first run deleted. ``false`` on rows
+      saved before this column. Added by migration ``0131``.
 
     Indexes
     -------
@@ -6778,6 +7063,27 @@ class ApprovalRequest(Base):
         _PORTABLE_JSON,
         nullable=True,
         default=None,
+    )
+    # The MEHO release the request was made under (#5030). See the class
+    # docstring. Added by migration ``0120``.
+    release_id: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # How many times the requester ran this approved request again after
+    # its run failed (#5417). ``0`` until the first re-run. The re-run claim
+    # adds one in the same conditional UPDATE that clears ``resume_result``,
+    # so two re-runs sent at the same time cannot both run, and the audit
+    # row names the attempt (``rerun_count + 1``; the first run is attempt
+    # 1). ``resumed_at`` stays a one-way latch for the first run. Added by
+    # migration ``0129``.
+    rerun_count: Mapped[int] = mapped_column(
+        sa.Integer(), nullable=False, default=0, server_default=sa.text("0")
+    )
+    # The target's connection settings when the request was made. See the
+    # class docstring. Added by migration ``0130``.
+    target_hash: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # The requester asked for the hidden values of the answer. See the class
+    # docstring. Added by migration ``0131``.
+    reveal_secret: Mapped[bool] = mapped_column(
+        sa.Boolean(), nullable=False, default=False, server_default=sa.false()
     )
 
     __table_args__ = (
@@ -8980,7 +9286,7 @@ class DispatchTraceSpan(Base):
       ``composite_step`` / ``jsonflux_reduction`` / ``typed`` / ``opaque``
       (the decision's enumerated span kinds). Text (no DB ``CHECK``) so a
       new kind lands without a migration; the seam validates.
-    * ``name`` -- Text NOT NULL. Human label (``"GET /rest/vm"``,
+    * ``name`` -- Text NOT NULL. Human label (``"GET /repos/{owner}/{repo}"``,
       ``"jsonflux.reduce"``, a composite sub-step name).
     * ``started_at`` -- ``timestamptz`` NOT NULL. Span start time.
     * ``duration_ms`` -- ``numeric(10,2)`` nullable. Same shape as

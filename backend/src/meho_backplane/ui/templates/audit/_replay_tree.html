@@ -22,10 +22,15 @@
   ``credential_read`` / ``audit_query`` node in the tree never leaks its
   payload, the T2 drawer withholds it on open.
 
+  Each node also names its tenant (``tenant_label``: the tenant name, or
+  the tenant id when the tenant row is gone; #5238), the same label the
+  flat list in ``_results_rows.html`` shows.
+
   Context variables:
     root -- list[dict]: the projected node forest (each: id / ts /
-            principal_* / target_name / op_id / op_class / badge_class /
-            result_status / work_ref / agent_session_id / depth / children)
+            tenant_label / principal_* / target_name / op_id / op_class /
+            badge_class / result_status / work_ref / agent_session_id /
+            depth / children)
 -#}
 {% from "_icons.html" import icon %}
 <ul
@@ -55,6 +60,8 @@
             </span>
           </div>
           <p class="truncate text-xs text-base-content/55">
+            <span data-tenant title="Tenant">{{ node.tenant_label }}</span>
+            <span aria-hidden="true">&middot;</span>
             <span>{{ node.principal_name or node.principal_sub }}</span>
             {% if node.target_name %}
               <span aria-hidden="true">&middot;</span>

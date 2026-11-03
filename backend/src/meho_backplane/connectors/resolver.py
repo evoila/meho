@@ -439,8 +439,8 @@ def _match_operator_preference(
     returned so priority breaks the tie rather than the resolver raising.
 
     G0.16-T6 Finding C (#1312). Accept both the base ``impl_id``
-    (``"nsx-rest"``) AND the versioned ``"{impl_id}-{version}"`` form
-    (``"nsx-rest-4.2"``) — the latter is the canonical shape per
+    (``"harbor-rest"``) AND the versioned ``"{impl_id}-{version}"`` form
+    (``"harbor-rest-2.x"``) — the latter is the canonical shape per
     ``docs/codebase/api-shape-conventions.md`` §3 and matches the
     ``connector_id`` string the dispatcher's ``parse_connector_id``
     round-trips through. Match on either alias against each candidate's

@@ -7,7 +7,8 @@ Coverage matrix (per Task #240 acceptance criteria):
 
 * Package exists and all public names are importable from the package root.
 * :class:`Connector` is an ABC: instantiating it (or a subclass that omits
-  any of the three abstract methods) raises :exc:`TypeError`.
+  ``fingerprint`` or ``probe``) raises :exc:`TypeError`. ``execute`` has a
+  default that refuses a direct call.
 * A concrete subclass that implements all three methods can be instantiated.
 * Schema round-trip: ``model_dump()`` → ``model_validate()`` is lossless for
   each model.
@@ -87,7 +88,19 @@ def test_connector_subclass_missing_all_methods_raises() -> None:
 
 
 def test_connector_subclass_missing_one_method_raises() -> None:
-    class MissingExecute(Connector):
+    class MissingProbe(Connector):
+        product = "test"
+
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    with pytest.raises(TypeError):
+        MissingProbe()
+
+
+@pytest.mark.asyncio
+async def test_connector_without_execute_instantiates_and_refuses_a_direct_call() -> None:
+    class NoExecute(Connector):
         product = "test"
 
         async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
@@ -96,8 +109,8 @@ def test_connector_subclass_missing_one_method_raises() -> None:
         async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
             raise NotImplementedError
 
-    with pytest.raises(TypeError):
-        MissingExecute()
+    with pytest.raises(NotImplementedError, match="register_typed_operation"):
+        await NoExecute().execute(None, "test.thing.read", {})
 
 
 def test_concrete_connector_instantiates() -> None:

@@ -137,8 +137,15 @@ async def client() -> AsyncIterator[tuple[httpx.AsyncClient, Any]]:
 def _headers(
     key: Any, *, sub: str, role: TenantRole = TenantRole.OPERATOR, kind: str | None = None
 ) -> dict[str, str]:
+    # A fresh sign-in, so a decision is refused for the withdrawn request,
+    # not for a missing sign-in time (#3979).
     token = mint_token(
-        key, sub=sub, tenant_role=role.value, tenant_id=str(_TENANT_ID), principal_kind=kind
+        key,
+        sub=sub,
+        tenant_role=role.value,
+        tenant_id=str(_TENANT_ID),
+        principal_kind=kind,
+        fresh_sign_in=True,
     )
     return {"Authorization": f"Bearer {token}"}
 

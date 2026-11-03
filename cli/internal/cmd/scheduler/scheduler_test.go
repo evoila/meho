@@ -688,6 +688,7 @@ func TestRunCancelHappyPath(t *testing.T) {
 			}
 			capturedPath = r.URL.Path
 			capturedQuery = r.URL.RawQuery
+			w.Header().Set("Meho-Audit-Id", "99999999-8888-7777-6666-555555555555")
 			w.WriteHeader(http.StatusNoContent)
 		},
 	)
@@ -712,12 +713,16 @@ func TestRunCancelHappyPath(t *testing.T) {
 	if !strings.Contains(stdout.String(), "cancelled trigger "+stubTriggerID) {
 		t.Errorf("expected cancelled-prose; got %q", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "audit receipt: 99999999-8888-7777-6666-555555555555\n") {
+		t.Errorf("expected audit receipt line; got %q", stdout.String())
+	}
 }
 
 func TestRunCancelJSONOutput(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/scheduler/triggers/"+stubTriggerID,
 		func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Meho-Audit-Id", "99999999-8888-7777-6666-555555555555")
 			w.WriteHeader(http.StatusNoContent)
 		},
 	)
@@ -742,6 +747,9 @@ func TestRunCancelJSONOutput(t *testing.T) {
 	}
 	if got["trigger_id"] != stubTriggerID {
 		t.Errorf("expected trigger_id echoed; got %+v", got)
+	}
+	if got["audit_id"] != "99999999-8888-7777-6666-555555555555" {
+		t.Errorf("expected audit_id from the Meho-Audit-Id header; got %+v", got)
 	}
 }
 

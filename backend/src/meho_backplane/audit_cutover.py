@@ -82,12 +82,14 @@ filled; with the setting off nothing is filled either.
 
 from __future__ import annotations
 
+import uuid
 from contextvars import ContextVar, Token
 from typing import Any, Final
 
-from sqlalchemy import event
+from sqlalchemy import event, inspect
 from sqlalchemy.orm import Session
 
+from meho_backplane.auth.current_tenant import tenant_role_source_from_context
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.operations._audit import (
@@ -102,6 +104,7 @@ __all__ = [
     "DISPATCH_ROUTES",
     "MCP_ROUTINE_OP_CLASSES",
     "ROUTINE_POST_ROUTES",
+    "classified_record_id",
     "classified_record_seen",
     "close_classified_record_scope",
     "mcp_tool_is_routine",
@@ -170,13 +173,17 @@ _DENIED_STATUSES: Final[frozenset[int]] = frozenset({401, 403})
 class _ClassifiedRecords:
     """Mutable marker for one request: which classified rows were built and committed?"""
 
-    __slots__ = ("built", "committed_subs", "preview")
+    __slots__ = ("built", "committed_ids", "committed_subs", "preview")
 
     def __init__(self) -> None:
-        #: Rows built in this scope that have not committed yet, with the caller each names.
-        self.built: dict[AuditLog, str] = {}
+        #: Rows built in this scope that have not committed yet, with the
+        #: caller each names and whether it is an ``operation_execution`` row.
+        self.built: dict[AuditLog, tuple[str, bool]] = {}
         #: Callers named by a committed classified row.
         self.committed_subs: set[str] = set()
+        #: The receipt row for each caller: its id, and whether it is an
+        #: ``operation_execution`` row. See :func:`classified_record_id`.
+        self.committed_ids: dict[str, tuple[uuid.UUID, bool]] = {}
         #: The request ran a dry-run branch and changed nothing.
         self.preview = False
 
@@ -219,6 +226,26 @@ def classified_record_seen(operator_sub: str) -> bool:
     return scope is not None and operator_sub in scope.committed_subs
 
 
+def classified_record_id(operator_sub: str) -> uuid.UUID | None:
+    """Return the id of the classified row that records this caller's change, or ``None``.
+
+    This is the first ``operation_execution`` row committed for the
+    caller. When there is none, it is the first committed classified row
+    of any class. A change can save another row first: a call allowed by
+    a standing grant saves its ``approval_decision`` row before the
+    operation runs, and the receipt must still name the execution row.
+
+    The audit middleware sends it back as the request's audit receipt
+    (#4976): this row is the record of the change, with or without the
+    cutover.
+    """
+    scope = _current_scope.get()
+    if scope is None:
+        return None
+    receipt = scope.committed_ids.get(operator_sub)
+    return None if receipt is None else receipt[0]
+
+
 def note_preview() -> None:
     """Mark the open request or MCP call as a preview: it changed nothing.
 
@@ -255,13 +282,35 @@ def _fill_request_lineage(kwargs: dict[str, Any]) -> None:
             kwargs[column] = value
 
 
+def _fill_tenant_role_source(kwargs: dict[str, Any]) -> None:
+    """Add the role-source marker of the request to a payload that lacks it.
+
+    A platform admin working in a tenant without a role group there has
+    the marker bound for the whole request (#5239). The wrapper writers
+    read it themselves; a writer that composes its own payload gets it
+    here, so the marker is on the record also when its row is the only one
+    (the wrapper row retired). A value the writer set is kept. The payload
+    is copied, not changed in place: the writer may still hold it.
+    """
+    marker = tenant_role_source_from_context()
+    if not marker:
+        return
+    payload = kwargs.get("payload")
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict) or any(key in payload for key in marker):
+        return
+    kwargs["payload"] = {**payload, **marker}
+
+
 @event.listens_for(AuditLog, "init")
 def _note_classified_record(_target: AuditLog, _args: Any, kwargs: dict[str, Any]) -> None:
     """Record whose row it is when a row with a non-legacy class is built.
 
-    After the cutover the row also inherits the request's lineage (see the
-    module docstring). SQLAlchemy passes ``kwargs`` so that the listener
-    may change it in place before ``__init__`` runs.
+    The row also gets the request's role-source marker when its writer
+    left it out, and after the cutover it inherits the request's lineage
+    (see the module docstring). SQLAlchemy passes ``kwargs`` so that the
+    listener may change it in place before ``__init__`` runs.
     """
     scope = _current_scope.get()
     if scope is None:
@@ -274,7 +323,8 @@ def _note_classified_record(_target: AuditLog, _args: Any, kwargs: dict[str, Any
         or not isinstance(operator_sub, str)
     ):
         return
-    scope.built[_target] = operator_sub
+    scope.built[_target] = (operator_sub, event_class == AuditEventClass.OPERATION_EXECUTION)
+    _fill_tenant_role_source(kwargs)
     if wrapper_rows_retired():
         _fill_request_lineage(kwargs)
 
@@ -293,7 +343,17 @@ def _note_committed_records(session: Session) -> None:
     if scope is None or not scope.built:
         return
     for row in [row for row in scope.built if row in session]:
-        scope.committed_subs.add(scope.built.pop(row))
+        operator_sub, is_execution = scope.built.pop(row)
+        scope.committed_subs.add(operator_sub)
+        # The identity key, not ``row.id``: reading an attribute after a
+        # commit can load the row again from the database.
+        identity = inspect(row).identity
+        if not identity or not isinstance(identity[0], uuid.UUID):
+            continue
+        # Keep the first row; replace it only with the first execution row.
+        current = scope.committed_ids.get(operator_sub)
+        if current is None or (is_execution and not current[1]):
+            scope.committed_ids[operator_sub] = (identity[0], is_execution)
 
 
 def rest_request_is_routine(method: str, route_template: str | None) -> bool:

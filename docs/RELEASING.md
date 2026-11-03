@@ -227,6 +227,24 @@ lines. The **Backfill** item below adds the lines for them.
    public "What's new" — it silently missed eight consecutive releases
    (v0.34.2 through v0.35.5, backfilled in #3782).
 
+5. **Check the connector kit.** The connector kit is the module
+   `meho_connector_kit`: the MEHO names a connector package may import.
+   It has its own version. When the kit changed since the last tag, the
+   `[X.Y.Z]` section needs a `### Connector kit` section that names the
+   new kit version. For a change in the first number, each line says the
+   smallest change a package must make, as the `Breaking changes` lines
+   do. Run, after the roll:
+
+   ```bash
+   python3 scripts/release/check_connector_kit_release.py --version X.Y.Z
+   ```
+
+   Exit 0 → proceed (the kit did not change, or it changed and the notes
+   say so). Exit 1 → the script lists each problem: the missing section,
+   a kit version that did not go up far enough, or a removed name that
+   was not marked as old at the last tag
+   ([`connector-packages.md`](codebase/connector-packages.md#the-connector-kit)).
+
 ### 3. Release-cutting PR → merge
 
 Open the PR (CHANGELOG roll + any release-only edits), get it reviewed,
@@ -518,10 +536,13 @@ into the pod's environment and re-deploy.
 
 **Contract** (#1607, hardened after the 2026-06-08 outage):
 `helm rollback` / `--atomic` reverts **manifests only** — the
-`pre-install,pre-upgrade` migration Job's schema commit survives the
-rollback (Helm does not track hook side effects). Pods rolled back
-across a migration therefore run against a *newer* schema than their
-code expects. Two enforced invariants make that safe:
+migration's schema commit survives the rollback. The migration runs in
+the `pre-install,pre-upgrade` hook Job when the install brings its own
+PostgreSQL, and in the `migrate` init container of each new backplane
+pod with the built-in PostgreSQL (#5233); Helm tracks neither side
+effect. Pods rolled back across a migration therefore run against a
+*newer* schema than their code expects. Two enforced invariants make
+that safe:
 
 1. **Additive-only `upgrade()`** — `scripts/ci/check_migration_compat.py`
    (CI: `migration-compat.yml`) rejects destructive DDL, so an older
@@ -535,6 +556,11 @@ code expects. Two enforced invariants make that safe:
    [`docs/codebase/migrations.md`](codebase/migrations.md) § "Rollback
    contract".
 
+With the built-in PostgreSQL, every pod of the rolled-back release runs
+the migration runner again when it starts. The runner sees a database
+revision its image does not know, prints `migration_skipped`, and exits
+`0`, so the older pods start (same check as the `db` probe).
+
 Never run `alembic downgrade` as part of a deploy or rollback;
 `downgrade()` bodies are the manual escape hatch only. **Caveat:** the
 tolerance lives in the image being rolled back **to** — rolling back
@@ -543,7 +569,11 @@ migration still bricks readiness; recover those by rolling forward.
 
 **Failure-injection drill** — run on a sandbox (kind/minikube or the
 staging namespace, never prod) when the release carries a migration,
-and whenever the migration Job or the `db` probe changes:
+and whenever the migration Job, the `migrate` init container, the
+migration runner or the `db` probe changes. Run it in the mode the
+release targets; with the built-in PostgreSQL, also delete one
+rolled-back pod after step 4 and check that the new pod's `migrate`
+init container logs `migration_skipped` and the pod gets Ready:
 
 - [ ] 1. Install the prior release `v(n)` (DB at migration `00NN`);
   wait Ready. Per the caveat above, `v(n)` must already carry the
@@ -568,7 +598,8 @@ and whenever the migration Job or the `db` probe changes:
   db_ahead=true`.
 - [ ] 5. Clean up by rolling **forward**: re-run the upgrade with
   readiness intact. The DB is already at `00NN+1`; the migration Job
-  re-runs as a no-op (`alembic upgrade head` is idempotent).
+  (or the new pods' `migrate` init container) re-runs as a no-op
+  (`alembic upgrade head` is idempotent).
 
 ### 7. Post-release
 
@@ -775,8 +806,9 @@ Step 6 as written, against `rke2-infra`, with the rc pins:
 - [ ] 6b rollback drill when the series carries a migration: the rc
   is the natural `v(n+1)` for the drill, with `v(n)` = the last
   **final** release (`PREV` from R1). Run it on the first rc that
-  carries the migration and re-run only if the migration Job or the
-  `db` probe changes in a later rc.
+  carries the migration and re-run only if the migration Job, the
+  `migrate` init container, the migration runner or the `db` probe
+  changes in a later rc.
 
 ### R6 — Acceptance round 2 against the rc (#3379)
 
@@ -925,7 +957,9 @@ follow-up task.
 [ ] 2. CHANGELOG: completeness audited, missing bullets backfilled,
        [Unreleased] rolled to [X.Y.Z] (post-tag work left behind);
        docs-site/reference/whats-new.md section added for [X.Y.Z]
-       (publishes with the v* tag — skipping it ships a stale What's new)
+       (publishes with the v* tag — skipping it ships a stale What's new);
+       connector kit check green
+       (scripts/release/check_connector_kit_release.py)
 [ ] 3. Release-body path-freshness gate green
        (scripts/release/check_release_body_paths.py — sister to #928);
        upgrade-relevant change → deploying.md version-specific notes row

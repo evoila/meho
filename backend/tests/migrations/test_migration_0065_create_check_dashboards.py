@@ -16,7 +16,7 @@ discipline the migration-test suite follows.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -117,10 +117,11 @@ _MEMBER_COLUMNS: frozenset[str] = frozenset({"dashboard_id", "sensor_id"})
 
 def test_upgrade_creates_dashboard_tables_columns_indexes(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``upgrade 0065`` lands both Dashboard tables with the 0065 shape."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0065")
+    copy_migrated_db(cfg, "0065")
 
     tables = _table_names(sync_url)
     assert "check_dashboards" in tables
@@ -136,10 +137,12 @@ def test_upgrade_creates_dashboard_tables_columns_indexes(
     assert "check_dashboard_sensors_sensor_idx" in member_indexes
 
 
-def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
+def test_column_nullability(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """NOT NULL columns reject NULL; nullable columns permit it."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0065")
+    copy_migrated_db(cfg, "0065")
 
     not_null = (
         "tenant_id",
@@ -162,10 +165,11 @@ def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
 
 def test_downgrade_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``downgrade "0064"`` drops both tables; ``upgrade 0065`` restores them."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0065")
+    copy_migrated_db(cfg, "0065")
     assert "check_dashboards" in _table_names(sync_url)
     assert "check_dashboard_sensors" in _table_names(sync_url)
 
@@ -181,7 +185,9 @@ def test_downgrade_then_upgrade_round_trips(
     assert _table_columns(sync_url, "check_dashboard_sensors") == _MEMBER_COLUMNS
 
 
-def test_sibling_tables_untouched(alembic_cfg: tuple[Config, str]) -> None:
+def test_sibling_tables_untouched(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """0065 adds new tables only; the pre-existing tables survive.
 
     Targets the explicit revision ``"0065"`` (the head at authoring time)
@@ -189,7 +195,7 @@ def test_sibling_tables_untouched(alembic_cfg: tuple[Config, str]) -> None:
     upgrade even once a later migration becomes head.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0065")
+    copy_migrated_db(cfg, "0065")
 
     tables = _table_names(sync_url)
     assert "check_dashboards" in tables

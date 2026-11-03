@@ -17,7 +17,7 @@ the migration uses only generic DDL so PG parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -105,26 +105,32 @@ def _table_names(sync_url: str) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
-def test_upgrade_adds_service_account_sub_column(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_service_account_sub_column(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0083`` adds the pairing identity join column."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert "service_account_sub" in _columns(sync_url, "addon_pairing")
 
 
-def test_upgrade_creates_step_event_table(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_creates_step_event_table(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0083`` creates the durable step-event log with its full shape."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     assert _columns(sync_url, _TABLE) == _EXPECTED_COLUMNS
     assert _index_names(sync_url, _TABLE) >= _EXPECTED_INDEXES
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade 0082`` drops the table + column; ``upgrade 0083`` restores them."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _TABLE in _table_names(sync_url)
     assert "service_account_sub" in _columns(sync_url, "addon_pairing")
 

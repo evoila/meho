@@ -3,7 +3,7 @@
 
 """hyperv vms ops — ``list`` / ``get`` / ``config`` / ``state`` (all safe).
 
-The migration-assessment surface. Read-only VM facts via ``Get-VM`` (inventory,
+The migration assessment surface. Read-only VM facts via ``Get-VM`` (inventory,
 identity, deep configuration, runtime state) and — for a Generation 2 VM —
 ``Get-VMFirmware`` (secure-boot state), routed through the shared
 PowerShell-over-SSH transport
@@ -210,7 +210,7 @@ VMS_OPS: tuple[HypervOp, ...] = (
             "Runs ``Get-VM`` and returns one row per VM (Name, Id, State, "
             "Status, CPUUsage, MemoryAssigned, Uptime, configuration Version, "
             "Generation, ProcessorCount, IntegrationServicesVersion / State, "
-            "config Path). Read-only; the migration-assessment surface — the "
+            "config Path). Read-only; the migration assessment surface — the "
             "starting inventory of source VMs. The ``{rows, total}`` envelope is "
             "JSONFlux-reduced to a handle for large result sets."
         ),

@@ -98,6 +98,9 @@ Safety contract
   ``target.secret_ref`` is bound into any log event. The structured
   error mirrors this: ``script`` and ``encoded`` are never written into
   the error's user-visible attributes.
+* A secret goes in the ``stdin`` argument of :func:`pwsh_run`, never in the
+  script. Standard input travels inside the SSH channel and is not part of
+  the remote process command line.
 * Callers must not pass credential material in ``script``. The helper
   cannot enforce this because the script is opaque to it; the rule is
   encoded in each connector's per-op handlers, none of which interpolate
@@ -294,6 +297,7 @@ async def pwsh_run(
     operator: Any = None,
     depth: int = PWSH_DEFAULT_DEPTH,
     timeout: float = 30.0,
+    stdin: str | None = None,
 ) -> Any:
     """Run *script* on *target* via ``-EncodedCommand``; parse JSON output.
 
@@ -312,6 +316,10 @@ async def pwsh_run(
     *timeout* is the wall-clock second budget forwarded to
     ``_run_command``.
 
+    *stdin*, when set, goes to the process on standard input (the script reads
+    it with ``$input``): the only way a secret may reach a script. It is never
+    logged and never kept on a :class:`PwshRunError`.
+
     Returns the parsed JSON payload (typically a ``dict`` or ``list``).
     Raises :class:`PwshRunError` when the process exits non-zero or stdout
     does not parse as JSON — ``exit_status`` carries the integer exit on a
@@ -326,7 +334,8 @@ async def pwsh_run(
     encoded = encode_pwsh_command(full_script)
     cmd = f"{executable} -NoProfile -NonInteractive -EncodedCommand {encoded}"
 
-    proc = await connector._run_command(target, cmd, operator=operator, timeout=timeout)
+    extra: dict[str, str] = {} if stdin is None else {"stdin": stdin}
+    proc = await connector._run_command(target, cmd, operator=operator, timeout=timeout, **extra)
 
     stdout: str = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     stderr: str = (proc.stderr or "") if hasattr(proc, "stderr") else ""

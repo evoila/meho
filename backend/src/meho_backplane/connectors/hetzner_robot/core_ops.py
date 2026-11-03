@@ -156,6 +156,7 @@ __all__ = [
     "ROBOT_VERSION",
     "RobotCoreGroup",
     "RobotCoreOp",
+    "RobotCoreOpsMissingError",
     "apply_robot_core_curation",
     "classify_robot_op",
 ]
@@ -710,9 +711,26 @@ ROBOT_CORE_OPS: Final[tuple[RobotCoreOp, ...]] = (
 )
 
 
-# code-quality-allow: verbatim mirror of apply_harbor_core_curation (both 107
-# lines); the five-phase substrate-override cascade must stay parallel across
-# the robot/harbor curation helpers, so it is not refactored in isolation.
+class RobotCoreOpsMissingError(LookupError):
+    """Raised when curated Robot ops are not in the ingested connector.
+
+    :func:`apply_robot_core_curation` raises it before it changes any
+    group or op. ``missing_op_ids`` lists every curated op_id the ingest
+    did not produce, in :data:`ROBOT_CORE_OPS` order.
+    """
+
+    def __init__(self, missing_op_ids: list[str]) -> None:
+        self.missing_op_ids = tuple(missing_op_ids)
+        super().__init__(
+            f"connector {ROBOT_CONNECTOR_ID!r} is missing curated ops "
+            f"{', '.join(missing_op_ids)}; ingest a Robot spec that has them, "
+            "then run the curation again. Nothing was changed."
+        )
+
+
+# code-quality-allow: mirror of apply_harbor_core_curation plus a missing-op
+# check (#4963); the five-phase substrate-override cascade must stay parallel
+# across the robot/harbor curation helpers, so it is not refactored in isolation.
 async def apply_robot_core_curation(
     review_service: ReviewService,
     *,
@@ -735,7 +753,6 @@ async def apply_robot_core_curation(
     works around this via the audit-log-driven operator-override
     exclusion — the same mechanism
     :func:`~meho_backplane.connectors.harbor.core_ops.apply_harbor_core_curation`
-    and :func:`~meho_backplane.connectors.nsx.core_ops.apply_nsx_core_curation`
     established:
 
     1. :meth:`ReviewService.get_review_payload` loads the current
@@ -755,6 +772,12 @@ async def apply_robot_core_curation(
     5. :meth:`ReviewService.edit_op` lands the curated
        ``llm_instructions`` blob per entry in :data:`ROBOT_CORE_OPS`.
 
+    Before step 2 the helper checks that every op in
+    :data:`ROBOT_CORE_OPS` was ingested. If any is missing it raises
+    :class:`RobotCoreOpsMissingError` naming all of them, and nothing
+    has changed yet. Without this check the cascade in step 4 would
+    switch on curated ops whose guidance step 5 never writes.
+
     Raises :class:`~meho_backplane.operations.ingest.ConnectorNotFoundError`
     if no groups exist for ``hetzner-rest-2026.04`` under *tenant_id*
     (the operator must run ``meho connector ingest`` against the Robot
@@ -764,6 +787,12 @@ async def apply_robot_core_curation(
         ROBOT_CONNECTOR_ID,
         tenant_id,
     )
+
+    ingested_op_ids = {op.op_id for group in payload.groups for op in group.ops}
+    ingested_op_ids.update(op.op_id for op in payload.ungrouped_ops)
+    missing = [op.op_id for op in ROBOT_CORE_OPS if op.op_id not in ingested_op_ids]
+    if missing:
+        raise RobotCoreOpsMissingError(missing)
 
     core_op_ids_by_group: dict[str, set[str]] = {}
     for op in ROBOT_CORE_OPS:

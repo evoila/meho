@@ -25,7 +25,7 @@ only generic DDL, so PG parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -90,10 +90,12 @@ def _column_is_nullable(sync_url: str, column: str) -> bool:
     raise AssertionError(f"column {column!r} not present on approval_request")
 
 
-def test_upgrade_adds_nullable_resumed_at(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_nullable_resumed_at(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0055`` lands the nullable ``resumed_at`` claim column."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     columns = _approval_request_columns(sync_url)
     assert _CLAIM_COLUMN in columns, f"migration 0055 must add approval_request.{_CLAIM_COLUMN}"
@@ -103,14 +105,16 @@ def test_upgrade_adds_nullable_resumed_at(alembic_cfg: tuple[Config, str]) -> No
     )
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0054"`` drops the column; ``upgrade "0055"`` restores it.
 
     Pinned to this migration's own revision on both legs (never ``head``)
     so a future head migration cannot break the round-trip.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _CLAIM_COLUMN in _approval_request_columns(sync_url)
 
     command.downgrade(cfg, _DOWN_REVISION)

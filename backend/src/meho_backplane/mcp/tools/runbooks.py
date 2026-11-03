@@ -99,6 +99,7 @@ from pydantic import ValidationError
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.kb.schemas import InvalidKbSlugError
 from meho_backplane.mcp.registry import (
+    READ_ONLY,
     ToolDefinition,
     ToolSurface,
     register_mcp_tool,
@@ -840,6 +841,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
         name="meho_runbook_list_templates",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=_LIST_DESCRIPTION,
         inputSchema={
@@ -876,6 +878,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
         name="meho_runbook_show_template",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=_SHOW_DESCRIPTION,
         inputSchema={

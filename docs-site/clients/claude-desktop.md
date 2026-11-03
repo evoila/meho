@@ -179,6 +179,13 @@ changing: the OAuth **client id** (default `meho-mcp`) and the OAuth
 session into the operator planes, add `mcp:admin` to the scopes field — see
 [MCP surface and scopes](mcp-surface-and-scopes.md#how-a-client-requests-elevation).
 
+The optional **Tenant** field names the MEHO tenant the extension works
+in (a tenant name or ID). Leave it empty if your login has one tenant. If
+your login has several, set it: without it MEHO allows only
+`meho_status`, which lists your tenants. To work in another tenant, change
+the field and turn the extension off and on again. See
+[MCP surface and scopes](mcp-surface-and-scopes.md#which-tenant-a-session-works-in).
+
 `offline_access` keeps the login alive between uses. The login lasts until
 you have not used MEHO for the `meho-mcp` client's offline idle limit: 48
 hours with the

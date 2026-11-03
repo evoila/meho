@@ -42,6 +42,7 @@ type fakeOperationsClient struct {
 	lastSearchParams      *api.GetSearchApiV1OperationsSearchGetParams
 	lastResultQueryParams *api.PostResultQueryApiV1OperationsResultQueryPostParams
 	lastResultQueryBody   *api.ResultQueryBody
+	lastSubopsParams      *api.GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams
 
 	// Sequenced canned responses — pop one per call (per verb). Tests
 	// register two responses on the auth-refresh scenarios (first a
@@ -52,6 +53,7 @@ type fakeOperationsClient struct {
 	groupsResponses      []*api.GetGroupsApiV1OperationsGroupsGetResponse
 	searchResponses      []*api.GetSearchApiV1OperationsSearchGetResponse
 	resultQueryResponses []*api.PostResultQueryApiV1OperationsResultQueryPostResponse
+	subopsResponses      []*api.GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse
 
 	// Per-verb transport-error queues. Drain in the same order as
 	// the response queues so a refresh-then-transport-failure scenario
@@ -61,6 +63,7 @@ type fakeOperationsClient struct {
 	groupsErrors      []error
 	searchErrors      []error
 	resultQueryErrors []error
+	subopsErrors      []error
 
 	// refreshCount tracks how many times Refresh was invoked across
 	// the whole client's lifetime. The 401 dance asserts this hits
@@ -111,6 +114,19 @@ func (f *fakeOperationsClient) GetSearchApiV1OperationsSearchGetWithResponse(
 ) (*api.GetSearchApiV1OperationsSearchGetResponse, error) {
 	f.lastSearchParams = params
 	return popSearchResp(&f.searchResponses), popErr(&f.searchErrors)
+}
+
+func (f *fakeOperationsClient) GetGovernedSubopsApiV1OperationsGovernedSubopsGetWithResponse(
+	_ context.Context,
+	params *api.GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams,
+	_ ...api.RequestEditorFn,
+) (*api.GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse, error) {
+	f.lastSubopsParams = params
+	var r *api.GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse
+	if len(f.subopsResponses) > 0 {
+		r, f.subopsResponses = f.subopsResponses[0], f.subopsResponses[1:]
+	}
+	return r, popErr(&f.subopsErrors)
 }
 
 // PostResultQueryApiV1OperationsResultQueryPost turns the canned typed
@@ -664,7 +680,7 @@ func TestReducedCallResultRendersHandleAndResultQueryAcceptsIt(t *testing.T) {
 		Extras: json.RawMessage(`{"flight_recorder_trace_handle":{"handle_id":"22222222-2222-2222-2222-222222222222"}}`),
 	}
 	var rendered bytes.Buffer
-	printCallResult(&rendered, "vmware-rest-9.0", "vmware.vm.list", result)
+	PrintCallResult(&rendered, "vmware-rest-9.0", "vmware.vm.list", result)
 	if !strings.Contains(rendered.String(), "result handle:") || !strings.Contains(rendered.String(), handleID) {
 		t.Fatalf("human render must expose the result handle id; got %q", rendered.String())
 	}
@@ -833,7 +849,7 @@ func withFakeClient(t *testing.T, f operationsAPI) {
 
 // TestRunCallAwaitingApprovalRealPath — the generic `operation call`
 // verb treats status=awaiting_approval as a parked, non-error,
-// exit-0 outcome on the REAL runCall path (not just printCallResult):
+// exit-0 outcome on the REAL runCall path (not just PrintCallResult):
 // stdout carries the parked hint and stderr never carries the
 // invalid-status diagnostic.
 func TestRunCallAwaitingApprovalRealPath(t *testing.T) {
@@ -865,6 +881,9 @@ func TestRunCallAwaitingApprovalRealPath(t *testing.T) {
 	if !strings.Contains(out.String(), "ar-op-1") ||
 		!strings.Contains(out.String(), "meho approvals show ar-op-1") {
 		t.Errorf("expected approval id + `meho approvals show` hint on stdout; got %q", out.String())
+	}
+	if !strings.Contains(out.String(), "meho approvals result ar-op-1") {
+		t.Errorf("expected the `meho approvals result` hint on stdout; got %q", out.String())
 	}
 	if strings.Contains(errBuf.String(), "invalid OperationResult") {
 		t.Errorf("awaiting_approval was wrongly rejected as invalid status: %s", errBuf.String())
@@ -1040,7 +1059,7 @@ func TestRunCallAwaitingApprovalRendersAuditReceipt(t *testing.T) {
 // dispatch responses (status=ok). These two tests pin what each operator
 // output mode actually does with it, because the two disagree and
 // docs/codebase/checks-advisory.md § "Operator reach" documents the gap:
-// --json passes the envelope through verbatim, while printCallResult
+// --json passes the envelope through verbatim, while PrintCallResult
 // returns inside its status=="ok" branch before reaching the extras
 // block, so the default human render drops it. Teaching the human render
 // to print extras on success is a CLI-wide UX change (it would also start

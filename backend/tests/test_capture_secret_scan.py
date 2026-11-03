@@ -52,7 +52,7 @@ from typing import Final, NamedTuple
 import pytest
 
 from meho_backplane.broadcast.events import is_secret_param_name
-from meho_backplane.redaction.patterns import NAMED_PATTERNS
+from meho_backplane.redaction.patterns import NAMED_PATTERNS, secret_spans
 from meho_backplane.redaction.secret_fields import QuotedSecretField, iter_quoted_secret_fields
 
 #: The start of every value ``test_redaction_planted_secrets.py`` plants.
@@ -153,12 +153,12 @@ def scan_text(text: str, *, path: str = "<text>") -> list[Finding]:
     for match in re.finditer(re.escape(PLANTED_MARKER), text, re.IGNORECASE):
         findings.append(Finding(path, _line_of(text, match.start()), "planted_marker"))
     for name in _TIER1_SHAPES:
-        for match in NAMED_PATTERNS[name].finditer(text):
-            secret = match.group("value") if "value" in match.re.groupindex else match.group(0)
+        for start, end in secret_spans(NAMED_PATTERNS[name], text):
+            secret = text[start:end]
             if name == "api_key":
                 secret = re.split(r"[=:]", secret, maxsplit=1)[-1]
             if _is_secret_value(secret):
-                findings.append(Finding(path, _line_of(text, match.start()), name))
+                findings.append(Finding(path, _line_of(text, start), name))
     for name, pattern in _OTHER_SHAPES.items():
         for match in pattern.finditer(text):
             findings.append(Finding(path, _line_of(text, match.start()), name))

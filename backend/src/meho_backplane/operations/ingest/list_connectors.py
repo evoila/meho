@@ -32,6 +32,22 @@ invisibility until the first op lands. v1-compat shim entries
 into the v2 table) are excluded — they're an internal compat
 detail, not separately registered connectors.
 
+Connector packages (#5560)
+--------------------------
+
+Rows written by a connector package that is not installed are hidden
+(:func:`~meho_backplane.operations._lookup.installed_owner_clause`): the
+counts leave them out, and a group that holds only such rows is not
+counted. A connector whose rows all come from such a package is still
+listed, with ``state="package_not_installed"``, zero counts,
+``dispatchable=False`` and a ``next_step`` that names the package.
+
+A connector whose code is not in this MEHO (#5585,
+:func:`~meho_backplane.operations._code_presence.code_missing_connectors`)
+is listed with ``state="code_not_installed"``, zero counts,
+``dispatchable=False`` and a ``next_step`` that says the code is missing.
+Its rows have no package name, so the text names no package.
+
 Status filter semantics
 -----------------------
 
@@ -84,10 +100,17 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
-from meho_backplane.operations._lookup import connector_exists, parse_connector_id
+from meho_backplane.operations._code_presence import code_missing_connectors
+from meho_backplane.operations._lookup import (
+    connector_exists,
+    installed_owner_clause,
+    package_visible_group_clause,
+    parse_connector_id,
+)
 from meho_backplane.operations.ingest._llm_grouping_internals import build_connector_id
 from meho_backplane.operations.ingest.api_schemas import (
     ConnectorListItem,
+    ConnectorState,
     ConnectorStatusFilter,
     NextStep,
 )
@@ -292,7 +315,9 @@ async def _aggregate_groups_by_connector(
 
     Returns a dict keyed on ``(tenant_id, product, version,
     impl_id)`` whose values are
-    ``{total, staged, enabled, disabled}`` counts.
+    ``{total, staged, enabled, disabled}`` counts. A group that holds
+    only rows of a connector package that is not installed is left out
+    (:func:`package_visible_group_clause`, #5560).
     """
     staged_case = func.sum(
         case((OperationGroup.review_status == "staged", 1), else_=0),
@@ -318,6 +343,7 @@ async def _aggregate_groups_by_connector(
         )
         .where(
             (OperationGroup.tenant_id.is_(None)) | (OperationGroup.tenant_id == operator_tenant_id),
+            package_visible_group_clause(),
         )
         .group_by(
             OperationGroup.tenant_id,
@@ -377,6 +403,10 @@ async def _operation_count_by_connector(
     of rows. The ``enabled`` split rides on the same unfiltered
     universe: both numbers count the same rows, one of them narrowed
     by ``is_enabled`` only.
+
+    Rows of a connector package that is not installed are not counted
+    (:func:`installed_owner_clause`, #5560), the same rows search and
+    dispatch hide.
     """
     enabled_case = func.sum(
         case((EndpointDescriptor.is_enabled.is_(True), 1), else_=0),
@@ -402,6 +432,7 @@ async def _operation_count_by_connector(
         .where(
             (EndpointDescriptor.tenant_id.is_(None))
             | (EndpointDescriptor.tenant_id == operator_tenant_id),
+            installed_owner_clause(),
         )
         .group_by(
             EndpointDescriptor.tenant_id,
@@ -420,6 +451,91 @@ async def _operation_count_by_connector(
             "code_shipped": int(code_shipped_v or 0),
         }
     return counts
+
+
+async def _missing_package_by_connector(
+    session: AsyncSession,
+    *,
+    operator_tenant_id: UUID,
+) -> dict[tuple[UUID | None, str, str, str], str]:
+    """Map each connector triple to a connector package it needs that is not installed.
+
+    Keyed like :func:`_operation_count_by_connector`. A connector with
+    rows of more than one missing package gets the first name in sorted
+    order. Built-in rows (``owner_package IS NULL``) never appear.
+    """
+    stmt = (
+        select(
+            EndpointDescriptor.tenant_id,
+            EndpointDescriptor.product,
+            EndpointDescriptor.version,
+            EndpointDescriptor.impl_id,
+            func.min(EndpointDescriptor.owner_package),
+        )
+        .where(
+            (EndpointDescriptor.tenant_id.is_(None))
+            | (EndpointDescriptor.tenant_id == operator_tenant_id),
+            ~installed_owner_clause(),
+        )
+        .group_by(
+            EndpointDescriptor.tenant_id,
+            EndpointDescriptor.product,
+            EndpointDescriptor.version,
+            EndpointDescriptor.impl_id,
+        )
+    )
+    result = await session.execute(stmt)
+    return {
+        (tenant_uuid, product, version, impl_id): package
+        for tenant_uuid, product, version, impl_id, package in result.all()
+    }
+
+
+def _package_not_installed_step(package: str) -> NextStep:
+    """Return the ``next_step`` of a ``state="package_not_installed"`` row (#5560)."""
+    return NextStep(
+        verb="meho status",
+        rationale=(
+            f"the operations of this connector come from the connector package "
+            f"{package!r}, which is not installed in this MEHO. Install the package "
+            f"again to use this connector. `meho status` lists the installed packages."
+        ),
+    )
+
+
+def _code_not_installed_step() -> NextStep:
+    """Return the ``next_step`` of a ``state="code_not_installed"`` row (#5585)."""
+    return NextStep(
+        verb="meho status",
+        rationale=(
+            "the code of this connector is not in this MEHO. Its operations were "
+            "written by a MEHO that had this connector built in. Run a MEHO image "
+            "that has this connector, or install the connector package that ships "
+            "it. `meho status` shows the version of this MEHO and its installed "
+            "packages."
+        ),
+    )
+
+
+def _keep_unusable_connectors(
+    groups_by_connector: dict[tuple[UUID | None, str, str, str], dict[str, int]],
+    op_counts_by_connector: dict[tuple[UUID | None, str, str, str], dict[str, int]],
+    missing_packages: dict[tuple[UUID | None, str, str, str], str],
+    missing_code: set[tuple[UUID | None, str, str, str]],
+) -> None:
+    """Give each connector that cannot be used a row, with zero counts.
+
+    A connector whose groups are all hidden still gets a row, so the
+    operator sees that its package is missing (#5560). Nothing of a
+    connector whose code is missing can be used, so its counts are zero
+    (#5585).
+    """
+    empty = {"total": 0, "staged": 0, "enabled": 0, "disabled": 0}
+    for key in missing_code:
+        groups_by_connector[key] = dict(empty)
+        op_counts_by_connector.pop(key, None)
+    for key in missing_packages:
+        groups_by_connector.setdefault(key, dict(empty))
 
 
 async def list_ingested_connectors(
@@ -491,11 +607,21 @@ async def list_ingested_connectors(
             session,
             operator_tenant_id=operator.tenant_id,
         )
+        missing_packages = await _missing_package_by_connector(
+            session,
+            operator_tenant_id=operator.tenant_id,
+        )
+        missing_code = await code_missing_connectors(session, operator_tenant_id=operator.tenant_id)
+    _keep_unusable_connectors(
+        groups_by_connector, op_counts_by_connector, missing_packages, missing_code
+    )
 
     items = await _emit_db_backed_rows(
         operator=operator,
         groups_by_connector=groups_by_connector,
         op_counts_by_connector=op_counts_by_connector,
+        missing_packages=missing_packages,
+        missing_code=missing_code,
         status=status,
     )
     items.extend(
@@ -558,7 +684,7 @@ def _legacy_tenant_copy_hint(
     """Return the delete hint for a tenant row stored under a former product name (#4889).
 
     Dispatch reads the product from ``connector_id``; a tenant row whose
-    stored ``product`` differs (``vcf-logs`` rows for ``vrli-rest-9.0``)
+    stored ``product`` differs (rows saved before a product rename)
     can therefore never be called. Such a row is listed so the operator
     can see it, but it is marked not dispatchable and carries this hint
     naming the clean-up verb. ``None`` for built-in rows, for rows whose
@@ -594,6 +720,8 @@ async def _emit_db_backed_rows(
     operator: Operator,
     groups_by_connector: dict[tuple[UUID | None, str, str, str], dict[str, int]],
     op_counts_by_connector: dict[tuple[UUID | None, str, str, str], dict[str, int]],
+    missing_packages: dict[tuple[UUID | None, str, str, str], str],
+    missing_code: set[tuple[UUID | None, str, str, str]],
     status: ConnectorStatusFilter | None,
 ) -> list[ConnectorListItem]:
     """Emit one ``state="ingested"`` :class:`ConnectorListItem` per DB-backed connector.
@@ -613,6 +741,13 @@ async def _emit_db_backed_rows(
     it would drop the old copy and the operator would never see it or
     its clean-up hint. Such a row is kept with ``dispatchable=False``
     and the delete hint instead (:func:`_legacy_tenant_copy_hint`).
+
+    A connector with no visible operation and rows of a connector package
+    that is not installed (*missing_packages*) gets
+    ``state="package_not_installed"``, ``dispatchable=False`` and the
+    install hint instead (#5560). A connector whose code is not in this
+    MEHO (*missing_code*, zero counts already) gets
+    ``state="code_not_installed"`` and ``dispatchable=False`` (#5585).
 
     Extracted from :func:`list_ingested_connectors` so the DB-side
     emission and the class-side-only emission stay each below the
@@ -645,7 +780,17 @@ async def _emit_db_backed_rows(
             enabled_operation_count=enabled_op_count,
             has_code_shipped_op=op_counts.get("code_shipped", 0) > 0,
         )
+        state: ConnectorState = "ingested"
+        next_step = legacy_hint
         if legacy_hint is not None:
+            dispatchable = False
+        elif key in missing_code:
+            state = "code_not_installed"
+            next_step = _code_not_installed_step()
+            dispatchable = False
+        elif op_counts.get("total", 0) == 0 and key in missing_packages:
+            state = "package_not_installed"
+            next_step = _package_not_installed_step(missing_packages[key])
             dispatchable = False
         items.append(
             ConnectorListItem(
@@ -660,8 +805,8 @@ async def _emit_db_backed_rows(
                 disabled_group_count=row["disabled"],
                 operation_count=op_counts.get("total", 0),
                 enabled_operation_count=enabled_op_count,
-                state="ingested",
-                next_step=legacy_hint,
+                state=state,
+                next_step=next_step,
                 kind=kind,
                 dispatchable=dispatchable,
                 scope="tenant" if tenant_uuid is not None else "builtin",
@@ -723,13 +868,12 @@ def _class_side_only_items(
     derived from the parser's interpretation of the v2-registry
     ``impl_id``, not the registry's ``product`` field, so the
     ``connector_id`` round-trips losslessly through
-    :func:`parse_connector_id`. For SDDC the v2 registry stores
-    ``product="sddc-manager"`` but the listing emits ``product="sddc"``
-    (consistent with what the dispatcher will derive from
-    ``parse_connector_id("sddc-rest-9.0")`` and what
-    ``SDDC_PRODUCT="sddc"`` already writes into ``endpoint_descriptor``
-    rows). When DB rows eventually land under the same row-product the
-    parser derives, the listing transitions cleanly from
+    :func:`parse_connector_id`. When the v2 registry stores a product
+    spelling that differs from the first segment of ``impl_id``, the
+    listing emits the parser-derived product (consistent with what the
+    dispatcher derives from ``parse_connector_id`` and what ingest
+    writes into ``endpoint_descriptor`` rows). When DB rows eventually
+    land under the same row-product the parser derives, the listing transitions cleanly from
     ``state="registered"`` to ``state="ingested"`` without a
     ``connector_id`` change. Entries whose ``connector_id`` cannot
     round-trip at all (parser-incompatible ``impl_id`` shape) are
@@ -738,9 +882,10 @@ def _class_side_only_items(
     if status not in (None, "all"):
         return []
     # Dedupe against the DB-emitted set using the row-side natural key
-    # (the dispatcher's parsed triple). This keeps the SDDC case clean:
-    # the v2 registry holds ``("sddc-manager", "9.0", "sddc-rest")`` but
-    # DB rows live under ``("sddc", ...)``; matching on the registry
+    # (the dispatcher's parsed triple). This keeps a product-spelling
+    # mismatch clean: when the v2 registry holds a product that differs
+    # from the parser-derived one, DB rows live under the parser-derived
+    # product; matching on the registry
     # triple would miss the dedupe and emit two rows for the same
     # connector (one ``ingested`` from the DB loop, one ``registered``
     # here). Comparing against the parser-derived triple — the same

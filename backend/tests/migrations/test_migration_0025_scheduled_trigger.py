@@ -38,7 +38,7 @@ env.py's async cookbook, so the test function itself must be sync.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -175,10 +175,12 @@ def _seed_tenant_and_definition(sync_url: str) -> tuple[uuid.UUID, uuid.UUID]:
     return tenant_id, definition_id
 
 
-def test_upgrade_adds_dispatcher_columns(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_dispatcher_columns(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0025`` adds ``timezone`` / ``identity_sub`` / ``inputs``."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0025")
+    copy_migrated_db(cfg, "0025")
 
     columns = _table_columns(sync_url, "scheduled_trigger")
     for new_col in _NEW_COLUMNS_0025:
@@ -188,17 +190,21 @@ def test_upgrade_adds_dispatcher_columns(alembic_cfg: tuple[Config, str]) -> Non
         )
 
 
-def test_new_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
+def test_new_column_nullability(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``timezone`` / ``identity_sub`` are NOT NULL; ``inputs`` is nullable."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0025")
+    copy_migrated_db(cfg, "0025")
 
     assert not _column_is_nullable(sync_url, "scheduled_trigger", "timezone")
     assert not _column_is_nullable(sync_url, "scheduled_trigger", "identity_sub")
     assert _column_is_nullable(sync_url, "scheduled_trigger", "inputs")
 
 
-def test_fired_status_accepted_after_0025(alembic_cfg: tuple[Config, str]) -> None:
+def test_fired_status_accepted_after_0025(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """The widened ``ck_scheduled_trigger_status`` admits ``status='fired'``.
 
     Inserts a one-off row directly at the SQL layer (bypassing the ORM
@@ -207,7 +213,7 @@ def test_fired_status_accepted_after_0025(alembic_cfg: tuple[Config, str]) -> No
     test fails fast if the widening didn't take effect.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0025")
+    copy_migrated_db(cfg, "0025")
 
     tenant_id, definition_id = _seed_tenant_and_definition(sync_url)
     sync_eng = sa_create_engine(sync_url)
@@ -237,6 +243,7 @@ def test_fired_status_accepted_after_0025(alembic_cfg: tuple[Config, str]) -> No
 
 def test_unknown_status_still_rejected_after_0025(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A status outside the v2 vocabulary still raises ``IntegrityError``.
 
@@ -245,7 +252,7 @@ def test_unknown_status_still_rejected_after_0025(
     free-text column.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0025")
+    copy_migrated_db(cfg, "0025")
 
     tenant_id, definition_id = _seed_tenant_and_definition(sync_url)
     sync_eng = sa_create_engine(sync_url)
@@ -275,6 +282,7 @@ def test_unknown_status_still_rejected_after_0025(
 
 def test_downgrade_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``downgrade "0020"`` drops the three columns; ``upgrade 0025`` restores them.
 
@@ -282,7 +290,7 @@ def test_downgrade_then_upgrade_round_trips(
     to 0025's reverse / forward even once 0026+ lands.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0025")
+    copy_migrated_db(cfg, "0025")
 
     columns = _table_columns(sync_url, "scheduled_trigger")
     for new_col in _NEW_COLUMNS_0025:
@@ -304,6 +312,7 @@ def test_downgrade_then_upgrade_round_trips(
 
 def test_downgrade_refuses_when_fired_rows_exist(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``downgrade "0020"`` raises ``RuntimeError`` when ``status='fired'`` rows exist.
 
@@ -318,7 +327,7 @@ def test_downgrade_refuses_when_fired_rows_exist(
     :mod:`alembic.versions.0010_widen_graph_edge_kind`.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0025")
+    copy_migrated_db(cfg, "0025")
 
     tenant_id, definition_id = _seed_tenant_and_definition(sync_url)
     sync_eng = sa_create_engine(sync_url)

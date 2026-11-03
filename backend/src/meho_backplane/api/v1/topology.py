@@ -465,8 +465,7 @@ async def dependents(
     :class:`~meho_backplane.connectors.kubernetes.KubernetesConnector`
     overrides
     :meth:`~meho_backplane.connectors.base.Connector.discover_topology`),
-    so every registered ``vault`` / ``vcenter`` / ``nsx`` /
-    ``sddc-manager`` / ``gh`` target currently surfaces as untracked
+    so every registered ``vault`` / ``harbor`` / ``gh`` target currently surfaces as untracked
     until non-k8s populators or a curated annotation lands. The
     distinct 404 lets the CLI / MCP front render the explicit "not
     in graph — `meho topology refresh` first / annotate the

@@ -49,6 +49,23 @@ them); a refused request gets a ``policy_decision`` row; any other change
 gets an ``operation_execution`` row. With the setting off, every authenticated
 request writes one ``legacy_request`` row, as described below.
 
+Audit receipt header (#4976)
+============================
+
+A buffered response carries the id of the request's audit record in the
+``Meho-Audit-Id`` header: the first ``operation_execution`` row the
+request committed in the caller's name (the record of the change, for
+example a connector edit or a dispatched operation). When there is no
+such row, it is the first other classified row the request committed in
+the caller's name (for example a decision row), else the wrapper row this
+middleware wrote. A call allowed by a standing grant saves its approval
+decision row first, so the header still names the execution row, the
+same row as the ``audit_id`` in the response body. A request with no
+record (a routine read after the cutover, an unauthenticated request, a
+streamed response) gets no header. Routes that answer ``204 No Content``
+have no body to carry the id, so ``meho`` reads it from this header and
+prints ``audit receipt: <id>``.
+
 Skip rules
 ==========
 
@@ -122,6 +139,7 @@ import structlog
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from meho_backplane.audit_cutover import (
+    classified_record_id,
     close_classified_record_scope,
     open_classified_record_scope,
     rest_request_is_routine,
@@ -162,6 +180,10 @@ _RESPONSE_BODY: Final[str] = "http.response.body"
 #: is untouched by this header; only the ``CallOperationBody.work_ref``
 #: field (a real body field) moves the documented schema.
 _WORK_REF_HEADER: Final[bytes] = b"meho-work-ref"
+
+#: Lower-cased response-header name carrying the id of the request's
+#: audit record (#4976). See "Audit receipt header" in the module docstring.
+_AUDIT_ID_HEADER: Final[bytes] = b"meho-audit-id"
 
 #: Content-type the middleware treats as a live stream that must NOT be
 #: buffered. Matched as a prefix against the lowercased ``content-type``
@@ -704,6 +726,28 @@ async def _send_audit_failure_response(send: Send) -> None:
     )
 
 
+def _add_audit_id_header(buffered: list[Message], audit_id: uuid.UUID | None) -> None:
+    """Put ``Meho-Audit-Id: <audit_id>`` on the buffered response start message.
+
+    Does nothing when *audit_id* is ``None`` or nothing was buffered (a
+    handler that raised). The start message is replaced, not changed in
+    place, so the inner app's header list is never touched.
+    """
+    if audit_id is None:
+        return
+    for index, message in enumerate(buffered):
+        if message["type"] != _RESPONSE_START:
+            continue
+        headers = [
+            (name, value)
+            for name, value in message.get("headers") or []
+            if name.lower() != _AUDIT_ID_HEADER
+        ]
+        headers.append((_AUDIT_ID_HEADER, str(audit_id).encode("ascii")))
+        buffered[index] = {**message, "headers": headers}
+        return
+
+
 async def _forward_without_audit_row(
     send: Send,
     buffered: list[Message],
@@ -963,6 +1007,7 @@ class AuditMiddleware:
             operator_sub=operator_sub,
         )
         if event_class is None:
+            _add_audit_id_header(buffered, classified_record_id(operator_sub))
             await _forward_without_audit_row(send, buffered, result)
             return
         log = structlog.get_logger()
@@ -1084,5 +1129,6 @@ class AuditMiddleware:
         # responses are flushed here.
         if result.streamed:
             return
+        _add_audit_id_header(buffered, classified_record_id(operator_sub) or audit_id)
         for message in buffered:
             await send(message)

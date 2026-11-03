@@ -10,9 +10,11 @@ without the operator is unaffected.
 Selects THIS release's backplane Service via the name+instance selector
 labels (the broadcast subchart's Service carries a different
 `app.kubernetes.io/name`, so it is not matched) and scrapes the named
-`service.portName` port at `serviceMonitor.path`. The `/metrics`
-exposition is unauthenticated (see backend/src/meho_backplane/metrics.py),
-so no scrape credentials are wired.
+`service.portName` port at `serviceMonitor.path`. With `metricsAuth.enabled`
+(the default) the endpoint sends the metrics token from the Secret as a
+bearer token (`authorization.credentials`, the Prometheus Operator field
+that replaced the deprecated `bearerTokenSecret`); the operator reads the
+Secret from this release's namespace.
 */ -}}
 {{- if .Values.serviceMonitor.enabled }}
 apiVersion: monitoring.coreos.com/v1
@@ -37,4 +39,11 @@ spec:
       scheme: http
       interval: {{ .Values.serviceMonitor.interval }}
       scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
+      {{- if .Values.metricsAuth.enabled }}
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ include "meho.metricsAuthSecretName" . | quote }}
+          key: {{ .Values.metricsAuth.secretKey | quote }}
+      {{- end }}
 {{- end }}

@@ -279,7 +279,7 @@ async def test_a_hanging_login_does_not_hold_up_another_credential() -> None:
         assert headers["Cookie"] == f"ipa_session={SESSION_COOKIE}"
         assert not hanging.done()
         release.set()
-        await hanging
+        assert (await hanging)["Cookie"] == f"ipa_session={SESSION_COOKIE}"
     assert login.call_count == 2
     await connector.aclose()
 

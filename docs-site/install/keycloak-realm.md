@@ -356,6 +356,8 @@ The token of a person in `MEHO-Readers` and `MEHO-lab-b-Operators`
 lists both tenants in `meho_tenants`. A site with one tenant gets a
 list with one entry, and nothing else changes. The design is in the
 [decision record](https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-several-tenants-per-person.md).
+The steps for an admin, from the new tenant to the switch between
+tenants, are in [One person in several tenants](../guides/several-tenants.md).
 
 ## Step 6 — Create an operator user
 

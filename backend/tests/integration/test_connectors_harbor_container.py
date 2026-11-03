@@ -507,7 +507,10 @@ async def _create_robot_via_approve_resume(
     assert parked.status == "awaiting_approval", parked.error
     request_id = uuid.UUID(parked.extras["approval_request_id"])
 
-    approver = _make_operator(sub=approver_sub, tenant_id=_HARBOR_E2E_TENANT_ID)
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+    approver = _make_operator(sub=approver_sub, tenant_id=_HARBOR_E2E_TENANT_ID).model_copy(
+        update={"self_approver": True}
+    )
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         await approve_request(session, request_id, operator=approver)
@@ -569,7 +572,10 @@ async def _delete_robot_via_approve_resume(
     assert parked.status == "awaiting_approval", parked.error
     request_id = uuid.UUID(parked.extras["approval_request_id"])
 
-    approver = _make_operator(sub=approver_sub, tenant_id=_HARBOR_E2E_TENANT_ID)
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+    approver = _make_operator(sub=approver_sub, tenant_id=_HARBOR_E2E_TENANT_ID).model_copy(
+        update={"self_approver": True}
+    )
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         await approve_request(session, request_id, operator=approver)

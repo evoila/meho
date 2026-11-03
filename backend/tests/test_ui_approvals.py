@@ -925,7 +925,14 @@ def test_approve_through_bff_destructive_needs_a_sign_in_of_its_own() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
     plain = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
     destructive = _seed_destructive_request()
-    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, sign_in_age=20, sid="kc-sid-a")
+    # An admin may approve another person's destructive change (#3328).
+    operator = _operator(
+        tenant_id=_TENANT_A,
+        sub=_REVIEWER_SUB,
+        role=TenantRole.TENANT_ADMIN,
+        sign_in_age=20,
+        sid="kc-sid-a",
+    )
 
     assert _post_decision(operator, plain).status_code == 200  # type: ignore[attr-defined]
     assert _request_status(plain) == ApprovalRequestStatus.APPROVED.value
@@ -934,7 +941,13 @@ def test_approve_through_bff_destructive_needs_a_sign_in_of_its_own() -> None:
     response = _post_decision(operator, destructive, resume_mock=resume_mock)
     _assert_sign_in_asked(response, destructive, resume_mock)
 
-    new_sign_in = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, sign_in_age=5, sid="kc-sid-b")
+    new_sign_in = _operator(
+        tenant_id=_TENANT_A,
+        sub=_REVIEWER_SUB,
+        role=TenantRole.TENANT_ADMIN,
+        sign_in_age=5,
+        sid="kc-sid-b",
+    )
     assert _post_decision(new_sign_in, destructive).status_code == 200  # type: ignore[attr-defined]
     assert _request_status(destructive) == ApprovalRequestStatus.APPROVED.value
     recorded = _decision_approval_auth(destructive)
@@ -946,7 +959,9 @@ def test_approve_through_bff_destructive_keeps_its_own_age_limit() -> None:
     """A 400-second-old sign-in is inside the window but too old for a destructive request."""
     _seed_tenant(_TENANT_A, "tenant-a")
     destructive = _seed_destructive_request()
-    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, sign_in_age=400)
+    operator = _operator(
+        tenant_id=_TENANT_A, sub=_REVIEWER_SUB, role=TenantRole.TENANT_ADMIN, sign_in_age=400
+    )
     resume_mock = AsyncMock(return_value=_dispatch_result())
 
     response = _post_decision(operator, destructive, resume_mock=resume_mock)

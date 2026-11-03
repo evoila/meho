@@ -130,12 +130,14 @@ def _token(key: Any, **claims: Any) -> str:
     """A person's token from a password sign-in with the approval client.
 
     *claims* change or add claims; a claim set to ``None`` is left out.
+    The person is a tenant admin, so they may approve another person's
+    ``destructive`` change too (#3328).
     """
     payload = {"azp": _APPROVAL_CLIENT, "acr": "1", **claims}
     return mint_token(
         key,
         sub="op-approver",
-        tenant_role=TenantRole.OPERATOR.value,
+        tenant_role=TenantRole.TENANT_ADMIN.value,
         tenant_id=str(_TENANT_A),
         extra_claims={k: v for k, v in payload.items() if v is not None},
     )

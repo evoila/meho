@@ -185,9 +185,17 @@ read from a *tenant-configurable* `backend.ref`, so two controls stop a
   `_corpus_client`: an httpx client whose transport
   (`build_pinned_async_transport`, shared with the connector dial path)
   checks the host again when the TCP connection opens and connects only
-  to an address from that same check. A refused address surfaces as
-  `CorpusDialBlockedError`, an `httpx.ConnectError`, which `_dial_corpus`
-  maps onto `CorpusUnavailable` like any other failed connect.
+  to an address from that same check. The check is
+  `screen_dial_addresses` (`connectors/_shared/dial_guard.py`), the same
+  one the connector dial path uses, so a name that does not resolve at
+  connect time is refused too: the pre-dial screen lets an unresolved
+  name through, and without this check the transport would look the name
+  up again and connect to whatever it then answered. Only a host listed
+  verbatim on the target allowlist (see *Destination screen* above) is
+  dialed by name. A refused
+  address or an unresolved name surfaces as `CorpusDialBlockedError`, an
+  `httpx.ConnectError`, which `_dial_corpus` maps onto `CorpusUnavailable`
+  like any other failed connect, and no socket is opened.
 
 ### `ask_corpus(...)` (`meho_backplane.auth.corpus`, #3911)
 

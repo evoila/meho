@@ -17,12 +17,14 @@ from __future__ import annotations
 import ipaddress
 from collections.abc import Iterator
 
+import httpcore
 import httpx
 import pytest
 import structlog
 import structlog.testing
 
 import meho_backplane.auth.corpus as corpus_mod
+import meho_backplane.connectors._shared.dial_guard as dial_guard
 import meho_backplane.targets.ssrf_guard as guard_mod
 from meho_backplane.auth.corpus import (
     READ_CALLER_HEADER,
@@ -50,6 +52,9 @@ from meho_backplane.connectors._shared.pinned_transport import _PinnedAsyncBacke
 from meho_backplane.settings import Settings, get_settings
 
 _CORPUS_URL = "https://corpus.test/search"
+#: Captured at import, before the suite-wide fixture replaces the refusal
+#: of a host name that does not resolve with "dial it by name".
+_REAL_UNRESOLVED = dial_guard._unresolved
 _JWT = "header.payload.signature-secret"
 #: The deployment-configured corpus service credential (#290) — the bearer
 #: the transport presents to the corpus, distinct from the operator JWT
@@ -564,6 +569,71 @@ async def test_corpus_client_dials_only_a_checked_address(
         assert "10.0.0.5" not in str(exc.value)
     finally:
         await client.aclose()
+
+
+def test_unresolved_name_is_refused_at_connect_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A name with no address to check is refused, not handed to the stock resolver."""
+    monkeypatch.setattr(dial_guard, "_unresolved", _REAL_UNRESOLVED)
+    monkeypatch.setattr(guard_mod, "_parse_allowlist", lambda: ((), frozenset()))
+    monkeypatch.setattr(guard_mod, "_resolve_addrs", lambda _host: [])
+
+    with pytest.raises(CorpusDialBlockedError) as exc:
+        corpus_mod._pin_corpus_addresses("corpus.test")
+    assert isinstance(exc.value, httpx.ConnectError)
+    assert "corpus.test" not in str(exc.value)
+
+    # A name listed verbatim on the allowlist is still dialed by name.
+    monkeypatch.setattr(guard_mod, "_parse_allowlist", lambda: ((), frozenset({"corpus.test"})))
+    assert corpus_mod._pin_corpus_addresses("corpus.test") is None
+
+
+class _NoSocketBackend(httpcore.AsyncNetworkBackend):
+    """Stands in for the stock network backend and records every dial attempt."""
+
+    def __init__(self) -> None:
+        self.dials: list[tuple[str, int]] = []
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: object = None,
+    ) -> httpcore.AsyncNetworkStream:
+        self.dials.append((host, port))
+        raise AssertionError("a socket was opened")
+
+
+@pytest.mark.asyncio
+async def test_unresolved_name_opens_no_socket_and_is_corpus_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed lookup ends as CorpusUnavailable and the transport never dials the name."""
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL, corpus_service_token=_SERVICE_TOKEN)
+    monkeypatch.setattr(dial_guard, "_unresolved", _REAL_UNRESOLVED)
+    monkeypatch.setattr(guard_mod, "_parse_allowlist", lambda: ((), frozenset()))
+    monkeypatch.setattr(guard_mod, "_resolve_addrs", lambda _host: [])
+
+    inner = _NoSocketBackend()
+    real_build = corpus_mod.build_pinned_async_transport
+
+    def _build(resolver: object, **kwargs: object) -> httpx.AsyncHTTPTransport:
+        transport = real_build(resolver, **kwargs)  # type: ignore[arg-type]
+        transport._pool._network_backend._inner = inner  # type: ignore[attr-defined]
+        return transport
+
+    monkeypatch.setattr(corpus_mod, "build_pinned_async_transport", _build)
+
+    with structlog.testing.capture_logs() as logs, pytest.raises(CorpusUnavailable) as exc:
+        await search_corpus(_make_operator(), "q")
+    assert exc.value.status is None
+    assert "CorpusDialBlockedError" in str(exc.value)
+    assert inner.dials == []
+    assert any(
+        log["event"] == "corpus_unreachable" and log["error"] == "CorpusDialBlockedError"
+        for log in logs
+    )
 
 
 @pytest.mark.asyncio

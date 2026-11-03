@@ -45,7 +45,10 @@ credential-capture + SSRF path). Two controls close it here:
   destination guard checked at connect time
   (:func:`~meho_backplane.connectors._shared.pinned_transport.build_pinned_async_transport`),
   so a name that changes its answer between the check and the connect
-  cannot steer the socket elsewhere.
+  cannot steer the socket elsewhere. A name that does not resolve at
+  connect time is refused, not dialed by name, unless it is listed
+  verbatim on the target allowlist named above
+  (:func:`~meho_backplane.connectors._shared.dial_guard.screen_dial_addresses`).
 
 The tradeoff of no longer forwarding the operator JWT: the corpus's own
 audit log now attributes the call to the service principal, not the
@@ -102,6 +105,7 @@ from pydantic import (
 )
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
 from meho_backplane.connectors._shared.pinned_transport import build_pinned_async_transport
 from meho_backplane.settings import Settings, get_settings
 from meho_backplane.targets.ssrf_guard import (
@@ -109,7 +113,6 @@ from meho_backplane.targets.ssrf_guard import (
     TargetDestinationBlockedError,
     assert_public_destination_async,
     is_allowlisted,
-    screen_and_resolve,
 )
 
 __all__ = [
@@ -333,11 +336,14 @@ def _pin_corpus_addresses(host: str) -> list[str] | None:
     """Connect-time check for the pinned corpus transport.
 
     Returns the checked addresses the socket may dial, or ``None`` to dial
-    an allowlisted name unchanged. A blocked answer becomes
-    :class:`CorpusDialBlockedError`; its message never names an address.
+    a name listed verbatim on the allowlist unchanged. A blocked answer,
+    and a name that does not resolve (so no address could be checked),
+    both become :class:`CorpusDialBlockedError`; its message never names
+    an address. The pre-dial screen lets an unresolved name through, so
+    this is the check that keeps the socket off a name nobody checked.
     """
     try:
-        return screen_and_resolve(host)
+        return screen_dial_addresses(host)
     except TargetDestinationBlockedError as exc:
         raise CorpusDialBlockedError(str(exc)) from exc
 
@@ -347,7 +353,8 @@ def _corpus_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
 
     Its transport checks the host again when the connection opens and
     connects only to an address from that same check, so the address the
-    socket reaches is the address that was checked.
+    socket reaches is the address that was checked. A name that does not
+    resolve is refused at that point rather than dialed by name.
     """
     return httpx.AsyncClient(
         transport=build_pinned_async_transport(_pin_corpus_addresses),

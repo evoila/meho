@@ -91,6 +91,7 @@ __all__ = [
     "result_receipt_too_large",
     "result_release_changed_while_waiting",
     "result_target_changed_since_approval",
+    "result_target_gone_since_approval",
     "result_target_invalid_type",
     "result_target_required",
     "result_unknown_connector",
@@ -1216,6 +1217,37 @@ def result_target_changed_since_approval(
             "reason": reason,
             "approval_request_id": str(approval_request_id),
             "target_id": str(target_id) if target_id is not None else None,
+        },
+    )
+
+
+def result_target_gone_since_approval(
+    op_id: str,
+    *,
+    approval_request_id: uuid.UUID,
+    target_id: uuid.UUID,
+) -> OperationResult:
+    """An approved request did not run: its target no longer resolves.
+
+    The request pinned a target by id. That target was deleted or revoked
+    after the request was made, so the approval covers nothing that still
+    exists. Nothing was sent. The requester asks again.
+    """
+    reason = (
+        f"approved target {target_id} no longer resolves (deleted or revoked "
+        "after the request was made), so the approval does not cover the run. "
+        "The operation did not run. Ask again."
+    )
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=f"target_gone_since_approval: {reason}",
+        duration_ms=0.0,
+        extras={
+            "error_code": "target_gone_since_approval",
+            "reason": reason,
+            "approval_request_id": str(approval_request_id),
+            "target_id": str(target_id),
         },
     )
 

@@ -121,6 +121,7 @@ from meho_backplane.operations._errors import (
     result_preview_changed_since_approval,
     result_release_changed_while_waiting,
     result_target_changed_since_approval,
+    result_target_gone_since_approval,
 )
 from meho_backplane.operations._secret_values import split_reveal_secret, with_reveal_secret
 from meho_backplane.operations._validate import (
@@ -197,6 +198,7 @@ __all__ = [
     "record_approval_step_event",
     "refuse_resume_if_preview_changed",
     "refuse_resume_if_release_changed",
+    "refuse_resume_if_target_changed",
     "rehydrate_resume_target",
     "reject_request",
     "resume_dispatch_after_approval",
@@ -220,9 +222,10 @@ _APPROVAL_STATUS_CODE: int = 202
 _DECISION_STATUS_CODE_APPROVED: int = 200
 _DECISION_STATUS_CODE_REJECTED: int = 403
 _DECISION_STATUS_CODE_EXPIRED: int = 410
-#: Audit ``status_code`` for an approved run refused because MEHO was
-#: updated while the request waited (#5030).
-_RELEASE_CHANGED_STATUS_CODE: int = 409
+#: Audit ``status_code`` for an approved run MEHO refused before it ran:
+#: MEHO was updated while the request waited (#5030), or the target changed
+#: or no longer resolves (:func:`refuse_resume_if_target_changed`).
+_RESUME_REFUSED_STATUS_CODE: int = 409
 
 #: Who may approve another person's ``dangerous`` or ``destructive`` change,
 #: in words for the refusal texts. The rule itself is in
@@ -2272,9 +2275,10 @@ async def resume_dispatch_after_approval(
     cancel) while the claim blocks the ``/approve`` / UI double-dispatch
     when the waiter is alive.
 
-    Before the run, the target must still have the connection settings it
-    had when the request was made (:func:`rehydrate_resume_target`), and a
-    request with a preview hash must still build the same preview
+    Before the run, the target must still resolve and still have the
+    connection settings it had when the request was made
+    (:func:`refuse_resume_if_target_changed`), and a request with a preview
+    hash must still build the same preview
     (:func:`refuse_resume_if_preview_changed`). Either change refuses the
     run, and the requester asks again.
     """
@@ -2289,14 +2293,15 @@ async def resume_dispatch_after_approval(
     if release_refusal is not None:
         return release_refusal
 
-    resolved_target, denied = await rehydrate_resume_target(operator, request)
-    if denied is not None:
-        return denied
+    resolved_target, target_refusal = await refuse_resume_if_target_changed(operator, request)
+    if target_refusal is not None:
+        return target_refusal
 
     # Exactly-one-resumer claim (#2293): win the atomic conditional UPDATE
-    # right before executing -- after the fail-closed checks above, so a
-    # refused resume (pre-0036 params gap, unresolvable target) never burns
-    # the claim and leaves the op un-executable. A lost claim means another
+    # right before executing -- after the pre-0036 params check above, so
+    # that gap never burns the claim and leaves the op un-executable. A
+    # refusal above (release or target) takes the claim itself: such a
+    # request never runs later. A lost claim means another
     # resumer already executed the approved op (the in-process agent waiter
     # that read the same approved row, or a racing operator
     # surface), so no-op with a benign already_resumed result rather than
@@ -2402,18 +2407,6 @@ async def refuse_resume_if_release_changed(
     if not approval_release_changed(request):
         return None
     running = cast(str, running_release_id())
-    if not await claim_resume(request.id):
-        return result_already_resumed(request.op_id, request.id, 0.0)
-    await _discard_refused_handoff(request)
-    refusal = result_release_changed_while_waiting(
-        request.op_id,
-        approval_request_id=request.id,
-        request_release=request.release_id,
-        running_release=running,
-    )
-    audit_id = await _audit_release_refusal(operator, request, running)
-    if audit_id is not None:
-        refusal = refusal.model_copy(update={"audit_id": audit_id})
     _log().warning(
         "approval_resume_release_changed",
         approval_request_id=str(request.id),
@@ -2422,6 +2415,89 @@ async def refuse_resume_if_release_changed(
         running_release=running,
         operator_sub=operator.sub,
     )
+    refusal = result_release_changed_while_waiting(
+        request.op_id,
+        approval_request_id=request.id,
+        request_release=request.release_id,
+        running_release=running,
+    )
+    return await _refuse_resume(
+        operator,
+        request,
+        refusal,
+        audit_payload={"request_release": request.release_id, "running_release": running},
+    )
+
+
+async def refuse_resume_if_target_changed(
+    operator: Operator,
+    request: ApprovalRequest,
+) -> tuple[Any, OperationResult | None]:
+    """Load the saved target for an approved run, or refuse the run.
+
+    Returns ``(resolved_target, None)`` when the target the request pinned
+    still resolves and still has the connection settings it had when the
+    request was made (``None`` for a tenant-wide request). Else the
+    operation never runs and the vendor gets no call: the refusal of
+    :func:`rehydrate_resume_target` (``target_changed_since_approval`` or
+    ``target_gone_since_approval``) is recorded the same way as the release
+    refusal (:func:`_refuse_resume`): the one-resumer claim is taken, the
+    stored run input is deleted, one audit row records the refusal, and the
+    refusal is stored as the request's run result. A lost claim returns the
+    usual ``already_resumed`` result.
+
+    Shared by both resume paths: the operator surfaces
+    (:func:`resume_dispatch_after_approval`) and the in-process agent
+    waiter (:mod:`meho_backplane.agent.approval_wait`). The re-run after a
+    failed run (:mod:`meho_backplane.operations.approval_rerun`) calls
+    :func:`rehydrate_resume_target` directly and records its own refusal.
+    """
+    resolved_target, denied = await rehydrate_resume_target(operator, request)
+    if denied is None:
+        return resolved_target, None
+    refusal = await _refuse_resume(
+        operator,
+        request,
+        denied,
+        audit_payload={"target_id": str(request.target_id)},
+    )
+    return None, refusal
+
+
+async def _refuse_resume(
+    operator: Operator,
+    request: ApprovalRequest,
+    refusal: OperationResult,
+    *,
+    audit_payload: dict[str, Any],
+) -> OperationResult:
+    """Record that an approved run was refused before it ran, and return the refusal.
+
+    The same four steps for every refusal that happens before the
+    one-resumer claim:
+
+    * The claim (:func:`claim_resume`) is taken, so the request can never
+      run later. A lost claim means another resumer already took the
+      request; the usual ``already_resumed`` result is returned and nothing
+      is recorded here. The claim itself hides the secret-named values of
+      the stored params.
+    * The stored run input (the credential-write custody row) is deleted,
+      the same as on every other way a request ends.
+    * One audit row records the refusal (``path`` ``approval.resume``,
+      ``result_status`` = the refusal's error code, plus *audit_payload*).
+      A failed audit write is logged; the run is refused either way.
+    * The refusal is stored as the request's run result, so every read
+      surface shows the run as refused with that error code.
+    """
+    if not await claim_resume(request.id):
+        return result_already_resumed(request.op_id, request.id, 0.0)
+    await _discard_refused_handoff(request)
+    error_code = str((refusal.extras or {}).get("error_code"))
+    audit_id = await _audit_resume_refusal(
+        operator, request, extra_payload={"result_status": error_code, **audit_payload}
+    )
+    if audit_id is not None:
+        refusal = refusal.model_copy(update={"audit_id": audit_id})
     await persist_resume_result(request.id, refusal, parked_op_id=request.op_id)
     return refusal
 
@@ -2482,12 +2558,13 @@ async def _discard_refused_handoff(request: ApprovalRequest) -> None:
         await session.commit()
 
 
-async def _audit_release_refusal(
+async def _audit_resume_refusal(
     operator: Operator,
     request: ApprovalRequest,
-    running: str,
+    *,
+    extra_payload: dict[str, Any],
 ) -> uuid.UUID | None:
-    """Write the audit row for a refused run (#5030); ``None`` if the write failed."""
+    """Write the audit row for a refused run; ``None`` if the write failed."""
     from meho_backplane.db.engine import get_sessionmaker
 
     audit_id = uuid.uuid4()
@@ -2500,19 +2577,16 @@ async def _audit_release_refusal(
                 operator=operator,
                 request=request,
                 path="approval.resume",
-                status_code=_RELEASE_CHANGED_STATUS_CODE,
+                status_code=_RESUME_REFUSED_STATUS_CODE,
                 duration_ms=0.0,
-                extra_payload={
-                    "result_status": "release_changed_while_waiting",
-                    "request_release": request.release_id,
-                    "running_release": running,
-                },
+                extra_payload=extra_payload,
             )
             await session.commit()
     except Exception:
         _log().exception(
-            "approval_resume_release_changed_audit_failed",
+            "approval_resume_refusal_audit_failed",
             approval_request_id=str(request.id),
+            result_status=extra_payload.get("result_status"),
         )
         return None
     return audit_id
@@ -2887,9 +2961,11 @@ async def rehydrate_resume_target(
     derives its connection from ``connector_id`` / ``params`` execute the
     approved privileged write outside the original target scope.
 
-    Shared by the operator surface (:func:`resume_dispatch_after_approval`)
-    and the in-process agent waiter's composite re-entry
-    (:mod:`meho_backplane.agent.approval_wait`, #3421). Loading by the saved
+    Shared, through :func:`refuse_resume_if_target_changed`, by the operator
+    surface (:func:`resume_dispatch_after_approval`) and the in-process
+    agent waiter (:mod:`meho_backplane.agent.approval_wait`, #3421), and
+    called directly by the re-run after a failed run
+    (:mod:`meho_backplane.operations.approval_rerun`). Loading by the saved
     ``target_id`` instead of the name the caller used at park time means a
     target renamed, or deleted and re-created under the same name, while the
     request waited can never receive the approved write.
@@ -2899,7 +2975,9 @@ async def rehydrate_resume_target(
     :mod:`meho_backplane.operations.approval_resume_checks`) is refused the
     same way, with the ``target_changed_since_approval`` error code: the
     approval covers the target as the person saw it, not a new host or new
-    credentials.
+    credentials. A target that no longer resolves gives the
+    ``target_gone_since_approval`` error code. This function only checks;
+    it records nothing.
     """
     if request.target_id is None:
         return None, None
@@ -2933,17 +3011,9 @@ async def rehydrate_resume_target(
         target_id=str(request.target_id),
         operator_sub=operator.sub,
     )
-    denied = result_denied(
-        request.op_id,
-        (
-            f"approved target {request.target_id} no longer resolves "
-            "(soft-deleted or revoked between request and approval); "
-            "re-dispatch refused to avoid executing outside the "
-            "original target scope"
-        ),
-        0.0,
+    return None, result_target_gone_since_approval(
+        request.op_id, approval_request_id=request.id, target_id=request.target_id
     )
-    return None, denied
 
 
 def _deadline_passed_clause(cutoff: datetime, default_ttl: timedelta | None) -> Any:

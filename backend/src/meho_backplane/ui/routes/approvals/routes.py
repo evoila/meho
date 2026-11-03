@@ -186,6 +186,7 @@ from meho_backplane.ui.routes.approvals.render import (
     STATUS_PILL_CLASS,
     project_request_to_view,
     project_run_result,
+    project_stored_run_result,
     set_csrf_cookie,
 )
 from meho_backplane.ui.templating import get_templates
@@ -872,6 +873,12 @@ async def _decide(
             operator_sub=operator.sub,
         )
         run = project_run_result(dispatch_result, parked_op_id=approval.op_id)
+        if run is None:
+            # Another resumer (usually the waiting requester) won the run
+            # claim. It may have refused the run or run it and failed, so
+            # the card reads the stored result instead of saying the
+            # operation was re-dispatched.
+            run = await project_stored_run_result(approval)
 
     context: dict[str, object] = {
         # The reason already passed validation in the service, so this

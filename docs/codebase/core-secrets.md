@@ -61,8 +61,10 @@ pair with their own certificate by setting `ingress.tls.secretName`.
 
 **Not made by this Job:**
 
-- `-core-first-login` (the first admin's temporary passwords): the realm
-  stage of the `bootstrap` Job (#4043).
+- `-core-first-login` (the first admin's temporary passwords) and
+  `-core-console-admin` (the console admin's user name and temporary
+  password, keys `username` and `password`): the realm stage of the
+  `bootstrap` Job (#4043).
 - The `meho-backplane` client secret: Keycloak makes it at realm import, and
   it never leaves Keycloak.
 - `-core-vault-unseal`, `-core-vault-init`, `-core-vault-snapshot`,
@@ -162,8 +164,9 @@ One namespaced Role, nothing cluster-wide:
 - `create` on Secrets. Kubernetes cannot limit `create` to names; creating a
   name that exists fails with 409 and changes nothing, so an operator's
   Secret is never overwritten.
-- `get` and `patch` only on the twelve `<release>-core-*` names (the ten
-  above, and `-core-first-login` and `-core-ci-login` of the realm stage).
+- `get` and `patch` only on the thirteen `<release>-core-*` names (the ten
+  above, and `-core-first-login`, `-core-console-admin` and `-core-ci-login`
+  of the realm stage).
 - `get` only on the Secrets the operator named in values, to check their
   keys.
 - No `list`, no `watch`, no access to the chart's own ServiceAccount.

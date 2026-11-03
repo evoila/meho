@@ -461,6 +461,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "azure-arm",
         "bind9-ssh",
         "entra-graph",
+        "freeipa-jsonrpc",
         "gcloud-rest",
         "harbor-rest",
         "hyperv-ssh",

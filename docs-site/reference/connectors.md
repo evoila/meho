@@ -16,6 +16,7 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `azure-arm-2026.10` | `azure` | — | — |
 | `bind9-ssh-9.x` | `bind9` | — | typed |
 | `entra-graph-1.0` | `entra` | — | — |
+| `freeipa-jsonrpc-4.x` | `freeipa` | >=4.9,<5.0 | — |
 | `gcloud-rest-1.0` | `gcloud` | — | — |
 | `gh-rest-3` | `gh` | — | generic |
 | `harbor-rest-2.x` | `harbor` | >=2.0,<3.0 | generic |

@@ -2523,7 +2523,11 @@ activity:
    share them. The check runs on the composed node graph, before the
    nodes are turned into Python objects (`_load_yaml_spec`), because a
    `<<` merge key copies every merged entry during that step, and the
-   duplicate keys then collapse in the result. A document without
+   duplicate keys then collapse in the result. The walk counts a node
+   when it enters it and keeps only the current path, so the check
+   itself never holds more than the cap. An alias that points back at
+   a node it sits inside (a recursive alias) is refused at once, since
+   such a document never finishes expanding. A document without
    aliases has at most one node per byte, so a real spec never hits
    this cap.
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime
 import json
 import socket
+import tracemalloc
 from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import patch
@@ -2596,6 +2597,56 @@ def test_yaml_spec_with_many_merge_aliases_is_refused() -> None:
     """
     with pytest.raises(InvalidSpecError, match="too many YAML aliases"):
         _decode_spec(_MERGE_HEAVY_YAML)
+
+
+_RECURSIVE_ALIAS_YAML = b"openapi: 3.0.0\na: &a [" + b", ".join([b"*a"] * 600) + b"]\n"
+
+
+def test_yaml_spec_with_a_recursive_alias_is_refused() -> None:
+    """A sequence whose items are aliases to itself is refused as recursive.
+
+    Such a document never finishes expanding. The check must refuse it
+    the first time the alias points back at an ancestor, not after the
+    node cap, because every visit of the list queued another 600 items
+    and the check itself grew to tens of megabytes before it stopped.
+    """
+    with pytest.raises(InvalidSpecError, match="recursive YAML alias"):
+        _decode_spec(_RECURSIVE_ALIAS_YAML)
+
+
+def test_yaml_spec_recursive_alias_check_holds_little_memory() -> None:
+    """Refusing the recursive document costs kilobytes, not megabytes."""
+    tracemalloc.start()
+    try:
+        with pytest.raises(InvalidSpecError, match="recursive YAML alias"):
+            _decode_spec(_RECURSIVE_ALIAS_YAML)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(b"openapi: 3.0.0\na: &a {b: *a}\n", id="mapping-value"),
+        pytest.param(b"openapi: 3.0.0\na: &a {b: {c: [*a]}}\n", id="nested-two-levels-down"),
+        pytest.param(b"openapi: 3.0.0\na: &a {<<: *a, k: v}\n", id="merge-key"),
+    ],
+)
+def test_yaml_spec_with_a_recursive_alias_in_a_mapping_is_refused(content: bytes) -> None:
+    """A mapping that refers to itself, directly or through a merge key, is refused."""
+    with pytest.raises(InvalidSpecError, match="recursive YAML alias"):
+        _decode_spec(content)
+
+
+def test_yaml_spec_with_a_shared_anchor_is_not_recursive() -> None:
+    """An anchor used in several places, but not inside itself, still loads."""
+    parsed = _decode_spec(
+        b"openapi: 3.0.0\nbase: &base {type: object}\none: *base\ntwo: {inner: *base}\n"
+    )
+    assert parsed["one"] == {"type": "object"}
+    assert parsed["two"] == {"inner": {"type": "object"}}
 
 
 def test_yaml_spec_with_a_small_merge_key_still_merges() -> None:

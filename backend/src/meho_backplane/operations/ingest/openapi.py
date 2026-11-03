@@ -70,7 +70,7 @@ import ipaddress
 import json
 import re
 import socket
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import urljoin, urlparse
@@ -969,34 +969,53 @@ def _load_yaml_spec(content: bytes) -> Any:
         loader.dispose()
 
 
+def _child_nodes(node: yaml.Node) -> Iterator[yaml.Node]:
+    """Yield the direct children of a composed YAML node, keys and values alike."""
+    if isinstance(node, yaml.MappingNode):
+        for key_node, value_node in node.value:
+            yield key_node
+            yield value_node
+    elif isinstance(node, yaml.SequenceNode):
+        yield from node.value
+
+
 def _assert_expanded_size(root: yaml.Node, *, max_nodes: int) -> None:
     """Refuse a composed YAML graph with more than *max_nodes* nodes once expanded.
 
     Walks the graph the way the ingest pipeline will walk the result:
     every alias is visited again at each place it is used, and every
     entry a ``<<`` merge key would copy in is visited too, so the count
-    is never below the size the constructor would build. The walk stops
-    at the cap, so its cost is bounded by *max_nodes* whatever the
-    document holds.
+    is never below the size the constructor would build. The walk is a
+    depth-first descent that keeps one child iterator per level of the
+    current path instead of queuing children, and it counts a node the
+    moment it is entered, so the memory the check itself holds stays
+    bounded by *max_nodes* whatever the document holds. An alias that
+    points back at one of its own ancestors is refused outright: such a
+    document never finishes expanding, so no cap would let it through.
 
     Raises:
-        InvalidSpecError: The expanded document is over the cap.
+        InvalidSpecError: The expanded document is over the cap, or an
+            alias refers to a node that contains it.
     """
-    count = 0
-    stack: list[yaml.Node] = [root]
-    while stack:
-        node = stack.pop()
+    count = 1
+    on_path: set[int] = {id(root)}
+    path: list[tuple[yaml.Node, Iterator[yaml.Node]]] = [(root, _child_nodes(root))]
+    while path:
+        node, children = path[-1]
+        child = next(children, None)
+        if child is None:
+            path.pop()
+            on_path.discard(id(node))
+            continue
+        if id(child) in on_path:
+            raise InvalidSpecError("spec contains a recursive YAML alias (a node refers to itself)")
         count += 1
         if count > max_nodes:
             raise InvalidSpecError(
                 f"spec expands to more than {max_nodes} nodes (too many YAML aliases for its size)"
             )
-        if isinstance(node, yaml.MappingNode):
-            for key_node, value_node in node.value:
-                stack.append(key_node)
-                stack.append(value_node)
-        elif isinstance(node, yaml.SequenceNode):
-            stack.extend(node.value)
+        on_path.add(id(child))
+        path.append((child, _child_nodes(child)))
 
 
 def _validate_openapi_version(spec: dict[str, Any]) -> None:

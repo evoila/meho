@@ -35,8 +35,8 @@ The dotted-path glob grammar is reused verbatim from the Tier-2 matcher
 (object or array) redacts the **whole subtree** at that path, so a
 declared ``credentials`` object never round-trips even partially.
 
-OVF PropertyParams structural rule
-----------------------------------
+OVF property values structural rule
+-----------------------------------
 A positional glob cannot condition on a *sibling* field's value, but a
 vSphere OVF deploy body carries its operator-supplied property values in a
 type-discriminated union: ``additional_parameters[]`` holds a mix of
@@ -44,12 +44,17 @@ subtypes at dynamic indices, and only the ``{type: "PropertyParams",
 properties: [{id, value}]}`` member carries secrets. Those values are OVF
 property inputs which commonly carry appliance credentials, yet each sits
 under a vendor-specific ``id`` no key-name heuristic or credential-shape
-net can place. :func:`_redact_property_params` therefore runs a structural
-pass keyed on the ``PropertyParams`` type marker (not a path, not a key
-name): it redacts **every** property ``value`` (replay analysis does not
-need OVF property inputs) while leaving the ``id`` and every non-secret
-field -- network mappings, name, placement -- intact. It runs on both
-request and response bodies and needs no per-connector config.
+net can place. :func:`_redact_ovf_property_values` therefore runs a
+structural pass keyed on the ``PropertyParams`` type marker (not a path,
+not a key name): it redacts **every** property ``value`` (replay analysis
+does not need OVF property inputs) while leaving the ``id`` and every
+non-secret field -- network mappings, name, placement -- intact. The same
+pass covers the two shapes the vSphere VI/JSON OVF import carries the same
+values in: the ``propertyMapping`` list of ``OvfManager.CreateImportSpec``
+(``[{_typeName: "KeyValue", key, value}]``), and the ``VAppPropertyInfo``
+objects (``value`` and ``defaultValue``) inside the import spec that
+``CreateImportSpec`` answers and ``ResourcePool.ImportVApp`` sends back. It
+runs on both request and response bodies and needs no per-connector config.
 
 Parse posture
 -------------
@@ -99,8 +104,19 @@ __all__ = ["BodyPathRedactionConfig", "redact_body"]
 
 #: The ``type`` discriminator of an OVF ``PropertyParams`` union member in a
 #: vSphere OVF deploy body (``Vcenter.Ovf.OvfParams``). A structural marker,
-#: not a key name -- see :func:`_redact_property_params`.
+#: not a key name -- see :func:`_redact_ovf_property_values`.
 _PROPERTY_PARAMS_TYPE: Final[str] = "PropertyParams"
+
+#: The list of ``KeyValue`` pairs an ``OvfCreateImportSpecParams`` body
+#: (``OvfManager.CreateImportSpec``) carries the OVF property values in.
+_PROPERTY_MAPPING_KEY: Final[str] = "propertyMapping"
+
+#: The VI/JSON type discriminator of a vApp property (``VAppPropertyInfo``)
+#: inside an import spec: the ``CreateImportSpec`` answer carries the OVF
+#: property values here, and ``ResourcePool.ImportVApp`` sends them back.
+_VAPP_PROPERTY_INFO_TYPE: Final[str] = "VAppPropertyInfo"
+_VIM_TYPE_NAME_KEY: Final[str] = "_typeName"
+_VAPP_PROPERTY_VALUE_KEYS: Final[frozenset[str]] = frozenset({"value", "defaultValue"})
 
 
 #: Content-type bases the engine will not attempt to parse as JSON. A
@@ -208,7 +224,7 @@ def redact_body(
 
     try:
         path_redacted = _apply_path_redaction(parsed, paths)
-        prop_redacted = _redact_property_params(path_redacted)
+        prop_redacted = _redact_ovf_property_values(path_redacted)
         scrubbed, _fired = scrub_content(prop_redacted)
     except Exception as exc:  # any walk/glob/scrub fault fails closed (F2 uncertainty)
         # Covers a RecursionError from an adversarially deep pre-parsed
@@ -385,16 +401,25 @@ def _is_json_array(node: Any) -> bool:
     return isinstance(node, Sequence) and not isinstance(node, (str, bytes, bytearray))
 
 
-def _redact_property_params(node: Any) -> Any:
-    """Redact every property ``value`` inside an OVF ``PropertyParams`` block.
+def _redact_ovf_property_values(node: Any) -> Any:
+    """Redact every OVF property ``value`` the vSphere deploy and import bodies carry.
 
-    Walks *node* and, for any object shaped ``{type: "PropertyParams",
-    properties: [...]}``, replaces each property entry's ``value`` with
-    :data:`~...verdict.OVF_PROPERTY_VALUE_MARKER`, keeping the entry's ``id``
-    and every sibling field. Keyed on the ``PropertyParams`` type marker
-    (a structural discriminator), so it fires wherever such a block sits --
-    the dynamic ``additional_parameters[]`` index, or any other placement --
-    without a per-connector path.
+    Walks *node* and masks, with
+    :data:`~...verdict.OVF_PROPERTY_VALUE_MARKER`, each of three shapes:
+
+    * an object shaped ``{type: "PropertyParams", properties: [...]}``
+      (the vSphere REST OVF deploy): each property entry's ``value``, keeping
+      the entry's ``id`` and every sibling field;
+    * a ``propertyMapping`` list (``OvfManager.CreateImportSpec``): the
+      ``value`` of each ``KeyValue`` entry, keeping its ``key``;
+    * a ``{_typeName: "VAppPropertyInfo", ...}`` object (the import spec
+      ``CreateImportSpec`` answers and ``ImportVApp`` sends back): its
+      ``value`` and ``defaultValue``, keeping ``id`` and the other fields.
+
+    Keyed on structural markers (a type discriminator or the list's field
+    name), so it fires wherever such a block sits -- the dynamic
+    ``additional_parameters[]`` index, the top level, or deep inside an
+    import spec -- without a per-connector path.
 
     Non-mutating: returns a new structure so a pre-parsed caller body is
     never rewritten in place (``_apply_path_redaction`` returns the input
@@ -406,13 +431,29 @@ def _redact_property_params(node: Any) -> Any:
                 str(key): (
                     _redact_property_list(value)
                     if key == "properties"
-                    else _redact_property_params(value)
+                    else _redact_ovf_property_values(value)
                 )
                 for key, value in node.items()
             }
-        return {str(key): _redact_property_params(value) for key, value in node.items()}
+        if node.get(_VIM_TYPE_NAME_KEY) == _VAPP_PROPERTY_INFO_TYPE:
+            return {
+                str(key): (
+                    OVF_PROPERTY_VALUE_MARKER
+                    if key in _VAPP_PROPERTY_VALUE_KEYS
+                    else _redact_ovf_property_values(value)
+                )
+                for key, value in node.items()
+            }
+        return {
+            str(key): (
+                _redact_property_list(value)
+                if key == _PROPERTY_MAPPING_KEY and _is_json_array(value)
+                else _redact_ovf_property_values(value)
+            )
+            for key, value in node.items()
+        }
     if _is_json_array(node):
-        return [_redact_property_params(item) for item in node]
+        return [_redact_ovf_property_values(item) for item in node]
     return node
 
 
@@ -422,10 +463,10 @@ def _is_property_params_block(node: Mapping[Any, Any]) -> bool:
 
 
 def _redact_property_list(properties: Any) -> Any:
-    """Redact the ``value`` of every property entry, keeping ``id`` + siblings."""
+    """Redact the ``value`` of every property entry, keeping ``id`` / ``key`` + siblings."""
     return [
         {**item, "value": OVF_PROPERTY_VALUE_MARKER}
         if isinstance(item, Mapping) and "value" in item
-        else _redact_property_params(item)
+        else _redact_ovf_property_values(item)
         for item in properties
     ]

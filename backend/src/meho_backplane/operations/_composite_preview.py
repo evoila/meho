@@ -22,12 +22,20 @@ governed approval tiers are the exception and MUST be previewable:
   secret rides in the params, which the ``redacted_body`` slot below cannot be
   trusted to scrub — so it never reaches here.
 
-The synthetic preview binds the *logical request tuple* (the redacted params
-on the ``redacted_body`` slot, a ``COMPOSITE`` sentinel ``method``, the
+The synthetic preview binds the *logical request tuple* (a safe view of the
+params on the ``redacted_body`` slot, a keyed digest of the full params on
+the ``params_digest`` slot, a ``COMPOSITE`` sentinel ``method``, the
 ``op_id`` as ``resolved_path``) so :func:`compute_preview_hash` stays
 param-sensitive, and layers on the reused park-time ``proposed_effect``. No
 handler runs, no connector is dialled, and nothing is sent — it is a pure,
 egress-free projection.
+
+``redacted_body`` is the same safe view the generic plan shows
+(:func:`safe_params_view`): a secret-named value is masked, a value whose
+shape looks like a secret is masked, and every value of a free-form map (a
+parameter the schema types as an object without fixed ``properties``, for
+example the OVF properties of an appliance deploy) is masked while its keys
+stay. The hash still changes with every value, through ``params_digest``.
 
 Every synthetic preview says whether it shows the plan (#4028):
 ``plan_shown=True`` when ``proposed_effect`` is present, otherwise
@@ -37,6 +45,7 @@ target declines here, and its plan is built only at park time.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
 import structlog
@@ -44,16 +53,19 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations._preview import (
+    _PARAM_REDACTED,
     PreviewContext,
+    _redact_echoed_params,
     build_proposed_effect,
     describe_preview_provenance,
 )
 from meho_backplane.operations._request_preview import (
-    _redact_request_body,
+    PARAMS_DIGEST_KEY,
     compute_preview_hash,
 )
+from meho_backplane.operations._validate import compute_params_hash
 
-__all__ = ["PLAN_NOT_SHOWN_NOTE", "build_composite_preview"]
+__all__ = ["PLAN_NOT_SHOWN_NOTE", "build_composite_preview", "safe_params_view"]
 
 _log = structlog.get_logger(__name__)
 
@@ -112,6 +124,66 @@ async def _synthetic_proposed_effect(
     return proposed_effect if populated else None
 
 
+def _hide_free_form_map_values(value: Any, schema: Any) -> Any:
+    """Return *value* with every value of a free-form map replaced by the marker.
+
+    Walks *value* next to its JSON *schema*. A mapping whose schema fixes
+    its keys (``properties``) is walked key by key, and a key the schema
+    does not name is masked. A mapping whose schema fixes no keys is a
+    free-form map: every value is masked and every key stays. A mapping
+    with no schema at all counts as free-form too, so an unknown shape
+    fails closed. A list is walked with its ``items`` schema. Scalars pass
+    through. The input is never mutated.
+    """
+    if isinstance(value, Mapping):
+        properties = schema.get("properties") if isinstance(schema, Mapping) else None
+        if not isinstance(properties, Mapping):
+            return {str(key): _PARAM_REDACTED for key in value}
+        return {
+            str(key): (
+                _hide_free_form_map_values(item, properties[key])
+                if key in properties
+                else _PARAM_REDACTED
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        items = schema.get("items") if isinstance(schema, Mapping) else None
+        return [_hide_free_form_map_values(item, items) for item in value]
+    return value
+
+
+def safe_params_view(
+    params: dict[str, Any],
+    *,
+    parameter_schema: Any,
+    connector_id: str,
+    operator: Operator,
+    op_id: str,
+) -> dict[str, Any]:
+    """Return the view of *params* a synthetic preview may show.
+
+    Three passes. First every value of a free-form map is replaced by the
+    fixed marker (:func:`_hide_free_form_map_values`): the top-level keys
+    are the operation's parameter names and always stay, and each value is
+    walked with the matching ``properties`` entry of *parameter_schema*.
+    Then the two passes of the generic plan
+    (:func:`~meho_backplane.operations._preview._redact_echoed_params`)
+    run: a secret-named value is masked, and the connector-boundary engine
+    masks a value whose shape looks like a secret. So ``redacted_body``
+    shows no more than the plan the approver sees.
+    """
+    properties = (
+        parameter_schema.get("properties") if isinstance(parameter_schema, Mapping) else None
+    )
+    known = properties if isinstance(properties, Mapping) else {}
+    hidden = {
+        str(key): _hide_free_form_map_values(item, known.get(key)) for key, item in params.items()
+    }
+    tenant = str(operator.tenant_id) if operator.tenant_id is not None else None
+    return _redact_echoed_params(hidden, connector_id=connector_id, tenant=tenant, op_id=op_id)
+
+
 async def build_composite_preview(
     *,
     operator: Operator,
@@ -125,11 +197,16 @@ async def build_composite_preview(
 
     A composite / typed op has no single literal HTTP request, so the
     preview-hash binding (decision ``governed-delete-operations.md``
-    requirement 2) binds the *logical request tuple*: the redacted params ride
-    the ``redacted_body`` slot, so :func:`compute_preview_hash` — unchanged, and
-    unaffected by the ``proposed_effect`` key it does not hash — is
-    param-sensitive (two different deletes hash differently) while ``method`` (a
-    ``COMPOSITE`` sentinel) and ``resolved_path`` (the ``op_id``) name the op. On
+    requirement 2) binds the *logical request tuple*: the safe view of the
+    params (:func:`safe_params_view`) rides the ``redacted_body`` slot and the
+    keyed digest of the full params
+    (:func:`~meho_backplane.operations._validate.compute_params_hash`) rides
+    the ``params_digest`` slot, so :func:`compute_preview_hash` — unaffected by
+    the ``proposed_effect`` key it does not hash — is param-sensitive (two
+    previews that differ in one masked value hash differently) while ``method``
+    (a ``COMPOSITE`` sentinel) and ``resolved_path`` (the ``op_id``) name the
+    op. The digest is keyed with the server key, so a masked value cannot be
+    guessed from it. On
     top of that projection it reuses the park-time ``proposed_effect`` (#3312,
     via :func:`_synthetic_proposed_effect`) so the calling agent reads the same
     effect block the approver sees. Only reached for the ``destructive`` /
@@ -138,8 +215,12 @@ async def build_composite_preview(
     every other typed/composite op keeps the ``"unavailable"`` contract. No
     handler runs and nothing is sent.
     """
-    redacted_body = _redact_request_body(
-        params, connector_id=connector_id, operator=operator, op_id=op_id
+    redacted_body = safe_params_view(
+        params,
+        parameter_schema=descriptor.parameter_schema,
+        connector_id=connector_id,
+        operator=operator,
+        op_id=op_id,
     )
     _log.info(
         "preview_dispatch_composite",
@@ -158,6 +239,7 @@ async def build_composite_preview(
         "resolved_path": op_id,
         "query": None,
         "redacted_body": redacted_body,
+        PARAMS_DIGEST_KEY: compute_params_hash(params),
     }
     envelope["preview_hash"] = compute_preview_hash(envelope)
     proposed_effect = await _synthetic_proposed_effect(

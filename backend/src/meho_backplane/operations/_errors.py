@@ -85,6 +85,7 @@ __all__ = [
     "result_invalid_params",
     "result_no_connector",
     "result_no_target",
+    "result_object_changed_since_approval",
     "result_preview_changed_since_approval",
     "result_rate_limited",
     "result_receipt_too_large",
@@ -1241,6 +1242,34 @@ def result_preview_changed_since_approval(
         duration_ms=0.0,
         extras={
             "error_code": "preview_changed_since_approval",
+            "reason": reason,
+            "approval_request_id": str(approval_request_id),
+        },
+    )
+
+
+def result_object_changed_since_approval(
+    op_id: str,
+    *,
+    approval_request_id: uuid.UUID,
+    reason: str,
+) -> OperationResult:
+    """An approved request did not run: its object is not the one on the approval card.
+
+    Right before the run, MEHO built the approval card again against the
+    live system. The object it found has another identity than the one the
+    person approved, an object appeared where the card said there was none,
+    or the card did not build (see
+    :mod:`~meho_backplane.operations.approval_object_check`). Nothing was
+    sent. The requester sends a new request.
+    """
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=f"object_changed_since_approval: {reason}",
+        duration_ms=0.0,
+        extras={
+            "error_code": "object_changed_since_approval",
             "reason": reason,
             "approval_request_id": str(approval_request_id),
         },

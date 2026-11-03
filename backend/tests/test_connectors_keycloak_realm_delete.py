@@ -617,6 +617,7 @@ async def test_realm_delete_waits_for_a_second_person_then_runs(kc: KeycloakConn
         mock.get(_REALM_PATH).mock(
             side_effect=[
                 httpx.Response(200, json=_realm_rep()),  # the card at park time
+                httpx.Response(200, json=_realm_rep()),  # the card again, before the run
                 httpx.Response(200, json=_realm_rep()),  # the handler's read
                 httpx.Response(404),  # the gone-check
             ]

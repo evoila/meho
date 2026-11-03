@@ -70,12 +70,10 @@ def test_header_name_overrides() -> None:
             "signature_header": "X-Grafana-Alerting-Signature",
             "timestamp_header": "X-When",
             "static_header": "X-Harbor-Secret",
-            "delivery_id_header": "X-GitHub-Delivery",
             "basic_username": "am",
         }
     )
     assert cfg.signature_header == "X-Grafana-Alerting-Signature"
     assert cfg.timestamp_header == "X-When"
     assert cfg.static_header == "X-Harbor-Secret"
-    assert cfg.delivery_id_header == "X-GitHub-Delivery"
     assert cfg.basic_username == "am"

@@ -113,6 +113,51 @@ def test_hmac_non_numeric_timestamp_rejected() -> None:
     assert exc.value.reason == "bad_timestamp"
 
 
+@pytest.mark.parametrize("ts_raw", ["nan", "NaN", "inf", "-inf", "1e400"])
+def test_hmac_non_finite_timestamp_rejected(ts_raw: str) -> None:
+    """A timestamp that parses as a float but is not a finite number is refused."""
+    headers = _hmac_headers()
+    headers["X-Meho-Timestamp"] = ts_raw
+    with pytest.raises(IngestAuthError) as exc:
+        _verify_hmac(headers)
+    assert exc.value.reason == "bad_timestamp"
+
+
+def test_hmac_non_ascii_signature_rejected() -> None:
+    """A signature header outside ASCII is a normal mismatch, not an exception."""
+    headers = _hmac_headers()
+    headers["X-Meho-Signature"] = "\u00e9" * 64
+    with pytest.raises(IngestAuthError) as exc:
+        _verify_hmac(headers)
+    assert exc.value.reason == "bad_signature"
+
+
+def test_hmac_returns_the_timestamped_signed_message() -> None:
+    """The caller gets the exact bytes the signature covers (timestamp + body)."""
+    signed = verify_ingest_auth(
+        strategy=EventSourceAuthStrategy.HMAC_SHA256,
+        secret=_SECRET,
+        headers=_hmac_headers(),
+        raw_body=_BODY,
+        config=resolve_ingest_config({}),
+        now=_NOW,
+    )
+    assert signed == f"{_NOW}".encode() + b"." + _BODY
+
+
+def test_hmac_body_only_scheme_returns_the_body() -> None:
+    sig = hmac.new(b"super-shared-key", _BODY, hashlib.sha256).hexdigest()
+    signed = verify_ingest_auth(
+        strategy=EventSourceAuthStrategy.HMAC_SHA256,
+        secret=_SECRET,
+        headers={"X-Meho-Signature": sig},
+        raw_body=_BODY,
+        config=resolve_ingest_config({"require_timestamp": False}),
+        now=_NOW,
+    )
+    assert signed == _BODY
+
+
 def test_hmac_body_only_scheme_ignores_timestamp() -> None:
     """``require_timestamp=false`` signs the body alone (Grafana-style)."""
     sig = hmac.new(b"super-shared-key", _BODY, hashlib.sha256).hexdigest()
@@ -134,8 +179,8 @@ def test_hmac_uppercase_hex_signature_accepted() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_static_header_valid_passes() -> None:
-    verify_ingest_auth(
+def test_static_header_valid_passes_and_returns_the_body() -> None:
+    signed = verify_ingest_auth(
         strategy=EventSourceAuthStrategy.STATIC_HEADER,
         secret=SecretStr("harbor-token"),
         headers={"Authorization": "harbor-token"},
@@ -143,6 +188,8 @@ def test_static_header_valid_passes() -> None:
         config=resolve_ingest_config({}),
         now=_NOW,
     )
+    # The token signs nothing, so the body is all a dedupe key can use.
+    assert signed == _BODY
 
 
 def test_static_header_bad_value_rejected() -> None:
@@ -179,8 +226,8 @@ def _basic_header(user: str, password: str) -> dict[str, str]:
     return {"Authorization": f"Basic {token}"}
 
 
-def _verify_basic(headers: dict[str, str], *, username: str = "alertmanager") -> None:
-    verify_ingest_auth(
+def _verify_basic(headers: dict[str, str], *, username: str = "alertmanager") -> bytes:
+    return verify_ingest_auth(
         strategy=EventSourceAuthStrategy.BASIC,
         secret=SecretStr("am-password"),
         headers=headers,
@@ -190,8 +237,8 @@ def _verify_basic(headers: dict[str, str], *, username: str = "alertmanager") ->
     )
 
 
-def test_basic_valid_passes() -> None:
-    _verify_basic(_basic_header("alertmanager", "am-password"))  # no raise
+def test_basic_valid_passes_and_returns_the_body() -> None:
+    assert _verify_basic(_basic_header("alertmanager", "am-password")) == _BODY
 
 
 def test_basic_wrong_password_rejected() -> None:

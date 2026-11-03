@@ -16,6 +16,12 @@
 * ``connector_code_not_installed`` -- the code of the connector is not in
   this MEHO: its rows have no package name, no handler imports and no
   class resolves (#5585).
+* ``license_read_off`` -- the op is an ingested read of licence keys
+  (``GET:/v1/license-keys``) and the caller can see its row, but the row
+  is off. MEHO keeps such a read off
+  (:mod:`meho_backplane.operations.license_reads`), so the answer is the
+  same one a call of the row turned on gets, and it names the hand-written
+  licence read to use. A row the caller cannot see stays unknown.
 * ``unknown_op`` -- the connector exists but has no such enabled op. The
   error names the other caller-visible connectors that have the op
   (``extras.connectors_with_op``), or points at ``search_operations``
@@ -43,6 +49,7 @@ from meho_backplane.operations._code_presence import (
 )
 from meho_backplane.operations._errors import (
     result_connector_package_not_installed,
+    result_license_read_off,
     result_unknown_connector,
     result_unknown_op,
 )
@@ -51,9 +58,11 @@ from meho_backplane.operations._lookup import (
     connector_class_registered,
     connector_exists,
     count_known_ops,
+    descriptor_exists_any_state,
     find_connectors_with_op,
     find_uninstalled_package_owner,
 )
+from meho_backplane.operations.license_reads import is_license_read_op_id
 
 __all__ = ["op_miss_result"]
 
@@ -88,6 +97,15 @@ async def op_miss_result(
         )
     if code_missing:
         return result_connector_code_not_installed(op_id, connector_id, _elapsed_ms(started))
+    # An ingested read of licence keys is off after the ingest, and
+    # ``enable-reads`` leaves it off. Its op id has the ``METHOD:/path``
+    # shape of an ingested row. When the caller can see the row (same
+    # tenant scope as the lookup), the answer is ``license_read_off``, the
+    # same one the row turned on gets in ``dispatch``.
+    if is_license_read_op_id(op_id) and await descriptor_exists_any_state(
+        tenant_id=tenant_id, product=product, version=version, impl_id=impl_id, op_id=op_id
+    ):
+        return result_license_read_off(op_id, _elapsed_ms(started))
     known_op_count = await count_known_ops(
         tenant_id=tenant_id, product=product, version=version, impl_id=impl_id
     )

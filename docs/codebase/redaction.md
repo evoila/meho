@@ -1040,8 +1040,10 @@ bodies from ever being recorded (`net.show` is not pinned: it sends no
 in-guest login). On top of that, a **broadening net** covers generic
 (`METHOD:/path`) ops and hand-authored tags the typed classifier does not
 see: case-sensitive `fnmatchcase` globs (`SECRET_FAMILY_PATTERNS`, e.g.
-`*token*`, `*secret*`, `*login*`, `*.auth.*`, `*:*/key`) plus
-token-split descriptor tags (`SECRET_FAMILY_TAGS`, so hyphenated
+`*token*`, `*secret*`, `*login*`, `*.auth.*`, `*:*/key`), case-insensitive
+words (`SECRET_FAMILY_WORDS`: `licen`, the stem of license and licence,
+because a vendor path keeps the vendor's spelling such as `/License-Keys`)
+plus token-split descriptor tags (`SECRET_FAMILY_TAGS`, so hyphenated
 compounds like `secret-read` / `credential-mint` match). Over-exclusion
 is deliberate — declining to record a benign body only loses debugging
 exhaust; under-exclusion leaks.
@@ -1049,7 +1051,7 @@ exhaust; under-exclusion leaks.
 | Family | Source | Records body? |
 | --- | --- | --- |
 | secret-bearing (credential-read / -mint / -write) | **single-sourced** with `broadcast.events.classify_op` (`_CREDENTIAL_*_OPS`) | never |
-| secret-bearing (generic / tag-declared) | broadening `SECRET_FAMILY_PATTERNS` globs + token-split `SECRET_FAMILY_TAGS` | never |
+| secret-bearing (generic / tag-declared) | broadening `SECRET_FAMILY_PATTERNS` globs + case-insensitive `SECRET_FAMILY_WORDS` + token-split `SECRET_FAMILY_TAGS` | never |
 | destructive / delete-shaped | **single-sourced** with the grant guard's `Settings.service_grant_delete_shaped_patterns` + HTTP `DELETE` + `destructive` tag + a vendor delete action name (`Destroy`, `Delete`, `Remove`, `Unregister`, also after a vSAN prefix, or an `action=delete` query; the ingest parser's word list in `meho_backplane/delete_names.py`, #4632) | never |
 | everything else | — | yes (subject to F2.2) |
 

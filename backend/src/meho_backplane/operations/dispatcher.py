@@ -332,6 +332,7 @@ from meho_backplane.operations._errors import (
     result_idempotency_key_conflict,
     result_invalid_op_schema,
     result_invalid_params,
+    result_license_read_off,
     result_no_connector,
     result_preview_binding_required,
     result_preview_hash_mismatch,
@@ -402,6 +403,7 @@ from meho_backplane.operations.dispatch_limits import (
     resolve_dispatch_concurrency_cap,
     resolve_dispatch_rate_limit,
 )
+from meho_backplane.operations.license_reads import is_license_read
 from meho_backplane.operations.reducer import (
     PassThroughReducer,
     Reducer,
@@ -3517,6 +3519,12 @@ async def dispatch(
             started=started,
             target=target,
         )
+    # An ingested read of licence keys never runs: the ingest would give it
+    # the safe level of its HTTP method, and its answer carries the keys in
+    # full. Refused before the target check, the catalog guard, the policy
+    # gate and any vendor call, whatever the row's enable flag says.
+    if descriptor.source_kind == "ingested" and is_license_read(descriptor.method, descriptor.path):
+        return result_license_read_off(op_id, _elapsed_ms(started))
     # #4139: an op that needs a target (every ingested op, or a typed op
     # bound to a connector) and got none fails here with one clear line,
     # before the catalog guard, the policy gate or a wait for approval.

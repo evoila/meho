@@ -102,7 +102,7 @@ about names that another file defines.
 | memory | `MemTotal` at least 7 GiB, which a machine with 8 GB shows | `/proc/meminfo` |
 | disk | at least 80 GB free for `/var/lib` | `df -P -k /var/lib` |
 | other runtime | none of `k3s`, `rke2`, `kubelet`, `containerd`, `dockerd`, `crio` is on `PATH` or runs | `command -v`, `pgrep -x` |
-| ports | TCP 80, 443, 6443, 9345, 10250, 2379, 2380, 2381, 9099 and UDP 8472 are free | `ss -H -l -n` |
+| ports | TCP 80, 443, 6443, 9345, 10250, 2379, 2380, 2381, 9099, 8081, 9091 and UDP 8472 are free, and the ports that parts of RKE2 listen on only on 127.0.0.1: TCP 2382, 10010, 10248, 10249, 10256, 10257, 10258, 10259 | `ss -H -l -n` |
 | clock | the clock is synchronised | `timedatectl show --property=NTPSynchronized` |
 | host name | a fully qualified name; default `hostname -f`, in lower case | `--hostname` |
 | DNS | the name has an A record in DNS; `/etc/hosts` does not count | see below |
@@ -731,9 +731,14 @@ the SSH session, `none`, or `meho-host admin-network`.
 - `firewall_port_list` prints the ports as a port scan from another
   machine must see them: `80/tcp open`, `443/tcp open`,
   `22/tcp admin-network`, and RKE2's ports as `closed` (6443, 9345, 10250,
-  2379, 2380, 2381, 9099, 30000-32767 and 8472/udp). The arrays are in
-  `lib/firewall.sh`. The release test of form 2 (#4742) reads this list.
-  A test checks that every port of the free-port check of step 1 is in it.
+  2379, 2380, 2381, 9099, 8081, 9091, 30000-32767 and 8472/udp). 8081
+  (flanneld) and 9091 (calico-node) are Canal's: they listen on every
+  address, as `ss -tulpn` showed on the week-4 install (#4741). The arrays
+  are in `lib/firewall.sh`. The release test of form 2 (#4742) reads this
+  list. A test checks that every port of the free-port check of step 1 is
+  in it. The ports that parts of RKE2 listen on only on 127.0.0.1
+  (`REQUIRED_LOCAL_TCP_PORTS` in `lib/checks.sh`) are not in it: they
+  never answer from another machine. Step 1 checks that they are free.
 - The SSH rule reads the set `admin_network`. `meho-host admin-network`
   (#4739) changes only that set and its note, so a change to the rendering
   of the set must keep the lines it looks for (`set admin_network {`,

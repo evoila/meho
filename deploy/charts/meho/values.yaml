@@ -346,6 +346,12 @@ ingress:
   # -- Annotations applied to the Ingress. Defaults are empty; consumers add
   # cert-manager / ingress-controller-specific annotations as needed (e.g.
   # `cert-manager.io/cluster-issuer: letsencrypt-prod`).
+  #
+  # The backplane refuses a request body above 32 MiB with a 413
+  # (`HTTP_MAX_REQUEST_BODY_BYTES`). Set the matching cap on the ingress
+  # controller too, so an oversized body is dropped at the edge. The
+  # annotation name depends on the controller; for ingress-nginx it is
+  # `nginx.ingress.kubernetes.io/proxy-body-size: "32m"`.
   annotations: {}
   tls:
     enabled: true
@@ -642,6 +648,19 @@ config:
   # nothing else. From 30 to 3600. Rendered into
   # `PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`.
   perActionSignInMaxAgeSeconds: "300"
+  # -- Per-person request limits on the operation path. Every chart
+  # install has the Valkey store the limits count in (`broadcast.enabled`
+  # is on by default), so they are on here. `dispatchRateLimitPerMinute`
+  # caps how many operations one person or agent may start per minute;
+  # `dispatchMaxConcurrentOps` caps how many may run at the same time. A
+  # request over the cap gets a `rate_limited` answer with a retry hint.
+  # `mcpSessionStartLimitPerMinute` caps new MCP sessions per tenant and
+  # minute. `"0"` turns a limit off. Per-tenant overrides go through
+  # `extraEnv` (`DISPATCH_RATE_LIMIT_PER_MINUTE_OVERRIDES` and friends).
+  # See `docs/codebase/rate-limiting.md`.
+  dispatchRateLimitPerMinute: "600"
+  dispatchMaxConcurrentOps: "16"
+  mcpSessionStartLimitPerMinute: "60"
   # -- Comma-separated `acr` values that mean the person entered a one-time
   # code from their authenticator app (#3979). Rendered into
   # `APPROVAL_ONE_TIME_CODE_ACR_VALUES`. Empty (the default) turns the

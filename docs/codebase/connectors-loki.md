@@ -88,7 +88,9 @@ closed on an unresolved credential.
 `revision`, `branch`, `goVersion`), `GET /ready` (readiness flag), and a
 best-effort `GET /loki/api/v1/labels` (`label_count`, `None` when the tenant-free
 read 401s on an `auth_enabled` Loki). All three go through `_unauth_get`, which
-hits the pooled client directly (no auth, no tenant), so the fingerprint works
+hits the pooled client directly (no auth, no tenant) with the same streamed,
+byte-capped read the curated ops use (`_read_capped_json_response`; a body
+over the cap counts as a transport fault), so the fingerprint works
 on a freshly registered target before any secret exists — the argocd
 `/api/version` precedent. `probe()` uses the tenant-free `GET /ready`
 (`200 "ready"` → ok; `503`/transport error → not ok with a reason).

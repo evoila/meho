@@ -33,6 +33,7 @@ from meho_backplane.topology.annotate import NodeRef
 from meho_backplane.topology.bulk_import import BulkImportRow
 
 __all__ = [
+    "BULK_MAX_UPLOAD_BYTES",
     "BulkParseError",
     "parse_bulk_rows",
     "resolve_bulk_text",
@@ -43,6 +44,10 @@ __all__ = [
 #: batch with the same legible message rather than handing 10k rows to the
 #: per-row validation loop.
 BULK_MAX_ROWS = 1000
+
+#: Byte cap on an uploaded rows file. Matches the ``rows_text`` form-field
+#: cap of the bulk route, so a paste and an upload have the same bound.
+BULK_MAX_UPLOAD_BYTES = 256 * 1024
 
 
 class BulkParseError(ValueError):
@@ -67,7 +72,11 @@ async def resolve_bulk_text(pasted: str | None, upload: UploadFile | None) -> st
     import surface's ``_resolve_yaml_text``.
     """
     if upload is not None and upload.filename:
-        raw = await upload.read()
+        raw = await upload.read(BULK_MAX_UPLOAD_BYTES + 1)
+        if len(raw) > BULK_MAX_UPLOAD_BYTES:
+            raise BulkParseError(
+                f"the uploaded file is larger than {BULK_MAX_UPLOAD_BYTES // 1024} KiB"
+            )
         return raw.decode("utf-8", errors="replace")
     return pasted or ""
 

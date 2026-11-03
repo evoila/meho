@@ -385,6 +385,7 @@ def test_happy_path_returns_full_federation_response(
         "audit_replay",
         "approval_queue",
         "approval_custody",
+        "vault_tenant_scope",
         "mcp",
     ]
     assert all({"name", "configured", "missing_env"} == set(entry) for entry in features)

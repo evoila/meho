@@ -184,7 +184,7 @@ from meho_backplane.memory import (
     start_memory_expiry_sweeper,
     stop_memory_expiry_sweeper,
 )
-from meho_backplane.metrics import render_metrics
+from meho_backplane.metrics import VAULT_TENANT_SCOPE_ENFORCED, render_metrics
 from meho_backplane.metrics_access import verify_metrics_access
 from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
 from meho_backplane.operations import operation_catalog_write, set_default_reducer
@@ -210,6 +210,7 @@ from meho_backplane.operations.result_read_admission import (
     configure_result_read_admission,
     shutdown_result_read_admission,
 )
+from meho_backplane.request_body_limit import RequestBodyLimitMiddleware
 from meho_backplane.request_usage.retention import (
     start_request_usage_retention_sweeper,
     stop_request_usage_retention_sweeper,
@@ -340,7 +341,9 @@ def _advise_vault_tenant_scope_unenforced() -> None:
     lifespan uses (e.g. :func:`_preload_embedding_model`): a single
     ``structlog`` event, no f-strings, no raise.
     """
-    if not get_settings().vault_kv_tenant_scope_prefix:
+    enforced = bool(get_settings().vault_kv_tenant_scope_prefix)
+    VAULT_TENANT_SCOPE_ENFORCED.set(1 if enforced else 0)
+    if not enforced:
         structlog.get_logger().warning(
             "vault_tenant_scope_unenforced",
             enable_via="VAULT_KV_TENANT_SCOPE_PREFIX",
@@ -931,6 +934,12 @@ app.add_middleware(RequestContextMiddleware)
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(UISessionMiddleware)
 app.add_middleware(UIFramingHeadersMiddleware)
+# ``RequestBodyLimitMiddleware`` is the outermost layer: a request body
+# above ``HTTP_MAX_REQUEST_BODY_BYTES`` gets a 413 before any inner
+# middleware or handler reads it. Header-only on the way in, so its
+# position relative to the chain below is not load-bearing beyond
+# "outside everything that buffers a body".
+app.add_middleware(RequestBodyLimitMiddleware)
 
 # G0.25 (#1694): app-level HTTPException handler. Intercepts exactly
 # the BFF refresh path's ``401 session_expired`` on ``/ui/*`` paths

@@ -71,8 +71,11 @@ pair with their own certificate by setting `ingress.tls.secretName`.
   `-core-vault-scheduler`: the `vault-init` Job (#4044,
   docs/codebase/core-vault-init.md).
 - `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `MAIL_SMTP_PASSWORD`,
-  `METRICS_AUTH_TOKEN`, `CORPUS_SERVICE_TOKEN`, `VCF_PAIF_OIDC_CLIENT_SECRET`:
-  the operator gives them; they are never generated.
+  `CORPUS_SERVICE_TOKEN`, `VCF_PAIF_OIDC_CLIENT_SECRET`: the operator gives
+  them; they are never generated.
+- `METRICS_AUTH_TOKEN`: the chart's own template
+  `templates/metrics-auth-secret.yaml` makes `<release>-metrics-auth` on
+  every install, built-in core or not (docs/codebase/metrics-ready-access.md).
 
 ## Use your own Secret
 

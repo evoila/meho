@@ -22,6 +22,12 @@ spec:
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if and .Values.metricsAuth.enabled (not .Values.metricsAuth.existingSecret) }}
+        # Roll the pod when the chart-made metrics token changes, so the
+        # token the pod checks is the one the Secret holds. On a cluster
+        # `lookup` keeps the value and the checksum stays stable.
+        checksum/metrics-auth: {{ include (print $.Template.BasePath "/metrics-auth-secret.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -130,6 +136,16 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.postgres.credentialsSecret }}
                   key: url
+            {{- if .Values.metricsAuth.enabled }}
+            # The metrics token (`metricsAuth`): `/metrics` and the
+            # `features` block of `/ready` answer only a caller that sends
+            # it. `secretKeyRef` only, never plaintext.
+            - name: METRICS_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "meho.metricsAuthSecretName" . | quote }}
+                  key: {{ .Values.metricsAuth.secretKey | quote }}
+            {{- end }}
             {{- if .Values.broadcast.enabled }}
             # BROADCAST_REDIS_URL points the backplane at the in-cluster
             # broadcast store. The name must match the env var the

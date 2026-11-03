@@ -3462,7 +3462,16 @@ class WebSession(Base):
       discipline: no FK to ``tenant.id``, matching the audit-log
       pattern (``audit_log.tenant_id``). Tenant deletion is a major
       ops operation that scrubs dependent sessions explicitly before
-      removing the tenant row.
+      removing the tenant row. Since #5240 it is the session's
+      **current** tenant: a switch in the web interface changes it.
+
+    * ``tenant_chosen`` -- ``False`` while a person with several
+      tenants has not picked one yet after login (migration ``0130``).
+      The web interface then shows only the tenant picker.
+
+    * ``can_switch_tenant`` -- ``True`` when the person has more than
+      one tenant or is a platform admin (migration ``0130``). Only a
+      hint for the sidebar; the switch itself checks the token.
 
     * ``access_token`` / ``refresh_token`` -- Fernet-encrypted bytes.
       ``LargeBinary`` -> ``bytea`` on PG, ``BLOB`` on SQLite. The
@@ -3538,6 +3547,18 @@ class WebSession(Base):
         DateTime(timezone=True),
         nullable=True,
         default=None,
+    )
+    tenant_chosen: Mapped[bool] = mapped_column(
+        Boolean(),
+        nullable=False,
+        default=True,
+        server_default=sa.true(),
+    )
+    can_switch_tenant: Mapped[bool] = mapped_column(
+        Boolean(),
+        nullable=False,
+        default=False,
+        server_default=sa.false(),
     )
 
     __table_args__ = (

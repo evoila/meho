@@ -1,0 +1,68 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Tenant picker (#5240). A standalone page (no sidebar): a person with
+  several tenants sees it right after login, before any other page, so
+  the page must not load the console chrome and its background requests.
+  It also opens from the sidebar tenant box.
+
+  Each tenant is one plain POST form to ``/ui/tenant/switch`` with the
+  CSRF token in a hidden field. The page has no ``data-meho-tenant``
+  marker: it is not made for one tenant.
+-#}
+<!doctype html>
+<html lang="en" data-theme="meho-dark" class="h-full">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Choose a tenant &middot; MEHO Operator Console</title>
+    {% include "_head_assets.html" %}
+  </head>
+  <body class="min-h-full bg-base-200 text-base-content antialiased">
+    <main class="mx-auto max-w-xl space-y-6 px-4 py-12">
+      <header class="space-y-1">
+        <h1 class="text-xl font-semibold">Choose a tenant</h1>
+        <p class="text-sm opacity-70">
+          MEHO works in one tenant at a time. You see only the systems,
+          approvals and records of the tenant you choose. You can switch
+          later from the tenant box in the sidebar.
+        </p>
+      </header>
+
+      {% if notice_text %}
+      <div role="status" class="alert alert-warning" data-field="tenant-notice">
+        <span>{{ notice_text }}</span>
+      </div>
+      {% endif %}
+
+      <ul class="space-y-2" data-field="tenant-choices">
+        {% for choice in choices %}
+        <li>
+          <form method="post" action="{{ switch_path }}" class="card bg-base-100 border-base-300 border shadow-sm">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="tenant" value="{{ choice.id }}">
+            <div class="card-body flex-row items-center justify-between gap-3 p-4">
+              <div class="min-w-0">
+                <div class="truncate font-medium" data-field="tenant-name">{{ choice.name }}</div>
+                <div class="text-xs opacity-60" data-field="tenant-role">{{ choice.role }}</div>
+              </div>
+              {% if choice.id == current_id %}
+              <span class="badge badge-primary badge-outline" data-field="tenant-current">Current</span>
+              {% else %}
+              <button type="submit" class="btn btn-sm btn-primary" data-tenant-id="{{ choice.id }}">Use this tenant</button>
+              {% endif %}
+            </div>
+          </form>
+        </li>
+        {% endfor %}
+      </ul>
+
+      {% if dashboard_path %}
+      <p>
+        <a class="link text-sm" href="{{ dashboard_path }}">Back to the dashboard</a>
+      </p>
+      {% endif %}
+    </main>
+  </body>
+</html>

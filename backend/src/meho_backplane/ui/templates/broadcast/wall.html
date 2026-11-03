@@ -59,7 +59,10 @@
        (the include is what keeps the two heads from drifting). #}
     {% include "_head_assets.html" %}
   </head>
-  <body class="bg-base-200 text-base-content flex h-full flex-col overflow-hidden">
+  {# ``data-meho-tenant``: the tenant this page was made for (#5240), like
+     ``base.html``. ``page-tenant.js`` sends it with the drawer requests and
+     shows the reload banner when the stream is refused after a switch. #}
+  <body class="bg-base-200 text-base-content flex h-full flex-col overflow-hidden" data-meho-tenant="{{ tenant_id }}">
     <section
       class="flex h-full flex-col"
       hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'

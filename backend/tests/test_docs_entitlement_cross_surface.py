@@ -153,9 +153,12 @@ async def test_ui_bff_reconstructs_token_capabilities_not_session_tenant() -> No
     but tenant_id from the session row". For the *entitlement* path that is
     not so: ``verify_access_token_with_refresh`` presents the stored access
     token to the same chassis chain and returns a full token-derived
-    :class:`Operator` — so both ``tenant_id`` and ``capabilities`` come from
-    the token, matching what REST derives from an identical claim set. (The
-    session-row ``tenant_id`` is used only for the page-header chip.)
+    :class:`Operator` — so ``capabilities`` come from the token, matching
+    what REST derives from an identical claim set. Since #5240 the
+    session-row ``tenant_id`` is the session's current tenant: it goes to
+    the chassis chain like a ``Meho-Tenant`` header, and the chain checks it
+    against the token. A row tenant the token does not allow resets the
+    session (``tests/test_ui_tenant_switch.py``).
     """
     key = _make_rsa_keypair("kid-A")
     ui_token = _mint(key, audience="meho-backplane")
@@ -163,9 +166,9 @@ async def test_ui_bff_reconstructs_token_capabilities_not_session_tenant() -> No
     decrypted = DecryptedSession(
         id=uuid.uuid4(),
         operator_sub=_SUB,
-        # A *different* tenant on the session row than the token claim, to
-        # prove the entitlement path follows the TOKEN, not the row.
-        tenant_id=uuid.UUID("99999999-9999-9999-9999-999999999999"),
+        # The session works in the token's tenant (#5240: the row's tenant
+        # is checked against the token).
+        tenant_id=uuid.UUID(_TENANT),
         created_at=now,
         # Far-future expiry so the reactive verify leg never refreshes: the
         # stored token is valid, so verify_access_token_with_refresh returns
@@ -184,8 +187,7 @@ async def test_ui_bff_reconstructs_token_capabilities_not_session_tenant() -> No
         )
 
     assert isinstance(ui_op, Operator)
-    # Entitlement inputs come from the TOKEN: tenant_id is the claim value,
-    # NOT the session-row 9999... tenant.
+    # Entitlement inputs come from the TOKEN, in the session's tenant.
     assert ui_op.tenant_id == uuid.UUID(_TENANT)
     assert ui_op.capabilities == frozenset(_CAPS)
     assert "meho-docs:vmware" in ui_op.capabilities

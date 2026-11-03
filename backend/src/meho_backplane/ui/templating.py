@@ -144,7 +144,7 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
     The context processor exposes two variables to every Jinja render:
 
     * ``session_tenant`` -- a ``dict`` carrying ``id`` / ``slug`` /
-      ``name``, or ``None`` when the request hit a surface where the
+      ``name`` / ``can_switch``, or ``None`` when the request hit a surface where the
       session middleware hasn't bound a context (the auth surfaces
       themselves, e.g. ``/ui/auth/login`` -- the operator is by
       definition not signed in there). ``base.html``'s header chip
@@ -205,6 +205,10 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
             "id": str(session_ctx.tenant_id),
             "slug": session_ctx.tenant_slug,
             "name": session_ctx.tenant_name,
+            # #5240: the sidebar tenant box links to the tenant picker
+            # when the person has more than one tenant or is a platform
+            # admin.
+            "can_switch": session_ctx.can_switch_tenant,
         },
         # The Keycloak ``sub`` of the signed-in operator, surfaced into the
         # sidebar account chip (G10.11-T1 #1892) to replace the hardcoded

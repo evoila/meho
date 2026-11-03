@@ -94,7 +94,9 @@ fresh target with no asserted version still resolves.
   status + `Location` + `conflict` outcome of a mutating request;
   `created_uuid()` parses the new object's UUID out of `Location`.
 - `redact_secret_fields` (`connectors/keycloak/redaction.py`) — the
-  recursive scrubber every read handler runs its response through.
+  recursive scrubber every read handler runs its response through. The
+  connector's trace mask (`KeycloakConnector.trace_response_body`) runs
+  the same scrubber on every recorded Admin REST answer.
 - `KeycloakClientCredentials` / `KeycloakPasswordCredentials`
   (`connectors/keycloak/session.py`) — the two admin-credential shapes
   (tagged union `KeycloakAdminCredentials`).
@@ -258,6 +260,22 @@ are config reads where the secret is incidental: it must never enter the
 synchronous `OperationResult` the caller receives.
 The write surface redacts secret *inputs* at the classification layer per
 the general posture (see "Write ops" below).
+
+The flight recorder stores the vendor answer of each recorded call, before
+the handler's scrub runs. So the connector masks the trace body too:
+`KeycloakConnector.trace_response_body` (`connectors/keycloak/connector.py`)
+parses the Admin REST answer and returns `redact_secret_fields(payload)`,
+the same scrub the result gets. The stored trace and the agent copy of it
+show `***REDACTED***` where the result does. This covers every admin read
+that goes through the recorded `_get_admin_json` path: the curated read
+ops, and the client reads inside `keycloak.client.update`, the client
+delete lookup and the realm delete. An empty answer is recorded as it is; an
+answer that is not JSON is replaced by a fixed marker. The shared trace
+engine (`docs/codebase/redaction.md`) still runs on what the hook returns
+and masks secret-named fields by name as well.
+`tests/test_connectors_keycloak_trace_mask.py` dispatches
+`keycloak.client.get` with the recorder on and checks that a made-up client
+secret is in neither the stored trace nor the agent copy.
 
 ## Write ops (G3.13-T4, extended by #3280)
 

@@ -242,8 +242,10 @@ the customer's key store (the third one-time file of step 6):
    5 seconds; press an arrow key to stop the countdown.
 2. Select the first entry and press `e`. Log in as `root` with the
    bootloader password.
-3. At the end of the line that starts with `linux`, add `init=/bin/bash`.
-   Press Ctrl+X to start it.
+3. On the line that starts with `linux`, change `console=ttyS0` to
+   `console=tty1`, and add `init=/bin/bash` at the end of the line. Press
+   Ctrl+X to start it. Without the change, the root shell opens on the
+   serial port, the last `console=` of the line, and not on the VM screen.
 4. In the root shell:
 
    ```bash

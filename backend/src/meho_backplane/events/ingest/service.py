@@ -1,18 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Inbound ingest orchestration: resolve-secret -> auth -> guard -> publish (#2881).
+"""Inbound ingest orchestration: rate-limit -> resolve-secret -> auth -> publish (#2881).
 
 The endpoint (:mod:`meho_backplane.api.v1.events_ingest`) resolves the source
-and reads the capped body; this module runs everything that follows, in the
-order the issue fixes:
+and reads the capped body; this module runs everything that follows, in
+this order:
 
-1. Read the source's shared secret from Vault under the synthetic
+1. Enforce the per-source rate limit. It runs first, so every delivery to
+   a source counts, whether or not it then authenticates, and the number
+   of Vault reads a source can cause per window is capped by the same
+   limit.
+2. Read the source's shared secret from Vault under the synthetic
    ``__ingest__`` identity (a background-dispatch service principal, since
    the webhook is JWT-less).
-2. Verify the sender against the source's auth strategy (constant-time).
-3. Enforce the per-source rate limit.
-4. Compute the dedupe key (sender delivery id, else body hash).
+3. Verify the sender against the source's auth strategy (constant-time).
+4. Compute the dedupe key: a SHA-256 of the signed message (the
+   timestamped message for ``hmac-sha256`` with a timestamp, else the raw
+   body), namespaced by source id. Only data the credential covers goes
+   into the key; no request header does.
 5. Normalise the parsed body with the source kind's per-vendor normaliser
    (:mod:`meho_backplane.events.normalizers`, #2882) into the outbox envelope
    and :func:`~meho_backplane.events.outbox.publish` it to ``event_outbox`` **in
@@ -105,10 +111,6 @@ INGEST_OPERATOR_SUB: str = "__ingest__"
 INGEST_AUDIT_METHOD: str = "INGEST"
 INGEST_AUDIT_PATH: str = "events.ingest"
 
-#: Defensive cap on a sender-supplied delivery id used as the dedupe basis,
-#: so an attacker cannot bloat the ``dedupe_key`` column with a huge header.
-_MAX_DELIVERY_ID_LEN: int = 200
-
 
 class IngestPayloadError(Exception):
     """The request body is not a JSON object/array (400 at the boundary)."""
@@ -183,19 +185,17 @@ async def _read_secret_or_fail(source: ResolvedSource) -> SecretStr:
         raise IngestVaultError(str(type(exc).__name__)) from exc
 
 
-def _dedupe_key(source: ResolvedSource, headers: Any, raw_body: bytes, config: IngestConfig) -> str:
+def _dedupe_key(source: ResolvedSource, signed_message: bytes) -> str:
     """Derive the ``(tenant, dedupe_key)`` idempotency token for this delivery.
 
-    Prefers a sender-supplied delivery id (capped) and falls back to a
-    SHA-256 of the raw body. Namespaced by source id so two sources in one
-    tenant that happen to relay an identical body never false-collide.
+    A SHA-256 of the signed message :func:`verify_ingest_auth` returned, so
+    two deliveries get the same key exactly when the data their credential
+    covers is the same. With a timestamped signature that is the timestamp
+    plus the body, so a sender that re-fires an identical body later makes a
+    new event. Namespaced by source id so two sources in one tenant that
+    happen to relay an identical body never false-collide.
     """
-    delivery_id = headers.get(config.delivery_id_header)
-    if delivery_id and delivery_id.strip():
-        basis = delivery_id.strip()[:_MAX_DELIVERY_ID_LEN]
-    else:
-        basis = hashlib.sha256(raw_body).hexdigest()
-    return f"{source.id}:{basis}"
+    return f"{source.id}:{hashlib.sha256(signed_message).hexdigest()}"
 
 
 def _parse_json_or_fail(raw_body: bytes) -> object:
@@ -308,18 +308,23 @@ async def accept_ingest_event(
     headers: Any,
     raw_body: bytes,
 ) -> IngestOutcome:
-    """Run auth -> rate-limit -> dedupe -> normalise -> publish+audit -> broadcast.
+    """Run rate-limit -> secret read -> auth -> dedupe -> normalise -> publish+audit.
 
     Raises the typed ingest errors on a fail-closed guard; returns an
     :class:`IngestOutcome` on accept or on a duplicate delivery (no second
-    outbox/audit row). The JSON body is parsed only after auth + rate-limit
-    pass, so a parse failure (400) is never reachable unauthenticated.
+    outbox/audit row). The rate limit runs before the Vault read, so it
+    bounds the Vault reads per source and window as well as the accepted
+    deliveries. The JSON body is parsed only after auth passes, so a parse
+    failure (400) is never reachable unauthenticated.
     """
     started = time.perf_counter()
     now = datetime.now(UTC)
 
+    await enforce_ingest_rate_limit(
+        source.tenant_id, source.slug, _resolve_rate_limit(source, config)
+    )
     secret = await _read_secret_or_fail(source)
-    verify_ingest_auth(
+    signed_message = verify_ingest_auth(
         strategy=source.auth_strategy,
         secret=secret,
         headers=headers,
@@ -327,11 +332,8 @@ async def accept_ingest_event(
         config=config,
         now=now.timestamp(),
     )
-    await enforce_ingest_rate_limit(
-        source.tenant_id, source.slug, _resolve_rate_limit(source, config)
-    )
 
-    dedupe_key = _dedupe_key(source, headers, raw_body, config)
+    dedupe_key = _dedupe_key(source, signed_message)
     parsed_body = _parse_json_or_fail(raw_body)
     event_kind, envelope = _normalise(source, parsed_body, now)
 

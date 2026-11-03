@@ -369,41 +369,62 @@ the source's Vault-custodied secret, not by a Keycloak JWT.
 
 1. **Resolve** the source by slug via
    `resolve_event_source_by_slug` (global — the webhook carries no
-   tenant). A missing *or* paused source returns the identical uniform
-   `404`, so the two are indistinguishable (no paused-vs-missing oracle).
+   tenant). A missing or paused source does not stop the request here:
+   it goes on with the default config and is refused at the auth step,
+   so a missing, a paused and a wrongly signed delivery all get the same
+   uniform `401` with the same body (see the note below).
 2. **Body cap** (`413`) is enforced *before* the whole body is buffered:
    a `Content-Length` fast-reject plus a streaming running-total guard
    (`_read_capped_body`) so an absent/understated length header cannot
-   smuggle an oversize body past it (the `ui/csrf.py` DoS lesson). The
+   get an oversize body past it (the `ui/csrf.py` DoS lesson). The
    cap defaults to 256 KiB; a source's `extras["max_body_bytes"]` can
-   only *lower* it, never raise it above the ceiling.
-3. **Auth** (`401`) per the source's `auth_strategy`, **constant-time**
+   only *lower* it, never raise it above the ceiling. The default cap
+   applies when there is no source.
+3. **Rate limit** (`429` + `Retry-After`) — the broadcast fixed-window
+   `INCR`/`EXPIRE` pattern under a new key namespace
+   `meho:ratelimit:ingest:{tenant}:{source}` (`events/ingest/rate_limit.py`).
+   It runs **before** the Vault read and the auth check, so every
+   delivery to a source counts, accepted or refused, and the limit also
+   caps how many Vault reads a source can cause per window. Fail-loud
+   on a Valkey outage (`503`; a webhook sender retries).
+4. **Auth** (`401`) per the source's `auth_strategy`, **constant-time**
    (`events/ingest/auth.py`, every secret comparison through
    `hmac.compare_digest`): `hmac-sha256` over the raw body (with an
    optional timestamp bound into the signature and gated by a replay
-   window), `static-header`, or `basic` (username from `extras`,
-   password is the secret). Header names are `extras`-configurable, so a
+   window; the timestamp must be a finite number), `static-header`, or
+   `basic` (username from `extras`, password is the secret). Header
+   values are compared as UTF-8 bytes, so a value outside ASCII is a
+   plain mismatch. Header names are `extras`-configurable, so a
    vendor whose headers differ (Grafana's `X-Grafana-Alerting-Signature`)
    is config, not a code branch — richer per-vendor normalisation is
    #2882. The failure reason is logged server-side, never returned, so
-   every rejection is the same uniform `401`.
-4. **Rate limit** (`429` + `Retry-After`) — the broadcast fixed-window
-   `INCR`/`EXPIRE` pattern under a new key namespace
-   `meho:ratelimit:ingest:{tenant}:{source}` (`events/ingest/rate_limit.py`).
-   Fail-loud on a Valkey outage (`503`; a webhook sender retries).
-5. **Dedupe** — the sender's delivery id where one exists, else a SHA-256
-   of the raw body, namespaced by source id, written as `event_outbox.dedupe_key`
-   (#2879). A `(tenant_id, dedupe_key)` collision (the partial unique
-   index) is caught as an `IntegrityError` and mapped to an idempotent
-   `200` — never a second outbox row, never a second audit row, so a
-   retry-storming sender never double-fires a subscriber.
+   every rejection is the same uniform `401`. On success the check
+   returns the **signed message**: `"<ts>." + body` for a timestamped
+   HMAC, else the raw body.
+5. **Dedupe** — a SHA-256 of the signed message, namespaced by source
+   id, written as `event_outbox.dedupe_key` (#2879). Only data the
+   credential covers goes into the key; no request header does. So a
+   redelivery of the same signed request collides, while the same body
+   signed at another time is a new event. A `(tenant_id, dedupe_key)`
+   collision (the partial unique index) is caught as an `IntegrityError`
+   and mapped to an idempotent `200` — never a second outbox row, never
+   a second audit row, so a retry-storming sender never double-fires a
+   subscriber.
 6. **Publish + audit in one transaction.** `events.publish()` (now
    carrying `origin` = source id and the `dedupe_key`) inserts the
    outbox row in the **same** `session.begin()` block as a synchronous
    audit row under the synthetic `__ingest__` identity (the `__sensor__`
    / `__scheduler__` sentinel precedent; `audit_log.operator_sub` is
    plain `Text`). No success without a committed audit row (postulate 7).
-   A **fail-open** broadcast follows the commit.
+
+**Which auth mode to use.** `hmac-sha256` with a timestamp (the
+default, `require_timestamp` on) is the strongest: the signature covers
+the body and the time, and the replay window bounds how long a signed
+request stays valid. `hmac-sha256` without a timestamp, `static-header`
+and `basic` have no time window; a delivery in these modes stays
+acceptable as long as the secret is the same, and only the body-hash
+dedupe stops an exact repeat. Use them when the sender cannot sign with
+a timestamp (Harbor, Alertmanager), and rotate their secrets.
 
 ### The `__ingest__` audit + Vault-read identities
 
@@ -430,15 +451,16 @@ correct posture. A dedicated ingest principal (its own client and Vault
 role) is a possible later step; it would need one more client on every
 install.
 
-### Reconciliation note (404 vs 401)
+### One answer for every refusal
 
-The #2880 resolver docstring suggests mapping a missing slug to the
-*same* response as an auth failure. This endpoint instead follows the
-#2881 contract: missing/paused → `404`, bad signature → `401`. The
-residual "a 404 vs 401 distinguishes a real slug" oracle is acceptable
-because a slug is a high-entropy routing token (not enumerable), while
-the uniform 404 still hides the operationally sensitive paused-vs-missing
-distinction.
+A missing source, a paused source, a source with no secret, and a bad
+or missing credential all answer `401` with the same body. The reason
+(`unknown_source`,
+`source_paused`, `no_secret_configured`, `bad_signature`, ...) goes to
+the server log only. The body cap runs before that answer, so an
+oversize body gets `413` whether or not the slug exists. What still
+differs is work: an active source costs a rate-limit count and a Vault
+read before its answer, a missing one does not.
 
 ## First-wave payload normalisers (#2882)
 

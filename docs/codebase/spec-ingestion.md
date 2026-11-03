@@ -1543,10 +1543,14 @@ op came from vi-json.yaml" during review.
 
 **Spec-vs-label cross-check (G0.9-T8).** Before parse/register/group
 runs, `_validate_spec_versions` reads each spec's `info.version` via
-the lightweight `read_spec_info_version` helper and compares it
+the `read_spec_info_version` helper and compares it
 against the operator-supplied `IngestRequest.version` label using the
 same `packaging.version.Version` semantics the resolver uses at
-dispatch time. Three outcomes:
+dispatch time. The helper downloads and parses the whole spec, so
+`ingest()` runs the check in a worker thread (`asyncio.to_thread`).
+The event loop keeps serving other requests (health checks included)
+on every path: background, blocking (`async=false`) and dry run. Three
+outcomes:
 
 * **Exact** (`spec=9.0.3`, `label=9.0.3` / `9.0` / `9`) — proceed.
 * **Compatible** (same major, different minor, e.g. `spec=9.0.3`,

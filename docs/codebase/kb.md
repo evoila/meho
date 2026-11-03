@@ -227,14 +227,33 @@ rule (below): it never lets file order pick a winner.
 
 ### Cross-principal write & delete semantics (#1845)
 
-kb rows are **tenant-shared with no per-row ownership check**. Any
-`tenant_admin` in a tenant may overwrite or delete **any** other
-principal's slug in that tenant — this is **wiki-like and intended**,
-not a bug. Operators must not assume per-author ownership: there is no
-`403`/`409` on a same-slug cross-principal write, and `DELETE` is not
-principal-scoped (it removes whatever row matches the natural key).
-This is deliberately different from `memory` DELETE, which **is**
-principal-scoped (a cross-principal memory delete is a silent no-op).
+kb rows are **tenant-shared**. Any `tenant_admin` in a tenant may
+overwrite or delete **any** other principal's slug in that tenant —
+this is **wiki-like and intended**, not a bug. There is no `403`/`409`
+on a same-slug cross-principal write by a `tenant_admin`, and `DELETE`
+is not principal-scoped (it removes whatever row matches the natural
+key). This is deliberately different from `memory` DELETE, which
+**is** principal-scoped (a cross-principal memory delete is a silent
+no-op).
+
+An `operator` writes only through the MCP `add_to_knowledge` tool
+(REST `POST /api/v1/kb` needs `tenant_admin`). The tool calls
+`create_entry(..., own_entries_only=True)` for every caller below
+`tenant_admin`, and then the service:
+
+- refuses to overwrite an entry whose `created_by_sub` is missing or
+  is another principal (`KbEntryNotOwnedError`; the tool answers with
+  a permission refusal, `reason: entry_not_owned`, and nothing is
+  written). A row with no `created_by_sub` (directory ingest, or a row
+  from before attribution) belongs to nobody, so an operator cannot
+  change it either;
+- refuses caller `metadata` with a key from `CURATION_METADATA_KEYS`
+  (`source_kind`, the key the curated-slice search filter scopes to;
+  `KbReservedMetadataError`, `reason: reserved_metadata`). So an
+  operator's entry cannot look curated.
+
+An operator can still create new entries and change its own. A
+`tenant_admin` keeps the wiki-like rule on both surfaces.
 
 To make a row self-describing about authorship without an audit-log
 join, every kb write stamps two keys into `documents.doc_metadata`

@@ -72,7 +72,12 @@ from __future__ import annotations
 from typing import Any, Final
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.kb.schemas import InvalidKbSlugError, KbEntrySearchHit
+from meho_backplane.kb.schemas import (
+    InvalidKbSlugError,
+    KbEntryNotOwnedError,
+    KbEntrySearchHit,
+    KbReservedMetadataError,
+)
 from meho_backplane.kb.service import KbService
 from meho_backplane.mcp.registry import (
     READ_ONLY,
@@ -81,7 +86,7 @@ from meho_backplane.mcp.registry import (
     register_mcp_tool,
 )
 from meho_backplane.mcp.resources.kb import read_kb_entry
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import wrap_untrusted_text
@@ -248,6 +253,12 @@ async def _add_to_knowledge_handler(
     * Returning the full :class:`~meho_backplane.kb.schemas.KbEntry`
       payload (id, slug, body, metadata, timestamps) so the agent can
       verify the write landed without a follow-up ``resources/read``.
+    * Keeping an ``operator`` to its own entries. REST ``POST /api/v1/kb``
+      needs ``tenant_admin``; this tool is open to ``operator`` so an
+      agent can capture knowledge, but then the service refuses to
+      overwrite an entry another principal created, and refuses the
+      curation metadata key ``source_kind``. A ``tenant_admin`` keeps
+      the wiki-like behaviour: any slug, any metadata.
 
     The body-hash short-circuit in
     :func:`~meho_backplane.retrieval.indexer.index_document` means a
@@ -267,9 +278,20 @@ async def _add_to_knowledge_handler(
             body=body,
             metadata=metadata,
             actor_sub=operator.sub,
+            own_entries_only=operator.tenant_role is not TenantRole.TENANT_ADMIN,
         )
     except InvalidKbSlugError as exc:
         raise McpInvalidParamsError(f"add_to_knowledge: {exc}") from exc
+    except KbEntryNotOwnedError as exc:
+        raise McpPermissionDeniedError(
+            f"add_to_knowledge: {exc}. Use a new slug, or ask a tenant admin to change it.",
+            data={"reason": "entry_not_owned", "slug": exc.slug},
+        ) from exc
+    except KbReservedMetadataError as exc:
+        raise McpPermissionDeniedError(
+            f"add_to_knowledge: {exc}. Remove the key, or ask a tenant admin to set it.",
+            data={"reason": "reserved_metadata", "keys": sorted(exc.keys)},
+        ) from exc
 
     return entry.model_dump(mode="json")
 
@@ -410,6 +432,9 @@ register_mcp_tool(
             "body-hash short-circuit). "
             "Do NOT use this for ephemeral session notes — those belong "
             "in `add_to_memory`. The kb is durable team knowledge. "
+            "You can change only entries you created; an entry another "
+            "principal created is refused (`reason: entry_not_owned`) "
+            "unless you are a tenant admin, who can change any entry. "
             "Surface-name note: every non-MCP MEHO surface calls this "
             "substrate `kb`, not `knowledge` — REST is `/api/v1/kb` "
             "(`GET`/`POST /api/v1/kb`, `GET`/`DELETE /api/v1/kb/{slug}`), "
@@ -445,8 +470,8 @@ register_mcp_tool(
                         "Optional JSON-shaped metadata. Null or omitted "
                         "preserves any existing row's metadata on "
                         "re-index; pass an empty object {} to clear. "
-                        "Free-form keys; the retrieval surface does not "
-                        "filter on metadata in v0.2."
+                        "Free-form keys, except `source_kind`: it marks "
+                        "curated content and only a tenant admin may set it."
                     ),
                     "additionalProperties": True,
                 },

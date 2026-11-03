@@ -109,15 +109,19 @@ from meho_backplane.kb.revisions import (
     write_entry,
 )
 from meho_backplane.kb.schemas import (
+    CURATION_METADATA_KEYS,
     KB_PASSAGE_SOURCE,
     KB_SOURCE,
+    META_CREATED_BY_SUB,
     META_KB_PASSAGE,
     KbEntry,
+    KbEntryNotOwnedError,
     KbEntryRevision,
     KbEntrySearchHit,
     KbIngestionResult,
     KbPassageEvidence,
     KbPassageLocator,
+    KbReservedMetadataError,
     validate_slug,
 )
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RetrievalHit, retrieve
@@ -290,6 +294,7 @@ class KbService:
         metadata: dict[str, object] | None = None,
         *,
         actor_sub: str | None = None,
+        own_entries_only: bool = False,
     ) -> tuple[KbEntry, bool]:
         """Insert (or re-index) one kb entry; return ``(entry, created)``.
 
@@ -312,9 +317,18 @@ class KbService:
         block with ``source_kind="direct"`` and no relative path,
         replacing any ``provenance`` key the caller sent.
 
-        Cross-principal writes are wiki-like (any ``tenant_admin`` may
-        overwrite any other principal's slug in-tenant -- intended, no
-        ownership gate); this method only adds attribution via
+        Cross-principal writes are wiki-like for a ``tenant_admin`` (any
+        ``tenant_admin`` may overwrite any other principal's slug
+        in-tenant -- intended). The caller says who it writes for with
+        *own_entries_only*: when ``True`` (the MCP ``add_to_knowledge``
+        tool for an ``operator``), an existing row whose
+        ``created_by_sub`` is missing or differs from *actor_sub* raises
+        :class:`~meho_backplane.kb.schemas.KbEntryNotOwnedError` before
+        anything is written, and caller *metadata* with a key from
+        :data:`~meho_backplane.kb.schemas.CURATION_METADATA_KEYS` raises
+        :class:`~meho_backplane.kb.schemas.KbReservedMetadataError`. So
+        an operator can create entries and change only its own, and
+        cannot make an entry look curated. Attribution comes from
         :func:`~meho_backplane.kb.attribution.merge_attribution`:
         ``created_by_sub`` set once and preserved across overwrites,
         ``last_updated_by_sub`` rewritten each write, both in
@@ -329,6 +343,8 @@ class KbService:
         (raises :class:`~meho_backplane.kb.schemas.InvalidKbSlugError`).
         """
         validate_slug(slug)
+        if own_entries_only:
+            _refuse_reserved_metadata(metadata)
 
         # One natural-key SELECT, ahead of the substrate upsert. It
         # serves two purposes: (1) the created-vs-overwrite signal for
@@ -340,6 +356,8 @@ class KbService:
         # metadata), not worth the wider blast radius here.
         existing = await self.get_entry(tenant_id=tenant_id, slug=slug)
         created = existing is None
+        if own_entries_only and existing is not None:
+            _refuse_if_not_own(existing, actor_sub)
 
         merged = merge_attribution(
             caller_metadata=metadata,
@@ -461,6 +479,26 @@ class KbService:
             metadata_filters=metadata_filters,
         )
         return _group_by_entry(ranked, limit)
+
+
+def _refuse_reserved_metadata(metadata: dict[str, object] | None) -> None:
+    """Raise :class:`KbReservedMetadataError` when *metadata* carries a curation key."""
+    if metadata is None:
+        return
+    reserved = CURATION_METADATA_KEYS.intersection(metadata)
+    if reserved:
+        raise KbReservedMetadataError(frozenset(reserved))
+
+
+def _refuse_if_not_own(existing: KbEntry, actor_sub: str | None) -> None:
+    """Raise :class:`KbEntryNotOwnedError` unless *actor_sub* created *existing*.
+
+    A row with no ``created_by_sub`` (a curated or legacy row) belongs
+    to nobody, so a caller limited to own entries may not change it.
+    """
+    creator = existing.metadata.get(META_CREATED_BY_SUB)
+    if not isinstance(creator, str) or creator != actor_sub:
+        raise KbEntryNotOwnedError(existing.slug, creator if isinstance(creator, str) else None)
 
 
 def _group_by_entry(ranked: list[RetrievalHit], limit: int) -> list[KbEntrySearchHit]:

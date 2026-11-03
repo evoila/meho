@@ -48,7 +48,7 @@ from meho_backplane.broadcast.events import BroadcastEvent
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentAnnouncement
 from meho_backplane.settings import get_settings
-from meho_backplane.untrusted_text import wrap_untrusted_text
+from meho_backplane.untrusted_text import wrap_untrusted_strings, wrap_untrusted_text
 
 __all__ = [
     "DEFAULT_WINDOW_MINUTES",
@@ -392,8 +392,15 @@ def dump_event_wire(
     (:data:`_ANNOUNCEMENT_UNTRUSTED_FIELDS`) is wrapped via
     :func:`~meho_backplane.untrusted_text.wrap_untrusted_text` so a
     reading agent sees the text delimited as untrusted data rather
-    than as bare context it might absorb as instructions. Audit-driven
-    :class:`BroadcastEvent` dumps pass through unchanged.
+    than as bare context it might absorb as instructions. On an
+    audit-driven :class:`BroadcastEvent`, the caller-typed parts get
+    the same envelope: every string inside ``payload.params`` (the
+    request parameters of the operation, for example the body of an
+    ``add_to_memory`` call) via
+    :func:`~meho_backplane.untrusted_text.wrap_untrusted_strings`, and
+    ``work_ref`` (a ticket reference the caller sent in a header).
+    Server-derived fields (``op_id``, ``op_class``, ``result_status``,
+    ``principal_sub``, ...) pass through unchanged.
 
     Every surface that re-serves events **to a model** goes through
     this helper — ``meho_broadcast_recent`` and ``meho_broadcast_watch``
@@ -422,6 +429,12 @@ def dump_event_wire(
                 data[field] = [
                     wrap_untrusted_text(item) if isinstance(item, str) else item for item in value
                 ]
+        return data
+    payload = data.get("payload")
+    if isinstance(payload, dict) and "params" in payload:
+        payload["params"] = wrap_untrusted_strings(payload["params"])
+    if isinstance(data.get("work_ref"), str):
+        data["work_ref"] = wrap_untrusted_text(data["work_ref"])
     return data
 
 

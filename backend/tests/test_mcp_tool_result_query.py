@@ -29,6 +29,7 @@ import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.settings import get_settings
+from meho_backplane.untrusted_text import DATA_NOTICE
 from tests._result_store_helpers import MemoryResultStore
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -114,6 +115,8 @@ def test_result_query_returns_window_beyond_inline_sample(
     assert payload["returned_rows"] == 50
     assert payload["truncated"] is False
     assert [r["i"] for r in payload["rows"]] == list(range(5, 55))
+    # Every page says that the text in its rows is data, never an instruction.
+    assert payload["data_notice"] == DATA_NOTICE
 
     # The tail (rows 55..59) is reachable too — the full set, not just a sample.
     tail = _call(client, {"handle_id": str(handle), "offset": 55, "limit": 50})

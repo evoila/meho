@@ -803,6 +803,112 @@ async def test_create_entry_overwrite_preserves_creator_updates_mutator(
 
 
 @pytest.mark.asyncio
+async def test_create_entry_own_entries_only_refuses_another_principals_slug(
+    stub_embedding: AsyncMock,
+) -> None:
+    """With ``own_entries_only``, a slug another principal created is refused unchanged."""
+    from meho_backplane.kb.schemas import KbEntryNotOwnedError
+
+    tenant_id = uuid.uuid4()
+    service = KbService()
+    await service.create_entry(
+        tenant_id=tenant_id, slug="shared", body="A body", actor_sub="user-a"
+    )
+
+    with pytest.raises(KbEntryNotOwnedError) as info:
+        await service.create_entry(
+            tenant_id=tenant_id,
+            slug="shared",
+            body="B body",
+            actor_sub="user-b",
+            own_entries_only=True,
+        )
+    assert info.value.slug == "shared"
+    assert info.value.created_by_sub == "user-a"
+    kept = await service.get_entry(tenant_id, "shared")
+    assert kept is not None
+    assert kept.body == "A body"
+    assert kept.metadata["last_updated_by_sub"] == "user-a"
+
+
+@pytest.mark.asyncio
+async def test_create_entry_own_entries_only_refuses_an_unattributed_slug(
+    stub_embedding: AsyncMock,
+) -> None:
+    """An entry with no ``created_by_sub`` (a curated or legacy row) is not the caller's."""
+    from meho_backplane.kb.schemas import KbEntryNotOwnedError
+
+    tenant_id = uuid.uuid4()
+    service = KbService()
+    await service.create_entry(tenant_id=tenant_id, slug="curated", body="curated body")
+
+    with pytest.raises(KbEntryNotOwnedError) as info:
+        await service.create_entry(
+            tenant_id=tenant_id,
+            slug="curated",
+            body="changed",
+            actor_sub="user-b",
+            own_entries_only=True,
+        )
+    assert info.value.created_by_sub is None
+    kept = await service.get_entry(tenant_id, "curated")
+    assert kept is not None
+    assert kept.body == "curated body"
+
+
+@pytest.mark.asyncio
+async def test_create_entry_own_entries_only_allows_create_and_own_overwrite(
+    stub_embedding: AsyncMock,
+) -> None:
+    """The limited caller can create a new slug and change its own entry."""
+    tenant_id = uuid.uuid4()
+    service = KbService()
+    first, created = await service.create_entry(
+        tenant_id=tenant_id, slug="mine", body="v1", actor_sub="user-a", own_entries_only=True
+    )
+    assert created is True
+    second, created_again = await service.create_entry(
+        tenant_id=tenant_id, slug="mine", body="v2", actor_sub="user-a", own_entries_only=True
+    )
+    assert created_again is False
+    assert second.id == first.id
+    assert second.body == "v2"
+
+
+@pytest.mark.asyncio
+async def test_create_entry_own_entries_only_refuses_curation_metadata_keys(
+    stub_embedding: AsyncMock,
+) -> None:
+    """``source_kind`` in caller metadata is refused for the limited caller, before any write."""
+    from meho_backplane.kb.schemas import CURATION_METADATA_KEYS, KbReservedMetadataError
+
+    assert "source_kind" in CURATION_METADATA_KEYS
+    tenant_id = uuid.uuid4()
+    service = KbService()
+    with pytest.raises(KbReservedMetadataError) as info:
+        await service.create_entry(
+            tenant_id=tenant_id,
+            slug="looks-curated",
+            body="body",
+            metadata={"source_kind": "evoila-distilled", "author": "me"},
+            actor_sub="user-a",
+            own_entries_only=True,
+        )
+    assert info.value.keys == frozenset({"source_kind"})
+    assert await service.get_entry(tenant_id, "looks-curated") is None
+
+    # The unlimited caller (a tenant admin) may set the key.
+    entry, _ = await service.create_entry(
+        tenant_id=tenant_id,
+        slug="looks-curated",
+        body="body",
+        metadata={"source_kind": "evoila-distilled"},
+        actor_sub="admin",
+    )
+    assert entry.metadata["source_kind"] == "evoila-distilled"
+
+
+@pytest.mark.asyncio
 async def test_create_entry_strips_caller_forged_attribution(stub_embedding: AsyncMock) -> None:
     """Caller-supplied attribution keys are ignored; the OIDC sub wins (#1845).
 

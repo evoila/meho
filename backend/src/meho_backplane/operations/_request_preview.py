@@ -77,6 +77,7 @@ from meho_backplane.operations._catalog_guard import (
     choose_catalog_for_target,
 )
 from meho_backplane.operations._errors import (
+    result_license_read_off,
     result_target_required,
     result_unqualified_target_version,
 )
@@ -94,6 +95,7 @@ from meho_backplane.operations._validate import (
     policy_gate,
     validate_params,
 )
+from meho_backplane.operations.license_reads import is_license_read
 from meho_backplane.redaction import apply_connector_boundary_redaction
 
 __all__ = ["compute_preview_hash", "preview_dispatch"]
@@ -234,6 +236,20 @@ def _is_previewable(descriptor: EndpointDescriptor) -> bool:
     return descriptor.requires_approval and classify_op(descriptor.op_id) not in _SENSITIVE_CLASSES
 
 
+def _refused_envelope(
+    result: Any, *, op_id: str, connector_id: str, source_kind: str
+) -> dict[str, Any]:
+    """The preview envelope of a dispatch error result that stops before the policy gate."""
+    return {
+        "status": "error",
+        "op_id": op_id,
+        "connector_id": connector_id,
+        "source_kind": source_kind,
+        "error": result.error,
+        "extras": dict(result.extras),
+    }
+
+
 async def _resolve_descriptor(
     *,
     operator: Operator,
@@ -291,19 +307,22 @@ async def _resolve_descriptor(
     # Imported lazily: the dispatcher imports this module at load time.
     from meho_backplane.operations.dispatcher import descriptor_requires_target
 
+    if descriptor.source_kind == "ingested" and is_license_read(descriptor.method, descriptor.path):
+        # Same answer and order as ``dispatch``: an ingested read of
+        # licence keys never runs, so its preview says so first.
+        held = result_license_read_off(op_id, 0.0)
+        return _refused_envelope(
+            held, op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
+        )
+
     if target is None and descriptor_requires_target(descriptor):
         # #4139: same answer and same order as ``dispatch`` -- before the
         # catalog choice, so a guarded catalog never answers
         # ``unqualified_target_version`` for a missing target.
         missing = result_target_required(op_id, 0.0)
-        return {
-            "status": "error",
-            "op_id": op_id,
-            "connector_id": connector_id,
-            "source_kind": descriptor.source_kind,
-            "error": missing.error,
-            "extras": dict(missing.extras),
-        }
+        return _refused_envelope(
+            missing, op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
+        )
 
     # --- Catalog choice (mirrors dispatch Step 3, no audit row) ------------
     choice = await choose_catalog_for_target(
@@ -320,14 +339,9 @@ async def _resolve_descriptor(
             target_version=choice.target_version,
             duration_ms=0.0,
         )
-        return {
-            "status": "error",
-            "op_id": op_id,
-            "connector_id": connector_id,
-            "source_kind": descriptor.source_kind,
-            "error": refused.error,
-            "extras": dict(refused.extras),
-        }
+        return _refused_envelope(
+            refused, op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
+        )
     return choice.descriptor, choice.connector_id
 
 

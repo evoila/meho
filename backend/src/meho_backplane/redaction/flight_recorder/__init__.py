@@ -42,6 +42,7 @@ from meho_backplane.redaction.flight_recorder.bodies import (
 from meho_backplane.redaction.flight_recorder.families import (
     SECRET_FAMILY_PATTERNS,
     SECRET_FAMILY_TAGS,
+    SECRET_FAMILY_WORDS,
     BodyExclusion,
     classify_body_exclusion,
 )
@@ -70,6 +71,7 @@ __all__ = [
     "SECRET_FAMILY_OMITTED_MARKER",
     "SECRET_FAMILY_PATTERNS",
     "SECRET_FAMILY_TAGS",
+    "SECRET_FAMILY_WORDS",
     "UNPLACEABLE_FAMILY_MARKER",
     "BodyExclusion",
     "BodyPathRedactionConfig",

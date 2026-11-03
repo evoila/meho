@@ -191,7 +191,7 @@ def destructive_action_name_in_op_id(op_id: str) -> str | None:
 
     An ingested op id is ``METHOD:/path``; see
     :func:`destructive_action_name_in_path` for the path rule. Dotted typed
-    op ids (``vmware.composite.vm.destroy``) have no path and return
+    op ids (``k8s.secret.delete``) have no path and return
     ``None``; they keep their own name patterns.
     """
     _method, separator, path = op_id.partition(":")

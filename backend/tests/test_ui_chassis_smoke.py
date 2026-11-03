@@ -51,9 +51,10 @@ from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 
-from meho_backplane import __version__
+from meho_backplane import __version__, connector_packages
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connector_packages import ConnectorPackage
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.settings import get_settings
@@ -526,6 +527,45 @@ def test_dashboard_authenticated_renders_console_html() -> None:
     # CSRF cookie set on the response so subsequent state-changing
     # requests can echo it back.
     assert CSRF_COOKIE_NAME in response.cookies
+
+
+def _render_dashboard() -> str:
+    session_id, jwks = _seed_role_session("operator")
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router, jwks=jwks)
+        client = TestClient(_build_app(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        response = client.get("/ui/")
+    assert response.status_code == 200
+    return response.text
+
+
+def test_dashboard_lists_installed_connector_packages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The deploy card lists the connector packages next to the version (#5036)."""
+    package = ConnectorPackage(
+        name="example-connectors",
+        version="1.2.0",
+        wheel_digest="sha256:" + "c" * 64,
+        folders=["example_widget"],
+    )
+    monkeypatch.setattr(connector_packages, "_installed", (package,))
+
+    body = _render_dashboard()
+
+    assert "Connector packages" in body
+    assert "example-connectors 1.2.0" in body
+    assert "sha256:" + "c" * 64 in body
+
+
+def test_dashboard_shows_no_connector_packages_for_the_plain_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(connector_packages, "_installed", ())
+
+    body = _render_dashboard()
+
+    section = body.split('data-testid="connector-packages"', 1)[1].split("</div>", 1)[0]
+    assert "none" in section
 
 
 def test_dashboard_tray_shows_notice_for_read_only_role() -> None:

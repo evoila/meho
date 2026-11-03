@@ -6,14 +6,17 @@
 // provisioning. The first verb (G0.9.1-T11 / #791) is
 // `bootstrap-clients`, which idempotently provisions:
 //
-//  1. The public `meho-cli` device-code client + 6 protocol mappers
+//  1. The public `meho-cli` device-code client + 8 protocol mappers
 //     + 4 default client scopes (`basic`, `roles`, `web-origins`,
 //     `acr`).
 //  2. The public `meho-mcp` authorization-code+PKCE client +
-//     the same 6 mappers + 4 default scopes.
+//     the same 8 mappers + 4 default scopes.
 //  3. The five MEHO role groups. Their attributes give each person
 //     their tenant and role (docs/decisions/login-role-groups.md).
-//  4. An admin user in `MEHO-Admins` with a password.
+//     Also `MEHO-Platform-Admins`, and on request the five groups of
+//     one more tenant (`--add-tenant`).
+//  4. An admin user in `MEHO-Admins` and `MEHO-Platform-Admins` with a
+//     password.
 //
 // The verb encodes the 5-step recipe documented in
 // deploy/values-examples/README.md § Auth onramp recipe. It does NOT
@@ -42,12 +45,11 @@ import (
 )
 
 // defaultCLIOfflineSessionIdleSeconds is the offline-session idle
-// timeout (48h) applied to the CLI device-code client when an operator
-// passes a bare `--cli-offline-access`. 48h means daily use never
-// re-prompts while a weekend gap costs at most one Monday device dance
-// — far tighter than the weeks-long gcloud / kubectl offline-token
-// norm, directly answering the RDC Wall W7 blast-radius concern
-// (#2902).
+// timeout (48h) set on the CLI device-code client by default, so a
+// `meho login` renews itself. Daily use never asks for a new login; a
+// weekend without use costs one new login on Monday.
+// `--cli-offline-access=0` turns the long CLI login off and removes it
+// from a client an earlier run set up.
 const defaultCLIOfflineSessionIdleSeconds = 172800
 
 // NewRootCmd returns the `meho admin keycloak` parent command, ready
@@ -60,9 +62,9 @@ func NewRootCmd() *cobra.Command {
 			"talk to a Keycloak admin REST API directly. The first " +
 			"verb is `bootstrap-clients`, which idempotently " +
 			"provisions the public device-code client, the public " +
-			"MCP browser-flow client, their 6 protocol mappers, " +
+			"MCP browser-flow client, their 8 protocol mappers, " +
 			"their 4 default client scopes, the five MEHO role " +
-			"groups, and an admin user — the realm-side prerequisites " +
+			"groups, MEHO-Platform-Admins, and an admin user — the realm-side prerequisites " +
 			"for `meho login` and the MCP onramp.",
 		SilenceUsage: true,
 	}
@@ -90,10 +92,14 @@ func newBootstrapClientsCmd() *cobra.Command {
 		realm                 string
 		adminUsername         string
 		cliClientID           string
+		cliApproveClientID    string
 		mcpClientID           string
 		backplaneAudience     string
 		mcpResourceURI        string
 		tenantID              string
+		tenantName            string
+		addTenantName         string
+		addTenantID           string
 		adminUserUsername     string
 		adminUserEmail        string
 		skipUserProvisioning  bool
@@ -112,19 +118,31 @@ func newBootstrapClientsCmd() *cobra.Command {
 		Long: "bootstrap-clients provisions every realm resource " +
 			"`meho login` and the MCP browser-flow onramp need:\n\n" +
 			"  * the public device-code client (default name `meho-cli`)\n" +
+			"  * the public client of the fresh browser sign-in of `meho approvals approve` (default name `meho-cli-approve`): PKCE on a 127.0.0.1 loopback only, no device flow, no offline_access, no refresh token (its access token lasts 15 minutes), and its own login flow `meho approval sign-in` that always asks for the password (made if missing). Only its tokens can approve on the command line\n" +
 			"  * the public authorization-code+PKCE MCP client (default name `meho-mcp`)\n" +
-			"  * 6 protocol mappers on each client (audience-meho-backplane, meho-mcp-audience, groups-claim, and the User Attribute mappers tenant-id, tenant-role, approver)\n" +
+			"  * 8 protocol mappers on the CLI and MCP clients (audience-meho-backplane, meho-mcp-audience, groups-claim, and the User Attribute mappers tenant-id, tenant-role, approver, platform-admin and meho-tenants); the approval client gets the same without meho-mcp-audience\n" +
 			"  * 4 default client scopes on each client (basic, roles, web-origins, acr) — including the load-bearing `basic` scope that carries the `sub` claim in Keycloak 25+\n" +
 			"  * the `mcp:read`, `mcp:execute` and `mcp:admin` client scopes, plus `offline_access`, as optional scopes on the MCP client — MEHO's MCP clients ask for them at login, and Keycloak refuses a login that asks for a scope the client does not offer\n" +
-			"  * the five MEHO role groups, each with a `tenant_id` and a `tenant_role` attribute:\n" +
+			"  * `offline_access` as an optional scope on the CLI client, with a 48-hour idle limit, so `meho login` gets a login that renews itself (`--cli-offline-access=0` turns it off, also on an existing client)\n" +
+			"  * the five MEHO role groups, each with a `tenant_id`, a `tenant_role` and a `meho_tenant` attribute:\n" +
 			"      MEHO-Readers (read_only), MEHO-Operators (operator), MEHO-SA-Operators (operator),\n" +
 			"      MEHO-Admins (tenant_admin), MEHO-Approvers (read_only, plus approver=true)\n" +
-			"  * an admin user in MEHO-Admins with a password\n\n" +
+			"  * the group MEHO-Platform-Admins (platform_admin=true): rights across all tenants\n" +
+			"  * an admin user in MEHO-Admins and MEHO-Platform-Admins with a password\n\n" +
 			"A person gets their tenant and role from their group. Put each " +
 			"person in exactly one of the five groups. A person in no group " +
 			"gets no tenant, and MEHO refuses the login (401 " +
 			"missing_tenant_claim). `--tenant-id` sets the `tenant_id` " +
 			"attribute on all five groups.\n\n" +
+			"More tenants: `--add-tenant <name>` makes the five groups " +
+			"MEHO-<name>-Readers, -Operators, -SA-Operators, -Admins and " +
+			"-Approvers. They carry only `meho_tenant` " +
+			"(`<tenant-uuid>:<name>:<Role>`). Give the tenant's UUID with " +
+			"`--add-tenant-id`; without it the command reuses the UUID the " +
+			"groups already carry, or makes a new one and prints it. A person " +
+			"may be in one role group per tenant. The `meho-tenants` mapper " +
+			"lists all of a person's tenants in the `meho_tenants` claim. Never " +
+			"set `meho_tenant` on a person.\n\n" +
 			"Idempotent: re-runs detect existing resources, " +
 			"reconcile drift via PUT, and never duplicate. " +
 			"Confidential clients (e.g. `meho-backplane`) are " +
@@ -179,10 +197,14 @@ func newBootstrapClientsCmd() *cobra.Command {
 				AdminUsername:                adminUsername,
 				AdminPassword:                adminPassword,
 				CLIClientID:                  cliClientID,
+				CLIApproveClientID:           cliApproveClientID,
 				MCPClientID:                  mcpClientID,
 				BackplaneAudience:            backplaneAudience,
 				MCPResourceURI:               mcpResourceURI,
 				TenantID:                     tenantID,
+				TenantName:                   tenantName,
+				AddTenantName:                addTenantName,
+				AddTenantID:                  addTenantID,
 				AdminUserUsername:            adminUserUsername,
 				AdminUserEmail:               adminUserEmail,
 				AdminUserPassword:            adminUserPassword,
@@ -254,6 +276,8 @@ func newBootstrapClientsCmd() *cobra.Command {
 		"master-realm admin username (or set KEYCLOAK_ADMIN_USER)")
 	cmd.Flags().StringVar(&cliClientID, "cli-client-id", "meho-cli",
 		"public client_id for the device-code flow (matches chart's `config.keycloakCliClientId`)")
+	cmd.Flags().StringVar(&cliApproveClientID, "cli-approve-client-id", "meho-cli-approve",
+		"public client_id for the fresh browser sign-in of `meho approvals approve` (matches chart's `config.keycloakCliApproveClientId`)")
 	cmd.Flags().StringVar(&mcpClientID, "mcp-client-id", "meho-mcp",
 		"public client_id for the MCP browser-flow client")
 	cmd.Flags().StringVar(&backplaneAudience, "backplane-audience", "meho-backplane",
@@ -263,8 +287,17 @@ func newBootstrapClientsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&tenantID, "tenant-id", "",
 		"tenant UUID written as the `tenant_id` attribute on the five MEHO role groups "+
 			"(default: the all-zero UUID). Changing it later moves everyone to a new tenant")
+	cmd.Flags().StringVar(&tenantName, "tenant-name", defaultTenantName,
+		"the first tenant's short name (lowercase letters, digits, dashes), written into "+
+			"the `meho_tenant` attribute of the five MEHO role groups")
+	cmd.Flags().StringVar(&addTenantName, "add-tenant", "",
+		"also make the five groups `MEHO-<name>-<Role>` of one more tenant with this short name")
+	cmd.Flags().StringVar(&addTenantID, "add-tenant-id", "",
+		"the UUID of the `--add-tenant` tenant (default: the UUID its groups already carry, "+
+			"else a new one, printed at the end)")
 	cmd.Flags().StringVar(&adminUserUsername, "admin-user-username", "",
-		"username of the admin user to provision in MEHO-Admins (required unless --skip-user-provisioning)")
+		"username of the admin user to provision in MEHO-Admins and MEHO-Platform-Admins "+
+			"(required unless --skip-user-provisioning)")
 	cmd.Flags().StringVar(&adminUserEmail, "admin-user-email", "",
 		"optional email for the new admin user")
 	cmd.Flags().BoolVar(&skipUserProvisioning, "skip-user-provisioning", false,
@@ -284,28 +317,30 @@ func newBootstrapClientsCmd() *cobra.Command {
 			"connection; prints a loud warning). Prefer --keycloak-ca-bundle")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"print what would be provisioned without making any API calls")
-	cmd.Flags().IntVar(&cliOfflineSessionIdle, "cli-offline-access", 0,
-		"opt the device-code CLI client into the long-lived offline-token "+
-			"path (#2902): assign `offline_access` as an optional client "+
-			"scope and bound its per-client offline-session idle timeout to "+
-			"the given number of seconds. Off by default. A bare "+
-			"`--cli-offline-access` uses "+strconv.Itoa(defaultCLIOfflineSessionIdleSeconds)+
-			" seconds (48h); to pass a custom value use the equals form, "+
-			"e.g. `--cli-offline-access=86400`. Pairs with `meho login "+
-			"--offline`. Security: this enables a long-lived refresh token "+
-			"on the operator's disk — keep the bound tight and prefer the "+
-			"OS keyring for storage")
+	cmd.Flags().IntVar(&cliOfflineSessionIdle, "cli-offline-access",
+		defaultCLIOfflineSessionIdleSeconds,
+		"how many seconds an unused CLI login stays valid: assigns "+
+			"`offline_access` as an optional client scope on the device-code "+
+			"CLI client and sets its `client.offline.session.idle.timeout` "+
+			"attribute, so `meho login` gets a login that renews itself. "+
+			"Default "+strconv.Itoa(defaultCLIOfflineSessionIdleSeconds)+
+			" seconds (48h). Use the equals form for another value, e.g. "+
+			"`--cli-offline-access=86400`. `--cli-offline-access=0` turns "+
+			"the long CLI login off and removes it from a client an earlier "+
+			"run set up. The refresh token is a long-lived "+
+			"secret on the operator's disk (OS keyring first)")
 	cmd.Flags().IntVar(&mcpOfflineSessionIdle, "mcp-offline-session-idle",
 		defaultMCPOfflineSessionIdleSeconds,
 		"how many seconds an unused MCP login stays valid: sets the "+
 			"`client.offline.session.idle.timeout` attribute on the MCP "+
 			"browser-flow client. Default 48h. Without it the realm's "+
 			"Offline Session Idle applies (30 days by default)")
-	// Optional-value flag: a bare `--cli-offline-access` yields the 48h
-	// default; a custom value MUST use the equals form
-	// (`--cli-offline-access=SECONDS`). pflag's NoOptDefVal treats a
-	// space-separated value as a positional arg, which the cobra.NoArgs
-	// guard above then rejects rather than silently dropping.
+	// Optional-value flag: a bare `--cli-offline-access` also yields the
+	// 48h default, so older scripts keep working; a custom value MUST
+	// use the equals form (`--cli-offline-access=SECONDS`). pflag's
+	// NoOptDefVal treats a space-separated value as a positional arg,
+	// which the cobra.NoArgs guard above then rejects rather than
+	// silently dropping.
 	cmd.Flags().Lookup("cli-offline-access").NoOptDefVal =
 		strconv.Itoa(defaultCLIOfflineSessionIdleSeconds)
 
@@ -406,15 +441,23 @@ func printSummary(out io.Writer, opts BootstrapOptions, res *Result) {
 	if !opts.SkipUserProvisioning {
 		switch {
 		case res.AdminUserCreated:
-			fmt.Fprintf(out, "    [created] user %s (joined %s)\n",
-				opts.AdminUserUsername, adminGroupName)
+			fmt.Fprintf(out, "    [created] user %s (joined %s and %s)\n",
+				opts.AdminUserUsername, adminGroupName, platformAdminGroupName)
 		case res.AdminUserJoined:
-			fmt.Fprintf(out, "    [updated] user %s (joined %s; password not reset)\n",
-				opts.AdminUserUsername, adminGroupName)
+			fmt.Fprintf(out, "    [updated] user %s (joined %s and %s; password not reset)\n",
+				opts.AdminUserUsername, adminGroupName, platformAdminGroupName)
 		default:
 			fmt.Fprintf(out, "    [skip]    user %s (already exists; password not reset)\n",
 				opts.AdminUserUsername)
 		}
+	}
+	if opts.AddTenantName != "" && res.AddedTenantID != "" {
+		note := ""
+		if res.AddedTenantIDNew {
+			note = " (new; keep it)"
+		}
+		fmt.Fprintf(out, "\n==> tenant %s: id %s%s\n",
+			opts.AddTenantName, res.AddedTenantID, note)
 	}
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "==> set these on the chart side to match the realm:")

@@ -31,7 +31,7 @@ Route-ordering contract (first-match-wins)
 ``connector_id`` (``<impl_id>-<version>``) and ``group_key`` (snake_case,
 max 64) are slash-free, so they use plain string path params -- NOT the
 ``:path`` converter. ``op_id`` is the natural key ``f"{method}:{path}"``
-(e.g. ``GET:/api/vcenter/cluster``) which CONTAINS slashes, so the per-op
+(e.g. ``GET:/repos/{owner}/{repo}/issues``) which CONTAINS slashes, so the per-op
 PATCH route uses ``{op_id:path}`` -- the only param here that needs it --
 so the key round-trips intact without URL-encoding breakage.
 
@@ -132,6 +132,8 @@ async def _edit_handler(
     # field, so "omitted" must stay "no edit" (``None``).
     requires_approval: str | None = Form(default=None),
     is_enabled: str | None = Form(default=None),
+    # #4711: the reason a platform admin gives for turning approval off.
+    reason: str | None = Form(default=None, max_length=1024),
     session_ctx: UISessionContext = _require_session_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
@@ -155,6 +157,7 @@ async def _edit_handler(
         is_enabled=_parse_flag(is_enabled, submitted="is_enabled" in form, field="is_enabled"),
         session_ctx=session_ctx,
         operator=operator,
+        reason=reason,
     )
 
 

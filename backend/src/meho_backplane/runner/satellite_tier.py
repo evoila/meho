@@ -19,13 +19,17 @@ single layer cannot alone punch a write through).
 This module lives beside :mod:`meho_backplane.runner.wire` — the other
 central+edge shared contract — precisely because the edge (runner) is
 **DB-free**: the classifier and the gate seam import only the standard
-library, so importing them on the runner never pulls the central DB stack.
+library and :mod:`meho_backplane.op_classes` (which imports nothing from
+MEHO), so importing them on the runner never pulls the central DB stack.
 
 The ladder (``safety_level`` → tier), composing with the destructive tier
 (#3196/#3183):
 
 * ``safe`` → :attr:`SatelliteMintTier.SAFE` — mints on ``AUTO_EXECUTE``, the
-  Stage-0 read path, semantics **unchanged**.
+  Stage-0 read path, semantics **unchanged**. One exception: a ``safe`` op its
+  connector marks as a safe write (:func:`meho_backplane.op_classes.is_safe_write`,
+  for example a GitHub ticket write that needs no approval) is a write, not a
+  read, so it is :attr:`SatelliteMintTier.EXCLUDED`.
 * ``caution`` → :attr:`SatelliteMintTier.REMOTE_WRITE` — the additive,
   separately-gated write tier. Mints **only** through the composed gate
   (:func:`evaluate_remote_write_gate`); until the sibling tasks (#3189-#3193)
@@ -49,6 +53,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from fnmatch import fnmatchcase
+
+# ``op_classes`` imports nothing from MEHO, so the edge stays DB-free.
+from meho_backplane.op_classes import is_safe_write
 
 __all__ = [
     "REMOTE_WRITE_SAFETY_LEVELS",
@@ -97,15 +104,21 @@ class SatelliteMintTier(StrEnum):
     EXCLUDED = "excluded"
 
 
-def classify_satellite_tier(safety_level: str) -> SatelliteMintTier:
+def classify_satellite_tier(safety_level: str, *, op_id: str) -> SatelliteMintTier:
     """Map a descriptor ``safety_level`` onto its :class:`SatelliteMintTier`.
 
     Fail-closed on the default: any level other than ``safe`` / ``caution``
     (i.e. ``dangerous``, ``destructive``, or an unrecognised value) is
     :attr:`SatelliteMintTier.EXCLUDED`, so a level added upstream is refused
     from riding a runner until this ladder is deliberately updated.
+
+    ``op_id`` is required so no caller forgets it: a ``safe`` op that its
+    connector marks as a safe write is :attr:`SatelliteMintTier.EXCLUDED`, never
+    the read path.
     """
     if safety_level == "safe":
+        if is_safe_write(op_id):
+            return SatelliteMintTier.EXCLUDED
         return SatelliteMintTier.SAFE
     if safety_level == "caution":
         return SatelliteMintTier.REMOTE_WRITE
@@ -166,7 +179,7 @@ def parse_runner_allowlist(raw: str) -> tuple[RemoteWriteAllowEntry, ...]:
     ``op_pattern@target_scope`` tokens (``@`` omitted ⇒ ``target_scope='*'``);
     blank tokens are skipped. Deliberately trivial + stdlib-only so it never
     pulls the central stack onto the edge. Example:
-    ``"vmware.vm.tag_set@*,vmware.vm.annotation_set"``.
+    ``"k8s.label@*,k8s.annotate"``.
     """
     entries: list[RemoteWriteAllowEntry] = []
     for token in raw.split(","):

@@ -212,6 +212,11 @@ class DecryptedSession:
     Fernet encrypt path).
 
     The cookie value the browser holds is ``str(self.id)``.
+
+    ``tenant_id`` is the session's current tenant (#5240).
+    ``tenant_chosen`` is ``False`` while a person with several tenants
+    has not picked one yet; ``can_switch_tenant`` tells the sidebar to
+    show the tenant switch.
     """
 
     id: uuid.UUID
@@ -222,6 +227,8 @@ class DecryptedSession:
     access_token: str
     refresh_token: str
     last_seen_at: datetime
+    tenant_chosen: bool = True
+    can_switch_tenant: bool = False
 
 
 @dataclass(frozen=True)
@@ -347,6 +354,8 @@ async def create_session(
     access_token: str,
     refresh_token: str,
     lifetime: timedelta,
+    tenant_chosen: bool = True,
+    can_switch_tenant: bool = False,
 ) -> DecryptedSession:
     """Insert a fresh ``web_session`` row and return its decrypted view.
 
@@ -384,13 +393,30 @@ async def create_session(
         the lifetime from the access-token's ``exp`` claim minus
         clock-skew margin so the session expires no later than the
         token it represents.
+    tenant_chosen
+        ``False`` when the person has several tenants and must pick one
+        first (#5240). The web interface then shows only the picker.
+    can_switch_tenant
+        ``True`` when the person has more than one tenant or is a
+        platform admin; the sidebar then shows the tenant switch.
 
     Returns
     -------
     DecryptedSession
         Plaintext view of the inserted row -- the caller uses
         ``str(result.id)`` as the ``meho_session`` cookie value.
+
+    The caller verified the access token through the JWT chain right
+    before this call, so creation also records the validation instant
+    for the read path's drift-gated revalidation
+    (:func:`~meho_backplane.ui.auth.revalidation.mark_session_validated`).
+    Without that record the first read of the new session would check
+    the token again.
     """
+    # Imported here: the revalidation module imports the refresh module,
+    # which imports this module.
+    from meho_backplane.ui.auth.revalidation import mark_session_validated
+
     now = datetime.now(UTC)
     expires_at = now + lifetime
     row = WebSession(
@@ -403,9 +429,12 @@ async def create_session(
         refresh_token=_encrypt(refresh_token),
         last_seen_at=now,
         revoked_at=None,
+        tenant_chosen=tenant_chosen,
+        can_switch_tenant=can_switch_tenant,
     )
     session.add(row)
     await session.flush()
+    mark_session_validated(row.id)
     return DecryptedSession(
         id=row.id,
         operator_sub=row.operator_sub,
@@ -415,6 +444,8 @@ async def create_session(
         access_token=access_token,
         refresh_token=refresh_token,
         last_seen_at=row.last_seen_at,
+        tenant_chosen=row.tenant_chosen,
+        can_switch_tenant=row.can_switch_tenant,
     )
 
 
@@ -487,6 +518,8 @@ async def load_session(
         access_token=access_plaintext,
         refresh_token=refresh_plaintext,
         last_seen_at=row.last_seen_at,
+        tenant_chosen=row.tenant_chosen,
+        can_switch_tenant=row.can_switch_tenant,
     )
 
 
@@ -541,6 +574,8 @@ async def load_session_for_update(
         access_token=_decrypt(row.access_token),
         refresh_token=_decrypt(row.refresh_token),
         last_seen_at=row.last_seen_at,
+        tenant_chosen=row.tenant_chosen,
+        can_switch_tenant=row.can_switch_tenant,
     )
 
 
@@ -891,6 +926,8 @@ async def _apply_rotation(
         access_token=new_access_token,
         refresh_token=new_refresh_token,
         last_seen_at=row.last_seen_at,
+        tenant_chosen=row.tenant_chosen,
+        can_switch_tenant=row.can_switch_tenant,
     )
 
 

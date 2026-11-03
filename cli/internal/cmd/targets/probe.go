@@ -22,7 +22,7 @@ import (
 //
 // CLI shape:
 //
-//	meho targets probe <name|alias> \
+//	meho targets probe <name, alias or id> \
 //	  [--json]                                 # machine-readable output
 //	  [--backplane <url>]                      # override the backplane URL
 //
@@ -48,7 +48,7 @@ func newProbeCmd() *cobra.Command {
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
-		Use:   "probe <name-or-alias>",
+		Use:   "probe <name, alias or id>",
 		Short: "Probe a target's connector and refresh its fingerprint",
 		Long: "probe calls POST /api/v1/targets/{name}/probe. The " +
 			"backend invokes the connector registered for the target's " +
@@ -89,7 +89,7 @@ func runProbe(cmd *cobra.Command, opts probeOptions) error {
 	if opts.Query == "" {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
-			output.Unexpected("probe requires a non-empty <name-or-alias> argument"),
+			output.Unexpected("probe requires a non-empty <name, alias or id> argument"),
 			opts.JSONOut,
 		)
 	}

@@ -115,28 +115,36 @@ Authoring tips:
 
 Some products publish a machine-readable spec, but only as **Swagger
 2.0** (a.k.a. OpenAPI 2.0 — the root key is `swagger: "2.0"` instead
-of `openapi: 3.x.y`). The ingest parser is OpenAPI-3.x-only **by
-decision** (#2090, reaffirming #1532): it does not convert 2.0
-in-process, because the maintained 2.0→3.0 converters are
-Node/web-service tools and a hand-rolled Python converter is a large
-correctness surface the operator review queue can't backstop.
-Handing ingest a native 2.0 document is rejected with a structured
-`UnsupportedSpecError` whose message names this exact on-ramp (the
-`_SWAGGER_2_CONVERSION_REMEDIATION` string in
-`backend/src/meho_backplane/operations/ingest/openapi.py`, shipped in
-#1542).
+of `openapi: 3.x.y`). The backplane imports OpenAPI 3.x only **by
+decision** (#2090, reaffirming #1532). The conversion runs in the CLI,
+on your machine (#5028).
 
-The supported path is **convert once out-of-band, then ingest the 3.x
-output** like any other spec:
+The supported path is **pass the file as `file://`** — the CLI converts
+it to OpenAPI 3.0, prints a short summary, and uploads only the
+converted file. Nothing is fetched and no outside converter is used:
 
 ```bash
-# Option A — swagger2openapi CLI (Node; the de-facto oas-kit converter)
-npx swagger2openapi swagger.json -o openapi3.yaml
+meho connector ingest \
+  --product acme --version 2.0 --impl acme-rest \
+  --spec file:///abs/path/swagger.json \
+  --save-converted /abs/path/openapi3.json \
+  --dry-run
+```
 
-# Option B — the hosted converter (no local Node toolchain)
-curl -sS https://converter.swagger.io/api/convert \
-  -H 'Content-Type: application/json' \
-  --data-binary @swagger.json -o openapi3.json
+`--save-converted` is optional; it keeps the converted copy so you can
+check it and store it next to the original. A `$ref` to another file
+or a URL is refused — put the referenced definitions into the one file
+first. An `https://` Swagger 2.0 spec is fetched by the backplane,
+which rejects it with a structured `UnsupportedSpecError` naming this
+path (the `_SWAGGER_2_CONVERSION_REMEDIATION` string in
+`backend/src/meho_backplane/operations/ingest/openapi.py`): download it
+and pass it as `file://`.
+
+If you prefer to convert yourself, use a local tool and ingest the 3.x
+output like any other spec:
+
+```bash
+npx swagger2openapi swagger.json -o openapi3.yaml
 ```
 
 The conversion is lossless for the request/response surface ingest
@@ -149,14 +157,13 @@ VMware ships no OpenAPI-3.x appliance spec for the VCFA
 tenant/consumption plane; the only machine-readable surface is the
 8 Swagger 2.0 fragments vendored under
 [`vmware/vra-sdk-go` `swagger/`](https://github.com/vmware/vra-sdk-go/tree/v0.6.5/swagger)
-(`vra-project.json`, `vra-iaas.json`, …). Each fragment converts and
-dry-runs individually:
+(`vra-project.json`, `vra-iaas.json`, …). Pass each fragment as
+`file://`; the CLI converts it and dry-runs it on its own:
 
 ```bash
-npx swagger2openapi vra-iaas.json -o vra-iaas-openapi3.yaml
 meho connector ingest \
   --product vcfa --version 9.0 --impl vcfa-rest \
-  --spec file:///abs/path/vra-iaas-openapi3.yaml \
+  --spec file:///abs/path/vra-iaas.json \
   --dry-run
 ```
 
@@ -164,7 +171,7 @@ Note this only **widens** VCF Automation's surface: the connector's
 curated 11-op read core is sourced from OpenAPI-3.x documents
 (`cloudapi.yaml` + `iaas.yaml`) and works without any 2.0
 conversion — see
-[`connectors-vcf-automation.md`](../codebase/connectors-vcf-automation.md).
+`connectors-vcf-automation.md`.
 The other shipped exemplar is Harbor 2.x, whose product-specific
 conversion runbook lives in
 [`harbor-onboarding.md`](harbor-onboarding.md#spec-ingest-swagger-20--openapi-3x-conversion).
@@ -303,7 +310,7 @@ meho operation groups vmware-rest-9.0
 meho operation search vmware-rest-9.0 "list virtual machines" --limit 10
 ```
 
-The first command returns the 8–15 enabled groups with their `when_to_use` hints. The second returns ranked hits — the load-bearing acceptance bar from the vSphere canary is "the canonical operation appears in the top-3". See the canary's [10 (query, canonical-op) pairs](g07-vsphere-canary.md#test-variant) for the working examples.
+The first command returns the 8–15 enabled groups with their `when_to_use` hints. The second returns ranked hits — the load-bearing acceptance bar from the vSphere canary is "the canonical operation appears in the top-3". See the canary's 10 (query, canonical-op) pairs for the working examples.
 
 To verify dispatch end-to-end against a real target:
 
@@ -397,7 +404,7 @@ Read paths require `operator`; write paths require `tenant_admin`. The REST rout
 
 ## Known gaps
 
-Documented inline pending formal Task filing. The vSphere canary (see [g07-vsphere-canary.md](g07-vsphere-canary.md)) is the test bed that surfaced each.
+Documented inline pending formal Task filing. The vSphere canary (see g07-vsphere-canary.md) is the test bed that surfaced each.
 
 ### Gap 1 — T1 `$ref` extension for `vi-json.yaml`
 
@@ -441,7 +448,7 @@ Routing the grouping pass through the G11.5 per-tenant model resolver (so air-ga
 
 - **Architecture doc:** [`docs/architecture/spec-ingestion.md`](../architecture/spec-ingestion.md) — the canonical reference for the pipeline's design.
 - **Sister architecture doc:** [`docs/architecture/operations-substrate.md`](../architecture/operations-substrate.md) — G0.6's substrate this pipeline writes into.
-- **vSphere canary runbook:** [`g07-vsphere-canary.md`](g07-vsphere-canary.md) — the worked example operators reproduce locally.
+- **vSphere canary runbook:** `g07-vsphere-canary.md` — the worked example operators reproduce locally.
 - **Internal codebase map:** [`docs/codebase/spec-ingestion.md`](../codebase/spec-ingestion.md) — symbol-level map of `backend/src/meho_backplane/operations/ingest/`.
 - **CLAUDE.md postulates:** postulate 1 (two connector kinds, both first-class); postulate 4 (operation grouping + LLM hints, operator-reviewable); postulate 5 (agent surface is meta-tools).
 - **Parent Initiative:** [#389 G0.7 Spec ingestion pipeline](https://github.com/evoila/meho/issues/389).

@@ -44,7 +44,7 @@ connector-specific names generalised:
 * The credentials cache + missing-key error shape ← Harbor's
   ``HarborConnector._load_credentials`` (``connector.py`` L209-238).
 * ``vcf_session_login`` ← the session-create round-trip inside
-  :meth:`meho_backplane.connectors.nsx.connector.NsxConnector._session_token`
+  ``NsxConnector._session_token`` in the NSX connector
   (``connector.py`` L213-279), pulled out of the 401-retry loop. The retry
   loop stays in the consumer because the downstream call paths differ
   per connector.
@@ -73,6 +73,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.vault_creds import (
     VaultCredentialsReadError,
     load_basic_credentials,
@@ -268,7 +269,10 @@ class CredentialsCache:
     The cache is keyed on the tenant-unique ``(tenant_id, target.id)``
     tuple (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`,
     #1642) so two same-named targets in different tenants never share a
-    cached credential. Production deploys with multiple connector instances
+    cached credential. A cached entry is handed to a caller only after
+    that caller's own Vault read of the target's secret passed once
+    (:class:`~meho_backplane.connectors._shared.secret_readers.SecretReaders`).
+    Production deploys with multiple connector instances
     each get their own cache — there is no process-global cache by design,
     so connector-instance teardown (``aclose``) clears credentials
     immediately.
@@ -291,6 +295,7 @@ class CredentialsCache:
         self._loader = loader
         self._product_label = product_label
         self._cache: dict[tuple[str, str], dict[str, str]] = {}
+        self._readers = SecretReaders()
         self._lock = asyncio.Lock()
 
     async def get(self, target: VcfTargetLike, operator: Operator) -> dict[str, str]:
@@ -301,15 +306,18 @@ class CredentialsCache:
         under the operator's Identity entity via
         :func:`~meho_backplane.auth.vault.vault_client_for_operator`. The
         cache is keyed on the tenant-unique ``(tenant_id, target.id)``
-        tuple (#1642) — a single per-target credential pair is shared
-        across operators of the same tenant because the
+        tuple — a single per-target credential pair, because the
         ``shared_service_account`` auth model authenticates the connector
         with a Vault-sourced service account, not the operator's OIDC
-        token. ``per_user`` / ``impersonation`` are explicitly out of
-        scope for State 2 (the auth-model boundary in each connector's
-        :meth:`auth_headers` rejects them before this method is reached).
-        See ``docs/architecture/connector-auth.md`` § "Cache scoping under
-        ``shared_service_account``" for the contract.
+        token. The pair is handed to a caller only after that caller's
+        own Vault read passed once in this process
+        (:class:`~meho_backplane.connectors._shared.secret_readers.SecretReaders`):
+        a cache hit by a caller who has not read yet runs the loader under
+        their login first. ``per_user`` / ``impersonation`` are explicitly
+        out of scope for State 2 (the auth-model boundary in each
+        connector's :meth:`auth_headers` rejects them before this method is
+        reached). See ``docs/architecture/connector-auth.md`` § "Cache
+        scoping under ``shared_service_account``" for the contract.
 
         Raises :class:`~meho_backplane.connectors._shared.vault_creds.VaultCredentialsReadError`
         when ``operator.raw_jwt`` is empty -- defense-in-depth fail-closed
@@ -341,7 +349,7 @@ class CredentialsCache:
         cache_key = target_cache_key(target)
         async with self._lock:
             cached = self._cache.get(cache_key)
-            if cached is not None:
+            if cached is not None and self._readers.has_read(target, operator):
                 return cached
             raw = await self._loader(target, operator)
             for required in ("username", "password"):
@@ -353,6 +361,7 @@ class CredentialsCache:
                         "{'username': str, 'password': str}"
                     )
             self._cache[cache_key] = raw
+            self._readers.record(target, operator)
             _log.info(
                 "vcf_credentials_loaded",
                 connector=self._product_label,
@@ -373,6 +382,7 @@ class CredentialsCache:
         """
         async with self._lock:
             self._cache.pop(target_cache_key(target), None)
+            self._readers.forget(target)
 
     async def clear(self) -> None:
         """Drop all cached credentials.
@@ -391,11 +401,17 @@ class CredentialsCache:
         """
         async with self._lock:
             self._cache.clear()
+            self._readers.clear()
 
     @property
     def cached_targets(self) -> frozenset[tuple[str, str]]:
         """Frozen view of the cached ``(tenant_id, id)`` keys (read-only, for tests/audit)."""
         return frozenset(self._cache)
+
+    @property
+    def readers(self) -> SecretReaders:
+        """The callers who have read a target's secret through this cache."""
+        return self._readers
 
 
 # ---------------------------------------------------------------------------

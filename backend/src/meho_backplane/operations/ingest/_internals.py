@@ -301,7 +301,7 @@ async def legacy_tenant_products(
 
     A ``connector_id`` fixes ``(version, impl_id)``; the product is read
     from the id's first segment. Rows a tenant ingested before a product
-    rename (``vcf-logs`` rows for ``vrli-rest-9.0``, now ``vrli``) share
+    rename (rows saved under the old product name) share
     the id but not the product, so every product-scoped probe misses
     them (#4889). This probe keys on ``(tenant_id, version, impl_id)``
     only and returns the distinct products that differ from
@@ -920,14 +920,16 @@ def apply_op_overrides(
     op_row: EndpointDescriptor,
     *,
     custom_description: str | _UnsetType | None,
-    safety_level: str | None,
-    requires_approval: bool | None,
     is_enabled: bool | None,
     llm_instructions: dict[str, object] | None,
 ) -> list[str]:
     """Apply every supplied override on *op_row*; return the field names set.
 
-    Pure PATCH application. For the four concrete overrides ``None`` means
+    Risk level and approval are not written here: they are stored apart from
+    the row, as an override (#4711, :mod:`meho_backplane.operations.op_policy`),
+    so the row keeps the classification.
+
+    Pure PATCH application. For the concrete overrides ``None`` means
     "leave unchanged". ``custom_description`` is the exception: it carries
     the omitted-vs-null distinction the callers resolve before the service
     layer, so :data:`_UNSET` (not supplied) means "leave unchanged" while
@@ -940,12 +942,6 @@ def apply_op_overrides(
     if custom_description is not _UNSET:
         op_row.custom_description = custom_description
         fields_updated.append("custom_description")
-    if safety_level is not None:
-        op_row.safety_level = safety_level
-        fields_updated.append("safety_level")
-    if requires_approval is not None:
-        op_row.requires_approval = requires_approval
-        fields_updated.append("requires_approval")
     if is_enabled is not None:
         op_row.is_enabled = is_enabled
         fields_updated.append("is_enabled")

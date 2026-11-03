@@ -14,7 +14,7 @@ without drowning in false positives.
 ## How analysis runs
 
 ```
-nightly schedule (06:17 UTC) ──► CI workflow on main
+nightly schedule (02:17 UTC) ──► CI workflow on main
                                    │   8 python-coverage shards + python-coverage-combine
                                    │   upload the python-coverage artifact
                                    │   (backend/coverage.xml)          [schedule only]
@@ -79,6 +79,54 @@ Coverage is the **unit sweep only** (`--cov`-equivalent over `meho_backplane`);
 integration tests run in a separate job without coverage. The gate is
 `continue-on-error: true` — it is **advisory** and never blocks merges (see the
 new-code-period + scan-trigger section below for why it is kept advisory).
+
+## Measuring a test-to-code map (#5298)
+
+`scripts/ci/measure_test_map.py` counts how many tests a "run only the tests
+for the changed code" map would pick for recent merged pull requests. CI does
+not use it. It needs coverage data that records which test ran each line:
+`dynamic_context = test_function` in `.coveragerc.ci`. Since #5642 that
+setting is on `main`: the nightly run records the test names and makes the
+unit test map that pull requests use (see "Test map run" in
+[`devops.md`](devops.md)). The combined `.coverage` file is not uploaded, only
+`coverage.xml` and the map. To get the data, give a pull request the
+`ci-coverage-validate` label and add an upload of `backend/.coverage` to the
+combine job. How to run the script is in its docstring.
+
+The script also needs the list from `pytest --collect-only`. Make that list
+on the **exact commit the coverage run tested**. For a `pull_request` run this
+is the merge commit, not the pull request head. The log of the checkout step
+shows its SHA ("HEAD is now at ..."). If the list comes from another commit,
+the counts are wrong. The script prints how many test functions in the
+coverage data are not in the list, and warns when that number is not zero.
+A small number can also come from tests that a decorator wraps (for example
+`@respx.mock`): coverage then names them after the decorator's module, such
+as `functools.test_x`.
+
+The report splits the changed files the map cannot judge into four kinds:
+files the data does not have (for example files added after the coverage
+run), files in the data that no test function ran, files that a test ran
+whose name is not in the test list (the decorator case above), and other
+files (config, test helpers, files outside `backend/`). A pull request with
+a file of any kind counts as a full-suite run in the "safe" column.
+
+No GitHub API orders pull requests by merge date. So the script reads the
+closed pull requests page by page, most recently updated first. A merge
+updates a pull request, so its update time is never before its merge time.
+Reading stops at the first page whose oldest update time is not after the
+N-th newest merge time found so far: no later page can hold a pull request
+merged after it. This finds the N merged last, also when they were created
+long ago. Give `--merged-before` the time the coverage run started, so the
+sample stays the same when the script runs again later on the same data.
+
+Things to know about the data:
+
+- `test_function` records only lines that run inside the test function
+  itself. Lines that run in fixtures, at import time, or in background tasks
+  get the empty context, so the map does not see them.
+- Coverage cannot use the faster `sysmon` core with test contexts. The
+  coverage shards use the C tracer (`COVERAGE_CORE=ctrace`), so they run
+  slower: their pytest step limit is 45 minutes, not 30.
 
 ## When coverage collapses to ~24% — the invisible-import failure mode
 
@@ -160,7 +208,7 @@ Nothing turns red because the coverage jobs are non-blocking by design.
    nothing. **Fix:** the `pytest_sessionfinish` hook in `backend/tests/conftest.py`
    saves the worker's coverage data (and stops the tracer) before the worker
    reports "finished". Pinned by `backend/tests/test_ci_coverage_shards.py`.
-2. **The shard hits its 30-minute step limit.** Then all of its processes are
+2. **The shard hits its pytest step limit (45 minutes since #5642).** Then all of its processes are
    killed and every data file of that shard is lost (the shard uploads an
    empty or missing artifact). With 5 shards on the 7 GiB heavy runner, a
    shard with about 4,500 tests ran up to 29 minutes. **Fix:** the sweep runs
@@ -179,9 +227,9 @@ Nothing turns red because the coverage jobs are non-blocking by design.
    file reports under 20%.
 2. The shard's `coverage-pytest-log-shard-N` artifact (kept 7 days): a
    `KeyboardInterrupt` after the last test, or a step that stopped at the
-   30-minute limit, means the shard lost its worker data.
+   45-minute limit, means the shard lost its worker data.
 3. The `Print peak memory` step of each shard: a peak at the memory limit
-   or a pytest step near 30 minutes means the shard count must go up.
+   or a pytest step near 45 minutes means the shard count must go up.
 
 ## New-code period + scan trigger — how they're configured
 
@@ -207,7 +255,7 @@ analyzed commit SHA — see `quality-gate.yml`'s `SonarCloud Scan` step), which 
 
 **Scan trigger = the nightly run only.** `quality-gate.yml`'s job carries
 `if: … && github.event.workflow_run.event == 'schedule'`. CI runs on `push`,
-`pull_request`, `merge_group` and once a night on `schedule` (`cron: '17 6 * * *'`
+`pull_request`, `merge_group` and once a night on `schedule` (`cron: '17 2 * * *'`
 in `ci.yml`, #4910). SonarCloud stores a single analysis per project keyed by
 branch — so before the event filter, every PR-branch CI completion triggered a
 scan that **overwrote** the main-branch analysis, churning the activity history

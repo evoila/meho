@@ -1401,7 +1401,7 @@ def _delete_refusal(
 ) -> dict[str, Any]:
     """Build a structured, fail-closed ``record.delete`` refusal envelope.
 
-    Mirrors the destructive-tier refusal shape of ``vmware.composite.vm.destroy``
+    Follows the destructive-tier refusal shape of the first governed delete
     (#3198): a ``status`` naming the refusal reason, ``deleted=False`` (never
     a silent success), and an operator-actionable ``guidance`` sentence.
     ``candidates`` carries the competing rdata values on the ``ambiguous``
@@ -1902,7 +1902,7 @@ _DELETE_WARNING = (
     "confirms the deleted value is gone, and rolls the ``/etc/bind/`` tree "
     "back byte-identical on any failure. Prefer ``bind9.record.delete`` over "
     "``bind9.record.remove`` when a shared zone must retire a single record "
-    "under governance (environment teardown); ``record.remove`` is the "
+    "under governance (environment teardown); ``bind9.record.remove`` is the "
     "governed destructive-tier whole-name clear (every A + AAAA at the name, "
     "#3247) — same gate, broader blast radius."
 )

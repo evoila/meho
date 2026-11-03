@@ -19,7 +19,7 @@ same DDL runs on PostgreSQL.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -105,10 +105,11 @@ def _audit_log_columns(sync_url: str) -> dict[str, dict[str, object]]:
 
 def test_old_rows_read_as_legacy_request_without_guessing(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Rows written before 0106 all read ``legacy_request`` after it."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     # One row looks like a dispatch, one like an approval, one like HTTP. The
     # migration must not use method / path to pick a class.
     ids = [
@@ -123,10 +124,12 @@ def test_old_rows_read_as_legacy_request_without_guessing(
     assert _audit_log_columns(sync_url)["event_class"]["nullable"] is False
 
 
-def test_database_rejects_an_unknown_class(alembic_cfg: tuple[Config, str]) -> None:
+def test_database_rejects_an_unknown_class(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """The CHECK constraint refuses a class outside the closed list."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     eng = sa_create_engine(sync_url)
     try:
@@ -146,10 +149,12 @@ def test_database_rejects_an_unknown_class(alembic_cfg: tuple[Config, str]) -> N
         eng.dispose()
 
 
-def test_downgrade_drops_the_column_and_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_drops_the_column_and_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade 0105`` drops ``event_class``; ``upgrade 0106`` restores it."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     row_id = _insert_old_row(sync_url, method="GET", path="/api/v1/targets")
 
     command.downgrade(cfg, _DOWN_REVISION)

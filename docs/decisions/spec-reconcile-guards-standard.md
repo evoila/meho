@@ -1,6 +1,6 @@
-# Spec-reconcile guards as standard — every hand-coded vendor path asserts against a pinned spec (decision)
+# Spec-reconcile guards as standard — hand-coded vendor paths are checked against a vendor spec when one is pinned (decision)
 
-**Status:** accepted
+**Status:** accepted; changed on 2026-10-30 (see "The standard")
 **Date:** 2026-08-17
 **Task:** [#2980](https://github.com/evoila/meho/issues/2980) (initiative
 [#2979](https://github.com/evoila/meho/issues/2979), wave 3 of the guard
@@ -10,9 +10,28 @@ rollout; mechanics precedent
 
 ## The standard
 
-**Every hand-coded vendor-API path literal in a typed connector or
-composite MUST be asserted against a pinned vendor spec in CI, wherever
-such a spec exists or can be pinned.**
+**Since 2026-10-30: a CI guard checks the hand-coded vendor-API paths of
+a typed connector or composite only against a vendor spec file that is
+already pinned (on the spec shelf, or as test data in this repo). A
+pinned file is not a step before coding.**
+
+- A build Task may add such a file as test data when it helps. No Task
+  waits for one.
+- The agent may use any source: vendor documents, published API files,
+  internet research, and live exploration in the sandbox or the lab.
+- A live test is the proof that a path works.
+- The guards that exist stay as they are. CI keeps its list of required
+  spec files for the files that exist, in `ci/spec-shelf/` (one small
+  file per product version; step 3 below).
+
+Why it changed: the old rule made a pinned file a step before coding, so
+build Tasks waited for separate file Tasks. Now one Task per capability
+reads the docs, explores the API, builds, tests live, and fixes what it
+finds. The old rule said: "Every hand-coded vendor-API path literal in a
+typed connector or composite MUST be asserted against a pinned vendor
+spec in CI, wherever such a spec exists or can be pinned." The rest of
+this file is the record of how the guards work. Where it says a Task
+must pin a file, that is now optional.
 
 The determination of record behind it (#2979, grounded 2026-08-17): *if
 we have the spec, we do not risk hallucinating an endpoint.* #2970
@@ -33,7 +52,7 @@ Scope boundaries:
 - **Generic (ingested) connectors are immune by construction** and need
   no lane: their op_ids are emitted *from* the spec by the ingest
   pipeline, so an unserved path cannot exist.
-- **Where no spec exists or can be pinned**, the lane still ships and
+- **Where no spec is pinned**, the lane still ships and
   skips uniformly; it arms itself the day the spec lands on the shelf.
   A task that proves a spec is unobtainable records the evidenced
   exclusion instead (#2993's contract; the entries live in the
@@ -97,12 +116,12 @@ Two cost classes of shelf-backed test, two CI homes:
   when armed (a full two-spec ingest measures ~164 s on CI runners,
   amortised once per module — see the shared-corpus pattern below).
   They run in exactly one armed lane: `python-integration` (its pytest
-  step selects the canary module alongside `tests/integration/`), and
-  the unit sweep opts out via `MEHO_SKIP_SPEC_INGEST_TESTS=1`, honored
-  by a collection-time `skipif` marker on every full-ingest test (so
-  an opted-out lane never even spins the module-scoped Postgres
-  container), with backstop re-checks in the canary's shared
-  `_canary_corpus` fixture and its `vcenter_spec_path` fixture.
+  step runs `tests/integration/`). A full-ingest test placed in the unit
+  sweep must opt out there with a collection-time `skipif` marker, so an
+  opted-out lane never even spins the module-scoped Postgres container.
+  (The vSphere canary that set this pattern left the public tree with
+  evoila's own connectors, #3345; its `MEHO_SKIP_SPEC_INGEST_TESTS`
+  opt-out left with it.)
   Everywhere the var is unset (local dev, the integration lane) the
   armed-shelf contract is unchanged.
 
@@ -160,7 +179,9 @@ starts from this pattern; per-test ingest is only acceptable while
 
 ## Extension mechanics (per new vendor lane)
 
-Each lane task (#2981-#2993) ships all of:
+Each lane task (#2981-#2993) ships all of the steps below. Since
+2026-10-30, steps 2 to 4 are optional: a build Task runs them only when
+it chooses to add a spec file.
 
 1. **The lane** — a `backend/tests/` module using the harness;
    declared set introspected from the connector's live constants.
@@ -169,13 +190,18 @@ Each lane task (#2981-#2993) ships all of:
    `MANIFEST.md` provenance. Freely-licensed (OSS) specs need only that
    provenance note; vendor-licensed specs follow the signoff model
    below.
-3. **CI checkout widened** — one line per job in
-   `.github/workflows/ci.yml`: add the product dir to the spec-shelf
-   `sparse-checkout` list, and one line in the fail-loud verify step so
-   a shelf-layout move fails the job instead of silently regressing the
-   lane to skip. Same `SPEC_SHELF_TOKEN`; **no new secret, ever** — the
-   PAT already reads the whole private shelf repo. These one-liners
-   collide trivially across parallel lane tasks; rebase, don't battle.
+3. **CI checkout widened** — one new list file
+   `ci/spec-shelf/<product>-<version>.txt`. Each line names one required
+   file, as a path from the shelf repo root
+   (`docs/<product>-<version>/<spec-file>`). `scripts/ci/spec_shelf.sh`
+   reads every list: both Python test jobs in
+   `.github/workflows/ci.yml` check out the listed shelf folders, and
+   the fail-loud verify step fails the job with the "Spec-shelf layout
+   drift" error when a listed file is missing, so a shelf-layout move
+   fails the job instead of silently regressing the lane to skip.
+   `ci.yml` itself names no shelf file, so this step changes no line
+   there. Same `SPEC_SHELF_TOKEN`; **no new secret, ever** — the
+   PAT already reads the whole private shelf repo.
 4. **Signoff extended** — one paragraph per vendor appended to
    [`vendor-spec-ci-provisioning.md`](vendor-spec-ci-provisioning.md)'s
    signoff of record (what is fetched, same ephemeral-use conditions).
@@ -356,8 +382,44 @@ split.
   on 9.1 and 9.1.1. CI requires the three lists, so a missing list fails
   instead of skipping. The other provider op_ids stay in the exclusion
   above; this change checks only the region path.
+- **Region and quota paths checked per version.** The ops that connect
+  vCenters and NSX managers, build regions and set organization quotas
+  keep their paths in `_infra_paths.py`. The lane checks every one of
+  them against the same three lists, in the form the connector sends for
+  each version (`/cloudapi/vcf/...` on 9.0, `/cloudapi/v1/...` on 9.1
+  and 9.1.1). Path parameter names are compared without braces, because
+  the lists write some of them bare. Two legacy `/api` calls stay
+  excluded with evidence: no 9.x reference lists a legacy call, and the
+  vendor SDK (`go-vcloud-director` v3) uses them on VCF Automation 9 --
+  the vCenter refresh (`/api/admin/extension/vimServer/{id}/action/refresh`,
+  "there is no OpenAPI endpoint for this operation") and the task read
+  (`/api/task/{id}`) behind every `202` task link.
 
-### vcd — fully excluded, all-typed (no pinnable spec) (#3057)
+### vcd — CloudAPI paths ARMED 2026-10-31 (#4519); `/api` paths pinned only
+
+**Update 2026-10-31 (#4519).** A running Cloud Director cell serves its own
+`/cloudapi` file: `GET /api-explorer/provider/cloudapi.json`, Swagger 2.0, no
+session needed. The spec shelf pins it as
+`vmware-cloud-director-10.6/cloudapi-39.2.json` (API 39.2, from a 10.6.2
+cell, 646 paths, `basePath` `/cloudapi`; provenance in the shelf's
+`MANIFEST.md`). This replaces the `/cloudapi` half of the exclusion below.
+
+- **Armed (every `/cloudapi` op_id):** `GET` and `POST /cloudapi/1.0.0/orgs`,
+  `GET`, `PUT` and `DELETE /cloudapi/1.0.0/orgs/{orgUrn}`, and
+  `POST /cloudapi/1.0.0/sessions/provider`. The lane
+  (`backend/tests/test_connectors_vcd_spec_reconcile.py`) reads the Swagger
+  2.0 file itself (MEHO's spec ingest reads OpenAPI 3 only), adds the
+  `basePath`, and ignores path parameter names. CI checks the folder out and
+  requires the file, so the check fails instead of skipping when it is
+  missing.
+- **Still pinned only (2 op_ids: `GET:/api/query`, `GET:/api/versions`).** The
+  vendor publishes no API file for the older `/api` surface. Both paths are in
+  the vendor's API 39.0 reference
+  (<https://developer.broadcom.com/xapis/vmware-cloud-director-api/39.0/>,
+  operations `GET-ExecuteQuery` and `GET-SupportedVersions`); the lane names
+  that link and keeps them in the manifest pin.
+
+The original exclusion (#3057) is kept below as history.
 
 The `vcd` (VMware Cloud Director) connector is a **net-new typed**
 connector for the legacy standalone product (initiative
@@ -629,6 +691,98 @@ file is there.
   `entra-graph-1.0/openapi.yaml`. The activating task runs the extension
   mechanics above (CI checkout widened, provenance recorded) and the
   compare test then runs for real.
+
+### phpipam-rest-1.x — no API file exists; the check pins the list (#5070)
+
+The `phpipam-rest-1.x` connector (product `phpipam`) calls the phpIPAM REST
+API with eleven hand-written path constants (thirteen `METHOD:/path` pairs).
+
+- **Check file:** `backend/tests/test_connectors_phpipam_spec_reconcile.py`.
+  It reads the `*_PATH` constants of `connectors/phpipam/_paths.py` live,
+  gives each one its HTTP methods, and pins the full `METHOD:/path` list. It
+  also checks that every path is in the reference list in the docstring of
+  `_paths.py`. All tests run always; there is no compare test.
+- **What was checked (2026-10-29).** phpIPAM documents its API only as web
+  pages: the API reference (<https://phpipam.net/api/api_reference/>) and
+  the API documentation (<https://phpipam.net/api/api_documentation/>),
+  which describe phpIPAM 1.8.2. Neither links an OpenAPI, Swagger or other
+  API description file, and the phpIPAM source at tag `v1.8.2`
+  (<https://github.com/phpipam/phpipam>) has none either: the API is served
+  by the PHP controllers in `api/controllers/`. Every path the connector
+  uses was checked against the reference page and against the controller
+  that serves it (`Subnets.php`, `Addresses.php`, `User.php`), including
+  the answer codes the connector relies on (404 for "nothing found", 409 for
+  a taken address, 201 for a created address). One address is read with
+  `GET /subnets/{subnet_id}/addresses/{ip}/`, not with
+  `GET /addresses/{ip}/{subnet_id}/`: in 1.8.2 the second call finds only the
+  first address row of a subnet (`Addresses.php` filters on an `ip` field that
+  the cache in `class.Common.php` fills in only for that row). The
+  `DELETE /addresses/{ip}/{subnet_id}/` call looks the address up by its value
+  and works for every row.
+- **Residual risk, named.** Without an API file, a renamed path or a changed
+  answer in a later phpIPAM release shows up only in a live call (the
+  connector's lab proof). The pinned list makes sure every path change in
+  MEHO is made on purpose.
+- **Activation:** phpIPAM publishing an API description file. Then the file
+  goes on the shelf, the check gets a compare test, and this entry is
+  withdrawn.
+
+### installer-cb-5.0 — no API file for Cloud Builder 5.x; the check uses the reference lists (#4469)
+
+The `installer-cb-5.0` connector (Cloud Builder 5.0 to 5.2, product
+`installer`) sends ten `METHOD:/path` calls under `/v1/sddcs`.
+
+- **Check file:** `backend/tests/test_connectors_vcf_cloud_builder_spec_reconcile.py`.
+  It reads the call sets of `vcf_cloud_builder/typed_reads.py` and
+  `typed_writes.py` live and pins them (always runs). When the shelf is
+  there, it checks every call against the reference list of each version:
+  `cloud-builder-5.0` (5.0.0), `cloud-builder-5.1` (5.1.0, 5.1.1) and
+  `cloud-builder-5.2` (5.2.0 to 5.2.4). CI checks out the three folders and
+  fails when a list is missing.
+- **What was checked (2026-10-19, on the shelf).** Broadcom publishes no
+  OpenAPI or Swagger file for VCF 5.x: the "Related Resources" page of each
+  version of the VMware Cloud Foundation API reference
+  (<https://developer.broadcom.com/xapis/vmware-cloud-foundation-api/5.2.0/>)
+  offers no download, and `vmware/vcf-api-specs` has 9.x tags only. The
+  shelf lists are made from the vendor's operation index and operation
+  pages, section "Sddc" (the Cloud Builder calls). One finding changed the
+  connector: `GET /v1/system/appliance-info` (the Installer's version call)
+  is in no 5.x list, so the connector reads the version from
+  `GET /v1/sddcs/about`.
+- **Residual risk, named.** The lists hold paths, not schemas. A field that
+  differs by patch release shows up only in a live call (the separate lab
+  proof).
+- **Activation:** Broadcom publishing a 5.x API file. Then the file goes on
+  the shelf next to the lists and the check compares against it.
+
+### idb-wsa-3.3 and idb-rest-9.0 — no API file exists; the check pins the list (#4508)
+
+The `idb` connectors (Workspace ONE Access 3.3 and VCF Identity Broker 9.x)
+call twelve hand-written path constants (twelve `METHOD:/path` pairs).
+
+- **Check file:** `backend/tests/test_connectors_idb_spec_reconcile.py`. It
+  reads the `*_PATH` constants of `connectors/idb/_paths.py` live, gives each
+  one its HTTP method, and pins the full `METHOD:/path` list. It also checks
+  that every path is in the reference list in the docstring of `_paths.py`.
+  All tests run always; there is no compare test.
+- **What was checked (2026-10-31).** Identity Broker documents its API only
+  as web pages (<https://developer.broadcom.com/xapis/vmware-identity-broker/latest/>);
+  no API file is linked. The token, `properties`, OpenID discovery and SCIM
+  search paths were checked against its operation index. For Workspace ONE
+  Access 3.3 no API reference exists. The login and SCIM search paths match
+  the archived Identity Manager swagger file (`apidocs/swagger.json` in
+  `omnissa-archive/idm`, not tied to 3.3). The identity provider and
+  directory list paths come from the VMware PowerCLI example module
+  `VMware.WorkspaceOneAccess`, the health path from the Identity Manager 3.3
+  monitoring docs, and the directory sync path only from community
+  write-ups. The decision record
+  `docs/decisions/2026-10-23-identity-broker-connector.md` lists them.
+- **Residual risk, named.** The Workspace ONE Access directory, identity
+  provider and sync calls are not in any API reference. A wrong path or body
+  shows up only in the lab proof. The pinned list makes sure every path change
+  in MEHO is made on purpose.
+- **Activation:** a vendor API file for either product. Then the file goes on
+  the shelf, the check gets a compare test, and this entry is withdrawn.
 
 ## Red lane = finding (the protocol)
 

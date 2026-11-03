@@ -44,7 +44,7 @@ nothing, and writing no audit row.
 
 Operations are addressed by **`connector_id`**, which has the form
 `<impl_id>-<version>` — for example `k8s-1.x`, `vault-1.x`,
-`vmware-rest-9.0`. It is *not* the bare product name; a product can
+`harbor-rest-2.x`. It is *not* the bare product name; a product can
 have several connector implementations, and the resolver picks one
 per target.
 
@@ -58,13 +58,13 @@ per target.
     fingerprint to one implementation, with tenant or operator
     preference breaking a tie. You address the operation by its
     `connector_id`, but you never hand-pick which implementation runs
-    against a given target. Real pairs today: `fleet-rest-9.0` /
-    `fleet-lcm-9.0`, `sddc-rest-9.0` / `sddc-vcf5-5.0`, `vcfa-rest-9.0`
-    / `vcfa-vra8-8.0`, `vrli-rest-9.0` / `vrli-vrli8-8.0`, and
-    `vrops-rest-9.0` / `vrops-vrops8-8.0`. So one estate that spans old
-    and new appliances resolves each system to the right implementation
-    on its own — useful when you read and inventory an existing estate
-    during onboarding.
+    against a given target. The public connectors ship one
+    implementation per product today; connector packages (for example
+    evoila's enterprise pack for the VMware estate) add a second one for
+    older appliances where needed. So one estate that spans old and new
+    appliances resolves each system to the right implementation on its
+    own — useful when you read and inventory an existing estate during
+    onboarding.
 
 ```bash
 meho connector list
@@ -254,6 +254,12 @@ call `call_operation` again with the same `connector_id`, `op_id` and that
 `run_id` to check it. While it runs you see `running` and the start time;
 when it is done you get the normal result.
 
+A check can also wait. Add `wait_seconds` (up to 50) to the check, or
+`?wait_seconds=N` to `GET /api/v1/operations/runs/{handle}`. MEHO then
+answers as soon as the run ends, or after that many seconds with the run
+still `running`. This helps an agent that has no shell and cannot sleep
+between checks.
+
 Synchronous mode stays the default and is byte-for-byte identical to
 the path without `async` — nothing changes unless you ask for it.
 
@@ -318,6 +324,7 @@ a one-VM drill becomes a cluster-wide incident.
 | `-32602` with `data.reason: connector_not_ingested` | The connector is registered but its spec has not been ingested, so it has no operations yet. Recoverable: the error's `data.next_step.verb` carries the exact `meho connector ingest …` command to run. | Run the named command, then retry. |
 | `meho operation groups` returns an empty list | The connector exists but nothing is enabled yet — operations ship default-deny until reviewed/enabled. | `meho connector review <id>`, then enable groups or single ops (`meho connector enable-reads <id>` bulk-enables the read class). |
 | Search cannot find an operation you know exists | Search only indexes **enabled** operations; a disabled op is invisible by design. An unknown `--group` also silently narrows to zero hits (that is not an error). | Check enablement via `meho connector review`; drop the group filter. |
+| An operation works for another tenant but not for yours | Your tenant turned this built-in operation off for itself. A tenant setting changes only that tenant; the `en` column of `meho connector review` is the install default, the `ten` column is your tenant's own setting. | `meho connector tenant-setting show <id>`; a tenant admin turns it back with `meho connector tenant-setting set <id> <op_id> --on` (or `--default`). |
 | `status: "error"` with `invalid_params` | The params failed the operation's schema. **Do not retry the same arguments verbatim.** | Read `extras.validation_errors`, fix the shape (e.g. `k8s.pod.list` requires exactly one of `namespace` / `all_namespaces: true`), re-call. |
 | `status: "error"` with a `connector_error` / credential message | Dispatch reached the connector but the target's credential failed to resolve or was rejected. | Work the [targets & secrets failure table](targets-and-secrets.md#what-can-go-wrong-here) — the error strings there map one-to-one. |
 | `status: "denied"` | Policy refused the call for this principal — distinct from a missing approval. | Inspect the reason in `extras`; this is a grants/policy conversation, not a retry. |

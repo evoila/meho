@@ -18,7 +18,7 @@ indexes), so PG parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -129,10 +129,12 @@ def _table_names(sync_url: str) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
-def test_upgrade_creates_table_with_full_column_set(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_creates_table_with_full_column_set(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0078`` creates the table with every column at the right nullability."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     assert _columns(sync_url, _TABLE) == _EXPECTED_COLUMNS
     for column in (
@@ -150,10 +152,12 @@ def test_upgrade_creates_table_with_full_column_set(alembic_cfg: tuple[Config, s
         assert not _not_null(sync_url, _TABLE, column), f"{column} must be nullable"
 
 
-def test_upgrade_creates_partial_unique_indexes(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_creates_partial_unique_indexes(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """Lookup index + two partial unique indexes are created with the right flags."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     meta = {name: (unique, partial) for name, unique, partial in _index_meta(sync_url, _TABLE)}
     assert set(meta) >= _EXPECTED_INDEXES
@@ -164,10 +168,12 @@ def test_upgrade_creates_partial_unique_indexes(alembic_cfg: tuple[Config, str])
         assert partial, f"{name} must be a PARTIAL index"
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade 0077`` drops the table; ``upgrade 0078`` recreates it identically."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _TABLE in _table_names(sync_url)
 
     command.downgrade(cfg, _DOWN_REVISION)

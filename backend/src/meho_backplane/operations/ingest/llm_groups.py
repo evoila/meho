@@ -131,6 +131,7 @@ from meho_backplane.operations.ingest._llm_grouping_internals import (
     strip_code_fences,
 )
 from meho_backplane.operations.ingest.exceptions import LlmOutputInvalid
+from meho_backplane.operations.ingest.group_truth import drop_unsupported_claims
 
 __all__ = [
     "DEFAULT_GROUPING_BATCH_SIZE",
@@ -591,6 +592,34 @@ def _project_persisted_groups(
     ]
 
 
+def _check_new_group_texts(
+    *,
+    triple: _ConnectorTriple,
+    rows: Sequence[OperationGroup],
+    operations: Sequence[EndpointDescriptor],
+) -> None:
+    """Remove the safety claims in each new group's text that its ops break (#4971).
+
+    Pass 1 sees only ``op_id`` / ``summary`` / ``tags``, never a risk
+    level, so the model can guess "approval-required" for writes that
+    run at once. The members are known only after Pass 2, so the check
+    runs here, on the groups this run created. Groups that already
+    existed (and texts an operator edited) are never passed in.
+    """
+    for row in rows:
+        members = [op for op in operations if op.group_id == row.id]
+        checked = drop_unsupported_claims(row.when_to_use, members)
+        if checked == row.when_to_use:
+            continue
+        _log.info(
+            "llm_grouping_unsupported_claims_dropped",
+            connector_id=triple.connector_id,
+            group_key=row.group_key,
+            member_count=len(members),
+        )
+        row.when_to_use = checked or f"Operations for {row.name}."
+
+
 async def _create_groups_and_assign(
     session: AsyncSession,
     llm_client: LlmClient,
@@ -671,6 +700,7 @@ async def _create_groups_and_assign(
         config=config,
         totals=totals,
     )
+    _check_new_group_texts(triple=triple, rows=persisted_rows, operations=operations)
     return proposals
 
 

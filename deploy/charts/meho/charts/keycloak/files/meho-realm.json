@@ -5,10 +5,17 @@
   "sslRequired": "external",
   "registrationAllowed": false,
   "resetPasswordAllowed": false,
-  "rememberMe": false,
+  "rememberMe": true,
+  "ssoSessionIdleTimeoutRememberMe": 2592000,
+  "ssoSessionMaxLifespanRememberMe": 2592000,
   "bruteForceProtected": true,
+  "ssoSessionIdleTimeout": 3600,
+  "ssoSessionMaxLifespan": 36000,
   "offlineSessionMaxLifespanEnabled": true,
   "offlineSessionMaxLifespan": 604800,
+  "webAuthnPolicyPasswordlessPasskeysEnabled": true,
+  "webAuthnPolicyPasswordlessUserVerificationRequirement": "required",
+  "webAuthnPolicyPasswordlessResidentKey": "required",
   "attributes": {
     "CreateDefaultClientScopes": "true"
   },
@@ -50,6 +57,9 @@
         ],
         "tenant_role": [
           "read_only"
+        ],
+        "meho_tenant": [
+          "${MEHO_REALM_TENANT_ID}:${MEHO_REALM_TENANT_NAME}:Readers"
         ]
       }
     },
@@ -61,6 +71,9 @@
         ],
         "tenant_role": [
           "operator"
+        ],
+        "meho_tenant": [
+          "${MEHO_REALM_TENANT_ID}:${MEHO_REALM_TENANT_NAME}:Operators"
         ]
       }
     },
@@ -72,6 +85,9 @@
         ],
         "tenant_role": [
           "operator"
+        ],
+        "meho_tenant": [
+          "${MEHO_REALM_TENANT_ID}:${MEHO_REALM_TENANT_NAME}:SA-Operators"
         ]
       }
     },
@@ -83,6 +99,9 @@
         ],
         "tenant_role": [
           "tenant_admin"
+        ],
+        "meho_tenant": [
+          "${MEHO_REALM_TENANT_ID}:${MEHO_REALM_TENANT_NAME}:Admins"
         ]
       }
     },
@@ -97,6 +116,9 @@
         ],
         "approver": [
           "true"
+        ],
+        "meho_tenant": [
+          "${MEHO_REALM_TENANT_ID}:${MEHO_REALM_TENANT_NAME}:Approvers"
         ]
       }
     },
@@ -107,6 +129,56 @@
           "true"
         ]
       }
+    }
+  ],
+  "authenticationFlows": [
+    {
+      "id": "5d2b8f3e-6a41-4c0b-9e57-3f1a8c6d2b10",
+      "alias": "meho approval sign-in",
+      "description": "Sign-in of `meho approvals approve`: always asks for the password, and for the one-time code when the person has set one up.",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-username-password-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "CONDITIONAL",
+          "priority": 20,
+          "flowAlias": "meho approval sign-in - one-time code",
+          "userSetupAllowed": false
+        }
+      ]
+    },
+    {
+      "id": "9a7c4e21-0b3d-4f68-8d15-6e2f0a9b4c73",
+      "alias": "meho approval sign-in - one-time code",
+      "description": "Asks for the one-time code when the person has set one up.",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "conditional-user-configured",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticator": "auth-otp-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "userSetupAllowed": false
+        }
+      ]
     }
   ],
   "clients": [
@@ -136,11 +208,11 @@
     {
       "clientId": "meho-cli",
       "name": "MEHO CLI",
-      "description": "Public client for `meho login` (device flow).",
+      "description": "Public client for `meho login` (device flow) and the fresh browser sign-in of `meho approvals approve` (loopback, PKCE).",
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": true,
-      "standardFlowEnabled": false,
+      "standardFlowEnabled": true,
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
@@ -148,9 +220,12 @@
       "attributes": {
         "oauth2.device.authorization.grant.enabled": "true",
         "use.refresh.tokens": "true",
-        "client.use.lightweight.access.token.enabled": "false"
+        "client.use.lightweight.access.token.enabled": "false",
+        "client.offline.session.idle.timeout": "172800"
       },
-      "redirectUris": [],
+      "redirectUris": [
+        "http://127.0.0.1:*"
+      ],
       "webOrigins": [],
       "defaultClientScopes": [
         "basic",
@@ -160,7 +235,9 @@
         "profile",
         "email"
       ],
-      "optionalClientScopes": [],
+      "optionalClientScopes": [
+        "offline_access"
+      ],
       "protocolMappers": [
         {
           "name": "audience-meho-backplane",
@@ -244,6 +321,165 @@
             "jsonType.label": "boolean",
             "aggregate.attrs": "false",
             "multivalued": "false",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "meho-tenants",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "meho_tenant",
+            "claim.name": "meho_tenants",
+            "jsonType.label": "String",
+            "aggregate.attrs": "true",
+            "multivalued": "true",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "groups-claim",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "meho-cli-approve",
+      "name": "MEHO CLI approvals",
+      "description": "Public client for the fresh browser sign-in of `meho approvals approve` (loopback, PKCE). Only its tokens can approve on the command line or REST.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": false,
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "use.refresh.tokens": "false",
+        "access.token.lifespan": "900",
+        "client.use.lightweight.access.token.enabled": "false"
+      },
+      "authenticationFlowBindingOverrides": {
+        "browser": "5d2b8f3e-6a41-4c0b-9e57-3f1a8c6d2b10"
+      },
+      "redirectUris": [
+        "http://127.0.0.1:*"
+      ],
+      "webOrigins": [],
+      "defaultClientScopes": [
+        "basic",
+        "roles",
+        "web-origins",
+        "acr",
+        "profile",
+        "email"
+      ],
+      "optionalClientScopes": [],
+      "protocolMappers": [
+        {
+          "name": "audience-meho-backplane",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "meho-backplane",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        },
+        {
+          "name": "tenant-id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "tenant_id",
+            "claim.name": "tenant_id",
+            "jsonType.label": "String",
+            "aggregate.attrs": "false",
+            "multivalued": "false",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "tenant-role",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "tenant_role",
+            "claim.name": "tenant_role",
+            "jsonType.label": "String",
+            "aggregate.attrs": "false",
+            "multivalued": "false",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "approver",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "approver",
+            "claim.name": "approver",
+            "jsonType.label": "boolean",
+            "aggregate.attrs": "false",
+            "multivalued": "false",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "platform-admin",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "platform_admin",
+            "claim.name": "platform_admin",
+            "jsonType.label": "boolean",
+            "aggregate.attrs": "false",
+            "multivalued": "false",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "meho-tenants",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "meho_tenant",
+            "claim.name": "meho_tenants",
+            "jsonType.label": "String",
+            "aggregate.attrs": "true",
+            "multivalued": "true",
             "id.token.claim": "false",
             "access.token.claim": "true",
             "introspection.token.claim": "true",
@@ -395,6 +631,22 @@
           }
         },
         {
+          "name": "meho-tenants",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "meho_tenant",
+            "claim.name": "meho_tenants",
+            "jsonType.label": "String",
+            "aggregate.attrs": "true",
+            "multivalued": "true",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
           "name": "groups-claim",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-group-membership-mapper",
@@ -528,6 +780,22 @@
             "jsonType.label": "boolean",
             "aggregate.attrs": "false",
             "multivalued": "false",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "meho-tenants",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "meho_tenant",
+            "claim.name": "meho_tenants",
+            "jsonType.label": "String",
+            "aggregate.attrs": "true",
+            "multivalued": "true",
             "id.token.claim": "false",
             "access.token.claim": "true",
             "introspection.token.claim": "true",

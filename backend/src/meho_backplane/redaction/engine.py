@@ -20,10 +20,15 @@ logging wrap the call, not patch the engine.
 **Walking strategy.** Strings are matched directly. Mappings are walked
 key-by-key; the key itself is not redacted (operator-facing keys are
 schema, not secrets), but its value is. Sequences are walked
-positionally. Anything that is not a str / Mapping / Sequence (numbers,
-booleans, None, bytes) is passed through verbatim -- regex redaction
-on numerics is nonsensical and bytes are not expected at the
-JSONFlux boundary.
+positionally. A sequence whose items are all strings (the rows of
+``linux.log.tail``, the lines of a ruleset) is matched as one text,
+the rows joined with newlines, so a secret that spans rows -- a PEM
+key is a ``BEGIN`` row, body rows and an ``END`` row -- is found as a
+whole; every row keeps its place and loses only its part of the match
+(see :func:`_apply_to_rows`). Anything that is not a str / Mapping /
+Sequence (numbers, booleans, None, bytes) is passed through verbatim
+-- regex redaction on numerics is nonsensical and bytes are not
+expected at the JSONFlux boundary.
 
 **Manifest contract.** :class:`RedactionManifestEntry` per match:
 
@@ -56,13 +61,12 @@ policy is responsible for ordering.
 from __future__ import annotations
 
 import hashlib
-import re
 from collections.abc import Mapping, Sequence
 from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from meho_backplane.redaction.patterns import get_pattern
+from meho_backplane.redaction.patterns import get_pattern, secret_spans
 from meho_backplane.redaction.policy import RedactionPolicy, RedactionRule
 
 __all__ = [
@@ -83,11 +87,6 @@ _HASH_SUFFIX_LEN: Final[int] = 12
 #: tokens it carries enough to disambiguate without leaking more than
 #: log2(16^4) = 16 bits.
 _MASK_SUFFIX_LEN: Final[int] = 4
-
-#: Name of the optional capture group that marks the secret part of a
-#: match. When a pattern defines it, only that part is replaced; the
-#: rest of the match stays in the output. See :mod:`.patterns`.
-_VALUE_GROUP: Final[str] = "value"
 
 
 class RedactionManifestEntry(BaseModel):
@@ -222,6 +221,8 @@ def _walk_and_apply(
             for key, value in node.items()
         }
     if isinstance(node, Sequence) and not isinstance(node, (str, bytes, bytearray)):
+        if len(node) > 1 and all(isinstance(item, str) for item in node):
+            return _apply_to_rows(list(node), rule, manifest, path=path, mutate=mutate)
         return [
             _walk_and_apply(
                 item,
@@ -260,50 +261,106 @@ def _apply_to_str(
     enforce mode; only the in-payload substitution is suppressed.
     """
     pattern = get_pattern(rule.pattern)
-    matches = list(pattern.finditer(leaf))
-    if not matches:
+    spans = secret_spans(pattern, leaf)
+    if not spans:
         return leaf
 
-    first = matches[0]
     manifest.append(
         RedactionManifestEntry(
             rule=rule.name,
             pattern=rule.pattern,
             action=rule.action,
-            count=len(matches),
-            span=_secret_span(first),
+            count=len(spans),
+            span=spans[0],
             reason=rule.reason,
             path=path,
         ),
     )
     if not mutate:
         return leaf
-    return pattern.sub(
-        lambda m: _substitute(rule, m),
-        leaf,
-    )
+    return _replace_spans(rule, leaf, spans)
 
 
-def _secret_span(match: re.Match[str]) -> tuple[int, int]:
-    """Return the span the engine replaces for *match*.
+def _apply_to_rows(
+    rows: list[str],
+    rule: RedactionRule,
+    manifest: list[RedactionManifestEntry],
+    *,
+    path: str,
+    mutate: bool,
+) -> list[str]:
+    """Match *rule* against *rows* as one text; rewrite each row's part of a match.
 
-    Most patterns capture only the secret, so that is the whole match.
-    A pattern that has to include variable-width context before the
-    secret (``bind_key_secret``, see :mod:`.patterns`) names the secret
-    part ``value``; only that group is replaced and reported.
+    A list of strings is usually the lines of one text. Matched row by
+    row, a secret that spans rows shows the pattern only its first row
+    (the ``BEGIN`` line of a PEM key), and the rest stays readable. So
+    the rows are joined with newlines and matched once. The list keeps
+    its length and every row keeps its place: a row inside a match is
+    rewritten for exactly the part of the match that falls into it, a
+    row outside every match is returned as is. A match inside one row
+    gives the same result as matching that row alone.
+
+    The manifest gets one entry per rewritten row, with the row's own
+    path and offsets, so the audit row reads the same as for a string
+    leaf. *mutate* works as in :func:`_apply_to_str`.
+
+    The spans come sorted and never overlap, so rows and spans are
+    walked together, each once, by index: a span that ends before the
+    current row is left behind, and a span that starts after the row's
+    end waits for a later row. The span list is never sliced or copied
+    per row. The cost grows with the number of rows plus the number of
+    matches, not their product, so a long log tail with many secrets in
+    every row is handled in about the time its rows take one by one.
     """
-    if _VALUE_GROUP in match.re.groupindex:
-        return match.span(_VALUE_GROUP)
-    return match.span()
+    pattern = get_pattern(rule.pattern)
+    spans = secret_spans(pattern, "\n".join(rows))
+    if not spans:
+        return rows
+
+    out: list[str] = []
+    offset = 0
+    first = 0
+    total = len(spans)
+    for index, row in enumerate(rows):
+        end = offset + len(row)
+        while first < total and spans[first][1] <= offset:
+            first += 1
+        row_spans: list[tuple[int, int]] = []
+        probe = first
+        while probe < total and spans[probe][0] < end:
+            start, stop = spans[probe]
+            if start < stop:
+                row_spans.append((max(start, offset) - offset, min(stop, end) - offset))
+            probe += 1
+        if row_spans:
+            manifest.append(
+                RedactionManifestEntry(
+                    rule=rule.name,
+                    pattern=rule.pattern,
+                    action=rule.action,
+                    count=len(row_spans),
+                    span=row_spans[0],
+                    reason=rule.reason,
+                    path=_join_path(path, str(index)),
+                ),
+            )
+            out.append(_replace_spans(rule, row, row_spans) if mutate else row)
+        else:
+            out.append(row)
+        offset = end + 1
+    return out
 
 
-def _substitute(rule: RedactionRule, match: re.Match[str]) -> str:
-    """Rewrite *match*: replace the secret span, keep the rest."""
-    start, end = _secret_span(match)
-    whole = match.group(0)
-    offset = match.start()
-    replacement = _replacement_for(rule, match.string[start:end])
-    return whole[: start - offset] + replacement + whole[end - offset :]
+def _replace_spans(rule: RedactionRule, leaf: str, spans: list[tuple[int, int]]) -> str:
+    """Rewrite *leaf*: replace every span, keep the rest."""
+    parts: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        parts.append(leaf[cursor:start])
+        parts.append(_replacement_for(rule, leaf[start:end]))
+        cursor = end
+    parts.append(leaf[cursor:])
+    return "".join(parts)
 
 
 def _replacement_for(rule: RedactionRule, matched: str) -> str:

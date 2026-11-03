@@ -527,3 +527,29 @@ async def test_resolve_target_by_id_soft_deleted_returns_none() -> None:
         result = await resolve_target_by_id(session, tenant_id, target_id)
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_does_not_match_by_id() -> None:
+    """``resolve_target`` stays name-or-alias only.
+
+    Only the four target routes look a target up by id (through a
+    route helper). ``call_operation`` and every other caller of
+    ``resolve_target`` still get a 404 for a target id, and the 404
+    detail carries no ``message`` key.
+    """
+    sessionmaker = get_sessionmaker()
+    tenant_id = uuid.uuid4()
+    target = _make_target(tenant_id=tenant_id, name="id-only-host", product="ssh")
+    target_id = target.id
+
+    async with sessionmaker() as session:
+        session.add(target)
+        await session.commit()
+
+    async with sessionmaker() as session:
+        with pytest.raises(TargetNotFoundError) as exc_info:
+            await resolve_target(session, tenant_id, str(target_id))
+
+    assert exc_info.value.detail["error"] == "no_target"
+    assert "message" not in exc_info.value.detail

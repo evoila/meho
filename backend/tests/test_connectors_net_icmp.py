@@ -171,9 +171,12 @@ async def test_empty_allowlist_refuses_before_socket(
     def _boom(*_a: object, **_kw: object) -> object:
         raise AssertionError("socket must not open when the probe is refused")
 
-    monkeypatch.setattr(icmp.socket, "socket", _boom)
-
-    result = await _dispatch(op_id, params)
+    # Only the dispatch runs without sockets. The shared teardown in
+    # conftest.py needs a socket pair for the event loop that closes
+    # the database engine.
+    with monkeypatch.context() as no_sockets:
+        no_sockets.setattr(icmp.socket, "socket", _boom)
+        result = await _dispatch(op_id, params)
     assert result.status == "error"
     assert result.result is None
     assert result.extras["error_code"] == "connector_probe_refused"
@@ -197,9 +200,12 @@ async def test_ping_degrades_when_icmp_socket_permission_denied(
     def _denied(*_a: object, **_kw: object) -> object:
         raise PermissionError("ping_group_range excludes this gid")
 
-    monkeypatch.setattr(icmp.socket, "socket", _denied)
-
-    result = await _dispatch("net.ping", {"host": "127.0.0.1"})
+    # Only the dispatch runs without sockets. The shared teardown in
+    # conftest.py needs a socket pair for the event loop that closes
+    # the database engine.
+    with monkeypatch.context() as no_sockets:
+        no_sockets.setattr(icmp.socket, "socket", _denied)
+        result = await _dispatch("net.ping", {"host": "127.0.0.1"})
     assert result.status == "ok", result.error
     assert result.result == {
         "available": False,
@@ -222,9 +228,12 @@ async def test_trace_degrades_when_socket_rejected(
     def _denied(*_a: object, **_kw: object) -> object:
         raise OSError("socket type not supported")
 
-    monkeypatch.setattr(icmp.socket, "socket", _denied)
-
-    result = await _dispatch("net.trace", {"host": "127.0.0.1", "max_hops": 2})
+    # Only the dispatch runs without sockets. The shared teardown in
+    # conftest.py needs a socket pair for the event loop that closes
+    # the database engine.
+    with monkeypatch.context() as no_sockets:
+        no_sockets.setattr(icmp.socket, "socket", _denied)
+        result = await _dispatch("net.trace", {"host": "127.0.0.1", "max_hops": 2})
     assert result.status == "ok", result.error
     assert result.result["completed"] is False
     assert result.result["reason"] == "trace_mechanism_unavailable"
@@ -339,9 +348,12 @@ async def test_trace_audit_row_records_literal_host(
     def _denied(*_a: object, **_kw: object) -> object:
         raise OSError("no route")
 
-    monkeypatch.setattr(icmp.socket, "socket", _denied)
-
-    result = await _dispatch("net.trace", {"host": "203.0.113.7", "port": 33434})
+    # Only the dispatch runs without sockets. The shared teardown in
+    # conftest.py needs a socket pair for the event loop that closes
+    # the database engine.
+    with monkeypatch.context() as no_sockets:
+        no_sockets.setattr(icmp.socket, "socket", _denied)
+        result = await _dispatch("net.trace", {"host": "203.0.113.7", "port": 33434})
     assert result.status == "ok", result.error
 
     sessionmaker = get_sessionmaker()

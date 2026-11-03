@@ -330,16 +330,16 @@ class DispatchChild(Protocol):
 
     Composite handlers declare the parameter against this Protocol::
 
-        async def vmware_vm_create_composite(
+        async def gh_repo_setup_composite(
             operator: Operator,
             target: Any,
             params: dict[str, Any],
             dispatch_child: DispatchChild,
         ) -> dict[str, Any]:
-            folder = await dispatch_child(
-                connector_id="vmware-rest-9.0",
-                op_id="GET:/api/vcenter/folder",
-                params={"filter.names": [params["folder_name"]]},
+            repo = await dispatch_child(
+                connector_id="gh-rest-3",
+                op_id="GET:/repos/{owner}/{repo}",
+                params={"owner": params["owner"], "repo": params["repo"]},
             )
             ...
 

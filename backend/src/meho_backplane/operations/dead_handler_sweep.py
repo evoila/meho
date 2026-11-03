@@ -37,10 +37,11 @@ tenant-scoped rows are out of scope.
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import structlog
-from sqlalchemy import delete, select
+from sqlalchemy import Row, delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
@@ -66,6 +67,9 @@ RETIRED_OPS: frozenset[RetiredOp] = frozenset(
         # vmware.host.vsan_health; the composite handlers were removed.
         RetiredOp("vmware", "9.0", "vmware-rest", "vmware.composite.host.network_uplinks"),
         RetiredOp("vmware", "9.0", "vmware-rest", "vmware.composite.host.vsan_health"),
+        # Shipped in v0.38.0; replaced by inventory.export on the inventory-1.x
+        # connector, which takes the file format as a parameter.
+        RetiredOp("migration", "1.x", "migration-assess", "migration.inventory.csv"),
     }
 )
 """Built-in typed/composite ops the sweep deletes at boot.
@@ -88,7 +92,7 @@ def handler_ref_resolves(handler_ref: str | None) -> bool:
     return True
 
 
-async def retire_dead_handler_rows() -> list[str]:
+async def retire_dead_handler_rows(session: AsyncSession | None = None) -> list[str]:
     """Delete built-in typed/composite rows listed in :data:`RETIRED_OPS`.
 
     Returns the retired ``op_id`` values, sorted, so callers and tests can
@@ -97,43 +101,18 @@ async def retire_dead_handler_rows() -> list[str]:
     listed is kept and logged once as ``dead_handler_op_kept``: it is
     either an op a newer release owns or a retirement missing from the
     list.
+
+    With *session*, the delete runs in that transaction and the caller
+    commits (the start-up registration does, #5019). Without it, the
+    function opens its own session and commits.
     """
-    async with get_sessionmaker()() as session:
-        rows = (
-            await session.execute(
-                select(
-                    EndpointDescriptor.id,
-                    EndpointDescriptor.product,
-                    EndpointDescriptor.version,
-                    EndpointDescriptor.impl_id,
-                    EndpointDescriptor.op_id,
-                    EndpointDescriptor.handler_ref,
-                ).where(
-                    EndpointDescriptor.tenant_id.is_(None),
-                    EndpointDescriptor.source_kind.in_(("typed", "composite")),
-                )
-            )
-        ).all()
-        dead = []
-        for row in rows:
-            key = RetiredOp(row.product, row.version, row.impl_id, row.op_id)
-            if key in RETIRED_OPS:
-                dead.append(row)
-            elif not handler_ref_resolves(row.handler_ref):
-                _log.warning(
-                    "dead_handler_op_kept",
-                    product=row.product,
-                    version=row.version,
-                    impl_id=row.impl_id,
-                    op_id=row.op_id,
-                    handler_ref=row.handler_ref,
-                )
-        if not dead:
-            return []
-        await session.execute(
-            delete(EndpointDescriptor).where(EndpointDescriptor.id.in_([row.id for row in dead]))
-        )
-        await session.commit()
+    if session is not None:
+        dead = await _delete_retired_rows(session)
+    else:
+        async with get_sessionmaker()() as owned_session:
+            dead = await _delete_retired_rows(owned_session)
+            if dead:
+                await owned_session.commit()
 
     for row in dead:
         _log.warning(
@@ -145,3 +124,41 @@ async def retire_dead_handler_rows() -> list[str]:
             handler_ref=row.handler_ref,
         )
     return sorted(row.op_id for row in dead)
+
+
+async def _delete_retired_rows(session: AsyncSession) -> list[Row[Any]]:
+    """Delete the listed rows in *session* without committing; return them."""
+    rows = (
+        await session.execute(
+            select(
+                EndpointDescriptor.id,
+                EndpointDescriptor.product,
+                EndpointDescriptor.version,
+                EndpointDescriptor.impl_id,
+                EndpointDescriptor.op_id,
+                EndpointDescriptor.handler_ref,
+            ).where(
+                EndpointDescriptor.tenant_id.is_(None),
+                EndpointDescriptor.source_kind.in_(("typed", "composite")),
+            )
+        )
+    ).all()
+    dead = []
+    for row in rows:
+        key = RetiredOp(row.product, row.version, row.impl_id, row.op_id)
+        if key in RETIRED_OPS:
+            dead.append(row)
+        elif not handler_ref_resolves(row.handler_ref):
+            _log.warning(
+                "dead_handler_op_kept",
+                product=row.product,
+                version=row.version,
+                impl_id=row.impl_id,
+                op_id=row.op_id,
+                handler_ref=row.handler_ref,
+            )
+    if dead:
+        await session.execute(
+            delete(EndpointDescriptor).where(EndpointDescriptor.id.in_([row.id for row in dead]))
+        )
+    return dead

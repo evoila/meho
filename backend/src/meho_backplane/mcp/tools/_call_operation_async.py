@@ -15,6 +15,9 @@ many minutes) should not hold one MCP request open for its whole run:
   ``run_id`` reads that run. While it runs the answer is ``status="pending"``
   or ``status="running"`` with ``extras.started_at``. When it is done the
   answer is the stored ``OperationResult`` of the call.
+* ``wait_seconds`` (with ``run_id``) makes the check wait up to that many
+  seconds for the run to end (#5264). An agent with no shell cannot sleep
+  between checks, so without it the agent would send check after check.
 
 No new MCP tool is added: the working surface does not change.
 """
@@ -32,7 +35,10 @@ from meho_backplane.db.models import OperationRun, OperationRunStatus
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.delivery_budget import bound_complete_response
 from meho_backplane.operations.operation_run import OperationRunNotFoundError
-from meho_backplane.operations.operation_run_service import get_operation_run_service
+from meho_backplane.operations.operation_run_service import (
+    get_operation_run_service,
+    run_result_visible_to,
+)
 from meho_backplane.settings import get_settings
 
 __all__ = ["poll_call", "submit_async_call"]
@@ -132,26 +138,44 @@ def _unknown_run(raw: str) -> McpInvalidParamsError:
 
 
 async def poll_call(
-    operator: Operator, arguments: dict[str, Any], raw_run_id: str
+    operator: Operator,
+    arguments: dict[str, Any],
+    raw_run_id: str,
+    *,
+    wait_seconds: float = 0,
 ) -> dict[str, Any]:
     """Read an async run started by :func:`submit_async_call`.
 
     Tenant-scoped like ``GET /api/v1/operations/runs/{handle}``. The run must
-    also match the ``connector_id`` and ``op_id`` of this call; an unknown,
-    other-tenant or mismatched run gives the same ``unknown_run`` error, so
-    nothing about other runs leaks.
+    also match the ``connector_id`` and ``op_id`` of this call, and must have
+    been started by the caller; an unknown, other-tenant, mismatched or
+    other-person run gives the same ``unknown_run`` error, so the answer
+    tells nothing about other runs. With ``wait_seconds`` above 0 the check
+    waits up to that long for the run to end; the run is checked against the
+    call first, so a wrong ``run_id`` is refused at once. The tool's
+    ``inputSchema`` keeps ``wait_seconds`` between 0 and the limit.
     """
     try:
         run_id = uuid.UUID(raw_run_id)
     except ValueError as exc:
         raise _unknown_run(raw_run_id) from exc
+    service = get_operation_run_service()
     try:
-        row = await get_operation_run_service().poll(operator, run_id)
+        row = await service.poll(operator, run_id)
     except OperationRunNotFoundError as exc:
         raise _unknown_run(raw_run_id) from exc
     op_id = str(arguments["op_id"])
-    if row.connector_id != arguments["connector_id"] or row.op_id != op_id:
+    if (
+        row.connector_id != arguments["connector_id"]
+        or row.op_id != op_id
+        or not run_result_visible_to(row, operator)
+    ):
         raise _unknown_run(raw_run_id)
+    if wait_seconds > 0:
+        try:
+            row = await service.wait_until_done(operator, row, wait_seconds=wait_seconds)
+        except OperationRunNotFoundError as exc:
+            raise _unknown_run(raw_run_id) from exc
 
     extras = _run_extras(row)
     if row.status == OperationRunStatus.SUCCEEDED and isinstance(row.result, dict):

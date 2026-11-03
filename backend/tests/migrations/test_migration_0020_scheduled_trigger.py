@@ -42,7 +42,7 @@ replay suite in :mod:`tests.test_migration_rollback`.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -168,6 +168,7 @@ _EXPECTED_INDEXES: frozenset[str] = frozenset(
 
 def test_upgrade_creates_scheduled_trigger_table_columns_indexes(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``upgrade 0020`` lands ``scheduled_trigger`` with the 0020 columns.
 
@@ -180,7 +181,7 @@ def test_upgrade_creates_scheduled_trigger_table_columns_indexes(
     exercised by :mod:`tests.test_migration_0025_scheduled_trigger`.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0020")
+    copy_migrated_db(cfg, "0020")
 
     assert "scheduled_trigger" in _table_names(sync_url), (
         "migration 0020 must create the scheduled_trigger table on upgrade 0020"
@@ -197,7 +198,9 @@ def test_upgrade_creates_scheduled_trigger_table_columns_indexes(
         assert expected in indexes, f"migration 0020 must create index {expected!r}"
 
 
-def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
+def test_column_nullability(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """NOT NULL columns reject NULL; nullable columns permit it.
 
     Same revision-pinning rationale as
@@ -207,7 +210,7 @@ def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
     :mod:`tests.test_migration_0025_scheduled_trigger`.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0020")
+    copy_migrated_db(cfg, "0020")
 
     not_null = (
         "tenant_id",
@@ -237,6 +240,7 @@ def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
 
 def test_downgrade_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``downgrade "0019"`` drops the table; ``upgrade 0020`` restores it.
 
@@ -249,7 +253,7 @@ def test_downgrade_then_upgrade_round_trips(
     "drop whatever's at head".
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0020")
+    copy_migrated_db(cfg, "0020")
 
     # Sanity -- the upgrade landed the table before we reverse it.
     assert "scheduled_trigger" in _table_names(sync_url)
@@ -265,7 +269,9 @@ def test_downgrade_then_upgrade_round_trips(
     assert _table_columns(sync_url, "scheduled_trigger") == _EXPECTED_COLUMNS
 
 
-def test_sibling_tables_untouched(alembic_cfg: tuple[Config, str]) -> None:
+def test_sibling_tables_untouched(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """The pre-existing ``agent_run`` + ``agent_definition`` tables survive 0020.
 
     0020 adds a new table only; it must not disturb the
@@ -273,7 +279,7 @@ def test_sibling_tables_untouched(alembic_cfg: tuple[Config, str]) -> None:
     accidental edit to the wrong table.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     tables = _table_names(sync_url)
     assert "agent_definition" in tables

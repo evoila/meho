@@ -10,7 +10,7 @@ Covers G0.5-T2 (#247) acceptance criteria for the discovery surface:
   ``MCP_RESOURCE_URI`` or, falling back, from ``BACKPLANE_URL``.
 * ``authorization_servers`` contains the configured issuer exactly as
   set, trailing slash included when the operator set one.
-* ``scopes_supported`` advertises the v0.2 scope namespace.
+* ``scopes_supported`` advertises the MCP scopes plus ``offline_access``.
 * ``bearer_methods_supported`` advertises only ``["header"]`` per the
   MCP transport spec's ban on URI-query tokens.
 
@@ -62,8 +62,9 @@ def test_well_known_returns_required_rfc9728_fields(client: TestClient) -> None:
     # MUST contain at least one issuer identifier.
     assert body["authorization_servers"] == ["https://keycloak.test/realms/meho"]
 
-    # RFC 9728 §3 recommended.
-    assert body["scopes_supported"] == ["mcp:read", "mcp:execute"]
+    # RFC 9728 §3 recommended. offline_access is listed so a client that
+    # asks for every listed scope gets a login that renews itself.
+    assert body["scopes_supported"] == ["mcp:read", "mcp:execute", "offline_access"]
 
     # MCP transport §Access Token Usage: "Access tokens MUST NOT be included
     # in the URI query string" — only header-bound tokens are accepted.

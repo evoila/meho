@@ -109,6 +109,8 @@ preview_dispatch(operator, connector_id, op_id, target, params)
         │       → status=unavailable (not_ingested)     ◄── governed tiers pass (#3198/#3312)
         ├─ validate_params → errors ? → status=error error_code=invalid_params
         │       (InvalidOpSchemaError ? → status=error error_code=invalid_op_schema, #3095)
+        ├─ params_check_errors → a problem ? → status=error error_code=invalid_params
+        │       (the op's own check from register_params_check; validator=params_check)
         ├─ resolve_connector_or_label → label ? → status=error (no_connector /
         │       ambiguous_connector)
         ├─ source_kind != 'ingested' (governed tier) ? → build_composite_preview:
@@ -153,10 +155,33 @@ mode (#4923): it returns the verdict and writes nothing — no audit row, no
 approval request, and no standing-grant use. A service principal whose
 standing grant would clear the call sees `auto-execute`, but the grant is
 not used until the real call. In sandbox mode a delete grant is consulted
-without building its evidence (that may read the target); a `destructive`
-delete therefore previews as `needs-approval` even when a delete grant
-would later clear the real call, because the preview presents no hash of
-its own. Both surfaces stay `OPERATOR`-gated at the route / tool layer.
+without building its evidence (that may read the target). A live delete
+grant on a `destructive` delete previews as `auto-execute` too (#5492);
+the reason names the grant and says that the call must send the
+`preview_hash` of this preview, because the real call checks the hash and
+the blast radius before it uses the grant. Without a live grant, the
+reason says that no delete grant covers the call and that it waits for
+approval.
+
+**Steps (#5492).** A multi-step operation checks MEHO policy again before
+each write step, so a grant on the operation alone does not let it run.
+When the gate says `auto-execute`, the preview also checks the steps the
+connector lists for the operation (`governed_subops_for`, the list behind
+`GET /api/v1/operations/governed-subops`), in `_preview_steps.py`. It
+skips plain `GET` / `HEAD` reads and runs the same decide-only gate on
+each other step, with the step gate's facts (`dangerous`, no
+`requires_approval`). A denied step makes the verdict `deny`; a step that
+would wait makes it `needs-approval`, and the reason names those steps.
+A step that is itself a multi-step operation with its own list is
+checked the same way, at every level, and each operation only once, so
+a list that loops back cannot run forever. The step check runs on every
+instance, not only in sandbox mode.
+The list has every step the operation may run, also reads sent as `POST`
+and the steps of every way the connector can do the work. The preview
+cannot tell which ones the call will run, because it never contacts the
+target. So it can say "waits" for a call that then does not need a step,
+but it never says "runs at once" for a call whose step would wait. Both
+surfaces stay `OPERATOR`-gated at the route / tool layer.
 
 ## Envelope shape
 
@@ -173,7 +198,11 @@ carries, unhashed: `safety_level` (`safe` / `caution` / `dangerous` /
 policy gate for this caller and target, and `policy_reason` (the gate's
 reason, or `null` when it gives none — a person's call that runs at once).
 The CLI prints them as one plain line, for example
-"Risk level: dangerous. This call waits for approval." Why: before #4923 a
+"Risk level: dangerous. This call waits for approval. A second person must
+approve it." The CLI adds the last sentence only for `dangerous` and
+`destructive` (#4963): the requester can never approve those. At a lower
+level the requester may approve their own call when self-approval is
+turned on (`APPROVAL_ALLOW_SELF_APPROVAL=true`). Why: before #4923 a
 preview looked the same whether the call would run at once or wait for
 approval, and an operator in a lab only found out with a second command
 (`meho operation search --op-id`).
@@ -254,7 +283,10 @@ named-pattern catalogue and policy resolution.
 - `operations._branches` — the shared request resolver.
 - `operations._lookup` — `parse_connector_id`, `lookup_descriptor`,
   `count_known_ops`.
-- `operations._validate` — `validate_params`, `policy_gate` (decide-only).
+- `operations._validate` — `validate_params`, `params_check_errors` (the
+  op's own params check, registered with `register_params_check`; the
+  dispatcher runs the same check before its policy gate), `policy_gate`
+  (decide-only).
 - `operations._handler_resolve` — `get_or_create_connector_instance`.
 - `connectors.resolve_connector_or_label` — the same yes/no/ambiguous
   connector resolution the dispatcher and the target-probe route use.

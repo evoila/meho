@@ -37,7 +37,7 @@ suite in :mod:`tests.test_migration_rollback`.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -168,6 +168,7 @@ _EXPECTED_INDEXES: frozenset[str] = frozenset(
 
 def test_upgrade_creates_agent_run_table_columns_indexes(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``upgrade "0017"`` lands the ``agent_run`` table with all columns + indexes.
 
@@ -179,7 +180,7 @@ def test_upgrade_creates_agent_run_table_columns_indexes(
     that add columns own their own drift assertions.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0017")
+    copy_migrated_db(cfg, "0017")
 
     assert "agent_run" in _table_names(sync_url), "migration 0017 must create the agent_run table"
 
@@ -194,10 +195,12 @@ def test_upgrade_creates_agent_run_table_columns_indexes(
         assert expected in indexes, f"migration 0017 must create index {expected!r}"
 
 
-def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
+def test_column_nullability(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """NOT NULL columns reject NULL; nullable columns permit it."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     not_null = (
         "tenant_id",
@@ -229,6 +232,7 @@ def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
 
 def test_downgrade_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``downgrade "0016"`` drops the table; ``upgrade "0017"`` restores it.
 
@@ -240,7 +244,7 @@ def test_downgrade_then_upgrade_round_trips(
     later migrations layer on top.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0017")
+    copy_migrated_db(cfg, "0017")
 
     # Sanity -- the upgrade landed the table before we reverse it.
     assert "agent_run" in _table_names(sync_url)
@@ -254,14 +258,16 @@ def test_downgrade_then_upgrade_round_trips(
     assert _table_columns(sync_url, "agent_run") == _EXPECTED_COLUMNS
 
 
-def test_audit_log_untouched(alembic_cfg: tuple[Config, str]) -> None:
+def test_audit_log_untouched(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """The pre-existing ``audit_log`` table + its 0014 column survive 0017.
 
     0017 adds a new table only; it must not disturb ``audit_log``. Guards
     against an accidental edit to the wrong table.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     audit_columns = _table_columns(sync_url, "audit_log")
     assert "agent_session_id" in audit_columns, (

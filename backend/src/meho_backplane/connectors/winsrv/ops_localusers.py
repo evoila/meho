@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors._shared.pwsh import ps_single_quote, pwsh_run
 from meho_backplane.connectors.winsrv.ops import SSH_TRANSPORT_NOTE, WinsrvOp, normalise_json_rows
+from meho_backplane.operations import register_plain_fields
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -408,3 +409,7 @@ LOCALUSER_OPS: tuple[WinsrvOp, ...] = (
         },
     ),
 )
+
+
+# ISO dates about each user's password, never the password.
+register_plain_fields("winsrv.localuser.list", ("PasswordLastSet", "PasswordExpires"))

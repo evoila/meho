@@ -435,7 +435,19 @@ What the code does:
   (no request field, header or token claim can set it; otherwise
   `DeleteGrantConsoleOnlyError`, HTTP 403 `delete_grant_console_only` on
   REST), and an expiry within 30 days (`SANDBOX_DELETE_GRANT_MAX_DAYS`).
-  The CLI refuses a delete op before it calls the server. The console
+  **The REST setting (#5251).** With `MEHO_SANDBOX_DELETE_GRANTS_FROM_API`
+  on (a `Settings` field, read at boot only, default `false`; chart value
+  `sandboxMode.deleteGrantsFromApi`), REST and the CLI may create a delete
+  grant too: `POST /api/v1/service-principals/grants` passes
+  `by_tenant_admin`, and an `operator` without `tenant_admin` gets
+  `DeleteGrantNeedsTenantAdminError`, HTTP 403
+  `grants_require_tenant_admin`. A machine token still gets 403 before the
+  route runs. The checks are the console's (`_review`). The mode check
+  runs first, so outside sandbox mode the setting changes nothing. The
+  CLI sends a delete op to the server and shows its answer, because only
+  the server knows the setting. The audit row of `service_grant.create`
+  carries `payload.created_via` (`console` or `api`). Renewal stays in
+  the console; a script renews by revoking and creating again. The console
   route itself runs only for a tenant admin who is a person
   (`is_human_principal`): a console session that holds an agent, service
   or runner token gets 403 `human_principal_required`, as on REST.
@@ -467,12 +479,19 @@ What the code does:
   so a `destructive` step or child stays refused. A delete below
   `destructive` needs no hash. With no delete grant the call falls through
   to the rules above, so an ordinary grant never changes its verdict.
+- **Role checks in a handler.** A service login has the `operator` role
+  on purpose. An op whose handler asks for `tenant_admin` must let a
+  service principal through when its call runs at once in sandbox mode,
+  or the delete grant cannot help. `targets.remove` does this (#5480): the
+  handler checks `sandbox_mode_active()`, the principal kind and the
+  gate's verdict (`policy_decision_var` is `auto-execute`). See
+  [`targets.md`](targets.md#removing-a-target-targetsremove).
 - **The grant-use row.** `payload.delete_grant = true`, plus
   `preview_hash` and `blast_radius` for a `destructive` call, or
   `proposed_effect` for a delete below it. A step's row names its
   multi-step operation through `parent_audit_id`.
-- **The step list.** `GET /api/v1/operations/governed-subops` marks delete
-  steps grantable with the mode on.
+- **The step list.** `GET /api/v1/operations/governed-subops` (CLI:
+  `meho operation subops`) marks delete steps grantable with the mode on.
 - **Display.** `/ready` has a top-level `sandbox_mode` (`"on"` / `"off"`)
   for every caller and `features.approval_queue.sandbox_mode`;
   `GET /api/v1/health` has `sandbox_mode`; `meho status` prints one line
@@ -481,7 +500,8 @@ What the code does:
 - **The audit mark.** `audit_log.sandbox_mode` (boolean, not null,
   database default `false`). One model default reads the process flag, so
   every writer stamps it.
-- **Chart.** `sandboxMode.enabled` and `sandboxMode.confirmHost`; the
+- **Chart.** `sandboxMode.enabled`, `sandboxMode.confirmHost` and
+  `sandboxMode.deleteGrantsFromApi` (rendered only with `enabled`); the
   render fails when the host is not `ingress.host`; the notes warn.
 
 Tests: `test_sandbox_mode_boot.py`, `test_sandbox_mode_grants.py`,
@@ -505,7 +525,7 @@ supported alternative:
 
 | Verb | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/v1/operations/governed-subops?op_id=<composite>&connector_id=<id>` | List the governed child ops a composite may dispatch (role: `operator`). |
+| `GET` | `/api/v1/operations/governed-subops?op_id=<composite>&connector_id=<id>` | List the governed child ops a composite may dispatch (role: `operator`). CLI: `meho operation subops <composite> [--connector <id>]`. |
 
 **Which connector id a step grant names.** Ask the route with the
 `connector_id` of the target's connector, and write each step grant with the
@@ -520,9 +540,9 @@ descriptor), a `grantable` flag, and an `ungrantable_reason`. The child set
 is **derived from the manifests** — a connector registers, per composite op
 id, the manifest tuples it fans out to via
 `operations.governed_subops.register_governed_subops`
-(the vmware-rest map lives in
-`connectors/vmware_rest/composites/_governed_subops.py`, referencing the
-`_SUB_OPS_*` constants, never re-typing them) — not hand-maintained. A
+(for vmware-rest, each composite row carries its own list in
+`governed_subops`, referencing the `_SUB_OPS_*` constants, never re-typing
+them; `connectors/vmware_rest/composites/_register.py` reads the rows) — not hand-maintained. A
 **delete-shaped** rollback / delete leg (e.g. `vm.create`'s
 `DELETE:/vcenter/vm/{vm}`, which rides `_SUB_OPS_VM_CREATE`, or
 `vm.destroy`'s VI-JSON step `POST:/VirtualMachine/{moId}/Destroy_Task`,
@@ -624,8 +644,8 @@ on one of these routers has no matching CLI verb in that reference.
   (selector fields + mutual-exclusion validator).
 - `operations/governed_subops.py` (#3349) — connector-agnostic discovery
   registry + `build_governed_subops_response` + grantability classifier;
-  `connectors/vmware_rest/composites/_governed_subops.py` populates it from
-  the manifests.
+  `connectors/vmware_rest/composites/_register.py` populates it from the
+  `governed_subops` field of the composite rows.
 - `api/v1/operations.py` — `GET /api/v1/operations/governed-subops` route.
 - `operations/_validate.py` — `_non_agent_verdict` (safety_level consult +
   grant consultation + #3349 null-target hint via `_service_grant_verdict`),

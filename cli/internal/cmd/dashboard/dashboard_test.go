@@ -754,6 +754,7 @@ func TestRunDeleteHappyPath(t *testing.T) {
 			}
 			capturedPath = r.URL.Path
 			capturedQuery = r.URL.RawQuery
+			w.Header().Set("Meho-Audit-Id", "99999999-8888-7777-6666-555555555555")
 			w.WriteHeader(http.StatusNoContent)
 		},
 	)
@@ -778,12 +779,16 @@ func TestRunDeleteHappyPath(t *testing.T) {
 	if !strings.Contains(stdout.String(), "deleted dashboard "+stubDashboardID) {
 		t.Errorf("expected deleted-prose; got %q", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "audit receipt: 99999999-8888-7777-6666-555555555555\n") {
+		t.Errorf("expected audit receipt line; got %q", stdout.String())
+	}
 }
 
 func TestRunDeleteJSONOutput(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/checks/dashboards/"+stubDashboardID,
 		func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Meho-Audit-Id", "99999999-8888-7777-6666-555555555555")
 			w.WriteHeader(http.StatusNoContent)
 		},
 	)
@@ -808,6 +813,9 @@ func TestRunDeleteJSONOutput(t *testing.T) {
 	}
 	if got["dashboard_id"] != stubDashboardID {
 		t.Errorf("expected dashboard_id echoed; got %+v", got)
+	}
+	if got["audit_id"] != "99999999-8888-7777-6666-555555555555" {
+		t.Errorf("expected audit_id from the Meho-Audit-Id header; got %+v", got)
 	}
 }
 

@@ -149,6 +149,7 @@ def test_plan_names_keycloak_the_realm_file_and_the_first_login_secret() -> None
     assert (plan.admin_username, plan.approver_username) == ("admin", "approver")
     assert plan.ci.enabled is False
     assert plan.ci.secret_name == f"{_RELEASE}-core-ci-login"
+    assert plan.tenants == ()
 
     custom = _job(
         _render(
@@ -168,6 +169,26 @@ def test_plan_names_keycloak_the_realm_file_and_the_first_login_secret() -> None
     assert (plan.admin_username, plan.approver_username) == ("root-person", "second")
     assert plan.ci.enabled is True
     assert plan.ci.tenant_id == _TENANT
+
+
+def test_extra_tenants_reach_the_plan_and_the_first_tenant_name_the_env() -> None:
+    lab_b = "5d0f7a3e-1c2b-4e8d-9f6a-7b3c2d1e0f9a"
+    job = _job(
+        _render(
+            *_CORE_ON,
+            "--set",
+            "coreKeycloak.tenantName=lab-a",
+            "--set",
+            "coreKeycloak.tenants[0].name=lab-b",
+            "--set",
+            f"coreKeycloak.tenants[0].id={lab_b}",
+        )
+    )
+    assert job is not None
+    env = _env(job)
+    assert env["MEHO_REALM_TENANT_NAME"]["value"] == "lab-a"
+    plan = Plan.model_validate_json(env["MEHO_CORE_KEYCLOAK_PLAN"]["value"])
+    assert [(t.name, str(t.id)) for t in plan.tenants] == [("lab-b", lab_b)]
 
 
 def test_secrets_come_by_reference_and_the_placeholders_have_values() -> None:
@@ -204,6 +225,7 @@ def test_secrets_come_by_reference_and_the_placeholders_have_values() -> None:
     }
     assert env["MEHO_REALM_PUBLIC_URL"]["value"] == "https://meho.test"
     assert env["MEHO_REALM_TENANT_ID"]["value"] == _TENANT
+    assert env["MEHO_REALM_TENANT_NAME"]["value"] == "main"
     assert env["POD_NAMESPACE"]["valueFrom"] == {"fieldRef": {"fieldPath": "metadata.namespace"}}
     placeholders = set(re.findall(r"\$\{([^}]*)\}", _REALM_FILE.read_text()))
     assert placeholders
@@ -303,6 +325,101 @@ def test_notes_name_the_first_login_secret_and_the_command_but_no_value() -> Non
     ids=["ci-needs-tenant", "ci-bad-tenant", "empty-username", "unknown-key"],
 )
 def test_bad_values_fail_at_render(extra: list[str], message: str) -> None:
+    result = _run(*_CORE_ON, *extra)
+    assert result.returncode != 0
+    assert message in result.stderr, result.stderr
+
+
+# --- The company login (#4592) -----------------------------------------------
+
+_DISCOVERY = "https://idp.test/application/o/meho/.well-known/openid-configuration"
+_COMPANY_ON = [
+    "--set",
+    "coreKeycloak.companyLogin.enabled=true",
+    "--set",
+    f"coreKeycloak.companyLogin.discoveryUrl={_DISCOVERY}",
+    "--set",
+    "coreKeycloak.companyLogin.clientId=meho-keycloak",
+    "--set",
+    "coreKeycloak.companyLogin.clientSecret.secretName=company-login",
+]
+
+
+def test_company_login_off_adds_nothing_to_the_job() -> None:
+    job = _job(_render(*_CORE_ON))
+    assert job is not None
+    env = _env(job)
+    assert "MEHO_COMPANY_LOGIN_CLIENT_SECRET" not in env
+    raw = env["MEHO_CORE_KEYCLOAK_PLAN"]["value"]
+    assert "company_login" not in raw
+    assert Plan.model_validate_json(raw).company_login.enabled is False
+
+
+def test_company_login_plan_and_secret_by_reference() -> None:
+    job = _job(
+        _render(
+            *_CORE_ON,
+            *_COMPANY_ON,
+            "--set",
+            "coreKeycloak.companyLogin.clientSecret.secretKey=secret",
+            "--set",
+            "coreKeycloak.companyLogin.groupMap.Ops=MEHO-Operators",
+            "--set",
+            "coreKeycloak.companyLogin.groupMap.Readers=MEHO-Readers",
+            "--set",
+            "coreKeycloak.companyLogin.autoRedirect=false",
+        )
+    )
+    assert job is not None
+    env = _env(job)
+    assert env["MEHO_COMPANY_LOGIN_CLIENT_SECRET"] == {
+        "name": "MEHO_COMPANY_LOGIN_CLIENT_SECRET",
+        "valueFrom": {"secretKeyRef": {"name": "company-login", "key": "secret"}},
+    }
+    plan = Plan.model_validate_json(env["MEHO_CORE_KEYCLOAK_PLAN"]["value"]).company_login
+    assert plan.enabled is True
+    assert plan.alias == "company"
+    assert plan.display_name == "Company login"
+    assert plan.discovery_url == _DISCOVERY
+    assert plan.client_id == "meho-keycloak"
+    assert plan.scopes == "openid profile email"
+    assert plan.groups_claim == "groups"
+    assert plan.group_map == {"Ops": "MEHO-Operators", "Readers": "MEHO-Readers"}
+    assert plan.auto_redirect is False
+
+
+def test_notes_print_the_redirect_address_for_the_company_login() -> None:
+    notes = (_CHART_DIR / "templates" / "NOTES.txt").read_text(encoding="utf-8")
+    block = notes[notes.index("Company login (built-in Keycloak)") :]
+    assert (
+        "https://{{ .Values.coreKeycloak.hostname }}/auth/realms/meho/broker/"
+        "{{ .Values.coreKeycloak.companyLogin.alias }}/endpoint"
+    ) in block
+    assert "autoRedirect=false" in block
+    head = notes[: notes.index("Company login (built-in Keycloak)")]
+    assert head.rstrip().endswith("{{- if .Values.coreKeycloak.companyLogin.enabled }}")
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (["--set", "coreKeycloak.companyLogin.enabled=true"], "discoveryUrl"),
+        (
+            [*_COMPANY_ON, "--set", "coreKeycloak.companyLogin.clientSecret.secretName="],
+            "secretName",
+        ),
+        ([*_COMPANY_ON, "--set", "coreKeycloak.companyLogin.clientId="], "clientId"),
+        (
+            [*_COMPANY_ON, "--set", "coreKeycloak.companyLogin.discoveryUrl=http://idp.test/x"],
+            "discoveryUrl",
+        ),
+        ([*_COMPANY_ON, "--set", "coreKeycloak.companyLogin.alias=a b"], "alias"),
+        ([*_COMPANY_ON, "--set", "coreKeycloak.companyLogin.scopes=profile email"], "scopes"),
+        ([*_COMPANY_ON, "--set", "coreKeycloak.companyLogin.other=x"], "other"),
+    ],
+    ids=["needs-url", "needs-secret", "needs-client", "https-only", "alias", "openid", "unknown"],
+)
+def test_bad_company_login_values_fail_at_render(extra: list[str], message: str) -> None:
     result = _run(*_CORE_ON, *extra)
     assert result.returncode != 0
     assert message in result.stderr, result.stderr

@@ -32,7 +32,7 @@ how many later migrations land.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -141,10 +141,11 @@ _EXPECTED_INDEXES: frozenset[str] = frozenset(
 
 def test_upgrade_creates_event_outbox_table_columns_indexes(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``upgrade 0027`` lands ``event_outbox`` with the documented schema."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0027")
+    copy_migrated_db(cfg, "0027")
 
     assert "event_outbox" in _table_names(sync_url), (
         "migration 0027 must create the event_outbox table on upgrade"
@@ -161,10 +162,12 @@ def test_upgrade_creates_event_outbox_table_columns_indexes(
         assert expected in indexes, f"migration 0027 must create index {expected!r}"
 
 
-def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
+def test_column_nullability(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """NOT NULL columns reject NULL; drain-managed columns permit it."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0027")
+    copy_migrated_db(cfg, "0027")
 
     not_null = (
         "tenant_id",
@@ -186,10 +189,11 @@ def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
 
 def test_downgrade_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``downgrade "0026"`` drops the table; ``upgrade 0027`` restores it."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0027")
+    copy_migrated_db(cfg, "0027")
     assert "event_outbox" in _table_names(sync_url)
 
     command.downgrade(cfg, "0026")

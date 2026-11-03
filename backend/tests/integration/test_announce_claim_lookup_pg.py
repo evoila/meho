@@ -42,7 +42,7 @@ pytestmark = pytest.mark.asyncio
 _TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
 _ME = "agent-op"
 _VC = "vc-lab-1"
-_OP = "POST:/content/library/item"
+_OP_CLASS = "write"
 _INDEX = "agent_announcement_tenant_principal_created_at_idx"
 _PEERS = 40
 _ROWS_PER_PEER = 150
@@ -104,7 +104,7 @@ async def _lookup_select() -> tuple[str, Any]:
 
     event.listen(sync_engine, "before_cursor_execute", _capture)
     try:
-        assert await announce_claim_gap(_operator(), op_id=_OP, target_name=_VC) is None
+        assert await announce_claim_gap(_operator(), op_class=_OP_CLASS, target_name=_VC) is None
     finally:
         event.remove(sync_engine, "before_cursor_execute", _capture)
     assert len(sent) == 1, sent

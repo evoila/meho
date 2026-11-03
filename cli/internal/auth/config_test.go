@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -64,5 +65,44 @@ func TestLoadConfigMissingReturnsSentinel(t *testing.T) {
 	_, err := LoadConfigAt(missing)
 	if !errors.Is(err, ErrConfigNotFound) {
 		t.Errorf("expected ErrConfigNotFound, got %v", err)
+	}
+}
+
+// TestConfigRoundTripTenant pins the stored tenant shape written by
+// `meho tenants use` (#5241): {"tenant": {"id", "name"}} next to the
+// backplane address, and no "tenant" key when none is chosen.
+func TestConfigRoundTripTenant(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	want := Config{
+		BackplaneURL: "https://meho.example.test",
+		Tenant:       &Tenant{ID: "3f0c5a52-0000-4000-8000-000000000001", Name: "lab-b"},
+	}
+	if err := SaveConfigAt(path, want); err != nil {
+		t.Fatalf("SaveConfigAt: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(raw), `"tenant": {`) || !strings.Contains(string(raw), `"name": "lab-b"`) {
+		t.Errorf("config file = %s; want a tenant object with id and name", raw)
+	}
+	got, err := LoadConfigAt(path)
+	if err != nil {
+		t.Fatalf("LoadConfigAt: %v", err)
+	}
+	if got.Tenant == nil || *got.Tenant != *want.Tenant || got.BackplaneURL != want.BackplaneURL {
+		t.Errorf("roundtrip mismatch: got %+v want %+v", got, want)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if err := SaveConfigAt(path, Config{BackplaneURL: "https://x"}); err != nil {
+		t.Fatalf("SaveConfigAt: %v", err)
+	}
+	raw, _ = os.ReadFile(path)
+	if strings.Contains(string(raw), "tenant") {
+		t.Errorf("config without a tenant must not write the key: %s", raw)
 	}
 }

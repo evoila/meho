@@ -1,0 +1,1 @@
+docs/loki-3.7/loki-http-api.md

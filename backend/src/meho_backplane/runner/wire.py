@@ -35,6 +35,15 @@ The check guards only the version number. The models still drop unknown
 fields without a message (the pydantic default), so a change a runner must
 not silently ignore -- a new field it has to act on, a changed meaning --
 needs a ``SCHEMA_VERSION`` bump.
+
+Next to its wire version the runner sends the digest of its connector
+packages (:mod:`meho_backplane.runner.package_set`, #5038). A work item for
+an operation that a connector package provides names the package set it
+needs in :attr:`RunnerWorkItem.package_set`. This field did not need a
+``SCHEMA_VERSION`` bump: a runner that sends no digest counts as a runner
+without connector packages, so the central MEHO never assigns it such an
+item, and an older runner never sees the field set.
+
 The per-assignment :attr:`RunnerAssignment.assignment_version` is a
 separate concern: an **opaque content digest** whose contract (a sha256
 over the canonical materialised payload) is owned by #2499. The runner
@@ -155,7 +164,15 @@ class ResolvedTargetDescriptor(BaseModel):
     verify_tls: bool = True
     tls_ca_pin: str | None = None
     tls_server_name: str | None = None
+    # #3711. Secret field names map the credential reader applies to the
+    # target's own secret. Field names only, never a value.
+    secret_field_map: dict[str, str] = Field(default_factory=dict)
     extras: dict[str, Any] = Field(default_factory=dict)
+    # When the target row last changed (#3879). The runner compares it with
+    # the value it saw last and drops the login it keeps for the target when
+    # the row changed. ``None`` from an older gateway: never treated as a
+    # change.
+    updated_at: datetime | None = None
 
 
 class RunnerPrincipal(BaseModel):
@@ -196,6 +213,13 @@ class RunnerWorkItem(BaseModel):
     path materialises only ``safe`` ops and never signs them) -- signing is
     a write-tier property, so their absence on a ``safe`` item is correct,
     not a missing field.
+
+    Connector packages (#5038): ``package_set`` is the digest of the
+    connector package set the item needs
+    (:func:`~meho_backplane.runner.package_set.package_set_digest`). The
+    central MEHO sets it only when a connector package provides the op, and
+    the runner refuses the item when its own digest differs. ``None`` for an
+    op built into MEHO.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -212,6 +236,7 @@ class RunnerWorkItem(BaseModel):
     target_descriptor: ResolvedTargetDescriptor | None = None
     signature: str | None = None
     expires_at: datetime | None = None
+    package_set: str | None = None
 
 
 class RunnerAssignment(BaseModel):

@@ -44,6 +44,7 @@ is mocked (its behaviour is covered by the service + REST suites).
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -56,6 +57,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -63,6 +65,7 @@ from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import (
     ApprovalRequest,
     ApprovalRequestStatus,
+    AuditLog,
     Target,
     Tenant,
 )
@@ -202,8 +205,11 @@ def _seed_request(
     expires_at: datetime | None = None,
     resumed_at: datetime | None = None,
     resume_result: dict[str, object] | None = None,
+    release_id: str | None = None,
     withdrawn_at: datetime | None = None,
     withdraw_reason: str | None = None,
+    created_at: datetime | None = None,
+    preview_hash: str | None = None,
 ) -> uuid.UUID:
     """Insert one ``approval_request`` row; return its id."""
     rid = request_id or uuid.uuid4()
@@ -236,12 +242,14 @@ def _seed_request(
                     reviewed_by=reviewed_by,
                     decided_at=decided_at,
                     work_ref=work_ref,
-                    created_at=datetime(2026, 6, 15, 12, 0, tzinfo=UTC),
+                    created_at=created_at or datetime(2026, 6, 15, 12, 0, tzinfo=UTC),
                     expires_at=stored_expires_at,
                     resumed_at=resumed_at,
                     resume_result=resume_result,
+                    release_id=release_id,
                     withdrawn_at=withdrawn_at,
                     withdraw_reason=withdraw_reason,
+                    preview_hash=preview_hash,
                 ),
             )
         return rid
@@ -304,6 +312,9 @@ def _operator(
     sub: str = _REVIEWER_SUB,
     role: TenantRole = TenantRole.OPERATOR,
     approver: bool = False,
+    sign_in_age: int | None = 0,
+    acr: str | None = "1",
+    sid: str = "kc-sid-1",
 ) -> Operator:
     """Build an :class:`Operator` the patched ``_resolve_operator`` returns.
 
@@ -311,13 +322,22 @@ def _operator(
     ``_operator_from_claims`` lifts from the JWT ``approver`` claim, so a
     dedicated approver principal is expressed as ``role=READ_ONLY`` +
     ``approver=True`` — the parity fixture #3282 pins for the console BFF.
+
+    By default the session's sign-in is from just now and asked for the
+    password (``acr`` ``"1"``), so an approve passes the sign-in check.
+    ``sign_in_age`` is how many seconds ago the person signed in; ``None``
+    means the token has no ``auth_time``.
     """
+    auth_time = None if sign_in_age is None else int(time.time()) - sign_in_age
     return Operator(
         sub=sub,
         raw_jwt="header.payload.signature",
         tenant_id=tenant_id,
         tenant_role=role,
         approver=approver,
+        auth_time=auth_time,
+        acr=acr,
+        sid=sid,
     )
 
 
@@ -433,6 +453,21 @@ def test_panel_lists_pending_requests() -> None:
     assert f'hx-get="/ui/approvals/{rid}"' in body
     # Fragment, not a full page.
     assert "<!doctype html>" not in body.lower()
+
+
+def test_page_heading_names_the_current_tenant() -> None:
+    """The full approvals page names the current tenant, not "this tenant" (#5238)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert '<span class="font-mono" data-tenant>Tenant tenant-a</span>' in body
+    assert "history for this tenant" not in body
 
 
 def test_panel_empty_state() -> None:
@@ -624,7 +659,7 @@ def test_detail_modal_reviewer_context_omits_secret_param() -> None:
         request_id=rid,
         op_id="POST:/vcenter/vm/{vm}/power?action=start",
         target_id=target_id,
-        params={"password": "hunter2", "token": "sk-abcdef0123456789"},
+        params={"password": "hunter2", "token": "sk-abcdef0123456789"},  # gitleaks:allow
     )
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
@@ -744,13 +779,234 @@ def test_approve_through_bff_decides_and_redispatches() -> None:
     resume_mock.assert_awaited_once()
 
 
+def _decision_approval_auth(request_id: uuid.UUID) -> object:
+    """Read ``payload["approval_auth"]`` off the request's decision audit row."""
+
+    async def _do() -> object:
+        async with get_sessionmaker()() as session:
+            rows = (
+                await session.execute(
+                    select(AuditLog.payload).where(AuditLog.path == "approval.decision")
+                )
+            ).scalars()
+            for payload in rows:
+                if payload.get("approval_request_id") == str(request_id):
+                    return payload.get("approval_auth")
+        raise AssertionError("no approval.decision audit row")
+
+    return asyncio.run(_do())
+
+
+_SIGN_IN_URL = "/ui/auth/login?return_to=%2Fui%2Fapprovals&amp;fresh_sign_in=1"
+
+
+def _post_decision(
+    operator: Operator,
+    rid: uuid.UUID,
+    *,
+    action: str = "approve",
+    resume_mock: AsyncMock | None = None,
+) -> object:
+    """POST an approve or reject through the console as *operator*."""
+    session_id = _seed_session_sync(tenant_id=operator.tenant_id, operator_sub=operator.sub)
+    csrf = _csrf_token(session_id)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, resume_mock or AsyncMock(return_value=_dispatch_result())),
+        ):
+            return client.post(
+                f"/ui/approvals/{rid}/{action}",
+                data={"reason": "checked"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+
+def _assert_sign_in_asked(response: object, rid: uuid.UUID, resume_mock: AsyncMock) -> None:
+    """The approve was refused: the modal asks for a new sign-in, the row waits."""
+    assert response.status_code == 200, response.text  # type: ignore[attr-defined]
+    text = response.text  # type: ignore[attr-defined]
+    assert 'data-testid="approval-fresh-sign-in"' in text
+    assert "Sign in again to approve" in text
+    assert f'href="{_SIGN_IN_URL}"' in text
+    assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
+    resume_mock.assert_not_awaited()
+
+
+def test_approve_through_bff_records_the_web_sign_in() -> None:
+    """A console approve with a recent sign-in passes; the audit row names the web sign-in.
+
+    The proof is the console session's own sign-in: ``auth_time`` from just
+    now and an ``acr`` that says the password was asked. The audit block
+    carries the same fields as a REST approve, with ``channel`` ``web``.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, sign_in_age=30)
+
+    response = _post_decision(operator, rid)
+
+    assert response.status_code == 200, response.text  # type: ignore[attr-defined]
+    assert _request_status(rid) == ApprovalRequestStatus.APPROVED.value
+    recorded = _decision_approval_auth(rid)
+    assert isinstance(recorded, dict)
+    assert recorded["channel"] == "web"
+    assert recorded["method"] == "fresh_sign_in"
+    assert recorded["auth_time"] == operator.auth_time
+    assert recorded["acr"] == "1"
+    assert len(recorded["sign_in_key"]) == 32
+    assert "single_use" not in recorded
+
+
+def test_approve_through_bff_refuses_an_old_sign_in_and_offers_a_new_one() -> None:
+    """A sign-in from ten days ago cannot approve; the modal links to a new sign-in.
+
+    The request stays pending and nothing runs. The link is the console
+    login with ``fresh_sign_in=1``, which asks for the password again and
+    comes back to the approvals page.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, sign_in_age=10 * 24 * 3600)
+    resume_mock = AsyncMock(return_value=_dispatch_result())
+
+    response = _post_decision(operator, rid, resume_mock=resume_mock)
+
+    _assert_sign_in_asked(response, rid, resume_mock)
+
+
+@pytest.mark.parametrize(
+    ("sign_in_age", "acr"),
+    [
+        pytest.param(901, "1", id="just-outside-the-window"),
+        pytest.param(None, "1", id="no-auth-time"),
+        pytest.param(5, None, id="no-acr"),
+        pytest.param(5, "0", id="acr-0-no-password-asked"),
+    ],
+)
+def test_approve_through_bff_needs_a_recent_sign_in_that_asked_for_the_password(
+    sign_in_age: int | None, acr: str | None
+) -> None:
+    """The console applies the same sign-in checks as REST: age, ``auth_time`` and ``acr``."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, sign_in_age=sign_in_age, acr=acr)
+    resume_mock = AsyncMock(return_value=_dispatch_result())
+
+    response = _post_decision(operator, rid, resume_mock=resume_mock)
+
+    _assert_sign_in_asked(response, rid, resume_mock)
+
+
+def _seed_destructive_request() -> uuid.UUID:
+    """A pending ``destructive`` request with its preview binding."""
+    return _seed_request(
+        tenant_id=_TENANT_A,
+        principal_sub=_REQUESTER_SUB,
+        op_id="vsphere.vm.destroy",
+        proposed_effect={
+            "op_id": "vsphere.vm.destroy",
+            "connector_id": "vsphere-1.x",
+            "safety_level": "destructive",
+        },
+        preview_hash="preview-hash",
+    )
+
+
+def test_approve_through_bff_destructive_needs_a_sign_in_of_its_own() -> None:
+    """In the console too, a destructive request needs a sign-in that approved nothing else.
+
+    One sign-in approves a plain request. The same sign-in then cannot
+    approve a destructive request; a new sign-in can, and its audit row
+    says ``single_use``.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    plain = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    destructive = _seed_destructive_request()
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, sign_in_age=20, sid="kc-sid-a")
+
+    assert _post_decision(operator, plain).status_code == 200  # type: ignore[attr-defined]
+    assert _request_status(plain) == ApprovalRequestStatus.APPROVED.value
+
+    resume_mock = AsyncMock(return_value=_dispatch_result())
+    response = _post_decision(operator, destructive, resume_mock=resume_mock)
+    _assert_sign_in_asked(response, destructive, resume_mock)
+
+    new_sign_in = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, sign_in_age=5, sid="kc-sid-b")
+    assert _post_decision(new_sign_in, destructive).status_code == 200  # type: ignore[attr-defined]
+    assert _request_status(destructive) == ApprovalRequestStatus.APPROVED.value
+    recorded = _decision_approval_auth(destructive)
+    assert isinstance(recorded, dict)
+    assert recorded["single_use"] is True
+
+
+def test_approve_through_bff_destructive_keeps_its_own_age_limit() -> None:
+    """A 400-second-old sign-in is inside the window but too old for a destructive request."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    destructive = _seed_destructive_request()
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, sign_in_age=400)
+    resume_mock = AsyncMock(return_value=_dispatch_result())
+
+    response = _post_decision(operator, destructive, resume_mock=resume_mock)
+
+    _assert_sign_in_asked(response, destructive, resume_mock)
+
+
+def test_detail_modal_offers_a_sign_in_when_the_sign_in_is_too_old() -> None:
+    """With an old sign-in the modal shows "Sign in to approve" in place of Approve.
+
+    Deny stays: a reject needs no new sign-in.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, sign_in_age=2 * 3600)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    assert 'data-action="sign-in-to-approve"' in response.text
+    assert f'href="{_SIGN_IN_URL}"' in response.text
+    assert 'data-testid="approval-sign-in-note"' in response.text
+    assert 'data-action="approve"' not in response.text
+    assert 'data-confirm="approve"' not in response.text
+    assert 'data-action="reject"' in response.text
+
+
+def test_detail_modal_with_a_recent_sign_in_has_no_sign_in_link() -> None:
+    """A recent sign-in sees the normal Approve button and no sign-in note."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, sign_in_age=60)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    assert 'data-action="approve"' in response.text
+    assert 'data-action="sign-in-to-approve"' not in response.text
+    assert 'data-testid="approval-sign-in-note"' not in response.text
+
+
 def test_reject_through_bff_decides_without_redispatch() -> None:
-    """Deny POSTs to the BFF, flips the row to rejected, and does NOT re-dispatch."""
+    """Deny POSTs to the BFF, flips the row to rejected, and does NOT re-dispatch.
+
+    A reject needs no new sign-in: this session's token has no ``auth_time``
+    at all, as on REST.
+    """
     _seed_tenant(_TENANT_A, "tenant-a")
     rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
     session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
     csrf = _csrf_token(session_id)
-    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, sign_in_age=None, acr=None)
     resume_mock = AsyncMock(return_value=_dispatch_result())
 
     with respx.mock(assert_all_called=False):
@@ -1723,6 +1979,43 @@ def test_detail_modal_decided_row_is_read_only() -> None:
     assert f'hx-post="/ui/approvals/{rid}/reject"' not in body
 
 
+def test_detail_modal_shows_release_changed_reason_and_release() -> None:
+    """A request ended by an update says so and tells the requester to ask again (#5030).
+
+    Only the start-up expiry ends a request before its deadline, so an
+    expired row with ``decided_at < expires_at`` reads as "MEHO was updated".
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="release.op",
+        status_value=ApprovalRequestStatus.EXPIRED.value,
+        decided_at=datetime(2026, 6, 16, 8, 0, tzinfo=UTC),
+        expires_at=datetime(2026, 6, 20, 8, 0, tzinfo=UTC),
+        release_id="feedfacefeedfacefeedfacefeedfacefeedface",
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub="op-99")
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-expired-reason="release_changed"' in body
+    assert "MEHO was updated while the request waited" in body
+    assert "Ask again." in body
+    assert "MEHO release" in body
+    assert "feedfacefeedfacefeedfacefeedfacefeedface" in body
+    # The banner shows when the update ended the request (``decided_at``),
+    # not the deadline it never reached. Prefix match, as the SQLite
+    # round-trip may drop the tz offset.
+    assert 'datetime="2026-06-16T08:00:00' in body
+    assert "2026-06-20T08:00:00" not in body
+
+
 def test_detail_modal_expired_row_shows_expiry_timestamp() -> None:
     """An expired request's banner renders the ``expires_at`` deadline as its "when".
 
@@ -1899,6 +2192,52 @@ def test_modal_generic_params_echo_renders_as_a_field_table() -> None:
     assert "widget" in table
     assert "replicas" in table
     assert "<details open" not in body
+
+
+def test_modal_k8s_apply_shows_manifest_and_subject() -> None:
+    """A ``k8s.apply`` card shows the echoed manifest and names the objects (#3877)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="k8s.apply",
+        connector_id="kubernetes-1.x",
+        proposed_effect={
+            "op_id": "k8s.apply",
+            "connector_id": "kubernetes-1.x",
+            "op_class": "other",
+            "preview": {
+                "dry_run": True,
+                "applied": [{"kind": "Secret", "namespace": "prod", "name": "db"}],
+                "subject": "Secret/prod/db",
+                "manifest": [
+                    {
+                        "apiVersion": "v1",
+                        "kind": "Secret",
+                        "metadata": {"name": "db", "namespace": "prod"},
+                        "data": {"pw": "***REDACTED***"},
+                    }
+                ],
+            },
+            "preview_populated": True,
+            "safety_level": "dangerous",
+        },
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+    assert response.status_code == 200, response.text
+    body = response.text
+
+    table = body.split('aria-label="Proposed effect fields"')[1].split("</table>")[0]
+    assert ">manifest<" in table
+    assert '"kind": "Secret"' in table
+    assert "***REDACTED***" in table
+    # The reviewer context names the object the apply touches.
+    assert ">Subject<" in body
+    assert "Secret/prod/db" in body
 
 
 def test_modal_credential_redacted_shows_elevated_risk_notice_and_no_table() -> None:
@@ -2409,6 +2748,91 @@ def test_detail_modal_renders_the_failed_run() -> None:
     assert "secret detail" not in body
 
 
+#: The stored envelope of a run MEHO refused because it was updated (#5030).
+_RELEASE_REFUSED_ENVELOPE: dict[str, object] = {
+    "status": "denied",
+    "op_id": "vsphere.vm.create",
+    "error": "release_changed_while_waiting: MEHO was updated after this request was made.",
+    "duration_ms": 0.0,
+    "audit_id": _RUN_AUDIT_ID,
+    "extras": {
+        "error_code": "release_changed_while_waiting",
+        "request_release": "feedfacefeedfacefeedfacefeedfacefeedface",
+        "running_release": "0123456789abcdef0123456789abcdef01234567",
+    },
+}
+
+
+def test_detail_modal_release_refusal_says_the_run_did_not_happen() -> None:
+    """A run MEHO refused because it was updated is not described as a run (#5030).
+
+    The stored refusal reads as ``result_state = "failed"`` like any other
+    failed run, but nothing ran and the vendor got no call. The banner must
+    say MEHO was updated, the operation did not run, and the requester must
+    ask again, not "the approved operation ran".
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_ran_request(op_id="refused.op", resume_result=_RELEASE_REFUSED_ENVELOPE)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-testid="approval-release-refused"' in body
+    assert "MEHO was updated after this request was made" in body
+    assert "The operation did not run." in body
+    assert "The requester must ask again." in body
+    assert "The approved operation ran" not in body
+    assert "did not succeed" not in body
+    # The outcome block still names the error code and the audit row.
+    assert 'data-result-state="failed"' in body
+    assert "release_changed_while_waiting" in body
+    assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
+
+
+def test_approve_refused_by_release_change_says_nothing_ran() -> None:
+    """An approve that MEHO refuses because it was updated does not say the run failed (#5030)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    refused = SimpleNamespace(
+        status="denied",
+        op_id="vsphere.vm.create",
+        audit_id=uuid.UUID(_RUN_AUDIT_ID),
+        extras={"error_code": "release_changed_while_waiting"},
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, AsyncMock(return_value=refused)),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                data={"reason": "looks safe"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Approved, but MEHO did not run it" in body
+    assert "The operation did not run." in body
+    assert "Approved, but the run failed" not in body
+    assert "was approved and ran" not in body
+    assert "Request approved" not in body
+    assert "release_changed_while_waiting" in body
+    assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
+
+
 def test_approve_whose_run_fails_shows_a_failed_card() -> None:
     """An approve whose run errors does not render the plain success card."""
     _seed_tenant(_TENANT_A, "tenant-a")
@@ -2471,3 +2895,374 @@ def test_approve_already_resumed_elsewhere_shows_the_approved_card() -> None:
     assert "Request approved" in body
     assert "the run failed" not in body
     assert 'data-testid="approval-outcome"' not in body
+
+
+# ---------------------------------------------------------------------------
+# The next step a failed multi-step operation names (#5377)
+# ---------------------------------------------------------------------------
+
+_CDROM_OP_ID = "vmware.composite.vm.device.cdrom"
+_CDROM_GUIDANCE = (
+    "The change did not answer in time and may still run (vCenter tasks: task-7). "
+    "Do not start it again yet. The VM waits on question _vmx1: show it to the user "
+    "and answer it with vmware.vm.question.answer."
+)
+
+#: The stored envelope of a CD-ROM change that timed out while the VM waits on a
+#: question, with the guidance stamp the approval store writes (#5377).
+_RESULT_UNKNOWN_ENVELOPE: dict[str, object] = {
+    "status": "error",
+    "op_id": _CDROM_OP_ID,
+    "error": "result_unknown: the device change timed out; its result is unknown",
+    "duration_ms": 30175.0,
+    "audit_id": _RUN_AUDIT_ID,
+    "extras": {"error_code": "result_unknown", "approval_guidance": _CDROM_GUIDANCE},
+    "result": {
+        "status": "result_unknown",
+        "vm_question": {"id": "_vmx1", "text": "The guest has locked the CD-ROM door."},
+        "guidance": _CDROM_GUIDANCE,
+    },
+}
+
+#: A VM resize result an older MEHO stored, before the guidance stamp existed:
+#: the body's ``guidance`` carries vendor error text, and there is no stamp.
+_OLD_PARTIAL_ENVELOPE: dict[str, object] = {
+    "status": "error",
+    "op_id": "vmware.composite.vm.resize",
+    "error": "partial: CPU applied; memory update failed",
+    "duration_ms": 900.0,
+    "audit_id": _RUN_AUDIT_ID,
+    "extras": {"error_code": "partial"},
+    "result": {
+        "status": "partial",
+        "guidance": "CPU applied; memory update failed: 500 at https://vc.example/api/vcenter/vm",
+    },
+}
+
+
+def test_detail_modal_shows_the_next_step_of_a_failed_run() -> None:
+    """The decided modal shows the guidance line, also to a later reader (#5377)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_ran_request(op_id=_CDROM_OP_ID, resume_result=_RESULT_UNKNOWN_ENVELOPE)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-testid="approval-guidance"' in body
+    assert "The VM waits on question _vmx1" in body
+    assert "result_unknown" in body
+    # The question text from vCenter stays on the owner-only /result read.
+    assert "locked the CD-ROM door" not in body
+
+
+def test_detail_modal_of_a_result_stored_before_the_stamp_has_no_next_step() -> None:
+    """Regression: an older stored result never shows its body text as the next step."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_ran_request(op_id="vmware.composite.vm.resize", resume_result=_OLD_PARTIAL_ENVELOPE)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "partial" in body
+    assert 'data-testid="approval-guidance"' not in body
+    assert "vc.example" not in body
+
+
+def test_detail_modal_of_a_plain_failed_run_has_no_next_step() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_ran_request(op_id="failed.op", resume_result=_FAILED_ENVELOPE)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    assert 'data-testid="approval-guidance"' not in response.text
+
+
+def test_approve_card_shows_the_next_step_of_a_failed_run() -> None:
+    """The card after an approve shows the guidance of the run it just started (#5377)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, op_id=_CDROM_OP_ID, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    failed = SimpleNamespace(
+        status="error",
+        op_id=_CDROM_OP_ID,
+        audit_id=uuid.UUID(_RUN_AUDIT_ID),
+        extras={"error_code": "result_unknown"},
+        result=_RESULT_UNKNOWN_ENVELOPE["result"],
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, AsyncMock(return_value=failed)),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                data={"reason": "looks safe"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Approved, but the run failed" in body
+    assert 'data-testid="approval-guidance"' in body
+    assert "The VM waits on question _vmx1" in body
+    assert "locked the CD-ROM door" not in body
+
+
+# ---------------------------------------------------------------------------
+# #3596 -- oldest-first + "step k of N" for a change ticket's pending chain,
+# and one more confirm before approving a later step out of order.
+# ---------------------------------------------------------------------------
+
+_CHAIN_REF = "gh:evoila/meho#7"
+
+
+def _seed_chain() -> list[uuid.UUID]:
+    """Seed three pending steps under one change ticket plus an unrelated
+    request that is newer than all of them; return the step ids, oldest first.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    base = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
+    steps = [
+        _seed_request(
+            tenant_id=_TENANT_A,
+            op_id=f"chain.step{n}",
+            work_ref=_CHAIN_REF,
+            created_at=base + timedelta(minutes=n),
+        )
+        for n in (1, 2, 3)
+    ]
+    _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="unrelated.op",
+        created_at=base + timedelta(hours=1),
+    )
+    return steps
+
+
+def _positions(body: str, *markers: str) -> list[int]:
+    return [body.index(marker) for marker in markers]
+
+
+def test_panel_lists_a_chain_oldest_first_with_step_numbers() -> None:
+    """The bell panel shows a change ticket's pending steps oldest first,
+    each with "Step k of N", without any filter typing."""
+    _seed_chain()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    first, second, third, unrelated = _positions(
+        body, "chain.step1", "chain.step2", "chain.step3", "unrelated.op"
+    )
+    assert first < second < third < unrelated
+    assert "Step 1 of 3" in body
+    assert "Step 2 of 3" in body
+    assert "Step 3 of 3" in body
+    # The unrelated request has no step.
+    assert body.count("data-approval-chain-step=") == 3
+
+
+def test_panel_stays_newest_first_without_a_chain() -> None:
+    """With no change ticket holding two pending requests, nothing changes."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    base = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
+    _seed_request(tenant_id=_TENANT_A, op_id="older.op", work_ref=_CHAIN_REF, created_at=base)
+    _seed_request(tenant_id=_TENANT_A, op_id="newer.op", created_at=base + timedelta(minutes=5))
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals", headers=_HX_HEADERS)
+
+    body = response.text
+    newer, older = _positions(body, "newer.op", "older.op")
+    assert newer < older
+    assert "data-approval-chain-step=" not in body
+
+
+def test_pending_tab_lists_a_chain_oldest_first_by_default() -> None:
+    """The default Pending tab reads a chain oldest first, with step numbers,
+    and the oldest/newest toggle shows oldest as the active order."""
+    _seed_chain()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    first, second, third, unrelated = _positions(
+        body, "chain.step1", "chain.step2", "chain.step3", "unrelated.op"
+    )
+    assert first < second < third < unrelated
+    assert "Step 2 of 3" in body
+    assert 'aria-pressed="true"' in _opening_tag(body, 'data-approval-order="oldest"')
+    assert 'aria-pressed="false"' in _opening_tag(body, 'data-approval-order="newest"')
+
+
+def test_history_toggle_can_pick_newest_first() -> None:
+    """The explicit toggle wins over the default on the Pending tab."""
+    _seed_chain()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=pending&order=newest", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    unrelated, third, first = _positions(body, "unrelated.op", "chain.step3", "chain.step1")
+    assert unrelated < third < first
+    assert 'aria-pressed="true"' in _opening_tag(body, 'data-approval-order="newest"')
+    # The live refresh keeps the operator's choice.
+    assert 'hx-get="/ui/approvals/list?tab=pending&order=newest"' in body
+
+
+def test_history_toggle_can_pick_oldest_first_on_a_decided_tab() -> None:
+    """The All tab is newest first by default; ``order=oldest`` flips it."""
+    _seed_chain()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        default = client.get("/ui/approvals/list?tab=all", headers=_HX_HEADERS).text
+        oldest = client.get("/ui/approvals/list?tab=all&order=oldest", headers=_HX_HEADERS).text
+
+    unrelated, first = _positions(default, "unrelated.op", "chain.step1")
+    assert unrelated < first
+    first, unrelated = _positions(oldest, "chain.step1", "unrelated.op")
+    assert first < unrelated
+
+
+def test_history_load_more_keeps_the_order() -> None:
+    """The pager's "Load more" URL carries the order of the first page."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    base = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
+    for n in range(26):
+        _seed_request(tenant_id=_TENANT_A, op_id=f"op{n}", created_at=base + timedelta(minutes=n))
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=pending&order=oldest", headers=_HX_HEADERS)
+
+    assert "/ui/approvals/list?tab=pending&order=oldest&offset=25&partial=rows" in response.text
+
+
+def test_history_unknown_order_is_422() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?order=random", headers=_HX_HEADERS)
+
+    assert response.status_code == 422
+
+
+def _render_chain_modal(request_id: uuid.UUID) -> str:
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{request_id}")
+    assert response.status_code == 200, response.text
+    return response.text
+
+
+def test_modal_out_of_order_step_needs_one_more_confirm() -> None:
+    """Opening step 2 directly (as a deep link does) names the step and puts
+    one more confirm in front of the approve confirm."""
+    steps = _seed_chain()
+
+    body = _render_chain_modal(steps[1])
+
+    assert 'data-approval-chain-step="2"' in body
+    assert "2 of 3" in body
+    # The group link opens the oldest-first Pending view for this ticket.
+    link = _opening_tag(body, "data-approval-chain-link")
+    assert 'href="/ui/approvals?tab=pending&order=oldest&work_ref=gh%3Aevoila/meho%237"' in link
+    # The Approve armer goes to the extra confirm, not straight to approve.
+    armer = _opening_tag(body, 'data-action="approve"')
+    assert "armed = 'approve-early'" in armer
+    early = body.split('data-approval-confirm="out-of-order"')[1].split("</p>")[0]
+    assert "step 2 of 3" in early
+    assert "before the earlier steps" in early
+    assert "cannot be un-approved" in early
+    # Only the extra confirm's button moves on to the approve confirm.
+    assert "armed = 'approve'" in _opening_tag(body, 'data-confirm="out-of-order"')
+    assert "data-approval-out-of-order" in body
+
+
+def test_modal_first_step_has_no_extra_confirm() -> None:
+    """Step 1 is the oldest waiting step: the normal approve flow applies."""
+    steps = _seed_chain()
+
+    body = _render_chain_modal(steps[0])
+
+    assert 'data-approval-chain-step="1"' in body
+    assert "armed = 'approve'" in _opening_tag(body, 'data-action="approve"')
+    assert 'data-approval-confirm="out-of-order"' not in body
+    assert "data-approval-out-of-order" not in body
+
+
+def test_modal_step_numbers_move_up_once_an_earlier_step_is_decided() -> None:
+    """Step numbers count pending requests only: once step 1 is decided, the
+    old step 2 is the oldest waiting step and needs no extra confirm."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    base = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
+    _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="chain.step1",
+        work_ref=_CHAIN_REF,
+        status_value=ApprovalRequestStatus.APPROVED.value,
+        reviewed_by=_REVIEWER_SUB,
+        created_at=base,
+    )
+    second = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="chain.step2",
+        work_ref=_CHAIN_REF,
+        created_at=base + timedelta(minutes=1),
+    )
+    _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="chain.step3",
+        work_ref=_CHAIN_REF,
+        created_at=base + timedelta(minutes=2),
+    )
+
+    body = _render_chain_modal(second)
+
+    assert 'data-approval-chain-step="1"' in body
+    assert "1 of 2" in body
+    assert 'data-approval-confirm="out-of-order"' not in body

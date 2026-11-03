@@ -30,7 +30,8 @@ Why a session BFF (same rationale as T1)
 
 The Bearer-gated ``POST /api/v1/operations/call`` cannot be authenticated by a
 browser carrying only the BFF session cookie, so these routes are
-``require_ui_session``-gated and call
+session-gated (the dispatch POSTs on the ``require_ui_operator`` role
+floor, the same floor as REST) and call
 :func:`~meho_backplane.operations.meta_tools.call_operation` IN-PROCESS -- the
 exact confirm-gated-dispatch pattern ``ui/routes/operations/routes.py`` uses
 for its Run surface. ``call_operation`` is complete and tested; NO backend
@@ -133,9 +134,13 @@ from fastapi.responses import HTMLResponse
 from meho_backplane.auth.operator import Operator
 from meho_backplane.operations.ingest.list_connectors import list_ingested_connectors
 from meho_backplane.operations.meta_tools import call_operation
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import (
+    UISessionContext,
+    require_ui_operator,
+    require_ui_session,
+)
 from meho_backplane.ui.csrf import mint_csrf_token
-from meho_backplane.ui.routes.approvals.render import set_csrf_cookie
+from meho_backplane.ui.routes.approvals.render import parked_request_chain, set_csrf_cookie
 from meho_backplane.ui.routes.vault.routes import (
     _DEFAULT_MOUNT,
     _MAX_MOUNT_LENGTH,
@@ -199,6 +204,9 @@ _MAX_REF_LENGTH: Final[int] = 1024
 #: Module-level ``Depends`` closure -- built once (rather than inline) to
 #: satisfy ruff B008, matching the operations / approvals / T1 routers.
 _require_session = Depends(require_ui_session)
+#: The ``operator`` role floor of the dispatch POSTs (the same floor as REST
+#: ``/api/v1/operations/call``); the confirm GETs stay on the session floor.
+_require_operator = Depends(require_ui_operator)
 
 
 async def _secret_broker_connector_id(operator: Operator) -> str | None:
@@ -317,7 +325,7 @@ def build_vault_writes_router() -> APIRouter:
     @router.post("/ui/vault/put", response_class=HTMLResponse)
     async def vault_put(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
         mount: str = Form(default=_DEFAULT_MOUNT, max_length=_MAX_MOUNT_LENGTH),
         path: str = Form(default="", max_length=_MAX_PATH_LENGTH),
@@ -326,8 +334,9 @@ def build_vault_writes_router() -> APIRouter:
     ) -> HTMLResponse:
         """Dispatch ``vault.kv.put`` in-process; render the result inline.
 
-        CSRF-gated (a ``POST`` under ``/ui/``) + ``require_ui_session``-gated.
-        ``data`` is the operator-supplied secret key/value JSON object;
+        CSRF-gated (a ``POST`` under ``/ui/``) + ``require_ui_operator``-gated
+        (``read_only`` gets 403 before any dispatch). ``data`` is the
+        operator-supplied secret key/value JSON object;
         ``cas`` rides in ``params`` ONLY when the operator set it (the CLI
         ``Changed("cas")`` rule). The BFF logs no secret material.
         """
@@ -336,7 +345,7 @@ def build_vault_writes_router() -> APIRouter:
     @router.post("/ui/vault/delete", response_class=HTMLResponse)
     async def vault_delete(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
         mount: str = Form(default=_DEFAULT_MOUNT, max_length=_MAX_MOUNT_LENGTH),
         path: str = Form(default="", max_length=_MAX_PATH_LENGTH),
@@ -344,7 +353,7 @@ def build_vault_writes_router() -> APIRouter:
     ) -> HTMLResponse:
         """Dispatch ``vault.kv.delete`` in-process; render the result inline.
 
-        CSRF-gated + ``require_ui_session``-gated. ``versions`` is the
+        CSRF-gated + ``require_ui_operator``-gated. ``versions`` is the
         comma-separated list of version numbers to soft-delete.
         """
         return await _render_delete_result(request, session, target, mount, path, versions)
@@ -352,14 +361,14 @@ def build_vault_writes_router() -> APIRouter:
     @router.post("/ui/vault/move", response_class=HTMLResponse)
     async def vault_move(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         from_ref: str = Form(default="", alias="from", max_length=_MAX_REF_LENGTH),
         to_ref: str = Form(default="", alias="to", max_length=_MAX_REF_LENGTH),
         reason: str = Form(default="", max_length=_MAX_REF_LENGTH),
     ) -> HTMLResponse:
         """Dispatch ``secret.move`` in-process; render the value-free result.
 
-        CSRF-gated + ``require_ui_session``-gated. Dispatches the SEPARATE
+        CSRF-gated + ``require_ui_operator``-gated. Dispatches the SEPARATE
         ``secret-broker-1.x`` connector with ``from`` / ``to`` references (+
         optional reason). VALUE-FREE: no value field is accepted, dispatched,
         logged, or rendered -- only the ``{status, value_sha256, length}``
@@ -490,7 +499,7 @@ async def _render_put_result(
         params["cas"] = cas_value
 
     envelope = await _dispatch_write(operator, connector_id, _OP_PUT, target, params)
-    return _render_write_result(request, "put", envelope)
+    return await _render_write_result(request, "put", envelope, operator)
 
 
 async def _render_delete_result(
@@ -524,7 +533,7 @@ async def _render_delete_result(
         params["mount"] = clean_mount
 
     envelope = await _dispatch_write(operator, connector_id, _OP_DELETE, target, params)
-    return _render_write_result(request, "delete", envelope)
+    return await _render_write_result(request, "delete", envelope, operator)
 
 
 async def _render_move_result(
@@ -563,7 +572,7 @@ async def _render_move_result(
         params["reason"] = clean_reason
 
     envelope = await _dispatch_write(operator, connector_id, _OP_MOVE, target="", params=params)
-    return _render_write_result(request, "move", envelope)
+    return await _render_write_result(request, "move", envelope, operator)
 
 
 async def _dispatch_write(
@@ -607,10 +616,11 @@ async def _dispatch_write(
     return envelope
 
 
-def _render_write_result(
+async def _render_write_result(
     request: Request,
     verb: str,
     envelope: dict[str, Any],
+    operator: Operator,
 ) -> HTMLResponse:
     """Render the shared write-result fragment for a dispatched write op.
 
@@ -618,13 +628,16 @@ def _render_write_result(
     selects the value-free ``secret.move`` ``ok`` branch vs the put / delete
     success branch. The ``awaiting_approval`` (deep-link), ``error`` /
     ``denied`` (with the tenant-scope special case), and form-error branches
-    are verb-agnostic.
+    are verb-agnostic. For a parked write that is step k of N pending
+    requests under one change ticket, ``chain`` carries the step and the
+    fragment links to the ticket's oldest-first view (#3596).
     """
     context: dict[str, Any] = {
         "verb": verb,
         "envelope": envelope,
         "error_message": None,
         "error_kind": None,
+        "chain": await parked_request_chain(operator.tenant_id, envelope),
     }
     return get_templates().TemplateResponse(request, "vault/_write_result.html", context)
 
@@ -651,6 +664,7 @@ def _render_write_form_error(
         "envelope": None,
         "error_message": None if error_kind else message_or_kind,
         "error_kind": error_kind,
+        "chain": None,
     }
     return get_templates().TemplateResponse(
         request,

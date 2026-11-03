@@ -32,8 +32,13 @@
   Submit contract: the form ``hx-post``s to
   ``/ui/connectors/registry/ingest`` swapping ``#ingest-result`` (the
   in-modal result slot). A 422 friendly pre-check error, a catalog 422,
-  the 503 ``LlmClientUnavailable`` panel, and the 202 job-poll seed all
-  render into that slot so the operator stays in the modal.
+  the 400 / 502 spec panels, the 403 write-scope panel (the global scope
+  needs platform_admin), the 503 ``LlmClientUnavailable`` panel, and the
+  202 job-poll seed all render into that slot so the operator stays in
+  the modal. htmx 2.0.9 does not swap a 4xx / 5xx body by default, so the
+  result slot carries an ``hx-on::before-swap`` override that lets those
+  panel statuses swap (the ``grants/index.html`` pattern). Without it a
+  tenant admin who submits the default global scope would see nothing.
 
   CSRF: the form carries the OWASP signed double-submit token on its OWN
   ``hx-headers`` (HTMX does not inherit the page ``hx-headers`` to an
@@ -164,7 +169,7 @@
               name="product"
               class="input input-bordered input-sm w-full"
               maxlength="64"
-              placeholder="vmware"
+              placeholder="gh"
               autocomplete="off"
             />
           </label>
@@ -175,7 +180,7 @@
               name="version"
               class="input input-bordered input-sm w-full"
               maxlength="64"
-              placeholder="9.0"
+              placeholder="3"
               autocomplete="off"
             />
           </label>
@@ -186,7 +191,7 @@
               name="impl_id"
               class="input input-bordered input-sm w-full"
               maxlength="128"
-              placeholder="vmware-rest"
+              placeholder="gh-rest"
               autocomplete="off"
             />
           </label>
@@ -246,13 +251,15 @@
           class="select select-bordered select-sm w-full"
           aria-label="Write scope"
         >
-          <option value="global" selected>Global (built-in scope) &mdash; visible to every tenant</option>
+          <option value="global" selected>Global (built-in scope) &mdash; visible to every tenant, platform admins only</option>
           <option value="tenant">This tenant only</option>
         </select>
         <span class="text-xs opacity-70">
           Global matches the CLI / REST default (omitting
-          <span class="font-mono">tenant_id</span>); &ldquo;This
-          tenant&rdquo; curates the connector under your tenant only.
+          <span class="font-mono">tenant_id</span>) and needs
+          platform_admin, because every tenant shares those rows;
+          &ldquo;This tenant&rdquo; curates the connector under your
+          tenant only.
         </span>
       </label>
 
@@ -271,9 +278,16 @@
 
       {# ---------- Result slot ---------- #}
       {# The submit handler swaps its render here: the friendly pre-check
-         error, a catalog / explicit 422 panel, the 503 panel, the
-         dry-run parse counts, or the 202 job-poll seed. #}
-      <div id="ingest-result" aria-live="polite"></div>
+         error, a catalog / explicit 422 panel, the 400 / 502 spec panels,
+         the 403 write-scope panel, the 503 panel, the dry-run parse
+         counts, or the 202 job-poll seed. htmx skips 4xx / 5xx bodies by
+         default, so the slot allows exactly the statuses the handler
+         renders as a panel. #}
+      <div
+        id="ingest-result"
+        aria-live="polite"
+        hx-on::before-swap="if ([400, 403, 422, 502, 503].includes(event.detail.xhr.status)) { event.detail.shouldSwap = true; event.detail.isError = false; }"
+      ></div>
 
       <div class="modal-action">
         <button

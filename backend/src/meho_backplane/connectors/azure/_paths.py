@@ -409,6 +409,78 @@ OFFAZURE_MASTER_SITES_PATH: Final[str] = f"{_OFFAZURE}/masterSites"
 
 # ---- network (Task #5085) ----
 
+#: The API version of the Microsoft.Network reads: virtual networks, network
+#: security groups, load balancers, public IP addresses, gateways, ExpressRoute
+#: circuits and route tables.
+NETWORK_API_VERSION: Final[str] = "2026-01-01"
+
+#: ``GET .../providers/Microsoft.Network/virtualNetworks``: every virtual
+#: network of the subscription (Virtual Networks - List All).
+VIRTUAL_NETWORKS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Network/virtualNetworks"
+)
+
+#: ``GET .../resourceGroups/{rg}/providers/Microsoft.Network/virtualNetworks/{name}``:
+#: one virtual network with its subnets and peerings (Virtual Networks - Get).
+VIRTUAL_NETWORK_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Network/virtualNetworks/{name}"
+)
+
+#: ``GET .../providers/Microsoft.Network/networkSecurityGroups``: every network
+#: security group of the subscription (Network Security Groups - List All).
+NETWORK_SECURITY_GROUPS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Network/networkSecurityGroups"
+)
+
+#: ``GET .../resourceGroups/{rg}/providers/Microsoft.Network/networkSecurityGroups/{name}``:
+#: one network security group with all its rules (Network Security Groups - Get).
+NETWORK_SECURITY_GROUP_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Network/networkSecurityGroups/{name}"
+)
+
+#: ``GET .../providers/Microsoft.Network/loadBalancers``: every load balancer of
+#: the subscription (Load Balancers - List All).
+LOAD_BALANCERS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Network/loadBalancers"
+)
+
+#: ``GET .../providers/Microsoft.Network/publicIPAddresses``: every public IP
+#: address of the subscription (Public IP Addresses - List All).
+PUBLIC_IP_ADDRESSES_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Network/publicIPAddresses"
+)
+
+#: ``GET .../resourceGroups/{rg}/providers/Microsoft.Network/virtualNetworkGateways``:
+#: the VPN and ExpressRoute gateways of one resource group (Virtual Network
+#: Gateways - List). Azure has no list of gateways per subscription.
+VIRTUAL_NETWORK_GATEWAYS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Network/virtualNetworkGateways"
+)
+
+#: ``GET .../providers/Microsoft.Network/expressRouteCircuits``: every
+#: ExpressRoute circuit of the subscription (Express Route Circuits - List All).
+EXPRESS_ROUTE_CIRCUITS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Network/expressRouteCircuits"
+)
+
+#: ``GET .../providers/Microsoft.Network/routeTables``: every route table of the
+#: subscription, with its routes (Route Tables - List All).
+ROUTE_TABLES_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Network/routeTables"
+)
+
+#: The API version of the private DNS zone reads (Microsoft.Network/privateDnsZones).
+PRIVATE_DNS_API_VERSION: Final[str] = "2024-06-01"
+
+#: ``GET .../providers/Microsoft.Network/privateDnsZones``: every private DNS
+#: zone of the subscription (Private Zones - List).
+PRIVATE_DNS_ZONES_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/providers/Microsoft.Network/privateDnsZones"
+)
+
 # ---- security (Task #5089) ----
 #
 # Microsoft Defender for Cloud, Azure Policy, role assignments and the

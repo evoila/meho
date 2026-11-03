@@ -133,7 +133,7 @@ class _FakeReviewService:
     raise_value_error: ClassVar[ValueError | None] = None
 
     #: When set, every mutating method (enable / disable / enable_reads /
-    #: edit_op / edit_group) raises this instead of returning — class
+    #: edit_op / edit_group / delete) raises this instead of returning — class
     #: attribute for the same lazy-construction reason as
     #: ``raise_not_found``, so the built-in-write platform_admin gate
     #: mapping (403 REST / -32602 MCP) can be exercised through the real
@@ -263,6 +263,8 @@ class _FakeReviewService:
         **kwargs: Any,
     ) -> DeleteConnectorResult:
         self.delete_calls.append({"connector_id": connector_id, **kwargs})
+        if self.raise_forbidden is not None:
+            raise self.raise_forbidden
         if self.raise_not_found is not None:
             raise self.raise_not_found
         return self.delete_result
@@ -1070,7 +1072,7 @@ def test_call_meho_connector_enable_reads_rejected_for_operator_role(
 
 @pytest.mark.parametrize(
     "client_with_operator",
-    [TenantRole.TENANT_ADMIN],
+    [(TenantRole.TENANT_ADMIN, True)],
     indirect=True,
 )
 def test_call_meho_connector_delete_defaults_to_global_scope(
@@ -1082,7 +1084,9 @@ def test_call_meho_connector_delete_defaults_to_global_scope(
     Pins the #1699 tenant-scope contract on the delete tool: an
     omitted ``tenant_id`` forwards ``None`` (global / built-in) to
     :meth:`ReviewService.delete_connector` — the mirror of the REST
-    route, which always forwards the operator's own tenant.
+    route, which always forwards the operator's own tenant. The caller
+    is a platform_admin: the real service refuses the built-in scope to
+    a plain tenant_admin (``test_mcp_connector_delete_builtin_scope``).
     """
     client, _op = client_with_operator
     response = post_mcp(
@@ -1512,12 +1516,12 @@ async def test_connector_handler_maps_not_found_to_invalid_params(
 # BuiltinConnectorWriteForbiddenError → structured -32602 (#3616 parity)
 #
 # A tenant_admin without platform_admin mutating a built-in (global) row
-# is refused by the service. The five mutating tools (enable / disable /
-# enable_reads / edit_op / edit_group) must surface it as a JSON-RPC
-# -32602 carrying the structured builtin_connector_write_forbidden data
-# envelope the REST 403 ships, NOT the dispatcher's bare -32603 class-name
-# leak. The read tool (review) and delete are not gated on the built-in
-# platform seat, so they are excluded.
+# is refused by the service. The six mutating tools (enable / disable /
+# enable_reads / edit_op / edit_group / delete) must surface it as a
+# JSON-RPC -32602 carrying the structured builtin_connector_write_forbidden
+# data envelope the REST 403 ships, NOT the dispatcher's bare -32603 with
+# the Python class name. The read tool (review) is not gated on the
+# built-in platform seat, so it is excluded.
 # ---------------------------------------------------------------------------
 
 
@@ -1538,6 +1542,7 @@ _FORBIDDEN_HANDLER_CASES: list[tuple[str, dict[str, Any]]] = [
         "_edit_op_handler",
         {"connector_id": "vmware-rest-9.0", "op_id": "GET:/x", "is_enabled": True},
     ),
+    ("_delete_handler", {"connector_id": "vmware-rest-9.0"}),
 ]
 
 

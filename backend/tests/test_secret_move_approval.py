@@ -454,6 +454,7 @@ async def test_expired_request_not_decidable(
         mock_discovery_and_jwks(r, public_jwks(key))
         token = mint_token(
             key,
+            fresh_sign_in=True,
             sub="operator:decider",
             tenant_role=TenantRole.OPERATOR.value,
             tenant_id=str(_TENANT_ID),
@@ -503,6 +504,7 @@ async def test_decide_redispatch_executes_move_once(
         mock_discovery_and_jwks(r, public_jwks(key))
         token = mint_token(
             key,
+            fresh_sign_in=True,
             sub="operator:decider",  # different from the requester
             tenant_role=TenantRole.OPERATOR.value,
             tenant_id=str(_TENANT_ID),
@@ -597,6 +599,7 @@ def _decide_approved(request_id: uuid.UUID, *, decider_sub: str) -> dict[str, An
         mock_discovery_and_jwks(r, public_jwks(key))
         token = mint_token(
             key,
+            fresh_sign_in=True,
             sub=decider_sub,
             tenant_role=TenantRole.OPERATOR.value,
             tenant_id=str(_TENANT_ID),

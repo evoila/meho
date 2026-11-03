@@ -35,7 +35,7 @@ testcontainers replay suite in :mod:`tests.test_migration_rollback`.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -121,20 +121,24 @@ def _indexes(sync_url: str, table: str) -> set[str]:
     return {str(row[1]) for row in rows}
 
 
-def test_upgrade_adds_table_and_index(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_table_and_index(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade head`` lands the table with the full column set + index."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     assert "agent_definition" in _table_names(sync_url)
     assert _columns(sync_url, "agent_definition") == _EXPECTED_COLUMNS
     assert "agent_definition_tenant_name_idx" in _indexes(sync_url, "agent_definition")
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0014"`` drops the table + index; ``upgrade head`` restores."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     assert "agent_definition" in _table_names(sync_url)
 
     command.downgrade(cfg, "0014")
@@ -145,10 +149,12 @@ def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> 
     assert "agent_definition_tenant_name_idx" in _indexes(sync_url, "agent_definition")
 
 
-def test_earlier_schema_survives(alembic_cfg: tuple[Config, str]) -> None:
+def test_earlier_schema_survives(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """0015 leaves the broadcast_override (0008) + audit_log (0001) tables intact."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     tables = _table_names(sync_url)
     assert "broadcast_override" in tables
     assert "audit_log" in tables

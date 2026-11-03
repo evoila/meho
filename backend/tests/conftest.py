@@ -199,9 +199,13 @@ def _default_database_url(
     # this conftest is loaded before any meho_backplane modules,
     # and importing the engine module here means it gets imported
     # once at fixture-resolution time per test.
+    import asyncio
     import shutil
 
-    from meho_backplane.db.engine import dispose_engine, reset_engine_for_testing
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
+    from meho_backplane.db import engine as engine_module
+    from meho_backplane.db.engine import reset_engine_for_testing
 
     db_path = tmp_path / "default.db"
     url = f"sqlite+aiosqlite:///{db_path}"
@@ -218,26 +222,50 @@ def _default_database_url(
     # ``DATABASE_URL`` win via last-write.
     monkeypatch.setenv("DATABASE_URL", url)
 
+    # Keep a reference to every engine the app makes during the test. Many
+    # test files call ``reset_engine_for_testing()`` in their own teardown,
+    # which runs before this one and drops the cached engine without closing
+    # it. Its pooled aiosqlite connections were then closed only by garbage
+    # collection, later, during another test and after their event loop was
+    # closed: aiosqlite then raised "Event loop is closed" in its worker
+    # thread. Closing every engine here, while a loop runs, prevents that.
+    made_engines: list[AsyncEngine] = []
+    make_engine = engine_module.create_engine_for_url
+
+    def _record_engine(url: str, *, pool_size: int, pool_timeout: float) -> AsyncEngine:
+        made = make_engine(url, pool_size=pool_size, pool_timeout=pool_timeout)
+        made_engines.append(made)
+        return made
+
+    monkeypatch.setattr(engine_module, "create_engine_for_url", _record_engine)
+
     get_settings.cache_clear()
     reset_engine_for_testing()
     yield
-    # Tests that constructed an engine via this URL leave a cached
-    # AsyncEngine pointing at a tmp file that pytest will reap;
-    # disposing here closes the asyncpg/aiosqlite pool cleanly so the
-    # next test gets a fresh engine bound to its own tmp DB.
-    try:
-        # Best-effort dispose; pytest-asyncio's event loop may already
-        # be torn down by the time we get here, in which case the
-        # cache reset alone is sufficient.
-        import asyncio
 
-        loop = asyncio.new_event_loop()
+    to_close = list(made_engines)
+    cached = engine_module._engine
+    if cached is not None and cached not in to_close:
+        to_close.append(cached)
+
+    async def _close_engines() -> None:
+        for made in to_close:
+            await made.dispose()
+
+    # Make a loop only when there is an engine to close: some tests replace
+    # ``socket.socket`` until their own teardown, and a new loop opens a
+    # socket pair. The test's own event loop may already be closed here, so
+    # the engines are closed on a new loop. aiosqlite closes a connection on
+    # whatever loop is running, so this works for the pools of every test.
+    if to_close:
         try:
-            loop.run_until_complete(dispose_engine())
-        finally:
-            loop.close()
-    except Exception:
-        pass
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(_close_engines())
+            finally:
+                loop.close()
+        except Exception as exc:
+            warnings.warn(f"closing the test database engines failed: {exc!r}", stacklevel=1)
     reset_engine_for_testing()
     get_settings.cache_clear()
 
@@ -551,12 +579,19 @@ def _default_target_ssrf_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
        re-patch the seam with their own resolver and
        ``monkeypatch.delenv`` the allowlist to exercise the real
        behaviour.
+    3. ``dial_guard._unresolved`` lets a name that does not resolve be
+       dialed by name, so the connect-time check does not refuse those
+       synthetic host names. Connect-time check tests
+       (``test_connectors_dial_guard``) restore the refusal.
     """
     monkeypatch.setenv(
         "MEHO_TARGET_SSRF_ALLOWLIST",
         "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,::1/128,fc00::/7,fe80::/10",
     )
     monkeypatch.setattr("meho_backplane.targets.ssrf_guard._resolve_addrs", lambda host: [])
+    monkeypatch.setattr(
+        "meho_backplane.connectors._shared.dial_guard._unresolved", lambda host: None
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -1184,7 +1219,9 @@ def _perf_lifespan_step_timing(request: pytest.FixtureRequest) -> Iterator[None]
     production code.
     """
     import asyncio
+    import inspect
     import json
+    from contextlib import asynccontextmanager
 
     path = os.environ.get("MEHO_LIFESPAN_TIMING")
     if not path:
@@ -1221,11 +1258,26 @@ def _perf_lifespan_step_timing(request: pytest.FixtureRequest) -> Iterator[None]
 
         return w
 
+    def _wrap_async_context(orig: Any, name: str) -> Any:
+        # The catalog write is an ``asynccontextmanager``: the time it
+        # takes is in entering the block (registrars) and leaving it
+        # (commit), so time the whole ``async with``.
+        @asynccontextmanager
+        async def w(*a: Any, **k: Any) -> Any:
+            t = time.perf_counter()
+            try:
+                async with orig(*a, **k):
+                    yield
+            finally:
+                _record(name, time.perf_counter() - t)
+
+        return w
+
     names = [
         "get_engine",
         "get_broadcast_client",
         "_eager_import_connectors",
-        "run_typed_op_registrars",
+        "operation_catalog_write",
         "eager_import_mcp_modules",
         "_preload_embedding_model",
         "start_topology_refresh_scheduler",
@@ -1234,8 +1286,12 @@ def _perf_lifespan_step_timing(request: pytest.FixtureRequest) -> Iterator[None]
     for name in names:
         orig = getattr(main_mod, name)
         originals[name] = orig
-        is_async = asyncio.iscoroutinefunction(orig)
-        wrapper = _wrap_async(orig, name) if is_async else _wrap_sync(orig, name)
+        if inspect.isasyncgenfunction(getattr(orig, "__wrapped__", None)):
+            wrapper = _wrap_async_context(orig, name)
+        elif asyncio.iscoroutinefunction(orig):
+            wrapper = _wrap_async(orig, name)
+        else:
+            wrapper = _wrap_sync(orig, name)
         setattr(main_mod, name, wrapper)
     try:
         yield

@@ -5,10 +5,12 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -22,15 +24,17 @@ import (
 // backplane 422 surface an unfamiliar value.
 //
 // Mirrors the generated `api.EditOpBodySafetyLevel` enum constants
-// (`EditOpBodySafetyLevelSafe` / `…Caution` / `…Dangerous`) so the
+// (`EditOpBodySafetyLevelSafe` / `…Caution` / `…Dangerous` /
+// `…Destructive`) so the
 // validator and the wire shape stay in lockstep. The generator-shipped
 // enum values are the authoritative source — we keep this map only to
 // render the verb's helptext + the "expected one of" message in the same
 // order the operator sees in --help.
 var validSafetyLevels = map[string]api.EditOpBodySafetyLevel{
-	"safe":      api.EditOpBodySafetyLevelSafe,
-	"caution":   api.EditOpBodySafetyLevelCaution,
-	"dangerous": api.EditOpBodySafetyLevelDangerous,
+	"safe":        api.EditOpBodySafetyLevelSafe,
+	"caution":     api.EditOpBodySafetyLevelCaution,
+	"dangerous":   api.EditOpBodySafetyLevelDangerous,
+	"destructive": api.EditOpBodySafetyLevelDestructive,
 }
 
 // newEditOpCmd returns the `meho connector edit-op` command.
@@ -39,9 +43,10 @@ var validSafetyLevels = map[string]api.EditOpBodySafetyLevel{
 //
 //	meho connector edit-op <connector_id> <op_id> \
 //	  [--custom-description <text>|@<file>] \
-//	  [--safety safe|caution|dangerous] \
+//	  [--safety safe|caution|dangerous|destructive] \
 //	  [--requires-approval | --no-requires-approval] \
 //	  [--enable | --disable] \
+//	  [--reason <text>] \
 //	  [--json] [--backplane <url>]
 //
 // Hits PATCH /api/v1/connectors/<connector_id>/operations/<op_id>
@@ -54,6 +59,7 @@ func newEditOpCmd() *cobra.Command {
 		clearApproval     bool
 		enableOp          bool
 		disableOp         bool
+		reason            string
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -67,7 +73,8 @@ func newEditOpCmd() *cobra.Command {
 			"                                # POST as 'caution'; bump it.\n" +
 			"  --requires-approval           # gate this op on the approval\n" +
 			"                                # workflow regardless of safety.\n" +
-			"  --no-requires-approval        # clear the requires_approval flag.\n" +
+			"  --no-requires-approval --reason <text>\n" +
+			"                                # turn approval off (platform admin).\n" +
 			"  --custom-description @path.md # operator-authored agent prompt\n" +
 			"                                # supersedes vendor docs.\n" +
 			"  --disable                     # exclude this op from\n" +
@@ -83,6 +90,16 @@ func newEditOpCmd() *cobra.Command {
 			"`warning (unreplaced_auto_shim)` to stderr: dispatch will fail\n" +
 			"until the per-product Connector subclass is registered, and\n" +
 			"re-ingesting the spec will not replace the shim.\n\n" +
+			"Risk level and approval are stored apart from the value in code,\n" +
+			"so they stay after a restart and a re-ingest. --safety can only\n" +
+			"raise the level; to lower the classification, open a pull request.\n" +
+			"A tenant admin's change applies to their own tenant; a platform\n" +
+			"admin's change to a built-in connector applies to the whole install.\n\n" +
+			"Turning approval off (--no-requires-approval on an operation whose\n" +
+			"code requires approval) needs platform_admin, a --reason, and a\n" +
+			"fresh sign-in: run `meho login` and retry within five minutes. It is\n" +
+			"never allowed for a destructive operation. List these operations\n" +
+			"with `meho connector overrides --reduced-approval`.\n\n" +
 			"Role: tenant_admin.",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
@@ -97,6 +114,7 @@ func newEditOpCmd() *cobra.Command {
 				ClearApproval:        clearApproval,
 				EnableOp:             enableOp,
 				DisableOp:            disableOp,
+				Reason:               reason,
 				JSONOut:              jsonOut,
 				BackplaneOverride:    backplaneOverride,
 			})
@@ -105,7 +123,7 @@ func newEditOpCmd() *cobra.Command {
 	cmd.Flags().StringVar(&customDesc, "custom-description", "",
 		"replacement custom_description; supports `@<path>` to read from a file")
 	cmd.Flags().StringVar(&safetyFlag, "safety", "",
-		"replacement safety_level: safe | caution | dangerous")
+		"replacement safety_level: safe | caution | dangerous | destructive (can only raise the level)")
 	cmd.Flags().BoolVar(&requiresApproval, "requires-approval", false,
 		"mark the op as requiring an approval workflow")
 	cmd.Flags().BoolVar(&clearApproval, "no-requires-approval", false,
@@ -114,6 +132,8 @@ func newEditOpCmd() *cobra.Command {
 		"set is_enabled=true on this op")
 	cmd.Flags().BoolVar(&disableOp, "disable", false,
 		"set is_enabled=false on this op")
+	cmd.Flags().StringVar(&reason, "reason", "",
+		"why you make this change; written to the audit row and required to turn approval off")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit machine-readable JSON to stdout instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -132,6 +152,7 @@ type editOpOptions struct {
 	ClearApproval        bool
 	EnableOp             bool
 	DisableOp            bool
+	Reason               string
 	JSONOut              bool
 	BackplaneOverride    string
 }
@@ -152,7 +173,7 @@ func runEditOp(cmd *cobra.Command, opts editOpOptions) error {
 		if !ok {
 			return output.RenderError(cmd.ErrOrStderr(),
 				output.Unexpected(fmt.Sprintf(
-					"--safety %q invalid; expected one of: safe | caution | dangerous",
+					"--safety %q invalid; expected one of: safe | caution | dangerous | destructive",
 					opts.SafetyFlag,
 				)),
 				opts.JSONOut,
@@ -177,6 +198,11 @@ func runEditOp(cmd *cobra.Command, opts editOpOptions) error {
 		body.IsEnabled = &f
 	}
 
+	if opts.Reason != "" {
+		reason := opts.Reason
+		body.Reason = &reason
+	}
+
 	if isEmptyEditOpBody(body) {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected("edit-op needs at least one of --custom-description / --safety / --requires-approval / --no-requires-approval / --enable / --disable"),
@@ -192,6 +218,15 @@ func runEditOp(cmd *cobra.Command, opts editOpOptions) error {
 	if err != nil {
 		var he *httpResponseError
 		if errors.As(err, &he) {
+			if he.statusCode == http.StatusUnauthorized && isFreshSignInRequired(he.body) {
+				return output.RenderError(cmd.ErrOrStderr(),
+					output.AuthExpired(fmt.Sprintf(
+						"%s Run `meho login %s` and retry.",
+						strings.TrimSpace(httpErrorDetail(he.body)), backplaneURL,
+					)),
+					opts.JSONOut,
+				)
+			}
 			return renderHTTPStatus(cmd, backplaneURL, he.statusCode, he.body, opts.JSONOut)
 		}
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
@@ -296,6 +331,28 @@ func printEditOpWarnings(w io.Writer, warnings []api.EditOpWarning) {
 	}
 }
 
+// freshSignInCode is the classifier the backplane puts at the start of
+// the 401 detail when an action needs a fresh sign-in (#4711).
+const freshSignInCode = "approval_off_needs_fresh_sign_in"
+
+// isFreshSignInRequired reports whether a 401 body is the fresh sign-in
+// refusal rather than an expired or invalid token.
+func isFreshSignInRequired(body []byte) bool {
+	return strings.HasPrefix(httpErrorDetail(body), freshSignInCode)
+}
+
+// httpErrorDetail returns the FastAPI `detail` string of an error body,
+// or the raw body when it has no string `detail`.
+func httpErrorDetail(body []byte) string {
+	var parsed struct {
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal(body, &parsed); err == nil && parsed.Detail != "" {
+		return parsed.Detail
+	}
+	return strings.TrimSpace(string(body))
+}
+
 func printEditOpResult(w io.Writer, connectorID, opID string, body api.EditOpBody) {
 	fmt.Fprintf(w, "%s/%s — updated\n", connectorID, opID)
 	if body.SafetyLevel != nil {
@@ -306,6 +363,9 @@ func printEditOpResult(w io.Writer, connectorID, opID string, body api.EditOpBod
 	}
 	if body.IsEnabled != nil {
 		fmt.Fprintf(w, "  is_enabled: %t\n", *body.IsEnabled)
+	}
+	if body.Reason != nil {
+		fmt.Fprintf(w, "  reason: %s\n", *body.Reason)
 	}
 	if body.CustomDescription != nil && *body.CustomDescription != "" {
 		fmt.Fprintf(w, "  custom_description: %s\n", *body.CustomDescription)

@@ -102,7 +102,7 @@ consumer correctly noted this as the "closest to parity" connector.
 now performs the live operator-context KV-v2 read via the shared
 [`load_basic_credentials`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py)
 helper; `shared_service_account` executes against a real vCenter.
-Operator recipe: [`vmware-rest-onboarding.md`](../cross-repo/vmware-rest-onboarding.md).
+Operator recipe: `vmware-rest-onboarding.md`.
 `k8s-1.x` joined this state via G3.10-T4
 [#948](https://github.com/evoila/meho/issues/948): its default loader
 [`load_kubeconfig_from_vault`](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py)
@@ -259,7 +259,7 @@ connector. It reads what MEHO registers at start-up and calls no vendor
 system. It runs in the normal unit test sweep. A new connector is covered
 as soon as its registrar runs; nothing needs to be added to the test.
 
-The ten rules (the rule name is in brackets):
+The twelve rules (the rule name is in brackets):
 
 1. A one-line summary of at most 120 characters, and a description of at
    most 300 characters. Longer guidance goes into `llm_instructions`.
@@ -292,6 +292,41 @@ The ten rules (the rule name is in brackets):
     holds a write word (for example `mssql.ha.sync-health`) goes into
     `READS_WITH_A_WRITE_WORD` at the top of the test, with a one-line
     reason. (`write_name`)
+11. No example value looks real, because agents copy example values into
+    real calls. A value fails when it holds an IPv4 or IPv6 address outside
+    the documentation ranges (192.0.2.0/24, 198.51.100.0/24,
+    203.0.113.0/24, 2001:db8::/32), a host name with a real top-level
+    domain, a vendor-shaped id (`vm-42`, `host-12`, `domain-c8`,
+    `datastore-15`, `resgroup-8`, `group-v3`, ...) or a UUID other than
+    the all-zero one. A real top-level domain is any public one (the
+    official list, kept in `backend/tests/data/top_level_domains.txt`) or
+    a private-network ending such as `.local` or `.lan`. Nested values
+    count too. A placeholder in angle brackets, such as `<vm-id>`, always
+    passes. `example.com`, `example.org`, `example.net`, `.test`,
+    `.example` and `.invalid` names are fine. Fixed vendor names that are
+    the same on every system and end like a domain (for example
+    `vsphere.local`, `cluster.local` or the Azure provider
+    `Microsoft.Storage`) are in `VENDOR_NAMES`, each with a reason. A
+    field whose name holds `version` may hold a value such as `9.0.2.0`.
+    A field whose name holds `path` or `file` may hold a file name such as
+    `release-notes.md`; there only the host parts are checked: the host of
+    a URL, of a network share (`\\host\share`) or of an NFS export
+    (`host:/export`). The checks are in
+    `backend/tests/_operation_contract_placeholders.py`.
+    (`example_placeholders`)
+12. Every operation id that `llm_instructions` names in backticks is a
+    registered operation, of any connector. A backticked word counts as an
+    operation id when it has the shape of one (lowercase parts with dots,
+    such as `k8s.pod.list`), whatever its first part. So a wrong first
+    part (`kubernetes.node.list` for `k8s.node.list`) is caught. A word
+    that only looks like an operation id (a file name such as
+    `config.yaml`, a field path, an API group, or the Linux setting
+    `net.ipv4.ip_forward`) goes into `NOT_OPERATION_IDS` at the top of the
+    test, with a reason. The live check fails on an entry that no guidance
+    names any more. This rule needs the list of all registered
+    operations. So a test that checks one operation alone
+    (`check_operation(op)`) skips it; the live check runs it.
+    (`named_operations_exist`)
 
 Ingested (generic) operations are not checked here. Their safety level
 comes from the HTTP method and the connector's safety floor, for example
@@ -316,13 +351,57 @@ To shrink the list: fix the operation's texts or schemas, run
 `cd backend && uv run pytest tests/test_operation_contracts.py`,
 and delete the entries the test reports as fixed.
 
-A new connector should meet all ten rules from the start, so it adds
+A new connector should meet all twelve rules from the start, so it adds
 nothing to the gap list. Every operation states `safety_level` and
 `requires_approval` in its own spec; no connector keeps a default for
 them in its spec class or registrar.
 
 Group texts are not checked for safety claims here; that is a separate
 test.
+
+## How group texts reach running installs
+
+A group text (`when_to_use`) of a hand-written connector lives in the
+connector's code. MEHO writes it into the `operation_group` row at
+start-up. Since #4332, a text change in the code reaches installs that
+already have the row, unless an operator changed the text.
+
+How it works
+([`_resolve_or_create_group`](../../backend/src/meho_backplane/operations/typed_register.py)):
+
+- When MEHO writes a code text, it also stores the SHA-256 of that text
+  in `operation_group.code_text_hash`.
+- At start-up, for each group:
+  - The row has a hash, and the hash does not match the row's text: an
+    operator wrote this text with `meho connector edit-group`. MEHO keeps
+    the row as it is. This also holds when a later code text happens to
+    be the same as the operator's text. MEHO does not store that hash,
+    because the row would then look like a text MEHO wrote, and the next
+    code text would overwrite the operator's choice.
+  - The row already holds the code text: MEHO only stores its hash.
+  - The row's text still matches its stored hash: no one changed it, so
+    MEHO writes the new code text and its hash.
+  - Otherwise MEHO keeps the row as it is. This is a text MEHO cannot
+    prove it wrote (no hash).
+- The write only lands when the row still holds the text and hash MEHO
+  read a moment before. During a rolling update, an operator can save an
+  edit through another instance in between. That edit is kept, and the
+  start-up logs `operation_group_text_refresh_skipped`.
+- Some connectors give one group different texts from different
+  operations. Only the first text of a start-up counts, the same text a
+  fresh install writes. So the row does not change back and forth.
+- Groups from spec ingestion have no hash. Their texts never change at
+  start-up.
+
+Migration
+[`0123`](../../backend/alembic/versions/0123_add_operation_group_code_text_hash.py)
+adds the column. It also stores the hash for rows that still hold a text
+MEHO shipped in an earlier version (every release from v0.2.0, including
+the texts of migration `0011`). Those rows then refresh like any other.
+
+What this means for a connector author: change the text in the code. No
+data migration is needed. A test for this is in
+[`backend/tests/test_operations_group_text_refresh.py`](../../backend/tests/test_operations_group_text_refresh.py).
 
 ## References
 

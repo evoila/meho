@@ -30,7 +30,7 @@ only generic DDL, so PG parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -95,10 +95,12 @@ def _column_is_nullable(sync_url: str, column: str) -> bool:
     raise AssertionError(f"column {column!r} not present on scheduled_trigger")
 
 
-def test_upgrade_adds_skip_state_columns(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_skip_state_columns(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0057`` lands all three skip-state columns with the right nullability."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     columns = _scheduled_trigger_columns(sync_url)
     for column in _SKIP_COLUMNS:
@@ -111,14 +113,16 @@ def test_upgrade_adds_skip_state_columns(alembic_cfg: tuple[Config, str]) -> Non
     assert not _column_is_nullable(sync_url, "skip_count")
 
 
-def test_skip_count_backfills_zero_on_existing_row(alembic_cfg: tuple[Config, str]) -> None:
+def test_skip_count_backfills_zero_on_existing_row(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """A row inserted at ``0056`` backfills ``skip_count=0`` when 0057 lands.
 
     Proves the server default covers pre-#2327 rows without a data-migration
     pass -- the "never skipped" starting state.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
 
     # Insert a minimal cron trigger directly at the pre-0057 schema. SQLite
     # does not enforce foreign keys by default, so the row needs no parent
@@ -166,14 +170,16 @@ def test_skip_count_backfills_zero_on_existing_row(alembic_cfg: tuple[Config, st
     assert row[2] is None
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0056"`` drops the columns; ``upgrade "0057"`` restores them.
 
     Pinned to this migration's own revision on both legs (never ``head``)
     so a future head migration cannot break the round-trip.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert set(_SKIP_COLUMNS) <= _scheduled_trigger_columns(sync_url)
 
     command.downgrade(cfg, _DOWN_REVISION)

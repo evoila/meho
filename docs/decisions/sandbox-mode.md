@@ -1,10 +1,11 @@
 # Sandbox mode: a standing grant may also cover deletes on an instance for disposable test systems (decision)
 
-**Status:** decided — program owner, 2026-10-19. This record: 2026-10-20, revised the same day after a second review.
+**Status:** decided — program owner, 2026-10-19. This record: 2026-10-20, revised the same day after a second review. Amended 2026-10-26: a scoped login on a shared vCenter.
 **Issue:** [#4622](https://github.com/evoila/meho/issues/4622), step 2. Source: the [step 1 review](https://github.com/evoila/meho/issues/4622#issuecomment-6286729259).
 **Initiative:** [#4621](https://github.com/evoila/meho/issues/4621) — sandbox mode for disposable test systems
 **Adds one exception to:** requirement 1 of [governed-delete-operations.md](governed-delete-operations.md), on a sandbox instance only
 **Same pattern as:** the boot-only switch for delegated decisions ([#3693](https://github.com/evoila/meho/issues/3693))
+**Amended 2026-10-28:** a boot setting lets REST and the CLI create delete grants too ([#5251](https://github.com/evoila/meho/issues/5251)); see "Grants in sandbox mode".
 
 ## The decision
 
@@ -16,6 +17,7 @@
 - A sandbox runs on its own site: its own MEHO, Keycloak and Vault, and no network route to any other system. Only disposable systems are registered there as targets. These walls take the place of a person's approval of each delete. They belong to the site, not to MEHO code.
 - The walls protect other sites. They do not protect one test from another on the same sandbox, or the sandbox's own control systems (see "Limits").
 - On a sandbox, AI agents sign in as service principals, on purpose. #3325 and #3980 describe service principals as fixed automation, such as build pipelines; this record does not change that for other instances.
+- **A target on a shared vCenter** (amended 2026-10-26). A sandbox may also have a target on a shared vCenter, but only with a scoped login. For that target, the scoped login's permission scope is the wall. MEHO cannot check it, because a grant names a target, not the VMs behind it. So the scoped login must reach only disposable systems. The sandbox still holds only disposable systems: the vCenter itself is not one, but through the scoped login MEHO reaches nothing else.
 
 ## Words used
 
@@ -29,12 +31,14 @@
 - **Blast radius:** what a delete affects: the object, its child objects, and whether it can be undone.
 - **Multi-step operation:** one operation that runs several steps (the code calls it a composite). Each step that writes passes its own check, the step gate.
 - **Older build:** a MEHO release from before sandbox mode. It does not know the mode.
+- **Shared vCenter:** a vCenter that also holds systems that are not disposable.
+- **Scoped login:** a vCenter login whose role reaches only the sandbox's own folder, resource pool and datastore.
 
 ## The one requirement it narrows
 
 Requirement 1 of the delete decision says today: "Mandatory human approval, always. No standing grant applies, no self-approval, no autonomous-session approval." The new wording:
 
-> 1. **Mandatory human approval, always — except on an instance in sandbox mode.** There, a standing grant may cover a delete by a service principal. A person creates that grant in the web console, and it expires within 30 days. The rest of this requirement is unchanged: no self-approval, no autonomous-session approval.
+> 1. **Mandatory human approval, always — except on an instance in sandbox mode.** There, a standing grant may cover a delete by a service principal. A tenant admin creates that grant in the web console, or, with the setting `MEHO_SANDBOX_DELETE_GRANTS_FROM_API` on, through REST or the CLI, and it expires within 30 days. The rest of this requirement is unchanged: no self-approval, no autonomous-session approval.
 
 The same exception applies wherever that record says that no standing grant can cover a delete, and to the cell "service principal, destructive" in the rules table of #3325. The 30 days are answer 2 in "Answered (2026-10-20)".
 
@@ -61,7 +65,7 @@ The same exception applies wherever that record says that no standing grant can 
 
 ## Guards at boot
 
-- Two settings, read at boot only: `MEHO_SANDBOX_MODE` (default `false`) and `MEHO_SANDBOX_MODE_CONFIRM`. No request, REST route, MCP tool, CLI command or console page can change them.
+- Three settings, read at boot only: `MEHO_SANDBOX_MODE` (default `false`), `MEHO_SANDBOX_MODE_CONFIRM` and `MEHO_SANDBOX_DELETE_GRANTS_FROM_API` (default `false`, see "Grants in sandbox mode"). No request, REST route, MCP tool, CLI command or console page can change them.
 - MEHO refuses to start, with a plain message, when:
   1. the mode is on, and `MEHO_SANDBOX_MODE_CONFIRM` is missing or is not the host name of the MCP resource URI (the public address of the instance, which MEHO already checks at boot);
   2. the mode is on, and no dot-separated part of that host name is exactly `sandbox`: `meho.sandbox.example` passes, `meho.example` and `meho-sandbox.example` are refused;
@@ -77,6 +81,8 @@ The same exception applies wherever that record says that no standing grant can 
 - **Only a tenant admin creates a delete grant, in the web console.** REST and the CLI refuse it, also with a person's token: an AI tool can use a person's login, so a token is never treated as a person (#3325, #3980).
 - **The server checks where the request came from.** The check reads a mark that only MEHO's server sets, from its own console session. No token claim, header or request field can set it. #3980 adds this mark (`web_session` on the caller). If this code lands first, the console route sets the same fact in server code, and #3980 replaces it with the mark.
 - **A console session does not prove that a person clicked.** An AI tool can drive a browser too. Keeping AI tools out of people's console sessions stays an operating rule. MEHO cannot check it.
+
+With the setting `MEHO_SANDBOX_DELETE_GRANTS_FROM_API` on, REST and the CLI may create them too, with a tenant admin's token. The setting is read at boot and cannot be changed by any request. Decided by the program owner on 2026-10-28: a sandbox instance needs no human step, and the walls of the sandbox site are the control.
 - **Every delete grant expires within 30 days** of its creation. Without an expiry, or with a later one, MEHO refuses it. The check sits in `ServicePrincipalGrantService.create`, so REST and the console both get it.
 - **Reminders and renewal.** The sandbox banner shows how many delete grants expire within 7 days, with a link to them. A person reviews the delete grants of one service principal together and renews them as one set. Each renewal is checked like a new grant. MEHO never renews a grant by itself.
 - A delete grant may name one target or a target selector, like any other grant: test systems are often registered during the run.
@@ -89,6 +95,7 @@ The same exception applies wherever that record says that no standing grant can 
 - A grant names a target (for example a vCenter), not the VMs behind it. MEHO cannot tell a disposable VM from another one, and it does not check that a test deletes only its own systems. That is why the site must hold only disposable systems.
 - So tests on one sandbox can delete each other's systems. Tests that must not touch each other use different targets, or run one after the other.
 - The sandbox's own control systems (its MEHO, Keycloak and Vault, and what they run on) must not sit inside a target that has delete grants. For example, they do not run as VMs in the vCenter that the tests use.
+- On a shared vCenter, the sandbox's own control systems may run as VMs, but only outside the scoped login's folder, resource pool and datastore. The scoped login has no rights on them.
 
 ## Display and audit mark
 
@@ -111,9 +118,15 @@ Test 1 (`backend/tests/test_sandbox_mode_verdict_table.py`) checks the verdict (
 
 - **Mode off, on every instance that does not set the mode:** the full test suite passes with only the test edits named below, and the verdict table gives the same verdicts as before the change. After the release, `/ready` on every instance we run shows `"sandbox_mode": "off"`.
 - **On the first sandbox instance, before its first test run:**
-  1. **Network walls, tested actively.** From inside the sandbox, a person tries to reach addresses outside it, over IPv4 and IPv6, and over HTTPS, SSH and DNS. Every try must fail. Quiet network logs alone prove nothing. Repeat this after every network change.
+  1. **Network walls, tested actively.** From inside the sandbox, a person tries to reach addresses outside it, over IPv4 and IPv6, and over HTTPS, SSH and DNS. Every try must fail. Quiet network logs alone prove nothing. Repeat this after every network change. One exception: the sandbox may reach the address of a shared vCenter, for its scoped-login target only. Every other try to reach an address outside the sandbox must still fail.
   2. **Rollback drill.** On the sandbox site, start the last release before sandbox mode against a copy of the sandbox database. A service principal's delete and a delete step must wait for a person. Then delete the copy.
   3. **Grant failures.** An expired grant, a revoked grant, a grant for another target or operation, and a grant revoked between two steps of one multi-step operation: the call or step does not run, and no "auto-approved" row is written.
+  4. **Permission scope, for a target on a shared vCenter.** Run through the sandbox MEHO with the scoped login:
+     - the lists of VMs, hosts, datastores and networks show only the sandbox's own objects;
+     - a change outside the scope fails with a permission error (for example a power-off of a control VM, or a file write on another datastore);
+     - a delete outside the scope is only previewed, never sent;
+     - a person makes delete grants on that target only after this test passed;
+     - the test runs again after every change to the role or the login. If it fails, a person revokes the delete grants on that target until the cause is fixed.
 - **Over the first 20 completed test runs.** A completed run builds, changes and deletes its own disposable systems through MEHO, and its clean-up is confirmed. A run with failed calls does not count: zero approval requests can also mean that nothing ran.
   1. zero approval requests from service principals;
   2. after each run, its systems are gone, and no object that the run did not create was changed or deleted (an inventory of the targets before and after the run);
@@ -135,6 +148,7 @@ Test 1 (`backend/tests/test_sandbox_mode_verdict_table.py`) checks the verdict (
 The program owner answered on 2026-10-20, in the approving review of [pull request #4633](https://github.com/evoila/meho/pull/4633). All five choices stay as written.
 
 1. **Delete grants only in the web console.** Yes: no automation and no CLI can create a delete grant, also not with a person's token.
+   The decision of 2026-10-28 ([#5251](https://github.com/evoila/meho/issues/5251)) changes this when `MEHO_SANDBOX_DELETE_GRANTS_FROM_API` is on: then a tenant admin's token may create one through REST or the CLI.
 2. **30 days for a delete grant.** Yes: every delete grant expires within 30 days of its creation.
 3. **Wording for other instances.** The wording stays: AI agents on service principal logins are on purpose on a sandbox, and the record changes nothing for other instances.
 4. **The review after 20 completed runs.** Yes: the results go into this record, and the program owner keeps or changes the decision.

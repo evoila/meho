@@ -142,9 +142,22 @@ The target SA (`target.gcp_impersonate_sa`) must have at minimum:
 | `gcloud.compute.instances.list` | `roles/compute.viewer` |
 | `gcloud.compute.networks.list` | `roles/compute.viewer` |
 | `gcloud.compute.subnetworks.list` | `roles/compute.viewer` |
+| `gcloud.iam.workload_identity_pools.list`, `gcloud.iam.workload_identity_pools.providers.list` | `roles/iam.workloadIdentityPoolViewer` |
+| `gcloud.iam.workload_identity_pools.delete` (a person must approve) | `iam.workloadIdentityPools.delete`, e.g. in `roles/iam.workloadIdentityPoolAdmin` |
+| `gcloud.iam.service_accounts.policy.read` | `iam.serviceAccounts.getIamPolicy` on the service account |
+| `gcloud.iam.service_accounts.binding.remove` (a person must approve) | `iam.serviceAccounts.getIamPolicy` and `iam.serviceAccounts.setIamPolicy`, e.g. in `roles/iam.serviceAccountAdmin` |
+| `gcloud.iam.workload_identity_pools.create` (a person must approve) | `iam.workloadIdentityPools.create`, e.g. in `roles/iam.workloadIdentityPoolAdmin` |
+| `gcloud.iam.workload_identity_pools.providers.create` (a person must approve) | `iam.workloadIdentityPoolProviders.create`, e.g. in `roles/iam.workloadIdentityPoolAdmin` |
+| `gcloud.iam.workload_identity_pools.providers.update_keys` (a person must approve) | `iam.workloadIdentityPoolProviders.update`, e.g. in `roles/iam.workloadIdentityPoolAdmin` |
+| `gcloud.iam.service_accounts.binding.add` (a person must approve) | `iam.serviceAccounts.getIamPolicy` and `iam.serviceAccounts.setIamPolicy`, e.g. in `roles/iam.serviceAccountAdmin` |
 
-A single `roles/viewer` project-level binding covers most of these;
-assign narrower custom roles for production least-privilege setups.
+A single `roles/viewer` project-level binding covers most of the reads;
+assign narrower custom roles for production least-privilege setups. The
+changes need the write permissions above. MEHO checks them with Google's
+`testIamPermissions` before it asks a person to approve, and refuses at once
+when one is missing. For the pool and provider changes the check runs on the
+project (Cloud Resource Manager), so grant those permissions at the project
+level.
 
 ## Prerequisites
 
@@ -171,9 +184,10 @@ A gcloud target row carries:
 | `product` | `gcloud` | Must be exactly `gcloud` |
 | `version` | `1.0` | Must be exactly `1.0` |
 | `impl_id` | `gcloud-rest` | Must be exactly `gcloud-rest` |
-| `gcp_project` | `rdc-dev-123456` | GCP project ID |
-| `gcp_impersonate_sa` | `meho-reader@rdc-dev-123456.iam.gserviceaccount.com` | SA the connector impersonates |
-| `secret_ref` | `{}` or Vault path dict | **No SA JSON key fields** (see auth section) |
+| `host` | `cloudresourcemanager.googleapis.com` | Required by the target registry; the connector does not use it |
+| `gcp_project` | `rdc-dev-123456` | GCP project ID. Saved in the target's `extras` |
+| `gcp_impersonate_sa` | `meho-reader@rdc-dev-123456.iam.gserviceaccount.com` | SA the connector impersonates. Saved in the target's `extras` |
+| `secret_ref` | leave out, or a Vault path | Leave it out: all auth is ADC + impersonation. If set, the secret must hold **no SA JSON key fields** (see auth section) |
 | `auth_model` | `impersonation` | The only supported auth model |
 
 ### targets.yaml entry
@@ -184,11 +198,14 @@ targets:
     product: gcloud
     version: "1.0"
     impl_id: gcloud-rest
+    host: cloudresourcemanager.googleapis.com
     gcp_project: rdc-dev-123456
     gcp_impersonate_sa: meho-reader@rdc-dev-123456.iam.gserviceaccount.com
-    secret_ref: {}
     auth_model: impersonation
 ```
+
+`meho targets import` saves `gcp_project` and `gcp_impersonate_sa` in the
+target's `extras`. The connector reads them from there on every call.
 
 Register with:
 
@@ -503,7 +520,7 @@ Broadcast events follow the standard envelope (CLAUDE.md §6 §7). All
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| `status=error connector_error: ValueError: target … secret_ref contains SA JSON key fields` | Vault secret has SA key material | Replace `secret_ref` with an empty dict `{}`; use ADC+impersonation instead |
+| `status=error connector_error: ValueError: target … secret_ref contains SA JSON key fields` | Vault secret has SA key material | Remove the SA key fields from the secret, or leave `secret_ref` out of the target; use ADC+impersonation instead |
 | `status=error connector_error: google.auth.exceptions.TransportError` | No ADC configured on backplane host | Run `gcloud auth application-default login` on the backplane; or set `GOOGLE_APPLICATION_CREDENTIALS` |
 | `status=error connector_error: google.auth.exceptions.RefreshError … 403 PERMISSION_DENIED` on impersonation | Backplane ADC principal lacks `roles/iam.serviceAccountTokenCreator` on the target SA | Grant the Token Creator binding (see Prerequisites) |
 | `status=error connector_error: google.auth.exceptions.RefreshError … 403 PERMISSION_DENIED` on the GCP API | Target SA lacks the required role | Grant the appropriate `roles/viewer` or narrower role on the project |

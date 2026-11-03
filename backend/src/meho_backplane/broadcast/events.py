@@ -24,11 +24,19 @@ responses broadcast aggregate-only by default; everything else
 broadcasts in full. Per-op opt-in to flip a sensitive class to full
 detail is a G6.3 surface; T2 ships the conservative default.
 
+Where the exact classes come from (#5579): a connector declares the
+class of its own operations in its package
+(``connectors/<name>/op_classes.py`` calls
+:func:`meho_backplane.op_classes.declare_op_classes` at import). The
+lists in this module name only the operations of the core connectors
+(``vault``, ``keycloak``, ``secret``, ``targets``, ``topology``, and the
+checks plane). Everything else is a pattern rule on the op id.
+
 Why a classifier rather than a per-op annotation:
 
 1. Sensitivity is mostly op-class-shaped. ``vault.kv.read`` is no more
-   sensitive than ``vault.kv.list``; ``vsphere.vm.list`` is no more
-   sensitive than ``vsphere.host.list``. A per-op flag would multiply
+   sensitive than ``vault.kv.list``; ``k8s.pod.list`` is no more
+   sensitive than ``k8s.node.list``. A per-op flag would multiply
    the contract surface for no policy gain.
 2. The classifier is one auditable function. A reviewer can read it in
    one sitting and verify policy compliance; scattered annotations on
@@ -71,94 +79,52 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from meho_backplane.op_classes import declared_op_class
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 
 __all__ = [
     "BroadcastEvent",
     "classify_op",
+    "holds_hidden_param_values",
     "is_secret_param_name",
     "redact_payload",
     "resolve_op_class",
+    "resolve_operation_op_class",
     "scrub_broadcast_params",
     "scrub_secret_named_values",
 ]
 
 
-#: Op-ids that classify as ``credential_read``. Extensible — every
-#: future credential-access verb (e.g. ``vault.transit.decrypt``,
-#: ``secretsmanager.get``, ``onepassword.read``) gets added here when
-#: it lands. Membership is the canonical signal; ``vault.kv.``-prefix
-#: matching would over-match a hypothetical future ``vault.kv.stats``
-#: which doesn't read secret content.
+#: Op ids of core connectors that classify as ``credential_read``: the
+#: answer holds a secret. Membership is the signal, not a ``vault.kv.``
+#: prefix, so a future ``vault.kv.stats`` (no secret content) is not
+#: swept in. Every other connector declares its own credential reads in
+#: its package (``connectors/<name>/op_classes.py``, read first by
+#: :func:`classify_op` through :func:`~meho_backplane.op_classes.declared_op_class`).
 _CREDENTIAL_READ_OPS: Final[frozenset[str]] = frozenset(
     {
         "vault.kv.read",
         "vault.kv.list",
-        # SDDC Manager is the system of record for nested-infra credentials;
-        # its typed ``GET /v1/credentials`` read returns live account secrets
-        # (#2306). Classified credential_read so audit + broadcast payloads
-        # collapse to aggregate-only, on top of the op's requires_approval
-        # gate and the connector-boundary secret scrub.
-        "sddc.credential.list",
-        # The governed guest-cluster kubeconfig read (#3496). Reads a Secret's
-        # data value on a k8s / vSphere-Supervisor target and stages it to a
-        # tenant-scoped Vault secret_ref (returning only the ref, never the
-        # value). Classified credential_read — same posture as the SDDC read —
-        # so audit + broadcast collapse to aggregate-only on top of its
-        # requires_approval gate; the result is value-free by construction.
-        "k8s.secret.read_to_ref",
-        # #4617 -- the ingested SDDC Manager reads whose answer holds
-        # credentials. Same posture as ``sddc.credential.list``: the catalog
-        # row ``sddc`` / ``9.0`` raises them to caution with approval, and
-        # this entry scrubs the answer and collapses the broadcast. An op id
-        # matches on its own, so one entry covers the path on every
-        # ingested connector that serves it.
-        # The credential store and its password-rotation tasks.
-        "GET:/v1/credentials",
-        "GET:/v1/credentials/{id}",
-        "GET:/v1/credentials/tasks",
-        "GET:/v1/credentials/tasks/{id}",
-        "GET:/v1/credentials/tasks/{id}/subtasks/{subtaskId}",
-        "GET:/v1/credentials/tasks/{id}/resource-credentials",
-        # Depot, backup and proxy settings carry account passwords.
-        "GET:/v1/system/settings/depot",
-        "GET:/v1/system/backup-configuration",
-        "GET:/v1/system/backup-configuration/backup-locations",
-        "GET:/v1/system/proxy-configuration",
-        # Host prechecks echo the host password; VASA providers and their
-        # users carry passwords; a management-component task spec carries
-        # the admin and root passwords.
-        "GET:/v1/hosts/prechecks/{id}",
-        "GET:/v1/vasa-providers",
-        "GET:/v1/vasa-providers/{id}",
-        "GET:/v1/vasa-providers/{id}/users",
-        "GET:/v1/vcf-management-components/tasks/{taskId}/spec",
-        # Users carry an API key; identity providers carry the sync client
-        # bearer token.
-        "GET:/v1/users",
-        "GET:/v1/users/ui",
-        "GET:/v1/users/local/admin",
-        "GET:/v1/identity-providers",
-        "GET:/v1/identity-providers/{id}",
-        # #4617 -- a BIND config file can hold TSIG and rndc key secrets.
-        # The answer is one text field, so the Tier-1 ``bind_key_secret``
-        # rule does the redaction; this entry collapses the broadcast and
-        # keeps the flight recorder from storing the body.
-        "bind9.config.show",
+        # #5230 -- the compare read. The backplane reads the secret values
+        # itself to compare them and returns only same/different, so the
+        # answer is value-free by construction. The pin makes the flight
+        # recorder drop the vendor bodies of the read (they carry the
+        # values) and collapses the broadcast to aggregate-only.
+        "vault.kv.compare",
     }
 )
 
-#: Op-ids that classify as ``credential_mint``. Like
-#: :data:`_CREDENTIAL_READ_OPS`, the explicit allowlist comes before
-#: the write-suffix check so ``harbor.robot.create`` (which ends with
-#: ``.create``) isn't misclassified as plain ``write``. Every op that
-#: returns a freshly-minted secret credential in its response payload
-#: belongs here — the broadcast collapses to aggregate-only so the
-#: secret never reaches the SSE stream or any Slack mirror channel.
+#: Op ids of core connectors that classify as ``credential_mint``. The
+#: explicit pin comes before the write-suffix check so a ``.create`` op
+#: that returns a new secret is not misclassified as plain ``write``.
+#: Every op that returns a freshly-minted secret credential in its
+#: response payload belongs in this class — the broadcast collapses to
+#: aggregate-only so the secret never reaches the SSE stream or any Slack
+#: mirror channel. Other connectors declare theirs in their own package
+#: (for example ``harbor.robot.create`` in ``connectors/harbor/op_classes.py``).
 _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
     {
-        "harbor.robot.create",
         # G11.7-T1 #1401 — Vault auth ops whose *response* carries a
         # freshly-minted secret. ``vault.token.create`` returns a client
         # token; ``vault.auth.approle.generate_secret_id`` returns a
@@ -167,33 +133,32 @@ _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
         # ``OperationResult`` returned to the caller still carries it.
         "vault.token.create",
         "vault.auth.approle.generate_secret_id",
-        # G-Node/RKE2-T2 #2429 — the RKE2 server-token rotate mints a new
-        # join token server-side. The handler never returns the token value
-        # (only a Vault pointer), so nothing sensitive is in the response —
-        # but ``.rotate`` would otherwise classify ``other`` and broadcast
-        # full params/detail. Pinning to ``credential_mint`` collapses the
-        # broadcast to aggregate-only as defence-in-depth for the op class.
-        "rke2.token.rotate",
-        # #3890 — the VCF Automation API-token mint. It logs in as the org
-        # user and mints a long-lived refresh token; the handler writes the
-        # token straight to Vault and returns only a Vault pointer + SHA-256,
-        # so nothing sensitive is in the response. The pin (``rke2.token.rotate``
-        # precedent) collapses the broadcast to aggregate-only and makes the
-        # flight recorder drop its bodies (the OAuth form carries the session
-        # JWT as the ``assertion``; the token response carries the token).
-        "vcfa.provider.api_token.create",
+        # ``vault.token.create_and_store`` makes a Vault token and writes it
+        # straight to a Vault KV path or a Kubernetes Secret; the handler
+        # returns only the accessor, expiry, policies and destination.
+        # Aggregate-only broadcast, and the flight recorder keeps no bodies
+        # (the token rides in the Vault create response and in the write
+        # request).
+        "vault.token.create_and_store",
+        # The handoff export returns a one-time handoff token: not the value,
+        # but it can fetch the value once. Aggregate-only keeps it off the feed.
+        "secret.handoff.export",
     }
 )
 
-#: Op-ids that classify as ``credential_write`` (G11.7-T1 #1401). Unlike
-#: :data:`_CREDENTIAL_MINT_OPS` (secret in the *response*), these ops
-#: carry the secret in their *request params* — the broadcast publisher
-#: ships ``params`` (request-side), so a plain ``write`` classification
-#: would leak the written credential to every operator on the feed.
-#: Collapsing them to aggregate-only keeps the team-coordination signal
-#: ("someone wrote a credential at 14:23") without the secret material.
-#: The explicit allowlist comes before the ``.write`` / ``.create`` /
-#: ``.update`` suffix branch so these win over the plain ``write`` class.
+#: Op ids of core connectors that classify as ``credential_write``
+#: (G11.7-T1 #1401). A credential-writing operation must be classed so
+#: that its written value stays hidden from other operators: the broadcast
+#: publisher ships ``params`` (request-side), and these ops carry the
+#: secret in their *request params*, or send a secret read from Vault in
+#: the request body. Unlike :data:`_CREDENTIAL_MINT_OPS` (secret in the
+#: *response*), the secret is on the way in. Collapsing them to
+#: aggregate-only keeps the team-coordination signal ("someone wrote a
+#: credential at 14:23") without the secret material. The explicit pin
+#: comes before the ``.write`` / ``.create`` / ``.update`` suffix branch so
+#: these win over the plain ``write`` class.
+#: Other connectors declare theirs in their own package (for example
+#: ``k8s.secret.create`` in ``connectors/kubernetes/op_classes.py``).
 #:
 #: * ``vault.auth.userpass.write`` / ``vault.auth.userpass.update_password``
 #:   — the userpass password is in ``params``.
@@ -205,36 +170,15 @@ _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
 #:   fields ride in ``params`` (G3.15-T1 #1409). Without the explicit
 #:   pin the ``.patch`` write-suffix would classify it plain ``write``
 #:   and broadcast the partial secret in full.
-#: * ``k8s.secret.create`` — the Secret ``data`` / ``stringData`` is in
-#:   ``params``.
-#: * ``k8s.job.create`` — the Job ``spec`` carries a pod template whose
-#:   inline ``env`` entries can hold credential material in ``params``
-#:   (G3.14-T1 #1403).
-#: * ``vmware.composite.vm.guest.{process.list,env.read,file.read,
-#:   file.write,program.run}`` (#3717) — the vSphere guest-ops composites
-#:   that log into the guest. Unlike every other member here, their secret
-#:   is **not** in ``params``: the guest OS password rides the downstream
-#:   vim ``NamePasswordAuthentication`` block in the *request body*,
-#:   resolved from ``secret_ref`` (``composites/_guest.py::_guest_auth``).
-#:   The pin is what the flight recorder's
-#:   :func:`~meho_backplane.redaction.flight_recorder.classify_body_exclusion`
-#:   delegates to, so these spans never record that body; the broadcast
-#:   collapse is defence-in-depth here (their params are non-secret). The
-#:   sibling ``vmware.composite.vm.guest.net.show`` is deliberately absent —
-#:   it reads Tools-reported VM state with no in-guest login and sends no
-#:   credential.
 _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
     {
         "vault.auth.userpass.write",
         "vault.auth.userpass.update_password",
         "vault.kv.put",
         "vault.kv.patch",
-        "k8s.secret.create",
-        # The values of an existing Secret ride in the same params shape as
-        # k8s.secret.create (inline maps or store refs), so the same pin
-        # keeps them off the approval row and the broadcast.
-        "k8s.secret.update",
-        "k8s.job.create",
+        # The handoff import carries the one-time handoff token in params.
+        # The pin keeps it off the approval row (stored encrypted) and the feed.
+        "secret.handoff.import",
         # G3.13-T4 #1406 — Keycloak user-credential write ops. Both source
         # the password from Vault (it is never an inline param), so the
         # request params carry only a Vault *path*. The pin is
@@ -243,159 +187,13 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # aggregate-only rather than shipping it on the feed.
         "keycloak.user.create",
         "keycloak.user.reset_password",
-        # G-Node/RKE2-T3 #2430 — the RKE2 node-config write op. Its ``patch``
-        # param carries key -> value edits, and an RKE2 ``config.yaml`` body
-        # holds ``token:`` / ``agent-token:`` join credentials, so a plain
-        # ``write`` classification (the ``.update`` suffix) would broadcast a
-        # written token in full. Pinning it collapses the broadcast to
-        # aggregate-only. (The op result itself returns key NAMES only.)
-        "rke2.node.config.update",
-        # #2892 — the GOSC customization-spec create composite. Its params
-        # carry Windows sysprep credentials (``windows_admin_password`` /
-        # ``windows_product_key`` / ``windows_domain_admin_password``). The
-        # ``password`` fields trip the key-name scrub, but ``product_key``
-        # does not (``key`` is neither an anywhere- nor a final-position
-        # secret token), so a plain ``write`` classification (the ``.create``
-        # suffix) would broadcast the product key in full. Pinning it
-        # collapses the whole params dict to aggregate-only (#1503); the
-        # park-time preview additionally echoes identity fields only. The
-        # sibling ``vmware.composite.vm.customize`` carries only a spec-name
-        # reference (no secret) and is not pinned.
-        "vmware.composite.guest.customization_spec.create",
-        # #2908 — the Holodeck HoloRouter patch op. Its C2 patch wraps the
-        # BroadcomBuildToken *read* and its fixed patch strings reference
-        # ``$env:brcm_build_token`` by name, never a value; the op takes no
-        # params today. The pin is defence-in-depth per the
-        # ``rke2.node.config.update`` precedent: should a future param-shape
-        # change ever place a token/credential in params, the broadcast
-        # collapses to aggregate-only rather than shipping it on the feed. The
-        # sibling ``holodeck.config.apply`` carries only non-secret config +
-        # Vault *refs* (the vCenter/depot creds are read on the appliance from
-        # its staged env, never a param), so it keeps its param-echo preview
-        # and is deliberately NOT pinned.
-        "holodeck.router.patch",
-        # #3255 — the governed in-guest program-execution write. Its
-        # ``arguments`` string (a command line) and ``env`` values can hold
-        # credential material (``--token=…``, ``API_KEY=…``) in ``params``,
-        # and neither is a secret-*named* key nor a recognisable secret
-        # *shape*, so the key-name / Tier-1 scrub in ``scrub_broadcast_params``
-        # would miss them — a plain ``write`` classification (the ``.run``
-        # suffix) would ship the command line in full on the feed. Pinning it
-        # collapses the whole params dict to aggregate-only, exactly as
-        # ``k8s.job.create``'s inline-env case and the GOSC create above; the
-        # park-time preview additionally echoes only program identity +
-        # argument byte size + env-var names. Its sibling
-        # ``guest.file.write`` (``content`` has the same characteristic) is
-        # pinned just below (#3298).
-        "vmware.composite.vm.guest.program.run",
-        # #3298 — the governed in-guest file write, the sibling of
-        # ``program.run`` above. Its ``content`` param is the file body to
-        # write; ``content`` is neither a secret-*named* key nor a
-        # recognisable secret *shape*, so the key-name / Tier-1 scrub in
-        # ``scrub_broadcast_params`` lets it through — a plain ``write``
-        # classification (the ``.write`` suffix) would ship the whole file
-        # body on the feed. Pinning it collapses the params dict to
-        # aggregate-only, exactly as ``program.run`` above and
-        # ``rke2.node.config.update``; the park-time preview additionally
-        # echoes only path + byte size + overwrite intent, never the content.
-        # This was the last guest-ops write riding broadcast unredacted
-        # (flagged as the unpinned sibling in the #3255 pin above).
-        "vmware.composite.vm.guest.file.write",
-        # #3717 — the guest-ops READ composites that log into the guest.
-        # process.list / env.read / file.read each resolve the guest OS
-        # credential from secret_ref and send it as the vim
-        # ``NamePasswordAuthentication`` block in the request BODY
-        # (composites/_guest.py::_guest_auth). Unlike the sibling writes above,
-        # the secret is NOT an op param and NOT a declared schema property, so
-        # neither the classifier-coverage lint nor the flight recorder's
-        # shape/pattern nets can see it — a ``read`` / ``other`` classification
-        # (``.list`` read-suffix / bare ``.read``) leaves the flight-recorder
-        # vendor-call + typed spans recording the guest password in plaintext
-        # (redaction/flight_recorder/families.py delegates body exclusion to
-        # this classifier). Pinning them ``credential_write`` sets
-        # body_recorded=false for their spans and collapses their broadcast to
-        # aggregate-only. ``net.show`` is deliberately NOT here: it reads
-        # Tools-reported VM state with no in-guest login, so it sends no
-        # credential (composites/_guest.py::guest_net_show_composite).
-        "vmware.composite.vm.guest.process.list",
-        "vmware.composite.vm.guest.env.read",
-        "vmware.composite.vm.guest.file.read",
-        # #3361 — the governed linux-ssh config-file write. Its ``content``
-        # param is the file body to write; ``content`` is neither a
-        # secret-*named* key nor a recognisable secret *shape*, so the
-        # key-name / Tier-1 scrub in ``scrub_broadcast_params`` lets it
-        # through — a plain ``write`` classification (the ``.write`` suffix)
-        # would ship the whole file body on the feed. Pinning it collapses the
-        # params dict to aggregate-only; the park-time bespoke preview echoes
-        # only path + byte size + backup path + validate command, never the
-        # content (the ``vmware.composite.vm.guest.file.write`` mold above).
-        "linux.file.write",
-        # #3361 — the governed linux-ssh script-execution write, the sibling of
-        # the guest ``program.run`` above. Its ``arguments`` string (a command
-        # line) and ``env`` values can hold credential material
-        # (``--token=…``, ``API_KEY=…``) in ``params``, and neither is a
-        # secret-*named* key nor a recognisable secret *shape*, so the scrub
-        # misses them — and ``.run`` is not even a ``.write`` suffix, so an
-        # unpinned classification would fall through to ``other`` and ship the
-        # command line in full. Pinning it collapses the params dict to
-        # aggregate-only; the park-time bespoke preview echoes only program
-        # identity + argument byte size + env-var NAMES, never any value.
-        "linux.script.run",
-        # #3497 — the governed SDDC Manager host-commission write pair. Both
-        # take the same ``{"spec": [<HostCommissionSpec>, ...]}`` params, and
-        # each spec item declares a ``password`` (the ESXi host root password
-        # POSTed to /v1/hosts/validations resp. /v1/hosts). ``password`` is a
-        # secret-*named* key the runtime ``scrub_broadcast_params`` key-scrub
-        # would catch, but the classifier-coverage lint (meho-internal #151)
-        # requires every op *declaring* a secret-shaped param to be statically
-        # pinned to a ``credential_*`` class so its broadcast collapses to
-        # aggregate-only, not merely field-redacted. ``.validate`` is not even
-        # a ``.write`` suffix (it would fall through to ``other``) and
-        # ``.commission`` would classify plain ``write`` — either would ship
-        # the host passwords on the feed. Pinning both collapses the params
-        # dict to aggregate-only. The sibling domain writes
-        # (``sddc.domain.validate`` / ``sddc.domain.create``) carry their
-        # passwords inside an open-``additionalProperties`` DomainCreationSpec
-        # (no *declared* secret prop), so the lint does not flag them; the
-        # runtime scrub catches their nested ``*password*`` keys and collapses
-        # the broadcast, exactly the two-layer split that pins ``vault.kv.put``
-        # statically while leaving its generic ``data`` container to the scrub.
-        "sddc.host.validate",
-        "sddc.host.commission",
-        # #3495 — the SUBSCRIBED content-library create composite. Its
-        # ``password`` param (BASIC-auth to the publisher) IS a secret-named
-        # key the scrub would catch, but ``username`` / ``ssl_thumbprint`` are
-        # not, and pinning the whole op collapses its params to aggregate-only
-        # rather than relying on per-key scrubbing — matching the GOSC-create /
-        # guest-ops precedent. The park-time bespoke preview echoes only the
-        # non-secret identity fields (name / subscription URL / datastore /
-        # auth method / sync mode). The sibling reads (status / items.list) and
-        # the sync write carry no credential and are NOT pinned.
-        "vmware.composite.content_library.subscribed.create",
-        # #3890 — the VCF Automation local org-user create. Like
-        # ``keycloak.user.create`` its params carry only a Vault *path*
+        # The Keycloak login test. Its params carry only a Vault *path*
         # (``password_secret_ref``); the password is read in-process and sent
-        # in the ``POST /cloudapi/1.0.0/users`` request BODY. Pinning it sets
-        # body_recorded=false for its flight-recorder spans and collapses the
-        # broadcast to aggregate-only as defence-in-depth.
-        "vcfa.provider.user.create",
-        # #3890 — the API-token revoke logs in as the token's owner with the
-        # password read from ``password_secret_ref`` (declared secret-shaped
-        # params, so the classifier-coverage lint requires a pin; ``.revoke``
-        # would otherwise fall through to ``other`` and broadcast in full).
-        # Same posture as its ``vcfa.provider.api_token.create`` sibling.
-        "vcfa.provider.api_token.revoke",
-        # The vCenter appliance local-account password change. Like
-        # ``keycloak.user.reset_password``, its params carry only a Vault
-        # *path* (``password_secret_ref``); the new password is read
-        # in-process and sent only in the ``PATCH
-        # /api/appliance/local-accounts/{username}`` request BODY. The pin
-        # sets body_recorded=false for its flight-recorder spans, collapses
-        # the broadcast to aggregate-only, and keeps a waiting approval's
-        # params in the encrypted handoff store. Its sibling
-        # ``vmware.appliance.local_account.policy.set`` sends only expiry
-        # numbers and flags, so it is NOT pinned.
-        "vmware.appliance.local_account.password.set",
+        # only in the token request BODY, and the token answer carries an
+        # access and a refresh token. The pin sets body_recorded=false for its
+        # flight-recorder spans, collapses the broadcast to aggregate-only and
+        # keeps a waiting approval's params in the encrypted handoff store.
+        "keycloak.user.check_login",
     }
 )
 
@@ -495,58 +293,38 @@ _WRITE_SUFFIXES: Final[tuple[str, ...]] = (
     ".restart",
 )
 
-#: Exact-match op-ids that classify ``write`` despite not carrying a
-#: write-shaped verb suffix. The four ArgoCD write verbs (#2681) are pinned
-#: here rather than added to :data:`_WRITE_SUFFIXES` because both spellings
-#: that a suffix would need — dotted and its underscore mirror — collide:
+#: Exact-match op ids of core connectors that classify ``write`` despite
+#: not carrying a write-shaped verb suffix. An exact pin, not a new
+#: suffix, for two reasons:
 #:
-#: * ``argocd.app.set`` / ``.sync`` / ``.rollback`` are approval-gated
-#:   mutations that fell through to ``other`` (their ``.delete`` /
-#:   ``appproject.create`` / ``appproject.update`` siblings already
-#:   classified ``write`` via existing suffixes). A ``.set`` / ``.sync`` /
-#:   ``.rollback`` suffix would work for the dotted argocd op-ids, but
-#:   :data:`_MEHO_FLAT_WRITE_SUFFIXES` is auto-derived from
-#:   :data:`_WRITE_SUFFIXES` by ``.`` → ``_``, so it would ALSO add
-#:   ``_set`` / ``_sync`` / ``_rollback`` to the flat MCP-tool arm and
+#: * :data:`_MEHO_FLAT_WRITE_SUFFIXES` is auto-derived from
+#:   :data:`_WRITE_SUFFIXES` by ``.`` → ``_``, so a new dotted suffix
+#:   (say ``.set``) would also add ``_set`` to the flat MCP-tool arm and
 #:   silently relabel ``meho_``-prefixed ops such as
-#:   ``meho_broadcast_overrides_set`` from ``other`` to ``write``. ArgoCD
-#:   op-ids are always dotted (``argocd.app.set``), never ``meho_``-flat,
-#:   so an exact pin classifies them ``write`` with zero flat-mirror bleed.
-#: * ``argocd.app.refresh`` is an HTTP GET
-#:   (``GET /api/v1/applications/{name}?refresh=hard``) that forces ArgoCD
-#:   to reconcile the live vs. desired state — an approval-gated action with
-#:   a cluster-side side effect, so on the approval/audit surface it is a
-#:   write even though the HTTP verb is a read. A ``.refresh`` suffix is
-#:   shared with ``topology.refresh``, a genuine read (it emits only
-#:   aggregate node/edge counts, explicitly stored ``op_class="read"``), and
-#:   because :func:`classify_op` re-runs at render time on stored op-ids a
+#:   ``meho_broadcast_overrides_set`` from ``other`` to ``write``.
+#: * A suffix can collide with a genuine read. ``.refresh`` is shared by
+#:   ``topology.refresh`` (a read that emits only aggregate node/edge
+#:   counts, explicitly stored ``op_class="read"``), and because
+#:   :func:`classify_op` re-runs at render time on stored op-ids a
 #:   blanket suffix would silently relabel every historical
 #:   ``topology.refresh`` row as ``write`` in the console drawers.
 #:
 #: Same exact-pin idiom as :data:`_CHECK_EVENT_OPS` /
 #: :data:`_CREDENTIAL_MINT_OPS`: a precise pin that beats a broader
-#: structural match.
+#: structural match. Other connectors declare theirs in their own package
+#: (for example ``argocd.app.sync`` in ``connectors/argocd/op_classes.py``).
 _WRITE_OPS: Final[frozenset[str]] = frozenset(
     {
-        "argocd.app.set",
-        "argocd.app.sync",
-        "argocd.app.rollback",
-        "argocd.app.refresh",
         # keycloak group-lifecycle writes (#3280) whose op-id suffix is not
         # one of _WRITE_SUFFIXES (``.update_attributes`` / ``.add`` /
         # ``.remove``): pin them ``write`` so a group mutation shows as a
         # mutation on the feed. Group attributes are not secret material, so
         # these stay plain ``write`` (never ``credential_write``);
         # ``keycloak.group.create`` already classifies write via its
-        # ``.create`` suffix. Same exact-pin idiom as the argocd entries.
+        # ``.create`` suffix.
         "keycloak.group.update_attributes",
         "keycloak.group.member.add",
         "keycloak.group.member.remove",
-        # pfSense user flag writes (#3937): ``.disable`` / ``.enable`` are not
-        # write suffixes, and a suffix would also relabel the flat ``meho_``
-        # mirror. The params carry only a user name, so plain ``write``.
-        "pfsense.user.disable",
-        "pfsense.user.enable",
         # keycloak per-user session logout (#3851): a mutation (it ends live
         # sessions) whose ``.logout`` suffix is not a write suffix. Its params
         # are a user id or username only, so plain ``write``.
@@ -585,9 +363,9 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
 #: ``.versions``) would otherwise fall through to the full-detail
 #: ``other`` class rather than broadcast at the same ``read`` sensitivity
 #: as its ``harbor.project.info`` sibling. Adding it also reclassifies
-#: the ``vmware.composite.performance.summary`` metrics composite from
-#: ``other`` to ``read`` — the correct class for a non-mutating read;
-#: neither class is sensitive (:data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`),
+#: any other ``*.summary`` metrics read from ``other`` to ``read`` —
+#: the correct class for a non-mutating read; neither class is sensitive
+#: (:data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`),
 #: so the broadcast detail level is unchanged for it. ``.ha_status`` and
 #: ``.autopilot_state`` are the Vault cluster-wide node reads
 #: (``vault.sys.ha_status`` / ``vault.sys.raft.autopilot_state``): like
@@ -745,6 +523,12 @@ def classify_op(op_id: str) -> str:
 
     Match order is policy-significant:
 
+    0. The class the op's own connector declared, if any
+       (:func:`~meho_backplane.op_classes.declared_op_class`, filled by
+       each ``connectors/<name>/op_classes.py`` at import). A declared
+       class is exact and wins over every rule below. The server imports
+       every connector package at start, so the declarations are in
+       place before the first call is classified.
     1. ``credential_read`` — explicit allowlist first so a hypothetical
        future ``vault.kv.audit-list`` (audit metadata, not secret
        content) could opt out by being absent from
@@ -752,13 +536,13 @@ def classify_op(op_id: str) -> str:
        check.
     2. ``credential_mint`` — explicit allowlist for ops that return a
        freshly-minted secret in their response payload (e.g.
-       ``harbor.robot.create``, ``vault.token.create``). Checked before
+       ``vault.token.create``, ``secret.handoff.export``). Checked before
        the ``.create`` suffix so the allowlist wins over the
        mutation-suffix branch.
     3. ``credential_write`` — explicit allowlist for write ops whose
        *request params* carry a secret (e.g.
        ``vault.auth.userpass.write``, ``vault.kv.put``,
-       ``k8s.secret.create``). Checked before the write-suffix branch
+       ``secret.handoff.import``). Checked before the write-suffix branch
        so the secret-bearing params collapse to aggregate-only instead
        of broadcasting in full under the plain ``write`` class
        (G11.7-T1 #1401).
@@ -809,18 +593,19 @@ def classify_op(op_id: str) -> str:
        non-mutating probe, matched by prefix because its verbs are
        underscore-joined (``net.tcp_check``), so a dotted read suffix
        never matches.
-    6. ``write`` — the exact-match :data:`_WRITE_OPS` pins (the four
-       ArgoCD write verbs ``argocd.app.set`` / ``.sync`` / ``.rollback`` /
-       ``.refresh``, pinned rather than made global suffixes to avoid a
-       flat-mirror bleed onto ``meho_``-prefixed ops and a ``.refresh``
-       collision with the read-class ``topology.refresh`` — see
+    6. ``write`` — the exact-match :data:`_WRITE_OPS` pins (the
+       keycloak group / logout verbs and MEHO's own registry writes
+       such as ``targets.register``, pinned rather than made global
+       suffixes to avoid a flat-mirror bleed onto ``meho_``-prefixed ops
+       and a ``.refresh``-style collision with a read — see
        :data:`_WRITE_OPS`) OR the mutation suffixes (``.create`` /
        ``.update`` / ``.delete`` / ``.patch`` / ``.put`` / ``.write`` /
        ``.add`` / ``.remove`` / ``.assign`` / ``.restart``).
-       The ``_CREDENTIAL_WRITE_OPS`` allowlist (step 3) runs first, so a
-       secret-bearing op like ``vault.auth.userpass.write`` or
-       ``rke2.node.config.update`` (``.update``-shaped, token-bearing
-       patch) keeps its ``credential_write`` class.
+       The declared classes (step 0) and the ``_CREDENTIAL_WRITE_OPS``
+       allowlist (step 3) run first, so a secret-bearing op like
+       ``vault.auth.userpass.write`` or ``rke2.node.config.update``
+       (``.update``-shaped, token-bearing patch, declared by the rke2
+       connector) keeps its ``credential_write`` class.
     7. ``read`` — non-mutating verb suffixes (``.list`` / ``.info`` /
        ``.get`` / ``.about`` / ``.ls`` / ``.health`` / ``.seal_status``
        / ``.versions`` / ``.summary``). ``.read`` is deliberately **not** a read
@@ -851,7 +636,7 @@ def classify_op(op_id: str) -> str:
 
     >>> classify_op("vault.kv.read")
     'credential_read'
-    >>> classify_op("harbor.robot.create")
+    >>> classify_op("secret.handoff.export")
     'credential_mint'
     >>> classify_op("vault.token.create")
     'credential_mint'
@@ -877,17 +662,11 @@ def classify_op(op_id: str) -> str:
     'write'
     >>> classify_op("net.tcp_check")
     'read'
-    >>> classify_op("vsphere.vm.list")
+    >>> classify_op("k8s.pod.list")
     'read'
-    >>> classify_op("vsphere.vm.create")
+    >>> classify_op("k8s.namespace.create")
     'write'
-    >>> classify_op("argocd.app.set")
-    'write'
-    >>> classify_op("argocd.app.sync")
-    'write'
-    >>> classify_op("argocd.app.rollback")
-    'write'
-    >>> classify_op("argocd.app.refresh")  # exact-match pin, not a .refresh suffix
+    >>> classify_op("keycloak.user.logout")  # exact-match pin, not a suffix
     'write'
     >>> classify_op("topology.refresh")  # a read: .refresh is deliberately not global
     'other'
@@ -906,6 +685,9 @@ def classify_op(op_id: str) -> str:
     >>> classify_op("meho.sensor.list")  # pre-#2745 stored rows re-render unchanged
     'read'
     """
+    declared = declared_op_class(op_id)
+    if declared is not None:
+        return declared
     if op_id in _CREDENTIAL_READ_OPS:
         return "credential_read"
     if op_id in _CREDENTIAL_MINT_OPS:
@@ -990,6 +772,58 @@ def resolve_op_class(op_id: str, declared: str | None = None) -> str:
     if declared and derived not in _SECRET_SHAPE_CLASSES:
         return declared
     return derived
+
+
+#: Source kinds of hand-written operations: typed operations and multi-step
+#: (composite) operations. Ingested operations get their class from the
+#: HTTP method in their op id instead.
+_HAND_WRITTEN_SOURCE_KINDS: Final[frozenset[str]] = frozenset({"typed", "composite"})
+
+#: Risk levels of an operation that changes something.
+_CHANGE_SAFETY_LEVELS: Final[frozenset[str]] = frozenset({"caution", "dangerous", "destructive"})
+
+
+def resolve_operation_op_class(op_id: str, *, source_kind: str, safety_level: str | None) -> str:
+    """Return the class of one run of a registered operation.
+
+    The dispatcher stores this class on the audit row, and the announce
+    gate, the announce reminder and the target activity warning use it.
+    So all four always agree.
+
+    A hand-written (typed or multi-step) operation states its risk level
+    where it is registered. That risk level is the declared class that goes
+    to :func:`resolve_op_class`. The last word of the op id is not enough:
+    reads like ``vmware.host.usage`` and writes like
+    ``vmware.composite.vm.destroy`` end in words :func:`classify_op` does
+    not know.
+
+    * Risk level ``caution`` or higher: the class is ``write``.
+    * Risk level ``safe``: the class is ``read`` when :func:`classify_op`
+      knows nothing better (``other``). A ``safe`` operation that does make
+      the target do work is pinned in :data:`_WRITE_OPS`.
+    * The credential and audit-query classes always win, as in
+      :func:`resolve_op_class`.
+    * Ingested operations, and a row with no risk level, keep
+      ``classify_op(op_id)``.
+
+    >>> resolve_operation_op_class("vmware.host.usage", source_kind="typed", safety_level="safe")
+    'read'
+    >>> resolve_operation_op_class(
+    ...     "vmware.composite.vm.destroy", source_kind="composite", safety_level="destructive"
+    ... )
+    'write'
+    >>> resolve_operation_op_class("vault.kv.read", source_kind="typed", safety_level="caution")
+    'credential_read'
+    >>> resolve_operation_op_class("POST:/vcenter/vm", source_kind="ingested", safety_level="safe")
+    'write'
+    """
+    declared: str | None = None
+    if source_kind in _HAND_WRITTEN_SOURCE_KINDS:
+        if safety_level in _CHANGE_SAFETY_LEVELS:
+            declared = "write"
+        elif safety_level == "safe" and classify_op(op_id) == "other":
+            declared = "read"
+    return resolve_op_class(op_id, declared)
 
 
 def _maybe_row_count(raw_params: dict[str, Any]) -> int | None:
@@ -1145,7 +979,9 @@ _SECRET_NAME_TOKENS_FINAL: Final[frozenset[str]] = frozenset(
 #: positional rules above don't (``api_key``, ``private_key``,
 #: ``secret_id`` -- the Vault AppRole SecretID is secret material
 #: even though ``secret`` is non-final there; ``license_key`` -- a
-#: product licence is a credential a vendor file may show in clear).
+#: product licence is a credential a vendor file may show in clear;
+#: ``product_key`` -- the Windows product key of a vSphere guest
+#: customization spec, the same kind of value).
 _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
     {
         ("api", "key"),
@@ -1154,6 +990,7 @@ _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
         ("encryption", "key"),
         ("license", "key"),
         ("licence", "key"),
+        ("product", "key"),
         ("secret", "id"),
         ("secret", "value"),
         ("secret", "data"),
@@ -1242,7 +1079,9 @@ def is_secret_param_name_lowercased(name: str) -> bool:
     )
 
 
-def _scrub_secret_named_keys(node: Any) -> tuple[Any, bool]:
+def _scrub_secret_named_keys(
+    node: Any, *, hide_numbers: bool = False, plain_names: frozenset[str] = frozenset()
+) -> tuple[Any, bool]:
     """Replace values of secret-named keys; report whether any were found.
 
     The Tier-1 engine matches *labelled* secret shapes inside string
@@ -1259,31 +1098,54 @@ def _scrub_secret_named_keys(node: Any) -> tuple[Any, bool]:
     never ``bind_secret_id=true`` or ``secret_id_ttl=3600`` -- the
     Vault AppRole config attributes that would otherwise collapse a
     vetted full-detail write broadcast to aggregate on every dispatch.
+    With *hide_numbers* a number under a secret-shaped key is replaced
+    too (a PIN or a password stored as a number); booleans and ``None``
+    still pass through. A key in *plain_names* keeps its whole value, at
+    every depth, although its name is secret-shaped: an operation declared
+    that the field holds no secret (a date, a count, a policy, a file's
+    mode; :func:`meho_backplane.operations.register_plain_fields`).
     """
     if isinstance(node, Mapping):
         found = False
         scrubbed: dict[str, Any] = {}
         for key, value in node.items():
-            if _is_secret_param_name(str(key)) and isinstance(value, (str, Mapping, Sequence)):
-                scrubbed[str(key)] = _REDACTED_PARAM
+            name = str(key)
+            if name in plain_names:
+                scrubbed[name] = value
+                continue
+            if _is_secret_param_name(name) and _is_secret_value(value, hide_numbers):
+                scrubbed[name] = _REDACTED_PARAM
                 found = True
                 continue
-            child, child_found = _scrub_secret_named_keys(value)
-            scrubbed[str(key)] = child
+            child, child_found = _scrub_secret_named_keys(
+                value, hide_numbers=hide_numbers, plain_names=plain_names
+            )
+            scrubbed[name] = child
             found = found or child_found
         return scrubbed, found
     if isinstance(node, Sequence) and not isinstance(node, (str, bytes, bytearray)):
         items: list[Any] = []
         found = False
         for item in node:
-            child, child_found = _scrub_secret_named_keys(item)
+            child, child_found = _scrub_secret_named_keys(
+                item, hide_numbers=hide_numbers, plain_names=plain_names
+            )
             items.append(child)
             found = found or child_found
         return items, found
     return node, False
 
 
-def scrub_secret_named_values(node: Any) -> tuple[Any, bool]:
+def _is_secret_value(value: Any, hide_numbers: bool) -> bool:
+    """True when *value* under a secret-shaped key is replaced."""
+    if isinstance(value, (str, Mapping, Sequence)):
+        return True
+    return hide_numbers and isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def scrub_secret_named_values(
+    node: Any, *, hide_numbers: bool = False, plain_names: frozenset[str] = frozenset()
+) -> tuple[Any, bool]:
     """Key-name-aware secret scrub for a caller-bound dispatch response.
 
     Public entry to :func:`_scrub_secret_named_keys` (the same walk the
@@ -1296,17 +1158,35 @@ def scrub_secret_named_values(node: Any) -> tuple[Any, bool]:
     matches only *labelled* secret shapes inside string leaves, so a
     ``credential_read`` response like ``{"data": {"password": "..."}}``
     passes through it verbatim. The dispatcher runs this scrub on the
-    caller-bound response of a ``credential_read``-classified op by
-    default (#2467) so the raw value never reaches the ``call_operation``
-    caller / agent transcript; ``params.reveal_secret=true`` opts out.
-    The audit row keeps the raw result regardless (the raw payload is
-    captured before this scrub runs), mirroring the #2172 secret-handler
-    posture. Unlike :func:`scrub_broadcast_params` this does **not** run
-    the Tier-1 engine pass -- the boundary middleware already applied it
-    to the response, so this layer is only the structured-dict
-    key-name complement.
+    caller-bound answer of every operation by default so the raw value
+    never reaches the ``call_operation`` caller / agent transcript;
+    ``params.reveal_secret=true`` from a person or a service principal
+    opts out. The audit row stores a keyed fingerprint in place of each
+    value this scrub hides (:mod:`meho_backplane.operations._secret_values`).
+    Unlike :func:`scrub_broadcast_params` this does **not** run the Tier-1
+    engine pass -- the boundary middleware already applied it to the
+    response, so this layer is only the structured-dict key-name
+    complement. *hide_numbers* also replaces a number under a secret-shaped
+    key; the dispatch answer and the stored audit copy use it, the params
+    hash and the broadcast params scrub do not. *plain_names* are the
+    fields the operation declared as plain; they keep their value.
     """
-    return _scrub_secret_named_keys(node)
+    return _scrub_secret_named_keys(node, hide_numbers=hide_numbers, plain_names=plain_names)
+
+
+def holds_hidden_param_values(node: Any) -> bool:
+    """True when a value in *node* is the marker :func:`scrub_secret_named_values` writes.
+
+    The approval queue uses it to tell stored params whose secret-named
+    values were already replaced from params it can still run with.
+    """
+    if isinstance(node, str):
+        return node == _REDACTED_PARAM
+    if isinstance(node, Mapping):
+        return any(holds_hidden_param_values(value) for value in node.values())
+    if isinstance(node, Sequence) and not isinstance(node, (bytes, bytearray)):
+        return any(holds_hidden_param_values(item) for item in node)
+    return False
 
 
 def scrub_broadcast_params(params: dict[str, Any]) -> tuple[dict[str, Any], bool]:

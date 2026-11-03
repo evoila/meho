@@ -279,7 +279,9 @@ def test_feed_page_wires_sse_extension_to_ui_bridge() -> None:
         response = client.get("/ui/broadcast")
     body = response.text
     assert 'hx-ext="sse"' in body
-    assert 'sse-connect="/ui/broadcast/stream"' in body
+    # The page's tenant marker rides the stream URL (#5240): the browser's
+    # EventSource can send no header.
+    assert f'sse-connect="/ui/broadcast/stream?meho_tenant={_TENANT_A}"' in body
     assert 'sse-swap="broadcast"' in body
     # The surface JS that holds the Alpine controller is loaded.
     assert "/ui/static/src/app/broadcast-feed.js" in body

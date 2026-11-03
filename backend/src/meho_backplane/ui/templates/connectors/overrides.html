@@ -1,0 +1,88 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Operation override report (#4711). Default view: the operations a
+  platform admin turned approval off for ("operations running with
+  reduced approval"). ``?show=all`` lists every operator override of a
+  risk level or approval flag.
+
+  Context contract:
+    * ``rows`` -- list[dict]: {connector_id, op_id, scope, tenant_id,
+                  safety_level, requires_approval, reason, set_by_sub,
+                  set_at}. ``safety_level`` / ``requires_approval`` are the
+                  values that apply in the row's scope.
+    * ``show`` -- "reduced" | "all".
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Operation overrides &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4" data-overrides-report data-show="{{ show }}">
+  <header class="space-y-1">
+    <h1 class="text-2xl font-semibold">
+      {{ "Operations running with reduced approval" if show == "reduced" else "Operation overrides" }}
+    </h1>
+    <p class="text-sm opacity-70">
+      {% if show == "reduced" %}
+        A platform admin turned approval off for these operations. Each one
+        runs without waiting for a person's approval.
+        <a href="/ui/connectors/overrides?show=all" class="link link-hover">Show all overrides</a>
+      {% else %}
+        Every risk level and approval change an operator made. A change can
+        only make an operation stricter, except when a platform admin turns
+        approval off.
+        <a href="/ui/connectors/overrides" class="link link-hover">Show reduced approval only</a>
+      {% endif %}
+    </p>
+  </header>
+
+  {% if rows %}
+    <div class="overflow-x-auto">
+      <table class="table table-sm" data-overrides-table>
+        <thead>
+          <tr>
+            <th>Connector</th>
+            <th>Operation</th>
+            <th>Risk level</th>
+            <th>Approval</th>
+            <th>Scope</th>
+            <th>Who</th>
+            <th>When</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+            <tr data-override-row data-op-id="{{ row.op_id }}">
+              <td class="font-mono text-xs">{{ row.connector_id }}</td>
+              <td class="font-mono text-xs">{{ row.op_id }}</td>
+              <td>{{ row.safety_level or "(from code)" }}</td>
+              <td>
+                {% if row.requires_approval is none %}
+                  (from code)
+                {% elif row.requires_approval %}
+                  required
+                {% elif show == "reduced" %}
+                  <span class="badge badge-warning badge-sm">turned off</span>
+                {% else %}
+                  not required
+                {% endif %}
+              </td>
+              <td>{{ "whole install" if row.scope == "install" else "tenant " ~ row.tenant_id }}</td>
+              <td class="text-xs">{{ row.set_by_sub }}</td>
+              <td class="text-xs">{{ row.set_at.strftime("%Y-%m-%d %H:%M UTC") }}</td>
+              <td class="text-xs">{{ row.reason or "" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="text-sm opacity-70" data-overrides-empty>
+      {{ "No operation runs with reduced approval." if show == "reduced" else "No operation overrides." }}
+    </p>
+  {% endif %}
+</section>
+{% endblock %}

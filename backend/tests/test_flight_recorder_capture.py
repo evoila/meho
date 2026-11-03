@@ -221,11 +221,15 @@ async def test_vendor_call_span_captured_and_redacted() -> None:
 
 
 class _MaskingHttpConnector(_ConcreteHttpConnector):
-    """A connector that masks a vendor field before the trace records the body."""
+    """A connector that masks a vendor field before the trace records the body.
+
+    The field name is one the shared secret-name rule does not know, so the
+    test shows what the hook adds.
+    """
 
     def trace_response_body(self, response: Any) -> Any:
         body = dict(response.json())
-        body["pairingPassword"] = "***"
+        body["pairingCode"] = "***"
         return body
 
 
@@ -239,16 +243,16 @@ async def test_connector_masked_response_body_is_what_the_span_records() -> None
     audit_id = uuid.uuid4()
 
     async with respx.mock(base_url=_BASE_URL) as mock:
-        mock.get("/api/items").respond(200, json={"name": "a", "pairingPassword": "plain-value"})
+        mock.get("/api/items").respond(200, json={"name": "a", "pairingCode": "plain-value"})
         result = await _run_get(
             conn, operator=operator, target=target, op_id="svc.items.list", audit_id=audit_id
         )
     await conn.aclose()
 
-    assert result == {"name": "a", "pairingPassword": "plain-value"}
+    assert result == {"name": "a", "pairingCode": "plain-value"}
     _, spans = await _fetch_trace(audit_id)
     assert len(spans) == 1
-    assert spans[0].attributes["response_body"] == {"name": "a", "pairingPassword": "***"}
+    assert spans[0].attributes["response_body"] == {"name": "a", "pairingCode": "***"}
     assert spans[0].attributes["body_recorded"] is True
     assert "plain-value" not in span_json(spans[0])
 

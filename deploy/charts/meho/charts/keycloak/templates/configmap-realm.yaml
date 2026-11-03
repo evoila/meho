@@ -7,6 +7,19 @@
 # The MEHO realm, imported by Keycloak at its first start (`--import-realm`).
 # No secret is in this file: every `${...}` is filled by Keycloak from the
 # pod's environment during the import (see the StatefulSet).
+#
+# With the company login on, the bootstrap Job sets up the identity provider
+# as meho-admin, which then needs two more realm-management roles. They are
+# added here, so the realm file itself stays the one of an install without
+# the company login (docs/codebase/core-bootstrap.md).
+{{- $realm := .Files.Get "files/meho-realm.json" }}
+{{- if .Values.companyLogin.enabled }}
+{{- $doc := fromJson $realm }}
+{{- $account := index $doc.users 0 }}
+{{- $roles := index $account.clientRoles "realm-management" }}
+{{- $_ := set $account.clientRoles "realm-management" (concat $roles (list "manage-identity-providers" "manage-realm")) }}
+{{- $realm = toPrettyJson $doc }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -15,4 +28,4 @@ metadata:
     {{- include "coreKeycloak.labels" . | nindent 4 }}
 data:
   meho-realm.json: |
-    {{- .Files.Get "files/meho-realm.json" | nindent 4 }}
+    {{- $realm | nindent 4 }}

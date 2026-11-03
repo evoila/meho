@@ -939,7 +939,8 @@ async def test_register_composite_dispatches_end_to_end_with_parent_audit(
         params={
             "sub_connector_id": "vault-1.x",
             "sub_op_id": "vault.kv.read",
-            "sub_params": {"path": "/secret/data/foo"},
+            # vault.kv.read hides values by default; the echo needs them.
+            "sub_params": {"path": "/secret/data/foo", "reveal_secret": True},
         },
     )
     assert result.status == "ok", result.error

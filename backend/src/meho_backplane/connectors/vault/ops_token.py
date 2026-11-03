@@ -6,8 +6,9 @@
 The token group surfaces the core Vault ``token`` auth backend (always
 mounted):
 
-* ``vault.token.create`` mints a client token (``requires_approval=True``;
-  the token is in the **response** -> ``credential_mint`` redaction).
+* ``vault.token.create`` makes a client token (``requires_approval=True``).
+  MEHO does not show the new token: the result has only its accessor and
+  policies. To get a token you can use, call ``vault.token.create_and_store``.
 * ``vault.token.revoke_accessor`` surgically revokes a single token by
   accessor (``requires_approval=True``).
 * ``vault.token.list_accessors`` lists accessor handles
@@ -24,23 +25,27 @@ recover from one leak (the vault skill's loudest Don't-rule). There is
 likewise no bulk full-detail lookup: an agent that needs many tokens'
 detail lists accessors then looks up each of interest.
 
-**Secret redaction is at the classification layer, not the handler**
-(#1397 / #1401). ``vault.token.create``'s minted client token rides in
-the *response* (under Vault's ``auth`` envelope);
-:func:`meho_backplane.broadcast.events.classify_op` maps it to
-``credential_mint`` (allowlist consulted BEFORE the ``.create``
-write-suffix), so the broadcast collapses to aggregate-only and the
-audit row holds only a ``params_hash``. The caller's ``OperationResult``
-still carries the token (the whole point of minting). A token
-**accessor** (``revoke_accessor`` / ``lookup_accessor`` param,
-``list_accessors`` response) is a reference handle, not the token secret
--- deliberately not redacted; ``lookup_accessor``'s response also omits
-the token ``id`` (Vault blanks it), so it exposes no secret.
+**The new token is never returned or stored.** The handler drops
+``client_token`` from Vault's answer, so the result, the audit row's raw
+copy, the approval result and the run record hold only the accessor and
+policies. :func:`meho_backplane.broadcast.events.classify_op` still maps the
+op to ``credential_mint`` (aggregate-only broadcast, no flight-recorder
+bodies). MEHO makes the token under its own Vault login for this call;
+Vault revokes a child token when that login is revoked at the end of the
+call. ``vault.token.create_and_store`` makes an orphan token that stays
+valid and writes it where the caller says. A token **accessor**
+(``revoke_accessor`` / ``lookup_accessor`` param, ``list_accessors``
+response) is a reference handle, not the token secret; ``lookup_accessor``'s
+response also omits the token ``id`` (Vault blanks it).
 
 Handler shape mirrors :mod:`meho_backplane.connectors.vault.ops_auth`:
 ``async def (operator, target, params) -> dict``, raises on failure,
-forwards the operator JWT via ``vault_client_for_operator``, offloads the
-blocking hvac call with ``asyncio.to_thread``. The ``token`` backend is
+opens its Vault client through
+:func:`~meho_backplane.connectors.vault.target_auth.vault_client_for_target`
+(the operator JWT, logged in under the target's ``extras["vault_role"]``
+when set, else the deployment-wide role; a refused target role fails the
+call with no fallback), offloads the blocking hvac call with
+``asyncio.to_thread``. The ``token`` backend is
 core (always mounted); ``list_accessors`` normalises an empty-store
 ``404`` to ``{"keys": []}``.
 """
@@ -50,7 +55,6 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vault.ops_auth import _extract_data, _extract_keys
 from meho_backplane.connectors.vault.ops_token_schemas import (
@@ -67,6 +71,7 @@ from meho_backplane.connectors.vault.ops_token_schemas import (
     VAULT_TOKEN_REVOKE_ACCESSOR_PARAMETER_SCHEMA,
     VAULT_TOKEN_REVOKE_ACCESSOR_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 
 __all__ = [
     "TOKEN_OP_SPECS",
@@ -108,20 +113,17 @@ _TOKEN_CREATE_FIELDS: tuple[str, ...] = (
 async def vault_token_create(
     operator: Operator, target: Any, params: dict[str, Any]
 ) -> dict[str, Any]:
-    """Mint a fresh Vault client token (NON-IDEMPOTENT; token in RESPONSE).
+    """Make a Vault client token and return its accessor, never the token.
 
     Op-id: ``vault.token.create``. Delegates to hvac's
     ``client.auth.token.create(policies=..., ttl=..., ...)``. Each call
-    mints a brand-new token -- the op is non-idempotent.
+    makes a new token, so the op is non-idempotent.
 
-    The minted ``client_token`` lands in the *response* (under Vault's
-    ``auth`` envelope), so the op classifies ``credential_mint``: the
-    broadcast collapses to aggregate-only and the audit row holds only a
-    ``params_hash``, so the token never reaches the feed or the audit
-    store. The caller's ``OperationResult`` still carries it (the whole
-    point of minting) -- store it immediately. The ``accessor`` returned
-    alongside is a non-secret reference handle (usable for
-    ``vault.token.revoke_accessor``).
+    Vault's answer carries the new ``client_token``. The handler keeps only
+    the ``accessor`` (a non-secret handle for ``vault.token.lookup_accessor``
+    and ``vault.token.revoke_accessor``) and the ``policies``. So the token
+    is in no result, audit row, approval result or run record. To get a
+    token you can use, call ``vault.token.create_and_store``.
     """
     kwargs: dict[str, Any] = {}
     for field in _TOKEN_CREATE_FIELDS:
@@ -132,14 +134,11 @@ async def vault_token_create(
     if params.get("ttl_period") is not None:
         kwargs["period"] = params["ttl_period"]
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         payload = await asyncio.to_thread(client.auth.token.create, **kwargs)
 
     auth = dict(payload["auth"])
-    result: dict[str, Any] = {
-        "client_token": auth["client_token"],
-        "accessor": auth["accessor"],
-    }
+    result: dict[str, Any] = {"accessor": auth["accessor"]}
     if "policies" in auth:
         result["policies"] = list(auth["policies"])
     return result
@@ -158,7 +157,7 @@ async def vault_token_revoke_accessor(
     """
     accessor: str = str(params["accessor"]).strip()
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         await asyncio.to_thread(client.auth.token.revoke_accessor, accessor=accessor)
 
     return {"accessor": accessor, "revoked": True}
@@ -174,7 +173,7 @@ async def vault_token_list_accessors(
     ``{"keys": [...]}`` dict. Accessors are non-secret references (never
     token secrets). An empty token store normalises to ``{"keys": []}``.
     """
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         try:
             payload = await asyncio.to_thread(client.auth.token.list_accessors)
         except _hvac_invalid_path():
@@ -204,7 +203,7 @@ async def vault_token_lookup_accessor(
     """
     accessor: str = str(params["accessor"]).strip()
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         payload = await asyncio.to_thread(client.auth.token.lookup_accessor, accessor=accessor)
 
     return _extract_data(payload)
@@ -213,13 +212,16 @@ async def vault_token_lookup_accessor(
 # --- spec table ------------------------------------------------------------
 
 TOKEN_WHEN_TO_USE: str = (
-    "Use to manage Vault TOKEN lifecycle: mint a client token "
-    "(vault.token.create -- requires approval; the token is secret and "
-    "redacted from audit/broadcast), surgically revoke ONE token by its "
+    "Use to manage Vault TOKEN lifecycle: make a client token and get "
+    "only its accessor (vault.token.create -- requires approval; MEHO "
+    "never shows the new token), surgically revoke ONE token by its "
     "accessor (vault.token.revoke_accessor -- requires approval), "
     "list active token accessors (vault.token.list_accessors -- safe), "
     "and look up one token's TTL/policies/expiry by its accessor "
     "(vault.token.lookup_accessor -- safe). "
+    "To make a token and store it straight in a Vault KV path or a "
+    "Kubernetes Secret, so nobody sees it, use "
+    "vault.token.create_and_store (requires approval). "
     "Token roles are saved sets of rules for making tokens (allowed "
     "policies, orphan, renewable, period): create or change one with "
     "vault.token.role.write (requires approval), read one with "
@@ -239,18 +241,21 @@ TOKEN_OP_SPECS: tuple[dict[str, Any], ...] = (
         "op_id": "vault.token.create",
         "handler": vault_token_create,
         "group_key": "token",
-        "summary": "Mint a fresh Vault client token (non-idempotent; token in response).",
+        "summary": "Make a Vault client token and return only its accessor.",
         "description": (
-            "Mints a brand-new Vault client token with explicit "
-            "policies/TTL (POST /v1/auth/token/create). NON-IDEMPOTENT: "
-            "each call yields a distinct token. The client_token lands in "
-            "the response, so the op is classified credential_mint: the "
-            "broadcast collapses to aggregate-only and the audit row holds "
-            "only a params_hash, so the minted token never reaches the "
-            "feed or audit store. The caller's OperationResult still "
-            "carries it -- store it immediately. safety_level=dangerous, "
-            "requires_approval=True. The accessor returned alongside is a "
-            "non-secret handle for vault.token.revoke_accessor."
+            "Makes a new Vault client token with explicit policies/TTL "
+            "(POST /v1/auth/token/create). NON-IDEMPOTENT: each call makes "
+            "a new token. MEHO never shows the new token: the result holds "
+            "only the accessor and the policies, and the token is in no "
+            "result, audit row, approval result or run record. The token is "
+            "made under MEHO's own Vault login for this call, so Vault "
+            "revokes it with that login unless it is an orphan. To get a "
+            "token you can use, call vault.token.create_and_store, which "
+            "makes an orphan token and writes it to a Vault KV path or a "
+            "Kubernetes Secret. Classified credential_mint (aggregate-only "
+            "broadcast). safety_level=dangerous, requires_approval=True. "
+            "The accessor is a non-secret handle for "
+            "vault.token.lookup_accessor and vault.token.revoke_accessor."
         ),
         "parameter_schema": VAULT_TOKEN_CREATE_PARAMETER_SCHEMA,
         "response_schema": VAULT_TOKEN_CREATE_RESPONSE_SCHEMA,

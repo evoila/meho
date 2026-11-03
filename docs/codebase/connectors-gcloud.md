@@ -28,8 +28,10 @@ refused before any token is built. This is not a soft warning — it raises
 
 Nine read-only ops registered via `register_gcloud_typed_operations()`
 at lifespan startup (eight from G3.7-T5 #848; the ninth,
-`gcloud.iam.service_account_keys.list`, added by #2846). All ops have
-`safety_level="safe"` and `requires_approval=False`. They land in the
+`gcloud.iam.service_account_keys.list`, added by #2846). These nine have
+`safety_level="safe"` and `requires_approval=False`. Nine more ops for
+workload identity pools and service-account policies are described in
+the next two sections. They land in the
 `endpoint_descriptor` table under `connector_id="gcloud-rest-1.0"`.
 
 | Op ID | API surface | HTTP verb | Notes |
@@ -45,7 +47,155 @@ at lifespan startup (eight from G3.7-T5 #848; the ninth,
 | `gcloud.iam.service_account_keys.list` | IAM v1 `serviceAccounts.keys.list` | GET | Per-SA key inventory; required `service_account_email`, optional `key_types` → `keyTypes[]` filter; row carries `key_type` (USER_MANAGED/SYSTEM_MANAGED) + `valid_before_time` expiry; never returns key material; single GET (no pagination) |
 
 Groups and `when_to_use` blurbs are defined in `_WHEN_TO_USE_BY_GROUP`
-in `connector.py`: `identity`, `project`, `services`, `iam`, `compute`.
+in `connector.py`: `identity`, `project`, `services`, `iam`, `compute`,
+`workload_identity`.
+
+## Workload identity and service-account policy ops
+
+Five more ops let an operator see and remove an old outside access path
+through MEHO, with an approval and an audit row. A **workload identity pool**
+lets an outside system (for example Vault) get Google access without a key
+file. The pool trusts an outside issuer through a provider; a binding on a
+service account (usually `roles/iam.workloadIdentityUser`) lets the pool's
+identities act as that account.
+
+| Op ID | Google call | Risk level |
+|---|---|---|
+| `gcloud.iam.workload_identity_pools.list` | `GET iam/v1/projects/<p>/locations/global/workloadIdentityPools` | safe |
+| `gcloud.iam.workload_identity_pools.providers.list` | `GET .../workloadIdentityPools/<pool>/providers` | safe |
+| `gcloud.iam.workload_identity_pools.delete` | `GET` then `DELETE .../workloadIdentityPools/<pool>` | dangerous (a person must approve) |
+| `gcloud.iam.service_accounts.policy.read` | `POST iam/v1/projects/<p>/serviceAccounts/<sa>:getIamPolicy` (version 3) | safe |
+| `gcloud.iam.service_accounts.binding.remove` | `getIamPolicy`, drop one member, `setIamPolicy` with the read `etag` | dangerous (a person must approve) |
+
+Source: metadata in `ops_workload_identity.py` (`WORKLOAD_IDENTITY_OPS`,
+appended to `GCLOUD_OPS`); handlers in `workload_identity.py`, as the
+`WorkloadIdentityOps` mixin that `GcloudConnector` inherits; the checks
+before approval in `workload_identity_preflight.py`.
+
+How they behave:
+
+- **Lists** follow `nextPageToken`; `show_deleted=true` also shows items
+  that are marked deleted. Provider rows show `kind`, `issuer_uri`
+  (`issuerUri`), `allowed_audiences`, `attribute_mapping` and
+  `attribute_condition` (`attributeCondition`). Key material (`jwksJson`,
+  SAML metadata, trust stores) is never returned.
+- **Pool delete** reads the pool first. A missing pool gives `not_found`. A
+  pool that is already marked deleted is not sent again (safe to run twice).
+  The `DELETE` answers with a Google operation. MEHO polls it (up to 15
+  times, one second apart) until it is done. A finished operation gives
+  `state: DELETED`; an operation with an `error` fails the call
+  (`ConnectorUpstreamError`, status 502); an operation still running after
+  the wait gives `state: DELETE_PENDING`, `operation_done: false` and a
+  `note` that says how to check (`gcloud.iam.workload_identity_pools.list`
+  with `show_deleted=true`). MEHO never says `DELETED` before Google does.
+  Google only marks a pool deleted: it stops working at once, Google keeps
+  it for 30 days and it can be restored in that time, and its ID cannot be
+  used again in those days. The result says so (`restorable_for_days: 30`,
+  `note`).
+- **Binding removal** reads the policy (version 3, asked for with the
+  query parameter `options.requestedPolicyVersion=3`; the body is empty),
+  drops only the named
+  member from the named role, only in bindings without a condition, drops a
+  binding left with no member, and writes the policy back with the `etag` it
+  read. If the member holds the role only through a binding with a
+  condition, MEHO refuses. If Google still answers in an older format (a
+  role name contains `_withcond_`, which hides a condition), MEHO refuses
+  too. If the member is not there, nothing is sent
+  (`removed: false`). If someone changed the policy in between, Google
+  answers `409`; MEHO raises `GcloudPolicyChangedError` (a
+  `ConnectorUpstreamError`), changes nothing and does **not** retry.
+- **Strict values.** `pool_id`, `service_account_email`, `role` and `member`
+  must fully match a pattern (in the parameter schema and again in the
+  handler with `re.fullmatch`). A value with `/`, `..`, spaces or an unknown
+  member prefix is refused before any call, so it cannot change the URL
+  path.
+- **Check before approval.** Both writes register a
+  `register_permission_preflight` check. The binding removal calls Google's
+  `testIamPermissions` on the service account. The pool delete reads the
+  pool (`GET`) and then calls `testIamPermissions` on the **project**
+  (`cloudresourcemanager.googleapis.com/v1/projects/<p>:testIamPermissions`)
+  for `iam.workloadIdentityPools.delete`, because the IAM API does not
+  answer `testIamPermissions` on every pool. A missing permission or a
+  missing pool / service account (404) sets `will_be_denied`, so the
+  dispatcher refuses at once (`write_capability_denied`) instead of asking a
+  person to approve a call that cannot work. Any other failure skips the
+  check; the call still waits for approval.
+- The delete stays `dangerous`, not `destructive`: Google keeps the pool
+  for 30 days and it can be restored. Both writes still match the
+  delete-shaped op-id patterns (`*.delete`, `*.remove`), so a standing
+  grant can never run them without a person's approval.
+
+Tests: `backend/tests/test_connectors_gcloud_workload_identity.py` (respx
+answers, no Google project needed).
+
+## Setting up keyless access: create ops
+
+Four more ops make the objects an outside workload needs for keyless Google
+access, so a person no longer makes them by hand. Example: a pod in a
+private Kubernetes cluster needs to read a Google resource. Google cannot
+reach the cluster's token issuer, so the provider carries the cluster's
+public keys, uploaded at creation.
+
+| Op ID | Google call | Risk level |
+|---|---|---|
+| `gcloud.iam.workload_identity_pools.create` | `POST .../locations/global/workloadIdentityPools?workloadIdentityPoolId=<id>` | caution (a person must approve) |
+| `gcloud.iam.workload_identity_pools.providers.create` | `POST .../workloadIdentityPools/<pool>/providers?workloadIdentityPoolProviderId=<id>` | dangerous (a person must approve) |
+| `gcloud.iam.workload_identity_pools.providers.update_keys` | `GET`, then `PATCH .../providers/<id>?updateMask=oidc.jwksJson` | dangerous (a person must approve) |
+| `gcloud.iam.service_accounts.binding.add` | `getIamPolicy`, add one member, `setIamPolicy` with the read `etag` | dangerous (a person must approve) |
+
+Every op that is not `safe` must have `requires_approval: true` (the
+operation contract check), so the pool create waits for approval too.
+
+Source: metadata in `ops_workload_identity_write.py`
+(`WORKLOAD_IDENTITY_WRITE_OPS`, appended to `GCLOUD_OPS`); handlers in
+`workload_identity_write.py`, as the `WorkloadIdentityWriteOps` mixin that
+`GcloudConnector` inherits. They reuse the value checks, the operation wait
+and the policy read/write of `workload_identity.py`.
+
+How they behave:
+
+- **Create and wait.** Pool create and provider create send the create call
+  and poll Google's operation (the same bounded wait as the pool delete).
+  When it is done, MEHO reads the new object, so `state` is its real state
+  (`ACTIVE`). When it is still running, `state` is `CREATE_PENDING` and
+  the `note` says how to check. An operation with an `error` fails the call
+  (`ConnectorUpstreamError`, status 502).
+- **Safe to run twice.** When Google answers `409` (the ID is used), MEHO
+  reads the object and returns it with `already_existed: true`; nothing is
+  changed. When the ID belongs to a deleted object, MEHO refuses: Google
+  keeps it 30 days and the ID cannot be used again in that time.
+- **Uploaded public keys (`jwks`).** A key set `{keys: [...]}`, sent to
+  Google as the string `oidc.jwksJson`. Only `RSA` and `EC` keys, and only
+  the fields Google accepts (`kty`, `alg`, `use`, `kid`, `n`, `e`, `x`, `y`,
+  `crv`). A key with private parts (`d`, `p`, `q`, `dp`, `dq`, `qi`, `oth`,
+  `k`) is refused. The parameter schema already refuses such keys, so a bad
+  key never waits for approval; the handler checks again. Key values are
+  never put in an error or a result: the result shows only `key_count`.
+- **Provider create** sends `oidc.issuerUri` (must be `https://`), the
+  optional keys and `allowedAudiences`, `attributeMapping` (must include
+  `google.subject`; default `{"google.subject": "assertion.sub"}`) and the
+  optional `attributeCondition`. The result shows `issuer_uri`,
+  `key_count` and `attribute_condition`.
+- **Key update** reads the provider first. A missing provider gives
+  `not_found`; a provider that is not OIDC, or is deleted, is refused. When
+  the uploaded keys are already the same, nothing is sent
+  (`changed: false`). The new set replaces every uploaded key.
+- **Binding add** is the opposite of the binding removal: it adds the member
+  to the role's binding without a condition (or makes that binding), keeps
+  every other binding as it is, and writes with the `etag` it read. A member
+  that is already there is kept and nothing is sent (`added: false`). A stale
+  etag raises `GcloudPolicyChangedError` without a retry. A policy with
+  hidden conditions (`_withcond_`) is refused. `allUsers`,
+  `allAuthenticatedUsers` and `deleted:` members are refused.
+- **Check before approval.** Pool create asks the project for
+  `iam.workloadIdentityPools.create`. Provider create reads the pool, then
+  asks the project for `iam.workloadIdentityPoolProviders.create`. Key
+  update reads the provider, then asks the project for
+  `iam.workloadIdentityPoolProviders.update`. Binding add asks the service
+  account for `getIamPolicy` and `setIamPolicy`, like the removal. A missing
+  pool or provider gives `pool_not_found` / `provider_not_found`.
+
+Tests: `backend/tests/test_connectors_gcloud_workload_identity_write.py`.
 
 ### JSONFlux handle note
 
@@ -67,23 +217,37 @@ and return a `ResultHandle` without any connector-side changes.
   `op_id`, `handler_attr`, `summary`, `description`, `parameter_schema`,
   `response_schema`, `group_key`, `tags`, `safety_level`,
   `requires_approval`, `llm_instructions`.
-- **`GCLOUD_OPS`** (`ops.py`) — tuple of all 9 `GcloudOp` entries.
+- **`GCLOUD_OPS`** (`ops.py`) — tuple of all 18 `GcloudOp` entries (the
+  nine in `ops.py` plus `WORKLOAD_IDENTITY_OPS` and
+  `WORKLOAD_IDENTITY_WRITE_OPS`).
   `register_gcloud_typed_operations()` walks this tuple.
 - **`GcloudTargetLike`** (`session.py`) — runtime-checkable Protocol
   capturing the minimum target shape the connector reads: `name`,
-  `gcp_project`, `gcp_impersonate_sa`, `secret_ref`, and `auth_model`.
-  `target.host` is intentionally unused — GCP REST is reached via
-  well-known public hostnames. Replaced by the concrete `Target` model
-  once G0.3 (#224) lands.
+  `host`, `secret_ref`, `auth_model`, `id` and `tenant_id`. The
+  registered `Target` row satisfies it unchanged. `target.host` is
+  intentionally unused — GCP REST is reached via well-known public
+  hostnames.
+- **`gcp_project(target)` / `gcp_impersonate_sa(target)`**
+  (`session.py`) — read the two Google settings a target needs. The
+  `Target` row has no column for them: a registered target keeps them
+  in `extras` (`meho targets import` puts the `gcp_project` and
+  `gcp_impersonate_sa` lines of `targets.yaml` there). A test stub may
+  carry them as attributes; the attribute wins when both exist. A
+  missing setting raises a `ValueError` that names the `extras` key to
+  set. Every handler, the probe and the fingerprint read the project
+  through these functions, never through `target.gcp_project`.
 - **`GcloudCredentialsLoader`** (`session.py`) — async callable type
   resolving a target to its Vault-stored credential record. Injectable
   on connector construction (`GcloudConnector(credentials_loader=...)`)
-  so unit tests, integration tests, and pre-G0.3 deployments override
-  the default Vault loader. The record is checked for SA-JSON-key fields
-  before use — the loader does NOT validate; the connector validates.
-- **`load_credentials_from_vault`** (`session.py`) — default loader,
-  stubbed `NotImplementedError` until G0.3 lands the operator-context
-  Vault read path (Goal #214).
+  so unit tests and integration tests override the default loader. The
+  record is checked for SA-JSON-key fields before use — the loader does
+  NOT validate; the connector validates.
+- **`load_credentials_from_vault`** (`session.py`) — default loader. A
+  target without a `secret_ref` has no record: the loader answers `{}`
+  and calls no Vault. A target with a `secret_ref` is read with the
+  shared operator-context reader
+  `meho_backplane.connectors._shared.vault_creds.load_vault_secret_data`,
+  like every other connector.
 - **`_SA_KEY_FIELDS`** (`session.py`) — `frozenset` of field names that
   identify a service-account JSON key file. The connector's
   `_gate_sa_key_refusal()` intersects the Vault record's keys against
@@ -262,27 +426,27 @@ Key tests:
 | `test_gcloud_live_integration_about` _(gated)_ | Live GCP probe; skips unless `CI_GCLOUD_CREDENTIALS_PRESENT=1` |
 | `test_gcloud_live_integration_all_9_ops_return_ok_status` _(gated)_ | Live 9-ops sweep |
 
-**Design note:** The always-on tests use handler method calls directly
-(not `call_operation`) because the `Target` ORM model does not yet have
-`gcp_project` / `gcp_impersonate_sa` as first-class columns (planned for
-a future `extras` migration). The live `@_SKIP_LIVE` tests use
-`CI_GCLOUD_PROJECT` + `CI_GCLOUD_IMPERSONATE_SA` env vars to construct a
-real `GcloudConnector` against a live project.
+**Design note:** The tests above call the handler methods directly.
+`test_connectors_gcloud_call_operation.py` covers the normal path: it
+seeds a registered `Target` row whose `extras` hold `gcp_project` and
+`gcp_impersonate_sa`, registers the operations, and runs pool create and
+binding add through `preview_operation` and `call_operation`. The call
+waits for approval, a second person approves, the operation runs against
+mocked Google for the project in `extras`, and the audit row names the
+approver. The live `@_SKIP_LIVE` tests use `CI_GCLOUD_PROJECT` +
+`CI_GCLOUD_IMPERSONATE_SA` env vars to construct a real `GcloudConnector`
+against a live project.
 
 ## Known issues
 
-- `load_credentials_from_vault` is a stub until Goal #214 (Connector
-  parity) wires the live Vault read. Inject `credentials_loader` on
-  construction to test or run pre-production.
 - `fingerprint()` and `probe()` run the SA-JSON-key gate under a synthesised
   system operator (empty `raw_jwt`), because their ABC signatures carry no
-  operator. Once the live `load_credentials_from_vault` lands (Goal #214),
-  the system operator's empty `raw_jwt` will fail closed on the Vault read —
-  which is the intended boundary for system-initiated credential reads, but
-  means probe/fingerprint on a target with a live Vault secret will need a
-  follow-up to thread a real operator (or an unauthenticated reachability
-  variant). Today, with the stub/injected loader, the gate runs and refuses
-  SA-key material correctly on these paths (#985).
+  operator. A target without a `secret_ref` (the normal shape: all auth is
+  ADC + impersonation) is not affected, because the loader reads nothing.
+  A target with a `secret_ref` fails closed on that Vault read — the
+  intended boundary for system-initiated credential reads — so its probe
+  and fingerprint need a follow-up to thread a real operator (or an
+  unauthenticated reachability variant).
 - `_fetch_token_sync` and `refresh_token` run synchronous
   `google.auth.transport.requests.Request()` calls in a thread pool
   executor. The executor is the event loop's default (unbounded); a

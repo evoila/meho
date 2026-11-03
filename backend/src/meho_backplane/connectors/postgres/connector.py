@@ -41,7 +41,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import asyncpg
 import structlog
@@ -67,7 +67,19 @@ from meho_backplane.connectors.schemas import (
 
 __all__ = ["PostgresConnector"]
 
-_log = structlog.get_logger(__name__)
+
+def _log() -> structlog.typing.FilteringBoundLogger:
+    """Get the structlog logger on every call, not once at import.
+
+    With the production ``cache_logger_on_first_use=True`` config, a
+    module-level logger keeps the processors it saw on first use. When a later
+    ``configure_logging()`` (for example an app start in another test) swaps
+    the processor list, a ``capture_logs()`` in the same pytest-xdist worker no
+    longer sees this module's lines. Same fix as ``_log()`` in
+    ``meho_backplane.checks.runner``.
+    """
+    return cast("structlog.typing.FilteringBoundLogger", structlog.get_logger(__name__))
+
 
 # Forward declaration -- replaced with `from meho_backplane.targets import Target`
 # once G0.3's Target model rollout lands, mirroring the sibling connectors.
@@ -251,7 +263,7 @@ class PostgresConnector(Connector):
             ValueError,
         ) as exc:
             error = redact_fingerprint_error(exc, _classify_fingerprint_error(exc))
-            _log.warning(
+            _log().warning(
                 "postgres_fingerprint_unreachable",
                 target=getattr(target, "name", None),
                 error=error,
@@ -378,7 +390,7 @@ class PostgresConnector(Connector):
                 requires_approval=op.requires_approval,
                 llm_instructions=op.llm_instructions,
             )
-        _log.info(
+        _log().info(
             "postgres_operations_registered",
             count=len(PG_OPS),
             product=cls.product,

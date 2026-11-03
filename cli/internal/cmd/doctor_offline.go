@@ -47,17 +47,28 @@ type doctorDeps struct {
 	// authedOpts is passed to api.NewAuthedClient (tests inject a store
 	// and a refresh discoverer).
 	authedOpts api.AuthedClientOptions
+	// The server layer (doctor_server.go): stat finds meho-host, geteuid
+	// says whether the doctor runs as root, runCommand runs meho-host,
+	// and serverTimeout bounds that run (mehoHostTimeout when zero).
+	stat          func(name string) (fs.FileInfo, error)
+	geteuid       func() int
+	runCommand    func(ctx context.Context, name string, args ...string) (stdout, stderr []byte, err error)
+	serverTimeout time.Duration
 }
 
 func defaultDoctorDeps() doctorDeps {
 	return doctorDeps{
-		getenv:       os.Getenv,
-		executable:   os.Executable,
-		homeDir:      os.UserHomeDir,
-		keyringGet:   keyring.Get,
-		httpClient:   &http.Client{Timeout: doctorRequestTimeout},
-		layerTimeout: doctorLayerTimeout,
-		lookupHost:   net.DefaultResolver.LookupHost,
+		getenv:        os.Getenv,
+		executable:    os.Executable,
+		homeDir:       os.UserHomeDir,
+		keyringGet:    keyring.Get,
+		httpClient:    &http.Client{Timeout: doctorRequestTimeout},
+		layerTimeout:  doctorLayerTimeout,
+		lookupHost:    net.DefaultResolver.LookupHost,
+		stat:          os.Stat,
+		geteuid:       os.Geteuid,
+		runCommand:    localCommandRunner(mehoHostWaitDelay),
+		serverTimeout: mehoHostTimeout,
 	}
 }
 

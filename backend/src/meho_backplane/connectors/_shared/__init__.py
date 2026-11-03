@@ -44,9 +44,6 @@ Exports:
   value under a secret name is replaced with a placeholder, and the
   checked copy is written back. The three reads on main and every new
   API file read use it.
-* :mod:`meho_backplane.connectors._shared.license_key` — the one rule for
-  showing a licence key: only its last 5 characters stay visible. Every
-  read that returns licence keys masks them with it.
 * :mod:`meho_backplane.connectors._shared.wrapped_creds` — the per-work-item
   short-lived response-wrapped credential broker + runner unwrap backend
   (#3191, satellite write-path mechanism 3), registered under kind
@@ -54,6 +51,11 @@ Exports:
   ``register_credential_backend`` call runs eagerly (as ``gsm_creds`` does
   for ``gsm``) and the ``wrapped`` kind is present before any credential
   resolution.
+
+* :mod:`meho_backplane.connectors._shared.soap_fault` — reads a SOAP 1.1
+  ``<soapenv:Fault>`` body and carries the parsed fault on an exception.
+  The core error builders use it to fill ``upstream_fault``, so it must not
+  live in a connector folder.
 
 New cross-connector shared modules land alongside these — keep each
 module focused on a single concern (auth, retries, pagination, etc.)

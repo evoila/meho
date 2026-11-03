@@ -180,6 +180,7 @@ def test_operator_rank_health_reaches_federation_probe(
         "email": "alice@example.com",
         "tenant_id": _DEFAULT_TENANT_ID,
         "tenant_role": role,
+        "tenants": [],
     }
     assert body["vault"] == {"reachable": True, "read_ok": True, "detail": "version=7"}
     head = ScriptDirectory.from_config(alembic_config()).get_current_head()
@@ -228,6 +229,7 @@ def test_read_only_liveness_returns_200_without_vault_touch(
             "email": "monitor@example.com",
             "tenant_id": _DEFAULT_TENANT_ID,
             "tenant_role": "read_only",
+            "tenants": [],
         },
         # #4830: the liveness route shares DbStatus, so it carries the
         # revision too — still without touching Vault.

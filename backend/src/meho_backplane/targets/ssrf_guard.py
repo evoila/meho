@@ -100,7 +100,7 @@ __all__ = [
 #: Env var holding the operator-configured destination allowlist:
 #: comma-separated CIDR ranges (``10.0.0.0/8``), bare IPs
 #: (``192.168.7.10``), and/or hostname literals
-#: (``vcenter.lab.internal``). Unset/empty = no exemptions (guard fully
+#: (``harbor.lab.internal``). Unset/empty = no exemptions (guard fully
 #: on). Read per call — no process-lifetime cache — so tests and
 #: hot-reconfigured deployments see the current value without a
 #: cache-clear hook.

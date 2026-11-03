@@ -33,7 +33,7 @@ class AuthoredCheckItem(BaseModel):
     ``target_name`` is resolved to a live target descriptor, ``op`` to the
     resolved connector's enabled descriptor (yielding ``handler_ref`` +
     ``safety_level`` + the ``(product, version, impl_id)`` key). ``op`` is
-    the connector-side op id (e.g. ``"vsphere.host.list"``); the connector
+    the connector-side op id (e.g. ``"k8s.node.list"``); the connector
     triple is derived from the resolved target, not authored here.
     """
 

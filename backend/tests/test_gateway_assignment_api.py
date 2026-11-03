@@ -8,14 +8,14 @@ app that mounts the real router behind the real JWT chain (respx-mocked
 JWKS) so the runner route cage + ``require_runner`` + ``assert_runner_scope``
 all run for real:
 
-* ``PUT /api/v1/checks/assignment/{runner}`` — operator authoring +
+* ``PUT /api/v1/checks/assignment/{runner}`` — tenant-admin authoring +
   structured-422 validation (non-safe / unknown op, unknown target).
 * ``GET /api/v1/checks/assignment`` — digest-versioned materialisation with
   resolved target descriptors, 304-on-unchanged, drift-changes-digest.
 * ``POST /api/v1/checks/results`` — idempotent batch ingest, central-stamped
   ``received_at``.
 * Runner scoping: a runner reaches only its own assignment/results;
-  operator-only PUT; unauthenticated 401.
+  tenant-admin-only PUT; unauthenticated 401.
 
 The wire shapes are :mod:`meho_backplane.runner.wire`'s — one schema on both
 ends by construction.
@@ -36,6 +36,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
 
+from meho_backplane.auth.operator import TenantRole
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.resolver import resolve_connector
@@ -51,6 +52,11 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.gateway.assignment_service import descriptor_from_target
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.runner import wire
+from meho_backplane.runner.package_set import (
+    EMPTY_PACKAGE_SET_DIGEST,
+    PACKAGE_SET_HEADER,
+    package_set_mismatch_message,
+)
 
 # Autouse fixtures (settings env, JWKS cache reset, connector-registry reset).
 from ._oidc_jwt_helpers import (
@@ -125,6 +131,11 @@ def _build_app() -> FastAPI:
 @pytest.fixture
 def client() -> Iterator[TestClient]:
     yield TestClient(_build_app())
+
+
+def _admin_token(key: Any) -> str:
+    """A person with the tenant-admin role: the one who authors assignments."""
+    return mint_token(key, sub="admin-1", tenant_role=TenantRole.TENANT_ADMIN.value)
 
 
 def _runner_token(key: Any, *, runner_id: uuid.UUID, sub: str = "runner-sub") -> str:
@@ -256,7 +267,7 @@ async def test_put_rejects_non_safe_op(client: TestClient) -> None:
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
-        headers = {"Authorization": f"Bearer {_operator_token(key)}"}
+        headers = {"Authorization": f"Bearer {_admin_token(key)}"}
 
         # Non-safe op.
         non_safe = {**_safe_item(), "op": _OP_CAUTION}
@@ -299,7 +310,7 @@ async def test_put_stores_safe_assignment(client: TestClient) -> None:
         resp = client.put(
             "/api/v1/checks/assignment/runner-a",
             json=_put_body(_safe_item()),
-            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
         )
 
     assert resp.status_code == 200
@@ -319,7 +330,7 @@ async def _author_via_put(client: TestClient, key: Any) -> None:
         resp = client.put(
             "/api/v1/checks/assignment/runner-a",
             json=_put_body(_safe_item()),
-            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
         )
     assert resp.status_code == 200
 
@@ -549,7 +560,7 @@ async def test_results_batch_idempotent(client: TestClient) -> None:
 
 @pytest.mark.asyncio
 async def test_runner_scoping(client: TestClient) -> None:
-    """A runner reaches only its own assignment/results; PUT is operator-only; 401 unauth."""
+    """A runner reaches only its own assignment/results; PUT is tenant-admin-only; 401 unauth."""
     await _seed_identities()
     key = make_rsa_keypair("kid-A")
 
@@ -563,9 +574,15 @@ async def test_runner_scoping(client: TestClient) -> None:
         cross_post = client.post(
             "/api/v1/checks/results", json=_result_batch("runner-b", "x-1"), headers=a_headers
         )
-        # Runner token on operator-only PUT → 403.
+        # Runner token on tenant-admin-only PUT → 403.
         runner_put = client.put(
             "/api/v1/checks/assignment/runner-a", json=_put_body(), headers=a_headers
+        )
+        # Operator token on tenant-admin-only PUT → 403.
+        operator_put = client.put(
+            "/api/v1/checks/assignment/runner-a",
+            json=_put_body(),
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
         )
         # Unauthenticated GET / POST → 401.
         unauth_get = client.get("/api/v1/checks/assignment?runner=runner-a")
@@ -574,6 +591,8 @@ async def test_runner_scoping(client: TestClient) -> None:
     assert cross_get.status_code == 403
     assert cross_post.status_code == 403
     assert runner_put.status_code == 403
+    assert operator_put.status_code == 403
+    assert operator_put.json()["detail"] == "insufficient_role"
     assert unauth_get.status_code == 401
     assert unauth_post.status_code == 401
 
@@ -772,3 +791,184 @@ def _forward(client: TestClient, request: Any) -> Any:
         content=request.content,
     )
     return httpx.Response(resp.status_code, headers=resp.headers, content=resp.content)
+
+
+# ---------------------------------------------------------------------------
+# Connector package set (#5038)
+# ---------------------------------------------------------------------------
+
+_OTHER_PACKAGE_SET = "sha256:" + "ab" * 32
+
+
+class _LogRecorder:
+    """Keeps the warnings of the assignment service, without structlog set-up."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    def warning(self, event: str, **fields: Any) -> None:
+        self.events.append({"event": event, **fields})
+
+
+@pytest.fixture
+def central_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """Central carries a made-up connector package that owns the ``checkprod`` folder.
+
+    Yields central's package set digest.
+    """
+    from meho_backplane import connector_packages
+    from meho_backplane.runner.package_set import local_package_set
+
+    allowlist = tmp_path / "connector-packages.json"
+    allowlist.write_text(
+        json.dumps(
+            {
+                "packages": [
+                    {
+                        "name": "acme-checkprod",
+                        "version": "1.0.0",
+                        "wheel_digest": "sha256:" + "1" * 64,
+                        "folders": ["checkprod"],
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(connector_packages, "CONNECTOR_PACKAGES_FILE", allowlist)
+    local_package_set.cache_clear()
+    yield local_package_set().digest
+    local_package_set.cache_clear()
+
+
+@pytest.fixture
+def assignment_log(monkeypatch: pytest.MonkeyPatch) -> _LogRecorder:
+    from meho_backplane.gateway import assignment_service
+
+    recorder = _LogRecorder()
+    monkeypatch.setattr(assignment_service, "_log", recorder)
+    return recorder
+
+
+async def _fetch_assignment_with_package_set(
+    client: TestClient, package_set: str | None
+) -> dict[str, Any]:
+    await _seed_identities()
+    await _seed_target()
+    await _seed_descriptor(op_id=_OP_SAFE)
+    _register_connector()
+    key = make_rsa_keypair("kid-A")
+    await _author_via_put(client, key)
+    headers = {"Authorization": f"Bearer {_runner_token(key, runner_id=_RUNNER_A_ID)}"}
+    if package_set is not None:
+        headers[PACKAGE_SET_HEADER] = package_set
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        resp = client.get("/api/v1/checks/assignment?runner=runner-a", headers=headers)
+    assert resp.status_code == 200, resp.text
+    body: dict[str, Any] = resp.json()
+    return body
+
+
+@pytest.mark.asyncio
+async def test_package_op_is_assigned_to_a_runner_with_the_same_package_set(
+    client: TestClient, central_package: str, assignment_log: _LogRecorder
+) -> None:
+    """Same digest: the item is served and names the package set it needs."""
+    body = await _fetch_assignment_with_package_set(client, central_package)
+
+    (item,) = body["items"]
+    assert item["handler_ref"] == _HANDLER_REF
+    assert item["package_set"] == central_package
+    assert assignment_log.events == []
+    assert (await _runner_a_row()).package_set_digest == central_package
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runner_package_set", [_OTHER_PACKAGE_SET, None])
+async def test_package_op_is_not_assigned_to_a_runner_with_another_package_set(
+    client: TestClient,
+    central_package: str,
+    assignment_log: _LogRecorder,
+    runner_package_set: str | None,
+) -> None:
+    """Another digest (or none, which counts as no packages): the item is left out.
+
+    The warning names both digests.
+    """
+    body = await _fetch_assignment_with_package_set(client, runner_package_set)
+
+    assert body["items"] == []
+    sent = runner_package_set or EMPTY_PACKAGE_SET_DIGEST
+    (event,) = assignment_log.events
+    assert event["event"] == "assignment_item_dropped"
+    assert event["reason"] == "connector_package_set_mismatch"
+    assert event["package"] == "acme-checkprod"
+    assert event["runner_package_set"] == sent
+    assert event["central_package_set"] == central_package
+    assert event["message"] == package_set_mismatch_message(sent, central_package)
+    assert (await _runner_a_row()).package_set_digest == sent
+
+
+@pytest.mark.asyncio
+async def test_built_in_op_ignores_the_package_set(
+    client: TestClient, assignment_log: _LogRecorder
+) -> None:
+    """An op built into MEHO carries no package set and runs on any runner."""
+    body = await _fetch_assignment_with_package_set(client, _OTHER_PACKAGE_SET)
+
+    (item,) = body["items"]
+    assert item["package_set"] is None
+    assert assignment_log.events == []
+
+
+@pytest.mark.asyncio
+async def test_malformed_package_set_is_rejected_and_not_stored(client: TestClient) -> None:
+    """A package set header in another shape is a 400 and never reaches the row."""
+    await _seed_identities()
+    key = make_rsa_keypair("kid-A")
+
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        resp = client.post(
+            "/api/v1/checks/results",
+            json=_result_batch("runner-a", "p-1"),
+            headers={
+                "Authorization": f"Bearer {_runner_token(key, runner_id=_RUNNER_A_ID)}",
+                PACKAGE_SET_HEADER: "sha256:not-hex",
+            },
+        )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"].startswith("runner_package_set_invalid")
+    assert (await _runner_a_row()).package_set_digest is None
+
+
+@pytest.mark.asyncio
+async def test_runner_client_sends_its_package_set_to_central(
+    client: TestClient, central_package: str
+) -> None:
+    """The real runner client sends this image's digest; central stores it and serves the item."""
+    from meho_backplane.runner.client import RunnerClient
+
+    await _seed_identities()
+    await _seed_target()
+    await _seed_descriptor(op_id=_OP_SAFE)
+    _register_connector()
+    key = make_rsa_keypair("kid-A")
+    await _author_via_put(client, key)
+    runner_client = RunnerClient(
+        central_url="http://central.test",
+        runner_id="runner-a",
+        token=_runner_token(key, runner_id=_RUNNER_A_ID),
+    )
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        mock_router.route(host="central.test").mock(
+            side_effect=lambda request: _forward(client, request)
+        )
+        async with runner_client:
+            assignment = await runner_client.fetch_assignment(known_version=None)
+
+    assert isinstance(assignment, wire.RunnerAssignment)
+    assert [item.package_set for item in assignment.items] == [central_package]
+    assert (await _runner_a_row()).package_set_digest == central_package

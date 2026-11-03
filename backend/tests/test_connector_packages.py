@@ -6,7 +6,8 @@
 Each test builds a small, made-up install in ``tmp_path``: a package
 ``fakemeho_conn`` with a ``connectors`` folder, a made-up built-in
 distribution that owns some of its subfolders, and (when needed) a
-made-up connector package distribution plus an allowlist file. The
+made-up connector package distribution plus an allowlist file, and a
+made-up connector kit distribution whose version the packages check. The
 distributions are real ``.dist-info`` folders, so :mod:`importlib.metadata`
 reads them exactly as it reads an installed wheel. The made-up
 ``connectors/__init__.py`` runs the check the same way the real one does.
@@ -43,10 +44,13 @@ from meho_backplane.connectors.registry import (
     registered_product_tokens,
 )
 from meho_backplane.operations import typed_register
+from meho_backplane.version import version as version_route
 
 _PKG = "fakemeho_conn"
 _BUILTIN_DIST = "fake-meho-core"
 _EXTRA_DIST = "fake-acme-connectors"
+_KIT_DIST = "fake-connector-kit"
+_KIT_RANGE = f"{_KIT_DIST}>=1.2,<2"
 
 _CONNECTORS_INIT = (
     "from pathlib import Path\n"
@@ -67,10 +71,13 @@ def _dist(
     files: list[str],
     *,
     direct_url: dict[str, object] | None = None,
+    requires: tuple[str, ...] = (),
 ) -> None:
     """Write a ``.dist-info`` folder whose RECORD lists ``files``."""
     info = site / f"{name.replace('-', '_')}-{version}.dist-info"
-    _write(info / "METADATA", f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n")
+    meta = f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+    meta += "".join(f"Requires-Dist: {r}\n" for r in requires)
+    _write(info / "METADATA", meta)
     record = [f"{f},," for f in files]
     if direct_url is not None:
         _write(info / "direct_url.json", json.dumps(direct_url))
@@ -93,6 +100,12 @@ class _LogRecorder:
 
     def info(self, event: str, **fields: object) -> None:
         self.events.append({"event": event, **fields})
+
+
+@pytest.fixture(autouse=True)
+def _keep_installed_packages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each check below stores what it accepted; put the process's own list back after."""
+    monkeypatch.setattr(connector_packages, "_installed", connector_packages._installed)
 
 
 @pytest.fixture
@@ -121,8 +134,10 @@ def site(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
             f"{_PKG}/connectors/builtin_one/ops.yaml",
         ],
     )
+    _dist(site, _KIT_DIST, "1.4.0", [])
     monkeypatch.syspath_prepend(str(site))
     monkeypatch.setattr(connector_packages, "BUILTIN_DISTRIBUTION", _BUILTIN_DIST)
+    monkeypatch.setattr(connector_packages, "KIT_DISTRIBUTION", _KIT_DIST)
     monkeypatch.setattr(
         connector_packages, "CONNECTOR_PACKAGES_FILE", tmp_path / "connector-packages.json"
     )
@@ -146,10 +161,22 @@ def _plant(site: Path, marker: Path) -> None:
     )
 
 
-def _add_listed_package(site: Path, tmp_path: Path, *, version: str = "2.3.0") -> None:
+def _add_listed_package(
+    site: Path,
+    tmp_path: Path,
+    *,
+    version: str = "2.3.0",
+    requires: tuple[str, ...] = (_KIT_RANGE,),
+) -> None:
     """Install a made-up connector package that adds the folder ``acme_widget``, and list it."""
     _write(site / _PKG / "connectors" / "acme_widget" / "__init__.py", _ACME_INIT)
-    _dist(site, _EXTRA_DIST, "2.3.0", [f"{_PKG}/connectors/acme_widget/__init__.py"])
+    _dist(
+        site,
+        _EXTRA_DIST,
+        "2.3.0",
+        [f"{_PKG}/connectors/acme_widget/__init__.py"],
+        requires=requires,
+    )
     _write(
         tmp_path / "connector-packages.json",
         json.dumps(
@@ -292,6 +319,30 @@ def test_listed_package_is_imported_and_registers_its_operations(
     ]
 
 
+async def test_version_lists_a_listed_package(site: Path, tmp_path: Path) -> None:
+    """``GET /version`` shows the package the start-up check accepted (#5036)."""
+    _add_listed_package(site, tmp_path)
+
+    _connectors_pkg()
+
+    body = (await version_route()).model_dump(mode="json")
+    assert body["connector_packages"] == [
+        {
+            "name": _EXTRA_DIST,
+            "version": "2.3.0",
+            "wheel_digest": "sha256:" + "0" * 64,
+            "folders": ["acme_widget"],
+        }
+    ]
+
+
+async def test_version_lists_no_packages_without_an_allowlist(site: Path) -> None:
+    """The plain public image has no allowlist file, so the list is empty (#5036)."""
+    _connectors_pkg()
+
+    assert (await version_route()).connector_packages == []
+
+
 def test_listed_folder_with_a_file_the_package_did_not_install_stops_the_start(
     site: Path, tmp_path: Path
 ) -> None:
@@ -300,6 +351,83 @@ def test_listed_folder_with_a_file_the_package_did_not_install_stops_the_start(
 
     with pytest.raises(
         ConnectorPackageError, match=r"connector_package_not_allowed.*'acme_widget'"
+    ):
+        _connectors_pkg()
+
+    assert f"{_PKG}.connectors.acme_widget" not in sys.modules
+
+
+@pytest.mark.parametrize(
+    "requires",
+    [
+        (),
+        ("httpx>=0.27",),
+        (_KIT_DIST,),
+        (f"{_KIT_DIST}>=1.0; python_version >= '3'",),
+        (f"{_KIT_DIST} @ https://example.invalid/kit.whl",),
+    ],
+    ids=["no-requires", "other-library-only", "kit-without-range", "kit-with-marker", "kit-link"],
+)
+def test_listed_package_without_a_kit_range_stops_the_start(
+    site: Path, tmp_path: Path, requires: tuple[str, ...]
+) -> None:
+    _add_listed_package(site, tmp_path, requires=requires)
+
+    with pytest.raises(
+        ConnectorPackageError,
+        match=(
+            rf"connector_package_kit_mismatch: the connector package '{_EXTRA_DIST}' does not "
+            r"say which versions .* This image has connector kit 1\.4\.0\."
+        ),
+    ):
+        _connectors_pkg()
+
+    assert f"{_PKG}.connectors" not in sys.modules
+    assert f"{_PKG}.connectors.acme_widget" not in sys.modules
+
+
+@pytest.mark.parametrize(
+    "requires",
+    [(f"{_KIT_DIST}>=2,<3",), (f"{_KIT_DIST}<1.4",), (_KIT_RANGE, f"{_KIT_DIST}!=1.4.0")],
+    ids=["above", "below", "two-ranges-one-excludes"],
+)
+def test_listed_package_whose_kit_range_does_not_fit_stops_the_start(
+    site: Path, tmp_path: Path, requires: tuple[str, ...]
+) -> None:
+    _add_listed_package(site, tmp_path, requires=requires)
+
+    with pytest.raises(ConnectorPackageError) as raised:
+        _connectors_pkg()
+
+    message = str(raised.value)
+    assert message.startswith(
+        f"connector_package_kit_mismatch: the connector package '{_EXTRA_DIST}' fits the "
+        f"connector kit {_KIT_DIST}"
+    )
+    assert "but this image has connector kit 1.4.0." in message
+    assert f"{_PKG}.connectors" not in sys.modules
+    assert f"{_PKG}.connectors.acme_widget" not in sys.modules
+
+
+def test_listed_package_whose_kit_range_fits_is_imported(site: Path, tmp_path: Path) -> None:
+    _add_listed_package(
+        site, tmp_path, requires=("httpx>=0.27", "Fake_Connector.Kit (>=1.0,<2)", _KIT_RANGE)
+    )
+
+    _import_connector_subpackages(_connectors_pkg())
+
+    assert f"{_PKG}.connectors.acme_widget" in sys.modules
+
+
+def test_listed_package_stops_the_start_when_the_image_has_no_kit(
+    site: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(connector_packages, "KIT_DISTRIBUTION", "fake-kit-not-installed")
+    _add_listed_package(site, tmp_path, requires=("fake-kit-not-installed>=1.0",))
+
+    with pytest.raises(
+        ConnectorPackageError,
+        match=r"connector_package_kit_mismatch: .* but this image has no connector kit\.",
     ):
         _connectors_pkg()
 

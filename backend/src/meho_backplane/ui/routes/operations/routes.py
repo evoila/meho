@@ -138,7 +138,7 @@ a new raw-secret surface, so it is surfaced verbatim (with a clear
 connector_id shape (load-bearing)
 ---------------------------------
 
-The picker emits the ``<impl_id>-<version>`` id (e.g. ``vmware-rest-9.0``,
+The picker emits the ``<impl_id>-<version>`` id (e.g. ``k8s-1.x``,
 ``vault-1.x``) the meta-tools expect, NOT the bare product slug
 (``vault``), which names no connector and raises
 :class:`~meho_backplane.operations.meta_tools.UnknownConnectorError`. The
@@ -193,7 +193,7 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
-from meho_backplane.operations._lookup import parse_connector_id
+from meho_backplane.operations._lookup import enabled_for_tenant_clause, parse_connector_id
 from meho_backplane.operations.ingest.list_connectors import list_ingested_connectors
 from meho_backplane.operations.meta_tools import (
     ConnectorNotIngestedError,
@@ -205,13 +205,17 @@ from meho_backplane.operations.meta_tools import (
     search_operations,
 )
 from meho_backplane.settings import get_settings
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import (
+    UISessionContext,
+    require_ui_operator,
+    require_ui_session,
+)
 from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
 )
 from meho_backplane.ui.csrf import mint_csrf_token
-from meho_backplane.ui.routes.approvals.render import set_csrf_cookie
+from meho_backplane.ui.routes.approvals.render import parked_request_chain, set_csrf_cookie
 from meho_backplane.ui.routes.connectors.operator import (
     OperatorRoleProbe,
     resolve_role_probe,
@@ -249,7 +253,7 @@ _GROUPS_LIMIT: Final[int] = 100
 _MAX_OP_ID_LENGTH: Final[int] = 512
 
 #: Maximum target-name length accepted on the preview form. A target name
-#: is a short slug (``rdc-vcenter``); the bound protects the form parse
+#: is a short slug (``prod-k8s``); the bound protects the form parse
 #: against a paste-from-clipboard accident.
 _MAX_TARGET_LENGTH: Final[int] = 256
 
@@ -274,6 +278,9 @@ _MAX_PREVIEW_HASH_LENGTH: Final[int] = 128
 #: Module-level ``Depends`` closures -- built once (rather than inline) to
 #: satisfy ruff B008, matching the approvals / kb / connectors routers.
 _require_session = Depends(require_ui_session)
+#: The ``operator`` role floor of the preview + call POSTs (the same floor
+#: as REST ``/api/v1/operations/call`` and the MCP ``call_operation`` tool).
+_require_operator = Depends(require_ui_operator)
 _role_probe_dep = Depends(resolve_role_probe)
 
 
@@ -308,6 +315,7 @@ async def _resolve_operator(session: UISessionContext) -> Operator:
     _refreshed, operator = await verify_access_token_with_refresh(
         decrypted,
         expected_audience=settings.keycloak_audience,
+        request_tenant=session.tenant_id,
     )
     return operator
 
@@ -368,7 +376,7 @@ async def _descriptor_ids_for_op_ids(
                 EndpointDescriptor.version == version,
                 EndpointDescriptor.impl_id == impl_id,
                 EndpointDescriptor.op_id.in_(op_ids),
-                EndpointDescriptor.is_enabled.is_(True),
+                enabled_for_tenant_clause(tenant_id=tenant_id),
                 (EndpointDescriptor.tenant_id.is_(None))
                 | (EndpointDescriptor.tenant_id == tenant_id),
             )
@@ -447,7 +455,7 @@ def build_operations_router() -> APIRouter:
     @router.post("/ui/operations/preview", response_class=HTMLResponse)
     async def operations_preview(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         connector_id: str = Form(max_length=_MAX_CONNECTOR_ID_LENGTH),
         op_id: str = Form(max_length=_MAX_OP_ID_LENGTH),
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
@@ -456,7 +464,8 @@ def build_operations_router() -> APIRouter:
         """Render the read-only request **preview** fragment (no dispatch).
 
         CSRF-gated by the ``ui/csrf.py`` middleware (a ``POST`` under
-        ``/ui/``) and ``require_ui_session``-gated. Resolves the same op +
+        ``/ui/``) and ``require_ui_operator``-gated (``read_only`` gets 403,
+        like on REST). Resolves the same op +
         target + params a real dispatch would and renders the literal
         would-be HTTP request -- ``method`` / ``resolved_path`` / ``query``
         / ``redacted_body`` -- WITHOUT sending it and WITHOUT writing an
@@ -486,7 +495,7 @@ def build_operations_router() -> APIRouter:
     @router.post("/ui/operations/call", response_class=HTMLResponse)
     async def operations_call(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         connector_id: str = Form(max_length=_MAX_CONNECTOR_ID_LENGTH),
         op_id: str = Form(max_length=_MAX_OP_ID_LENGTH),
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
@@ -498,7 +507,8 @@ def build_operations_router() -> APIRouter:
 
         The highest-blast-radius action the console gains -- it executes a
         real connector op against a live target. CSRF-gated (a ``POST`` under
-        ``/ui/``) and ``require_ui_session``-gated; calls
+        ``/ui/``) and ``require_ui_operator``-gated (``read_only`` gets 403
+        before anything is dispatched or queued, like on REST); calls
         :func:`~meho_backplane.operations.meta_tools.call_operation`
         in-process (the same BFF pattern the approvals decision POSTs use).
         The structured envelope is surfaced verbatim
@@ -941,6 +951,10 @@ async def _render_call_result(
         "error_message": None,
         "connector_id": connector_id,
         "op_id": op_id,
+        # Step k of N when the parked request is one of two or more pending
+        # requests under its change ticket (#3596); the notice then links to
+        # the ticket's oldest-first view.
+        "chain": await parked_request_chain(operator.tenant_id, envelope),
     }
     return get_templates().TemplateResponse(request, "operations/_result.html", context)
 
@@ -964,6 +978,7 @@ def _render_call_form_error(
         "error_message": message,
         "connector_id": connector_id,
         "op_id": op_id,
+        "chain": None,
     }
     return get_templates().TemplateResponse(
         request,

@@ -23,7 +23,7 @@ test; the migration branches the ``last_seen_at`` default per dialect
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -105,19 +105,23 @@ def _index_names(sync_url: str, table: str) -> set[str]:
     return {str(row[1]) for row in rows}
 
 
-def test_upgrade_adds_both_columns(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_both_columns(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0062`` adds ``last_seen_at`` + ``stale_at`` to the gateway tables."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     assert _LAST_SEEN_COLUMN in _columns(sync_url, _PRINCIPAL_TABLE)
     assert _STALE_COLUMN in _columns(sync_url, _ASSIGNMENTS_TABLE)
 
 
-def test_last_seen_at_not_null_with_default(alembic_cfg: tuple[Config, str]) -> None:
+def test_last_seen_at_not_null_with_default(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``last_seen_at`` lands ``NOT NULL`` with a non-NULL default (initialises rows)."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     # PRAGMA table_info: (cid, name, type, notnull, dflt_value, pk).
     _cid, _name, _type, notnull, dflt_value, _pk = _column_row(
@@ -127,10 +131,12 @@ def test_last_seen_at_not_null_with_default(alembic_cfg: tuple[Config, str]) -> 
     assert dflt_value is not None, "last_seen_at needs a server default to initialise existing rows"
 
 
-def test_stale_at_is_nullable(alembic_cfg: tuple[Config, str]) -> None:
+def test_stale_at_is_nullable(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``stale_at`` is nullable — ``NULL`` = fresh, the un-flipped default."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     _cid, _name, _type, notnull, _dflt, _pk = _column_row(
         sync_url, _ASSIGNMENTS_TABLE, _STALE_COLUMN
@@ -138,16 +144,19 @@ def test_stale_at_is_nullable(alembic_cfg: tuple[Config, str]) -> None:
     assert notnull == 0, "stale_at must be nullable (NULL = fresh)"
 
 
-def test_upgrade_creates_last_seen_index(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_creates_last_seen_index(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """The sweeper's ``last_seen_at`` scan index is created."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     assert _LAST_SEEN_INDEX in _index_names(sync_url, _PRINCIPAL_TABLE)
 
 
 def test_stamp_down_revision_then_upgrade_is_idempotent(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Stamp ``0061`` then upgrade to ``0062`` — pinned to own revisions, never ``head``.
 
@@ -157,7 +166,7 @@ def test_stamp_down_revision_then_upgrade_is_idempotent(
     an already-migrated schema, since no leg targets ``"head"``.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     command.stamp(cfg, _DOWN_REVISION)
     command.upgrade(cfg, _REVISION)
 
@@ -165,13 +174,15 @@ def test_stamp_down_revision_then_upgrade_is_idempotent(
     assert _STALE_COLUMN in _columns(sync_url, _ASSIGNMENTS_TABLE)
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0061"`` drops the columns + index; ``upgrade "0062"`` re-adds them.
 
     Pinned to this migration's own revision on both legs (never ``head``).
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _LAST_SEEN_COLUMN in _columns(sync_url, _PRINCIPAL_TABLE)
 
     command.downgrade(cfg, _DOWN_REVISION)

@@ -640,7 +640,9 @@ async def test_credential_write_agent_claim_winner_discards_handoff(
         await session.commit()
     assert request.execution_handle is not None
 
-    async def _redispatch(_operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _redispatch(
+        _operator: Operator, arguments: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
         assert arguments["params"] == params
         return {"status": "ok"}
 
@@ -829,7 +831,9 @@ def _forbid_dispatch(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
     calls: list[dict[str, Any]] = []
 
-    async def _spy(_operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _spy(
+        _operator: Operator, arguments: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
         calls.append(arguments)
         return {"status": "ok"}
 
@@ -1168,7 +1172,9 @@ async def test_post_approval_dispatch_outcome_is_returned_unchanged(
     requester = _make_operator(sub="agent-durable-outcome")
     request = await _park_request(requester=requester, status=ApprovalRequestStatus.APPROVED)
 
-    async def _dispatch(_operator: Operator, _arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _dispatch(
+        _operator: Operator, _arguments: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
         return dispatch_envelope
 
     monkeypatch.setattr(meta_tools_module, "call_operation_with_approval", _dispatch)
@@ -1253,7 +1259,10 @@ async def test_direct_park_resume_redispatches_original_call_on_stored_catalog(
     }
     seen: list[tuple[dict[str, Any], Any, Any]] = []
 
-    async def _spy(_operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _spy(
+        _operator: Operator, arguments: dict[str, Any], *, resolved_target: Any = None
+    ) -> dict[str, Any]:
+        assert resolved_target is None, "tenant-wide park: no saved target"
         seen.append((arguments, composite_resume_var.get(), composite_resume_scope_var.get()))
         return {"status": "ok"}
 
@@ -1268,6 +1277,87 @@ async def test_direct_park_resume_redispatches_original_call_on_stored_catalog(
     assert resumed == {"status": "ok"}
     assert seen == [(call_arguments, None, None)]
     assert seen[0][0] is not call_arguments, "the agent's own dict must stay untouched"
+
+
+@pytest.mark.parametrize(
+    ("target_arg", "expected_fqdn"),
+    [
+        pytest.param(
+            {"name": "vcf-auto", "fqdn": "automation.invalid"},
+            "automation.invalid",
+            id="dict-with-fqdn",
+        ),
+        pytest.param("vcf-auto", "stored.invalid", id="bare-name"),
+    ],
+)
+async def test_direct_park_resume_keeps_the_per_call_fqdn(
+    monkeypatch: pytest.MonkeyPatch, target_arg: Any, expected_fqdn: str
+) -> None:
+    """The direct re-dispatch runs with the ``fqdn`` the agent's call named.
+
+    A dict-shaped ``target`` may carry a per-call ``fqdn``, the virtual host a
+    connector sends as the HTTP Host header and the TLS server name. The park
+    ran with it. The resume loads the target by the saved id, checks its
+    stored settings, and then applies the same override again, so the
+    approved call reaches the same virtual host as the call that waited. A
+    bare target name has no override, so the stored ``fqdn`` is used. The
+    stored row keeps its own value either way.
+    """
+    import meho_backplane.operations.meta_tools as meta_tools_module
+    from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
+
+    target_id = await _persist_target("vcf-auto", fqdn="stored.invalid")
+    requester = _make_operator(sub="agent-direct-fqdn")
+    params = {"name": "direct"}
+    request = await _park_approved(
+        requester=requester,
+        connector_id="apprestest-1.x",
+        op_id="apprestest.op",
+        params=params,
+        target_id=target_id,
+    )
+    assert request.target_hash is not None
+    seen: list[dict[str, Any]] = []
+
+    async def _spy(
+        _operator: Operator, arguments: dict[str, Any], *, resolved_target: Any = None
+    ) -> dict[str, Any]:
+        seen.append(
+            {
+                "target_id": getattr(resolved_target, "id", None),
+                "host": getattr(resolved_target, "host", None),
+                "fqdn": getattr(resolved_target, "fqdn", None),
+                "target_argument": arguments["target"],
+            }
+        )
+        return {"status": "ok"}
+
+    monkeypatch.setattr(meta_tools_module, "call_operation_with_approval", _spy)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=requester,
+        call_arguments={
+            "connector_id": "apprestest-1.x",
+            "op_id": "apprestest.op",
+            "params": params,
+            "target": target_arg,
+        },
+        awaiting_envelope={"op_id": "apprestest.op", "extras": {}},
+        approval_request_id=request.id,
+    )
+
+    assert resumed == {"status": "ok"}
+    assert seen == [
+        {
+            "target_id": target_id,
+            "host": "target.invalid",
+            "fqdn": expected_fqdn,
+            "target_argument": None,
+        }
+    ]
+    async with get_sessionmaker()() as s:
+        stored = await s.get(TargetORM, target_id)
+        assert stored is not None
+        assert stored.fqdn == "stored.invalid"
 
 
 async def test_credential_composite_subop_resume_uses_handoff_parent(
@@ -1349,7 +1439,11 @@ async def test_credential_composite_subop_resume_uses_handoff_parent(
 
 
 async def _persist_target(
-    name: str, *, product: str = "apprestest", version: str | None = None
+    name: str,
+    *,
+    product: str = "apprestest",
+    version: str | None = None,
+    fqdn: str | None = None,
 ) -> uuid.UUID:
     """Persist one live target row in the test tenant and return its id."""
     target_id = uuid.uuid4()
@@ -1362,6 +1456,7 @@ async def _persist_target(
                 product=product,
                 version=version,
                 host="target.invalid",
+                fqdn=fqdn,
                 aliases=[],
             )
         )
@@ -1500,147 +1595,3 @@ async def test_composite_resume_fails_closed_when_saved_target_deleted_and_name_
         row = await fresh.get(ApprovalRequest, request.id)
     assert row is not None
     assert row.resumed_at is None, "a refused resume must not burn the claim"
-
-
-# ---------------------------------------------------------------------------
-# Direct park on a sibling catalog (#3600): the resume uses the stored catalog
-# ---------------------------------------------------------------------------
-
-_GUARD_OP_ID = "POST:/api/vcenter/vm/example"
-
-
-@pytest.fixture
-async def _vmware_sibling_target() -> AsyncIterator[uuid.UUID]:
-    """The 9.0 and 8.0 vCenter catalogs, the guard op in both, and one 8.0.3 target.
-
-    Reuses the dispatcher suite's catalog doubles so the park and the resume
-    run the production catalog guard and sibling fallback. The op is
-    ``caution``: an agent needs no grant for that level, and it still parks
-    for approval.
-    """
-    from meho_backplane.connectors.registry import clear_registry
-    from meho_backplane.operations import reset_dispatcher_caches
-    from tests.test_operations_dispatcher import (
-        _add_vmware_guard_descriptor,
-        _register_vmware_sibling_catalogs,
-    )
-
-    reset_dispatcher_caches()
-    clear_registry()
-    _register_vmware_sibling_catalogs()
-    async with get_sessionmaker()() as s:
-        await _add_vmware_guard_descriptor(s, version="9.0", safety_level="caution")
-        await _add_vmware_guard_descriptor(s, version="8.0", safety_level="caution")
-    target_id = await _persist_target("vc-sibling", product="vmware", version="8.0.3")
-    yield target_id
-    reset_dispatcher_caches()
-    clear_registry()
-
-
-async def _park_sibling_call_as_agent(
-    operator: Operator,
-) -> tuple[dict[str, Any], dict[str, Any], uuid.UUID]:
-    """Park a ``vmware-rest-9.0`` call for the 8.0.3 target and approve it.
-
-    Returns the agent's original ``call_arguments``, the awaiting envelope
-    and the request id. The park runs on the 8.0 sibling catalog, so the
-    row stores ``vmware-rest-8.0``.
-    """
-    from meho_backplane.operations.approval_queue import approve_request
-    from meho_backplane.operations.meta_tools import call_operation
-
-    call_arguments: dict[str, Any] = {
-        "connector_id": "vmware-rest-9.0",
-        "op_id": _GUARD_OP_ID,
-        "target": "vc-sibling",
-        "params": {},
-    }
-    awaiting = await call_operation(operator, call_arguments)
-    assert awaiting["status"] == "awaiting_approval", awaiting
-    request_id = uuid.UUID(awaiting["extras"]["approval_request_id"])
-    async with get_sessionmaker()() as s:
-        row = await s.get(ApprovalRequest, request_id)
-        assert row is not None
-        assert row.connector_id == "vmware-rest-8.0"
-    reviewer = _make_operator(sub="human-reviewer", principal_kind=PrincipalKind.USER)
-    async with get_sessionmaker()() as s:
-        await approve_request(s, request_id, operator=reviewer, params=None)
-        await s.commit()
-    return call_arguments, awaiting, request_id
-
-
-async def _guard_op_audit_rows() -> list[AuditLog]:
-    """The dispatch rows for the guard op. A park writes its row under another path."""
-    async with get_sessionmaker()() as fresh:
-        rows = await fresh.execute(select(AuditLog).where(AuditLog.path == _GUARD_OP_ID))
-        return list(rows.scalars().all())
-
-
-async def test_agent_resume_runs_on_the_stored_sibling_catalog(
-    _vmware_sibling_target: uuid.UUID,
-) -> None:
-    """The agent resume runs on the catalog the row stored, not the one it named.
-
-    The agent named ``vmware-rest-9.0`` for an 8.0.3 target, so the park ran
-    on the 8.0 sibling and stored ``vmware-rest-8.0``. After approval the
-    waiter re-dispatches with the agent's original ``call_arguments``. An
-    approved call never falls back to a sibling, so re-using the agent's
-    ``connector_id`` would refuse the resume. The waiter must use the
-    stored catalog: the op then runs on 8.0, as the approver saw it.
-    """
-    from tests.test_operations_dispatcher import _RecordingVmwareTransport
-
-    operator = _make_operator(sub="agent-sibling-resume")
-    call_arguments, awaiting, _request_id = await _park_sibling_call_as_agent(operator)
-    assert _RecordingVmwareTransport.sent == []
-
-    resumed = await resume_or_surface_awaiting_approval(
-        operator=operator,
-        call_arguments=call_arguments,
-        awaiting_envelope=awaiting,
-        timeout_seconds=2.0,
-    )
-
-    assert resumed["status"] == "ok", resumed
-    assert _RecordingVmwareTransport.sent == [("8.0", "/api/vcenter/vm/example")]
-    assert call_arguments["connector_id"] == "vmware-rest-9.0"
-    audits = await _guard_op_audit_rows()
-    assert [a.payload["result_status"] for a in audits] == ["ok"]
-    assert audits[0].payload["connector_version"] == "8.0"
-
-
-async def test_agent_resume_is_refused_when_the_target_version_moved(
-    _vmware_sibling_target: uuid.UUID,
-) -> None:
-    """A target that moved to 9.x while the request waited gets no approved run.
-
-    The park stored ``vmware-rest-8.0``. By the time the approval lands the
-    target reports 9.0.1. The resume stays on the stored catalog, and that
-    catalog no longer fits the target, so the resume is refused with
-    ``unqualified_target_version``. Running the 9.0 op here instead would be
-    an operation the approver never saw, with the policy gate skipped.
-    """
-    from tests.test_operations_dispatcher import _RecordingVmwareTransport
-
-    operator = _make_operator(sub="agent-sibling-resume-moved")
-    call_arguments, awaiting, _request_id = await _park_sibling_call_as_agent(operator)
-    async with get_sessionmaker()() as s:
-        target = await s.get(TargetORM, _vmware_sibling_target)
-        assert target is not None
-        target.version = "9.0.1"
-        await s.commit()
-
-    resumed = await resume_or_surface_awaiting_approval(
-        operator=operator,
-        call_arguments=call_arguments,
-        awaiting_envelope=awaiting,
-        timeout_seconds=2.0,
-    )
-
-    assert resumed["status"] == "error", resumed
-    assert resumed["extras"]["error_code"] == "unqualified_target_version"
-    assert resumed["extras"]["target_version"] == "9.0.1"
-    assert _RecordingVmwareTransport.sent == []
-    audits = await _guard_op_audit_rows()
-    assert [a.payload["result_status"] for a in audits] == ["unqualified_target_version"]
-    assert audits[0].payload["connector_version"] == "8.0"

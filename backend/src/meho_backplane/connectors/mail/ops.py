@@ -70,6 +70,15 @@ __all__ = [
 #: rejected subject is always ``invalid_params``.
 _SINGLE_LINE_PATTERN: Final[str] = r"^[^\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029]+$"
 
+#: A plain recipient: letters, digits and ``. _ + -`` before the ``@``,
+#: then one domain. The same rule as the allowlist gate
+#: (``allowlist._PLAIN_LOCAL_PART``), applied here so a dispatched call
+#: with any other character in the local part is rejected as
+#: ``invalid_params`` before the handler runs. The allowlist gate stays
+#: the real floor, because the checks notifier calls the transport
+#: directly and never passes through this schema.
+_PLAIN_RECIPIENT_PATTERN: Final[str] = r"^[A-Za-z0-9._+-]+@[^@\s]+$"
+
 MAIL_SEND_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -81,12 +90,14 @@ MAIL_SEND_PARAMETER_SCHEMA: dict[str, Any] = {
                 "type": "string",
                 "minLength": 3,
                 "maxLength": 254,
-                "pattern": r"^[^@\s]+@[^@\s]+$",
+                "pattern": _PLAIN_RECIPIENT_PATTERN,
                 "description": (
-                    "Recipient email address. Must be covered by "
-                    "MAIL_RECIPIENT_ALLOWLIST (full address or its "
-                    "domain) or the whole send is refused before any "
-                    "SMTP connection opens."
+                    "Recipient email address. The part before the @ "
+                    "holds only letters, digits and . _ + - ; any other "
+                    "character is rejected as invalid_params. Must be "
+                    "covered by MAIL_RECIPIENT_ALLOWLIST (full address "
+                    "or its domain) or the whole send is refused before "
+                    "any SMTP connection opens."
                 ),
             },
             "description": "Recipient addresses; one refused recipient refuses the whole send.",

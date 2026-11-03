@@ -12,9 +12,10 @@ Image reference from a `{repository, tag, digest}` map. The digest wins:
 subcharts uses this helper.
 With `global.imageRegistry` set (#4100), the registry replaces the
 registry host of the repository; a repository with no host gets the
-registry in front. A one-word name gets `library/` too, as Docker Hub
-does (`busybox` -> `<registry>/library/busybox`). The digest and the tag
-stay. Empty = the reference is unchanged.
+registry in front. A one-word Docker Hub name gets `library/` too, as
+Docker Hub does: `busybox` and `docker.io/busybox` both become
+`<registry>/library/busybox`. The digest and the tag stay. Empty = the
+reference is unchanged. images.txt uses the same rule for its second column.
 Usage: {{ include "meho.core.image" (dict "image" .Values.image "global" .Values.global) }}
 */}}
 {{- define "meho.core.image" -}}
@@ -24,13 +25,15 @@ Usage: {{ include "meho.core.image" (dict "image" .Values.image "global" .Values
 {{- with and .global .global.imageRegistry -}}
 {{- $parts := splitList "/" $repository -}}
 {{- $first := first $parts -}}
-{{- if eq (len $parts) 1 -}}
-{{- $repository = printf "%s/library/%s" . $repository -}}
-{{- else if or (contains "." $first) (contains ":" $first) (eq $first "localhost") -}}
-{{- $repository = printf "%s/%s" . (join "/" (rest $parts)) -}}
-{{- else -}}
-{{- $repository = printf "%s/%s" . $repository -}}
+{{- $dockerHub := true -}}
+{{- if and (gt (len $parts) 1) (or (contains "." $first) (contains ":" $first) (eq $first "localhost")) -}}
+{{- $dockerHub = has $first (list "docker.io" "index.docker.io") -}}
+{{- $parts = rest $parts -}}
 {{- end -}}
+{{- if and $dockerHub (eq (len $parts) 1) -}}
+{{- $parts = prepend $parts "library" -}}
+{{- end -}}
+{{- $repository = printf "%s/%s" . (join "/" $parts) -}}
 {{- end -}}
 {{- if $image.digest -}}
 {{- printf "%s@%s" $repository $image.digest -}}

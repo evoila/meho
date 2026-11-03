@@ -51,7 +51,7 @@ wire-level round-trip; this test exercises the data-layer shape.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
@@ -306,6 +306,7 @@ def _count(sync_url: str, table: str, where: str, params: dict[str, object]) -> 
 
 def test_head_replaces_rdc_internal_with_default(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``upgrade head`` -> rdc-internal seed gone, default seed in place.
 
@@ -313,7 +314,7 @@ def test_head_replaces_rdc_internal_with_default(
     and seeds the new default tenant.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     # Legacy: tenant row preserved by design (other v0.2 features may
     # key on tenant_id); but the 8 seeded conventions + their history
@@ -371,6 +372,7 @@ def test_head_replaces_rdc_internal_with_default(
 
 def test_seeded_default_bodies_carry_no_consumer_specific_tokens(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Signal-12 verification: no consumer CLAUDE.md tokens in default-seed bodies.
 
@@ -387,7 +389,7 @@ def test_seeded_default_bodies_carry_no_consumer_specific_tokens(
     independently of MCP plumbing.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     default_tenant_id = _fetch_tenant_id(sync_url, _TENANT_SLUG)
     assert default_tenant_id is not None
@@ -409,6 +411,7 @@ def test_seeded_default_bodies_carry_no_consumer_specific_tokens(
 
 def test_operator_curated_rdc_internal_content_survives_supersede(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Operator-authored content under rdc-internal slugs survives 0028.
 
@@ -421,7 +424,7 @@ def test_operator_curated_rdc_internal_content_survives_supersede(
     cfg, sync_url = alembic_cfg
     # Stop at 0018 so the rdc-internal seed is present but 0028 has
     # not yet run.
-    command.upgrade(cfg, "0018")
+    copy_migrated_db(cfg, "0018")
 
     legacy_tenant_id_str = _fetch_tenant_id(sync_url, _LEGACY_TENANT_SLUG)
     assert legacy_tenant_id_str is not None
@@ -486,10 +489,11 @@ def test_operator_curated_rdc_internal_content_survives_supersede(
 
 def test_re_running_supersede_is_idempotent(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Stamp 0027 + upgrade 0028 twice: no duplicate rows land."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     default_tenant_id = _fetch_tenant_id(sync_url, _TENANT_SLUG)
     assert default_tenant_id is not None
@@ -518,6 +522,7 @@ def test_re_running_supersede_is_idempotent(
 
 def test_downgrade_removes_default_seed_keeps_tenant_no_rdc_internal_restore(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``downgrade 0027`` -> default seed gone; tenant kept; rdc-internal NOT restored.
 
@@ -527,7 +532,7 @@ def test_downgrade_removes_default_seed_keeps_tenant_no_rdc_internal_restore(
     documented in docs/architecture/conventions-seed.md.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     default_tenant_id_str = _fetch_tenant_id(sync_url, _TENANT_SLUG)
     assert default_tenant_id_str is not None
@@ -574,6 +579,7 @@ def test_downgrade_removes_default_seed_keeps_tenant_no_rdc_internal_restore(
 
 def test_cleanup_is_noop_on_fresh_db_without_rdc_internal(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """When no rdc-internal tenant exists, 0028's cleanup is a no-op.
 
@@ -585,7 +591,7 @@ def test_cleanup_is_noop_on_fresh_db_without_rdc_internal(
     land on the same head state.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     # Both the cleanup-after-0018 path and the never-had-rdc-internal
     # path should converge on the same state: rdc-internal tenant row
@@ -619,6 +625,7 @@ def test_cleanup_is_noop_on_fresh_db_without_rdc_internal(
 
 def test_seeded_default_bodies_fit_individual_token_budget(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Each seeded default body fits the individual 600-token write-time gate.
 
@@ -628,7 +635,7 @@ def test_seeded_default_bodies_fit_individual_token_budget(
     overshoots the per-entry budget.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     from meho_backplane.conventions.schemas import (
         DEFAULT_MAX_PREAMBLE_TOKENS,

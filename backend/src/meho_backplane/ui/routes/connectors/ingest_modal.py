@@ -203,8 +203,9 @@ def _panel_from_http_exception(
     The catalog-resolution 422s, the explicit-shape 422s
     (``VersionMismatchError`` / ``ProductImplIdMismatch`` /
     ``UncoveredVersionLabel``), the ``400`` spec-parse family, the
-    ``502`` upstream-fetch arm, and the ``503 LlmClientUnavailable`` all
-    render as actionable panels. The ``catalog_entry_not_found`` 422
+    ``502`` upstream-fetch arm, the ``403`` write-scope refusal (the global
+    scope needs ``platform_admin``), and the ``503 LlmClientUnavailable``
+    all render as actionable panels. The ``catalog_entry_not_found`` 422
     enumerates the ``available_entries[]`` it carries. Anything else
     (a genuinely unexpected fault) re-raises unchanged so it still
     surfaces as a real error rather than a mislabelled panel.
@@ -258,6 +259,18 @@ def _panel_from_http_exception(
                 fallback="The spec could not be parsed or fetched.",
             ),
             status_code=exc.status_code,
+        )
+    if exc.status_code == 403:
+        # The write scope is not allowed for this operator: the global
+        # scope needs platform_admin, because every tenant shares its rows.
+        return _render_error_panel(
+            request,
+            title="Write scope not allowed",
+            message=_detail_message(
+                detail,
+                fallback="You may not ingest into that scope.",
+            ),
+            status_code=403,
         )
     raise exc
 

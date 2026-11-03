@@ -39,7 +39,7 @@ import assert from "node:assert/strict";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BUNDLE_ROOT = join(HERE, "..");
-const GUARD = join(BUNDLE_ROOT, "..", "claude-code-plugin", "lib", "login-guard.mjs");
+const PLUGIN_LIB = join(BUNDLE_ROOT, "..", "claude-code-plugin", "lib");
 const RECONNECT =
   "turn the MEHO extension off and on again in Claude Desktop (Settings > Extensions)";
 const LOGIN_EXPIRED =
@@ -65,12 +65,15 @@ for (const name of ["open", "xdg-open", "browser"]) {
   chmodSync(join(STUB_BIN, name), 0o755);
 }
 
-// A bundle copy the way build.sh stages it: server/ plus the guard.
+// A bundle copy the way build.sh stages it: server/ plus the guard and its
+// helper files.
 // `nodeModules` is either a folder to link in or a stub entry source.
 function makeBundle({ realNodeModules, stubSource }) {
   const dir = tempDir("meho-mcpb-guard-");
   cpSync(join(BUNDLE_ROOT, "server"), join(dir, "server"), { recursive: true });
-  cpSync(GUARD, join(dir, "server", "login-guard.mjs"));
+  for (const name of readdirSync(PLUGIN_LIB).filter((n) => n.endsWith(".mjs"))) {
+    cpSync(join(PLUGIN_LIB, name), join(dir, "server", name));
+  }
   if (realNodeModules) {
     symlinkSync(realNodeModules, join(dir, "node_modules"), "dir");
   } else {
@@ -146,7 +149,7 @@ function portIsFree(port) {
 
 function signInLocks(authDir) {
   try {
-    return readdirSync(authDir).filter((f) => f.startsWith("meho-claude-desktop-"));
+    return readdirSync(authDir).filter((f) => f.startsWith("meho-signin-"));
   } catch {
     return [];
   }
@@ -262,6 +265,8 @@ function makeCertificate() {
 //     that expired during the session.
 async function startFakeMeho(mode, tls) {
   let base;
+  // The Meho-Tenant header of every /mcp request, in order (#5242).
+  const tenantHeaders = [];
   const server = createHttpsServer({ key: tls.key, cert: tls.cert }, (req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
@@ -294,6 +299,7 @@ async function startFakeMeho(mode, tls) {
         res.writeHead(404);
         return res.end();
       }
+      tenantHeaders.push(req.headers["meho-tenant"] ?? null);
       const challenge = {
         "www-authenticate": `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource"`,
       };
@@ -323,12 +329,16 @@ async function startFakeMeho(mode, tls) {
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   base = `https://127.0.0.1:${server.address().port}`;
-  return { url: `${base}/mcp`, close: () => server.close() };
+  return { url: `${base}/mcp`, tenantHeaders, close: () => server.close() };
 }
 
 // Save a login for `url`, the way mcp-remote stores it after a browser login.
-function saveLogin(authDir, url) {
-  const hash = createHash("md5").update(url).digest("hex");
+// mcp-remote keys a login on the URL plus the custom headers it sends, so a
+// session with a Meho-Tenant header has its own saved login.
+function saveLogin(authDir, url, headers = {}) {
+  const keys = Object.keys(headers).sort();
+  const parts = keys.length > 0 ? [url, JSON.stringify(headers, keys)] : [url];
+  const hash = createHash("md5").update(parts.join("|")).digest("hex");
   const dir = join(authDir, `mcp-remote-${mcpRemoteConfigVersion()}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(
@@ -405,7 +415,8 @@ e2e("e2e: an unfinished login stops at the time limit and frees the port", { tim
 });
 
 e2e("e2e: a second start during an unfinished login waits, then stops cleanly", { timeout: 40000 }, async () => {
-  // Claude Desktop can start the extension twice at once (#3857).
+  // Claude Desktop can start the extension twice at once (#3857). The time
+  // limit covers the wait for the other copy's login too (#5514).
   const fake = await startFakeMeho("login", TLS);
   try {
     const bundle = makeBundle({ realNodeModules: REAL_NODE_MODULES });
@@ -422,7 +433,11 @@ e2e("e2e: a second start during an unfinished login waits, then stops cleanly", 
       assert.doesNotMatch(run.stderr, /EADDRINUSE|Fatal error|Unhandled|TypeError/);
     }
     assert.match(second.stderr, /another MEHO instance \(pid \d+\) is signing in; waiting/);
-    assert.ok(b.ms > a.ms, "the second copy must start its login after the first one stopped");
+    assert.doesNotMatch(
+      second.stderr,
+      /Please authorize this client by visiting/,
+      "the second copy must not start its own login while the first one runs",
+    );
     assert.deepEqual(signInLocks(bundle.authDir), []);
   } finally {
     fake.close();
@@ -449,6 +464,49 @@ e2e("e2e: two starts at once with a saved login both connect", { timeout: 30000 
       assert.doesNotMatch(run.stderr, /did not connect|Fatal error/);
     }
     assert.deepEqual(signInLocks(bundle.authDir), []);
+  } finally {
+    fake.close();
+  }
+});
+
+e2e("e2e: the tenant setting reaches MEHO as the Meho-Tenant header", { timeout: 30000 }, async () => {
+  // #5242: the session works in the tenant the header names.
+  const fake = await startFakeMeho("expire", TLS);
+  try {
+    const bundle = makeBundle({ realNodeModules: REAL_NODE_MODULES });
+    saveLogin(bundle.authDir, fake.url, { "Meho-Tenant": "tenant-b" });
+    const run = startLauncher(bundle, [fake.url, TLS.certPath], { MEHO_TENANT: "tenant-b" });
+    run.send(INITIALIZE);
+    await waitFor(
+      () => run.lines.some((l) => JSON.parse(l).id === 1 && JSON.parse(l).result),
+      `an initialize answer; stderr:\n${run.stderr}`,
+    );
+    run.child.stdin.end();
+    const { code } = await run.exited;
+    assert.equal(code, 0, run.stderr);
+    assert.ok(fake.tenantHeaders.length > 0, "MEHO got no /mcp request");
+    assert.deepEqual([...new Set(fake.tenantHeaders)], ["tenant-b"]);
+  } finally {
+    fake.close();
+  }
+});
+
+e2e("e2e: without a tenant setting MEHO gets no Meho-Tenant header", { timeout: 30000 }, async () => {
+  const fake = await startFakeMeho("expire", TLS);
+  try {
+    const bundle = makeBundle({ realNodeModules: REAL_NODE_MODULES });
+    saveLogin(bundle.authDir, fake.url);
+    const run = startLauncher(bundle, [fake.url, TLS.certPath], { MEHO_TENANT: "" });
+    run.send(INITIALIZE);
+    await waitFor(
+      () => run.lines.some((l) => JSON.parse(l).id === 1 && JSON.parse(l).result),
+      `an initialize answer; stderr:\n${run.stderr}`,
+    );
+    run.child.stdin.end();
+    const { code } = await run.exited;
+    assert.equal(code, 0, run.stderr);
+    assert.ok(fake.tenantHeaders.length > 0, "MEHO got no /mcp request");
+    assert.deepEqual([...new Set(fake.tenantHeaders)], [null]);
   } finally {
     fake.close();
   }

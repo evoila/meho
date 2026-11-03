@@ -22,6 +22,16 @@ result does not change.
 The rule runs on the built result, not on the raised error. So the
 dispatcher still sorts the error by its class and status as before: the new
 login and one retry after HTTP 401, and the 403 and 429 results.
+
+For every operation, :func:`redact_error_result` then removes secrets from
+the whole error result (#5031). The error builders clean each free text, but
+some fields come straight from the vendor (the ``errors[]`` list of an HTTP
+422, the permission headers of a 403), and a connector can add its own. So
+the same place cleans every string and every field of ``error``, ``extras``
+and ``result``: the value of each secret-named field is replaced, then the
+Tier-1 default policy runs. :func:`redact_error_payload` is that cleanup for
+one value; the dispatcher runs it over a multi-step operation's error
+envelope before the reducer stores the envelope behind a result handle.
 """
 
 from __future__ import annotations
@@ -32,12 +42,27 @@ from typing import Any, Final
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors import OperationResult
 from meho_backplane.operations._errors import UPSTREAM_SAID, VAULT_SAID
+from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.flight_recorder.families import secret_tag_tokens
+from meho_backplane.redaction.policy import RedactionPolicy
+from meho_backplane.redaction.resolver import get_default_policy
+from meho_backplane.redaction.secret_fields import scrub_secret_fields
 
-__all__ = ["VENDOR_TEXT_WITHHELD", "sends_secret", "withhold_vendor_text"]
+__all__ = [
+    "ERROR_TEXT_WITHHELD",
+    "VENDOR_TEXT_WITHHELD",
+    "redact_error_payload",
+    "redact_error_result",
+    "sends_secret",
+    "withhold_vendor_text",
+]
 
 #: The text put in place of each vendor text of an operation that sends a secret.
 VENDOR_TEXT_WITHHELD: Final = "<vendor text withheld: this operation sends a secret>"
+
+#: The error summary when the redaction itself fails. The result then keeps
+#: only its ``error_code``: an error result that may hold a secret is not sent.
+ERROR_TEXT_WITHHELD: Final = "<error text withheld: redaction unavailable>"
 
 #: ``extras`` keys whose value is text from the vendor or from a raised error.
 _VENDOR_TEXT_KEYS: Final = ("upstream_message", "exception_message", "raw_message")
@@ -102,3 +127,46 @@ def withhold_vendor_text(
             "extras": _extras_without_vendor_text(dict(result.extras)),
         }
     )
+
+
+def redact_error_payload(node: Any, policy: RedactionPolicy | None = None) -> Any:
+    """Return *node* with secrets removed: the secret-field walk, then Tier-1.
+
+    *node* is a dict, a list, a string or ``None`` (an error result's
+    ``error``, ``extras`` or ``result``, or a multi-step operation's error
+    envelope). The default policy is pinned
+    (:func:`~meho_backplane.redaction.resolver.get_default_policy`), the same
+    as the error builders use, so a registered shadow-mode policy cannot turn
+    it off. Raises when the redaction itself fails; the caller then withholds
+    the value.
+    """
+    return redact(scrub_secret_fields(node), policy or get_default_policy()).redacted
+
+
+def redact_error_result(result: OperationResult) -> OperationResult:
+    """Return *result* with secrets removed from its ``error``, ``extras`` and ``result``.
+
+    Runs on every error result, for every operation. ``result`` is set on an
+    error a handler returned (#4274) and on a multi-step operation's error
+    envelope (#3809); both can carry the vendor's detail. Each field goes
+    through :func:`redact_error_payload`. If the redaction fails, the result
+    keeps only its ``error_code`` and the summary :data:`ERROR_TEXT_WITHHELD`:
+    ``result`` and ``handle`` are dropped and ``delivery`` is ``"unavailable"``.
+    """
+    try:
+        policy = get_default_policy()
+        error = redact_error_payload(result.error, policy)
+        extras = redact_error_payload(dict(result.extras), policy)
+        payload = redact_error_payload(result.result, policy)
+    except Exception:  # fail-closed: never send an error result that may hold a secret
+        kept = {key: result.extras[key] for key in ("error_code",) if key in result.extras}
+        return result.model_copy(
+            update={
+                "error": ERROR_TEXT_WITHHELD,
+                "extras": kept,
+                "result": None,
+                "handle": None,
+                "delivery": "unavailable",
+            }
+        )
+    return result.model_copy(update={"error": error, "extras": extras, "result": payload})

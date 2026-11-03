@@ -23,6 +23,11 @@ Three primitives, layered:
   with HTTP 409 before FastAPI reads the request body, so an old runner
   always gets the message that names both versions.
 
+* :func:`runner_package_set` — reads the digest of the runner's connector
+  packages (#5038). It does not refuse a call: the assignment leaves out
+  the work the runner cannot run (see
+  :func:`~meho_backplane.gateway.assignment_service.materialize_assignment`).
+
 * :func:`assert_runner_scope` — the scope gate. Given the runner operator
   and the runner **name** the route addresses (the gateway set keys
   runners by name: #2498's ``{runner}`` path segment, #2499's ``?runner=``
@@ -69,8 +74,13 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import RunnerPrincipal
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.runner import wire
+from meho_backplane.runner.package_set import (
+    EMPTY_PACKAGE_SET_DIGEST,
+    PACKAGE_SET_DIGEST_PATTERN,
+    PACKAGE_SET_HEADER,
+)
 
-__all__ = ["assert_runner_scope", "require_runner", "runner_wire_version"]
+__all__ = ["assert_runner_scope", "require_runner", "runner_package_set", "runner_wire_version"]
 
 #: Detail token shared by every runner-authorization failure — the
 #: negative cage (:func:`~meho_backplane.middleware.verify_jwt_and_bind`),
@@ -183,6 +193,32 @@ async def runner_wire_version(
     )
 
 
+def runner_package_set(
+    header_value: Annotated[str | None, Header(alias=PACKAGE_SET_HEADER)] = None,
+) -> str:
+    """Read the digest of the runner's connector packages (FastAPI dependency, #5038).
+
+    A call without the header counts as
+    :data:`~meho_backplane.runner.package_set.EMPTY_PACKAGE_SET_DIGEST` (a
+    runner without connector packages), so a runner built before the header
+    existed keeps working. A value in another shape than ``sha256:`` and 64
+    lowercase hex characters is refused with HTTP 400, so the runner list
+    never shows a made-up value. :func:`assert_runner_scope` stores the
+    digest on the runner's row.
+    """
+    if header_value is None:
+        return EMPTY_PACKAGE_SET_DIGEST
+    if PACKAGE_SET_DIGEST_PATTERN.fullmatch(header_value) is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"runner_package_set_invalid: {PACKAGE_SET_HEADER} must be sha256: "
+                "and 64 lowercase hex characters"
+            ),
+        )
+    return header_value
+
+
 async def _store_refused_wire_version(operator: Operator, *, wire_version: str) -> None:
     """Store a refused wire version on the runner's own row and log the refusal."""
     structlog.get_logger(__name__).warning(
@@ -205,6 +241,7 @@ async def assert_runner_scope(
     runner_name: str,
     session: AsyncSession,
     wire_version: str,
+    package_set: str,
 ) -> RunnerPrincipal:
     """Bind a runner token's ``runner_id`` to the runner *named* by the route.
 
@@ -231,10 +268,9 @@ async def assert_runner_scope(
     at least one authenticated request per poll window, so the idle work
     cycle *is* the heartbeat (the #1501 zombie-heartbeat lesson).
 
-    After the scope match the guard stores the runner's wire version on the
-    row (#5020). The version was already checked by
-    :func:`runner_wire_version`, which refuses a mismatch before the request
-    body is read, so the value here always equals the central version.
+    After the scope match the guard stores the runner's wire version (#5020)
+    and connector package set digest (#5038) on the row, for the runner
+    list. :func:`runner_wire_version` already refused another version.
 
     Fail-closed with **no existence oracle**: a name that resolves to no
     row *and* a name that resolves to a **different** runner both raise the
@@ -248,9 +284,8 @@ async def assert_runner_scope(
             :func:`require_runner`). ``operator.runner_id`` must be set;
             :func:`require_runner` guarantees this.
         runner_name: The runner name the route addresses (path/query param).
-        wire_version: The runner's wire version, as read and checked by
-            :func:`runner_wire_version`. Stored on the row so the runner
-            list shows it.
+        wire_version: From :func:`runner_wire_version`. Stored on the row.
+        package_set: From :func:`runner_package_set`. Stored on the row.
         session: An open :class:`AsyncSession` the caller owns. On a
             successful match this guard stamps the heartbeat and
             ``commit()``s it on this session (see "Heartbeat side effect");
@@ -286,14 +321,15 @@ async def assert_runner_scope(
             detail=_RUNNER_SCOPE_VIOLATION,
         )
     row.wire_version = wire_version
+    row.package_set_digest = package_set
     # Heartbeat (#2501): stamp runner liveness on the central clock, keyed
     # by the token's ``runner_id`` claim (``row.id``), reading no request
     # field. Committed on the caller's own session (no nested session -- the
     # SQLite dev/test pool is a single-connection StaticPool). This guard is
     # always the first operation in each runner-plane handler, so the commit
-    # flushes only the heartbeat and the stored wire version, and it persists
-    # even for the callers (the long-poll GET and the assignment GET) that
-    # never otherwise commit.
+    # flushes only the heartbeat, the stored wire version and the package
+    # set, and it persists even for the callers (the long-poll GET and the
+    # assignment GET) that never otherwise commit.
     row.last_seen_at = datetime.now(UTC)
     await session.commit()
     return row

@@ -40,8 +40,8 @@ through the same body-hash skip-re-embed path; what differs is:
 Multi-spec merge
 ----------------
 
-vSphere ingests ``vcenter.yaml`` + ``vi-json.yaml`` under one
-``connector_id='vmware-rest-9.0'``. The CLI / API caller invokes
+A product whose API is split across two spec files ingests both under
+one ``connector_id`` (for example ``'gh-rest-3'``). The CLI / API caller invokes
 :func:`register_ingested_operations` twice -- once per spec -- with
 distinct ``spec_source`` arguments. Each call tags every row's
 ``tags`` with ``f"spec:{spec_source}"`` so the operator-facing

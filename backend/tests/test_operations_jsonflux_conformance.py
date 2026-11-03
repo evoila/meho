@@ -460,13 +460,7 @@ async def test_reduced_page_is_never_labeled_source_complete() -> None:
 #: Ops whose parts are deliberately NOT kept when their list spills. Each
 #: entry needs a reason. Keep this list short: a new op belongs here only if
 #: it is credential-class and its parts are secret-shaped.
-_PARTS_HELD_BACK: dict[str, str] = {
-    "sddc.credential.list": "credential_read: the page lists stored passwords.",
-    "sddc.host.commission": "credential_write: the request carries host passwords.",
-    "vmware.composite.vm.guest.file.read": (
-        "credential_write: it reads guest files, which can hold secrets."
-    ),
-}
+_PARTS_HELD_BACK: dict[str, str] = {}
 
 _SAMPLE_PART_OBJECT: dict[str, Any] = {"note": "sample"}
 

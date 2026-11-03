@@ -9,13 +9,23 @@
 # docs/design/2026-10-10-install-forms/).
 #
 # Commands in this version:
-#   check [--json]    a red/green list of the built-in Kubernetes (RKE2)
+#   check [--json]    a red/green list of the built-in Kubernetes (RKE2) and
+#                     of the hardening: the firewall, RKE2's CIS profile and
+#                     the console certificate (#4638)
 #   support-bundle    one file for evoila support, with no passwords in it
 #   admin-network     the addresses that may use SSH, in the MEHO firewall
-#   uninstall         remove MEHO and RKE2; the MEHO firewall stays on
+#   uninstall         remove MEHO and RKE2, and the host changes of RKE2's
+#                     CIS profile that the install made; the MEHO firewall
+#                     stays on
 #
-# Later Tasks add the hardening lines to check (#4638) and the commands
-# certificate, keyholder and unseal (#4738).
+# A later Task adds the commands certificate, keyholder and unseal (#4738).
+#
+# meho-host sources two files of lib/, the files install.sh uses too:
+# lib/firewall.sh and lib/cis.sh, for their read-only functions
+# firewall_state and cis_state. In the download and in the repository they
+# are in lib/ next to meho-host. install.sh copies them to
+# /usr/local/lib/meho-host, which is ../lib/meho-host from the folder of
+# /usr/local/sbin/meho-host.
 #
 # Exit codes:
 #   0  check: every line is ok or a warning; the other commands: done
@@ -38,32 +48,58 @@ set -Eeuo pipefail
 # real machine the variable is not set.
 HOST_ROOT="${MEHO_TEST_ROOT:-}"
 
+MEHO_HOST_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+# The two places of the lib files, in this order: lib/ next to meho-host
+# (the download, the repository), and ../lib/meho-host (the machine).
+MEHO_LIB_DIRS=("$MEHO_HOST_DIR/lib" "$(cd -- "$MEHO_HOST_DIR/.." && pwd -P)/lib/meho-host")
+MEHO_LIB_DIR=""
+for MEHO_LIB_CANDIDATE in "${MEHO_LIB_DIRS[@]}"; do
+    if [[ -f $MEHO_LIB_CANDIDATE/firewall.sh && -f $MEHO_LIB_CANDIDATE/cis.sh ]]; then
+        MEHO_LIB_DIR=$MEHO_LIB_CANDIDATE
+        break
+    fi
+done
+if [[ -z $MEHO_LIB_DIR ]]; then
+    printf '[FAIL] meho-host cannot find firewall.sh and cis.sh: neither %s nor %s holds both. Fix: copy lib/firewall.sh and lib/cis.sh of the MEHO download to /usr/local/lib/meho-host/.\n' \
+        "${MEHO_LIB_DIRS[0]}" "${MEHO_LIB_DIRS[1]}" >&2
+    exit 1
+fi
+readonly MEHO_HOST_DIR MEHO_LIB_DIRS MEHO_LIB_DIR
+# shellcheck source=lib/firewall.sh
+source "$MEHO_LIB_DIR/firewall.sh"
+# shellcheck source=lib/cis.sh
+source "$MEHO_LIB_DIR/cis.sh"
+
 readonly MEHO_STATE_DIR=/var/lib/meho
 readonly MEHO_SUPPORT_DIR=/var/lib/meho/support
 readonly MEHO_FIRST_LOGIN_FILE=/var/lib/meho/first-login-passwords
 readonly MEHO_UNSEAL_KEY_FILE=/var/lib/meho/unseal-key
 readonly MEHO_INSTALL_RECORD=/etc/meho/install.json
 readonly MEHO_ETC_DIR=/etc/meho
-# The two commands install.sh puts on the machine (lib/common.sh).
+# The two commands install.sh puts on the machine, and the folder of the
+# files meho-host sources (lib/common.sh). The paths of the MEHO host firewall
+# (#4635), MEHO_FIREWALL_FILE and the others, come from lib/firewall.sh.
 readonly MEHO_CLI_PATH=/usr/local/bin/meho
 readonly MEHO_HOST_PATH=/usr/local/sbin/meho-host
-# The MEHO host firewall of lib/firewall.sh (#4635): one nftables file, its
-# boot unit, and the drop-in that lets RKE2 start only while it is loaded.
-readonly MEHO_FIREWALL_FILE=/etc/meho/firewall.nft
-readonly MEHO_FIREWALL_UNIT=meho-firewall.service
-readonly MEHO_FIREWALL_UNIT_FILE=/etc/systemd/system/meho-firewall.service
-readonly RKE2_FIREWALL_DROPIN=/etc/systemd/system/rke2-server.service.d/meho-firewall.conf
+readonly MEHO_HOST_LIB_DIR=/usr/local/lib/meho-host
 # uninstall leaves the firewall in place (ADR 0009). This removes it.
 readonly FIREWALL_REMOVE_COMMAND="systemctl disable $MEHO_FIREWALL_UNIT && rm -r $MEHO_FIREWALL_UNIT_FILE $MEHO_ETC_DIR && systemctl daemon-reload && nft delete table inet meho"
 # RKE2's own uninstall script of a tarball install
 # (https://docs.rke2.io/install/uninstall). It removes RKE2, its units and
 # the cluster data, and itself.
 readonly RKE2_UNINSTALL=/usr/local/bin/rke2-uninstall.sh
+# The host changes of RKE2's CIS profile (#4636): RKE2's kernel settings
+# file, and the etcd user and group. lib/cis.sh, sourced above, defines
+# CIS_SYSCTL_FILE, ETCD_ACCOUNT and ETCD_ACCOUNT_RECORD. The install writes
+# the parts of the etcd account that it created to ETCD_ACCOUNT_RECORD, so
+# uninstall removes only these parts (#5133).
 # The IPv4 patterns of lib/net.sh, which is not on the machine.
 readonly IPV4_OCTET_RE='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
 readonly IPV4_RE="^(${IPV4_OCTET_RE}\\.){3}${IPV4_OCTET_RE}\$"
 readonly PREFIX_RE='^([0-9]|[12][0-9]|3[0-2])$'
 readonly RKE2_DATA_DIR=/var/lib/rancher
+# RKE2's settings, which cis_state reads (lib/common.sh).
+readonly RKE2_CONFIG_FILE=/etc/rancher/rke2/config.yaml
 readonly RKE2_KUBECONFIG=/etc/rancher/rke2/rke2.yaml
 readonly RKE2_KUBECTL=/var/lib/rancher/rke2/bin/kubectl
 # RKE2's installer puts rke2 here. sudo's PATH on RHEL does not hold it.
@@ -97,6 +133,24 @@ readonly SECRET_VALUES_TEMPLATE='{{range .items}}{{if ne .type "helm.sh/release.
 # USAGES cannot break it.
 readonly CERT_EXPIRES_RE='[A-Z][a-z][a-z] [0-9][0-9], [0-9]{4} [0-9][0-9]:[0-9][0-9] [A-Z]+'
 readonly CERT_ROW_RE="^([^[:space:]]+)[[:space:]]+.*[[:space:]](${CERT_EXPIRES_RE})[[:space:]]+.*[[:space:]](OK|WARNING|EXPIRED|NOT YET VALID)[[:space:]]*$"
+# The certificate of the console: the TLS Secret of the Ingress
+# (ingress.tls.secretName in values-single-node.yaml). The install makes it
+# for the host name (backend/src/meho_backplane/core/tls.py), and
+# meho-host certificate (#4738) puts the customer's own into the same
+# Secret. The check reads only its two public keys: tls.crt (the server
+# certificate, then the intermediate ones) and ca.crt (the CA that the
+# clients trust). It never reads tls.key.
+readonly CONSOLE_TLS_SECRET=meho-core-tls
+readonly CONSOLE_CERT_MIN_DAYS=30
+# One kubectl call prints both keys, decoded, with the marker line between
+# them: each call may wait 10 seconds, and meho doctor gives the whole check
+# 60 seconds (#4740).
+readonly TLS_CA_MARKER='#ca.crt'
+readonly TLS_CERTS_TEMPLATE='{{with index .data "tls.crt"}}{{base64decode .}}{{end}}{{"\n#ca.crt\n"}}{{with index .data "ca.crt"}}{{base64decode .}}{{end}}'
+# The openssl verify error codes of the time checks (X509_V_ERR_CERT_NOT_YET_VALID
+# and X509_V_ERR_CERT_HAS_EXPIRED). certificate_state reports the time of the
+# server certificate itself, in its own words.
+readonly VERIFY_TIME_ERRORS_RE='^error (9|10) at 0 depth lookup:'
 
 COMMAND=""
 BUNDLE_WORK=""
@@ -118,9 +172,11 @@ Run it as root:
   sudo meho-host uninstall
 
 Commands:
-  check [--json]    Check the built-in Kubernetes (RKE2) and print a
-                    red/green list: the node, the pods, the disk and RKE2's
-                    certificates. Every line that is not ok says what to do.
+  check [--json]    Check the built-in Kubernetes (RKE2) and the hardening
+                    of this machine, and print a red/green list: the node,
+                    the pods, the disk, RKE2's certificates, the MEHO
+                    firewall, RKE2's CIS profile and the certificate of the
+                    console. Every line that is not ok says what to do.
                     --json prints the list as JSON, for meho doctor.
   support-bundle    Write one file for evoila support to
                     /var/lib/meho/support/, for root only, and print its
@@ -139,9 +195,13 @@ Commands:
                     SSH, it asks first when the new range does not hold
                     your own address.
   uninstall         Remove MEHO and the built-in Kubernetes from this
-                    machine, with all their data. It asks twice. The MEHO
-                    firewall stays on, and the last line names the
-                    command that removes it.
+                    machine, with all their data. It asks twice. It also
+                    removes RKE2's kernel settings file and the etcd user
+                    and group that the install created; an etcd user or
+                    group from before the install stays. The MEHO
+                    firewall stays on, and a line names the command that
+                    removes it. A restart of the machine brings back the
+                    operating system's own kernel values.
   -h, --help        Show this help and stop.
 
 Exit codes:
@@ -155,6 +215,8 @@ HELP
 ok() { printf '[ok]   %s\n' "$*"; }
 
 warn() { printf '[WARN] %s\n' "$*" >&2; }
+
+note() { printf '[note] %s\n' "$*"; }
 
 # fail <problem> <fix>: one [FAIL] line that says what is wrong and what to
 # do about it, then stop with exit code 1.
@@ -378,11 +440,156 @@ check_certificates() {
     fi
 }
 
+# check_firewall: the MEHO host firewall of install.sh (#4635), from
+# firewall_state in lib/firewall.sh.
+check_firewall() {
+    local state
+    if state=$(firewall_state); then
+        result firewall ok "on: the table inet meho is loaded, its chain prerouting drops what it does not allow, and $MEHO_FIREWALL_UNIT loads it at every start"
+    else
+        result firewall fail "${state:-off}." \
+            "load the MEHO firewall and keep it on at every start: systemctl enable $MEHO_FIREWALL_UNIT && systemctl restart $MEHO_FIREWALL_UNIT. It needs nft (the package nftables) and the rules in $MEHO_FIREWALL_FILE, whose chain prerouting keeps policy drop. If it does not start, see its log: $FIREWALL_LOG_COMMAND"
+    fi
+}
+
+# check_cis_profile: RKE2's CIS hardening profile (#4636), from cis_state in
+# lib/cis.sh.
+check_cis_profile() {
+    local state
+    if state=$(cis_state); then
+        result cis-profile ok "on: RKE2's settings set profile: $RKE2_CIS_PROFILE, and the machine has the etcd user and the kernel settings the profile needs"
+    else
+        result cis-profile fail "${state:-off}." \
+            "set back what this line names, as install.sh set it up for RKE2's CIS profile. Then restart RKE2: $RKE2_RESTART_COMMAND. If the cause is not clear, $SUPPORT_HINT"
+    fi
+}
+
+# install_hostname: the host name of the install, from the install record.
+install_hostname() {
+    awk -F'"' '$2 == "hostname" { print $4; exit }' "${HOST_ROOT}${MEHO_INSTALL_RECORD}" 2>/dev/null
+}
+
+# utc_day <seconds>: the day of a time, for example 2027-10-23.
+utc_day() { date -u -d "@$1" +%F; }
+
+# verify_chain <chain> <CA certificate or ""> <now in seconds>: openssl
+# verify of the server certificate at that time, with the rest of the chain
+# as the intermediate certificates. The CA certificate is the trust anchor
+# (-partial_chain: it may be an intermediate CA, as the customer's ca.crt
+# can be); without one, the trust store of this machine is. With a CA
+# certificate, -no-CApath and -no-CAstore keep the machine's trust folder and
+# store out: otherwise a certificate from a public CA passes with an
+# unrelated ca.crt. (-CAfile already replaces the machine's trust file.) It
+# prints openssl's messages and returns its exit code.
+verify_chain() {
+    local chain=$1 ca=$2 now=$3
+    if [[ -n $ca ]]; then
+        openssl verify -attime "$now" -partial_chain -no-CApath -no-CAstore \
+            -CAfile <(printf '%s\n' "$ca") \
+            -untrusted <(printf '%s\n' "$chain") <(printf '%s\n' "$chain") 2>&1
+    else
+        openssl verify -attime "$now" -untrusted <(printf '%s\n' "$chain") <(printf '%s\n' "$chain") 2>&1
+    fi
+}
+
+# certificate_state <host name> <chain> <CA certificate> <now in seconds>:
+# the rule for the console certificate, in one place. The first-start list
+# (#4042) checks the same rule, and meho-host certificate (#4738) can check a
+# new certificate with it. The chain is PEM text as in tls.crt: the server
+# certificate first, then the intermediate certificates. The CA certificate
+# (ca.crt) is the trust anchor: the chain must end at it. Without one, the
+# trust store of this machine is the anchor. The rule:
+#
+# - the server certificate is valid at <now>;
+# - it names the host (OpenSSL's host check: the DNS names of the subject
+#   alternative names, with a wildcard only in the first label, and the
+#   common name only when there is no DNS name);
+# - its chain ends at the anchor, and every certificate of it is valid;
+# - it has more than 30 days left.
+#
+# It prints "ok: <detail>", "warn: <detail>" (the certificate is good, but
+# 30 days or less are left) or "fail: <every problem>". Every time check uses
+# <now>, so the tests can fix it.
+certificate_state() {
+    local host=$1 chain=$2 ca=$3 now=$4 dates start end left problems=() match errors line
+    if ! dates=$(openssl x509 -noout -startdate -enddate <<<"$chain" 2>/dev/null) ||
+        ! start=$(date -u -d "$(sed -n 's/^notBefore=//p' <<<"$dates")" +%s 2>/dev/null) ||
+        ! end=$(date -u -d "$(sed -n 's/^notAfter=//p' <<<"$dates")" +%s 2>/dev/null); then
+        printf 'fail: tls.crt holds no certificate that openssl can read\n'
+        return 0
+    fi
+    if ((now < start)); then
+        problems+=("it is valid only from $(utc_day "$start"), so the clock of this machine or the certificate is wrong")
+    elif ((now >= end)); then
+        problems+=("it expired on $(utc_day "$end")")
+    fi
+    match=$(openssl x509 -noout -checkhost "$host" <<<"$chain" 2>/dev/null) || match=""
+    if [[ $match != *" does match certificate" ]]; then
+        problems+=("it does not name $host, the host name of this install")
+    fi
+    if ! errors=$(verify_chain "$chain" "$ca" "$now"); then
+        line=$(grep -E '^error [0-9]+ at [0-9]+ depth lookup:' <<<"$errors" | grep -vE "$VERIFY_TIME_ERRORS_RE" | head -n 1) || true
+        if [[ -n $line ]]; then
+            problems+=("its chain to ca.crt is not valid: ${line#*lookup: }")
+        elif ((${#problems[@]} == 0)); then
+            problems+=("openssl verify refused it: $(head -n 1 <<<"$errors")")
+        fi
+    fi
+    left=$(((end - now) / 86400))
+    if ((${#problems[@]} > 0)); then
+        printf 'fail: %s\n' "$(join_by '; ' "${problems[@]}")"
+    elif ((end - now <= CONSOLE_CERT_MIN_DAYS * 86400)); then
+        printf 'warn: only %s days left: it expires on %s\n' "$left" "$(utc_day "$end")"
+    else
+        printf 'ok: valid for %s until %s (%s days left)\n' "$host" "$(utc_day "$end")" "$left"
+    fi
+}
+
+# check_console_certificate: the certificate that the console, the API and
+# the login show to the browser and to the meho CLI.
+check_console_certificate() {
+    local host certs chain ca state hint
+    hint="the console needs a certificate for the host name of this install, valid for more than $CONSOLE_CERT_MIN_DAYS days. $SUPPORT_HINT"
+    if ! command -v openssl >/dev/null 2>&1; then
+        result console-certificate fail "openssl not found, so the certificate cannot be checked." \
+            "install the package openssl from your distribution's mirror, then run the check again."
+        return 0
+    fi
+    host=$(install_hostname) || host=""
+    if [[ -z $host ]]; then
+        result console-certificate fail "the host name is not in $MEHO_INSTALL_RECORD, so the certificate cannot be checked." \
+            "$SUPPORT_HINT"
+        return 0
+    fi
+    if ! certs=$(rke2_kubectl -n "$MEHO_NAMESPACE" get secret "$CONSOLE_TLS_SECRET" \
+        -o go-template="$TLS_CERTS_TEMPLATE" 2>/dev/null) || [[ $certs != *$'\n'"$TLS_CA_MARKER"* ]]; then
+        result console-certificate fail "the Secret $CONSOLE_TLS_SECRET with the certificate cannot be read." \
+            "check the node and pods lines first. Then $SUPPORT_HINT"
+        return 0
+    fi
+    chain=${certs%%$'\n'"$TLS_CA_MARKER"*}
+    ca=${certs#*$'\n'"$TLS_CA_MARKER"}
+    ca=${ca#$'\n'}
+    if [[ -z ${chain//[[:space:]]/} ]]; then
+        result console-certificate fail "the Secret $CONSOLE_TLS_SECRET has no tls.crt." "$hint"
+        return 0
+    fi
+    state=$(certificate_state "$host" "$chain" "$ca" "$(date -u +%s)")
+    case $state in
+        ok:*) result console-certificate ok "${state#ok: }" ;;
+        warn:*) result console-certificate warn "${state#warn: }." "$hint" ;;
+        *) result console-certificate fail "${state#fail: }." "$hint" ;;
+    esac
+}
+
 run_checks() {
     check_node
     check_pods
     check_disk
     check_certificates
+    check_firewall
+    check_cis_profile
+    check_console_certificate
 }
 
 print_checks() {
@@ -777,12 +984,78 @@ command_admin_network() {
     fi
 }
 
+# remove_kernel_settings: RKE2's kernel settings file of its CIS profile.
+# systemd-sysctl only sets the values that a file names, so the running
+# kernel keeps RKE2's values until the machine restarts. The last line of
+# uninstall says so.
+remove_kernel_settings() {
+    [[ -e ${HOST_ROOT}${CIS_SYSCTL_FILE} ]] || return 0
+    rm -f "${HOST_ROOT}${CIS_SYSCTL_FILE}"
+    ok "removed RKE2's kernel settings file $CIS_SYSCTL_FILE"
+}
+
+# etcd_user_exists, etcd_group_exists and etcd_account_recorded come from
+# lib/cis.sh, sourced above.
+etcd_part_exists() {
+    case $1 in
+        user) etcd_user_exists ;;
+        group) etcd_group_exists ;;
+    esac
+}
+
+# remove_etcd_account: remove the parts of the etcd account that the
+# install record names. A part that the record does not name existed before
+# the install, or an older install.sh created it without a record, so it
+# stays and a [note] line says how to remove it. A failed userdel or
+# groupdel is a [WARN] line with the command, and uninstall goes on.
+remove_etcd_account() {
+    local part found=() removed=() unrecorded=() it=them remove_command
+    for part in user group; do
+        if etcd_part_exists "$part"; then
+            found+=("$part")
+        fi
+    done
+    ((${#found[@]} > 0)) || return 0
+    # userdel also removes the user's group of the same name when
+    # USERGROUPS_ENAB is yes in /etc/login.defs, the default of Ubuntu and
+    # RHEL (userdel(8)). So a user that the install created stays when its
+    # group existed before the install.
+    if etcd_account_recorded user && etcd_user_exists &&
+        ! etcd_account_recorded group && etcd_group_exists; then
+        note "kept the $ETCD_ACCOUNT user and group. The install created the user, but the group existed before the install, and userdel would remove the group together with the user. If nothing else uses the group, remove both with: userdel $ETCD_ACCOUNT, then groupdel $ETCD_ACCOUNT if the group is still there."
+        return 0
+    fi
+    if etcd_account_recorded user && etcd_user_exists && ! userdel "$ETCD_ACCOUNT"; then
+        warn "userdel could not remove the $ETCD_ACCOUNT user, which the install created. Read its message above, then run: userdel $ETCD_ACCOUNT"
+    fi
+    if etcd_account_recorded group && etcd_group_exists && ! groupdel "$ETCD_ACCOUNT"; then
+        warn "groupdel could not remove the $ETCD_ACCOUNT group, which the install created. Read its message above, then run: groupdel $ETCD_ACCOUNT"
+    fi
+    for part in "${found[@]}"; do
+        if ! etcd_part_exists "$part"; then
+            removed+=("$part")
+        elif ! etcd_account_recorded "$part"; then
+            unrecorded+=("$part")
+        fi
+    done
+    if ((${#removed[@]} > 0)); then
+        ok "removed the $ETCD_ACCOUNT $(join_by ' and ' "${removed[@]}") that the install created for RKE2's etcd"
+    fi
+    ((${#unrecorded[@]} > 0)) || return 0
+    case ${unrecorded[*]} in
+        "user group") remove_command="userdel $ETCD_ACCOUNT, then groupdel $ETCD_ACCOUNT if the group is still there." ;;
+        user) remove_command="userdel $ETCD_ACCOUNT" it=it ;;
+        group) remove_command="groupdel $ETCD_ACCOUNT" it=it ;;
+    esac
+    note "kept the $ETCD_ACCOUNT $(join_by ' and ' "${unrecorded[@]}"): the install did not record that it created $it, so another program may use $it. If nothing else uses $it, remove $it with: $remove_command"
+}
+
 command_uninstall() {
     (($# == 0)) || usage_error "uninstall takes no option: $1"
     check_root
     local uninstall="${HOST_ROOT}${RKE2_UNINSTALL}" etc_dir="${HOST_ROOT}${MEHO_ETC_DIR}"
-    printf 'This removes MEHO and the built-in Kubernetes (RKE2) from this machine, with all their data: %s, %s and the cluster data in %s. There is no way back without a backup.\n' \
-        "$MEHO_STATE_DIR" "$MEHO_ETC_DIR" "$RKE2_DATA_DIR"
+    printf 'This removes MEHO and the built-in Kubernetes (RKE2) from this machine, with all their data: %s, %s and the cluster data in %s. It also removes RKE2'"'"'s kernel settings file %s and the %s user and group that the install created. There is no way back without a backup.\n' \
+        "$MEHO_STATE_DIR" "$MEHO_ETC_DIR" "$RKE2_DATA_DIR" "$CIS_SYSCTL_FILE" "$ETCD_ACCOUNT"
     ask "Remove MEHO from this machine?" || stop_unchanged
     ask "Last question: the data is gone afterwards. Remove MEHO?" || stop_unchanged
     if [[ -x $uninstall ]]; then
@@ -791,8 +1064,12 @@ command_uninstall() {
                 "read its message above, then run meho-host uninstall again."
         ok "removed RKE2 and the cluster data with $RKE2_UNINSTALL"
     else
-        printf '[note] %s is not on this machine, so RKE2 is already gone.\n' "$RKE2_UNINSTALL"
+        note "$RKE2_UNINSTALL is not on this machine, so RKE2 is already gone."
     fi
+    # RKE2 is stopped now, so no etcd process runs as the etcd user. The
+    # record is in /etc/meho, so the account goes before that folder.
+    remove_kernel_settings
+    remove_etcd_account
     rm -rf "${HOST_ROOT}${MEHO_STATE_DIR}"
     if [[ -d $etc_dir ]]; then
         find "$etc_dir" -mindepth 1 -maxdepth 1 ! -name "${MEHO_FIREWALL_FILE##*/}" -exec rm -rf {} +
@@ -802,11 +1079,15 @@ command_uninstall() {
     rm -f "${HOST_ROOT}${RKE2_FIREWALL_DROPIN}"
     rmdir "${HOST_ROOT}${RKE2_FIREWALL_DROPIN%/*}" 2>/dev/null || true
     systemctl daemon-reload
-    # bash keeps the running script open, so meho-host can remove itself.
+    # bash keeps the running script open and has read the two files of lib/,
+    # so meho-host can remove itself and them.
     rm -f "${HOST_ROOT}${MEHO_CLI_PATH}" "${HOST_ROOT}${MEHO_HOST_PATH}"
-    ok "removed $MEHO_STATE_DIR and $MEHO_ETC_DIR, except the firewall file, and the commands $MEHO_CLI_PATH and $MEHO_HOST_PATH"
+    rm -rf "${HOST_ROOT}${MEHO_HOST_LIB_DIR}"
+    ok "removed $MEHO_STATE_DIR and $MEHO_ETC_DIR, except the firewall file, the commands $MEHO_CLI_PATH and $MEHO_HOST_PATH, and $MEHO_HOST_LIB_DIR"
     printf 'The MEHO firewall stays on, so this machine is never without one. When your own firewall is ready, remove it with: %s\n' \
         "$FIREWALL_REMOVE_COMMAND"
+    printf 'Removing %s does not change the running kernel. A restart of this machine brings back the operating system'"'"'s own kernel values.\n' \
+        "$CIS_SYSCTL_FILE"
 }
 
 main() {

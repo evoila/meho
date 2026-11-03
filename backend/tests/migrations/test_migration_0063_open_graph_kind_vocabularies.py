@@ -39,7 +39,7 @@ native ``ALTER TABLE`` statements).
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -228,10 +228,11 @@ def _insert_edge(
 
 def test_upgrade_accepts_novel_and_closed_kinds(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Post-0063: novel slugs and every closed-set member insert cleanly."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     tenant_id, from_id, to_id = _seed_tenant_and_nodes(sync_url)
 
     # Novel kinds — the point of the migration.
@@ -251,10 +252,11 @@ def test_upgrade_accepts_novel_and_closed_kinds(
 def test_upgrade_shape_check_rejects_malformed_kind(
     alembic_cfg: tuple[Config, str],
     bad_kind: str,
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Post-0063: uppercase / too-short / too-long kinds violate the CHECK."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     tenant_id, from_id, to_id = _seed_tenant_and_nodes(sync_url)
 
     with pytest.raises(IntegrityError):
@@ -265,6 +267,7 @@ def test_upgrade_shape_check_rejects_malformed_kind(
 
 def test_upgrade_preserves_ck_graph_edge_source(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``ck_graph_edge_source`` survives the batch table rebuild.
 
@@ -276,7 +279,7 @@ def test_upgrade_preserves_ck_graph_edge_source(
     post-0063 — this test is the empirical pin for that behaviour.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     tenant_id, from_id, to_id = _seed_tenant_and_nodes(sync_url)
 
     with pytest.raises(IntegrityError):
@@ -292,10 +295,11 @@ def test_upgrade_preserves_ck_graph_edge_source(
 
 def test_pre_upgrade_rejects_novel_kinds(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """At revision 0062 the closed IN-lists still reject novel kinds."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     tenant_id, from_id, to_id = _seed_tenant_and_nodes(sync_url)
 
     with pytest.raises(IntegrityError):
@@ -306,6 +310,7 @@ def test_pre_upgrade_rejects_novel_kinds(
 
 def test_downgrade_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``downgrade 0062`` → ``upgrade 0063`` is clean on a compliant graph.
 
@@ -315,7 +320,7 @@ def test_downgrade_then_upgrade_round_trips(
     back in effect (novel kind inserts cleanly).
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     tenant_id, from_id, to_id = _seed_tenant_and_nodes(sync_url)
     _insert_edge(sync_url, tenant_id, from_id, to_id, "depends-on")
 
@@ -329,6 +334,7 @@ def test_downgrade_then_upgrade_round_trips(
 
 def test_downgrade_refuses_when_novel_kind_rows_exist(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``downgrade 0062`` raises :class:`RuntimeError` naming novel kinds.
 
@@ -337,7 +343,7 @@ def test_downgrade_refuses_when_novel_kind_rows_exist(
     operator can write the targeted cleanup before retrying.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     tenant_id, from_id, to_id = _seed_tenant_and_nodes(sync_url)
     _insert_node(sync_url, tenant_id, "dns-record", "www.example.com")
     _insert_edge(sync_url, tenant_id, from_id, to_id, "resolves-to")

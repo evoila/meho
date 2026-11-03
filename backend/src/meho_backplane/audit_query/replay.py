@@ -46,7 +46,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from meho_backplane.db.models import AuditLog, Target
+from meho_backplane.db.models import AuditLog, Target, Tenant
 
 from .query import _build_audit_entry
 from .schemas import ReplayNode
@@ -94,7 +94,7 @@ async def _fetch_session_closure(
     tenant_id: uuid.UUID,
     session: AsyncSession,
     max_depth: int,
-) -> list[tuple[AuditLog, str | None]]:
+) -> list[tuple[AuditLog, str | None, str | None]]:
     """Fetch every audit row reachable for the session, tenant-scoped.
 
     Builds the closure with a recursive CTE: the non-recursive arm selects the
@@ -141,7 +141,11 @@ async def _fetch_session_closure(
     closure_ids = sa.select(closure.c.id).distinct().scalar_subquery()
 
     stmt = (
-        sa.select(AuditLog, Target.name.label("target_name"))
+        sa.select(
+            AuditLog,
+            Target.name.label("target_name"),
+            Tenant.name.label("tenant_name"),
+        )
         .outerjoin(
             Target,
             sa.and_(
@@ -149,15 +153,16 @@ async def _fetch_session_closure(
                 Target.tenant_id == tenant_id,
             ),
         )
+        .outerjoin(Tenant, AuditLog.tenant_id == Tenant.id)
         .where(AuditLog.id.in_(closure_ids))
     )
 
     result = await session.execute(stmt)
-    return [(row.AuditLog, row.target_name) for row in result.all()]
+    return [(row.AuditLog, row.target_name, row.tenant_name) for row in result.all()]
 
 
 def _assemble_tree(
-    rows: list[tuple[AuditLog, str | None]],
+    rows: list[tuple[AuditLog, str | None, str | None]],
     *,
     max_depth: int,
 ) -> list[ReplayNode]:
@@ -193,15 +198,18 @@ class _TreeBuilder:
 
     def __init__(
         self,
-        rows: list[tuple[AuditLog, str | None]],
+        rows: list[tuple[AuditLog, str | None, str | None]],
         *,
         max_depth: int,
     ) -> None:
         self._max_depth = max_depth
-        self._entries = {row.id: _build_audit_entry(row, name) for row, name in rows}
+        self._entries = {
+            row.id: _build_audit_entry(row, target_name, tenant_name=tenant_name)
+            for row, target_name, tenant_name in rows
+        }
         self._children: dict[uuid.UUID, list[uuid.UUID]] = defaultdict(list)
         self._root_ids: list[uuid.UUID] = []
-        for row, _ in rows:
+        for row, _, _ in rows:
             parent_id = row.parent_audit_id
             if parent_id is not None and parent_id in self._entries and parent_id != row.id:
                 self._children[parent_id].append(row.id)

@@ -127,24 +127,38 @@ Each language has a fixed toolchain. CI runs the same tools — no
 "works on my machine" surprises.
 
 - **Python (backplane, tests):** `ruff check` + `ruff format` are the
-  format-and-lint pair. `mypy --ignore-missing-imports` for
-  type-checking. Pinned versions live in
-  [`backend/pyproject.toml`](./backend/pyproject.toml) under the
-  `dev` group; the pre-commit hook uses the same pinned versions.
+  format-and-lint pair. `mypy` in strict mode checks the types. The
+  versions live in [`backend/pyproject.toml`](./backend/pyproject.toml)
+  under the `dev` group (and in `backend/uv.lock`). The pre-commit hook
+  does not run ruff or mypy. Only CI runs them. Run them yourself in
+  `backend/` before you push: `uv run ruff check src/ tests/`,
+  `uv run ruff format --check src/ tests/` and `uv run mypy src/`.
 - **Go (operator CLI):** `gofmt -s` + `golangci-lint run` from
   [`cli/.golangci.yml`](./cli/.golangci.yml). `go vet` is part of the
   same pipeline. Generated code (oapi-codegen output) is checked in
   and excluded from lint.
 - **YAML, Markdown, JSON:** trailing-whitespace, end-of-file-fixer,
   and `check-yaml` / `check-json` from the pre-commit hooks repo
-  catch the common formatting traps. CI also runs `gitleaks` for
-  secret detection on every PR.
+  catch the common formatting traps.
+- **Secrets:** the pre-commit hook runs `gitleaks` on the lines a
+  commit adds. CI also runs `gitleaks` on the whole tree for every
+  pull request. A test needs a made-up secret? Put a
+  `# gitleaks:allow` comment on the line of the value. Do not add
+  lines to a `.gitleaksignore` file: those lines name a line number,
+  so they break when the value moves.
 
 The full pre-commit config lives at
 [`.pre-commit-config.yaml`](./.pre-commit-config.yaml). Install hooks
 locally with `pre-commit install --install-hooks` (and re-run them on
 the whole tree with `pre-commit run --all-files` if you need to
 verify a clean baseline).
+
+## Where new code goes
+
+Add a feature in new files. Do not add lines to a list that every feature
+edits, such as one long list of operations, imports or test ids. Two pull
+requests that add to the same list conflict. The rules and examples are on
+[How code is organised so pull requests do not conflict](./docs/codebase/how-code-is-organised.md).
 
 ## Write in plain English
 
@@ -159,6 +173,10 @@ requests, commit messages, code comments and docs.
   reader must do.
 - Describe the outcome: what will be true when the work is done.
 - Use short lists instead of long paragraphs.
+- Do not write how many operations exist, and do not list every operation
+  name, in docs or code comments. Such text goes stale, and every new
+  operation then edits the same line. Readers get the list from
+  `list_operation_groups` and `search_operations`.
 
 ## Developer Certificate of Origin
 

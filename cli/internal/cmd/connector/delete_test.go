@@ -55,6 +55,7 @@ func TestRunTransitionDelete204(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"DELETE /api/v1/connectors/vrli-rest-9.0": func(w http.ResponseWriter, r *http.Request) {
 			method = r.Method
+			w.Header().Set("Meho-Audit-Id", "delete-audit-id")
 			w.WriteHeader(http.StatusNoContent)
 		},
 	})
@@ -84,7 +85,8 @@ func TestRunTransitionDelete204(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("decode --json envelope: %v\n%s", err, out.String())
 	}
-	if got.ConnectorID != "vrli-rest-9.0" || got.Action != "deleted" {
+	if got.ConnectorID != "vrli-rest-9.0" || got.Action != "deleted" ||
+		got.AuditID == nil || *got.AuditID != "delete-audit-id" {
 		t.Errorf("unexpected envelope: %+v", got)
 	}
 }

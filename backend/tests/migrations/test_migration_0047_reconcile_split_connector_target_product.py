@@ -36,7 +36,7 @@ cookbook through ``asyncio.run``, so the test functions stay sync.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Final
 from uuid import UUID, uuid4
@@ -167,6 +167,7 @@ def test_live_long_token_target_reconciled_to_short(
     alembic_cfg: tuple[Config, str],
     long_product: str,
     short_product: str,
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A live long-token target carries the short token after upgrade.
 
@@ -174,7 +175,7 @@ def test_live_long_token_target_reconciled_to_short(
     sees the change.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0046")
+    copy_migrated_db(cfg, "0046")
 
     row_id = _insert_target(sync_url, name=f"{short_product}-prod", product=long_product)
 
@@ -189,13 +190,14 @@ def test_live_long_token_target_reconciled_to_short(
 
 def test_all_five_renames_are_per_product_scoped(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Five long-token rows seeded together each land on their own short token.
 
     Proves the per-product scoping: no mapping bleeds into another.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0046")
+    copy_migrated_db(cfg, "0046")
 
     ids = {
         long_product: _insert_target(sync_url, name=f"{long_product}-target", product=long_product)
@@ -213,10 +215,11 @@ def test_all_five_renames_are_per_product_scoped(
 
 def test_soft_deleted_long_token_target_preserved(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A soft-deleted long-token tombstone is left under the stale spelling."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0046")
+    copy_migrated_db(cfg, "0046")
 
     row_id = _insert_target(
         sync_url,
@@ -237,6 +240,7 @@ def test_soft_deleted_long_token_target_preserved(
 def test_unrelated_product_untouched(
     alembic_cfg: tuple[Config, str],
     unrelated: str,
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """An unrelated product is not rewritten — the rename is family-scoped.
 
@@ -244,7 +248,7 @@ def test_unrelated_product_untouched(
     a ``vrli`` row must survive ``0047`` unchanged.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0046")
+    copy_migrated_db(cfg, "0046")
 
     row_id = _insert_target(sync_url, name=f"{unrelated}-prod", product=unrelated)
 
@@ -258,6 +262,7 @@ def test_unrelated_product_untouched(
 
 def test_upgrade_is_idempotent(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Re-running the upgrade against an already-reconciled DB changes nothing.
 
@@ -275,7 +280,7 @@ def test_upgrade_is_idempotent(
     ``add_column("targets", "tls_server_name")`` → "duplicate column").
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0046")
+    copy_migrated_db(cfg, "0046")
 
     row_id = _insert_target(sync_url, name="vcfa-prod", product="vcf-automation")
 
@@ -298,6 +303,7 @@ def test_downgrade_restores_long_token(
     alembic_cfg: tuple[Config, str],
     long_product: str,
     short_product: str,
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``downgrade`` rewrites live short-token targets back to the long spelling.
 
@@ -306,7 +312,7 @@ def test_downgrade_restores_long_token(
     resolvable against the older code.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     row_id = _insert_target(sync_url, name=f"{short_product}-prod", product=short_product)
 

@@ -46,7 +46,6 @@ import pytest
 import structlog.testing
 
 from meho_backplane.connectors.base import Connector
-from meho_backplane.connectors.nsx import NsxConnector
 from meho_backplane.connectors.registry import (
     clear_registry,
     register_connector_v2,
@@ -121,34 +120,34 @@ def _events(capture: structlog.testing.LogCapture, event: str) -> list[dict[str,
 def test_sibling_helper_finds_handrolled_class_under_different_impl() -> None:
     """A hand-rolled class for the same ``(product, version)`` is returned."""
     register_connector_v2(
-        product="nsx",
-        version="9.0",
-        impl_id="nsx-rest",
-        cls=NsxConnector,
+        product="acme",
+        version="1.0",
+        impl_id="acme-rest",
+        cls=_FakeHandRolledConnector,
     )
     assert (
         sibling_handrolled_impl_id(
-            product="nsx",
-            version="9.0",
-            exclude_impl_id="nsx-rest-probe",
+            product="acme",
+            version="1.0",
+            exclude_impl_id="acme-rest-probe",
         )
-        == "nsx-rest"
+        == "acme-rest"
     )
 
 
 def test_sibling_helper_excludes_self() -> None:
     """The ``impl_id`` being ingested never flags itself as its own sibling."""
     register_connector_v2(
-        product="nsx",
-        version="9.0",
-        impl_id="nsx-rest",
-        cls=NsxConnector,
+        product="acme",
+        version="1.0",
+        impl_id="acme-rest",
+        cls=_FakeHandRolledConnector,
     )
     assert (
         sibling_handrolled_impl_id(
-            product="nsx",
-            version="9.0",
-            exclude_impl_id="nsx-rest",
+            product="acme",
+            version="1.0",
+            exclude_impl_id="acme-rest",
         )
         is None
     )
@@ -157,16 +156,16 @@ def test_sibling_helper_excludes_self() -> None:
 def test_sibling_helper_returns_none_on_version_mismatch() -> None:
     """A sibling at a DIFFERENT version is not a near-miss (resolver keys on version)."""
     register_connector_v2(
-        product="nsx",
-        version="9.0",
-        impl_id="nsx-rest",
-        cls=NsxConnector,
+        product="acme",
+        version="1.0",
+        impl_id="acme-rest",
+        cls=_FakeHandRolledConnector,
     )
     assert (
         sibling_handrolled_impl_id(
-            product="nsx",
-            version="4.1",
-            exclude_impl_id="nsx-rest-probe",
+            product="acme",
+            version="0.9",
+            exclude_impl_id="acme-rest-probe",
         )
         is None
     )
@@ -199,38 +198,38 @@ def test_sibling_helper_ignores_auto_shims() -> None:
 def test_near_miss_impl_id_warns_naming_the_sibling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``(nsx, 9.0, nsx-rest-probe)`` with ``(nsx, 9.0, nsx-rest)`` registered → warn.
+    """``(acme, 1.0, acme-rest-probe)`` with ``(acme, 1.0, acme-rest)`` registered → warn.
 
     The structured warning names the sibling ``impl_id`` and the
     orphan info-log does NOT fire (this is a near-miss, not a novel
     triple). No raise — the guard is advisory.
     """
     register_connector_v2(
-        product="nsx",
-        version="9.0",
-        impl_id="nsx-rest",
-        cls=NsxConnector,
+        product="acme",
+        version="1.0",
+        impl_id="acme-rest",
+        cls=_FakeHandRolledConnector,
     )
     capture = _private_log_capture(monkeypatch)
 
     # Must not raise — the near-miss guard warns and proceeds.
     check_version_covered_by_registered_class(
-        product="nsx",
-        version="9.0",
-        impl_id="nsx-rest-probe",
+        product="acme",
+        version="1.0",
+        impl_id="acme-rest-probe",
     )
 
     near_miss = _events(capture, "connector_ingest_near_miss_impl_id")
     assert len(near_miss) == 1
     event = near_miss[0]
-    assert event["product"] == "nsx"
-    assert event["version"] == "9.0"
-    assert event["impl_id"] == "nsx-rest-probe"
-    assert event["sibling_impl_id"] == "nsx-rest"
+    assert event["product"] == "acme"
+    assert event["version"] == "1.0"
+    assert event["impl_id"] == "acme-rest-probe"
+    assert event["sibling_impl_id"] == "acme-rest"
     # The human-readable message names the sibling + the "did you mean".
-    assert "nsx-rest" in event["message"]
-    assert "nsx-rest-probe" in event["message"]
-    assert "did you mean nsx-rest?" in event["message"]
+    assert "acme-rest" in event["message"]
+    assert "acme-rest-probe" in event["message"]
+    assert "did you mean acme-rest?" in event["message"]
 
     # The orphan branch must NOT fire on a near-miss.
     assert _events(capture, "connector_ingest_orphaned_class") == []

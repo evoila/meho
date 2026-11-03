@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""meho_backplane.connectors.targets — targetless target-registry write op (#2861).
+"""meho_backplane.connectors.targets — targetless target-registry write ops.
+
+``targets.register`` (#2861) and its opposite ``targets.remove`` (#4623),
+plus ``targets.probe``, which detects a target's product and version
+(``probe.py``).
 
 The third **synthetic** connector subpackage (after ``secret`` and
 ``topology``): no vendor connector backs it. Importing the package (the
@@ -11,8 +15,10 @@ walks ``connectors/<product>/`` and imports each subpackage) queues
 :func:`~meho_backplane.connectors.targets.ops.register_targets_registry_operations`
 onto the lifespan-driven registrar list via
 :func:`~meho_backplane.operations.typed_register.register_typed_op_registrar`,
-so the ``targets.register`` ``endpoint_descriptor`` row lands before the
-first dispatch.
+so the ``targets.register`` and ``targets.remove`` ``endpoint_descriptor``
+rows land before the first dispatch. Importing the package also registers
+the ``targets.remove`` preview builder and the ``targets.probe`` park-time
+permission check.
 
 Like the other synthetic packages, this one calls neither
 ``register_connector`` nor ``register_connector_v2``: the synthetic
@@ -32,13 +38,32 @@ human-only and keep calling
 :func:`~meho_backplane.api.v1.targets.create_target` directly.
 """
 
-from meho_backplane.connectors.targets.ops import register_targets_registry_operations
+from meho_backplane.connectors.targets.ops import (
+    TARGETS_REMOVE_OP_ID,
+    build_targets_remove_preview,
+    register_targets_registry_operations,
+)
+from meho_backplane.connectors.targets.probe import (
+    TARGETS_PROBE_OP_ID,
+    register_targets_probe_operation,
+    targets_probe_preflight,
+)
+from meho_backplane.operations._preview import (
+    register_permission_preflight,
+    register_preview_builder,
+)
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 
-# Queue the targets.register typed-op upsert onto the lifespan-driven
-# registrar list (run after the connector eager-import pass).
+# Queue the targets.* typed-op upserts onto the lifespan-driven registrar
+# list (run after the connector eager-import pass).
 register_typed_op_registrar(register_targets_registry_operations)
+# targets.probe lives in its own module, with its own registrar.
+register_typed_op_registrar(register_targets_probe_operation)
+# The preview of targets.remove names the target and its topology count.
+register_preview_builder(TARGETS_REMOVE_OP_ID, build_targets_remove_preview)
+register_permission_preflight(TARGETS_PROBE_OP_ID, targets_probe_preflight)
 
 __all__ = [
+    "register_targets_probe_operation",
     "register_targets_registry_operations",
 ]

@@ -21,7 +21,7 @@ Every step targets this migration's own revision (``0111``) and its
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -91,9 +91,11 @@ def _tables(sync_url: str) -> set[str]:
         eng.dispose()
 
 
-def test_upgrade_seeds_one_legacy_state_row(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_seeds_one_legacy_state_row(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     assert _fetch(sync_url, "SELECT id, mode, manifest_id FROM topology_identity_state") == [
         (1, "legacy", None)
@@ -107,9 +109,11 @@ def test_upgrade_seeds_one_legacy_state_row(alembic_cfg: tuple[Config, str]) -> 
     assert indexes["graph_node_tenant_kind_name_idx"]["unique"], "the old key stays"
 
 
-def test_checks_reject_a_second_row_and_unknown_values(alembic_cfg: tuple[Config, str]) -> None:
+def test_checks_reject_a_second_row_and_unknown_values(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     for sql in (
         "INSERT INTO topology_identity_state (id, mode, changed_at) "
@@ -123,9 +127,11 @@ def test_checks_reject_a_second_row_and_unknown_values(alembic_cfg: tuple[Config
             _execute(sync_url, sql)
 
 
-def test_downgrade_drops_both_tables_while_legacy(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_drops_both_tables_while_legacy(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
 
     assert {"topology_identity_state", "topology_scope_manifest"}.isdisjoint(_tables(sync_url))
@@ -133,9 +139,11 @@ def test_downgrade_drops_both_tables_while_legacy(alembic_cfg: tuple[Config, str
     assert _fetch(sync_url, "SELECT mode FROM topology_identity_state") == [("legacy",)]
 
 
-def test_downgrade_refuses_once_scoped(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_refuses_once_scoped(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     _execute(sync_url, "UPDATE topology_identity_state SET mode = 'scoped'")
 
     with pytest.raises(RuntimeError, match="Refusing to downgrade 0111"):

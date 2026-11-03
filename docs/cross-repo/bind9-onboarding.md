@@ -267,7 +267,7 @@ $ meho bind9 config reload --target vcf-router-bind9
 
 | Verb | op_id | Notes |
 | --- | --- | --- |
-| `config show <file>` | `bind9.config.show` | `<file>` may be absolute (must be lexically under the bind config root) or relative (resolved against it). Traversal / outside-root rejected pre-stage with no content leak. |
+| `config show <file>` | `bind9.config.show` | `<file>` may be absolute (must be under the bind config root) or relative (resolved against it). Reads only `named.conf`, `named.conf.*` and `*.conf` files, without approval; key secrets come back hidden. Key files, zone files, traversal and outside-root paths are refused with no content. |
 | `config apply-file <name> <local-src>` | `bind9.config.apply_file` | `safety_level=dangerous`, `op_class=write`. CLI reads `<local-src>` locally and stages it as the replacement for `<name>` on the target. |
 | `config apply-views <local-views.conf> <zones-dir>` | `bind9.config.apply_views` | `safety_level=dangerous`, `op_class=write`. CLI reads `<local-views.conf>` (lands at `named.conf.local`) and every regular file under `<zones-dir>` (each lands at its relative path under `/etc/bind/`). `--verify-fqdn` adds a dig-verify post-reload; `--primary-path` selects which staged key drives the audit row's pre/post-op capture. |
 | `config backup [--tag T]` | `bind9.config.backup` | `safety_level=safe`. Creates a UTC-timestamped tar.gz under `/var/backups/meho-bind9/`. `--tag` (optional) embeds a `[A-Za-z0-9._-]{1,64}` friendly tag in the filename. |

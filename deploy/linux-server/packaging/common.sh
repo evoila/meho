@@ -86,6 +86,42 @@ need_tools() {
 
 sha256_of() { sha256sum -- "$1" | awk '{ print $1 }'; }
 
+# check_registry_login: MEHO_REGISTRY, MEHO_REGISTRY_USERNAME and
+# MEHO_REGISTRY_PASSWORD come as all three or not at all.
+check_registry_login() {
+    local set=0
+    [[ -z ${MEHO_REGISTRY:-} ]] || set=$((set + 1))
+    [[ -z ${MEHO_REGISTRY_USERNAME:-} ]] || set=$((set + 1))
+    [[ -z ${MEHO_REGISTRY_PASSWORD:-} ]] || set=$((set + 1))
+    ((set == 0 || set == 3)) ||
+        usage_error "MEHO_REGISTRY, MEHO_REGISTRY_USERNAME and MEHO_REGISTRY_PASSWORD must be set together."
+}
+
+# registry_login <folder> <tool>...: log the tools (regctl, cosign) in to
+# MEHO_REGISTRY, when it is set. The logins are kept in <folder>, so the
+# script neither reads nor changes the logins of the user who runs it. The
+# password goes to each tool on stdin, never on a command line, and is then
+# removed from the environment, so no later command gets it.
+registry_login() {
+    local folder=$1 tool
+    shift
+    [[ -n ${MEHO_REGISTRY:-} ]] || return 0
+    mkdir -p "$folder/regctl" "$folder/docker"
+    chmod -R 0700 "$folder"
+    export REGCTL_CONFIG=$folder/regctl/config.json DOCKER_CONFIG=$folder/docker
+    for tool in "$@"; do
+        case $tool in
+            regctl) printf '%s' "$MEHO_REGISTRY_PASSWORD" |
+                regctl registry login "$MEHO_REGISTRY" --user "$MEHO_REGISTRY_USERNAME" --pass-stdin >/dev/null ;;
+            cosign) printf '%s' "$MEHO_REGISTRY_PASSWORD" |
+                cosign login "$MEHO_REGISTRY" --username "$MEHO_REGISTRY_USERNAME" --password-stdin >/dev/null ;;
+        esac || fail "$tool could not log in to $MEHO_REGISTRY as $MEHO_REGISTRY_USERNAME." \
+            "check MEHO_REGISTRY, MEHO_REGISTRY_USERNAME and MEHO_REGISTRY_PASSWORD."
+    done
+    unset MEHO_REGISTRY_PASSWORD
+    ok "logged in to $MEHO_REGISTRY as $MEHO_REGISTRY_USERNAME"
+}
+
 # join_lines <separator>: join the lines of stdin into one line. When there
 # are more than 5 lines, only the first 5 are shown, and the total.
 join_lines() {

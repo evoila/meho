@@ -52,7 +52,7 @@ from pathlib import Path
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
-from meho_backplane.api.v1 import service_grants, service_read_scopes
+from meho_backplane.api.v1 import connector_tenant_settings, service_grants, service_read_scopes
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.main import app
 from meho_backplane.mcp import registry as mcp_registry
@@ -134,6 +134,20 @@ _SERVICE_READ_SCOPES_CLI_VERBS: dict[tuple[str, str], str] = {
     ),
 }
 
+_TENANT_SETTINGS_PREFIX = "/api/v1/connectors/{connector_id}/tenant-settings"
+
+#: The per-tenant operation on/off routes (#5029) and their ``meho`` verbs,
+#: same contract as the grants table above.
+_TENANT_SETTINGS_CLI_VERBS: dict[tuple[str, str], str] = {
+    ("GET", _TENANT_SETTINGS_PREFIX): "meho connector tenant-setting show",
+    ("PUT", _TENANT_SETTINGS_PREFIX + "/operations/{op_id:path}"): (
+        "meho connector tenant-setting set"
+    ),
+    ("PUT", _TENANT_SETTINGS_PREFIX + "/groups/{group_key}"): (
+        "meho connector tenant-setting set-group"
+    ),
+}
+
 # backend/tests/<this> -> parents[2] == repo root
 _CLI_REFERENCE = Path(__file__).resolve().parents[2] / "docs-site" / "reference" / "cli.md"
 
@@ -168,6 +182,35 @@ WORKING_SURFACE_SORTED: tuple[str, ...] = (
     "search_knowledge",
     "search_memory",
     "search_operations",
+)
+
+#: The tools whose ``tools/list`` entry carries ``annotations.readOnlyHint``
+#: = true (#4202). A client such as VS Code runs these without asking the user
+#: first. Every other tool sends no hints, so it keeps the spec default (may
+#: change and may delete things) and the client still asks. ``call_operation``
+#: must never be in this set: it can run writes.
+READ_ONLY_HINT_TOOLS: frozenset[str] = frozenset(
+    {
+        "ask_docs",
+        "list_doc_collections",
+        "list_operation_groups",
+        "list_targets",
+        "meho_broadcast_recent",
+        "meho_broadcast_watch",
+        "meho_connector_list",
+        "meho_runbook_list_runs",
+        "meho_runbook_list_templates",
+        "meho_runbook_show_template",
+        "meho_status",
+        "preview_operation",
+        "query_topology",
+        "read_docs",
+        "result_query",
+        "search_docs",
+        "search_knowledge",
+        "search_memory",
+        "search_operations",
+    }
 )
 
 #: The operator planes an ``mcp:admin``-elevated session additionally
@@ -331,6 +374,20 @@ def test_service_read_scopes_rest_plane_has_cli_parity() -> None:
         assert f"#### `{verb}`" in cli_reference, f"{verb} is missing from the CLI reference"
 
 
+def test_connector_tenant_settings_rest_plane_has_cli_parity() -> None:
+    """Every per-tenant operation on/off REST route has its `meho` CLI verb (#5029)."""
+    routes = {
+        (method, route.path)
+        for route in connector_tenant_settings.router.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods or ()
+    }
+    assert routes == set(_TENANT_SETTINGS_CLI_VERBS)
+    cli_reference = _CLI_REFERENCE.read_text(encoding="utf-8")
+    for verb in _TENANT_SETTINGS_CLI_VERBS.values():
+        assert f"#### `{verb}`" in cli_reference, f"{verb} is missing from the CLI reference"
+
+
 def test_pinned_surfaces_partition_the_live_registry() -> None:
     """The pinned listings partition the whole registry (exhaustive + disjoint).
 
@@ -449,6 +506,30 @@ async def test_wire_listing_entries_are_spec_shape_no_surface_leak() -> None:
         assert {"name", "description", "inputSchema"} <= set(tool)
         assert "surface" not in tool
         assert "required_role" not in tool
+
+
+async def test_wire_listing_read_only_hints_are_pinned() -> None:
+    """Exactly the pinned read tools carry ``readOnlyHint: true`` on the wire.
+
+    Checked on the full elevated listing, so a write tool on either surface
+    that wrongly claims the hint also fails here. ``call_operation`` sends no
+    hints at all on the normal listing.
+    """
+    op = _operator(
+        capabilities=frozenset({_DOCS_CAPABILITY}),
+        scopes=frozenset({MCP_ADMIN_SCOPE}),
+    )
+    result = await handle_tools_list(op, None)
+    tools = {tool["name"]: tool for tool in result["tools"]}
+    hinted = {
+        name for name, tool in tools.items() if tool.get("annotations", {}).get("readOnlyHint")
+    }
+    assert hinted == READ_ONLY_HINT_TOOLS
+    for name in READ_ONLY_HINT_TOOLS:
+        assert tools[name]["annotations"] == {"readOnlyHint": True}
+    assert READ_ONLY_HINT_TOOLS.issubset(WORKING_SURFACE_SORTED)
+    assert "annotations" not in tools["call_operation"]
+    assert "_meta" not in tools["call_operation"]
 
 
 # ---------------------------------------------------------------------------

@@ -121,6 +121,20 @@
               <dt>Deployed version</dt>
               <dd><code class="font-mono text-xs text-base-content/80">{{ app_version }}</code></dd>
             </div>
+            {# Connector packages this image carries (#5036): the same list
+               GET /version shows. Empty for the plain public image. #}
+            {% set packages = connector_packages() %}
+            <div class="flex items-start justify-between gap-4" data-testid="connector-packages">
+              <dt>Connector packages</dt>
+              <dd class="text-right">
+                {% for package in packages %}
+                  <code class="block font-mono text-xs text-base-content/80">{{ package.name }} {{ package.version }}</code>
+                  <code class="block max-w-64 truncate font-mono text-[0.65rem] text-base-content/50" title="{{ package.wheel_digest }}">{{ package.wheel_digest }}</code>
+                {% else %}
+                  <span class="text-xs">none</span>
+                {% endfor %}
+              </dd>
+            </div>
           </dl>
         </div>
       </div>

@@ -211,13 +211,11 @@ def test_provenance_populated_generic_echo() -> None:
 def test_provenance_credential_class_none_is_redacted_reason() -> None:
     """A credential-class op that collapsed to identifier-only ⇒ redacted reason.
 
-    ``vmware.composite.vm.guest.env.read`` is a credential_write op with no
-    bespoke builder, so its preview is intentionally suppressed. The
-    provenance must name that as a deliberate redaction, not a missing preview.
+    ``k8s.secret.read_to_ref`` is a credential_read op with no bespoke
+    builder, so its preview is intentionally suppressed. The provenance must
+    name that as a deliberate redaction, not a missing preview.
     """
-    populated, reason = describe_preview_provenance(
-        None, op_id="vmware.composite.vm.guest.env.read"
-    )
+    populated, reason = describe_preview_provenance(None, op_id="k8s.secret.read_to_ref")
     assert populated is False
     assert reason == PREVIEW_REASON_CREDENTIAL_REDACTED
 
@@ -302,16 +300,16 @@ async def test_dispatcher_stamps_redacted_reason_for_builderless_credential_op(
     monkeypatch.setattr(dispatcher, "_resolve_connector_instance", _no_connector)
     monkeypatch.setattr(dispatcher, "build_permission_preflight", _no_preflight)
 
-    # guest.env.read is credential_write and has no builder (the userpass
-    # writes got one in #4850).
-    op_id = "vmware.composite.vm.guest.env.read"
+    # k8s.secret.read_to_ref is credential_read and has no builder (the
+    # userpass writes got one in #4850).
+    op_id = "k8s.secret.read_to_ref"
     effect = await dispatcher._build_proposed_effect(
         op_id=op_id,
-        connector_id="vmware-rest-9.0",
+        connector_id="k8s-1.x",
         descriptor=_FakeStampDescriptor(op_id=op_id, safety_level="caution"),  # type: ignore[arg-type]
         operator=_operator(),
         target=None,
-        params={"vm": "vm-42", "password": "sekret"},
+        params={"namespace": "ns-42", "name": "secret-42", "password": "sekret"},
     )
     assert effect is not None
     assert effect["preview_populated"] is False

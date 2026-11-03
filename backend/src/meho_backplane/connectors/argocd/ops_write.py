@@ -41,8 +41,8 @@ operationState polling (sync / rollback)
 ``app.sync`` and ``app.rollback`` POST a SyncOperation / rollback that
 ArgoCD runs **asynchronously**: the POST returns immediately with the
 Application object, and the result lands later under
-``status.operationState.phase``. The handlers mirror
-``vmware.composite.vm.clone``'s task-poll: after the POST they poll
+``status.operationState.phase``. The handlers poll a task: after the
+POST they poll
 ``GET .../applications/{name}`` until ``operationState.phase`` reaches a
 terminal value (``Succeeded`` / ``Failed`` / ``Error``) or a bounded timeout
 elapses, then return the final phase + message. The terminal set matches
@@ -178,8 +178,8 @@ async def _poll_operation_state(
 
     Returns ``{phase, message, synced_revision, timed_out}`` where *phase* is
     the terminal ``operationState.phase`` (Succeeded / Failed / Error), or —
-    on timeout — the last-observed phase with ``timed_out=True``. Mirrors
-    ``vmware.composite.vm.clone``'s ``_poll_clone_task`` bound-deadline loop.
+    on timeout — the last-observed phase with ``timed_out=True``. The loop
+    has a fixed deadline.
     """
     path = route_path(APP_GET_ROUTE, name=name)
     deadline = time.monotonic() + timeout_seconds

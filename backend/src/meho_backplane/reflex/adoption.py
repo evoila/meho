@@ -33,7 +33,7 @@ key, migration ``0014``). Two row shapes matter here:
 * **Dispatch rows** — one per connector operation, written by
   :func:`meho_backplane.operations._audit.write_audit_row` with
   ``method="DISPATCH"`` and ``path = descriptor.op_id`` (e.g.
-  ``vsphere.vm.create``, ``GET:/api/v2.0/systeminfo``). A row's
+  ``k8s.namespace.create``, ``GET:/api/v2.0/systeminfo``). A row's
   write-vs-read class is :func:`meho_backplane.broadcast.events.classify_op`
   applied to ``path``; the mutating classes are :data:`WRITE_OP_CLASSES`.
 

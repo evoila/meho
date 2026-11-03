@@ -27,9 +27,25 @@ allowed when:
 Any other folder stops the start with ``connector_package_not_allowed``.
 Nothing is imported in that case.
 
+Each listed package must also say which versions of the connector kit
+(``meho-connector-kit``) it fits: a version range in its installed
+metadata (``Requires-Dist``). A package with no range, or with a range
+that the kit of this image does not meet, stops the start with
+``connector_package_kit_mismatch``. Nothing is imported in that case
+either. The overlay build already refuses both cases, so this only
+happens with an image made in another way.
+
 The allowlist file (:data:`CONNECTOR_PACKAGES_FILE`) is written by the
 build of an overlay image. The plain public image has none, so only the
 built-in folders are allowed there.
+
+The ``connectors`` package records the allowed packages
+(:func:`record_installed_connector_packages`). Operation registration
+then marks each row a package writes with that package's name
+(:func:`connector_package_of`), and discovery and dispatch hide rows whose
+package is not installed (:func:`installed_connector_package_names`).
+The accepted packages themselves (:func:`installed_connector_packages`)
+are shown by ``GET /version``, ``GET /api/v1/health`` and the console.
 
 "Files belong to a distribution" is read from the installed file list of
 that distribution (its ``RECORD``, through :mod:`importlib.metadata`).
@@ -48,21 +64,30 @@ from __future__ import annotations
 import json
 import os
 import pkgutil
+from collections.abc import Mapping
 from importlib import metadata
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Final
 from urllib.parse import unquote, urlsplit
 
 import structlog
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.specifiers import SpecifierSet
+from packaging.utils import canonicalize_name
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 __all__ = [
     "BUILTIN_DISTRIBUTION",
     "CONNECTOR_PACKAGES_FILE",
+    "KIT_DISTRIBUTION",
     "ConnectorPackage",
     "ConnectorPackageError",
     "check_connector_folders",
+    "connector_package_of",
+    "installed_connector_package_names",
+    "installed_connector_packages",
     "load_connector_packages",
+    "record_installed_connector_packages",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -73,7 +98,17 @@ CONNECTOR_PACKAGES_FILE: Path = Path("/app/connector-packages.json")
 BUILTIN_DISTRIBUTION: str = "meho-backplane"
 """The distribution whose connector folders are built in."""
 
+KIT_DISTRIBUTION: str = "meho-connector-kit"
+"""The connector kit. Every listed package names the range of its versions that it fits."""
+
 _PYCACHE: Final[str] = "__pycache__"
+
+_CONNECTORS_MODULE_PREFIX: Final[str] = "meho_backplane.connectors."
+
+#: Connector folder -> name of the listed package that installed it. Set
+#: once, when :mod:`meho_backplane.connectors` is imported. Built-in
+#: folders are not in it.
+_installed_folders: dict[str, str] = {}
 
 
 class ConnectorPackageError(RuntimeError):
@@ -91,6 +126,10 @@ class ConnectorPackage(BaseModel):
     folders: list[Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]] = Field(
         min_length=1
     )
+
+
+_installed: tuple[ConnectorPackage, ...] = ()
+"""The packages the last successful start-up check accepted."""
 
 
 class _ConnectorPackageList(BaseModel):
@@ -198,11 +237,61 @@ class _Installed:
         return True
 
 
+def _kit_version() -> str | None:
+    """The version of the connector kit in this image, or ``None`` when it has none."""
+    try:
+        return metadata.version(KIT_DISTRIBUTION)
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def _kit_range(dist: metadata.Distribution) -> SpecifierSet:
+    """The range of the connector kit that *dist* names in its metadata (empty when none).
+
+    A ``Requires-Dist`` value counts when it names the kit with a version
+    range, and has no link and no environment marker, the same rule as the
+    overlay build. Several such values all apply.
+    """
+    kit_range = SpecifierSet()
+    for value in dist.requires or ():
+        try:
+            requirement = Requirement(value)
+        except InvalidRequirement:
+            continue
+        if (
+            canonicalize_name(requirement.name) == KIT_DISTRIBUTION
+            and requirement.url is None
+            and requirement.marker is None
+        ):
+            kit_range &= requirement.specifier
+    return kit_range
+
+
+def _check_kit_range(dist: metadata.Distribution, name: str, kit_version: str | None) -> None:
+    """Stop the start unless the package names a kit range that the image's kit meets."""
+    kit_range = _kit_range(dist)
+    have = "no connector kit" if kit_version is None else f"connector kit {kit_version}"
+    if not kit_range:
+        raise ConnectorPackageError(
+            f"connector_package_kit_mismatch: the connector package {name!r} does not say which "
+            f"versions of the connector kit ({KIT_DISTRIBUTION}) it fits. This image has "
+            f"{have}. MEHO does not import the package. Build it again with a kit range in "
+            "its dependencies."
+        )
+    if kit_version is None or not kit_range.contains(kit_version, installed=True):
+        raise ConnectorPackageError(
+            f"connector_package_kit_mismatch: the connector package {name!r} fits the connector "
+            f"kit {KIT_DISTRIBUTION}{kit_range}, but this image has {have}. MEHO does not "
+            "import the package. Use a version of the package that fits this image."
+        )
+
+
 def _listed_folders(
     packages: list[ConnectorPackage], connectors_dir: Path, path: Path
 ) -> dict[str, str]:
     """Check each listed package against what is installed; map folder -> package name."""
     listed: dict[str, str] = {}
+    kit_version = _kit_version() if packages else None
     for package in packages:
         try:
             dist = metadata.distribution(package.name)
@@ -217,6 +306,7 @@ def _listed_folders(
                 f"in {path} with version {package.version!r}, but version {dist.version!r} "
                 "is installed."
             )
+        _check_kit_range(dist, package.name, kit_version)
         installed = _Installed(dist, connectors_dir)
         for folder in package.folders:
             if not installed.owns(connectors_dir, folder):
@@ -229,14 +319,18 @@ def _listed_folders(
     return listed
 
 
-def check_connector_folders(connectors_dir: Path, allowlist_path: Path | None = None) -> None:
+def check_connector_folders(
+    connectors_dir: Path, allowlist_path: Path | None = None
+) -> dict[str, str]:
     """Stop the start unless every subpackage folder in ``connectors_dir`` is built in or listed.
 
     Called from the ``__init__`` of the ``connectors`` package, so it runs
     before any connector subpackage is imported. Raises
     :class:`ConnectorPackageError` that names the first folder (in name
     order) that is not allowed. On success, logs one
-    ``connector_packages_allowed`` line.
+    ``connector_packages_allowed`` line, keeps the accepted packages for
+    :func:`installed_connector_packages`, and returns the listed folders,
+    each mapped to the name of its package.
     """
     path = CONNECTOR_PACKAGES_FILE if allowlist_path is None else allowlist_path
     connectors_dir = connectors_dir.resolve()
@@ -282,3 +376,43 @@ def check_connector_folders(connectors_dir: Path, allowlist_path: Path | None = 
         ],
         source_checkout=editable_root is not None,
     )
+    global _installed
+    _installed = tuple(packages)
+    return listed
+
+
+def installed_connector_packages() -> tuple[ConnectorPackage, ...]:
+    """The connector packages the start-up check accepted, in allowlist order.
+
+    Read from the allowlist file once, by :func:`check_connector_folders`.
+    Empty for the plain public image, which has no allowlist file.
+    ``GET /version``, ``GET /api/v1/health`` and the console show this list.
+    """
+    return _installed
+
+
+def record_installed_connector_packages(folders: Mapping[str, str]) -> None:
+    """Remember the listed folders and their packages for this process.
+
+    *folders* is what :func:`check_connector_folders` returned. The
+    ``connectors`` package calls this once, right after the check.
+    """
+    _installed_folders.clear()
+    _installed_folders.update(folders)
+
+
+def installed_connector_package_names() -> frozenset[str]:
+    """Names of the connector packages that are installed and allowed in this process."""
+    return frozenset(_installed_folders.values())
+
+
+def connector_package_of(dotted_path: str) -> str | None:
+    """The installed package that owns *dotted_path*, or ``None`` for built-in code.
+
+    *dotted_path* is a module path or a ``handler_ref``. It belongs to a
+    package when it lies in a connector folder that the package installed.
+    """
+    if not dotted_path.startswith(_CONNECTORS_MODULE_PREFIX):
+        return None
+    folder = dotted_path[len(_CONNECTORS_MODULE_PREFIX) :].split(".", 1)[0]
+    return _installed_folders.get(folder)

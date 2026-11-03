@@ -85,7 +85,7 @@
       <label class="flex flex-col gap-1">
         <span class="text-sm font-medium">Operation id</span>
         <input type="text" class="input input-bordered input-sm font-mono w-full"
-               x-model="step.op_id" placeholder="vmware.composite.vm.create"
+               x-model="step.op_id" placeholder="gh.composite.repo_create"
                autocomplete="off"
                x-bind:aria-label="'Step ' + (idx + 1) + ' operation id'" />
         <span class="text-xs opacity-60">registry op_id (free text)</span>
@@ -152,7 +152,7 @@
         <label class="flex flex-col gap-1">
           <span class="text-sm font-medium">Operation id</span>
           <input type="text" class="input input-bordered input-sm font-mono w-full"
-                 x-model="step.verify.op_id" placeholder="vmware.cert.status"
+                 x-model="step.verify.op_id" placeholder="harbor.health"
                  autocomplete="off"
                  x-bind:aria-label="'Step ' + (idx + 1) + ' verify operation id'" />
         </label>

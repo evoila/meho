@@ -100,8 +100,8 @@ tenant returned ``[]`` from :func:`find_dependents` /
 :func:`find_dependencies`. Auto-discovery is k8s-only — every
 non-k8s connector inherits the no-op
 :meth:`~meho_backplane.connectors.base.Connector.discover_topology`
-from the ABC — so every registered ``vault`` / ``vcenter`` / ``nsx``
-/ ``sddc-manager`` / ``gh`` target falls into that hole and reads as
+from the ABC — so every registered ``vault`` / ``harbor`` / ``gh``
+target falls into that hole and reads as
 "nothing depends on me," which the pre-destructive blast-radius use
 case mis-reads as "safe to delete" (RDC #789 N2 false-negative).
 

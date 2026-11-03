@@ -7,12 +7,12 @@ Proves an agent can file a board-complete ticket through MEHO's own
 dispatch surface -- **without a ``gh`` CLI fallback** -- by composing the
 four #2081 composites in the documented order:
 
-    create issue -> add to Projects-v2 board -> set Status field
+    file issue -> add to Projects-v2 board -> set Status field
                  -> link a sub-issue
 
 Every step runs against **one shared connector session stub** (the
-#2255 direct-session substrate): the create is the connector's live REST
-POST, the board reads/writes are the GraphQL composites, and the
+#2255 direct-session substrate): the create is ``gh.composite.issue_create``,
+the board reads/writes are the GraphQL composites, and the
 sub-issue link is the REST composite. Nothing shells out to ``gh`` -- the
 whole flow is connector-session calls, which is the point of the Task.
 
@@ -22,12 +22,16 @@ of the pr-status composite lives under ``tests/integration``.
 
 The load-bearing assertions are the *threading* ones: the board node id
 from ``project_view`` flows into the add + set-field mutations, and the
-sub-issue link uses the child's **database id** (from the create
-response) rather than its issue number -- the sub_issue_id gotcha.
+sub-issue link names the child by its number, reads it first, and sends
+GitHub the child's **database id** from that read.
+
+The target names one repository and one board, as every ticket write needs
+(``docs/decisions/2026-11-02-github-ticket-writes-are-safe.md``).
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -39,6 +43,7 @@ from meho_backplane.connectors.github.composites._board import (
     project_item_set_field_composite,
     project_view_composite,
 )
+from meho_backplane.connectors.github.composites._issues import issue_create_composite
 from meho_backplane.connectors.github.composites._sub_issues import sub_issue_add_composite
 
 _OWNER = "evoila"
@@ -47,7 +52,7 @@ _PROJECT_NUMBER = 19
 
 
 def _make_operator() -> Operator:
-    """Human operator -- auto-executes ``caution`` board writes (board-complete filing)."""
+    """Operator for the flow; the ticket writes are ``safe`` and run at once."""
     return Operator(
         sub="op-gh-board-flow",
         name="GH Board Flow Test",
@@ -105,6 +110,18 @@ class _BoardFlowConnector:
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         return path
 
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        self.calls.append({"path": path, "verb": "GET", "json": None})
+        if path == f"/repos/{_OWNER}/{_REPO}/issues/200":
+            return {
+                "id": 555,
+                "number": 200,
+                "repository_url": f"https://api.github.com/repos/{_OWNER}/{_REPO}",
+            }
+        raise AssertionError(f"unexpected GET path in board flow: {path!r}")
+
     async def _post_json(
         self,
         target: Any,
@@ -132,6 +149,13 @@ class _BoardFlowConnector:
     def _route_graphql(query: str) -> Any:
         if "projectV2(number:" in query:
             return _PROJECT_VIEW_RESPONSE
+        if "node(id: $id)" in query:
+            repository = {"owner": {"login": _OWNER}, "name": _REPO}
+            content = {"__typename": "Issue", "repository": repository}
+            if "ProjectV2Item" in query:
+                item = {"__typename": "ProjectV2Item", "project": {"id": "PVT_board"}}
+                return {"data": {"node": {**item, "content": content}}}
+            return {"data": {"node": content}}
         if "addProjectV2ItemById" in query:
             return {"data": {"addProjectV2ItemById": {"item": {"id": "PVTI_main"}}}}
         if "updateProjectV2ItemFieldValue" in query:
@@ -145,18 +169,26 @@ class _BoardFlowConnector:
 async def test_file_board_complete_ticket_without_gh_cli() -> None:
     """create -> add-to-board -> set-Status -> link-sub-issue, all via the connector session."""
     operator = _make_operator()
-    target = object()
+    target = SimpleNamespace(
+        name="gh-board-flow", host=f"{_OWNER}/{_REPO}", extras={"project_id": "PVT_board"}
+    )
     connector = _BoardFlowConnector()
 
-    # ----- Step 1: create the main ticket + a child issue (live REST op) -----
-    main = await connector._post_json(
-        target, f"/repos/{_OWNER}/{_REPO}/issues", operator=operator, json={"title": "Main ticket"}
+    # ----- Step 1: file the main ticket + a child issue (issue_create) -----
+    main = await issue_create_composite(
+        operator=operator,
+        target=target,
+        params={"owner": _OWNER, "repo": _REPO, "title": "Main ticket"},
+        connector=connector,  # type: ignore[arg-type]
     )
-    child = await connector._post_json(
-        target, f"/repos/{_OWNER}/{_REPO}/issues", operator=operator, json={"title": "Child task"}
+    child = await issue_create_composite(
+        operator=operator,
+        target=target,
+        params={"owner": _OWNER, "repo": _REPO, "title": "Child task"},
+        connector=connector,  # type: ignore[arg-type]
     )
     assert main["node_id"] == "I_kwMAIN"
-    assert child["id"] == 555  # the DATABASE id -- distinct from its number (200)
+    assert child["number"] == 200
 
     # ----- Step 2: read the board (project id + Status field + its options) -----
     board = await project_view_composite(
@@ -202,11 +234,12 @@ async def test_file_board_complete_ticket_without_gh_cli() -> None:
             "owner": _OWNER,
             "repo": _REPO,
             "issue_number": main["number"],
-            "sub_issue_id": child["id"],
+            "sub_issue_number": child["number"],
         },
         connector=connector,  # type: ignore[arg-type]
     )
     assert linked["status"] == "linked"
+    assert linked["sub_issue_id"] == 555
 
     # ----- The flow used only the connector session, in the documented order -----
     wire = [(c["path"], c["verb"]) for c in connector.calls]
@@ -216,15 +249,20 @@ async def test_file_board_complete_ticket_without_gh_cli() -> None:
         ("/graphql", "POST"),
         ("/graphql", "POST"),
         ("/graphql", "POST"),
+        ("/graphql", "POST"),
+        ("/graphql", "POST"),
+        (f"/repos/{_OWNER}/{_REPO}/issues/200", "GET"),
         (f"/repos/{_OWNER}/{_REPO}/issues/100/sub_issues", "POST"),
     ]
 
     # ----- Node-id / database-id threading is correct across the steps -----
-    add_call = connector.calls[3]
+    assert connector.calls[3]["json"]["variables"] == {"id": "I_kwMAIN"}
+    add_call = connector.calls[4]
     assert add_call["json"]["variables"] == {"projectId": "PVT_board", "contentId": "I_kwMAIN"}
-    set_field_call = connector.calls[4]
+    assert connector.calls[5]["json"]["variables"] == {"id": "PVTI_main"}
+    set_field_call = connector.calls[6]
     assert set_field_call["json"]["variables"]["fieldId"] == "F_status"
     assert set_field_call["json"]["variables"]["optionId"] == "opt_todo"
-    sub_issue_call = connector.calls[5]
-    # The link uses the child's DATABASE id (555), never its issue number (200).
+    sub_issue_call = connector.calls[8]
+    # GitHub gets the child's DATABASE id (555) that MEHO read for number 200.
     assert sub_issue_call["json"] == {"sub_issue_id": 555}

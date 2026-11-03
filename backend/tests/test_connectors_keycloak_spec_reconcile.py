@@ -41,7 +41,7 @@ grep for ``/admin`` / ``/realms`` string literals). The
 display metadata derived from the same filled constant, never
 dispatched (the vcf-operations lane's display-metadata precedent).
 
-Two hand-coded paths are dispatched but deliberately **excluded** from
+Three hand-coded paths are dispatched but deliberately **excluded** from
 the reconcile — the #2970 decision-table class "surface lives outside
 the pinned spec", evidenced rather than repointed (the pinned spec's
 only top-level path family is ``/admin/realms``; verified 2026-08-18,
@@ -52,6 +52,10 @@ first armed run):
   (RFC 6749 §3.2) / per-realm OIDC discovery
   (``/realms/{realm}/.well-known/openid-configuration``), not by the
   Admin REST OpenAPI document. No served alternative exists.
+* ``POST:/realms/{realm}/protocol/openid-connect/logout`` — the OIDC
+  logout endpoint ``keycloak.user.check_login`` uses to end the session
+  its login test opened. Specified by OIDC, not by the Admin REST
+  OpenAPI document. No served alternative exists.
 * ``GET:/admin/serverinfo`` — the admin console's server-info endpoint
   (best-effort version read; the connector already treats any failure
   as non-fatal ``version=None``). Stable in practice but not modeled by
@@ -63,7 +67,8 @@ they stay **unserved** — the day a newer pinned spec starts serving
 one, that test fails and the constant must be promoted into
 :data:`_METHODS_BY_CONSTANT`. All reconciled op_ids (19 at #2988, extended
 to 29 by the #3280 group-lifecycle ops, to 33 by the #3944 deletes, to
-34 by the #3851 user logout, and to 37 by the #3886 realm delete) were
+34 by the #3851 user logout, to 37 by the #3886 realm delete, and to 45 by the login flow
+ops) were
 served on the armed run; no path repoints were needed. Protocol:
 docs/decisions/spec-reconcile-guards-standard.md.
 """
@@ -119,6 +124,13 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     # Realm delete approval card (#3886): user and group counts.
     "_USERS_COUNT_PATH": ("GET",),
     "_GROUPS_COUNT_PATH": ("GET",),
+    # Approval sign-in flow op and the identity provider list.
+    "_AUTH_FLOWS_PATH": ("GET", "POST"),
+    "_AUTH_FLOW_EXECUTIONS_PATH": ("GET", "PUT"),
+    "_AUTH_FLOW_ADD_STEP_PATH": ("POST",),
+    "_AUTH_FLOW_ADD_SUBFLOW_PATH": ("POST",),
+    "_AUTH_CONFIG_PATH": ("GET",),
+    "_IDENTITY_PROVIDERS_PATH": ("GET",),
 }
 
 #: Dispatched constants deliberately outside the pinned Admin REST
@@ -126,6 +138,7 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
 #: serverinfo). Method per constant, mirroring the dispatch seams.
 _EXCLUDED_METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_TOKEN_PATH": ("POST",),
+    "_LOGOUT_PATH": ("POST",),
     "_SERVERINFO_PATH": ("GET",),
 }
 
@@ -179,6 +192,9 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "DELETE:/admin/realms/{realm}/users/{user-id}",
         "DELETE:/admin/realms/{realm}/users/{user-id}/groups/{groupId}",
         "GET:/admin/realms/{realm}",
+        "GET:/admin/realms/{realm}/authentication/config/{id}",
+        "GET:/admin/realms/{realm}/authentication/flows",
+        "GET:/admin/realms/{realm}/authentication/flows/{flowAlias}/executions",
         "GET:/admin/realms/{realm}/client-scopes",
         "GET:/admin/realms/{realm}/clients",
         "GET:/admin/realms/{realm}/clients/{client-uuid}",
@@ -188,6 +204,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/groups/{group-id}",
         "GET:/admin/realms/{realm}/groups/{group-id}/children",
         "GET:/admin/realms/{realm}/groups/{group-id}/members",
+        "GET:/admin/realms/{realm}/identity-provider/instances",
         "GET:/admin/realms/{realm}/roles",
         "GET:/admin/realms/{realm}/roles/{role-name}",
         "GET:/admin/realms/{realm}/roles/{role-name}/users",
@@ -197,6 +214,9 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/users/{user-id}/groups",
         "GET:/admin/realms/{realm}/users/{user-id}/role-mappings",
         "POST:/admin/realms",
+        "POST:/admin/realms/{realm}/authentication/flows",
+        "POST:/admin/realms/{realm}/authentication/flows/{flowAlias}/executions/execution",
+        "POST:/admin/realms/{realm}/authentication/flows/{flowAlias}/executions/flow",
         "POST:/admin/realms/{realm}/client-scopes",
         "POST:/admin/realms/{realm}/clients",
         "POST:/admin/realms/{realm}/clients/{client-uuid}/protocol-mappers/models",
@@ -206,6 +226,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "POST:/admin/realms/{realm}/users/{user-id}/logout",
         "POST:/admin/realms/{realm}/users/{user-id}/role-mappings/realm",
         "PUT:/admin/realms/{realm}",
+        "PUT:/admin/realms/{realm}/authentication/flows/{flowAlias}/executions",
         "PUT:/admin/realms/{realm}/clients/{client-uuid}",
         "PUT:/admin/realms/{realm}/groups/{group-id}",
         "PUT:/admin/realms/{realm}/users/{user-id}/groups/{groupId}",
@@ -213,6 +234,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
     ]
     assert sorted(_op_ids(_EXCLUDED_METHODS_BY_CONSTANT)) == [
         "GET:/admin/serverinfo",
+        "POST:/realms/{realm}/protocol/openid-connect/logout",
         "POST:/realms/{realm}/protocol/openid-connect/token",
     ]
 

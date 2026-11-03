@@ -69,7 +69,7 @@ _OP_CLASS_WRITE: Final[str] = "write"
 # one string instead of six.
 _CONNECTOR_ID_DESCRIPTION: Final[str] = (
     "Operator-facing connector identifier — '<impl_id>-<version>' "
-    "(e.g. 'vmware-rest-9.0', 'vault-1.x'). Split into the parsed "
+    "(e.g. 'k8s-1.x', 'vault-1.x'). Split into the parsed "
     "(product, version, impl_id) triple by the same rule the CLI "
     "uses."
 )
@@ -370,7 +370,8 @@ def raise_invalid_params_for_builtin_write_forbidden(
     """Map :class:`BuiltinConnectorWriteForbiddenError` onto -32602.
 
     The mutating curation tools (``meho_connector_enable`` /
-    ``enable_reads`` / ``disable`` / ``edit_group`` / ``edit_op``) resolve
+    ``enable_reads`` / ``disable`` / ``edit_group`` / ``edit_op`` /
+    ``delete``) resolve
     ``connector_id`` to a row-scope before acting; when that scope is a
     built-in (``tenant_id IS NULL``) row and the caller is a
     ``tenant_admin`` without ``platform_admin``, the service refuses with

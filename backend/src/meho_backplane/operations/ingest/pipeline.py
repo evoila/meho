@@ -26,7 +26,7 @@ admin MCP tools (T7) all consume:
 Both surfaces are tenant-scoped at construction time: the service is
 built from an :class:`Operator` and every operation acts on either
 ``tenant_id == operator.tenant_id`` or ``tenant_id is None`` (built-in
-scope, gated on :class:`TenantRole.TENANT_ADMIN`). Cross-tenant probes
+scope, which needs ``platform_admin``). Cross-tenant probes
 raise :class:`ConnectorNotFoundError` — the same conflation
 :class:`ReviewService` uses to keep the operator-facing failure
 surface uniform.
@@ -89,7 +89,7 @@ from packaging.version import InvalidVersion, Version
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.audit_cutover import note_preview
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.profile import AuthSchemeName, ExecutionProfile
 from meho_backplane.connectors.registry import product_impl_id_round_trips
 from meho_backplane.db.engine import get_sessionmaker
@@ -125,6 +125,7 @@ from meho_backplane.operations.ingest.exceptions import (
     ProductImplIdMismatch,
     VersionMismatchError,
 )
+from meho_backplane.operations.ingest.ingest_auth_store import save_ingest_auth_profile
 from meho_backplane.operations.ingest.ingest_profile import build_ingest_execution_profile
 from meho_backplane.operations.ingest.llm_groups import (
     GroupingResult,
@@ -497,13 +498,15 @@ class IngestionPipelineService:
     :class:`Operator` at construction.
 
     Tenant scoping: :meth:`ingest` optionally takes an explicit
-    ``tenant_id`` (``None`` → built-in scope). Built-in ingests are
-    gated on :class:`TenantRole.TENANT_ADMIN`; tenant-curated ingests
-    are gated on a match between the requested ``tenant_id`` and the
-    operator's tenant, unless the operator holds ``platform_admin``
-    (#3800 — a platform operator seeding a connector row for another
-    tenant). Mismatches raise :class:`PermissionError`, which the REST
-    router maps onto HTTP 403.
+    ``tenant_id`` (``None`` → built-in scope). A built-in ingest needs
+    ``platform_admin``: the rows it writes are shared by every tenant,
+    the same rule the enable / disable / edit / delete paths of
+    :class:`~meho_backplane.operations.ingest.service.ReviewService`
+    apply. Tenant-curated ingests are gated on a match between the
+    requested ``tenant_id`` and the operator's tenant, unless the
+    operator holds ``platform_admin`` (#3800 — a platform operator
+    seeding a connector row for another tenant). Mismatches raise
+    :class:`PermissionError`, which the REST router maps onto HTTP 403.
 
     LLM-client factory: pass a custom factory to inject a test stub or
     a production adapter once one lands. The default fail-closed
@@ -534,9 +537,15 @@ class IngestionPipelineService:
     def authorize_scope(self, tenant_id: UUID | None) -> None:
         """Mirror :meth:`ReviewService._authorize_scope` for ingest paths.
 
-        Built-in ingests require ``tenant_admin``; tenant-curated
-        ingests require the operator's tenant_id to match. Raises
-        :class:`PermissionError` on a violation.
+        A built-in ingest (``tenant_id`` ``None``) requires
+        ``platform_admin``. A built-in connector's rows are shared by
+        every tenant, and a second ingest of an existing built-in
+        connector updates those rows in place, so the write is a
+        platform action like enable, disable, edit and delete. A
+        tenant_admin who wants their own copy ingests into their own
+        tenant. Tenant-curated ingests require the operator's
+        tenant_id to match. Raises :class:`PermissionError` on a
+        violation.
 
         The one exception (#3800): an operator with ``platform_admin``
         may ingest into another tenant. This only happens when the
@@ -555,9 +564,11 @@ class IngestionPipelineService:
         get the same isolation even if they skip the route gate.
         """
         if tenant_id is None:
-            if self._operator.tenant_role is not TenantRole.TENANT_ADMIN:
+            if not self._operator.platform_admin:
                 raise PermissionError(
-                    "built-in connector ingest requires tenant_admin",
+                    "built-in connector ingest requires platform_admin: "
+                    "a built-in connector's rows are shared by every tenant; "
+                    "pass your own tenant_id for a tenant-scoped ingest",
                 )
             return
         if tenant_id != self._operator.tenant_id and not self._operator.platform_admin:
@@ -578,9 +589,10 @@ class IngestionPipelineService:
 
         Three guards in one pass:
 
-        1. Each spec's ``info.version`` is parsed via the lightweight
-           :func:`read_spec_info_version` helper (no DB hits, no full
-           parse — just enough to read the ``info`` block).
+        1. Each spec's ``info.version`` is read via
+           :func:`read_spec_info_version`. It has no DB hits, but it
+           downloads and parses the whole spec, so :meth:`ingest` calls
+           this method in a worker thread (``asyncio.to_thread``).
         2. Each parsed ``info.version`` is classified against the
            operator's label via :func:`_classify_version_match`. An
            ``incompatible`` outcome raises
@@ -772,8 +784,12 @@ class IngestionPipelineService:
         # dry-run path benefits from catching the mistake at the validate
         # boundary rather than letting an operator dry-run a spec that
         # belongs under a different version label and convince themselves
-        # the real ingest will work.
-        self._validate_spec_versions(
+        # the real ingest will work. It runs in a worker thread: reading
+        # each spec's ``info.version`` downloads and parses the whole
+        # spec, which would otherwise block the event loop (and every
+        # other request) for the whole download and parse.
+        await asyncio.to_thread(
+            self._validate_spec_versions,
             specs=specs,
             requested_version=version,
             log=log,
@@ -1168,6 +1184,7 @@ class IngestionPipelineService:
                     connector_id=connector_id,
                     tenant_id=tenant_id,
                     execution_profile=execution_profile,
+                    sessionmaker=sessionmaker,
                 )
                 or connector_registered
             )
@@ -1250,8 +1267,9 @@ class IngestionPipelineService:
         connector_id: str,
         tenant_id: UUID | None,
         execution_profile: ExecutionProfile,
+        sessionmaker: async_sessionmaker[AsyncSession],
     ) -> bool:
-        """Stamp a profiled connector synthesised from *execution_profile*.
+        """Save the login type, then stamp a profiled connector built from it.
 
         The non-catalog on-ramp (#2289) sibling of
         :func:`~meho_backplane.operations.ingest.boot_stamp.stamp_catalog_profiled_connectors`:
@@ -1264,7 +1282,22 @@ class IngestionPipelineService:
         no-op (the triple is already served by a stamped / hand-coded class).
         The stamp writes a ``meho_connector_profile_stamp`` audit row under
         the ingesting operator and never enables an op (#1971).
+
+        The login type is saved first (#5016), so the class can be built
+        again after a restart or on another replica
+        (:func:`~meho_backplane.operations.ingest.ingest_auth_store.restore_ingested_profiled_connectors`).
+        A failed save stops the ingest before anything is registered, so a
+        retry saves and stamps again.
         """
+        await save_ingest_auth_profile(
+            sessionmaker,
+            tenant_id=tenant_id,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            profile=execution_profile,
+            operator_sub=self._operator.sub,
+        )
         connector_class = synthesise_profiled_class(
             product=product, version=version, impl_id=impl_id, profile=execution_profile
         )

@@ -31,7 +31,7 @@ Windows Server 2016 → 2025. `impl_id="windns-ssh"` leaves room for a future
 
 Source: `backend/src/meho_backplane/connectors/windows_dns/`.
 
-## Op surface (5 ops)
+## Op surface (9 ops)
 
 | op | safety | approval | cmdlet(s) |
 | --- | --- | --- | --- |
@@ -40,6 +40,10 @@ Source: `backend/src/meho_backplane/connectors/windows_dns/`.
 | `windns.record.get` | safe | no | `Get-DnsServerResourceRecord -ZoneName [-Name] [-RRType]` |
 | `windns.record.add` | caution | no | `Add-DnsServerResourceRecordA -IPv4Address` (A) / `Add-DnsServerResourceRecordCName -HostNameAlias` (CNAME), optional `-TimeToLive (New-TimeSpan -Seconds <ttl>)` |
 | `windns.record.remove` | **destructive** | **yes** | `Remove-DnsServerResourceRecord -ZoneName -Name -RRType -Force` |
+| `windns.zone.get` | safe | no | `Get-DnsServerZone -Name` + the zone's SOA record |
+| `windns.zone.set` | caution | **yes** | `Set-DnsServerPrimaryZone -DynamicUpdate` and/or SOA minimum TTL via `Set-DnsServerResourceRecord` |
+| `windns.forwarder.list` | safe | no | `Get-DnsServerForwarder` |
+| `windns.forwarder.set` | caution | **yes** | `Set-DnsServerForwarder -IPAddress @(...) [-UseRootHint]` |
 
 `record.add` is `safety_level="caution"` (a DNS change is global — no
 per-caller scoping), mirroring bind9's `record.add`; `requires_approval=false`.
@@ -208,6 +212,33 @@ record.remove `-Force`, `about` mapping, the probe post-connect
 `command_failed` guard (parametrized over `OSError` /
 `asyncssh.ConnectionLost` / `TimeoutError`), and the registry-triple
 round-trip + safety-level invariants.
+
+## Server settings for a new DNS server
+
+Two settings ops and two reads cover the DNS steps of a domain controller
+build. Both changes wait for a person to approve them, because they change how
+the whole server answers. Both read the result back and return it, and both
+are safe to run twice.
+
+- **`windns.zone.get`** returns one zone's type and storage, who may update
+  names (`dynamic_update`) and the SOA timers. `soa_minimum_ttl_seconds` is
+  how long resolvers keep a "name does not exist" answer (RFC 2308).
+- **`windns.zone.set`** takes `zone` plus `dynamic_update` (`None`, `Secure`,
+  `NonsecureAndSecure`), `soa_minimum_ttl_seconds` (0 to 86400), or both.
+  The TTL change follows the documented pattern: read the SOA record, copy
+  it with `[ciminstance]::new`, change the copy, and pass old and new to
+  `Set-DnsServerResourceRecord`.
+  Only a primary zone can be changed; `Secure` needs a zone stored in AD.
+- **`windns.forwarder.list`** returns the forwarders in order, the root-hint
+  flag, the timeout and the reordering flag.
+- **`windns.forwarder.set`** replaces the whole list with 1 to 8 addresses
+  and can set the root-hint flag. Each address is checked with Python's
+  `ipaddress` and written back in its normal form, so a host name or any
+  other text is refused before the script runs. Clearing the list is not
+  offered.
+
+Code: `ops_zone_settings.py`, `ops_forwarder.py`. Tests:
+`backend/tests/test_connectors_windows_dc_build_ops.py`.
 
 ## Known issues / scope
 

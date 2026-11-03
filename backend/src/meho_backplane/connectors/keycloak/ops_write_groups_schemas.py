@@ -33,9 +33,14 @@ WHEN_TO_USE_GROUP_WRITE = (
     "``keycloak.group.member.add`` / ``keycloak.group.member.remove`` "
     "attach or detach a user (so the user's token carries the group's "
     "tenant claims). All four are privilege-adjacent (a tenant-access "
-    "grant), so all are dangerous and require human approval. The typical "
-    "flow: create the role group with attributes → add the user → the "
-    "user's minted token then carries the group-derived claims. "
+    "grant), so all are dangerous and require human approval. A second "
+    "person must approve: the self-approval break-glass switch does not "
+    "cover the dangerous risk level, so one operator alone cannot finish "
+    "these (guide: "
+    "https://evoila.github.io/meho/latest/guides/tenant-bootstrap/). The "
+    "typical flow: create the role group with attributes → add the user → "
+    "the user's minted token then carries the group-derived claims. Put "
+    "each person in exactly one role group. "
     "``keycloak.group.delete`` removes a group (and, only when asked, its "
     "sub-groups) for good: destructive, a second person must approve, "
     "preview first."
@@ -45,8 +50,10 @@ _ATTRIBUTES_PROP: dict[str, Any] = {
     "type": "object",
     "description": (
         "Group attributes as Keycloak's Map<String, List<String>> "
-        '(e.g. {"tenant_id": ["t-2"], "tenant_role": ["admin"]}). A plain '
-        "string value is wrapped into a single-element list."
+        '(e.g. {"tenant_id": ["<tenant-uuid>"], "tenant_role": ["operator"]}). '
+        "tenant_id is a UUID; tenant_role is read_only, operator or "
+        "tenant_admin. A plain string value is wrapped into a "
+        "single-element list."
     ),
     "additionalProperties": True,
 }
@@ -94,7 +101,7 @@ GROUP_WRITE_OPS: tuple[KeycloakOp, ...] = (
             "when_to_use": WHEN_TO_USE_GROUP_WRITE,
             "parameter_hints": {
                 "name": "The group name (e.g. a role-group name).",
-                "attributes": "e.g. {'tenant_id': ['t-2'], 'tenant_role': ['admin']}.",
+                "attributes": "e.g. {'tenant_id': ['<tenant-uuid>'], 'tenant_role': ['operator']}.",
                 "parent_id": "Parent UUID for a subgroup; omit for top-level.",
             },
             "output_shape": "``{name, parent_id, id, path, created, already_exists}``.",

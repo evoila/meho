@@ -15,6 +15,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/cmd/workref"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -35,7 +36,7 @@ import (
 //	  [--audit-id ID]              # exact-id lookup
 //	  [--parent-audit-id ID]       # rows whose parent is this audit-id
 //	  [--session-id ID]            # narrow to one agent session (UUID)
-//	  [--work-ref REF]             # exact change-ticket ref: gh:evoila/meho#1
+//	  [--filter-work-ref REF]      # exact change-ticket ref: gh:evoila/meho#1
 //	  [--json]                     # raw AuditQueryResult JSON
 //	  [--backplane <url>]          # override the configured backplane
 //
@@ -92,7 +93,7 @@ func newQueryCmd() *cobra.Command {
 				AuditID:           auditID,
 				ParentAuditID:     parentAuditID,
 				SessionID:         sessionID,
-				WorkRef:           workRef,
+				WorkRef:           workref.Filter(cmd, workRef),
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -125,7 +126,7 @@ func newQueryCmd() *cobra.Command {
 			"e.g. the decision and run rows of one approval request")
 	cmd.Flags().StringVar(&sessionID, "session-id", "",
 		"narrow to one agent session (UUID); the flat companion to `meho audit replay`")
-	cmd.Flags().StringVar(&workRef, "work-ref", "",
+	cmd.Flags().StringVar(&workRef, workref.FilterFlag, "",
 		"narrow to one external change-ticket reference (exact match; "+
 			"e.g. gh:evoila/meho#1) — \"show every write authorised by ticket X\"")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
@@ -318,18 +319,19 @@ func postQuery(
 }
 
 // printQueryTable renders the audit page as a compact, scannable
-// table. Columns: AUDIT_ID, TIME, PRINCIPAL, TARGET, OP_ID, CLASS,
-// STATUS. The audit id comes first and is printed whole (#4858), so
-// an operator can paste it into `meho audit show` without re-running
-// the query with --json. When `next_cursor` is set, a final NEXT
+// table. Columns: AUDIT_ID, TIME, TENANT, PRINCIPAL, TARGET, OP_ID,
+// CLASS, STATUS. TENANT is the tenant name, or the tenant id when the
+// backend has no name for it (#5238). The audit id comes first and
+// is printed whole (#4858), so an operator can paste it into
+// `meho audit show` without re-running the query with --json. When `next_cursor` is set, a final NEXT
 // line tells the operator how to paste-paginate.
 func printQueryTable(w io.Writer, r *api.AuditQueryResult) {
 	if r == nil || len(r.Rows) == 0 {
 		fmt.Fprintln(w, "no audit rows matched the filter")
 		return
 	}
-	fmt.Fprintf(w, "%-36s  %-22s %-32s %-18s %-26s %-16s %s\n",
-		"AUDIT_ID", "TIME", "PRINCIPAL", "TARGET", "OP_ID", "CLASS", "STATUS")
+	fmt.Fprintf(w, "%-36s  %-22s %-18s %-32s %-18s %-26s %-16s %s\n",
+		"AUDIT_ID", "TIME", "TENANT", "PRINCIPAL", "TARGET", "OP_ID", "CLASS", "STATUS")
 	for _, row := range r.Rows {
 		principal := row.PrincipalSub
 		if name := strDeref(row.PrincipalName); name != "" {
@@ -339,9 +341,10 @@ func printQueryTable(w io.Writer, r *api.AuditQueryResult) {
 		if target == "" {
 			target = "-"
 		}
-		fmt.Fprintf(w, "%-36s  %-22s %-32s %-18s %-26s %-16s %s\n",
+		fmt.Fprintf(w, "%-36s  %-22s %-18s %-32s %-18s %-26s %-16s %s\n",
 			row.Id.String(),
 			truncate(formatTS(row.Ts), 22),
+			truncate(tenantLabel(row.TenantName, row.TenantId), 18),
 			principal,
 			truncate(target, 18),
 			truncate(row.OpId, 26),

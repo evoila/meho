@@ -115,6 +115,7 @@ def _node(node_id: str, *, depth: int, children: list[ReplayNode] | None = None)
         work_ref=None,
         policy_decision=None,
         event_class="legacy_request",
+        sandbox_mode=False,
         broadcast_event_id=None,
         depth=depth,
         children=children or [],

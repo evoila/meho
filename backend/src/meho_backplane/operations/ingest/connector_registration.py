@@ -421,11 +421,11 @@ def handrolled_class_for_impl_id(
     ``None`` when none exists.
 
     This is the ingest guard's lookup: a hand-coded connector's
-    ``impl_id`` is its stable, product-independent identity (vRLI is
-    ``vrli-rest`` whether it registers under the dispatch-canonical
-    ``product="vrli"`` or the historical ``"vcf-logs"``). An ingest that
+    ``impl_id`` is its stable, product-independent identity (Harbor is
+    ``harbor-rest`` whether it registers under the dispatch-canonical
+    ``product="harbor"`` or an older product name). An ingest that
     supplies a *divergent* product token for that same ``impl_id`` —
-    ``--product vcf-logs`` for ``vrli-rest`` after the realignment, say —
+    ``--product registry`` for ``harbor-rest``, say —
     must defer to the hand-coded class rather than scaffold a
     :class:`GenericRestConnector` shim under the divergent key, which
     would be non-dispatchable and could shadow the real connector. The
@@ -587,7 +587,7 @@ def sibling_handrolled_impl_id(
 
     * **Ingest near-miss guard** (:func:`check_version_covered_by_registered_class`)
       — before scaffolding a shim under a one-token-off ``impl_id``
-      (``nsx-rest-probe`` when ``nsx-rest`` already ships a hand-rolled
+      (``harbor-rest-probe`` when ``harbor-rest`` already ships a hand-rolled
       class), warn that the new shim is non-dispatchable and may shadow
       the sibling (the resolver-tie-break footgun T1 #1750 fixes
       load-bearingly).
@@ -741,16 +741,16 @@ def check_version_covered_by_registered_class(
     class's PEP 440 ``supported_version_range``; the ingest pipeline
     keys rows on a free-form ``(product, version, impl_id)`` triple.
     Without a pre-flight an operator can ingest under
-    ``(vmware, "7.0", vmware-rest)`` when the only registered class
-    advertises ``">=8.5,<10.0"`` — the catalog shows the ops but every
+    ``(harbor, "1.10", harbor-rest)`` when the only registered class
+    advertises ``">=2.0,<3.0"`` — the catalog shows the ops but every
     call later fails with :exc:`NoMatchingConnector`, far from the
     ingest call site. This runs **before**
     :func:`ensure_connector_class_registered` synthesises the auto-shim
     (whose range is derived from the operator's own label, so it would
     always "match" and make the check vacuous), and filters by
-    ``(product, impl_id)`` — a class at ``(vmware, "9.0", vmware-rest)``
-    advertising ``">=8.5,<10.0"`` covers an ingest at
-    ``(vmware, "8.5.1", vmware-rest)``.
+    ``(product, impl_id)`` — a class at ``(harbor, "2.x", harbor-rest)``
+    advertising ``">=2.0,<3.0"`` covers an ingest at
+    ``(harbor, "2.11", harbor-rest)``.
 
     Three outcomes by registry state (full prose:
     ``docs/codebase/spec-ingestion.md`` §``check_version_covered_by_registered_class``):

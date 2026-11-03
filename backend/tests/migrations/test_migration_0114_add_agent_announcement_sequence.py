@@ -13,7 +13,7 @@ oldest first, and each tenant's counter starts at its highest number.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -74,9 +74,11 @@ def _insert(conn: sa.Connection, *, tenant_id: str, created_at: str, activity: s
     )
 
 
-def test_upgrade_numbers_existing_rows_per_tenant(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_numbers_existing_rows_per_tenant(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     tenant_a, tenant_b = uuid.uuid4().hex, uuid.uuid4().hex
     sync_eng = sa_create_engine(sync_url)
     try:
@@ -120,9 +122,11 @@ def test_upgrade_numbers_existing_rows_per_tenant(alembic_cfg: tuple[Config, str
         inspector_eng.dispose()
 
 
-def test_downgrade_removes_counter_column_and_index(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_removes_counter_column_and_index(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
 
     sync_eng = sa_create_engine(sync_url)

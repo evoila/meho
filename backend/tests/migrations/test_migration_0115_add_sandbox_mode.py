@@ -20,7 +20,7 @@ Every step targets this migration's own revision (``0115``) and its
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -118,11 +118,13 @@ def _stored_mode(sync_url: str) -> list[Any]:
 
 
 def test_existing_database_stores_off_and_refuses_the_mode_on(
-    alembic_cfg: tuple[Config, str], monkeypatch: pytest.MonkeyPatch
+    alembic_cfg: tuple[Config, str],
+    monkeypatch: pytest.MonkeyPatch,
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A database at the previous revision, with no rows at all, is not a new install."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     command.upgrade(cfg, _REVISION)
     assert _stored_mode(sync_url) == [(1, False)]
 
@@ -148,9 +150,11 @@ def test_new_database_stores_nothing_until_the_first_start(
     assert _stored_mode(sync_url) == [(1, True)]
 
 
-def test_state_table_holds_one_row(alembic_cfg: tuple[Config, str]) -> None:
+def test_state_table_holds_one_row(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     command.upgrade(cfg, _REVISION)
     from sqlalchemy.exc import IntegrityError
 
@@ -164,9 +168,10 @@ def test_state_table_holds_one_row(alembic_cfg: tuple[Config, str]) -> None:
 
 def test_delete_grant_table_mirrors_the_ordinary_grant_table(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     tables = _tables(sync_url)
     assert {"sandbox_delete_grant", "sandbox_mode_state"} <= tables
     ordinary = _columns(sync_url, "service_principal_grant")
@@ -180,10 +185,12 @@ def test_delete_grant_table_mirrors_the_ordinary_grant_table(
     }
 
 
-def test_audit_mark_defaults_to_false(alembic_cfg: tuple[Config, str]) -> None:
+def test_audit_mark_defaults_to_false(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """Existing rows read false, and so does a row written without the column."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     _execute(sync_url, _OLD_BUILD_AUDIT_INSERT.format(id="1" * 32, path="/x"))
     command.upgrade(cfg, _REVISION)
     column = _columns(sync_url, "audit_log")["sandbox_mode"]
@@ -194,9 +201,11 @@ def test_audit_mark_defaults_to_false(alembic_cfg: tuple[Config, str]) -> None:
     assert [bool(mode) for _sub, mode in rows] == [False, False]
 
 
-def test_downgrade_drops_the_tables_and_the_column(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_drops_the_tables_and_the_column(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
     tables = _tables(sync_url)
     assert "sandbox_delete_grant" not in tables

@@ -24,12 +24,13 @@ Supported spec dialects:
 Out of scope (no conversion performed in-process):
 
 * Swagger 2.0 — rejected with an actionable :exc:`UnsupportedSpecError`
-  that names the conversion path (convert to OpenAPI 3.x with
-  ``swagger2openapi`` / ``converter.swagger.io`` and re-ingest). The
-  parser stays 3.x-only on purpose: the maintained 2.0→3.0 converters
-  are Node/web-service tools, and a hand-rolled converter is a large
-  correctness surface the operator review queue can't backstop. See
-  the Harbor 2.x ``swagger.yaml`` exemplar (#1532).
+  that names the conversion path: pass the file to ``meho connector
+  ingest`` as ``file://`` and the CLI converts it to OpenAPI 3 on the
+  operator's machine (#5028), or convert it locally with
+  ``swagger2openapi`` and ingest the result. The backplane stays
+  3.x-only on purpose: the conversion runs in the CLI, so the vendor's
+  file never goes to an outside converter. See the Harbor 2.x
+  ``swagger.yaml`` exemplar (#1532).
 * GraphQL SDL / WSDL / protobuf — separate parsers; v0.2.next.
 * Cross-document ``$ref`` (``$ref: "other.yaml#/..."``) — raises
   :exc:`UnsupportedSpecError`.
@@ -236,19 +237,20 @@ _SpecYamlLoader.add_constructor(
 _SUPPORTED_OPENAPI_RE = re.compile(r"^3\.(0|1)(\.\d+)?$")
 
 # Operator-facing remediation appended to the Swagger-2.0 rejection.
-# The parser stays OpenAPI-3.x-only on purpose (no spec-conversion
-# dependency in the Python backend — the de-facto 2.0→3.0 converters
-# are Node/web-service tools, and a hand-rolled converter is a large
-# correctness surface the review queue can't backstop). Instead of a
-# bare "not supported", the rejection names the concrete conversion
-# path so the operator can self-serve: run a converter, then re-ingest
-# the OpenAPI-3.x output through the same path. ``swagger2openapi`` /
-# the hosted ``converter.swagger.io`` are the maintained converters.
+# The parser stays OpenAPI-3.x-only on purpose: the conversion runs in
+# the CLI on the operator's machine (#5028), so no spec-conversion
+# dependency lands in the backplane. The CLI converts only files it
+# reads itself (file:// and docs:), so a Swagger 2.0 file reached here
+# either came over https:// (the backplane fetched it) or from a client
+# that does not convert. The CLI path comes first; a local converter
+# is the fallback. No hosted converter is named: it would send the
+# vendor's file to an outside service.
 _SWAGGER_2_CONVERSION_REMEDIATION = (
-    "convert it to OpenAPI 3.x first (e.g. the swagger2openapi CLI "
-    "`npx swagger2openapi swagger.yaml -o openapi.yaml`, or the hosted "
-    "converter at https://converter.swagger.io/), then ingest the "
-    "converted 3.x document"
+    "download the file and pass it to `meho connector ingest --spec "
+    "file:///path/to/swagger.yaml`; the CLI converts Swagger 2.0 to "
+    "OpenAPI 3 on your machine before the upload. Or convert it to "
+    "OpenAPI 3 yourself with a local tool (e.g. `npx swagger2openapi "
+    "swagger.yaml -o openapi.yaml`) and ingest the converted document"
 )
 
 # Operator-facing remediation appended to the SSRF-guard rejections
@@ -572,8 +574,10 @@ def _project_spec_bytes_to_protos(
 def read_spec_info_version(spec_path_or_uri: str, *, content: str | None = None) -> str | None:
     """Return the spec's ``info.version`` string, or ``None`` if absent.
 
-    Lightweight companion to :func:`parse_openapi` for the ingest
-    pipeline's spec-vs-label cross-check (G0.9-T8). Loads the spec
+    Companion to :func:`parse_openapi` for the ingest pipeline's
+    spec-vs-label cross-check (G0.9-T8). It is blocking and not light:
+    it downloads and parses the whole spec, so async callers must run
+    it in a worker thread (``asyncio.to_thread``). Loads the spec
     bytes the same way :func:`parse_openapi` does, decodes them, runs
     the supported-OpenAPI-version gate so callers don't need to
     re-validate, and returns ``info.version`` verbatim.
@@ -641,12 +645,13 @@ def _assert_fetchable_remote_url(url: str) -> None:
 
     2. **Destination guard** — the hostname is resolved via
        ``socket.getaddrinfo`` and every returned address is checked
-       with :mod:`ipaddress`. Any candidate that is private,
-       loopback, link-local, ULA, unspecified, multicast, or
-       otherwise reserved triggers immediate rejection. This covers
-       at minimum ``127.0.0.0/8``, ``10.0.0.0/8``,
-       ``172.16.0.0/12``, ``192.168.0.0/16``, ``169.254.0.0/16``
-       (cloud metadata), ``::1``, ``fc00::/7``, ``fe80::/10``.
+       with :mod:`ipaddress`. Any candidate that is not globally
+       routable (``not is_global``), private, loopback, link-local,
+       ULA, unspecified, multicast, or otherwise reserved triggers
+       immediate rejection. This covers at minimum ``127.0.0.0/8``,
+       ``10.0.0.0/8``, ``172.16.0.0/12``, ``192.168.0.0/16``,
+       ``169.254.0.0/16`` (cloud metadata), ``100.64.0.0/10``
+       (carrier-grade NAT), ``::1``, ``fc00::/7``, ``fe80::/10``.
 
     The same check is called for every redirect hop in
     :func:`_load_spec_bytes` so a benign-looking initial host cannot
@@ -692,10 +697,13 @@ def _screen_fetch_host(hostname: str) -> list[str]:
     Fails **closed**, unlike the target guard: an unresolvable name is
     rejected here (the ingest path has no split-horizon fail-open case),
     and there is no allowlist — the fetch path is public-https-only. Every
-    resolved address must be public; any private / loopback / link-local /
-    ULA / unspecified / multicast / reserved candidate rejects the whole
-    fetch. The message stays path-free (no resolved IP echoed) so the
-    response is not a network-topology oracle.
+    resolved address must be public; any candidate that is not globally
+    routable (``not is_global``, which also covers carrier-grade NAT
+    ``100.64.0.0/10``) or is private / loopback / link-local / ULA /
+    unspecified / multicast / reserved rejects the whole fetch. The
+    explicit classes stay next to ``is_global`` because global-scope
+    multicast reports ``is_global=True``. The message stays path-free (no
+    resolved IP echoed) so the response is not a network-topology oracle.
 
     Raises:
         InvalidSpecError: The hostname is unresolvable, resolves to no
@@ -716,7 +724,8 @@ def _screen_fetch_host(hostname: str) -> list[str]:
         except ValueError as exc:
             raise InvalidSpecError("spec URI resolved to an unrecognised address format") from exc
         if (
-            addr.is_private
+            not addr.is_global
+            or addr.is_private
             or addr.is_loopback
             or addr.is_link_local
             or addr.is_reserved
@@ -933,9 +942,9 @@ def _validate_openapi_version(spec: dict[str, Any]) -> None:
     ``swagger: "2.0"`` (no ``openapi`` key) and are rejected with an
     actionable :exc:`UnsupportedSpecError` that names the conversion
     path (a 2.0-only surface such as Harbor 2.x's ``swagger.yaml`` is
-    onboarded by converting it to OpenAPI 3.x and re-ingesting the
-    output). Newer specs with future major versions raise the same
-    error type without the conversion remedy.
+    onboarded through the CLI, which converts it to OpenAPI 3 locally).
+    Newer specs with future major versions raise the same error type
+    without the conversion remedy.
     """
     if "swagger" in spec:
         version = spec.get("swagger", "<missing>")

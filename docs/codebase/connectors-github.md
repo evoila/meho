@@ -143,43 +143,142 @@ gh catalog ingest.
     trailing `Track` single-select on every assigned item; per-item
     field-value pagination stays a separate follow-on.
   - `gh.composite.project_item_add` (write) — `addProjectV2ItemById`.
+    It first reads the content node (`node(id:)`) and refuses content
+    that is not an issue or pull request of the target's repository.
   - `gh.composite.project_item_set_field` (write) —
     `updateProjectV2ItemFieldValue` with a `singleSelectOptionId` value.
-- **`composites/_sub_issues.py`** — the one `issues`-group composite,
-  `gh.composite.sub_issue_add` (write), wrapping
+    It first reads the board item (`node(id:)`) and refuses an item that
+    is not on the target's board, or whose content is not an issue or
+    pull request of the target's repository (a draft issue has no
+    repository, so it is refused).
+- **`composites/_sub_issues.py`** — the sub-issue link of the `issues`
+  group, `gh.composite.sub_issue_add` (write), wrapping
   `POST /repos/{owner}/{repo}/issues/{issue_number}/sub_issues`.
-  **`sub_issue_id` is the child's database `id`, not its issue number** —
-  the REST create-issue response carries that id; passing the number is
-  the obvious mistake, so the schema and docstring both call it out. The
-  sub-issue must share the parent's repository owner.
+  The caller names the parent (`issue_number`) and the child
+  (`sub_issue_number`) by number. MEHO reads the child with
+  `GET .../issues/{sub_issue_number}`, checks that the answer comes from
+  the target's repository (a moved issue answers from its new one) and
+  that it is not a pull request, and sends GitHub the child's database
+  `id` from that read. GitHub has no call that finds an issue by its
+  database id, so a database id alone could not be checked.
+- **`composites/_scope.py`** — the guard of the five ticket writes; see
+  "Why ticket writes need no approval" below.
 
-**Governance posture.** `project_view` is `safety_level="safe"`; the
-three writes are `safety_level="caution"`, all four
-`requires_approval=False`. Adding a card to a board / setting a status
-field / linking a sub-issue are low-blast-radius, reversible
-board-hygiene mutations — honestly a write, but not `dangerous` like the
-vmware VM-delete composites. Each is a **single** logical mutation, so
-the composite is the reviewed unit: the dispatcher runs `policy_gate`
-against the composite's own descriptor before invoking the handler, which
-fully governs the one write it performs. Unlike the multi-write vmware
-composites there is no heterogeneous internal write sub-op to protect, so
-these do **not** call `enforce_subop_policy` (that seam re-gates
-*additional* writes a direct-session composite fans out to). Under this
-posture a human/service operator auto-executes a board write
-(board-complete filing without a `gh` CLI fallback), while an agent
-principal routes to the approval queue via the `caution` safety default —
-exactly the governance a raw CLI fallback would bypass.
+**Governance posture.** All four are `safety_level="safe"` with
+`requires_approval=False`. `project_view` is a read. The three writes
+(`project_item_add`, `project_item_set_field`, `sub_issue_add`) are
+ticket writes: they run at once for every caller, people and agents,
+but only inside the target's own repository and board. The rules and the
+reasons are in the next section, "Why ticket writes need no approval".
+Each write is one mutation, so the dispatcher's `policy_gate` on the
+composite governs the whole call; these composites do not call
+`enforce_subop_policy` (that seam re-gates *additional* writes a
+direct-session composite fans out to).
+
+#### Why ticket writes need no approval
+
+Decision record:
+[`docs/decisions/2026-11-02-github-ticket-writes-are-safe.md`](../decisions/2026-11-02-github-ticket-writes-are-safe.md).
+
+Five GitHub writes are `safe` with `requires_approval=False`:
+
+| Write | Operation |
+|---|---|
+| File an issue | `gh.composite.issue_create` |
+| Comment on an issue | `gh.composite.issue_comment` |
+| Link a sub-issue | `gh.composite.sub_issue_add` |
+| Add an item to a board | `gh.composite.project_item_add` |
+| Set a board field | `gh.composite.project_item_set_field` |
+
+Why: since the approval rules of 2026-10-10, a call with a token runs only
+`safe` operations at once; every `caution` or higher operation waits until
+a person clicks approve in the web interface. A ticket write changes no
+infrastructure. If it waited, every agent would stop at every comment.
+Every other GitHub operation keeps its risk level, also the raw operations
+generated from GitHub's API file.
+
+Two guards make "safe" true:
+
+1. **Only the target's repository and board** (`composites/_scope.py`).
+   - The repository comes from the target's `host`
+     (`api.github.com/repos/<owner>/<repo>` or `<owner>/<repo>`). A write
+     whose `owner`/`repo` is another repository is refused. Names are
+     compared without case, as GitHub does.
+   - The board comes from the target's `extras.project_id`: the board's
+     node id (`project_id` from `project_view`). A board write with another
+     `project_id` is refused.
+   - `project_item_add` adds only issues and pull requests of the target's
+     repository. `project_item_set_field` changes only a board item that
+     holds such an issue or pull request; it reads the item first. A
+     draft issue has no repository, so its fields cannot be set this
+     way. `sub_issue_add` links only issues of that repository.
+   - A target with no repository cannot run the five writes. A target with
+     no board cannot run the two board writes. The refusal says what to
+     set on the target.
+   - Each refusal is a `TicketWriteScopeError` (a `ValueError`) raised
+     before any call to GitHub; the dispatcher answers `connector_error`
+     and writes the audit row.
+   - Agent grants and service read scopes still decide which caller may
+     run which operation on which target.
+2. **Never an infrastructure trigger.**
+   - MEHO never reads a ticket's state, label or comment as an
+     instruction, and a ticket write never starts a run, a check, an
+     approval or an operation in MEHO.
+   - `connectors/github/op_classes.py` declares the five as `write` and
+     marks them as safe writes (`declare_safe_writes` in
+     `meho_backplane.op_classes`; no other connector's op is on that
+     list). So "safe" does not mean "read" for
+     them: a health check (Sensor) refuses them at create and the check
+     runner never runs them (`checks/service.py`, `_safe_tier_floor` in
+     `checks/runner.py`); a satellite runner never takes them on its read
+     path (`classify_satellite_tier` in `runner/satellite_tier.py` puts
+     them in the excluded tier). The audit row and the broadcast event
+     still carry the class `write`.
+   - The target repository must have no GitHub workflow, webhook or app
+     that acts on issue, comment, sub-issue or board events. The probe
+     checks the workflow files (see "Workflow check" below).
+
+**Set up a target for ticket writes.**
+
+- Set `host` to `api.github.com/repos/<owner>/<repo>`.
+- For the board writes, set `extras.project_id` to the board's node id.
+  Read it with `gh.composite.project_view`.
+- Probe the target and read `ticket_write_warning` in its fingerprint.
+- Check once in the repository settings that no webhook and no installed
+  app acts on issue, comment, sub-issue or board events. The connector's
+  rights cannot read all of them, so MEHO cannot check this for you.
+
+**Workflow check.** The probe of a target that names one repository
+(`workflow_check.py`) lists `.github/workflows/` and reads each `.yml` /
+`.yaml` file (at most 100). It reports every workflow whose `on:` names
+`issues`, `issue_comment`, `sub_issues`, `project`, `project_card`,
+`project_column`, `projects_v2` or `projects_v2_item`. The fingerprint
+`extras` carry:
+
+- `workflow_check`: `ok`, `incomplete` (some files could not be read, or
+  there are more than 100) or `unknown` (the folder could not be read);
+- `ticket_event_workflows`: `[{path, events}]`, or `null` when unknown;
+- `ticket_write_warning`: the text to show, or `null`;
+- `workflow_check_error`: why the check is incomplete or unknown.
+
+A missing folder (404) means no workflows. Any other failed read is
+`unknown`, never "no workflows".
 
 **End-to-end acceptance.**
 `backend/tests/test_github_board_composite_flow.py` drives the full
 create → add-to-board → set-Status → link-sub-issue sequence against one
 shared connector-session stub (deterministic, runs in the default unit
 lane), asserting the board node id threads from `project_view` into the
-add + set-field mutations and that the sub-issue link uses the child's
-database id rather than its number. Per-handler unit tests live in
+add + set-field mutations and that the sub-issue link sends the database
+id MEHO read for the child's number. Per-handler unit tests live in
 `test_connectors_github_composites_board.py` /
 `test_connectors_github_composites_sub_issues.py`; registration/posture
-assertions are in `test_connectors_github_composites_register.py`.
+assertions are in `test_connectors_github_composites_register.py`. The
+ticket-write posture and guards are pinned in
+`test_connectors_github_ticket_writes.py`; the health-check refusal in
+`test_checks_safe_ticket_writes.py`; the satellite refusal in
+`test_runner_satellite_tier.py`; the workflow check in
+`test_connectors_github_workflow_check.py`.
 
 ### One repository (`gh.composite.repo_view`)
 
@@ -326,6 +425,83 @@ risk level and approval flag of each operation, the `git` group, the
 preview builder, and that each operation passes the operation contract
 rules of `test_operation_contracts.py` with no gap.
 
+### Issues: search, read, file and comment
+
+Four hand-written operations in the `issues` group let an agent or an
+add-on work with GitHub issues without the raw generated operations. The
+handlers are in `composites/_issues.py`; the schemas and agent guidance are
+in `composites/schemas_issues.py`. Like the other composites, they call
+GitHub through the connector's own session (through `GitRepo` from
+`_git.py`, which checks and percent-encodes the owner and repository), so
+they work on a fresh install with no spec import.
+
+| Operation | What it does | GitHub calls | Risk level |
+|---|---|---|---|
+| `gh.composite.issue_search` | Finds issues in one repository. | `GET /repos/{owner}/{repo}/issues` or `GET /search/issues` | `safe` |
+| `gh.composite.issue_view` | One issue: title, text, state, labels, assignees, parent, direct sub-issues, number of comments, and on request the newest comments. | `GET .../issues/{n}`, `.../parent`, `.../sub_issues`, `.../comments` | `safe` |
+| `gh.composite.issue_create` | Files one issue in the target's repository. Returns its `number` (for `sub_issue_add`), its `node_id` (for `project_item_add`) and its database `id`. | `POST /repos/{owner}/{repo}/issues` | `safe`, runs at once (ticket write) |
+| `gh.composite.issue_comment` | Adds one comment to one issue in the target's repository. | `POST .../issues/{n}/comments` | `safe`, runs at once (ticket write) |
+
+**The two search modes.** Every answer says which mode ran.
+
+- `mode=exact` (the default) uses filters only: `state`, `labels` (all must
+  match), `assignee`, `author`, and an optional exact `phrase`. Newest first.
+  - Without a phrase, MEHO reads the plain issue list, 100 per page, to the
+    end. There is no page cap, so the list is complete. `total_count` is
+    null, because this list has no count.
+  - With a phrase, MEHO uses GitHub's search with the phrase in double
+    quotes, sorted by creation date, and reads up to 1,000 hits.
+- `mode=ranked` sends free text (`query`) to GitHub's search and keeps
+  GitHub's relevance order. It returns at most `limit` hits (default 30,
+  at most 100). Each hit has `suggestion: true`.
+- Every answer carries `mode`, `complete`, `total_count`, `count`, `reason`
+  (why the list is not complete, or null) and `query` (the search text
+  MEHO sent, or null for the plain list).
+- `complete` is false when GitHub says the results are incomplete
+  (`incomplete_results`), when there are more than 1,000 hits (GitHub's
+  search limit), or when a ranked search returned only its limit.
+- Pull requests are left out (`is:issue`, or dropped from the plain list)
+  unless `include_pull_requests` is true.
+
+**The search stays in the repository.** Every search query starts with
+`repo:<owner>/<repo>`. Before any call, MEHO refuses:
+
+- free text or a phrase that holds `repo:`, `org:`, `user:` or `owner:`;
+- free text with `OR`, `AND`, `NOT` or brackets;
+- a phrase with a double quote, and control characters;
+- an assignee or author that is not a GitHub login, and a label with a
+  double quote or a comma.
+
+A refused value raises a `ValueError`; GitHub is not called.
+
+**`issue_view` details.** A 404 from `/parent` means the issue has no
+parent (`parent: null`). A 404 from `/sub_issues` (for example on a pull
+request) means no sub-issues. GitHub lists comments oldest first, so MEHO
+reads the last page and, if needed, the page before it, and returns the
+newest `comments_limit` comments (0 to 50), oldest of them first.
+
+**The writes.** `issue_create` sends only the fields that were given.
+GitHub drops labels and assignees without an error when the identity has
+no push access; the answer shows the labels and assignees GitHub really
+set. Both writes are ticket writes: `safe`, no approval, and only in the
+repository the target names (see "Why ticket writes need no approval").
+
+**Lists.** A long search answer goes behind a result handle. The scalars
+(`mode`, `complete`, `total_count`, `count`, `reason`, `query`) are listed
+under `llm_instructions.result_scalars`, so they stay in the direct answer.
+
+**Tests.** `backend/tests/test_connectors_github_composites_issues.py`
+drives the handlers with saved responses (no live GitHub): both search
+modes, a list over several pages, the 1,000-hit limit, the `repo:` prefix
+on every query, the refused inputs, the parent and comments of
+`issue_view`, and `issue_create` feeding its number to
+`sub_issue_add`. `backend/tests/test_connectors_github_composites_issues_register.py`
+checks the risk levels, the `issues` group, the operation contract rules,
+that each call through the dispatcher writes one audit row, and that a
+write to another repository is refused with no call to GitHub.
+`backend/tests/test_github_board_composite_flow.py` files its issues with
+`issue_create`.
+
 ## Key types
 
 - **`GitHubRestConnector`** (`connector.py`) — `HttpConnector` subclass
@@ -417,7 +593,13 @@ session of ~50 dispatch calls pays the JWT/installation-token
 round-trip exactly once per target. The PAT-path cache lives for
 the connector instance lifetime — operator-managed expiry, no
 MEHO-side refresh dance. Re-reads only on cold cache (restart /
-`aclose`, or the App-path window expiring).
+`aclose`, the App-path window expiring, or `invalidate_credentials`).
+
+`invalidate_credentials(target)` drops both kept tokens for one target.
+Two callers use it: the dispatcher after a failed login, and the target
+update route after a change to the target's connection fields (#3879).
+So a new or narrower credential works on the next call, not after the
+kept token expires.
 
 ### Fingerprint
 
@@ -432,7 +614,9 @@ closed) and inspects `target.host`:
   `permissions`.
 - `host="api.github.com/repos/<owner>/<repo>"` (or `api.github.com/<owner>/<repo>`)
   → `GET /repos/{owner}/{repo}`. Returns repo identity (`full_name`,
-  `id`, `private`, `default_branch`) + owner identity (`login`, `type`).
+  `id`, `private`, `default_branch`) + owner identity (`login`, `type`),
+  plus the workflow check of the ticket writes (`workflow_check`,
+  `ticket_event_workflows`, `ticket_write_warning`; see "Workflow check").
 
 Transport / credential failures surface as `reachable=False` with both
 the exception class+message in `extras["error"]` and the structured T11

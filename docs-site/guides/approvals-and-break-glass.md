@@ -63,9 +63,69 @@ meho approvals approve <id>         # runs the parked write now
 meho approvals reject <id>          # terminal; the requester must re-file
 ```
 
+After approval, the person who sent the request reads what the operation
+printed with one command. Only that person can read it:
+
+```bash
+meho approvals result <id>          # the output of the approved run
+```
+
 The operator console exposes the same queue at **`/ui/approvals`**: a
 bell with the live pending count, a request-detail modal with the
 proposed effect, and Approve / Deny buttons.
+
+When several requests belong to one change ticket and depend on each
+other, approve them as a group, oldest first:
+
+```bash
+meho approvals approve --filter-work-ref <ticket> --in-order
+```
+
+Each step is an ordinary approval and runs at once. MEHO goes on to the
+next step only when the run was OK. It stops at the first step that fails
+or is refused, and names that step and the steps it did not run. At each
+step it shows what the step does and asks you to type `yes` first. In
+the console, filter the Pending tab to the change ticket and use
+**Approve group in order**. The sign-in rules hold for every step: when
+a step needs a new sign-in (your sign-in is too old, or the step is
+`destructive` and your sign-in already approved something), the run
+stops there and shows **Sign in again**. Sign in, then start the run
+again; the steps that ran OK are skipped.
+
+You can also approve several requests by id in one run:
+`meho approvals approve <id> <id> ...`. The command shows each request
+(what it does, the operation, the connector and its version, the target,
+the risk level and the parameters) and asks you to type `yes` for each
+one. Anything else skips that request.
+
+**Approving asks you to sign in again.** An approval must come from a
+person who is present, so MEHO checks the sign-in behind every approval.
+In the console, your sign-in must be at most 15 minutes old and must
+have asked for your password. When it is older, the request shows **Sign
+in to approve** instead of **Approve**: click it, sign in with your
+password (and your authenticator code or passkey), then open the request
+again and approve. On the command line and REST, MEHO needs a fresh
+sign-in made only for approvals. So `meho approvals approve` opens your
+browser and asks for your password (and your authenticator code, if your
+realm asks for one).
+
+- The browser always asks for your password, even when you are signed in
+  to the console in the same browser.
+- One sign-in covers approvals for 15 minutes. In that time one run of
+  the command can approve several requests.
+- An operation marked `destructive` needs a sign-in of its own. The
+  command opens the browser again for it.
+- The command keeps the sign-in in memory for this one run. It never
+  stores it.
+- Your normal `meho login` stays as it is, but it never approves. An MCP
+  token or an agent token never approves either.
+- Reject needs no new sign-in, in the console or on the command line.
+- The same limits hold in the console: 15 minutes for one sign-in, and a
+  sign-in of its own for a `destructive` operation.
+
+Without a browser (for example over SSH), the command prints the sign-in
+link and stops. Approve in the console instead: it is the normal place to
+approve.
 
 ## The rule: requester and approver must differ
 
@@ -268,8 +328,11 @@ What stays the same on a sandbox:
 
 How delete grants work:
 
-- Only a tenant admin creates one, and only in the web console. The REST
-  API and the CLI refuse it, also with a person's token.
+- Only a tenant admin creates one, in the web console. The REST API and
+  the CLI refuse it, also with a person's token, unless the instance has
+  the chart value `sandboxMode.deleteGrantsFromApi: true`. Then a tenant
+  admin who signed in with `meho login` may create one through REST or
+  `meho service-principals grants create`, with the same checks.
 - Every delete grant expires within 30 days. MEHO never renews one by
   itself; the banner on every console page counts the delete grants that
   expire within 7 days. A tenant admin renews the delete grants of one
@@ -406,6 +469,14 @@ single-account hole for every operation.
 the requester. The modal names both options inline and links back here.
 Deny stays enabled. To take back your own request, use
 `meho approvals withdraw <id>` instead.
+
+**`approve` fails with `fresh_sign_in_required` or
+`fresh_sign_in_already_used`.** The command line or REST call did not show
+a fresh, unused sign-in. Run `meho approvals approve <id>` in a terminal
+where a browser can open, and sign in when asked. If it still fails right
+after you signed in, the realm is not set up for it yet: see
+[Keycloak realm setup, Step 2](../install/keycloak-realm.md#step-2-create-the-public-meho-cli-client).
+Or approve in the console.
 
 **I set the flag but `/ready` still says `four_eyes_enforced`.** The
 backplane reads `APPROVAL_ALLOW_SELF_APPROVAL` at startup. Confirm the

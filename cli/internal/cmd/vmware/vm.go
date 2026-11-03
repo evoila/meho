@@ -16,17 +16,18 @@ import (
 )
 
 // newVMCmd returns the `meho vmware vm` parent command and assembles
-// its three verbs (list / info / create). The parent itself takes no
-// args and prints its own help.
+// its verbs (list / info / create) and the cdrom sub-tree. The parent
+// itself takes no args and prints its own help.
 func newVMCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "vm",
-		Short:        "vSphere VM verbs (list / info / create)",
+		Short:        "vSphere VM verbs (list / info / create / cdrom)",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newVMListCmd())
 	cmd.AddCommand(newVMInfoCmd())
 	cmd.AddCommand(newVMCreateCmd())
+	cmd.AddCommand(newVMCdromCmd())
 	return cmd
 }
 

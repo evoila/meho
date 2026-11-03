@@ -15,7 +15,7 @@ migrations 0072 and 0073.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -87,9 +87,11 @@ def _insert(conn: sa.Connection, *, row_id: str, status: str) -> None:
     )
 
 
-def test_upgrade_adds_column_and_partial_unique_index(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_column_and_partial_unique_index(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     columns, indexes = _schema(sync_url)
     assert columns[_COLUMN]["nullable"] is True
@@ -99,9 +101,10 @@ def test_upgrade_adds_column_and_partial_unique_index(alembic_cfg: tuple[Config,
 
 def test_index_blocks_two_live_rows_but_frees_the_key_after_reject(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     sync_eng = sa_create_engine(sync_url)
     try:
@@ -116,9 +119,11 @@ def test_index_blocks_two_live_rows_but_frees_the_key_after_reject(
         sync_eng.dispose()
 
 
-def test_downgrade_drops_column_and_index(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_drops_column_and_index(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
 
     columns, indexes = _schema(sync_url)
@@ -126,9 +131,11 @@ def test_downgrade_drops_column_and_index(alembic_cfg: tuple[Config, str]) -> No
     assert _INDEX not in indexes
 
 
-def test_upgrade_round_trips_after_clean_downgrade(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_round_trips_after_clean_downgrade(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
     command.upgrade(cfg, _REVISION)
 

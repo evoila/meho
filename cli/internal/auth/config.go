@@ -28,6 +28,17 @@ type Config struct {
 	// operator most recently authenticated against. Written by
 	// `meho login` at the end of a successful flow.
 	BackplaneURL string `json:"backplane_url"`
+	// Tenant is the tenant chosen with `meho tenants use` for this
+	// backplane, or nil. The CLI sends its ID in the Meho-Tenant
+	// header on every call. A login in one tenant needs none.
+	Tenant *Tenant `json:"tenant,omitempty"`
+}
+
+// Tenant names one tenant of the person: the ID the CLI sends, and
+// the name it shows.
+type Tenant struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // ErrConfigNotFound is returned by LoadConfig when the operator

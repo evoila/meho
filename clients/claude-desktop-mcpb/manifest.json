@@ -22,7 +22,8 @@
       "env": {
         "NODE_EXTRA_CA_CERTS": "${user_config.ca_cert}",
         "MEHO_MCP_CLIENT_ID": "${user_config.client_id}",
-        "MEHO_MCP_SCOPES": "${user_config.scopes}"
+        "MEHO_MCP_SCOPES": "${user_config.scopes}",
+        "MEHO_TENANT": "${user_config.tenant}"
       }
     }
   },
@@ -51,6 +52,12 @@
       "title": "OAuth scopes (advanced)",
       "description": "Space-separated OAuth scopes the shim requests during login. Leave the default: the working surface plus offline_access, which keeps the login alive between uses (up to 48 hours with no use, with the recommended realm setting). Add mcp:admin (e.g. \"mcp:read mcp:execute offline_access mcp:admin\") only to deliberately opt into operator mode. Every scope must be offered by your realm's meho-mcp client, or the login fails with invalid_scope.",
       "default": "mcp:read mcp:execute offline_access",
+      "required": false
+    },
+    "tenant": {
+      "type": "string",
+      "title": "Tenant (optional)",
+      "description": "The MEHO tenant this extension works in: a tenant name or ID. Leave it empty if your login has only one tenant. If your login has several tenants, set it, or MEHO refuses every tool except meho_status (which lists your tenants). To work in another tenant, change this field and turn the extension off and on again. The first session in a new tenant asks you to log in again.",
       "required": false
     }
   },

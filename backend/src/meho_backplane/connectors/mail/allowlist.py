@@ -29,6 +29,13 @@ receiving host, but no practical mail system distinguishes
 ``OnCall@`` from ``oncall@``, and a case-sensitive floor would turn
 an operator's capitalization habit into a silent refusal.
 
+A recipient must be a **plain** address: the local part (the part
+before the ``@``) holds only letters, digits and ``. _ + -``. Any
+other character refuses the recipient before the allowlist is even
+consulted (:func:`_normalise_recipient`). So the string the floor
+checks and the string the relay receives in ``RCPT TO`` are the same
+plain ``local@domain``: the relay only ever sees a plain mailbox name.
+
 There is deliberately no pattern/glob dimension (#1177: one closed-set
 config, no DSL). The SMTP block itself is deployment-level (one MTA, one
 floor). A **per-tenant narrowing** override rides on top of this floor
@@ -45,6 +52,9 @@ past it.
 
 from __future__ import annotations
 
+import re
+from typing import Final
+
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -53,6 +63,13 @@ __all__ = [
     "parse_recipient_allowlist",
     "recipient_allowed",
 ]
+
+
+#: The only characters a recipient's local part may hold (after the
+#: case fold). Letters, digits, dot, underscore, plus and hyphen cover
+#: every mailbox name in practice (``first.last+tag``); everything else
+#: is refused so the relay only ever sees a plain mailbox name.
+_PLAIN_LOCAL_PART: Final[re.Pattern[str]] = re.compile(r"[a-z0-9._+-]+")
 
 
 class RecipientNotAllowedError(ValueError):
@@ -133,10 +150,13 @@ def _normalise_recipient(address: str) -> str | None:
     """Return the folded ``local@domain`` candidate, or ``None`` if unparseable.
 
     An address is unparseable — and therefore never matches any allowlist —
-    when it is empty, carries whitespace or non-printable characters, or is
-    not exactly one ``local@domain`` pair. Refusing an unparseable recipient
-    (rather than guessing) is what keeps SMTP envelope injection (CR/LF in a
-    recipient) structurally impossible past this gate.
+    when it is empty, carries whitespace or non-printable characters, is
+    not exactly one ``local@domain`` pair, or has a local part with any
+    character outside :data:`_PLAIN_LOCAL_PART` (letters, digits and
+    ``. _ + -``). Refusing an unparseable recipient (rather than guessing)
+    keeps a line break out of the envelope and keeps the local part a
+    plain mailbox name: ``%``, ``!``, ``<``, ``>`` and the like never
+    reach the relay.
     """
     candidate = address.strip().lower()
     local, sep, domain = candidate.partition("@")
@@ -146,6 +166,7 @@ def _normalise_recipient(address: str) -> str | None:
         or not domain
         or "@" in domain
         or any(ch.isspace() or not ch.isprintable() for ch in candidate)
+        or _PLAIN_LOCAL_PART.fullmatch(local) is None
     ):
         return None
     return candidate
@@ -189,11 +210,12 @@ def assert_recipient_allowed(address: str) -> None:
     * an address whose domain is listed → allowed.
 
     An address the floor cannot positively parse — empty, containing
-    whitespace or control characters, or not exactly ``local@domain`` —
-    is **refused**, not guessed at: only a parseable address can match
-    the allowlist, which also keeps SMTP envelope injection (CR/LF in a
-    recipient) structurally impossible past this gate. The message never
-    echoes the parsed set (no recipient-space oracle).
+    whitespace or control characters, not exactly ``local@domain``, or
+    with a local part outside letters, digits and ``. _ + -`` — is
+    **refused**, not guessed at: only a plain, parseable address can
+    match the allowlist, which also keeps a line break out of the
+    envelope. The message never echoes the parsed set (no
+    recipient-space oracle).
 
     Membership is decided by :func:`recipient_allowed`; the empty-allowlist
     and malformed-address arms are split out here only so each raises its

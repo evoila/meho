@@ -29,7 +29,7 @@ from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
 from meho_backplane.broadcast.client import get_broadcast_client
-from meho_backplane.broadcast.events import BroadcastEvent, classify_op
+from meho_backplane.broadcast.events import BroadcastEvent
 from meho_backplane.broadcast.history import (
     WRITE_OP_CLASSES,
     event_matches,
@@ -147,7 +147,7 @@ async def _recent_target_events_newest_first(
 async def build_target_activity_advisory(
     operator: Operator,
     *,
-    op_id: str,
+    op_class: str,
     target_name: str | None,
 ) -> dict[str, Any]:
     """Build the ``extras`` fragment advising of recent peer activity.
@@ -166,8 +166,9 @@ async def build_target_activity_advisory(
 
     * the feature is disabled (``dispatch_activity_advisory_window_minutes
       == 0``);
-    * the op is not write-class (read-class dispatches perform no stream
-      read -- the frozenset check returns before any Valkey call);
+    * *op_class* is not write-class (read-class dispatches perform no
+      stream read -- the frozenset check returns before any Valkey call).
+      The dispatcher passes the class it stores on the op's audit row;
     * the dispatch has no target;
     * no peer activity was found in the window.
 
@@ -183,7 +184,7 @@ async def build_target_activity_advisory(
     window_minutes = get_settings().dispatch_activity_advisory_window_minutes
     if window_minutes <= 0:
         return {}
-    if classify_op(op_id) not in _ADVISORY_WRITE_OP_CLASSES:
+    if op_class not in _ADVISORY_WRITE_OP_CLASSES:
         return {}
     if not target_name:
         return {}

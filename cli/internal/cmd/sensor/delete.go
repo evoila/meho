@@ -101,11 +101,13 @@ func runDelete(cmd *cobra.Command, opts deleteOptions) error {
 	if status < 200 || status >= 300 {
 		return renderHTTPStatus(cmd, backplaneURL, status, resp.Body, opts.JSONOut)
 	}
+	auditID := output.AuditIDFromResponse(resp.HTTPResponse)
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(),
-			map[string]any{"sensor_id": opts.SensorID, "deleted": true})
+			map[string]any{"sensor_id": opts.SensorID, "deleted": true, "audit_id": auditID})
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "deleted sensor %s\n", opts.SensorID)
+	output.WriteAuditReceipt(cmd.OutOrStdout(), auditID)
 	return nil
 }
 

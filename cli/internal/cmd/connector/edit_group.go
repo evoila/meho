@@ -109,7 +109,8 @@ func runEditGroup(cmd *cobra.Command, opts editGroupOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
 	}
-	if err := patchGroup(cmd.Context(), backplaneURL, opts.ConnectorID, opts.GroupKey, body); err != nil {
+	auditID, err := patchGroup(cmd.Context(), backplaneURL, opts.ConnectorID, opts.GroupKey, body)
+	if err != nil {
 		var he *httpResponseError
 		if errors.As(err, &he) {
 			return renderHTTPStatus(cmd, backplaneURL, he.statusCode, he.body, opts.JSONOut)
@@ -126,9 +127,10 @@ func runEditGroup(cmd *cobra.Command, opts editGroupOptions) error {
 			ConnectorID: opts.ConnectorID,
 			GroupKey:    opts.GroupKey,
 			Patched:     body,
+			AuditID:     auditID,
 		})
 	}
-	printEditGroupResult(cmd.OutOrStdout(), opts.ConnectorID, opts.GroupKey, body)
+	printEditGroupResult(cmd.OutOrStdout(), opts.ConnectorID, opts.GroupKey, body, auditID)
 	return nil
 }
 
@@ -141,10 +143,10 @@ func patchGroup(
 	ctx context.Context,
 	backplaneURL, connectorID, groupKey string,
 	body api.EditGroupBody,
-) error {
+) (*string, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	resp, err := retryOn401(ctx, authed,
 		func(ctx context.Context) (*api.EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse, error) {
@@ -161,26 +163,28 @@ func patchGroup(
 		},
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if resp.StatusCode() != http.StatusNoContent {
-		return &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+		return nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
 	}
-	return nil
+	return output.AuditIDFromResponse(resp.HTTPResponse), nil
 }
 
 // editGroupResult is the synthetic envelope rendered to JSON for
 // --json operators. The PATCH route returns 204 No Content; the only
 // structured record of the operator's edit is the body they sent,
 // which this envelope echoes back together with the path coordinates
-// for downstream tooling.
+// for downstream tooling. AuditID comes from the Meho-Audit-Id
+// response header (#4976); null when the backplane sent none.
 type editGroupResult struct {
 	ConnectorID string            `json:"connector_id"`
 	GroupKey    string            `json:"group_key"`
 	Patched     api.EditGroupBody `json:"patched"`
+	AuditID     *string           `json:"audit_id"`
 }
 
-func printEditGroupResult(w io.Writer, connectorID, groupKey string, body api.EditGroupBody) {
+func printEditGroupResult(w io.Writer, connectorID, groupKey string, body api.EditGroupBody, auditID *string) {
 	fmt.Fprintf(w, "%s/%s — updated (204 No Content)\n", connectorID, groupKey)
 	if body.Name != nil {
 		fmt.Fprintf(w, "  name: %s\n", *body.Name)
@@ -188,4 +192,5 @@ func printEditGroupResult(w io.Writer, connectorID, groupKey string, body api.Ed
 	if body.WhenToUse != nil {
 		fmt.Fprintf(w, "  when_to_use: %s\n", *body.WhenToUse)
 	}
+	output.WriteAuditReceipt(w, auditID)
 }

@@ -81,7 +81,7 @@ class AuditQueryFilters(BaseModel):
     injects it from the validated JWT.
 
     Glob semantics: ``op_id`` accepts shell-style ``*`` wildcards
-    (``"vsphere.vm.*"``), which the query handler translates to SQL ``LIKE``
+    (``"k8s.pod.*"``), which the query handler translates to SQL ``LIKE``
     with ``%`` substitution. ``?`` and bracket expressions are not supported
     in v0.2 — the consumer use case is prefix matching, not arbitrary glob.
 
@@ -133,6 +133,8 @@ class AuditEntry(BaseModel):
     * ``id`` ← ``audit_log.id``
     * ``ts`` ← ``audit_log.occurred_at``
     * ``tenant_id`` ← ``audit_log.tenant_id``
+    * ``tenant_name`` ← LEFT JOIN ``tenant.name`` ON ``audit_log.tenant_id``
+      (#5238). ``None`` when the tenant row is gone; show ``tenant_id`` then.
     * ``principal_sub`` ← ``audit_log.operator_sub``
     * ``target_id`` ← ``audit_log.target_id``
     * ``target_name`` ← LEFT JOIN ``targets.name`` ON ``audit_log.target_id``
@@ -149,6 +151,7 @@ class AuditEntry(BaseModel):
       ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain
       None pending a separate fix to bind ``name`` to contextvars in
       ``verify_jwt_and_bind``.
+    * ``sandbox_mode`` ← ``audit_log.sandbox_mode`` (the sandbox mark; #4622)
     * ``broadcast_event_id`` — v0.2 placeholder, always None (FK direction
       is reversed: ``BroadcastEvent.audit_id`` points at the audit row).
     """
@@ -158,6 +161,7 @@ class AuditEntry(BaseModel):
     id: uuid.UUID
     ts: datetime
     tenant_id: uuid.UUID | None
+    tenant_name: str | None = None
     principal_sub: str
     principal_name: str | None
     target_id: uuid.UUID | None
@@ -185,6 +189,10 @@ class AuditEntry(BaseModel):
     # ``audit_log.event_class`` column. Rows written before the column
     # existed read as ``legacy_request``.
     event_class: str
+    # Whether the instance ran in sandbox mode when it wrote the row
+    # (#4622), from the real ``audit_log.sandbox_mode`` column. Rows
+    # written before the column existed read as ``False``.
+    sandbox_mode: bool
     broadcast_event_id: uuid.UUID | None
 
 

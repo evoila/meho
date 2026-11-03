@@ -30,7 +30,6 @@ from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
-from meho_backplane.broadcast.events import classify_op
 from meho_backplane.broadcast.history import (
     _is_expired_claim,
     _target_matches,
@@ -113,7 +112,7 @@ def _claim_gap(
 async def announce_claim_gap(
     operator: Operator,
     *,
-    op_id: str,
+    op_class: str,
     target_name: str | None,
 ) -> ClaimGap | None:
     """Return ``None`` when the caller holds an active claim covering this op.
@@ -136,8 +135,8 @@ async def announce_claim_gap(
       operator.sub``, so a delegated agent's claim rides its human
       principal's ``sub``);
     * it has not expired (a claim with no ``ttl_minutes`` never expires);
-    * its declared ``planned_op_class`` matches the op's
-      :func:`classify_op` class, or the claim declared no class (a
+    * its declared ``planned_op_class`` matches *op_class* (the class the
+      dispatcher stores on the op's audit row), or the claim declared no class (a
       class-agnostic claim covers any op); and
     * its target attribution covers the op (see :func:`_claim_covers_target`),
       matched on the stored values, never on the read tools' untrusted wrap.
@@ -159,7 +158,6 @@ async def announce_claim_gap(
     async with get_sessionmaker()() as session:
         rows = (await session.execute(stmt)).scalars().all()
     now = datetime.now(UTC)
-    op_class = classify_op(op_id)
     gap: ClaimGap = "no_claim"
     for row in rows:
         row_gap = _claim_gap(
@@ -175,11 +173,11 @@ async def announce_claim_gap(
 async def caller_has_active_announce_claim(
     operator: Operator,
     *,
-    op_id: str,
+    op_class: str,
     target_name: str | None,
 ) -> bool:
     """Return ``True`` iff the caller holds an active claim covering this op.
 
     The yes/no form of :func:`announce_claim_gap`, for the announce gate.
     """
-    return await announce_claim_gap(operator, op_id=op_id, target_name=target_name) is None
+    return await announce_claim_gap(operator, op_class=op_class, target_name=target_name) is None

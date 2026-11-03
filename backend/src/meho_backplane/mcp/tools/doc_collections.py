@@ -71,7 +71,12 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import DocCollection as DocCollectionORM
 from meho_backplane.docs_collections import project_doc_collection_to_summary
 from meho_backplane.docs_search import collection_capability_key
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 
 __all__: list[str] = []
 
@@ -314,6 +319,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="doc_collections",
         name="list_doc_collections",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=_LIST_DOC_COLLECTIONS_DESCRIPTION,
         inputSchema=_LIST_DOC_COLLECTIONS_INPUT_SCHEMA,

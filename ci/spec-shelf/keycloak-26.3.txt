@@ -1,0 +1,1 @@
+docs/keycloak-26.3/keycloak-admin-openapi.json

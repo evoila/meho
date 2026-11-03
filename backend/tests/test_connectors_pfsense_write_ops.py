@@ -305,6 +305,10 @@ async def test_gateway_add_config_read_failure_raises() -> None:
         {"name": "LAB_GW", "interface": "lan", "gateway": "not-an-ip"},
         {"name": "LAB_GW", "interface": "lan", "gateway": "10.0.0.1; rm -rf /"},
         {"name": "LAB_GW", "interface": "lan"},  # missing gateway
+        {"name": "LAB_GW", "interface": "lan", "gateway": "10.0.0.1", "descr": "a\nb"},
+        {"name": "LAB_GW", "interface": "lan", "gateway": "10.0.0.1", "descr": "   "},
+        {"name": "LAB_GW", "interface": "lan", "gateway": "10.0.0.1", "descr": "x" * 201},
+        {"name": "LAB_GW", "interface": "lan", "gateway": "10.0.0.1", "descr": 7},
     ],
 )
 async def test_gateway_add_rejects_bad_input_before_ssh(params: dict[str, Any]) -> None:
@@ -373,6 +377,90 @@ async def test_route_add_canonicalises_host_bits() -> None:
     assert mock_cmd.await_count == 1
 
 
+async def test_route_add_default_descr_names_the_network() -> None:
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [
+            _proc(_CONFIG_GW_NO_ROUTE),
+            _proc("", 0),
+            _proc("", 0),
+            _proc("", 0),
+            _proc(_CONFIG_GW_WITH_ROUTE),
+        ]
+        result = await connector.route_static_add(
+            _TARGET, {"network": "10.9.0.0/24", "gateway": "LAB_GW"}
+        )
+    assert result["descr"] == "meho: static route 10.9.0.0/24"
+    assert "$route['descr'] = 'meho: static route 10.9.0.0/24';" in _commands(mock_cmd)[1]
+
+
+async def test_route_add_writes_caller_descr_escaped() -> None:
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [
+            _proc(_CONFIG_GW_NO_ROUTE),
+            _proc("", 0),
+            _proc("", 0),
+            _proc("", 0),
+            _proc(_CONFIG_GW_WITH_ROUTE),
+        ]
+        result = await connector.route_static_add(
+            _TARGET,
+            {
+                "network": "10.9.0.0/24",
+                "gateway": "LAB_GW",
+                "descr": "  lab-a VPN users, ticket ABC-12 (it's $ok)  ",
+            },
+        )
+    assert result["descr"] == "lab-a VPN users, ticket ABC-12 (it's $ok)"
+    body = _commands(mock_cmd)[1]
+    assert "$route['descr'] = 'lab-a VPN users, ticket ABC-12 (it\\'s $ok)';" in body
+    # The write_config message keeps naming the network, not the free text.
+    assert "write_config('meho: add static route 10.9.0.0/24');" in body
+
+
+async def test_gateway_add_writes_caller_descr() -> None:
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [
+            _proc(_CONFIG_NO_GW),
+            _proc("", 0),
+            _proc("", 0),
+            _proc("", 0),
+            _proc(_CONFIG_WITH_LAB_GW),
+        ]
+        result = await connector.gateway_add(
+            _TARGET,
+            {"name": "LAB_GW", "interface": "lan", "gateway": "10.0.0.1", "descr": "lab-a uplink"},
+        )
+    assert result["descr"] == "lab-a uplink"
+    assert "$gw['descr'] = 'lab-a uplink';" in _commands(mock_cmd)[1]
+
+
+async def test_gateway_add_default_descr_names_the_gateway() -> None:
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [_proc(_CONFIG_WITH_LAB_GW)]
+        result = await connector.gateway_add(
+            _TARGET, {"name": "LAB_GW", "interface": "lan", "gateway": "10.0.0.1"}
+        )
+    assert result["descr"] == "meho: gateway LAB_GW"
+
+
+def test_descr_is_in_both_add_schemas_and_rejects_newlines() -> None:
+    from jsonschema import Draft202012Validator
+
+    for op_id, base in (
+        ("pfsense.gateway.add", {"name": "LAB_GW", "interface": "lan", "gateway": "10.0.0.1"}),
+        ("pfsense.route.static.add", {"network": "10.9.0.0/24", "gateway": "LAB_GW"}),
+    ):
+        op = next(o for o in PFSENSE_OPS if o.op_id == op_id)
+        validator = Draft202012Validator(op.parameter_schema)
+        assert validator.is_valid({**base, "descr": "lab-a, ticket ABC-12"}), op_id
+        assert not validator.is_valid({**base, "descr": "two\nlines"}), op_id
+        assert not validator.is_valid({**base, "descr": "x" * 201}), op_id
+
+
 # ---------------------------------------------------------------------------
 # pfsense.route.static.add -- already present + guards
 # ---------------------------------------------------------------------------
@@ -425,6 +513,8 @@ async def test_route_add_playback_nonzero_exit_raises() -> None:
         {"network": "10.9.0.0/24", "gateway": "bad gateway"},
         {"network": "10.9.0.0/24", "gateway": "gw'; drop"},
         {"gateway": "LAB_GW"},  # missing network
+        {"network": "10.9.0.0/24", "gateway": "LAB_GW", "descr": "line\rbreak"},
+        {"network": "10.9.0.0/24", "gateway": "LAB_GW", "descr": ""},
     ],
 )
 async def test_route_add_rejects_bad_input_before_ssh(params: dict[str, Any]) -> None:
@@ -503,6 +593,7 @@ def test_gateway_add_response_schema_accepts_both_outcomes() -> None:
             "gateway": "10.0.0.1",
             "ipprotocol": "inet",
             "monitor_disable": False,
+            "descr": "meho: gateway LAB_GW",
             "existed_before": False,
             "applied": True,
             "existing": None,
@@ -517,6 +608,7 @@ def test_gateway_add_response_schema_accepts_both_outcomes() -> None:
             "gateway": "10.0.0.1",
             "ipprotocol": "inet",
             "monitor_disable": False,
+            "descr": "meho: gateway LAB_GW",
             "existed_before": True,
             "applied": False,
             "existing": {"name": "LAB_GW", "interface": "lan"},
@@ -536,6 +628,7 @@ def test_route_add_response_schema_accepts_both_outcomes() -> None:
             "resource": "static_route",
             "network": "10.9.0.0/24",
             "gateway": "LAB_GW",
+            "descr": "meho: static route 10.9.0.0/24",
             "existed_before": False,
             "applied": True,
             "existing": None,

@@ -5,7 +5,8 @@
 
 The default renders no sandbox setting. With ``sandboxMode.enabled=true``
 the ConfigMap carries ``MEHO_SANDBOX_MODE`` and
-``MEHO_SANDBOX_MODE_CONFIRM``, the render fails when ``confirmHost`` is
+``MEHO_SANDBOX_MODE_CONFIRM`` (and ``MEHO_SANDBOX_DELETE_GRANTS_FROM_API``
+when ``sandboxMode.deleteGrantsFromApi`` is on too, #5251), the render fails when ``confirmHost`` is
 not ``ingress.host`` (or is missing), and the install notes warn. Skips
 where ``helm`` is absent unless ``MEHO_REQUIRE_HELM=1``.
 """
@@ -110,6 +111,14 @@ def test_enabled_renders_both_settings_and_warns(tmp_path: Path) -> None:
     notes = _render_notes(tmp_path, *_ON)
     assert "WARNING: sandbox mode is ON" in notes
     assert "disposable" in notes
+
+
+def test_delete_grants_from_api_renders_only_with_the_mode_on() -> None:
+    assert "MEHO_SANDBOX_DELETE_GRANTS_FROM_API" not in _configmap_data(*_ON)
+    on = _configmap_data(*_ON, "--set", "sandboxMode.deleteGrantsFromApi=true")
+    assert on["MEHO_SANDBOX_DELETE_GRANTS_FROM_API"] == "true"
+    off = _configmap_data("--set", "sandboxMode.deleteGrantsFromApi=true")
+    assert not [key for key in off if key.startswith("MEHO_SANDBOX")]
 
 
 def test_confirm_host_must_equal_ingress_host() -> None:

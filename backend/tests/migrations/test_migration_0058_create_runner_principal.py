@@ -19,7 +19,7 @@ uses only generic DDL, so PG parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -111,10 +111,12 @@ def _unique_index_names(sync_url: str, table: str) -> set[str]:
     return {str(row[1]) for row in rows if int(row[2]) == 1}
 
 
-def test_upgrade_creates_runner_principal_table(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_creates_runner_principal_table(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0058`` creates ``runner_principal`` with the full column set."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     assert _columns(sync_url, _TABLE) == _EXPECTED_COLUMNS
     # Every column is NOT NULL (the register path always populates them).
@@ -122,21 +124,25 @@ def test_upgrade_creates_runner_principal_table(alembic_cfg: tuple[Config, str])
         assert _not_null(sync_url, _TABLE, column), f"{column} must be NOT NULL"
 
 
-def test_upgrade_creates_unique_indexes(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_creates_unique_indexes(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """The two unique indexes (tenant+name, keycloak_client_id) are created."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _unique_index_names(sync_url, _TABLE) >= _UNIQUE_INDEXES
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0057"`` drops the table; ``upgrade "0058"`` recreates it.
 
     Pinned to this migration's own revision on both legs (never ``head``)
     so a future head migration cannot break the round-trip.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _TABLE in _table_names(sync_url)
 
     command.downgrade(cfg, _DOWN_REVISION)

@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# The appliance's first start: reads the import wizard's fields and makes
+# this appliance its own (firststart.sh). It runs before SSH and the console
+# login, because it makes the SSH host keys and the admin account. Once it
+# is done, the condition keeps it from running again.
+
+[Unit]
+Description=MEHO appliance first start
+ConditionPathExists=!/var/lib/meho/firststart.done
+After=network.target
+Before=ssh.service systemd-user-sessions.service getty-pre.target
+Wants=getty-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/meho/appliance/firststart/firststart.sh
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

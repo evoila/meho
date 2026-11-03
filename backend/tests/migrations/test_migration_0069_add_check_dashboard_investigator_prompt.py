@@ -20,7 +20,7 @@ DDL through ``batch_alter_table``, so PG parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -102,24 +102,28 @@ def _insert_pre_0069_dashboard(sync_url: str) -> None:
         sync_eng.dispose()
 
 
-def test_upgrade_adds_nullable_prompt_column(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_nullable_prompt_column(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0069`` lands ``investigator_prompt`` as a nullable column."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     info = dict(_table_info(sync_url))
     assert _COLUMN in info, "migration 0069 must add check_dashboards.investigator_prompt"
     assert info[_COLUMN], "investigator_prompt must be nullable (NULL = pre-#2721 briefing)"
 
 
-def test_existing_row_backfills_null(alembic_cfg: tuple[Config, str]) -> None:
+def test_existing_row_backfills_null(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """A row inserted at ``0068`` backfills a NULL prompt.
 
     The behaviour-preserving property: no pre-#2721 Dashboard's briefing
     changes when the migration lands, because NULL is the "unchanged" state.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     _insert_pre_0069_dashboard(sync_url)
 
     command.upgrade(cfg, _REVISION)
@@ -136,7 +140,9 @@ def test_existing_row_backfills_null(alembic_cfg: tuple[Config, str]) -> None:
     assert row[0] is None, "pre-0069 rows must backfill with no operator prompt"
 
 
-def test_notify_columns_survive_the_add(alembic_cfg: tuple[Config, str]) -> None:
+def test_notify_columns_survive_the_add(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """0068's columns and CHECK survive 0069's batch block.
 
     ``batch_alter_table`` recreates the table on SQLite for operations the
@@ -144,7 +150,7 @@ def test_notify_columns_survive_the_add(alembic_cfg: tuple[Config, str]) -> None
     (and the row data in it) comes through the migration intact.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     _insert_pre_0069_dashboard(sync_url)
 
     command.upgrade(cfg, _REVISION)
@@ -163,14 +169,16 @@ def test_notify_columns_survive_the_add(alembic_cfg: tuple[Config, str]) -> None
     assert row[1] == "critical"
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0068"`` drops the column; ``upgrade "0069"`` restores it.
 
     Pinned to this migration's own revision on both legs (never ``head``) so a
     future head migration cannot break the round-trip.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _COLUMN in _columns(sync_url)
 
     command.downgrade(cfg, _DOWN_REVISION)

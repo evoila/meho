@@ -377,6 +377,7 @@ def test_tools_call_handler_returns_result_model_dump(
         work_ref=None,
         policy_decision=None,
         event_class="legacy_request",
+        sandbox_mode=False,
         broadcast_event_id=None,
     )
     mock_query = AsyncMock(

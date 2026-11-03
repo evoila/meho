@@ -16,7 +16,7 @@ generic ``ADD COLUMN`` / ``DROP COLUMN`` DDL so PG parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -68,17 +68,21 @@ def _columns(sync_url: str, table: str) -> set[str]:
     return {str(row[1]) for row in rows}
 
 
-def test_upgrade_adds_agent_read_gate_column(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_agent_read_gate_column(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0087`` adds the nullable tri-state agent-read gate column."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _NEW_COLUMN in _columns(sync_url, "tenant")
 
 
-def test_column_is_nullable_tristate(alembic_cfg: tuple[Config, str]) -> None:
+def test_column_is_nullable_tristate(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """The column is nullable (NULL = inherit) so the add-column needs no backfill."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     sync_eng = sa_create_engine(sync_url)
     try:
         with sync_eng.connect() as conn:
@@ -91,10 +95,12 @@ def test_column_is_nullable_tristate(alembic_cfg: tuple[Config, str]) -> None:
     assert info[_NEW_COLUMN][3] == 0  # notnull == 0 => nullable
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade 0086`` drops the column; ``upgrade 0087`` restores it."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _NEW_COLUMN in _columns(sync_url, "tenant")
 
     command.downgrade(cfg, _DOWN_REVISION)

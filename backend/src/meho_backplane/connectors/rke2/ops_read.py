@@ -76,6 +76,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from meho_backplane.connectors.rke2.ops import SSH_TRANSPORT_NOTE, Rke2Op
+from meho_backplane.operations import register_plain_fields
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -714,7 +715,7 @@ _RKE2_SERVICE_STATUS_OP = Rke2Op(
             "Call to check whether an RKE2 node's systemd service is up "
             "WITHOUT changing anything -- especially 'is rke2-server active, "
             "since when, and is it crash-looping?' when the Kubernetes API is "
-            "unreachable and node-level ops like ``kubernetes.node.list`` "
+            "unreachable and node-level ops like ``k8s.node.list`` "
             "cannot answer (the API server is what is down). Probes the fixed "
             "``rke2-server`` / ``rke2-agent`` pair; the unit reporting "
             "``load_state: not-found`` is simply not installed on this node, "
@@ -1020,3 +1021,8 @@ READ_OPS: tuple[Rke2Op, ...] = (
     _RKE2_SERVICE_STATUS_OP,
     _RKE2_CONFIG_GET_OP,
 )
+
+
+# The ``token`` entry of the posture read holds the mode and owner of the token
+# file (``redacted: true``), never its content.
+register_plain_fields(_RKE2_POSTURE_OP.op_id, ("token",))

@@ -21,36 +21,36 @@ from uuid import UUID, uuid4
 import pytest
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.connectors.migration import adapter_kit
-from meho_backplane.connectors.migration.adapter_kit import read_child
-from meho_backplane.connectors.migration.azure_migrate_csv import inventory_to_csv
-from meho_backplane.connectors.migration.contracts import (
+from meho_backplane.connectors.inventory import adapter_kit
+from meho_backplane.connectors.inventory.adapter_kit import read_child
+from meho_backplane.connectors.inventory.azure_migrate_csv import inventory_to_csv
+from meho_backplane.connectors.inventory.contracts import (
     InventoryEnvelope,
     KubernetesWorkloadRecord,
     ServerRecord,
     bios_uuid_match_key,
 )
-from meho_backplane.connectors.migration.inventory_load import (
+from meho_backplane.connectors.inventory.inventory_load import (
     load_inventories,
     merge_inventories,
 )
-from meho_backplane.connectors.migration.source_hosts import (
+from meho_backplane.connectors.inventory.source_hosts import (
     count_cpus,
     linux_migration_inventory,
     whole_disks,
     winsrv_migration_inventory,
 )
-from meho_backplane.connectors.migration.source_hyperv import hyperv_migration_inventory
-from meho_backplane.connectors.migration.source_k8s import (
+from meho_backplane.connectors.inventory.source_hyperv import hyperv_migration_inventory
+from meho_backplane.connectors.inventory.source_k8s import (
     k8s_migration_inventory,
     parse_quantity,
 )
-from meho_backplane.connectors.migration.source_proxmox import (
+from meho_backplane.connectors.inventory.source_proxmox import (
     memory_mb,
     proxmox_migration_inventory,
     size_gb,
 )
-from meho_backplane.connectors.migration.source_register import (
+from meho_backplane.connectors.inventory.source_register import (
     SOURCE_ADAPTERS,
     _llm_instructions,
 )
@@ -400,7 +400,7 @@ async def test_hyperv_inventory(store: ResultHandleStore) -> None:
 
     export = inventory_to_csv(envelope.records, [])
     assert export.row_count == 1  # only the Windows VM has an OS name
-    assert "app-win-01" in export.csv_lines[1]
+    assert "app-win-01" in export.lines[1]
 
 
 async def test_hyperv_inventory_without_guest_data(store: ResultHandleStore) -> None:

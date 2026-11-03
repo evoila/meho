@@ -170,6 +170,7 @@ func printEntrySummary(w io.Writer, e *api.AuditEntry) {
 	fmt.Fprintf(w, "%-18s %s\n", "id:", e.Id.String())
 	fmt.Fprintf(w, "%-18s %s\n", "ts:", formatTS(e.Ts))
 	fmt.Fprintf(w, "%-18s %s\n", "tenant_id:", strOrDash(uuidDeref(e.TenantId)))
+	fmt.Fprintf(w, "%-18s %s\n", "tenant_name:", strOrDash(strDeref(e.TenantName)))
 	fmt.Fprintf(w, "%-18s %s\n", "principal_sub:", e.PrincipalSub)
 	fmt.Fprintf(w, "%-18s %s\n", "principal_name:", strOrDash(strDeref(e.PrincipalName)))
 	fmt.Fprintf(w, "%-18s %s\n", "target_id:", strOrDash(uuidDeref(e.TargetId)))

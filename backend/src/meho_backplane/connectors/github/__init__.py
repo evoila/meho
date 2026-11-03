@@ -31,6 +31,7 @@ acceptance which populates the ``endpoint_descriptor`` rows. The
 the lifespan can call cheaply; T3 fills in the body.
 """
 
+from meho_backplane.connectors.github import op_classes  # noqa: F401 -- declares the op classes
 from meho_backplane.connectors.github.connector import GitHubRestConnector
 from meho_backplane.connectors.github.session import (
     DEFAULT_GITHUB_API_URL,
@@ -66,7 +67,7 @@ async def register_github_typed_operations(
     """No-op registrar — T1 ships zero typed ops.
 
     Queued onto :func:`run_typed_op_registrars` for symmetry with vault /
-    kubernetes / vmware-rest so a future enhancement (T3's catalog
+    kubernetes so a future enhancement (T3's catalog
     entry) can fill in the body without touching the lifespan wiring.
     The pattern matches :func:`register_kubernetes_typed_operations` —
     a module-level wrapper around the connector's classmethod.
@@ -129,6 +130,6 @@ register_typed_op_registrar(register_github_typed_operations)
 # Side-effect import: the composites subpackage's ``__init__`` queues
 # its own registrar onto the lifespan list (T4 #1224 ships the first L1
 # composite ``gh.composite.pr_status_summary``). Import-after-typed-
-# registrar ordering matches the vmware-rest precedent so the lifespan
-# runs the typed registrar before the composite registrar.
+# registrar ordering makes the lifespan
+# run the typed registrar before the composite registrar.
 import meho_backplane.connectors.github.composites  # noqa: E402,F401  -- side-effect

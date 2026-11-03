@@ -22,12 +22,10 @@ Coverage matrix:
   contain the substring ``"Operations grouped under"`` -- the
   template-literal shape T4a is killing.
 
-First-write-wins on the existing-row branch is contractual (see
-:func:`~meho_backplane.operations.typed_register._resolve_or_create_group`
-+ sibling PR #757): curation iteration is a code-review + redeploy
-flow, not a re-register-against-live-DB flow. No test exercises the
-post-restart curation update path because that path no longer
-exists.
+A changed code text reaches an existing row at start-up unless an
+operator edited it (#4332, see
+:func:`~meho_backplane.operations.typed_register._resolve_or_create_group`);
+``test_operations_group_text_refresh.py`` covers that path.
 
 The tests reuse the project's autouse SQLite engine plus a per-test
 embedding-service stub so neither the real ONNX model nor a network
@@ -50,9 +48,6 @@ from meho_backplane.connectors.kubernetes import KubernetesConnector
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.connectors.vault.ops import register_vault_typed_operations
 from meho_backplane.connectors.vault.ops_sys import register_vault_sys_typed_operations
-from meho_backplane.connectors.vmware_rest.composites import (
-    register_vmware_composite_operations,
-)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import OperationGroup
 from meho_backplane.operations import reset_dispatcher_caches
@@ -75,29 +70,10 @@ _K8S_GROUPS: Final[frozenset[str]] = frozenset(
         "exec",
         "storage",
         "custom_resources",
+        "access",
     }
 )
 _VAULT_GROUPS: Final[frozenset[str]] = frozenset({"auth", "kv", "sys"})
-_VMWARE_COMPOSITE_GROUPS: Final[frozenset[str]] = frozenset(
-    {
-        "cluster",
-        "events",
-        "performance",
-        "storage",
-        "networking",
-        "vm",
-        "host",
-        "guest",
-        "guest_ops",
-        "namespace_management",
-        "content_library",
-        # Shared with the two typed licence reads.
-        "vmware-licensing",
-        "alarms",
-        # The migration inventory read.
-        "migration",
-    }
-)
 _BIND9_GROUPS: Final[frozenset[str]] = frozenset({"identity", "zone", "record", "config"})
 
 #: The substring that signals the auto-derive default in
@@ -275,26 +251,4 @@ async def test_vault_groups_have_curated_when_to_use(
         assert row.when_to_use.strip(), f"vault group {key!r} has empty when_to_use"
         assert _PLACEHOLDER_SUBSTRING not in row.when_to_use, (
             f"vault group {key!r} regressed to the auto-derive template: {row.when_to_use!r}"
-        )
-
-
-@pytest.mark.asyncio
-async def test_vmware_composite_groups_have_curated_when_to_use(
-    stub_embedding_service: AsyncMock,
-    session: AsyncSession,
-) -> None:
-    """Every vmware-rest composite group registers with curated prose."""
-    await register_vmware_composite_operations(embedding_service=stub_embedding_service)
-
-    groups = await _operation_groups_for(
-        session, product="vmware", version="9.0", impl_id="vmware-rest"
-    )
-    assert set(groups) == _VMWARE_COMPOSITE_GROUPS, (
-        f"vmware composite groups in DB {set(groups)!r} != expected {_VMWARE_COMPOSITE_GROUPS!r}"
-    )
-    for key, row in groups.items():
-        assert row.when_to_use.strip(), f"vmware composite group {key!r} has empty when_to_use"
-        assert _PLACEHOLDER_SUBSTRING not in row.when_to_use, (
-            f"vmware composite group {key!r} regressed to the auto-derive "
-            f"template: {row.when_to_use!r}"
         )

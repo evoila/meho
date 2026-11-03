@@ -103,11 +103,13 @@ func runDelete(cmd *cobra.Command, opts deleteOptions) error {
 	if status < 200 || status >= 300 {
 		return renderHTTPStatus(cmd, backplaneURL, status, resp.Body, opts.JSONOut)
 	}
+	auditID := output.AuditIDFromResponse(resp.HTTPResponse)
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(),
-			map[string]any{"dashboard_id": opts.DashboardID, "deleted": true})
+			map[string]any{"dashboard_id": opts.DashboardID, "deleted": true, "audit_id": auditID})
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "deleted dashboard %s\n", opts.DashboardID)
+	output.WriteAuditReceipt(cmd.OutOrStdout(), auditID)
 	return nil
 }
 

@@ -37,6 +37,7 @@ from typing import Any, Final
 
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.policy import RedactionPolicy
+from meho_backplane.redaction.secret_fields import scrub_secret_fields
 
 __all__ = ["CONTENT_POLICY_ID", "scrub_content"]
 
@@ -103,8 +104,15 @@ def scrub_content(payload: Any) -> tuple[Any, bool]:
     caller can hand it a bare string (a header value), a parsed JSON
     object, or a list and get the same-shaped result back.
 
+    Before the shape patterns run, the value of each secret-named field is
+    replaced (:func:`~meho_backplane.redaction.secret_fields.scrub_secret_fields`,
+    #5031): a ``{"password": "..."}`` entry, or the same pair as JSON text in
+    a string, has no label the patterns could find. *fired* is ``True`` for
+    that step too.
+
     Never raises for input shape: non-str / non-container leaves pass
     through untouched (the engine's documented contract).
     """
-    result = redact(payload, _CONTENT_POLICY)
-    return result.redacted, bool(result.manifest)
+    fields_scrubbed = scrub_secret_fields(payload)
+    result = redact(fields_scrubbed, _CONTENT_POLICY)
+    return result.redacted, bool(result.manifest) or fields_scrubbed != payload

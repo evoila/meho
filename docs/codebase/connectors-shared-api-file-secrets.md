@@ -61,7 +61,8 @@ MEHO's one rule for secret-named fields,
 `pwd`, `passphrase`, `apikey`, `kubeconfig` anywhere in the name;
 `secret`, `secrets`, `token`, `credential`, `credentials` at the end of
 the name; and the pairs `api_key`, `access_key`, `private_key`,
-`encryption_key`, `license_key`, `licence_key`, `secret_id`,
+`encryption_key`, `license_key`, `licence_key`, `product_key` (the
+Windows key of a vSphere guest customization spec), `secret_id`,
 `secret_value`, `secret_data`. Names are read in snake, camel and kebab
 case. #4780 added the licence key.
 

@@ -223,3 +223,45 @@ func joinComma(parts []string) string {
 	}
 	return out
 }
+
+// opVMInfo is the typed single-VM read. It resolves a VM name on the
+// backend without the ingested catalog, so a verb that only dispatches
+// typed operations stays usable on a fresh install.
+const opVMInfo = "vmware.vm.info"
+
+// resolveVMTyped resolves a VM name to its moid through the typed
+// vmware.vm.info operation. resolveName goes through the ingested
+// GET:/vcenter/vm row, which does not exist until the catalog is
+// ingested. A moid passes through without a round-trip, like
+// resolveName. The backend answers not_found for an unknown name and
+// an error for an ambiguous one; both come back as a returned error.
+func resolveVMTyped(ctx context.Context, backplaneURL, targetSlug, name string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("empty vm name")
+	}
+	if isMoid("vm", name) {
+		return name, nil
+	}
+	r, err := conn.Call(ctx, backplaneURL, opVMInfo, targetSlug, map[string]any{"name": name})
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case r.Status == "not_found":
+		return "", fmt.Errorf("no vm named %q on target %q; check the name or pass the vSphere moid directly", name, targetSlug)
+	case r.Status != "ok" && r.Error != nil && *r.Error != "":
+		return "", fmt.Errorf("resolve vm %q failed: %s", name, *r.Error)
+	case r.Status != "ok":
+		return "", fmt.Errorf("resolve vm %q failed: dispatcher status %s", name, r.Status)
+	}
+	var row struct {
+		VM string `json:"vm"`
+	}
+	if err := json.Unmarshal(unwrapValue(r.Result), &row); err != nil {
+		return "", fmt.Errorf("resolve vm %q: decode %s result: %w", name, opVMInfo, err)
+	}
+	if row.VM == "" {
+		return "", fmt.Errorf("resolve vm %q: %s result missing %q field", name, opVMInfo, "vm")
+	}
+	return row.VM, nil
+}

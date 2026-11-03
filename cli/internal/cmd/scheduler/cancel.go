@@ -111,11 +111,13 @@ func runCancel(cmd *cobra.Command, opts cancelOptions) error {
 	if status < 200 || status >= 300 {
 		return renderHTTPStatus(cmd, backplaneURL, status, resp.Body, opts.JSONOut)
 	}
+	auditID := output.AuditIDFromResponse(resp.HTTPResponse)
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(),
-			map[string]any{"trigger_id": opts.TriggerID, "cancelled": true})
+			map[string]any{"trigger_id": opts.TriggerID, "cancelled": true, "audit_id": auditID})
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "cancelled trigger %s\n", opts.TriggerID)
+	output.WriteAuditReceipt(cmd.OutOrStdout(), auditID)
 	return nil
 }
 

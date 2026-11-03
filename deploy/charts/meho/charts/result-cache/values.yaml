@@ -16,6 +16,11 @@ image:
   # -- Image tag. Pinned to the same Valkey 9.x alpine variant as the
   # broadcast subchart; bump on security advisories.
   tag: "9.0-alpine"
+  # -- Image index digest (`sha256:<64 hex>`). When set, the pod uses
+  # `repository@digest` and the tag is only a label. Bump both together.
+  # To change the tag or the repository, set `digest` too, or set
+  # `digest: ""` to use the tag.
+  digest: "sha256:2d04268dfa26ab31cfa3fdc538866e76438b2d00e41db41b8cb86d780ac5a416"
   # -- Image pull policy.
   pullPolicy: IfNotPresent
 

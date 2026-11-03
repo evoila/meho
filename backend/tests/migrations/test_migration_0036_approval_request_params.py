@@ -16,7 +16,7 @@ so PG and SQLite parity holds (the ORM pins ``JSONB`` on PG via
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -71,10 +71,12 @@ def _column_names(sync_url: str) -> set[str]:
     return {name for name, _ in _approval_request_columns(sync_url)}
 
 
-def test_upgrade_adds_params_column_nullable(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_params_column_nullable(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade head`` lands the ``params`` column as nullable JSON."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     columns = _approval_request_columns(sync_url)
     by_name = dict(columns)
@@ -83,10 +85,12 @@ def test_upgrade_adds_params_column_nullable(alembic_cfg: tuple[Config, str]) ->
     assert by_name["params"] == 0, "params must be nullable"
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade 0035`` drops ``params``; ``upgrade head`` restores it."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     assert "params" in _column_names(sync_url)
 
     command.downgrade(cfg, "0035")
@@ -96,10 +100,12 @@ def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> 
     assert "params" in _column_names(sync_url)
 
 
-def test_existing_columns_untouched(alembic_cfg: tuple[Config, str]) -> None:
+def test_existing_columns_untouched(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """Pre-0036 approval_request columns survive the ALTER."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     columns = _column_names(sync_url)
     for column in (

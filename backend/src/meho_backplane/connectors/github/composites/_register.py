@@ -10,9 +10,7 @@ after the registrar list is populated by the
 ``__init__`` (which appends this function via
 :func:`register_typed_op_registrar`).
 
-Mirrors the vmware-rest precedent
-(:mod:`meho_backplane.connectors.vmware_rest.composites._register`):
-per-composite arguments (summary / description / group_key / tags /
+Per-composite arguments (summary / description / group_key / tags /
 ``parameter_schema`` / ``safety_level`` / ``requires_approval``) live
 in this module so a future shape change touches one file. The helper
 :func:`~meho_backplane.operations.typed_register.register_composite_operation`
@@ -22,7 +20,7 @@ handles upsert, body-hash dedupe, embedding pipeline, and
 Scope
 -----
 
-Ten composites ship. ``gh.composite.pr_status_summary`` (T4 #1224) and
+Fourteen composites ship. ``gh.composite.pr_status_summary`` (T4 #1224) and
 ``gh.composite.repo_view`` (one repository, read) are read-only.
 ``gh.composite.repo_create`` (one repository in an organization) is a
 ``caution`` write that waits for approval (``requires_approval=True``). #2081
@@ -34,17 +32,21 @@ together the "file a board-complete ticket without a gh CLI fallback"
 surface. The ``git`` group adds ``gh.composite.git_ref_view`` and
 ``gh.composite.git_tree_view`` (reads) and
 ``gh.composite.branch_commit_files`` (a ``dangerous`` write that always
-waits for approval; see :mod:`._git`).
+waits for approval; see :mod:`._git`). The ``issues`` group also holds
+``gh.composite.issue_search`` and ``gh.composite.issue_view`` (reads) and
+``gh.composite.issue_create`` and ``gh.composite.issue_comment`` (writes;
+see :mod:`._issues`).
 
 The composite-helper's defaults are ``safety_level="dangerous"`` +
 ``requires_approval=True`` (suited to high-blast-radius write
-composites). The reads override to ``safe``; the board + sub-issue
-writes override to ``caution`` -- low-blast-radius, reversible
-board-hygiene mutations -- all with ``requires_approval=False`` so a
-human / service operator can file a board-complete ticket without an
-approval round-trip while an agent still routes through the ``caution``
-safety default. See :mod:`._board` / :mod:`._sub_issues` for the
-per-composite governance rationale.
+composites). The reads override to ``safe``. The five ticket writes
+(``issue_create``, ``issue_comment``, ``sub_issue_add``,
+``project_item_add``, ``project_item_set_field``) are ``safe`` with
+``requires_approval=False`` too: they run at once for every caller, but
+only inside the repository and board the target names (:mod:`._scope`).
+``connectors/github/op_classes.py`` declares them ``write``, so no health
+check and no satellite runner treats them as reads. See
+``docs/decisions/2026-11-02-github-ticket-writes-are-safe.md``.
 
 ``safety_level`` value note
 ---------------------------
@@ -73,6 +75,12 @@ from meho_backplane.connectors.github.composites._git import (
     branch_commit_files_composite,
     git_ref_view_composite,
     git_tree_view_composite,
+)
+from meho_backplane.connectors.github.composites._issues import (
+    issue_comment_composite,
+    issue_create_composite,
+    issue_search_composite,
+    issue_view_composite,
 )
 from meho_backplane.connectors.github.composites._read import (
     pr_status_summary_composite,
@@ -110,6 +118,20 @@ from meho_backplane.connectors.github.composites.schemas_git import (
     GIT_TREE_VIEW_LLM_INSTRUCTIONS,
     GIT_TREE_VIEW_PARAMETER_SCHEMA,
     GIT_TREE_VIEW_RESPONSE_SCHEMA,
+)
+from meho_backplane.connectors.github.composites.schemas_issues import (
+    ISSUE_COMMENT_LLM_INSTRUCTIONS,
+    ISSUE_COMMENT_PARAMETER_SCHEMA,
+    ISSUE_COMMENT_RESPONSE_SCHEMA,
+    ISSUE_CREATE_LLM_INSTRUCTIONS,
+    ISSUE_CREATE_PARAMETER_SCHEMA,
+    ISSUE_CREATE_RESPONSE_SCHEMA,
+    ISSUE_SEARCH_LLM_INSTRUCTIONS,
+    ISSUE_SEARCH_PARAMETER_SCHEMA,
+    ISSUE_SEARCH_RESPONSE_SCHEMA,
+    ISSUE_VIEW_LLM_INSTRUCTIONS,
+    ISSUE_VIEW_PARAMETER_SCHEMA,
+    ISSUE_VIEW_RESPONSE_SCHEMA,
 )
 from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
@@ -152,15 +174,17 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "the board's node id, its single-select field ids, and each "
         "field's option ids; then project_item_add to place an issue / "
         "PR on the board (by content node id); then "
-        "project_item_set_field to set a single-select field. This is "
-        "the 'file a board-complete ticket' path -- no gh CLI fallback."
+        "project_item_set_field to set a single-select field. The two "
+        "writes run at once, but only on the target's own board."
     ),
     "issues": (
-        "Use to link a task to its parent as a GitHub sub-issue "
-        "(sub_issue_add). Complements the board group: after creating a "
-        "child issue you attach it under a parent by the child's "
-        "database id. The sub-issue must share the parent's repository "
-        "owner."
+        "Use to work with the issues of one repository: find issues "
+        "(issue_search, by filters or by free text), read one issue with "
+        "its parent, sub-issues and comments (issue_view), file an issue "
+        "(issue_create), add a comment (issue_comment), and link a task "
+        "under its parent as a sub-issue (sub_issue_add, by the child's "
+        "number). The writes run at once, but only in the target's own "
+        "repository. Search before you file, so you do not file twice."
     ),
     "repos": (
         "Use for questions about one repository as a whole: does it "
@@ -260,18 +284,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         summary="Add an issue / PR to a Projects-v2 board (addProjectV2ItemById).",
         description=(
             "Adds an issue or pull request to a GitHub Projects-v2 board by "
-            "content node id, wrapping the addProjectV2ItemById GraphQL "
-            "mutation. project_id comes from gh.composite.project_view; "
-            "content_id is the issue/PR node_id the REST payload carries. A "
-            "low-blast-radius board-hygiene write -- adding a card to a board "
-            "is reversible. Returns the new board item's node id, which "
-            "project_item_set_field then targets."
+            "content node id (addProjectV2ItemById). Only the target's own "
+            "board and issues or PRs of its own repository; others are refused. "
+            "A ticket write: runs at once, no approval. Returns the new item's "
+            "node id for project_item_set_field."
         ),
         parameter_schema=PROJECT_ITEM_ADD_PARAMETER_SCHEMA,
         response_schema=PROJECT_ITEM_ADD_RESPONSE_SCHEMA,
         group_key="board",
         tags=["composite", "write", "board", "projectv2", "graphql"],
-        safety_level="caution",
+        safety_level="safe",
         requires_approval=False,
     ),
     _CompositeSpec(
@@ -282,15 +304,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "Sets a single-select field on a GitHub Projects-v2 board item -- "
             "Status, Priority, Size, or any other single-select field -- "
             "wrapping the updateProjectV2ItemFieldValue GraphQL mutation with a "
-            "singleSelectOptionId value. Every argument (project_id, item_id, "
-            "field_id, option_id) is a node id resolvable from "
-            "gh.composite.project_view. A reversible board-hygiene write."
+            "singleSelectOptionId value. Every id comes from "
+            "gh.composite.project_view. Only the target's own board, and only an "
+            "item that is an issue or pull request of the target's own repository "
+            "(a draft issue is refused). A ticket write: runs at once, no approval."
         ),
         parameter_schema=PROJECT_ITEM_SET_FIELD_PARAMETER_SCHEMA,
         response_schema=PROJECT_ITEM_SET_FIELD_RESPONSE_SCHEMA,
         group_key="board",
         tags=["composite", "write", "board", "projectv2", "graphql"],
-        safety_level="caution",
+        safety_level="safe",
         requires_approval=False,
     ),
     _CompositeSpec(
@@ -298,20 +321,89 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         handler=sub_issue_add_composite,
         summary="Link a sub-issue to a parent issue (POST .../sub_issues).",
         description=(
-            "Links a task to its parent as a GitHub sub-issue, wrapping "
-            "POST /repos/{owner}/{repo}/issues/{issue_number}/sub_issues. "
-            "sub_issue_id is the child issue's DATABASE id (the ``id`` field on "
-            "the issue payload), NOT its issue number -- the REST create-issue "
-            "response carries that id. The sub-issue must share the parent's "
-            "repository owner. Set replace_parent=true to move an already-"
-            "parented sub-issue. A reversible board-hygiene write."
+            "Links an issue under its parent as a GitHub sub-issue "
+            "(POST /repos/{owner}/{repo}/issues/{issue_number}/sub_issues). "
+            "Parent and child are named by number and must both be in the "
+            "target's own repository. Set replace_parent=true to move a child "
+            "that has a parent. A ticket write: runs at once, no approval."
         ),
         parameter_schema=SUB_ISSUE_ADD_PARAMETER_SCHEMA,
         response_schema=SUB_ISSUE_ADD_RESPONSE_SCHEMA,
         group_key="issues",
         tags=["composite", "write", "issues", "sub_issue"],
-        safety_level="caution",
+        safety_level="safe",
         requires_approval=False,
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.issue_search",
+        handler=issue_search_composite,
+        summary="Find issues in one repository by filters, an exact phrase, or free text.",
+        description=(
+            "Mode 'exact' (default) returns every issue that matches state, labels, "
+            "assignee, author and an optional exact phrase, newest first. Mode "
+            "'ranked' returns free-text hits in GitHub's order, as suggestions. The "
+            "search never leaves the named repository. Read-only."
+        ),
+        parameter_schema=ISSUE_SEARCH_PARAMETER_SCHEMA,
+        response_schema=ISSUE_SEARCH_RESPONSE_SCHEMA,
+        group_key="issues",
+        tags=["composite", "read-only", "issues", "search"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=ISSUE_SEARCH_LLM_INSTRUCTIONS,
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.issue_view",
+        handler=issue_view_composite,
+        summary="Read one issue with its parent, sub-issues and newest comments.",
+        description=(
+            "Reads GET /repos/{owner}/{repo}/issues/{issue_number} and its parent, "
+            "direct sub-issues and, on request, newest comments. Returns the title, "
+            "text, state, labels, assignees, number of comments, and the node id and "
+            "database id other issue and board operations need. Read-only."
+        ),
+        parameter_schema=ISSUE_VIEW_PARAMETER_SCHEMA,
+        response_schema=ISSUE_VIEW_RESPONSE_SCHEMA,
+        group_key="issues",
+        tags=["composite", "read-only", "issues"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=ISSUE_VIEW_LLM_INSTRUCTIONS,
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.issue_create",
+        handler=issue_create_composite,
+        summary="File one issue in the target's repository: title, text, labels, assignees.",
+        description=(
+            "Files one issue with POST /repos/{owner}/{repo}/issues, only in the "
+            "target's own repository. Returns its number (for sub_issue_add), its "
+            "node id (for project_item_add) and its database id. A ticket write: "
+            "runs at once, no approval."
+        ),
+        parameter_schema=ISSUE_CREATE_PARAMETER_SCHEMA,
+        response_schema=ISSUE_CREATE_RESPONSE_SCHEMA,
+        group_key="issues",
+        tags=["composite", "write", "issues"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=ISSUE_CREATE_LLM_INSTRUCTIONS,
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.issue_comment",
+        handler=issue_comment_composite,
+        summary="Add a comment to one issue in the target's repository.",
+        description=(
+            "Adds one comment with POST /repos/{owner}/{repo}/issues/{issue_number}/"
+            "comments, only in the target's own repository, and returns its id and "
+            "link. A ticket write: runs at once, no approval."
+        ),
+        parameter_schema=ISSUE_COMMENT_PARAMETER_SCHEMA,
+        response_schema=ISSUE_COMMENT_RESPONSE_SCHEMA,
+        group_key="issues",
+        tags=["composite", "write", "issues", "comment"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=ISSUE_COMMENT_LLM_INSTRUCTIONS,
     ),
     _CompositeSpec(
         op_id="gh.composite.repo_view",

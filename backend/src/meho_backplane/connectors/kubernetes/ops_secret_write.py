@@ -24,8 +24,8 @@ neither shows a Secret value anywhere.
     inputs are resolved through the credential-backend seam
     (:func:`~meho_backplane.connectors.kubernetes.ops_write_dangerous._resolve_secret_refs`),
     so a Vault-resident value never passes through the caller. The op is
-    pinned ``credential_write``
-    (:data:`~meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS`): while
+    declared ``credential_write``
+    (``kubernetes/op_classes.py``): while
     it waits for approval its params live in the approval hand-off store,
     not on the approval row, and the broadcast collapses to aggregate-only.
 
@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.kubernetes.kubeconfig import KubernetesTargetLike
 
 __all__ = [
+    "OPS",
     "SECRET_WRITE_OPS",
     "KubernetesSecretConflictError",
     "KubernetesSecretImmutableError",
@@ -179,6 +180,7 @@ async def _resolve_value_inputs(
                     target,
                     dict(refs),
                     mount=str(params.get(mount_field) or DEFAULT_KV_MOUNT).strip(),
+                    param=ref_field,
                     op_id=_OP_UPDATE,
                 )
             )
@@ -460,8 +462,8 @@ _SECRET_DELETE_LLM: dict[str, Any] = {
     "output_shape": "{name, namespace, deleted}.",
     "next_step": (
         "If the preview lists workloads that use the Secret, change them first "
-        "(k8s.apply) or keep the Secret. After the delete, k8s.cr.list of secrets "
-        "in the namespace no longer shows it."
+        "(k8s.apply) or keep the Secret. After the delete, k8s.secret.list in the "
+        "namespace no longer shows it."
     ),
 }
 
@@ -503,3 +505,6 @@ SECRET_WRITE_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=_SECRET_DELETE_LLM,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = SECRET_WRITE_OPS

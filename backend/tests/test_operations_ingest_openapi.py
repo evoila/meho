@@ -857,11 +857,14 @@ def test_unsupported_swagger_2_raises() -> None:
         with pytest.raises(UnsupportedSpecError, match=r"Swagger 2\.0") as excinfo:
             parse_openapi(url)
     # The rejection must be *actionable* -- it names the conversion path
-    # (swagger2openapi / converter.swagger.io) so a 2.0-only surface such
-    # as Harbor 2.x can be onboarded without an opaque dead end (#1532).
+    # so a 2.0-only surface such as Harbor 2.x can be onboarded without an
+    # opaque dead end (#1532). The CLI path comes first (#5028): the CLI
+    # converts a file:// spec locally. No hosted converter is named.
     message = str(excinfo.value)
-    assert "swagger2openapi" in message
-    assert "converter.swagger.io" in message
+    assert "meho connector ingest" in message
+    assert "file://" in message
+    assert message.index("meho connector ingest") < message.index("swagger2openapi")
+    assert "converter.swagger.io" not in message
     assert "'2.0'" in message
 
 
@@ -1980,6 +1983,7 @@ def test_assert_fetchable_remote_url_rejects_missing_hostname() -> None:
         "172.16.0.1",  # RFC-1918
         "192.168.1.1",  # RFC-1918
         "169.254.169.254",  # cloud metadata (link-local)
+        "100.64.1.1",  # carrier-grade NAT (shared address space)
         "::1",  # IPv6 loopback
         "fc00::1",  # ULA (unique local)
         "fe80::1",  # IPv6 link-local
@@ -2149,7 +2153,7 @@ def test_read_spec_info_version_rejects_swagger_2() -> None:
         url = _mock_yaml_spec(router, "spec.yaml", content)
         with pytest.raises(UnsupportedSpecError, match=r"Swagger 2\.0") as excinfo:
             read_spec_info_version(url)
-    assert "swagger2openapi" in str(excinfo.value)
+    assert "meho connector ingest" in str(excinfo.value)
 
 
 def test_read_spec_info_version_non_https_scheme_raises_invalid_spec() -> None:

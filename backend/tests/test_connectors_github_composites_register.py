@@ -58,6 +58,10 @@ _EXPECTED_OP_IDS: tuple[str, ...] = (
     "gh.composite.git_ref_view",
     "gh.composite.git_tree_view",
     "gh.composite.branch_commit_files",
+    "gh.composite.issue_search",
+    "gh.composite.issue_view",
+    "gh.composite.issue_create",
+    "gh.composite.issue_comment",
 )
 
 _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
@@ -91,6 +95,18 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     "gh.composite.branch_commit_files": (
         "meho_backplane.connectors.github.composites._git.branch_commit_files_composite"
     ),
+    "gh.composite.issue_search": (
+        "meho_backplane.connectors.github.composites._issues.issue_search_composite"
+    ),
+    "gh.composite.issue_view": (
+        "meho_backplane.connectors.github.composites._issues.issue_view_composite"
+    ),
+    "gh.composite.issue_create": (
+        "meho_backplane.connectors.github.composites._issues.issue_create_composite"
+    ),
+    "gh.composite.issue_comment": (
+        "meho_backplane.connectors.github.composites._issues.issue_comment_composite"
+    ),
 }
 
 _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
@@ -112,9 +128,9 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
 _EXPECTED_SAFETY_BY_OP: dict[str, str] = {
     "gh.composite.pr_status_summary": "safe",
     "gh.composite.project_view": "safe",
-    "gh.composite.project_item_add": "caution",
-    "gh.composite.project_item_set_field": "caution",
-    "gh.composite.sub_issue_add": "caution",
+    "gh.composite.project_item_add": "safe",
+    "gh.composite.project_item_set_field": "safe",
+    "gh.composite.sub_issue_add": "safe",
     "gh.composite.repo_view": "safe",
     "gh.composite.repo_create": "caution",
     "gh.composite.git_ref_view": "safe",
@@ -474,7 +490,7 @@ async def test_new_composite_registers_with_expected_posture(
     Asserts the descriptor is present (so ``list_operations`` / meta-tools
     surface it), routed to the expected group, carries the canonical
     module-level ``handler_ref``, the documented ``safety_level``, and
-    ``requires_approval=False`` -- the board-hygiene write posture.
+    ``requires_approval=False`` -- the ticket-write posture.
     """
     await register_github_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()

@@ -115,7 +115,9 @@ left it empty; a value the writer set is kept. So a connector edit made
 over MCP still shows up in its session's replay, and its request id
 matches the request's usage event. Records written outside a request (a
 system job, an async run that finishes after the response) are not
-changed.
+changed. The same listener adds `tenant_role_source: platform_admin` to
+the payload of a record whose writer left it out, when the caller's role
+came from platform admin access (#5239); with or without the cutover.
 
 The routine `POST` routes and the operation routes are two lists in
 `audit_cutover.py` (`ROUTINE_POST_ROUTES`, `DISPATCH_ROUTES`). A new

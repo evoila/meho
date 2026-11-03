@@ -212,7 +212,7 @@ func TestRunListRunsAdminWithAssignee(t *testing.T) {
 	}
 }
 
-// TestRunListRunsForwardsWorkRef — issue #1661. The --work-ref filter
+// TestRunListRunsForwardsWorkRef — issue #1661. The --filter-work-ref filter
 // is forwarded verbatim as the work_ref query param.
 func TestRunListRunsForwardsWorkRef(t *testing.T) {
 	var lastQuery string

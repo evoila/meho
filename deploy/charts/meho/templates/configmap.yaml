@@ -54,6 +54,10 @@ data:
   # actionable public-client error rather than silently misusing
   # `KEYCLOAK_AUDIENCE` (the confidential resource-server id).
   KEYCLOAK_CLI_CLIENT_ID: {{ $kc.cliClientId | quote }}
+  # #5515 -- public client of the fresh browser sign-in of
+  # `meho approvals approve`. Only a token made for this client can
+  # approve on the command line or REST. Empty: no token can approve.
+  KEYCLOAK_CLI_APPROVE_CLIENT_ID: {{ $kc.cliApproveClientId | quote }}
   # #2594 (Goal #336) — public client_id of the confidential `meho-web`
   # client the operator-console browser BFF login runs its OAuth 2.1
   # authorization-code grant against. Unconditionally emitted so the
@@ -200,6 +204,14 @@ data:
   # unconditionally, like the self-approval switch above; the default
   # `"false"` refuses decisions made on someone else's instruction.
   APPROVAL_ALLOW_DELEGATED_DECISION: {{ .Values.config.approvalAllowDelegatedDecision | quote }}
+  # The approval window (#5515): how old a sign-in may be to approve on
+  # the command line or REST. Then the limit for an action that needs a
+  # fresh sign-in each time: turning approval off (#4711) and approving a
+  # destructive operation. Then which `acr` values count as a one-time
+  # code step for an approve. The web interface is not affected.
+  FRESH_SIGN_IN_MAX_AGE_SECONDS: {{ .Values.config.freshSignInMaxAgeSeconds | quote }}
+  PER_ACTION_SIGN_IN_MAX_AGE_SECONDS: {{ .Values.config.perActionSignInMaxAgeSeconds | quote }}
+  APPROVAL_ONE_TIME_CODE_ACR_VALUES: {{ .Values.config.approvalOneTimeCodeAcrValues | quote }}
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
   # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that
@@ -244,6 +256,11 @@ data:
   {{- end }}
   MEHO_SANDBOX_MODE: "true"
   MEHO_SANDBOX_MODE_CONFIRM: {{ .Values.sandboxMode.confirmHost | quote }}
+  {{- /* #5251 -- REST and the CLI may create delete grants too. Only with
+       sandbox mode on; outside it the setting is never rendered. */}}
+  {{- if .Values.sandboxMode.deleteGrantsFromApi }}
+  MEHO_SANDBOX_DELETE_GRANTS_FROM_API: "true"
+  {{- end }}
   {{- end }}
   # #3997 — most output tokens the agent asks the model for in one answer.
   # Rendered always; it only matters when the agent runtime is in use.

@@ -3780,10 +3780,13 @@ async def dispatch(
             # executed row honestly records it was four-eyes-gated, not
             # auto-executed.
             policy_decision_var.set(PermissionVerdict.NEEDS_APPROVAL.value)
-            # The call runs under the person who approved it, so that
-            # person's role must meet the op's role floor (the gate checked
-            # the asker's role; an agent or service asker has none to check).
-            role_denial = role_floor_denial(op_id, operator.tenant_role)
+            # From an approvals surface the call runs under the person who
+            # approved it, so that person's role must meet the op's role
+            # floor. An agent's own resume (an agent principal, or a hosted
+            # agent run) keeps the person's approval as the authorization.
+            role_denial = (
+                None if _agent_acts(operator) else role_floor_denial(op_id, operator.tenant_role)
+            )
             if role_denial is not None:
                 duration_ms = _elapsed_ms(started)
                 receipt = await audit_safe(

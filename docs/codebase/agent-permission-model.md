@@ -307,9 +307,13 @@ non-agent branch of `policy_gate` checks it first for a person
 refused on every path (`call_operation`, the REST dispatch route, the
 CLI, `preview_operation`) and the audit row says `denied`. Agents and
 service logins are not checked here; they park or run under a grant, and
-a person decides. The approved call runs under that person, so the
-dispatcher's approve-and-run path (`_approved=True`) checks the approver
-against the same floor and refuses with a `denied` audit row.
+a person decides. When that person runs the approved call from an
+approvals surface (REST `/approve` and `/decide`, the MCP by-id approve),
+it runs under them, so the dispatcher's approve-and-run path
+(`_approved=True`) checks the approver against the same floor and
+refuses with a `denied` audit row. An agent's own resume of an approved
+call (`agent/approval_wait.py`, an agent principal or a hosted agent run)
+is not checked: the person's approval is the authorization.
 
 `policy_gate` (`_validate.py`) opens its own DB session (same
 `get_sessionmaker()` pattern as `audit_and_broadcast_safe`) and calls

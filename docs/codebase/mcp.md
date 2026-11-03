@@ -1269,7 +1269,9 @@ but `call_operation` (and the REST dispatch route and the CLI) needs only
 (`operations/role_floors.py`, registered at import by the connector
 module). The policy gate (`_validate.py`) refuses a person below the
 floor with `denied` and a `denied` audit row; the dispatcher refuses an
-approver below the floor on the approve-and-run path. Agents and service
+approver below the floor when that person runs the approved call from an
+approvals surface (an agent's own resume keeps the approval as the
+authorization). Agents and service
 logins keep their park-for-approval behaviour. `secret.move` and the
 `secret.handoff.*` ops need no floor: they are `dangerous` with
 `requires_approval=True`, so a person's call always waits for a second

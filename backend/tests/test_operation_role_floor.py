@@ -15,8 +15,10 @@ checks it (:mod:`meho_backplane.operations.role_floors`).
   audit row says ``denied``. The preview says the same.
 * **A person at the floor** -- runs at once, as before.
 * **An agent** -- waits for approval, as before. A service login waits too.
-* **After approval** -- the approver's role counts: an ``operator``
-  approver is refused, a ``tenant_admin`` approver runs the call.
+* **After approval** -- the approver's role counts when a person runs
+  the approved call: an ``operator`` approver is refused, a
+  ``tenant_admin`` approver runs the call. An agent's own resume runs:
+  the person's approval is the authorization.
 * **The topology writes** -- the same rule on all five.
 """
 
@@ -31,6 +33,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
+from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.base import Connector
@@ -271,6 +274,25 @@ async def test_an_approver_below_the_floor_is_refused(
 
 async def test_a_tenant_admin_approver_runs_the_call(_registered_ops: None) -> None:
     result = await _register(_person(TenantRole.TENANT_ADMIN, sub="approver"), approved=True)
+
+    assert result.status == "ok", result
+    assert len(await _target_rows()) == 1
+
+
+async def test_an_agent_runs_its_own_approved_call(_registered_ops: None) -> None:
+    """The agent runtime resumes an approved call under the agent; the approval counts."""
+    agent = _person(TenantRole.OPERATOR, kind=PrincipalKind.AGENT, sub="agent:a")
+
+    result = await _register(agent, approved=True)
+
+    assert result.status == "ok", result
+    assert len(await _target_rows()) == 1
+
+
+async def test_a_hosted_agent_run_resumes_an_approved_call(_registered_ops: None) -> None:
+    """A direct run is bound to the person who started it; the approval counts."""
+    with actor_delegation("agent:helper"):
+        result = await _register(_person(TenantRole.OPERATOR, sub="starter"), approved=True)
 
     assert result.status == "ok", result
     assert len(await _target_rows()) == 1

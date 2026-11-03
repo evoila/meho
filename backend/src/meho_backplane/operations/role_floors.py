@@ -14,11 +14,13 @@ there as well:
   otherwise run at once or wait for approval. The call is denied and the
   audit row says ``denied``. ``preview_operation`` shows the same verdict.
 * on the approve-and-run path (``dispatcher.py``), for the person who
-  approved. An operation never runs under a role below its floor.
+  approved and runs the call from an approvals surface. An agent's own
+  resume of an approved call (an agent principal, or a hosted agent run)
+  is not checked: the person's approval is the authorization, as before.
 
 The floor applies to people. An agent login parks or is refused by the
 policy gate as before, and a service login parks or runs under a grant a
-person made. A person approves either, and that person's role is checked.
+person made.
 
 A connector module registers the floor at import time, next to the
 handler (the same shape as ``register_params_check`` and the preview

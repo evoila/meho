@@ -3,11 +3,11 @@
 
 """Shared pieces of the FreeIPA op metadata: the op dataclass, groups, schemas, builders.
 
-Every operation of this connector reads. A list read runs a ``*_find``
-command and returns ``{rows, total, truncated}``; a read of one object runs a
-``*_show`` command and returns ``{entry}``. :func:`list_op` and
-:func:`show_op` build the metadata of both kinds, so each operation module
-only states what differs.
+A list read runs a ``*_find`` command and returns ``{rows, total,
+truncated}``; a read of one object runs a ``*_show`` command and returns
+``{entry}``. :func:`list_op` and :func:`show_op` build the metadata of both
+kinds, so each read module only states what differs. Writes carry
+:data:`WRITE_TAGS` instead of :data:`TAGS`.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ __all__ = [
     "GROUP_SERVER",
     "TAGS",
     "UNTRUSTED_TEXT_NOTE",
+    "WRITE_TAGS",
     "FreeipaTypedOp",
     "list_op",
     "name_schema",
@@ -35,8 +36,13 @@ GROUP_HOSTS: Final[str] = "hosts"
 GROUP_IDENTITY: Final[str] = "identity"
 GROUP_ACCESS: Final[str] = "access"
 
+_PRODUCT_TAGS: Final[tuple[str, ...]] = ("freeipa", "idm", "identity-management")
+
 #: Tags every FreeIPA read carries.
-TAGS: Final[tuple[str, ...]] = ("read-only", "freeipa", "idm", "identity-management")
+TAGS: Final[tuple[str, ...]] = ("read-only", *_PRODUCT_TAGS)
+
+#: Tags every FreeIPA write carries.
+WRITE_TAGS: Final[tuple[str, ...]] = ("write", *_PRODUCT_TAGS)
 
 #: Added to the guidance of every read: names and descriptions come from the
 #: IPA server and may hold any text.

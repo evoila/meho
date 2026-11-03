@@ -67,6 +67,12 @@ def test_freeipa_hand_coded_command_manifest_is_pinned() -> None:
         "hbacrule_show",
         "hbactest",
         "pwpolicy_show",
+        "hostgroup_add",
+        "hostgroup_add_member",
+        "hostgroup_del",
+        "host_del",
+        "automember_add",
+        "automember_add_condition",
     }
     assert (_rpc_module.LOGIN_PATH, _rpc_module.JSON_PATH) == (
         "/ipa/session/login_password",

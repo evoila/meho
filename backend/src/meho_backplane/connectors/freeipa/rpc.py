@@ -33,13 +33,19 @@ from typing import Any, Final
 
 __all__ = [
     "API_VERSION",
+    "AUTOMEMBER_ADD_COMMAND",
+    "AUTOMEMBER_ADD_CONDITION_COMMAND",
     "GROUP_FIND_COMMAND",
     "GROUP_SHOW_COMMAND",
     "HBACRULE_FIND_COMMAND",
     "HBACRULE_SHOW_COMMAND",
     "HBACTEST_COMMAND",
+    "HOSTGROUP_ADD_COMMAND",
+    "HOSTGROUP_ADD_MEMBER_COMMAND",
+    "HOSTGROUP_DEL_COMMAND",
     "HOSTGROUP_FIND_COMMAND",
     "HOSTGROUP_SHOW_COMMAND",
+    "HOST_DEL_COMMAND",
     "HOST_FIND_COMMAND",
     "HOST_SHOW_COMMAND",
     "JSON_PATH",
@@ -87,6 +93,12 @@ HBACRULE_FIND_COMMAND: Final[str] = "hbacrule_find"
 HBACRULE_SHOW_COMMAND: Final[str] = "hbacrule_show"
 HBACTEST_COMMAND: Final[str] = "hbactest"
 PWPOLICY_SHOW_COMMAND: Final[str] = "pwpolicy_show"
+HOSTGROUP_ADD_COMMAND: Final[str] = "hostgroup_add"
+HOSTGROUP_ADD_MEMBER_COMMAND: Final[str] = "hostgroup_add_member"
+HOSTGROUP_DEL_COMMAND: Final[str] = "hostgroup_del"
+HOST_DEL_COMMAND: Final[str] = "host_del"
+AUTOMEMBER_ADD_COMMAND: Final[str] = "automember_add"
+AUTOMEMBER_ADD_CONDITION_COMMAND: Final[str] = "automember_add_condition"
 
 #: Longest error text from the server kept in an error message.
 _ERROR_TEXT_LIMIT: Final[int] = 500

@@ -7,16 +7,18 @@ Copyright (c) 2026 evoila Group
 
 ## Overview
 
-The FreeIPA connector reads a Red Hat Identity Management (IdM) server. IdM
-is Red Hat's build of FreeIPA. One target is one IPA server.
+The FreeIPA connector reads and changes a Red Hat Identity Management (IdM)
+server. IdM is Red Hat's build of FreeIPA. One target is one IPA server.
 
 - Connector ID: `freeipa-jsonrpc-4.x` (product `freeipa`), plus a wildcard
   row, so every `freeipa` target finds it. The supported range is FreeIPA
   `>=4.9,<5.0` (Red Hat Enterprise Linux 8 and later).
 - FreeIPA has no OpenAPI description. Its API is JSON-RPC, so the connector
   has typed (hand-written) operations only. Nothing is ingested.
-- Seventeen operations, all reads (`safe`, no approval). Writes come in
-  later Tasks of Initiative #4772.
+- Twenty-three operations. Seventeen read (`safe`, no approval). Six change
+  host groups, their members, automember rules and hosts; each waits until a
+  second person approves. Writes for users, groups, sudo rules, access rules
+  and password policy come in later Tasks of Initiative #4772.
 
 Code: [`backend/src/meho_backplane/connectors/freeipa/`](../../backend/src/meho_backplane/connectors/freeipa/).
 Onboarding for operators: [`docs/cross-repo/freeipa-onboarding.md`](../cross-repo/freeipa-onboarding.md).
@@ -44,7 +46,7 @@ meho targets add <ipa-target-name> --product freeipa --host <ipa-server-name> \
 | --- | --- | --- |
 | `FreeipaConnector` | `connector.py` | Login, session cache, `call()`, fingerprint, the handler methods |
 | `FreeipaAnswer` | `rpc.py` | A successful answer: `result`, `principal`, `server_version` |
-| `FreeipaCommandError` | `rpc.py` | The server answered a command with `error`; names the command, error and text |
+| `FreeipaCommandError` | `rpc.py` | The server answered a command with `error`, or a write did not do all of its change (`NotDone`); names the command, error and text |
 | `FreeipaRequestRefusedError` | `connector.py` | HTTP 400; the message names the `Referer` rule |
 | `FreeipaTypedOp` | `_op_common.py` | Metadata of one operation, as the registrar passes it on |
 | `FreeipaTargetLike` | `session.py` | The target fields the connector reads |
@@ -139,6 +141,65 @@ keys named `<attribute>_<object type>`, for example `member_host`.
 `granted` is FreeIPA's `value`. FreeIPA's `warning` and `error` lists are
 renamed, so they cannot be mistaken for a failed call.
 
+### The writes
+
+Bodies are in `writes.py`, metadata in `ops_host_writes.py`. All six are in
+the `hosts` group and carry the tag `write`. Every write has
+`requires_approval: true`: the dispatcher runs the body only after a second
+person approved. A change is `caution`, a delete is `dangerous`.
+
+| Operation | Command | Risk level | Parameters | Returns |
+| --- | --- | --- | --- | --- |
+| `freeipa.hostgroup.create` | `hostgroup_add` | `caution` | `name`, `description` | `{entry}` |
+| `freeipa.hostgroup.member.add` | `hostgroup_add_member` | `caution` | `name`, `hosts` (sent as `host`), `hostgroups` (sent as `hostgroup`); at least one of the two | `{entry, completed}` |
+| `freeipa.automember.rule.create` | `automember_add` with `type=hostgroup` | `caution` | `hostgroup`, `description` | `{entry}` |
+| `freeipa.automember.condition.add` | `automember_add_condition` with `type=hostgroup` | `caution` | `hostgroup`, `key`, `inclusive_regex`, `exclusive_regex` (sent as `automemberinclusiveregex`, `automemberexclusiveregex`); at least one of the two | `{entry, completed}` |
+| `freeipa.host.delete` | `host_del` | `dangerous` | `fqdn`, `updatedns` (default false) | `{deleted, warnings}` |
+| `freeipa.hostgroup.delete` | `hostgroup_del` | `dangerous` | `name` | `{deleted, warnings}` |
+
+- Adding a member never creates a host. A host must exist in FreeIPA first.
+- FreeIPA names an automember rule after the host group it fills, so the
+  parameter is `hostgroup`. A rule acts on hosts that are added after it.
+- A delete sends one name and no `continue`, so a missing object is
+  FreeIPA's `NotFound` error. `warnings` holds FreeIPA's messages, for
+  example that `updatedns` found no DNS records to remove.
+- FreeIPA itself refuses to delete an IPA server or the host group
+  `ipaservers`. A host delete also deletes the host's services and revokes
+  its certificates.
+
+#### A change that did not happen is never "ok"
+
+FreeIPA answers many writes with success and lists what it could not do in
+`failed`. Every write checks it:
+
+- `hostgroup_add_member` lists each member with FreeIPA's reason, by
+  attribute and object type:
+  `{"member": {"host": [["web99.example.test", "no such entry"]]}}`. A host
+  that is already a member is listed too (`This entry is already a member`).
+- `automember_add_condition` lists conditions under
+  `{"failed": {"automemberinclusiveregex": [...]}}`. A condition that the
+  rule already has is not listed; FreeIPA only counts it as not added.
+- A delete lists names under `result.failed`.
+
+When `failed` has an entry, or when FreeIPA's `completed` count is lower than
+the number of members or conditions sent, the write raises
+`FreeipaCommandError` with the name `NotDone`. The message says how many
+changes FreeIPA made and names each one it did not make, with FreeIPA's
+reason. So the dispatcher answers with an error and the audit row says
+`error`, also when FreeIPA made part of the change.
+
+#### The approval preview
+
+`writes.py` registers a preview builder for `freeipa.host.delete`
+(`register_preview_builder`). When the call waits for approval, the builder
+runs `host_show` with the requester's login and stores
+`{host, hostgroups, indirect_hostgroups, updatedns}` in the approval
+request, so the approver sees which host groups the host leaves. When
+`host_show` fails (for example `NotFound`), the request still waits, and the
+approval request says the preview is unavailable and why. Without a live
+connector (`preview_operation`) the builder declines. The other writes show
+the generic echo of their parameters.
+
 ## Dependencies
 
 - `adapters/http.py` (`HttpConnector`): pooled client, address checks, TLS
@@ -159,6 +220,11 @@ renamed, so they cannot be mistaken for a failed call.
 - `backend/tests/test_connectors_freeipa_reads.py`: every read's command,
   arguments, options and answer shape; invalid parameters are refused before
   any call.
+- `backend/tests/test_connectors_freeipa_writes.py`: every write waits for
+  approval; the host delete preview; each write's command, arguments,
+  options and answer shape after approval; `failed` entries and a low
+  `completed` count fail the call and are named; invalid parameters are
+  refused before any call.
 - `backend/tests/test_connectors_freeipa_spec_reconcile.py`: the command
   names against FreeIPA's `API.txt` (skips until the file is on the spec
   shelf; see `docs/decisions/spec-reconcile-guards-standard.md`).
@@ -166,7 +232,12 @@ renamed, so they cannot be mistaken for a failed call.
 
 ## Known issues
 
-- No live proof yet. The lab proof of #5357 runs on a lab IdM server.
+- No live proof yet. The lab proofs of the reads (#5357) and of the host
+  writes (#5359) run on a lab IdM server.
+- There is no read of automember rules yet. An agent sees a rule's
+  conditions only in the answer of `freeipa.automember.condition.add`.
+- Adding a host that is already a member fails, because FreeIPA lists it in
+  `failed`. The message names it with FreeIPA's reason.
 - FreeIPA's answer to an expired session is a 401 by its source code
   (`ipaserver/rpcserver.py`, `need_login`). The lab proof confirms it.
 - A target that points at a load balancer in front of several IPA servers
@@ -180,4 +251,4 @@ renamed, so they cannot be mistaken for a failed call.
 - FreeIPA JSON-RPC usage: `doc/api/jsonrpc_usage.md` in
   [`freeipa/freeipa`](https://github.com/freeipa/freeipa), release 4.13.4.
 - FreeIPA `API.txt`, release 4.13.4 (506 commands, API version 2.257).
-- Initiative #4772 and Task #5357.
+- Initiative #4772, Tasks #5357 (reads) and #5359 (host writes).

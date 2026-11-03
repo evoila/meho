@@ -193,6 +193,18 @@ catalog YAML. The field validator pins each value to a single path
 segment (no `/`, `\`, or `..`) so a resource name can't escape its
 package root.
 
+A connector package (a wheel that adds a folder under
+`meho_backplane/connectors/`) can bring catalog rows of its own: its
+folder's `__init__` calls the kit's `register_connector_catalog`, and
+`load_catalog()` reads the package's YAML file with the built-in one.
+The `spec_resource` and `profile_resource` of such a row name files in
+the package's folder, not in the two resource packages above. So code
+that reads a row's files uses `load_entry_spec(entry)` and
+`load_entry_profile(entry)`, which look in the right place for either
+kind of row (`entry.source_package` says which package brought it;
+`None` is a built-in row). See
+[connector-packages.md](connector-packages.md), "Bring catalog rows".
+
 **Why:** `vmware/9.0` and `sddc/9.0` have an `upstream` the backend
 can't dereference (HTML developer portal / fqdn-templated appliance
 URL) — the `catalog_entry_upstream_not_spec` /

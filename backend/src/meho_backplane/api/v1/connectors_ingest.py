@@ -262,7 +262,7 @@ from meho_backplane.operations.ingest import (
     get_job_registry,
     list_ingested_connectors,
     load_catalog,
-    load_spec_resource,
+    load_entry_spec,
     run_ingest_job,
 )
 from meho_backplane.operations.ingest.api_schemas import (
@@ -931,7 +931,8 @@ def _catalog_entry_specs(entry: ConnectorSpecEntry) -> list[SpecSource]:
     Two on-ramps (#1964 T1):
 
     * **Shipped spec** — ``entry.spec_resource`` is set: load the
-      MEHO-authored OpenAPI bytes from package data and carry them
+      shipped OpenAPI bytes from package data (MEHO's own, or the
+      connector package that brought the row) and carry them
       inline as :attr:`SpecSource.content` (the ``uri`` is the audit
       label ``spec:<resource>``). The ingest pipeline uses the content
       verbatim — no fetch, no SSRF guard — bypassing an ``upstream`` the
@@ -943,7 +944,7 @@ def _catalog_entry_specs(entry: ConnectorSpecEntry) -> list[SpecSource]:
       to fetch under the https guard.
     """
     if entry.spec_resource is not None:
-        content = load_spec_resource(entry.spec_resource)
+        content = load_entry_spec(entry)
         return [SpecSource(uri=f"spec:{entry.spec_resource}", content=content)]
     return [SpecSource(uri=uri) for uri in (entry.upstream or ())]
 

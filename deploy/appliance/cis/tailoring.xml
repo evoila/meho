@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-License-Identifier: Apache-2.0
+Copyright (c) 2026 evoila Group
+
+The MEHO appliance's tailoring of the CIS Ubuntu Linux 24.04 LTS Benchmark
+v1.0.0, Level 1 - Server, in the content of ComplianceAsCode 0.1.82
+(ssg-ubuntu2404-ds.xml). harden.sh uses it (docs/codebase/appliance-cis.md):
+
+- the profile "appliance" is the scan. It leaves out the rules that do not
+  apply to the appliance; not-applicable.md gives each reason. A test checks
+  that both lists name the same rules.
+- the profile "appliance_remediate" is the fix that the build runs before
+  the scan. It extends the scan and also leaves out the rules whose fix
+  harden.sh does itself (the firewall) or first start does (the AIDE
+  database). The scan still checks them.
+-->
+<xccdf:Tailoring xmlns:xccdf="http://checklists.nist.gov/xccdf/1.2" id="xccdf_com.evoila.meho_tailoring_appliance">
+  <xccdf:status>accepted</xccdf:status>
+  <xccdf:version time="2026-11-02T00:00:00">1</xccdf:version>
+
+  <xccdf:Profile id="xccdf_com.evoila.meho_profile_appliance" extends="xccdf_org.ssgproject.content_profile_cis_level1_server">
+    <xccdf:title>MEHO appliance: CIS Ubuntu 24.04 Level 1 - Server</xccdf:title>
+    <xccdf:description>CIS Level 1 - Server without the rules that do not apply to the MEHO appliance (not-applicable.md).</xccdf:description>
+    <!-- 3.3.1: RKE2 passes traffic to its pods. -->
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_sysctl_net_ipv4_ip_forward" selected="false"/>
+    <!-- 4.2: the ufw way; the appliance uses nftables (4.1.1). -->
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_package_ufw_installed" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_service_ufw_enabled" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_check_ufw_active" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_set_ufw_loopback_traffic" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_ufw_rules_for_open_ports" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_set_ufw_default_rule" selected="false"/>
+    <!-- 4.4: the iptables way; the appliance uses nftables (4.1.1). -->
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_package_iptables-persistent_installed" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_package_iptables_installed" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_service_nftables_disabled" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_set_iptables_default_rule" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_set_loopback_traffic" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_iptables_rules_for_open_ports" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_set_ip6tables_default_rule" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_set_ipv6_loopback_traffic" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_ip6tables_rules_for_open_ports" selected="false"/>
+    <!-- 7.1.12: files in container layers and volumes. -->
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_no_files_unowned_by_user" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_file_permissions_ungroupowned" selected="false"/>
+  </xccdf:Profile>
+
+  <xccdf:Profile id="xccdf_com.evoila.meho_profile_appliance_remediate" extends="xccdf_com.evoila.meho_profile_appliance">
+    <xccdf:title>MEHO appliance: the fixes the build runs</xccdf:title>
+    <xccdf:description>The scan profile without the rules whose fix harden.sh or first start does.</xccdf:description>
+    <!-- 4.1.1 and 4.3: harden.sh sets the firewall; these fixes would add an inet filter table. -->
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_firewall_single_service_active" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_package_ufw_removed" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_set_nftables_table" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_set_nftables_base_chain" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_set_nftables_loopback_traffic" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_nftables_ensure_default_deny_policy" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_service_nftables_enabled" selected="false"/>
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_nftables_rules_permanent" selected="false"/>
+    <!-- 6.3.1: first start builds the AIDE database of each appliance. -->
+    <xccdf:select idref="xccdf_org.ssgproject.content_rule_aide_build_database" selected="false"/>
+  </xccdf:Profile>
+</xccdf:Tailoring>

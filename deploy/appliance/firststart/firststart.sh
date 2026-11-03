@@ -20,6 +20,8 @@
 #      RKE2 with this appliance's own keys, installs the core and writes the
 #      two one-time files
 #   6. this appliance's own bootloader password, in the third one-time file
+#   7. this appliance's own AIDE database (CIS 6.3.1), which the daily
+#      check of AIDE compares the files with
 #
 # Each step writes a done-marker under /var/lib/meho/firststart/ and is not
 # run again; /var/lib/meho/firststart.done follows the last one, and the
@@ -60,7 +62,7 @@ readonly ADMIN_USER=admin
 readonly MIN_PASSWORD_LENGTH=14
 readonly CLOCK_WAIT_SECONDS=600
 readonly OVF_ENV_NAMES=(ovf-env.xml ovf_env.xml OVF-ENV.XML OVF_ENV.XML)
-readonly STEPS=(ssh-host-keys disk wizard-fields clock core bootloader-password)
+readonly STEPS=(ssh-host-keys disk wizard-fields clock core bootloader-password aide-database)
 readonly VAPP_FIX="power the VM off, correct the field in the VM's vApp options in vCenter (Configure, vApp Options), and power it on."
 
 # The host name and address checks of the form-2 install, from the copy of
@@ -515,6 +517,15 @@ SCRIPT
     ok "the boot menu shows for 5 seconds at every boot and has this appliance's own password, in $BOOTLOADER_PASSWORD_FILE (root only)"
 }
 
+# --- Step 7 ----------------------------------------------------------------
+
+# The build hardened the appliance (cis/harden.sh) but left the database
+# out: it must hold this appliance's files, after the core is installed.
+build_aide_database() {
+    aideinit --yes --force
+    ok "AIDE has the database of this appliance's files; its daily check compares them with it"
+}
+
 # --- Steps -----------------------------------------------------------------
 
 run_step() {
@@ -552,6 +563,7 @@ main() {
     run_step 4 wait_for_clock
     run_step 5 install_core
     run_step 6 set_bootloader_password
+    run_step 7 build_aide_database
     touch "${HOST_ROOT}${DONE_FILE}"
     printf '\nfirststart.sh: first start is done. Log in as %s; the banner above the login lists the next steps.\n' "$ADMIN_USER"
 }

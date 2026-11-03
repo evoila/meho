@@ -40,7 +40,15 @@ FAIL_LINE = re.compile(r"^\[FAIL\] .*$", re.MULTILINE)
 
 DOWNLOAD = "/opt/meho/appliance/download"
 STATE = "/var/lib/meho/firststart"
-STEPS = ("ssh-host-keys", "disk", "wizard-fields", "clock", "core", "bootloader-password")
+STEPS = (
+    "ssh-host-keys",
+    "disk",
+    "wizard-fields",
+    "clock",
+    "core",
+    "bootloader-password",
+    "aide-database",
+)
 UBUNTU_CLASS_LINE = 'CLASS="--class gnu-linux --class gnu --class os"\n'
 
 PASSWORD = "Wizard&Pass<word>\"1'"
@@ -139,6 +147,7 @@ STUBS = {
         printf 'PBKDF2 hash of your password is grub.pbkdf2.sha512.10000.FAKESALT.FAKEHASH\\n'
         """),
     "update-grub": "",
+    "aideinit": "",
     "sleep": "",
 }
 

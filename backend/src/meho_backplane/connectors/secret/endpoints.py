@@ -10,7 +10,7 @@ owns the abstraction the move handler dispatches through:
 
 * :class:`SecretMaterial` — an in-memory wrapper over the moved value.
   Its ``__repr__`` / ``__str__`` redact the value; it exposes only the
-  value's SHA-256 digest and byte length to the response path. The
+  value's keyed fingerprint and byte length to the response path. The
   wrapped value is read back exactly once by a sink's
   :meth:`SecretEndpoint.write_secret` and is otherwise inert.
 * :class:`SecretEndpoint` — a structural :class:`typing.Protocol` every
@@ -33,11 +33,14 @@ No secret in logs / responses / audit
 
 The broker's core invariant (Initiative #581): the value never appears
 in op args, the transcript, logs, the op response, a broadcast payload,
-or the audit row — only the move's status, the value's SHA-256, and its
-length. :class:`SecretMaterial` enforces the representation half of that
+or the audit row — only the move's status, the value's keyed fingerprint,
+and its length. The fingerprint is an HMAC under the server key, never a
+plain hash: without the key it cannot be computed again from a value, so
+it tells nothing about a short or common value.
+:class:`SecretMaterial` enforces the representation half of that
 invariant (a stray ``logger.info("...", material=m)`` or f-string renders
 the redacted form, not the value); the handler enforces the response
-half by returning only ``status`` + ``value_sha256`` + ``length`` and
+half by returning only ``status`` + ``value_fingerprint`` + ``length`` and
 never threading the value into params. Adapters keep only field *names*
 (never values) in their structlog events, mirroring the discipline in
 :mod:`meho_backplane.connectors._shared.vault_creds`.
@@ -45,7 +48,6 @@ never threading the value into params. Adapters keep only field *names*
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -81,7 +83,7 @@ class SecretMaterial:
     * a ``print`` left in during debugging.
 
     The wrapped value is stored as ``bytes`` (a ``str`` value is encoded
-    UTF-8 on construction) so the SHA-256 digest and the length are over
+    UTF-8 on construction) so the fingerprint and the length are over
     the exact byte sequence that will be written to the sink. The plain
     value is reachable only through :attr:`value` — the single accessor a
     sink adapter calls inside :meth:`SecretEndpoint.write_secret`. No
@@ -104,15 +106,26 @@ class SecretMaterial:
         return len(self._value)
 
     @property
-    def value_sha256(self) -> str:
-        """Hex SHA-256 of the wrapped value — the provenance hash for the response/audit."""
-        return hashlib.sha256(self._value).hexdigest()
+    def fingerprint(self) -> str:
+        """Keyed fingerprint of the wrapped value — what the response and the audit row carry.
+
+        HMAC-SHA256 under the server key
+        (:func:`~meho_backplane.operations._validate.compute_value_fingerprint`),
+        64 hex characters. Equal values give equal fingerprints inside one
+        install; without the server key it cannot be computed again from
+        a value.
+        """
+        # Lazy import: the operations package is built on top of the
+        # connectors, so a module-level import here would be a cycle.
+        from meho_backplane.operations._validate import compute_value_fingerprint
+
+        return compute_value_fingerprint(self._value)
 
     def __repr__(self) -> str:
-        # Redacted: length + digest only, never the value. The digest is
-        # the provenance signal an auditor reading a log line wants; the
-        # value never appears.
-        return f"<SecretMaterial len={self.length} sha256={self.value_sha256}>"
+        # Redacted: length + fingerprint only, never the value. The
+        # fingerprint is the provenance signal an auditor reading a log
+        # line wants; the value never appears.
+        return f"<SecretMaterial len={self.length} fingerprint={self.fingerprint}>"
 
     __str__ = __repr__
 

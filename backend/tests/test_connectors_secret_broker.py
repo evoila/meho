@@ -6,7 +6,7 @@
 Covers the mechanism this task establishes:
 
 * The ``SecretMaterial`` wrapper redacts its value in ``repr``/``str``
-  and exposes only ``value_sha256`` / ``length``.
+  and exposes only a keyed ``fingerprint`` / ``length``.
 * ``parse_secret_ref`` splits ``"<kind>:<ref>"`` (first-colon split) and
   rejects malformed intents.
 * The synthetic ``secret-broker-1.x`` connector_id round-trips through
@@ -17,7 +17,7 @@ Covers the mechanism this task establishes:
   ``requires_approval=True``).
 * End-to-end vault-kv → vault-kv move through ``dispatch(...,
   _approved=True)``: the sink receives the value, the response carries
-  ONLY ``status`` + ``value_sha256`` + ``length``, and the secret
+  ONLY ``status`` + ``value_fingerprint`` + ``length``, and the secret
   substring is absent from the response, the params, and the persisted
   audit row's ``payload`` AND ``raw_payload``.
 * The existing approval gate parks an unapproved move at
@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -63,12 +64,19 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._lookup import parse_connector_id
+from meho_backplane.operations._validate import compute_value_fingerprint
 from meho_backplane.settings import get_settings
 
 from ._vault_fakes import install_fake_client
 
 _SECRET_VALUE = "hunter2"
 _SECRET_SHA256 = hashlib.sha256(_SECRET_VALUE.encode()).hexdigest()
+
+
+def _secret_fingerprint() -> str:
+    """The keyed fingerprint of the test value under the test settings' key."""
+    return compute_value_fingerprint(_SECRET_VALUE.encode())
+
 
 #: The Nil-UUID system tenant, exempt from the tenant-scope guard. A
 #: module-level singleton (not an inline ``UUID(int=0)`` default) so the
@@ -175,16 +183,35 @@ def test_secret_material_repr_and_str_redact_the_value() -> None:
     assert _SECRET_VALUE not in repr(material)
     assert _SECRET_VALUE not in str(material)
     # The redacted form carries the provenance signal an auditor wants.
-    assert _SECRET_SHA256 in repr(material)
+    assert _secret_fingerprint() in repr(material)
     assert f"len={len(_SECRET_VALUE.encode())}" in repr(material)
+    assert _SECRET_SHA256 not in repr(material)
 
 
-def test_secret_material_exposes_sha256_and_length() -> None:
+def test_secret_material_exposes_keyed_fingerprint_and_length() -> None:
     material = SecretMaterial(_SECRET_VALUE)
-    assert material.value_sha256 == _SECRET_SHA256
+    assert material.fingerprint == _secret_fingerprint()
     assert material.length == len(_SECRET_VALUE.encode())
-    # bytes and str of the same content hash identically.
-    assert SecretMaterial(_SECRET_VALUE.encode()).value_sha256 == _SECRET_SHA256
+    # bytes and str of the same content give the same fingerprint.
+    assert SecretMaterial(_SECRET_VALUE.encode()).fingerprint == _secret_fingerprint()
+    # Same column shape as before, but not the plain hash of the value.
+    assert len(material.fingerprint) == 64
+    int(material.fingerprint, 16)
+    assert material.fingerprint != _SECRET_SHA256
+
+
+def test_secret_material_fingerprint_needs_the_server_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The fingerprint depends on the server key, so it cannot be computed without it."""
+    before = SecretMaterial(_SECRET_VALUE).fingerprint
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'other.db'}")
+    get_settings.cache_clear()
+    try:
+        assert SecretMaterial(_SECRET_VALUE).fingerprint != before
+    finally:
+        monkeypatch.undo()
+        get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +336,7 @@ async def test_secret_move_response_carries_only_status_hash_length(
     monkeypatch: pytest.MonkeyPatch,
     _registered_secret_broker_op: None,
 ) -> None:
-    """(b) The result payload is exactly {status, value_sha256, length}.
+    """(b) The result payload is exactly {status, value_fingerprint, length}.
 
     And the secret substring is absent from the JSON-serialised result.
     """
@@ -325,7 +352,7 @@ async def test_secret_move_response_carries_only_status_hash_length(
     assert result.status == "ok", result.error
     assert result.result == {
         "status": "moved",
-        "value_sha256": _SECRET_SHA256,
+        "value_fingerprint": _secret_fingerprint(),
         "length": len(_SECRET_VALUE.encode()),
     }
     # The value never appears anywhere in the serialised OperationResult.
@@ -360,10 +387,10 @@ async def test_secret_move_audit_row_omits_value(
     assert row.status_code == 200
     assert _SECRET_VALUE not in json.dumps(row.payload)
     assert _SECRET_VALUE not in json.dumps(row.raw_payload)
-    # The raw payload is the handler's return dict — hash + length only.
+    # The raw payload is the handler's return dict — fingerprint + length only.
     assert row.raw_payload == {
         "status": "moved",
-        "value_sha256": _SECRET_SHA256,
+        "value_fingerprint": _secret_fingerprint(),
         "length": len(_SECRET_VALUE.encode()),
     }
 
@@ -401,7 +428,7 @@ async def test_secret_move_handler_does_not_read_value_from_params(
 
     assert result == {
         "status": "moved",
-        "value_sha256": _SECRET_SHA256,
+        "value_fingerprint": _secret_fingerprint(),
         "length": len(_SECRET_VALUE.encode()),
     }
     # The value the sink wrote came from the source read, not params.
@@ -601,7 +628,7 @@ async def test_secret_move_in_namespace_ref_round_trips(
 
     assert result == {
         "status": "moved",
-        "value_sha256": _SECRET_SHA256,
+        "value_fingerprint": _secret_fingerprint(),
         "length": len(_SECRET_VALUE.encode()),
     }
     assert fake.secrets.kv.v2.put_calls == [

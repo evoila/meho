@@ -35,17 +35,24 @@ boundary redaction:
   value is read inside the backplane, never passed in params.
 - `SecretMaterial` (the in-memory carrier) redacts its value in
   `__repr__` / `__str__`, so a stray log-bind or f-string renders
-  `<SecretMaterial len=N sha256=…>`, not the value.
-- The handler returns only `{status, value_sha256, length}`. The
+  `<SecretMaterial len=N fingerprint=…>`, not the value.
+- The handler returns only `{status, value_fingerprint, length}`. The
   dispatcher stores `params_hash` (not the params) in the audit row's
   `payload`, and the handler's return dict in `raw_payload` — so neither
   audit column carries the value.
+- `value_fingerprint` is a keyed fingerprint, not a plain hash: HMAC-SHA256
+  under the server key (`compute_value_fingerprint` in
+  `operations/_validate.py`, the same key the audit params hash uses),
+  64 hex characters. Equal values give equal fingerprints inside one
+  install, so an auditor can still match two rows that moved the same
+  value. Without the server key the fingerprint cannot be computed again
+  from a value, so it tells nothing about a short or common value.
 
 ## Key types
 
 - **`SecretMaterial`** (`endpoints.py`) — wraps the moved value as
   `bytes`. Exposes `value` (read once by a sink's `write_secret`),
-  `length`, and `value_sha256`. `__repr__`/`__str__` redact.
+  `length`, and the keyed `fingerprint`. `__repr__`/`__str__` redact.
 - **`SecretEndpoint`** (`endpoints.py`) — a `runtime_checkable`
   `typing.Protocol`. A source adapter implements
   `async read_secret(operator) -> SecretMaterial`; a sink adapter
@@ -136,13 +143,14 @@ do that, and nobody sees the value:
    the tenant check), then calls `sys/wrapping/wrap` on A's own Vault,
    logged in as the operator. Vault returns a **response-wrapping
    token**: a token that works once, has a short life, and does not hold
-   the value — the value stays in A's store. The result is
-   `{status: "exported", value_sha256, length, handoff_token,
-   handoff_ttl_seconds}`.
+   the value — the value stays in A's store. Next to the value, the
+   handoff carries a random key (`check_key`) that MEHO stores nowhere.
+   The result is `{status: "exported", value_fingerprint, length,
+   handoff_token, handoff_ttl_seconds}`.
 2. **On B: `secret.handoff.import`.** Params: `handoff_token`, `store`
    (the name of a target on B, product `vault`, whose host is A's Vault
    or OpenBao), `to` (`<kind>:<ref>` sink on B), optional
-   `expect_sha256`, `reason`. The handler:
+   `expect_fingerprint`, `reason`. The handler:
    - builds the sink and runs its write check first
      (`VaultKvSecretEndpoint.check_write_allowed`, the tenant check), so
      a wrong sink path does not use up the handoff;
@@ -160,11 +168,11 @@ do that, and nobody sees the value:
      after registration is refused, and nothing is sent. The client
      follows no redirect: a `3xx` answer is reported as an error. Seam:
      `handoff._build_store_client`;
-   - checks `expect_sha256` when it is set, and writes nothing on a
+   - checks `expect_fingerprint` when it is set, and writes nothing on a
      mismatch;
    - writes the value through the sink (for `vault:`, B's own Vault,
      only under B's tenant path) and returns
-     `{status: "imported", value_sha256, length}`.
+     `{status: "imported", value_fingerprint, length}`.
 
 Both ops are `dangerous` with `requires_approval=True`, so each waits
 until a second person approves it on its own instance.
@@ -180,9 +188,18 @@ long-lived login for the other's store: the handoff token is the only
 credential, and it works once. Vault's default policy allows
 `sys/wrapping/wrap` and `sys/wrapping/unwrap`; OpenBao has the same API.
 
-**What carries the SHA-256.** Each side's dispatch audit row stores the
-handler's result in `raw_payload`. Both results carry the same
-`value_sha256`, so an auditor can match A's export row to B's import row.
+**What carries the fingerprint.** Each side's dispatch audit row stores
+the handler's result in `raw_payload`. Both results carry the same
+`value_fingerprint`, so an auditor can match A's export row to B's import
+row. For the handoff it is the HMAC-SHA256 of the value under the random
+key inside the handoff, not the server-keyed fingerprint `secret.move`
+answers: the two instances share no server key, but both read the key
+from the handoff. The key is gone once the handoff is used or expired, so
+the fingerprint on an audit row cannot be computed again from a value. A
+handoff made by an
+older MEHO carries no key: then the import refuses an `expect_fingerprint`
+(nothing is written, the handoff is used), and without one it answers
+this install's own server-keyed fingerprint of the value.
 
 **Where the handoff token goes.** It is not the value, but it can fetch
 the value once, so it is handled as a credential:
@@ -193,7 +210,7 @@ the value once, so it is handled as a credential:
   (with the token) are stored encrypted (`approval_handoff.py`), not on
   the approval row.
 - The import's approval preview (`handoff_preview.py`) shows the store
-  target, the sink and `expect_sha256`, never the token.
+  target, the sink and `expect_fingerprint`, never the token.
 - The export result returns the token to the caller, and A's audit row
   keeps the result like any other result.
 
@@ -217,7 +234,7 @@ handoff is used.
 | `SecretHandoffDestinationBlockedError` | the store target is, or now resolves to, an address this MEHO does not dial; nothing was sent, the handoff is still usable |
 | `SecretHandoffRefusedError` | the store refused the login or the call, or the source or sink path is outside the operator's tenant path |
 | `SecretHandoffInvalidError` | the handoff was already used, expired, or was made by another store |
-| `SecretHandoffDigestMismatchError` | the value's SHA-256 is not `expect_sha256`; nothing was written |
+| `SecretHandoffDigestMismatchError` | the handoff does not give `expect_fingerprint`: the value's fingerprint is another one, or the handoff was made by an older MEHO and carries no key; nothing was written |
 | `SecretHandoffSinkWriteError` | the handoff was used but the sink write failed; make a new handoff |
 | `SecretHandoffStoreError` | a bad store target (not product `vault`, a pinned CA), a redirect, another HTTP status, a malformed reply, or a source path or field that cannot be read |
 
@@ -244,7 +261,7 @@ meho secret move \
   `secret` mount, inside the operator's tenant subtree).
 - The op is `requires_approval=True`, so the move parks at
   `awaiting_approval` and a human approves it before it runs. The response
-  is only `{status: "moved", value_sha256, length}` — the value never
+  is only `{status: "moved", value_fingerprint, length}` — the value never
   appears in the CLI/MCP output, a log event, or the audit row.
 
 The same move over MCP is `call_operation(connector_id="secret-broker-1.x",
@@ -277,7 +294,7 @@ A move dispatches through the standard typed-op path:
    `SecretEndpoint` via the registry, `read_secret` from the source
    (value enters memory only as a `SecretMaterial`), `write_secret` to
    the sink — entirely server-side. It returns
-   `{status, value_sha256, length}`.
+   `{status, value_fingerprint, length}`.
 6. The dispatcher redacts → reduces → audits the return dict. Since the
    return carries no value, the audit row's `raw_payload` and `payload`
    carry no value.

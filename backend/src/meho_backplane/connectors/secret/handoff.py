@@ -60,6 +60,7 @@ handoff error too.
 from __future__ import annotations
 
 import asyncio
+import hmac
 from typing import TYPE_CHECKING, Any, Final, NoReturn
 
 import httpx
@@ -77,6 +78,12 @@ from meho_backplane.connectors.secret.endpoints import (
     SecretMaterial,
     parse_secret_ref,
     resolve_secret_endpoint,
+)
+from meho_backplane.connectors.secret.handoff_check import (
+    CHECK_KEY_FIELD,
+    handoff_fingerprint,
+    new_check_key,
+    parse_check_key,
 )
 from meho_backplane.connectors.vault.tenant_scope import VaultTenantScopeError
 from meho_backplane.db.engine import get_sessionmaker
@@ -109,7 +116,8 @@ _log = structlog.get_logger(__name__)
 WRAP_PATH: Final[str] = "sys/wrapping/wrap"
 UNWRAP_PATH: Final[str] = "sys/wrapping/unwrap"
 
-#: The one key the wrapped payload carries.
+#: The key of the wrapped payload that carries the value. The payload also
+#: carries the handoff's check key (:mod:`.handoff_check`).
 _WRAP_FIELD: Final[str] = "value"
 
 #: Handoff life when the caller does not set ``ttl_seconds``.
@@ -169,7 +177,11 @@ class SecretHandoffStoreError(SecretHandoffError):
 
 
 class SecretHandoffDigestMismatchError(SecretHandoffError):
-    """The unwrapped value's SHA-256 is not the one the export reported."""
+    """The handoff does not give the ``expect_fingerprint`` the caller passed.
+
+    Either the value's fingerprint is another one, or the handoff was made
+    by an older MEHO and carries no key to compute it.
+    """
 
 
 class SecretHandoffSinkWriteError(SecretHandoffError):
@@ -245,14 +257,14 @@ async def _read_source(
 
 
 async def _wrap_on_local_store(
-    operator: Operator, material: SecretMaterial, ttl_seconds: int
+    operator: Operator, material: SecretMaterial, check_key: bytes, ttl_seconds: int
 ) -> tuple[str, int]:
-    """Put *material* into a response-wrapping token on this instance's store.
+    """Put *material* and *check_key* into a response-wrapping token on this instance's store.
 
     Logs in under the operator's own Vault identity (the same login every
     broker read uses). Returns ``(token, ttl_seconds)``.
     """
-    payload = {_WRAP_FIELD: material.value.decode("utf-8")}
+    payload = {_WRAP_FIELD: material.value.decode("utf-8"), CHECK_KEY_FIELD: check_key.hex()}
     try:
         async with _auth_vault.vault_client_for_operator(operator) as client:
             response = await asyncio.to_thread(client.sys.wrap, payload=payload, ttl=ttl_seconds)
@@ -280,26 +292,28 @@ async def secret_handoff_export(
 ) -> dict[str, Any]:
     """Read a secret and put it into a one-time handoff on this instance's store.
 
-    Op-id: ``secret.handoff.export``. Returns ``status``, ``value_sha256``,
-    ``length``, ``handoff_token`` and ``handoff_ttl_seconds``. The value
-    itself is never returned.
+    Op-id: ``secret.handoff.export``. Returns ``status``,
+    ``value_fingerprint``, ``length``, ``handoff_token`` and
+    ``handoff_ttl_seconds``. The value itself is never returned.
     """
     del target
     source_ref = parse_secret_ref(str(params["from"]))
     source = resolve_secret_endpoint(source_ref)
     material = await _read_source(operator, source, f"{source_ref.kind}:{source_ref.ref}")
     ttl_seconds = int(params.get("ttl_seconds", DEFAULT_HANDOFF_TTL_SECONDS))
-    token, ttl = await _wrap_on_local_store(operator, material, ttl_seconds)
+    check_key = new_check_key()
+    token, ttl = await _wrap_on_local_store(operator, material, check_key, ttl_seconds)
+    fingerprint = handoff_fingerprint(check_key, material.value)
     _log.info(
         "secret_broker.handoff.export",
         from_kind=source_ref.kind,
-        value_sha256=material.value_sha256,
+        value_fingerprint=fingerprint,
         length=material.length,
         handoff_ttl_seconds=ttl,
     )
     return {
         "status": "exported",
-        "value_sha256": material.value_sha256,
+        "value_fingerprint": fingerprint,
         "length": material.length,
         "handoff_token": token,
         "handoff_ttl_seconds": ttl,
@@ -414,8 +428,19 @@ def _check_unwrap_status(store: _RemoteStore, response: httpx.Response) -> None:
     )
 
 
-async def _unwrap(store: _RemoteStore, handoff_token: str) -> SecretMaterial:
-    """Use the handoff once at the other store and wrap the value it returns."""
+def _check_key_of(store: _RemoteStore, data: dict[str, Any]) -> bytes | None:
+    """The handoff's check key, or ``None`` for a handoff made by an older MEHO."""
+    try:
+        return parse_check_key(data.get(CHECK_KEY_FIELD))
+    except ValueError as exc:
+        raise SecretHandoffStoreError(
+            f"{store.label} returned a '{CHECK_KEY_FIELD}' field at path {UNWRAP_PATH} that "
+            f"{exc}; the handoff was not made by secret.handoff.export. {_NEW_HANDOFF}"
+        ) from None
+
+
+async def _unwrap(store: _RemoteStore, handoff_token: str) -> tuple[SecretMaterial, bytes | None]:
+    """Use the handoff once at the other store; return the value and the handoff's key."""
     try:
         await assert_public_destination_async(store.host)
     except TargetDestinationBlockedError as exc:
@@ -441,12 +466,47 @@ async def _unwrap(store: _RemoteStore, handoff_token: str) -> SecretMaterial:
         body = None
     data = body.get("data") if isinstance(body, dict) else None
     value = data.get(_WRAP_FIELD) if isinstance(data, dict) else None
-    if not isinstance(value, str):
+    if not isinstance(data, dict) or not isinstance(value, str):
         raise SecretHandoffStoreError(
             f"{store.label} returned no '{_WRAP_FIELD}' field at path {UNWRAP_PATH}; "
             f"the handoff was not made by secret.handoff.export. {_NEW_HANDOFF}"
         )
-    return SecretMaterial(value)
+    return SecretMaterial(value), _check_key_of(store, data)
+
+
+def _import_fingerprint(
+    store: _RemoteStore,
+    material: SecretMaterial,
+    check_key: bytes | None,
+    expected: Any,
+    sink_name: str,
+) -> str:
+    """The fingerprint the import answers, after the ``expect_fingerprint`` check.
+
+    With the handoff's key, the fingerprint is the one the export answered,
+    and a set *expected* must equal it. A handoff made by an older MEHO
+    carries no key: then *expected* cannot be checked and the import
+    refuses, and without *expected* the answer carries this install's own
+    keyed fingerprint of the value. Nothing is written when this raises;
+    the handoff is used either way.
+    """
+    if check_key is None:
+        if isinstance(expected, str):
+            raise SecretHandoffDigestMismatchError(
+                f"the handoff from {store.label} was made by an older MEHO version and "
+                f"carries no key for the fingerprint, so expect_fingerprint cannot be "
+                f"checked; nothing was written to {sink_name}. The handoff is used now: "
+                f"{_NEW_HANDOFF}, and leave expect_fingerprint out"
+            )
+        return material.fingerprint
+    fingerprint = handoff_fingerprint(check_key, material.value)
+    if isinstance(expected, str) and not hmac.compare_digest(expected.lower(), fingerprint):
+        raise SecretHandoffDigestMismatchError(
+            f"the value from {store.label} has fingerprint {fingerprint}, not the expected "
+            f"{expected.lower()}; nothing was written to {sink_name}. The handoff is used "
+            f"now: {_NEW_HANDOFF}, and pass its value_fingerprint as expect_fingerprint"
+        )
+    return fingerprint
 
 
 def _check_sink(operator: Operator, sink: SecretEndpoint, sink_name: str) -> None:
@@ -476,7 +536,7 @@ async def secret_handoff_import(
 
     Op-id: ``secret.handoff.import``. Checks the sink before the handoff is
     used, so a wrong sink path does not burn the handoff. Returns only
-    ``status``, ``value_sha256`` and ``length``.
+    ``status``, ``value_fingerprint`` and ``length``.
     """
     del target
     sink_ref = parse_secret_ref(str(params["to"]))
@@ -485,15 +545,10 @@ async def secret_handoff_import(
     _check_sink(operator, sink, sink_name)
     store = await _resolve_remote_store(operator, str(params["store"]))
 
-    material = await _unwrap(store, str(params["handoff_token"]))
-
-    expected = params.get("expect_sha256")
-    if isinstance(expected, str) and expected.lower() != material.value_sha256:
-        raise SecretHandoffDigestMismatchError(
-            f"the value from {store.label} has SHA-256 {material.value_sha256}, not the "
-            f"expected {expected.lower()}; nothing was written to {sink_name}. The handoff "
-            f"is used now: {_NEW_HANDOFF}, and pass its value_sha256 as expect_sha256"
-        )
+    material, check_key = await _unwrap(store, str(params["handoff_token"]))
+    fingerprint = _import_fingerprint(
+        store, material, check_key, params.get("expect_fingerprint"), sink_name
+    )
     try:
         await sink.write_secret(operator, material)
     except Exception as exc:
@@ -507,11 +562,11 @@ async def secret_handoff_import(
         "secret_broker.handoff.import",
         to_kind=sink_ref.kind,
         store=store.label,
-        value_sha256=material.value_sha256,
+        value_fingerprint=fingerprint,
         length=material.length,
     )
     return {
         "status": "imported",
-        "value_sha256": material.value_sha256,
+        "value_fingerprint": fingerprint,
         "length": material.length,
     }

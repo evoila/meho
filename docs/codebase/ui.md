@@ -1048,8 +1048,19 @@ body (`_require_ui_role`):
   runs or queues an operation, or starts, advances or aborts a runbook
   run, declares it: `POST /ui/operations/call` and `/preview`,
   `POST /ui/vault/put`, `/delete` and `/move`, `POST /ui/runbooks/runs`,
-  `POST /ui/runbooks/runs/{run_id}/next` and `/abort`. The confirm
-  modals and every read page stay on the session floor.
+  `POST /ui/runbooks/runs/{run_id}/next` and `/abort`. So does every
+  console page that reads through an operation or the audit log, because
+  the REST route it mirrors has the same floor: the whole Vault console
+  (`/ui/vault`, `/list`, `/read`, `/versions`, `/status`, `/auth` and the
+  three write confirm modals), the Keycloak read pages (`/ui/keycloak`,
+  `/clients/{client_uuid}`, `/users`), and the audit console (`/ui/audit`,
+  `/results`, `/my-recent`, `/show/{audit_id}`; the replay tree keeps its
+  own tenant_admin check). A `read_only` person gets `403
+  operator_required` on these pages before any operation runs or any
+  audit row is read. Read pages that do not run an operation (dashboard,
+  connectors, knowledge, memory, topology, runbook catalog) stay on the
+  session floor, and so does the approvals list, which a `read_only`
+  approver needs.
 
 Upload routes chain `require_ui_admin` on top:
 
@@ -3435,7 +3446,9 @@ out-of-scope path — and the generic `extras.error_code`); and the inline
 ### RBAC (operator tier; the gate is policy, not role)
 
 The write verbs are OPERATOR-tier (like the operations Run surface) — there
-is **no** `tenant_admin` hard-403 on the write POST. Safety is enforced by
+is **no** `tenant_admin` hard-403 on the write POST. The confirm modals sit
+on the same `require_ui_operator` floor as the POSTs and every other Vault
+console page, so a `read_only` person never reaches a Vault form. Safety is enforced by
 the confirm modal + the dispatcher's `policy_gate` → approval queue, not by
 `TenantRole`; a role gate here would contradict the backend gate and the
 operations console. Tenant scoping derives from `operator.tenant_id` only

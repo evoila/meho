@@ -390,6 +390,16 @@ The service primitive
   `tenant_admin` could otherwise open. Absent endpoint (the legacy global
   `settings.corpus_url` deploy) is nothing to screen here; that global is
   deployment-owned and screened again at dial time.
+- **Only a docs-service host of the deployment** — each of the three
+  endpoint fields (`endpoint`, `answer_endpoint`, `read_endpoint`) must
+  name the host of `CORPUS_URL` or an entry of `CORPUS_ALLOWED_HOSTS`
+  (`assert_corpus_host_allowed` in `auth/corpus.py`, run before the
+  public-address screen). MEHO sends the deployment's docs-service token to
+  these endpoints, so a tenant can only point a collection at a docs
+  service the deployment named. Any other host is the same
+  `DocCollectionEndpointError` → `422` (`kind="endpoint_not_allowed"`),
+  with a message naming the two settings. The update path runs the same
+  check on a repoint.
 - **Server-derived fields** — `id` / `created_at` / `updated_at` are
   generated; `status` defaults to `provisioning` (a follow-up `probe`
   promotes it); the probe-written liveness stays `NULL`.

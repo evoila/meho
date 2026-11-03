@@ -498,7 +498,7 @@ async def test_registered_ops_are_typed_and_documented_and_writes_need_approval(
         .all()
     )
     assert {r.op_id for r in rows} == {op.op_id for op in FREEIPA_TYPED_OPS}
-    assert len(rows) == 23
+    assert len(rows) == 34
     for row in rows:
         assert row.source_kind == "typed"
         assert row.handler_ref is not None

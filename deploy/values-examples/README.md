@@ -876,7 +876,7 @@ In the Keycloak realm that hosts `meho-backplane`, create a new
 | --- | --- | --- |
 | Client ID | `meho-cli` (suggested) | Matches the default in `values-rdc-example.yaml`. Any short identifier works — set `config.keycloakCliClientId` (`KEYCLOAK_CLI_CLIENT_ID`) to whatever you choose. |
 | Client authentication | **Off** (public client) | The device grant cannot be completed by a confidential client; the CLI has nowhere to store a secret. Confidential client + device-grant → `401 unauthorized_client` from Keycloak's device endpoint (Wall #1). |
-| Authentication flow → Standard flow | **On**, PKCE method empty | Older CLI versions use it for the fresh browser sign-in an approval needs (#3979); the current CLI uses `meho-cli-approve`. `meho login` uses the device grant and sends no PKCE. Keycloak checks PKCE at the device login too, so a required PKCE method refuses every `meho login`. |
+| Authentication flow → Standard flow | **On**, PKCE method empty (or `S256` once every person runs CLI 0.44.0 or later) | Older CLI versions use it for the fresh browser sign-in an approval needs (#3979); the current CLI uses `meho-cli-approve`. `meho login` uses the device grant. From CLI 0.44.0 it sends PKCE (`S256`) there; older versions send none. Keycloak checks PKCE at the device login too, so a required PKCE method refuses `meho login` of older versions. |
 | Authentication flow → Direct access grants | Off | Resource-owner password is explicitly out of scope. |
 | Authentication flow → Implicit flow | Off | Deprecated by OAuth 2.1. |
 | Authentication flow → Service accounts roles | Off | Public clients can't hold credentials. |

@@ -32,6 +32,7 @@ from urllib.parse import quote
 import respx
 from sqlalchemy import update
 
+from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRF_HEADER_NAME
@@ -170,7 +171,15 @@ def _post(
     without it the sign-in is from now minus *sign_in_age* seconds.
     """
     csrf = _csrf_token(session_id)
-    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, sid=sid, sign_in_age=sign_in_age)
+    # An admin, so the reviewer may approve the dangerous and destructive
+    # steps of another person too (#3328).
+    operator = _operator(
+        tenant_id=_TENANT_A,
+        sub=_REVIEWER_SUB,
+        role=TenantRole.TENANT_ADMIN,
+        sid=sid,
+        sign_in_age=sign_in_age,
+    )
     if auth_time is not None:
         operator = operator.model_copy(update={"auth_time": auth_time})
     with respx.mock(assert_all_called=False):

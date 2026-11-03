@@ -630,7 +630,8 @@ async def test_full_park_approve_resume_honours_bound_hash(embedding: list[float
     assert effect["blast_radius"]["irreversibility"] == "permanent"
 
     # 4) A different operator approves (four-eyes) — the binding re-verifies.
-    approver = _operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+    approver = _operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         approved = await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()
@@ -676,7 +677,9 @@ async def test_approve_refuses_destructive_row_without_binding(embedding: list[f
         await s.commit()
         request_id = request.id
 
-    approver = _operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+
+    approver = _operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         with pytest.raises(PreviewBindingMissingError):
             await approve_request(s, request_id, operator=approver, params=None)
@@ -700,7 +703,9 @@ async def test_approve_allows_non_destructive_row_without_binding(embedding: lis
         await s.commit()
         request_id = request.id
 
-    approver = _operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+
+    approver = _operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         approved = await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()

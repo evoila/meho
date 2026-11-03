@@ -28,7 +28,6 @@ from dataclasses import dataclass
 from typing import Any
 
 __all__ = [
-    "DEFAULT_DELIVERY_ID_HEADER",
     "DEFAULT_MAX_BODY_BYTES",
     "DEFAULT_REPLAY_WINDOW_SECONDS",
     "DEFAULT_SIGNATURE_HEADER",
@@ -58,7 +57,6 @@ MAX_REPLAY_WINDOW_SECONDS: int = 3600
 DEFAULT_SIGNATURE_HEADER: str = "X-Meho-Signature"
 DEFAULT_TIMESTAMP_HEADER: str = "X-Meho-Timestamp"
 DEFAULT_STATIC_HEADER: str = "Authorization"
-DEFAULT_DELIVERY_ID_HEADER: str = "X-Meho-Delivery-Id"
 
 
 @dataclass(frozen=True)
@@ -71,7 +69,6 @@ class IngestConfig:
     signature_header: str
     timestamp_header: str
     static_header: str
-    delivery_id_header: str
     basic_username: str
     rate_per_minute_override: int | None
 
@@ -138,9 +135,6 @@ def resolve_ingest_config(extras: dict[str, Any]) -> IngestConfig:
         signature_header=_coerce_str(extras.get("signature_header"), DEFAULT_SIGNATURE_HEADER),
         timestamp_header=_coerce_str(extras.get("timestamp_header"), DEFAULT_TIMESTAMP_HEADER),
         static_header=_coerce_str(extras.get("static_header"), DEFAULT_STATIC_HEADER),
-        delivery_id_header=_coerce_str(
-            extras.get("delivery_id_header"), DEFAULT_DELIVERY_ID_HEADER
-        ),
         basic_username=_coerce_str(extras.get("basic_username"), ""),
         rate_per_minute_override=_coerce_rate_override(extras.get("rate_per_minute")),
     )

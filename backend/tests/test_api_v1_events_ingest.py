@@ -7,12 +7,15 @@ Acceptance-criteria coverage:
 
 * oversize body -> 413 before the body is buffered (streaming-guard unit +
   Content-Length endpoint path)
-* missing / paused source -> uniform 404 (no existence oracle)
-* bad signature -> 401
+* missing / paused source -> the same 401 as a bad signature
+* bad signature -> 401; a non-ASCII signature or a ``nan`` timestamp too
+* wrongly signed deliveries count against the rate limit, before any
+  secret read
 * accepted delivery -> 202 ``{event_id}`` with one ``event_outbox`` row
   (``origin`` = source id, ``dedupe_key`` set) and one synchronous
   ``__ingest__`` audit row (criterion 2)
-* duplicate delivery -> 200 with no second outbox/audit row (criterion 1)
+* duplicate delivery -> 200 with no second outbox/audit row (criterion 1);
+  the dedupe key comes from the signed data, never from a request header
 * rate-limit -> 429 with ``Retry-After``
 * authenticated invalid JSON -> 400
 * deeply-nested within-cap body -> parser fails closed (400, never a 500)
@@ -130,24 +133,56 @@ async def _count(model: object) -> int:
 
 
 # --------------------------------------------------------------------------
-# resolution / 404
+# resolution: a missing or paused source answers like a bad credential
 # --------------------------------------------------------------------------
 
 
-def test_missing_source_returns_uniform_404(client: TestClient) -> None:
-    resp = client.post("/api/v1/events/ingest/nope", content=b"{}")
-    assert resp.status_code == 404
-    assert resp.json()["detail"] == {"error": "no_event_source"}
-
-
 @pytest.mark.asyncio
-async def test_paused_source_returns_same_404(client: TestClient) -> None:
-    await _seed_source(status="paused")
+async def test_missing_and_paused_source_answer_like_a_bad_signature(
+    client: TestClient,
+) -> None:
+    """Unknown slug, paused source and wrong signature: one status, one body."""
+    await _seed_source()
+    await _seed_source(slug="paused-am", name="paused-am", status="paused")
     body = b'{"x":1}'
-    resp = client.post("/api/v1/events/ingest/prod-am", content=body, headers=_signed(body))
-    # Paused is indistinguishable from missing -- same body, no oracle.
-    assert resp.status_code == 404
-    assert resp.json()["detail"] == {"error": "no_event_source"}
+    bad = _signed(body)
+    bad["X-Meho-Signature"] = "0" * 64
+
+    wrong_sig = client.post("/api/v1/events/ingest/prod-am", content=body, headers=bad)
+    missing = client.post("/api/v1/events/ingest/nope", content=body, headers=_signed(body))
+    paused = client.post("/api/v1/events/ingest/paused-am", content=body, headers=_signed(body))
+
+    assert wrong_sig.status_code == 401
+    assert missing.status_code == wrong_sig.status_code
+    assert paused.status_code == wrong_sig.status_code
+    assert missing.json() == wrong_sig.json()
+    assert paused.json() == wrong_sig.json()
+
+
+def test_missing_source_reads_the_body_under_the_default_cap(client: TestClient) -> None:
+    """An oversize body gets 413 whether or not the slug exists."""
+    huge = b"x" * (256 * 1024 + 1)
+    resp = client.post("/api/v1/events/ingest/nope", content=huge, headers=_signed(huge))
+    assert resp.status_code == 413
+    assert resp.json()["detail"]["error"] == "payload_too_large"
+
+
+def test_missing_source_makes_no_secret_read(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reads: list[str] = []
+
+    async def _read_secret(_operator: object, ref: str) -> SecretStr:
+        reads.append(ref)
+        return SecretStr(_SECRET_VALUE)
+
+    monkeypatch.setattr(
+        "meho_backplane.events.ingest.service.read_event_source_secret", _read_secret
+    )
+    body = b"{}"
+    resp = client.post("/api/v1/events/ingest/nope", content=body, headers=_signed(body))
+    assert resp.status_code == 401
+    assert reads == []
 
 
 # --------------------------------------------------------------------------
@@ -193,6 +228,66 @@ async def test_bad_signature_returns_401(client: TestClient) -> None:
     resp = client.post("/api/v1/events/ingest/prod-am", content=body, headers=headers)
     assert resp.status_code == 401
     assert resp.json()["detail"] == {"error": "unauthorized"}
+
+
+@pytest.mark.asyncio
+async def test_non_ascii_signature_header_returns_401(client: TestClient) -> None:
+    """A signature header with a byte outside ASCII is refused like any wrong one."""
+    await _seed_source()
+    body = b'{"alert":"firing"}'
+    ts = _signed(body)["X-Meho-Timestamp"]
+    headers = {b"X-Meho-Signature": b"\xe9" * 64, b"X-Meho-Timestamp": ts.encode()}
+    resp = client.post("/api/v1/events/ingest/prod-am", content=body, headers=headers)
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_nan_timestamp_returns_401(client: TestClient) -> None:
+    await _seed_source()
+    body = b'{"alert":"firing"}'
+    headers = _signed(body)
+    headers["X-Meho-Timestamp"] = "nan"
+    resp = client.post("/api/v1/events/ingest/prod-am", content=body, headers=headers)
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_counts_every_delivery_before_the_secret_read(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wrongly signed deliveries count against the source's limit, and the
+    limit stops them before any Vault read."""
+    await _seed_source()
+    reads: list[str] = []
+    counted: list[str] = []
+    limit = 2
+
+    async def _read_secret(_operator: object, ref: str) -> SecretStr:
+        reads.append(ref)
+        return SecretStr(_SECRET_VALUE)
+
+    async def _count(_tenant: object, slug: str, _limit: int) -> None:
+        counted.append(slug)
+        if len(counted) > limit:
+            raise IngestRateLimitError(limit=limit, window_seconds=60, retry_after_seconds=7)
+
+    monkeypatch.setattr(
+        "meho_backplane.events.ingest.service.read_event_source_secret", _read_secret
+    )
+    monkeypatch.setattr("meho_backplane.events.ingest.service.enforce_ingest_rate_limit", _count)
+
+    body = b'{"alert":"firing"}'
+    bad = _signed(body)
+    bad["X-Meho-Signature"] = "0" * 64
+    codes = [
+        client.post("/api/v1/events/ingest/prod-am", content=body, headers=bad).status_code
+        for _ in range(limit + 3)
+    ]
+
+    assert codes == [401, 401, 429, 429, 429]
+    assert len(counted) == limit + 3
+    # Only the deliveries under the limit reached Vault.
+    assert len(reads) == limit
 
 
 @pytest.mark.asyncio
@@ -249,10 +344,13 @@ async def test_duplicate_delivery_is_idempotent_200(client: TestClient) -> None:
     await _seed_source()
     body = json.dumps({"type": "alert"}).encode()
 
-    first = client.post("/api/v1/events/ingest/prod-am", content=body, headers=_signed(body))
+    headers = _signed(body)
+
+    first = client.post("/api/v1/events/ingest/prod-am", content=body, headers=headers)
     assert first.status_code == 202
-    # Same body -> same dedupe_key -> the retry is an idempotent ack.
-    second = client.post("/api/v1/events/ingest/prod-am", content=body, headers=_signed(body))
+    # A redelivery repeats the same signed request -> same dedupe_key -> an
+    # idempotent ack.
+    second = client.post("/api/v1/events/ingest/prod-am", content=body, headers=headers)
     assert second.status_code == 200
     assert second.json()["deduplicated"] is True
     assert second.json()["event_id"] == first.json()["event_id"]
@@ -266,6 +364,65 @@ async def test_duplicate_delivery_is_idempotent_200(client: TestClient) -> None:
             )
         ).scalar_one()
     assert n_audit == 1
+
+
+@pytest.mark.asyncio
+async def test_same_signed_delivery_with_another_delivery_id_is_a_duplicate(
+    client: TestClient,
+) -> None:
+    """The dedupe key comes from the signed data; a request header cannot vary it."""
+    await _seed_source()
+    body = json.dumps({"type": "alert"}).encode()
+    signed = _signed(body)
+
+    first = client.post(
+        "/api/v1/events/ingest/prod-am",
+        content=body,
+        headers={**signed, "X-Meho-Delivery-Id": "one"},
+    )
+    second = client.post(
+        "/api/v1/events/ingest/prod-am",
+        content=body,
+        headers={**signed, "X-Meho-Delivery-Id": "two"},
+    )
+    assert first.status_code == 202
+    assert second.status_code == 200
+    assert second.json()["deduplicated"] is True
+    assert second.json()["event_id"] == first.json()["event_id"]
+    assert await _count(EventOutbox) == 1
+
+
+@pytest.mark.asyncio
+async def test_same_body_signed_at_another_time_is_a_new_event(client: TestClient) -> None:
+    """A sender that re-fires an identical body later makes a second event."""
+    await _seed_source()
+    body = json.dumps({"type": "alert"}).encode()
+    now = time.time()
+
+    first = client.post(
+        "/api/v1/events/ingest/prod-am", content=body, headers=_signed(body, ts=now)
+    )
+    second = client.post(
+        "/api/v1/events/ingest/prod-am", content=body, headers=_signed(body, ts=now + 1)
+    )
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert second.json()["event_id"] != first.json()["event_id"]
+    assert await _count(EventOutbox) == 2
+
+
+@pytest.mark.asyncio
+async def test_static_header_source_dedupes_on_the_body(client: TestClient) -> None:
+    """Without a signed timestamp the body is the whole dedupe basis."""
+    await _seed_source(slug="harbor", name="harbor", kind="harbor", auth_strategy="static-header")
+    body = json.dumps({"type": "PUSH_ARTIFACT"}).encode()
+    headers = {"Authorization": _SECRET_VALUE}
+
+    first = client.post("/api/v1/events/ingest/harbor", content=body, headers=headers)
+    second = client.post("/api/v1/events/ingest/harbor", content=body, headers=headers)
+    assert first.status_code == 202
+    assert second.status_code == 200
+    assert await _count(EventOutbox) == 1
 
 
 # --------------------------------------------------------------------------

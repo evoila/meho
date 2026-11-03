@@ -187,6 +187,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("UI_KEYCLOAK_CLIENT_ID", "meho-web")
     monkeypatch.setenv("UI_KEYCLOAK_CLIENT_SECRET", "test-client-secret")
     monkeypatch.setenv("CORPUS_URL", "")
+    monkeypatch.setenv("CORPUS_ALLOWED_HOSTS", "corpus.test")
     resets = (
         get_settings.cache_clear,
         clear_jwks_cache,

@@ -379,11 +379,13 @@ def _approve_via_decide(
     clear_jwks_cache()
     key = make_rsa_keypair("kid-decider")
     mock_discovery_and_jwks(mock, public_jwks(key))
+    # An admin, so the approver may approve another person's destructive
+    # change too (#3328).
     token = mint_token(
         key,
         fresh_sign_in=True,
         sub=approver_sub,
-        tenant_role=TenantRole.OPERATOR.value,
+        tenant_role=TenantRole.TENANT_ADMIN.value,
         tenant_id=str(_TENANT_ID),
     )
     with TestClient(app) as client:

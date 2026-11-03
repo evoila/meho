@@ -730,7 +730,7 @@ func Bootstrap(
 	// the opt-out needs its own call.
 	if cliOptional := opts.requiredCLIOptionalScopes(); len(cliOptional) > 0 {
 		cliOptionalEvents, oerr := reconcileOptionalScopes(
-			ctx, c, cliUUID, cliOptional)
+			ctx, c, cliUUID, cliOptional, nil)
 		if oerr != nil {
 			return nil, fmt.Errorf("reconcile CLI optional scopes: %w", oerr)
 		}
@@ -799,14 +799,14 @@ func Bootstrap(
 		return nil, fmt.Errorf("reconcile MCP default scopes: %w", err)
 	}
 	res.MapperEventsLog = append(res.MapperEventsLog, mcpScopeEvents...)
-	realmScopeEvents, err := reconcileRealmClientScopes(
+	createdScopes, realmScopeEvents, err := reconcileRealmClientScopes(
 		ctx, c, mcpClientScopes())
 	if err != nil {
 		return nil, fmt.Errorf("reconcile MCP client scopes: %w", err)
 	}
 	res.MapperEventsLog = append(res.MapperEventsLog, realmScopeEvents...)
 	mcpOptionalEvents, err := reconcileOptionalScopes(
-		ctx, c, mcpUUID, requiredMCPOptionalScopes())
+		ctx, c, mcpUUID, requiredMCPOptionalScopes(), createdScopes)
 	if err != nil {
 		return nil, fmt.Errorf("reconcile MCP optional scopes: %w", err)
 	}
@@ -1097,19 +1097,20 @@ func reconcileDefaultScopes(
 
 // reconcileRealmClientScopes creates every desired realm-level client
 // scope that does not exist yet, matched by name. An existing scope is
-// left as it is: an admin may have changed it on purpose.
+// left as it is: an admin may have changed it on purpose. Returns the
+// names of the scopes it created plus one event line per scope.
 func reconcileRealmClientScopes(
 	ctx context.Context, c *adminClient, desired []clientScopeRep,
-) ([]string, error) {
+) ([]string, []string, error) {
 	allScopes, err := c.listRealmClientScopes(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	exists := make(map[string]bool, len(allScopes))
 	for _, s := range allScopes {
 		exists[s.Name] = true
 	}
-	var events []string
+	var created, events []string
 	for _, want := range desired {
 		if exists[want.Name] {
 			events = append(events,
@@ -1118,13 +1119,14 @@ func reconcileRealmClientScopes(
 			continue
 		}
 		if err := c.createClientScope(ctx, want); err != nil {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"create client scope %s: %w", want.Name, err)
 		}
+		created = append(created, want.Name)
 		events = append(events,
 			fmt.Sprintf("[created] client scope %s", want.Name))
 	}
-	return events, nil
+	return created, events, nil
 }
 
 // reconcileOptionalScopes resolves each desired-scope name to its
@@ -1135,9 +1137,14 @@ func reconcileRealmClientScopes(
 //
 // Used to assign `offline_access` and the `mcp:*` scopes to the MCP
 // browser-flow client; see requiredMCPOptionalScopes.
+//
+// created names the realm scopes this run made just before
+// (reconcileRealmClientScopes). A real run finds them in the realm. A
+// dry run did not make them, so it takes them as the scopes it would
+// create and reports that it would assign them.
 func reconcileOptionalScopes(
 	ctx context.Context, c *adminClient,
-	clientUUID string, desired []string,
+	clientUUID string, desired, created []string,
 ) ([]string, error) {
 	allScopes, err := c.listRealmClientScopes(ctx)
 	if err != nil {
@@ -1146,6 +1153,13 @@ func reconcileOptionalScopes(
 	scopeIDByName := make(map[string]string, len(allScopes))
 	for _, s := range allScopes {
 		scopeIDByName[s.Name] = s.ID
+	}
+	if c.dryRun {
+		for _, name := range created {
+			if _, ok := scopeIDByName[name]; !ok {
+				scopeIDByName[name] = dryRunNewID
+			}
+		}
 	}
 	existing, err := c.listClientOptionalScopes(ctx, clientUUID)
 	if err != nil {
@@ -1249,8 +1263,8 @@ func reconcileGroups(
 		if err != nil {
 			return nil, nil, fmt.Errorf("read group %s: %w", g.Name, err)
 		}
-		merged, changed := mergeOwnedAttributes(existing.Attributes, want, g.Owned)
-		if !changed {
+		merged, changes := mergeOwnedAttributes(existing.Attributes, want, g.Owned)
+		if len(changes) == 0 {
 			events = append(events, fmt.Sprintf(
 				"[skip]    group %s (already matches)", g.Name))
 			continue
@@ -1261,36 +1275,49 @@ func reconcileGroups(
 		}); err != nil {
 			return nil, nil, fmt.Errorf("update group %s: %w", g.Name, err)
 		}
-		events = append(events, fmt.Sprintf("[updated] group %s (%s)",
-			g.Name, formatAttributes(want)))
+		events = append(events, fmt.Sprintf("[updated] group %s: %s",
+			g.Name, strings.Join(changes, ", ")))
 	}
 	return uuids, events, nil
 }
 
 // mergeOwnedAttributes returns existing with the owned keys set to want:
 // an owned key in want is set, an owned key not in want is removed, and
-// every other key is kept. changed reports whether anything differs.
+// every other key is kept. changes names each key that differs, as
+// "key: old -> new", in the order of owned; a removed key ends in
+// "(removed)".
 func mergeOwnedAttributes(
 	existing, want map[string][]string, owned []string,
-) (map[string][]string, bool) {
+) (map[string][]string, []string) {
 	merged := make(map[string][]string, len(existing)+len(want))
 	for k, v := range existing {
 		merged[k] = v
 	}
-	changed := false
+	var changes []string
 	for _, k := range owned {
 		wantVal, keep := want[k]
 		gotVal, has := existing[k]
 		switch {
 		case keep && !slices.Equal(gotVal, wantVal):
 			merged[k] = wantVal
-			changed = true
+			changes = append(changes, fmt.Sprintf("%s: %s -> %s",
+				k, attributeText(gotVal, has), listText(wantVal)))
 		case !keep && has:
 			delete(merged, k)
-			changed = true
+			changes = append(changes, fmt.Sprintf("%s: %s -> (removed)",
+				k, listText(gotVal)))
 		}
 	}
-	return merged, changed
+	return merged, changes
+}
+
+// attributeText renders an attribute's values, or "(none)" when the
+// group does not have the attribute.
+func attributeText(values []string, ok bool) string {
+	if !ok {
+		return "(none)"
+	}
+	return listText(values)
 }
 
 // formatAttributes renders the owned attributes in a fixed order for

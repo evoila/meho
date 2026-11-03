@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -198,6 +199,105 @@ func TestBootstrap_DryRunOnHalfMadeFlow(t *testing.T) {
 	want := `[would update] login flow "meho approval sign-in": finished`
 	if eventWith(res, want) == "" {
 		t.Errorf("no event %q in %v", want, res.MapperEventsLog)
+	}
+}
+
+// A dry run names each group attribute it would change, with the old
+// and the new value, also one it would remove.
+func TestBootstrap_DryRunNamesEachGroupAttributeChange(t *testing.T) {
+	fake := newFakeKeycloak()
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("first Bootstrap: %v", err)
+	}
+	for _, g := range fake.groups {
+		switch g.Name {
+		case adminGroupName:
+			g.Attributes["approver"] = []string{"true"}
+		case "MEHO-Operators":
+			g.Attributes["tenant_role"] = []string{"tenant_admin"}
+			delete(g.Attributes, "meho_tenant")
+		}
+	}
+	res, _ := runDryRun(t, fake, fullOpts())
+	for _, want := range []string{
+		"[would update] group MEHO-Admins: approver: [true] -> (removed)",
+		"[would update] group MEHO-Operators: tenant_role: [tenant_admin] -> [operator], " +
+			"meho_tenant: (none) -> [" + fullOpts().TenantID + ":main:Operators]",
+		"[skip]    group MEHO-Readers (already matches)",
+	} {
+		if !slices.Contains(res.MapperEventsLog, want) {
+			t.Errorf("events miss %q: %v", want, res.MapperEventsLog)
+		}
+	}
+}
+
+// On a realm without the mcp:* scopes, the dry run says it would make
+// each one and assign it to the MCP client.
+func TestBootstrap_DryRunAssignsTheScopesItWouldCreate(t *testing.T) {
+	res, _ := runDryRun(t, newFakeKeycloak(), fullOpts())
+	for _, s := range mcpClientScopes() {
+		for _, want := range []string{
+			"[would create] client scope " + s.Name,
+			"[would add]   optional scope " + s.Name,
+		} {
+			if !slices.Contains(res.MapperEventsLog, want) {
+				t.Errorf("events miss %q: %v", want, res.MapperEventsLog)
+			}
+		}
+	}
+	for _, e := range res.MapperEventsLog {
+		if strings.HasPrefix(e, "[WARN]") {
+			t.Errorf("dry run warns %q", e)
+		}
+	}
+}
+
+// A flow with an extra step and a missing required step: the dry run
+// says, like a real run, that it would finish the flow and that the
+// approval client is not bound to it.
+func TestBootstrap_DryRunDoesNotBindAFlowWithOtherSteps(t *testing.T) {
+	seed := func() *fakeKeycloak {
+		fake := newFakeKeycloak()
+		flow := seedApprovalFlow(fake)
+		code := fake.flows[approvalCodeFlowAlias]
+		code.Steps = code.Steps[:1] // auth-otp-form is missing
+		flow.Steps = append(flow.Steps, &fakeFlowStep{
+			ID: fake.mintID(), Provider: "auth-cookie", Requirement: "ALTERNATIVE"})
+		return fake
+	}
+	flowLines := func(res *Result) []string {
+		var lines []string
+		for _, e := range res.MapperEventsLog {
+			if strings.Contains(e, "login flow") {
+				lines = append(lines, dryRunEvent(e))
+			}
+		}
+		return lines
+	}
+	want := []string{
+		`[would update] login flow "meho approval sign-in": finished the steps an earlier run left out`,
+		`[skip] login flow "meho approval sign-in" has other steps than the bootstrap makes; the approval client is not bound to it`,
+	}
+	dry, _ := runDryRun(t, seed(), fullOpts())
+	if got := flowLines(dry); !slices.Equal(got, want) {
+		t.Errorf("dry run flow lines = %v, want %v", got, want)
+	}
+
+	fake := seed()
+	real, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if got := flowLines(real); !slices.Equal(got, want) {
+		t.Errorf("real run flow lines = %v, want %v", got, want)
+	}
+	for _, c := range fake.clients {
+		if c.ClientID == "meho-cli-approve" && len(c.AuthenticationFlowBindingOverrides) != 0 {
+			t.Errorf("the approval client is bound to %v, want no binding", c.AuthenticationFlowBindingOverrides)
+		}
+	}
+	if got := approvalFlowStepLines(fake); !slices.Equal(got, append(slices.Clone(wantApprovalFlowStepLines), "0 auth-cookie ALTERNATIVE")) {
+		t.Errorf("the real run did not finish the flow: %v", got)
 	}
 }
 

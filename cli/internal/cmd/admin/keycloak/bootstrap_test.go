@@ -1786,15 +1786,18 @@ func TestBootstrap_FixesChangedGroupAttributes(t *testing.T) {
 	if n := fake.calls["POST /groups"]; n != 4 {
 		t.Errorf("POST /groups called %d times, want 4 (the missing groups)", n)
 	}
-	for _, name := range []string{"MEHO-Operators", "MEHO-Readers"} {
+	for name, change := range map[string]string{
+		"MEHO-Operators": "tenant_role: [tenant_admin] -> [operator]",
+		"MEHO-Readers":   "approver: [true] -> (removed)",
+	} {
 		found := false
 		for _, line := range res.MapperEventsLog {
-			if strings.HasPrefix(line, "[updated] group "+name+" ") {
+			if strings.HasPrefix(line, "[updated] group "+name+": ") && strings.Contains(line, change) {
 				found = true
 			}
 		}
 		if !found {
-			t.Errorf("no [updated] event for %s: %v", name, res.MapperEventsLog)
+			t.Errorf("no [updated] event for %s with %q: %v", name, change, res.MapperEventsLog)
 		}
 	}
 }

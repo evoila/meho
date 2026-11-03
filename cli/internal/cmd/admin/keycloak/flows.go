@@ -147,26 +147,34 @@ func reconcileApprovalFlow(ctx context.Context, c *adminClient) (string, []strin
 	if err != nil {
 		return "", nil, err
 	}
-	if changed && c.dryRun {
-		return id, []string{fmt.Sprintf("[updated] login flow %q: finished the steps an earlier run left out", approvalFlowAlias)}, nil
-	}
-	if changed {
+	requirements := stepRequirements(have)
+	switch {
+	case changed && c.dryRun:
+		// The dry run sent no write: take the steps as a real run
+		// leaves them, so an extra step is found the same way.
+		maps.Copy(requirements, wantApprovalFlowSteps())
+	case changed:
 		if have, err = c.readApprovalFlowSteps(ctx); err != nil {
 			return "", nil, err
 		}
+		requirements = stepRequirements(have)
 	}
-	if !maps.Equal(stepRequirements(have), wantApprovalFlowSteps()) {
-		return "", []string{fmt.Sprintf(
-			"[skip] login flow %q has other steps than the bootstrap makes; the approval client is not bound to it",
-			approvalFlowAlias)}, nil
-	}
+	var events []string
 	switch {
 	case created:
-		return id, []string{fmt.Sprintf("[created] login flow %q", approvalFlowAlias)}, nil
+		events = append(events, fmt.Sprintf("[created] login flow %q", approvalFlowAlias))
 	case changed:
-		return id, []string{fmt.Sprintf("[updated] login flow %q: finished the steps an earlier run left out", approvalFlowAlias)}, nil
+		events = append(events, fmt.Sprintf("[updated] login flow %q: finished the steps an earlier run left out", approvalFlowAlias))
 	}
-	return id, []string{fmt.Sprintf("[skip] login flow %q exists", approvalFlowAlias)}, nil
+	if !maps.Equal(requirements, wantApprovalFlowSteps()) {
+		return "", append(events, fmt.Sprintf(
+			"[skip] login flow %q has other steps than the bootstrap makes; the approval client is not bound to it",
+			approvalFlowAlias)), nil
+	}
+	if len(events) == 0 {
+		events = append(events, fmt.Sprintf("[skip] login flow %q exists", approvalFlowAlias))
+	}
+	return id, events, nil
 }
 
 // findApprovalFlow returns the id of the approval flow, or "" when the

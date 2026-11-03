@@ -2861,11 +2861,17 @@ admin client's HTTP transport (`dryRunTransport` in `dryrun.go`) sends
 only reads (GET). It answers every other request itself: a create gets
 201 with the id `dry-run-new`, an update or delete gets 204, and a read
 below a `dry-run-new` id gets an empty list. So no write can leave the
-process, also not one a later change adds. The approval login flow
-stops early in a dry run, since a flow it would create cannot be read
-back. The events are printed with `[would create]`, `[would update]`,
-`[would add]` and `[would remove]`, and the summary ends with "Nothing
-was changed".
+process, also not one a later change adds. A later read does not see
+what the dry run would create, so two steps carry it along: the
+`mcp:*` client scopes the run would create are taken as present when
+the optional scopes of the MCP client are assigned, and the approval
+login flow is checked for extra steps as a real run leaves it (the
+steps it would add, with their requirement). A flow the dry run would
+create stops early, since it cannot be read back. A group update
+names each attribute it changes with the old and the new value, also
+one it removes (`approver: [true] -> (removed)`). The events are
+printed with `[would create]`, `[would update]`, `[would add]` and
+`[would remove]`, and the summary ends with "Nothing was changed".
 
 ### Refusals
 

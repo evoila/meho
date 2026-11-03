@@ -385,7 +385,7 @@ spec:
         # means any change to what the pod consumes — config.*, memory.*,
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
-        checksum/config: 37787f2275cee3e589f966955041e30ece64f5281545a417956144a08d2668ff
+        checksum/config: cd847854582c3b10a8812fd9f2f61a32ded1ac6eda84c644539492c65c1d22d8
       labels:
         app.kubernetes.io/name: meho
         app.kubernetes.io/instance: test
@@ -864,6 +864,12 @@ data:
   # code step for an approve. The web interface is not affected.
   FRESH_SIGN_IN_MAX_AGE_SECONDS: "900"
   PER_ACTION_SIGN_IN_MAX_AGE_SECONDS: "300"
+  # Per-person request limits on the operation path, and the per-tenant
+  # cap on new MCP sessions. On by default; "0" turns a limit off. See
+  # `docs/codebase/rate-limiting.md`.
+  DISPATCH_RATE_LIMIT_PER_MINUTE: "600"
+  DISPATCH_MAX_CONCURRENT_OPS: "16"
+  MCP_SESSION_START_LIMIT_PER_MINUTE: "60"
   APPROVAL_ONE_TIME_CODE_ACR_VALUES: ""
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The

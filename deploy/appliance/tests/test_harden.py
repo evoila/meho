@@ -248,6 +248,27 @@ class HardenTests(unittest.TestCase):
                     (APPLIANCE / "cis" / name).read_text(), self.vm.read(f"{cis}/{name}")
                 )
 
+    def test_script_checks_run_through_the_runner_from_the_noexec_tmp(self) -> None:
+        # OpenSCAP uses the runner when it cannot execute a check it wrote
+        # under the noexec /tmp; a check without its x bit stands in here.
+        self.assert_succeeds(self.vm.run())
+
+        runner = self.vm.host_path("/usr/local/bin/oscap-run-sce-script")
+        self.assertEqual(0o755, runner.stat().st_mode & 0o777)
+        check = self.vm.host_path("/tmp/oscap.test/check.sh")
+        check.parent.mkdir(parents=True)
+        check.write_text('#!/bin/bash\nexit "$XCCDF_RESULT_FAIL"\n')
+        check.chmod(0o644)
+        result = subprocess.run(
+            [str(runner), str(check)],
+            capture_output=True,
+            text=True,
+            env={"XCCDF_RESULT_FAIL": "102"},
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(102, result.returncode, result.stderr)
+
     def test_the_fixes_run_first_then_the_settings_then_the_firewall_then_the_scan(self) -> None:
         self.assert_succeeds(self.vm.run())
 

@@ -11,7 +11,8 @@
 #
 #   1. the packages the hardening needs, and ufw goes
 #   2. the scanner files under /opt/meho/appliance/cis, where meho-host check
-#      and the update find them
+#      and the update find them, and oscap-run-sce-script in /usr/local/bin,
+#      so the script checks run from the noexec /tmp
 #   3. the fixes of ComplianceAsCode for every rule of the profile
 #      appliance_remediate
 #   4. the settings of the design, after the fixes so they win: /dev/shm and
@@ -49,6 +50,7 @@ readonly DOWNLOAD_DIR=/opt/meho/appliance/download
 readonly CIS_DIR=/opt/meho/appliance/cis
 readonly DATA_STREAM=ssg-ubuntu2404-ds.xml
 readonly CIS_FILES=(tailoring.xml not-applicable.md exceptions.md)
+readonly SCE_RUNNER=/usr/local/bin/oscap-run-sce-script
 readonly SCAN_PROFILE=xccdf_com.evoila.meho_profile_appliance
 readonly REMEDIATE_PROFILE=xccdf_com.evoila.meho_profile_appliance_remediate
 readonly RULE_PREFIX=xccdf_org.ssgproject.content_rule_
@@ -180,13 +182,17 @@ install_scanner_files() {
     for file in "${CIS_FILES[@]}"; do
         install -m 0644 "$CIS_SOURCE_DIR/$file" "${HOST_ROOT}${CIS_DIR}/$file"
     done
-    ok "the scanner files are under $CIS_DIR"
+    mkdir -p "${HOST_ROOT}${SCE_RUNNER%/*}"
+    install -m 0755 "$CIS_SOURCE_DIR/${SCE_RUNNER##*/}" "${HOST_ROOT}${SCE_RUNNER}"
+    ok "the scanner files are under $CIS_DIR, and OpenSCAP's runner for script checks is $SCE_RUNNER"
 }
 
 # --- Step 3 ----------------------------------------------------------------
 
 run_fixes() {
     local rc=0
+    # The build user keeps sudo without a password, which build.sh's clean
+    # step needs: the rule that takes it away (CIS 5.2.4) is Level 2 only.
     # oscap exits 2 when a rule still fails after its fix, 1 on an error.
     oscap xccdf eval --remediate --tailoring-file "${HOST_ROOT}${CIS_DIR}/tailoring.xml" \
         --profile "$REMEDIATE_PROFILE" "${HOST_ROOT}${CIS_DIR}/$DATA_STREAM" \

@@ -29,6 +29,7 @@ decisions of Damir Topic".
 | `cis/harden.sh` | Runs on the build VM as root: the packages, the fixes, the design's settings, the firewall's default block, the scan. |
 | `cis/tailoring.xml` | Two profiles: `appliance` (the scan) and `appliance_remediate` (the fixes). |
 | `cis/not-applicable.md` | Each rule the scan leaves out, with its reason; also the manual rules that do not apply. |
+| `cis/oscap-run-sce-script` | OpenSCAP's runner for script checks it cannot execute, as from the `noexec` `/tmp`. |
 | `cis/exceptions.md` | Each rule that applies but fails on the build, with one sentence on why. Damir Topic approves the list once per release. |
 | `tests/test_harden.py` | `harden.sh` against a fake build VM. |
 | `tests/test_cis_lists.py` | The tailoring and the two lists agree. |
@@ -59,11 +60,20 @@ unit and `firewall_state`. In order:
 2. **The scanner files** go to `/opt/meho/appliance/cis/`: the data stream,
    the tailoring and the two lists. They stay on the appliance, because
    `meho-host check` and the update scan with them later (#4737).
+   `oscap-run-sce-script` goes to `/usr/local/bin`. OpenSCAP writes the
+   script checks of the content under `/tmp` (built in; it ignores
+   `TMPDIR`). When it cannot execute them there, because `/tmp` is
+   `noexec`, it runs them through that file on `PATH`. Ubuntu ships the
+   file only in `openscap-utils`, which also pulls in `rpm`; without it,
+   every script check ends in `error`.
 3. **The fixes of ComplianceAsCode:** `oscap xccdf eval --remediate` with
    the profile `appliance_remediate`. It sets the bulk of Level 1: the
    password and lock rules in PAM, the SSH settings, sysctl values, file
    permissions, kernel modules, packages to remove. oscap exits 2 when a
-   rule still fails after its fix, which is not an error; 1 is.
+   rule still fails after its fix, which is not an error; 1 is. The build
+   user keeps sudo without a password, which the clean step needs: the
+   rule that takes it away, `sudo_require_authentication` (CIS 5.2.4), is
+   Level 2 only.
 4. **The design's settings**, after the fixes so they win:
    - `/dev/shm`: one `/etc/fstab` line with `nodev,nosuid,noexec`, and a
      remount (CIS 1.1.2.2).
@@ -210,7 +220,13 @@ and `not-applicable.md` name the same rules and that no exception is also
 
 The tailoring was also checked with the real data stream in an
 `ubuntu:24.04` container: both profiles load, the scan runs 390 rules and
-the fixes 381.
+the fixes 381. A second container run had `/tmp` mounted `noexec` and a
+build user with a locked password and sudo without a password, as
+cloud-init makes it. After the fixes, that user's `sudo -n` still worked.
+With `nftables` installed, five script checks apply in the container.
+With `/tmp` `noexec` and no runner, all five ended in `error`. With the
+runner, every rule had the same result as in a scan with an executable
+`/tmp`.
 
 ## References
 

@@ -125,10 +125,17 @@ _GLOBAL_POLICY_WARNING: Final[str] = (
 )
 
 
-def _external(entry: dict[str, Any], attribute: str, sent: list[str]) -> list[str]:
-    """The names in *sent* that FreeIPA keeps in *attribute*, because it knows no such object."""
+def _external(
+    entry: dict[str, Any], attribute: str, sent: list[str], prefix: str = ""
+) -> list[str]:
+    """The names in *sent* that FreeIPA keeps in *attribute*, because it knows no such object.
+
+    FreeIPA keeps such a name in lower case. With *prefix*, the name also
+    counts when it is kept with that prefix: sudo writes a group as
+    ``%<group>``.
+    """
     kept = {str(name).lower() for name in as_list(entry.get(attribute))}
-    return [name for name in sent if name.lower() in kept]
+    return [name for name in sent if {name.lower(), f"{prefix}{name}".lower()} & kept]
 
 
 class FreeipaAccessWriteOps(_Base):
@@ -191,8 +198,11 @@ class FreeipaAccessWriteOps(_Base):
         answer = await self._add_members(
             operator, target, SUDORULE_ADD_USER_COMMAND, params, members
         )
-        sent = [*params.get("users", []), *params.get("groups", [])]
-        answer["external"] = _external(answer["entry"], "externaluser", sent)
+        entry = answer["entry"]
+        answer["external"] = [
+            *_external(entry, "externaluser", params.get("users", [])),
+            *_external(entry, "externaluser", params.get("groups", []), prefix="%"),
+        ]
         return answer
 
     async def sudorule_host_add(

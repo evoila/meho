@@ -202,8 +202,11 @@ write is in the `identity` group, next to its read; the others are in the
 - A sudo rule keeps a user, group or host name that FreeIPA does not know as
   an external name (`externaluser`, `externalhost`), and FreeIPA counts it
   as added. That is how a sudo rule names a local user. The sudo bodies
-  return these names in `external`, so a typo is visible. An access rule
-  has no external names: an unknown name is in `failed`.
+  return these names in `external`, so a typo is visible. FreeIPA keeps
+  the name in lower case. A group also counts when it is kept with sudo's
+  group prefix (`%<group>`), for example a group from a trusted domain.
+  Users and groups are matched separately. An access rule has no external
+  names: an unknown name is in `failed`.
 - `hbacrule_disable` answers `result: true` also for a rule that was
   disabled already.
 - `freeipa.pwpolicy.set` sends only the settings given:

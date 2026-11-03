@@ -224,7 +224,9 @@ an error body, where a quote sits between the name and the `:`.
 
 The name rule is the shared `broadcast.events.is_secret_param_name`
 (`password`, `encryptedPassword`, `sessionToken`, `client_secret`,
-`licenseKey`, ...), the one the broadcast scrub and the approval echo use.
+`licenseKey`, `psk`, `sharedKey`, `secret_key`, ...), the one the
+broadcast scrub and the approval echo use. The full word list is in
+[connectors-shared-api-file-secrets.md](connectors-shared-api-file-secrets.md#what-counts-as-a-secret-name).
 Numbers, booleans and `null` stay. A value an earlier step already masked
 (`[REDACTED:...]`, a trace marker, `***`) stays, so its label is kept.
 

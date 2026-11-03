@@ -96,9 +96,32 @@ ipa role-add-member "MEHO host writes" --users=meho-svc
 
 Automember rules: FreeIPA 4.13 has no built-in privilege that may change
 them. By default only members of the group `admins` may. To let MEHO's user
-change them, make a permission for the LDAP subtree
-`cn=automember,cn=etc,<base DN>` with the rights add, write and delete. Put it
-into a privilege of its own, and add that privilege to the role above.
+change them, make two permissions for the LDAP subtree of the rules, in the
+same way FreeIPA builds its own:
+
+- one with the rights add and delete, for whole rules. It names no attributes.
+- one with the right write and the attributes of the conditions. A write
+  right without attributes allows no change at all; FreeIPA warns about it.
+
+`<base DN>` is your domain in LDAP form, for example `dc=example,dc=test` for
+`example.test`.
+
+```bash
+ipa permission-add "MEHO add and delete automember rules" \
+  --subtree="cn=automember,cn=etc,<base DN>" \
+  --right=add --right=delete
+ipa permission-add "MEHO change automember conditions" \
+  --subtree="cn=automember,cn=etc,<base DN>" \
+  --right=write \
+  --attrs=automemberinclusiveregex \
+  --attrs=automemberexclusiveregex \
+  --attrs=description
+ipa privilege-add "MEHO automember rules" --desc="Automember rules of MEHO"
+ipa privilege-add-permission "MEHO automember rules" \
+  --permissions="MEHO add and delete automember rules" \
+  --permissions="MEHO change automember conditions"
+ipa role-add-privilege "MEHO host writes" --privileges="MEHO automember rules"
+```
 
 ## Step 2: get the IPA CA
 

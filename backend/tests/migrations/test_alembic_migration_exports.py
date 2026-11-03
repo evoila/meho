@@ -35,7 +35,11 @@ _VERSIONS_DIR: Path = _ALEMBIC_DIR / "versions"
 
 #: The newest migration on main when this rule started. Migrations up to
 #: and including it are not checked and must not be changed for this rule.
-_BASELINE_REVISION = 133
+_BASELINE_REVISION = 134
+
+#: The baseline and the first revision after it, as zero-padded strings.
+_OLD = f"{_BASELINE_REVISION:04d}"
+_NEW = f"{_BASELINE_REVISION + 1:04d}"
 
 _REQUIRED_EXPORTS: frozenset[str] = frozenset(
     {"revision", "down_revision", "branch_labels", "depends_on", "upgrade", "downgrade"}
@@ -121,9 +125,9 @@ def test_new_migrations_list_their_names_in_all() -> None:
 
 
 def test_only_migrations_after_the_baseline_are_checked(tmp_path: Path) -> None:
-    (tmp_path / "0133_old.py").write_text('revision: str = "0133"\n', encoding="utf-8")
-    (tmp_path / "0134_new.py").write_text('revision: str = "0134"\n', encoding="utf-8")
-    assert [p.name for p in _new_migration_files(tmp_path)] == ["0134_new.py"]
+    (tmp_path / f"{_OLD}_old.py").write_text(f'revision: str = "{_OLD}"\n', encoding="utf-8")
+    (tmp_path / f"{_NEW}_new.py").write_text(f'revision: str = "{_NEW}"\n', encoding="utf-8")
+    assert [p.name for p in _new_migration_files(tmp_path)] == [f"{_NEW}_new.py"]
 
 
 def test_template_writes_all(tmp_path: Path) -> None:
@@ -138,20 +142,27 @@ def test_template_writes_all(tmp_path: Path) -> None:
 
 
 def test_baseline_is_the_last_unchecked_migration() -> None:
-    """The baseline is a real migration, so the cut between old and new is exact."""
+    """The baseline is a real migration, and every migration after it has ``__all__``.
+
+    Together this makes the baseline the last migration without the check.
+    """
     revisions = {
         _module_revision(ast.parse(p.read_text(encoding="utf-8")))
         for p in _VERSIONS_DIR.glob("*.py")
     }
-    assert f"{_BASELINE_REVISION:04d}" in revisions
+    assert _OLD in revisions
+    unchecked_newer = [
+        p.name for p in _new_migration_files() if check_exports(p.read_text(encoding="utf-8"))
+    ]
+    assert not unchecked_newer, unchecked_newer
 
 
 @pytest.mark.parametrize(
     ("revision", "expected"),
     [
-        ("0133", False),
+        (_OLD, False),
         ("0001", False),
-        ("0134", True),
+        (_NEW, True),
         ("1000", True),
         ("abc123", True),
         (None, True),
@@ -161,7 +172,7 @@ def test_is_new_migration(revision: str | None, expected: bool) -> None:
     assert _is_new_migration(revision) is expected
 
 
-_HEADER = 'revision: str = "0134"\ndown_revision: str | None = "0133"\n'
+_HEADER = f'revision: str = "{_NEW}"\ndown_revision: str | None = "{_OLD}"\n'
 
 
 @pytest.mark.parametrize(

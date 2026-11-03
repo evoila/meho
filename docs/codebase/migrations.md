@@ -56,7 +56,7 @@ Rules for the block:
 - Copy the block into a migration you write by hand.
 
 `backend/tests/migrations/test_alembic_migration_exports.py` checks the
-template and every migration after `0133`. Migrations up to `0133` are older
+template and every migration after `0134`. Migrations up to `0134` are older
 than the rule and stay as they are.
 
 ## UUID binding convention

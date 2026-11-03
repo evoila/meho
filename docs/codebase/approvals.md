@@ -1047,9 +1047,12 @@ request. The one-resumer claim (`claim_resume`, inside
 `resume_dispatch_after_approval`) decides who runs it. Only the caller
 that wins the claim runs the op:
 
-- `/decide` wins: it runs the op. A waiting agent then gets an "already
-  run" answer (`_resume_approved_or_already_resumed` in
-  `agent/approval_wait.py`) and runs nothing.
+- `/decide` wins: it runs the op, or refuses it before it runs. A
+  waiting agent then runs nothing. It reads the request again and
+  returns the stored result of that run: the refusal, or the result of
+  the run (`_lost_claim_envelope` in `agent/approval_wait.py`). When no
+  result is stored yet, it returns an `already_resumed` answer that says
+  the outcome is not known yet; it never says the operation ran.
 - The waiting agent wins: `/decide` runs nothing and returns
   `dispatch_status="already_resumed"`.
 - No agent is waiting any more: `/decide` wins and runs the op.
@@ -3185,6 +3188,11 @@ What the agent waiter does:
   the waiter returns a `denied` envelope and runs nothing. The refusal
   takes the one-resumer claim, deletes the stored run input, writes one
   audit row and is stored as the run result, like the release refusal.
+  When another caller (usually the console) took the claim first, the
+  waiter reads the request again and returns the stored result of that
+  caller's run: its refusal, or the result of the run. No stored result
+  yet gives an `already_resumed` envelope that says the outcome is not
+  known; the waiter never answers that the operation ran.
   Covered by `test_composite_resume_uses_saved_target_when_name_was_reassigned`
   and `test_composite_resume_fails_closed_when_saved_target_deleted_and_name_reused`
   (unit) and the two `test_agent_waiter_composite_resume_*` tests (end to

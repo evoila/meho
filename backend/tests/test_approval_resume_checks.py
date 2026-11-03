@@ -15,6 +15,10 @@ This suite pins the checks every approved run makes before it starts:
 * A run refused because the target changed, or no longer resolves, is
   recorded: one audit row, the refusal as the stored run result, the
   one-resumer claim taken, and the stored run input deleted.
+* A waiting agent that loses the one-resumer claim gets the stored
+  outcome of the run the other caller made: the refusal, or the result
+  of the run. No stored result yet gives an answer that says the outcome
+  is not known.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_handoff import ApprovalExecutionPayload
 from meho_backplane.operations.approval_queue import (
+    claim_resume,
     create_pending_request,
     resume_dispatch_after_approval,
 )
@@ -501,6 +506,70 @@ async def test_agent_direct_resume_is_refused_when_the_target_is_gone(
     assert resumed["status"] == "denied"
     assert resumed["extras"]["error_code"] == "target_gone_since_approval"
     await _assert_refusal_recorded(request.id, "target_gone_since_approval", target_id)
+
+
+async def test_agent_resume_returns_the_refusal_the_operator_recorded_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator refused the run first: the agent gets that refusal, not "already run"."""
+    target_id = await _persist_target("vc-operator-first")
+    request = await _park_approved(target_id)
+    calls = _spy_dispatch(monkeypatch)
+    await _update_target(target_id, host="second.invalid")
+    refusal = await resume_dispatch_after_approval(
+        operator=_operator("op-approver"), request=await _row(request.id)
+    )
+    assert refusal.status == "denied"
+    seen = _spy_agent_dispatch(monkeypatch)
+
+    resumed = await _agent_resume(request, "vc-operator-first")
+
+    assert calls == [] and seen == [], "the vendor must get no call"
+    assert resumed["status"] == "denied"
+    assert resumed["extras"]["error_code"] == "target_changed_since_approval"
+    assert resumed["extras"]["target_id"] == str(target_id)
+    audit = await _assert_refusal_recorded(request.id, "target_changed_since_approval", target_id)
+    assert resumed["audit_id"] == str(audit.id)
+    assert len(await _resume_audit_rows(request.id)) == 1, "the refusal is recorded once"
+
+
+async def test_agent_resume_returns_the_result_of_the_run_the_operator_made_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator ran the op first: the agent gets that run's stored result."""
+    target_id = await _persist_target("vc-operator-ran")
+    request = await _park_approved(target_id)
+    calls = _spy_dispatch(monkeypatch)
+    ran = await resume_dispatch_after_approval(
+        operator=_operator("op-approver"), request=await _row(request.id)
+    )
+    assert ran.status == "ok" and len(calls) == 1
+    seen = _spy_agent_dispatch(monkeypatch)
+
+    resumed = await _agent_resume(request, "vc-operator-ran")
+
+    assert seen == [] and len(calls) == 1, "the op runs once"
+    assert resumed["status"] == "ok"
+    assert resumed["op_id"] == _OP_ID
+    assert resumed == (await _row(request.id)).resume_result
+
+
+async def test_agent_resume_says_the_outcome_is_not_known_without_a_stored_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another caller holds the claim and has stored nothing yet: the agent gets no "executed"."""
+    target_id = await _persist_target("vc-claimed")
+    request = await _park_approved(target_id)
+    assert await claim_resume(request.id) is True
+    seen = _spy_agent_dispatch(monkeypatch)
+
+    resumed = await _agent_resume(request, "vc-claimed")
+
+    assert seen == []
+    assert resumed["status"] == "already_resumed"
+    assert resumed["extras"]["error_code"] == "already_resumed"
+    assert "not known" in resumed["error"]
+    assert "executed" not in resumed["error"]
 
 
 async def test_agent_resume_of_tenant_wide_request_has_no_target(

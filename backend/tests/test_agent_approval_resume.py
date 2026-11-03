@@ -747,6 +747,7 @@ async def test_resume_no_ops_when_operator_surface_already_claimed(
     assert resumed["status"] == "already_resumed", resumed
     assert resumed["extras"]["decision"] == "approved"
     assert resumed["extras"]["error_code"] == "already_resumed"
+    assert "not known" in resumed["error"], "no stored result: the outcome is unknown"
     assert redispatched == 0
     assert request.execution_handle is not None
     async with sessionmaker() as fresh:
@@ -1128,7 +1129,13 @@ async def test_durable_approval_winner_claims_and_discards_handoff(
 
 
 async def test_competing_resumers_dispatch_at_most_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Two waiters on one approved row: one dispatches, the other is already_resumed."""
+    """Two waiters on one approved row: one dispatches, the other runs nothing.
+
+    The loser reads the stored result of the winner's run. Whether that
+    result is stored yet when the loser reads the row depends on timing, so
+    the loser answers ``already_resumed`` (nothing stored yet) or the
+    winner's ``ok`` result.
+    """
     requester = _make_operator(sub="agent-durable-race")
     request = await _park_request(requester=requester, status=ApprovalRequestStatus.APPROVED)
     dispatched = _forbid_dispatch(monkeypatch)
@@ -1143,7 +1150,8 @@ async def test_competing_resumers_dispatch_at_most_once(monkeypatch: pytest.Monk
 
     outcomes = await asyncio.gather(_resume(), _resume())
 
-    assert sorted(o["status"] for o in outcomes) == ["already_resumed", "ok"]
+    assert "ok" in [o["status"] for o in outcomes]
+    assert all(o["status"] in ("already_resumed", "ok") for o in outcomes)
     assert len(dispatched) == 1
 
 

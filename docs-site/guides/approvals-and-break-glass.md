@@ -291,9 +291,11 @@ written to the audit log. Concretely:
   card: the same id or key, or, for an object that has none, the same
   fields. If someone deleted the object and created a new one under the
   same name while the request waited, the run is refused and nothing is
-  deleted. The requester sends a new request, and the approver sees the
-  new object. If the object is simply gone, the run reports it as already
-  absent.
+  deleted. The same happens when the card said there was nothing to delete
+  and an object with that name is there now, and when MEHO cannot read the
+  object right before the run. The requester sends a new request, and the
+  approver sees the new object. If the object is simply gone, the run
+  reports it as already absent.
 - **A blast-radius statement is mandatory.** A destructive operation
   cannot park without a block naming the object, its enumerated child
   objects, and how irreversible the change is. The console renders it as

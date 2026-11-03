@@ -120,7 +120,9 @@ _REFUSAL_MESSAGES: Final[dict[RerunRefusal, str]] = {
         "the connection settings of the approved target changed after the request was made"
     ),
     RerunRefusal.PREVIEW_CHANGED: "the preview of the call differs from the approved one",
-    RerunRefusal.OBJECT_CHANGED: "the object of the call is not the one on the approval card",
+    RerunRefusal.OBJECT_CHANGED: (
+        "the object of the call is not the one on the approval card, or could not be read"
+    ),
     RerunRefusal.INPUT_NOT_KEPT: (
         "MEHO did not keep the input of this multi-step credential write after its first run"
     ),

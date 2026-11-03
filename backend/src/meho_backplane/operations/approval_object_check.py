@@ -15,10 +15,16 @@ card again against the live system and compares the object with the card:
   record): the live object must have the same fields. Counts and yes/no
   flags do not count; they change on their own and do not say which
   object it is.
-* The live object is gone, or the card does not build now (a builder
-  declines when the name matches no object): the run goes ahead, and the
+* The card says the object is absent (the approver saw "nothing to
+  delete"): the live card must say so too. An object that appeared under
+  that name since the request refuses the run.
+* The live card says the object is gone: the run goes ahead, and the
   handler answers as it does for an absent object ("already absent" /
-  "not found"), or reports its own error.
+  "not found").
+* The card does not build now (the op does not resolve, the builder
+  declines or fails): the run is refused. MEHO cannot tell which object
+  the handler would find, so an unreadable object is never treated as
+  the approved one, and not as a gone one either.
 
 Like the preview check in
 :mod:`~meho_backplane.operations.approval_resume_checks`, the check runs
@@ -50,7 +56,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "IDENTITY_FIELDS",
+    "REASON_APPEARED",
     "REASON_CHANGED",
+    "REASON_UNREADABLE",
     "card_object",
     "live_card",
     "object_changed_since_request",
@@ -68,6 +76,21 @@ REASON_CHANGED: Final[str] = (
     "The object this call would change is not the one on the approval card: "
     "it changed after the request was made. The operation did not run. "
     "Send a new request."
+)
+
+#: Why a run was refused: the card said there was nothing to change, and
+#: now there is an object under that name.
+REASON_APPEARED: Final[str] = (
+    "The approval card said the object this call would change was not there, "
+    "but an object with that name is there now. The operation did not run. "
+    "Send a new request."
+)
+
+#: Why a run was refused: the card could not be built again.
+REASON_UNREADABLE: Final[str] = (
+    "MEHO could not read the object this call would change, so it could not "
+    "check that it is still the one on the approval card. The operation did "
+    "not run. Send a new request."
 )
 
 
@@ -168,19 +191,17 @@ async def object_changed_since_request(
 ) -> str | None:
     """Why the run must be refused, or ``None`` when the object is the approved one.
 
-    Returns :data:`REASON_CHANGED` when the live object has another
-    identity than the card. Returns ``None`` when the request stored no
-    preview hash or no card object, when the card already said the object
-    is absent, when the live object is gone or the card does not build
-    now, and when the identities match.
+    Returns :data:`REASON_UNREADABLE` when the card does not build now,
+    :data:`REASON_APPEARED` when the card said the object was absent and
+    the live card names one, and :data:`REASON_CHANGED` when the live
+    object has another identity than the card. Returns ``None`` when the
+    request stored no preview hash or no card object, when the live card
+    says the object is gone, and when the identities match.
     """
     if request.preview_hash is None:
         return None
     approved = card_object(request.proposed_effect)
     if approved is None:
-        return None
-    approved_identity = object_identity(approved)
-    if approved_identity is None:
         return None
     live = card_object(
         await live_card(
@@ -191,24 +212,37 @@ async def object_changed_since_request(
             params=params,
         )
     )
+    log_fields = {
+        "approval_request_id": str(request.id),
+        "op_id": request.op_id,
+        "connector_id": request.connector_id,
+    }
     if live is None:
-        # The builder declined or failed: the object is gone, or cannot be
-        # read now. The handler finds that out itself and answers.
-        _log.info(
-            "approval_resume_object_card_not_built",
-            approval_request_id=str(request.id),
-            op_id=request.op_id,
-            connector_id=request.connector_id,
+        _log.warning("approval_resume_object_unreadable", **log_fields)
+        return REASON_UNREADABLE
+    approved_identity = object_identity(approved)
+    reason = _identity_refusal(approved_identity, object_identity(live))
+    if reason is REASON_APPEARED:
+        _log.warning("approval_resume_object_appeared", **log_fields)
+    elif reason is REASON_CHANGED:
+        _log.warning(
+            "approval_resume_object_changed",
+            identity_fields=sorted(approved_identity or ()),
+            **log_fields,
         )
+    return reason
+
+
+def _identity_refusal(approved: dict[str, Any] | None, live: dict[str, Any] | None) -> str | None:
+    """Why the identities refuse the run, or ``None`` when they let it go ahead.
+
+    ``None`` for an identity means the card says the object is absent. A
+    live object that is gone, or still absent, lets the run go ahead so the
+    handler answers "already absent". An object where the card said there
+    was none refuses, and so does one with another identity.
+    """
+    if live is None:
         return None
-    live_identity = object_identity(live)
-    if live_identity is None or live_identity == approved_identity:
-        return None
-    _log.warning(
-        "approval_resume_object_changed",
-        approval_request_id=str(request.id),
-        op_id=request.op_id,
-        connector_id=request.connector_id,
-        identity_fields=sorted(approved_identity),
-    )
-    return REASON_CHANGED
+    if approved is None:
+        return REASON_APPEARED
+    return None if live == approved else REASON_CHANGED

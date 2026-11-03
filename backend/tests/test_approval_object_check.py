@@ -10,8 +10,11 @@ starts (``operations/approval_object_check.py``):
   the system has no id. Counts and yes/no flags do not count.
 * Right before the run, MEHO builds the card again against the live
   system. A live object with another identity refuses the run and nothing
-  is sent. The same object runs. A gone object runs, and so does a card
-  that does not build, so the handler can answer "already absent" itself.
+  is sent. The same object runs. A gone object runs, so the handler can
+  answer "already absent" itself. A card that does not build refuses the
+  run: an unreadable object is never taken for the approved one. A card
+  that said the object was absent refuses the run when an object is there
+  now.
 * All three run paths check: the approve surfaces, the agent's own resume
   and the re-run after a failure.
 """
@@ -39,7 +42,9 @@ from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_object_check import (
+    REASON_APPEARED,
     REASON_CHANGED,
+    REASON_UNREADABLE,
     card_object,
     live_card,
     object_identity,
@@ -80,6 +85,13 @@ _USER_CARD: dict[str, Any] = {
     "present": True,
     "enabled": True,
     "groups": ["/ops"],
+}
+#: The card of a user that was not there: the approver saw "nothing to delete".
+_ABSENT_USER_CARD: dict[str, Any] = {
+    "kind": "user",
+    "username": "bob",
+    "id": None,
+    "present": False,
 }
 #: A card of an object whose system has no id (a firewall alias).
 _ALIAS_CARD: dict[str, Any] = {
@@ -227,14 +239,27 @@ def _same_preview(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _live_object(
-    monkeypatch: pytest.MonkeyPatch, obj: dict[str, Any] | None, *, builds: bool = True
+    monkeypatch: pytest.MonkeyPatch,
+    obj: dict[str, Any] | None,
+    *,
+    builds: bool = True,
+    unavailable: bool = False,
 ) -> list[dict[str, Any]]:
-    """The card MEHO builds right before the run names *obj*; ``builds=False`` means no card."""
+    """The card MEHO builds right before the run names *obj*.
+
+    ``builds=False`` means no card at all (the op did not resolve, or the
+    build raised). ``unavailable=True`` means the card carries the
+    ``preview_unavailable`` marker a builder that raised leaves behind.
+    """
     calls: list[dict[str, Any]] = []
 
     async def _fake_live_card(operator: Operator, **kwargs: Any) -> dict[str, Any] | None:
         calls.append(kwargs)
-        return _card(obj) if builds else None
+        if not builds:
+            return None
+        if unavailable:
+            return {**_card(None), "preview_unavailable": True, "preview_error": "read failed"}
+        return _card(obj)
 
     monkeypatch.setattr(object_check_module, "live_card", _fake_live_card)
     return calls
@@ -400,12 +425,88 @@ async def test_operator_resume_runs_when_the_object_is_gone(
     assert len(calls) == 1
 
 
-async def test_operator_resume_runs_when_the_card_does_not_build(
+@pytest.mark.parametrize(
+    "live_card_kwargs",
+    [
+        pytest.param({"builds": False}, id="no-card"),
+        pytest.param({"unavailable": True}, id="builder-raised"),
+    ],
+)
+async def test_operator_resume_is_refused_when_the_card_does_not_build(
+    monkeypatch: pytest.MonkeyPatch, live_card_kwargs: dict[str, Any]
+) -> None:
+    """An unreadable object is never taken for the approved one.
+
+    The op does not resolve, the builder declines, or it finds the object
+    and then fails while reading the rest of the card (a user's groups):
+    the card has no object, and the run must not look the name up again.
+    """
+    target_id = await _persist_target(f"kc-no-card-{uuid.uuid4().hex[:6]}")
+    request = await _park_approved(target_id)
+    _same_preview(monkeypatch)
+    _live_object(monkeypatch, None, **live_card_kwargs)
+    calls = _spy_dispatch(monkeypatch)
+
+    result = await resume_dispatch_after_approval(
+        operator=_operator("op-approver"), request=await _row(request.id)
+    )
+
+    assert calls == [], "the vendor must get no call"
+    assert result.status == "denied"
+    assert result.extras["error_code"] == "object_changed_since_approval"
+    assert result.extras["reason"] == REASON_UNREADABLE
+    stored = await _row(request.id)
+    assert stored.resumed_at is not None, "the request can never run later"
+    assert stored.resume_result is not None
+    assert stored.resume_result["extras"]["reason"] == REASON_UNREADABLE
+
+
+async def test_operator_resume_is_refused_when_an_object_appeared_under_an_absent_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A builder that declines means the object is gone; the handler answers itself."""
-    target_id = await _persist_target("kc-no-card")
-    request = await _park_approved(target_id)
+    """The approver saw "nothing to delete"; the run must not delete what came later."""
+    target_id = await _persist_target("kc-appeared")
+    request = await _park_approved(target_id, card=_ABSENT_USER_CARD)
+    _same_preview(monkeypatch)
+    _live_object(monkeypatch, {**_USER_CARD, "id": "3333-new"})
+    calls = _spy_dispatch(monkeypatch)
+
+    result = await resume_dispatch_after_approval(
+        operator=_operator("op-approver"), request=await _row(request.id)
+    )
+
+    assert calls == [], "the vendor must get no call"
+    assert result.status == "denied"
+    assert result.extras["error_code"] == "object_changed_since_approval"
+    assert result.extras["reason"] == REASON_APPEARED
+    stored = await _row(request.id)
+    assert stored.resume_result is not None
+    assert stored.resume_result["extras"]["reason"] == REASON_APPEARED
+
+
+async def test_operator_resume_runs_when_the_object_is_still_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_id = await _persist_target("kc-still-absent")
+    request = await _park_approved(target_id, card=_ABSENT_USER_CARD)
+    _same_preview(monkeypatch)
+    _live_object(monkeypatch, dict(_ABSENT_USER_CARD))
+    calls = _spy_dispatch(monkeypatch)
+
+    result = await resume_dispatch_after_approval(
+        operator=_operator("op-approver"), request=await _row(request.id)
+    )
+
+    assert result.status == "ok", "the handler answers 'already absent' itself"
+    assert len(calls) == 1
+
+
+async def test_operator_resume_is_refused_when_the_absent_card_does_not_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A card that said "absent" still needs the live card to build."""
+    target_id = await _persist_target("kc-absent-no-card")
+    request = await _park_approved(target_id, card=_ABSENT_USER_CARD)
     _same_preview(monkeypatch)
     _live_object(monkeypatch, None, builds=False)
     calls = _spy_dispatch(monkeypatch)
@@ -414,8 +515,8 @@ async def test_operator_resume_runs_when_the_card_does_not_build(
         operator=_operator("op-approver"), request=await _row(request.id)
     )
 
-    assert result.status == "ok"
-    assert len(calls) == 1
+    assert calls == []
+    assert result.extras["reason"] == REASON_UNREADABLE
 
 
 @pytest.mark.parametrize(
@@ -525,6 +626,35 @@ async def test_agent_resume_is_refused_when_a_new_object_has_the_approved_name(
     assert stored.resume_result["extras"]["error_code"] == "object_changed_since_approval"
 
 
+@pytest.mark.parametrize(
+    ("card", "live", "reason"),
+    [
+        pytest.param(_USER_CARD, None, REASON_UNREADABLE, id="unreadable"),
+        pytest.param(
+            _ABSENT_USER_CARD, {**_USER_CARD, "id": "3333-new"}, REASON_APPEARED, id="appeared"
+        ),
+    ],
+)
+async def test_agent_resume_is_refused_when_the_object_cannot_be_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+    card: dict[str, Any],
+    live: dict[str, Any] | None,
+    reason: str,
+) -> None:
+    name = f"kc-agent-{uuid.uuid4().hex[:6]}"
+    target_id = await _persist_target(name)
+    request = await _park_approved(target_id, card=card)
+    _same_preview(monkeypatch)
+    _live_object(monkeypatch, live, builds=live is not None)
+    seen = _spy_agent_dispatch(monkeypatch)
+
+    resumed = await _agent_resume(request, name)
+
+    assert seen == []
+    assert resumed["status"] == "denied"
+    assert resumed["extras"]["reason"] == reason
+
+
 async def test_agent_resume_runs_when_the_object_is_the_approved_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -560,6 +690,28 @@ async def test_rerun_is_refused_when_a_new_object_has_the_approved_name(
     assert exc_info.value.reason is RerunRefusal.OBJECT_CHANGED
     assert calls == []
     assert (await _row(request.id)).rerun_count == 0
+
+
+@pytest.mark.parametrize(
+    ("card", "live"),
+    [
+        pytest.param(_USER_CARD, None, id="unreadable"),
+        pytest.param(_ABSENT_USER_CARD, {**_USER_CARD, "id": "3333-new"}, id="appeared"),
+    ],
+)
+async def test_rerun_is_refused_when_the_object_cannot_be_confirmed(
+    monkeypatch: pytest.MonkeyPatch, card: dict[str, Any], live: dict[str, Any] | None
+) -> None:
+    request = await _park_approved(None, card=card, failed_run=True)
+    _same_preview(monkeypatch)
+    _live_object(monkeypatch, live, builds=live is not None)
+    calls = _spy_dispatch(monkeypatch)
+
+    with pytest.raises(RerunNeedsNewApprovalError) as exc_info:
+        await rerun_failed_request(operator=_operator(), request_id=request.id)
+
+    assert exc_info.value.reason is RerunRefusal.OBJECT_CHANGED
+    assert calls == []
 
 
 async def test_rerun_runs_when_the_object_is_the_approved_one(

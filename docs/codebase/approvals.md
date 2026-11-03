@@ -233,15 +233,27 @@ names (`proposed_effect.blast_radius.object`) with the live one
 - The card has no id or key: the live object must have the same fields,
   without counts and yes/no flags. pfSense alias, gateway and static-route
   deletes, DNS record deletes, a Vault secret path, a Kubernetes Secret.
-- The live object is gone (the card says `present: false` or has an empty
-  id), or the card does not build now (a builder declines when the name
-  matches no object): the run goes ahead and the handler answers "already
-  absent" or "not found" itself.
+- The card says the object is absent (`present: false` or an empty id; the
+  approver saw "nothing to delete"): the live card must say so too. An
+  object that appeared under that name since the request refuses the run
+  (`REASON_APPEARED`).
+- The live card says the object is gone: the run goes ahead and the
+  handler answers "already absent" or "not found" itself.
+- The card does not build now (the op does not resolve, the builder
+  declines, or it fails while reading, for example a user is found but
+  the read of their groups fails): the run is refused
+  (`REASON_UNREADABLE`). MEHO cannot tell which object the handler would
+  find, so an unreadable object is never treated as the approved one, and
+  not as a gone one either. A builder that declines for an absent object
+  (pfSense) refuses the run too; a new request is then refused at park
+  time with `blast_radius_required`, which tells the requester the object
+  is not there.
 
-A changed object refuses the run with
-`error_code = "object_changed_since_approval"`. The refusal is stored as
-the run result like the preview refusal. A request without a card object (no blast radius) is not
-checked. The re-run path reports the three checks as `target_changed`,
+A changed, appeared or unreadable object refuses the run with
+`error_code = "object_changed_since_approval"`; `extras.reason` says
+which. The refusal is stored as the run result like the preview refusal.
+A request without a card object (no blast radius) is not checked. The
+re-run path reports the three checks as `target_changed`,
 `preview_changed` and `object_changed`.
 
 ## The params hash on requests and audit rows
@@ -1098,7 +1110,7 @@ There is no MCP tool for it; the agent working surface is unchanged.
 | The saved target still resolves. | same (`target_gone`) |
 | The saved target has the connection settings it had when the request was made (`target_hash`, same check as every approved run). | same (`target_changed`) |
 | A `destructive` request: a new server-side preview has the approved `preview_hash`. | same (`preview_changed`) |
-| A `destructive` request: the object the approval card names is still the live object, or is gone (`approval_object_check.py`, same check as every approved run). | same (`object_changed`) |
+| A `destructive` request: the live card builds, and the object it names is still the one on the approval card, or is gone (`approval_object_check.py`, same check as every approved run). | same (`object_changed`) |
 
 The operation, connector and target always come from the request, so the
 caller cannot change them. A refused re-run runs nothing.

@@ -1258,7 +1258,8 @@ def result_object_changed_since_approval(
 
     Right before the run, MEHO built the approval card again against the
     live system. The object it found has another identity than the one the
-    person approved, or the card did not build (see
+    person approved, an object appeared where the card said there was none,
+    or the card did not build (see
     :mod:`~meho_backplane.operations.approval_object_check`). Nothing was
     sent. The requester sends a new request.
     """

@@ -150,6 +150,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.connectors._shared.credential_backend import split_credential_ref
+from meho_backplane.connectors._shared.gsm_creds import (
+    ALLOWED_PROJECTS_SETTING,
+    gsm_project_of,
+    is_gsm_project_allowed,
+)
 from meho_backplane.connectors._shared.vault_creds import DEFAULT_KV_MOUNT
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import (
@@ -991,6 +996,19 @@ def _tenant_prefix_or_empty(operator: Operator) -> str:
     return rendered_tenant_prefix(operator, template=template).strip().strip("/")
 
 
+def _resolve_store(secret_ref: str) -> tuple[str, str]:
+    """Split *secret_ref* into ``(kind, store_ref)`` as the dispatch-time read does.
+
+    Surrounding whitespace is cut before the scheme is read, as the
+    dispatch-time read cuts it, so a leading blank cannot hide the scheme.
+    A schemeless ref resolves through the deploy default
+    (``CREDENTIAL_BACKEND``).
+    """
+    return split_credential_ref(
+        secret_ref.strip(), default_backend=get_settings().credential_backend
+    )
+
+
 def _vault_kv_candidate(secret_ref: str) -> str | None:
     """Return the normalised ``<mount>/<path>`` the Vault read of *secret_ref* addresses.
 
@@ -999,16 +1017,58 @@ def _vault_kv_candidate(secret_ref: str) -> str | None:
     tenant-subtree convention does not apply there. The path is the
     scheme-stripped store ref, the same one the dispatch-time read sends
     to Vault, so a ``vault:`` scheme on the ref cannot hide a ``.`` or
-    ``..`` in the first segment. Surrounding whitespace is cut before the
-    scheme is read, as the dispatch-time read cuts it, so a leading blank
-    cannot hide the scheme either.
+    ``..`` in the first segment.
     """
-    kind, store_ref = split_credential_ref(
-        secret_ref.strip(), default_backend=get_settings().credential_backend
-    )
+    kind, store_ref = _resolve_store(secret_ref)
     if kind != "vault":
         return None
     return f"{DEFAULT_KV_MOUNT}/{store_ref.strip('/')}"
+
+
+def _build_secret_ref_project_not_allowed_detail(
+    *, secret_ref: str, project: str
+) -> dict[str, object]:
+    """Build the structured 422 detail for a ``gsm:`` ref in a project not allowed.
+
+    Same shape convention as :func:`_build_secret_ref_outside_tenant_scope_detail`:
+    a stable snake_case ``kind``, the offending value, the project it
+    names, the setting that lists the allowed projects, and a human
+    ``message`` with the remediation. Pure builder, no I/O.
+    """
+    return {
+        "kind": "secret_ref_project_not_allowed",
+        "secret_ref": secret_ref,
+        "project": project,
+        "setting": ALLOWED_PROJECTS_SETTING,
+        "message": (
+            f"secret_ref={secret_ref!r} names the Google Cloud project {project!r}, "
+            f"which {ALLOWED_PROJECTS_SETTING} does not list. MEHO reads a target's "
+            f"Google Secret Manager login only from a listed project, so this "
+            f"target could never dispatch. List the project in "
+            f"{ALLOWED_PROJECTS_SETTING} (comma-separated project ids) and restart "
+            f"the backplane, or point secret_ref at a secret in a listed project. "
+            f"See docs/codebase/connectors-vault-tenant-scope.md for the rule and "
+            f"docs/codebase/error-message-shape.md for the error convention."
+        ),
+    }
+
+
+def _enforce_gsm_project_allowed(secret_ref: str, store_ref: str) -> None:
+    """Reject a ``gsm:`` ``secret_ref`` whose project is not in the allowed list.
+
+    The dispatch-time read of a target's ``gsm:`` login runs the same check
+    (:func:`~meho_backplane.connectors._shared.gsm_creds.check_gsm_target_ref`),
+    so a target that would be refused at every read is refused when it is
+    saved instead. Raises a structured 422
+    (``kind="secret_ref_project_not_allowed"``) on violation.
+    """
+    project = gsm_project_of(store_ref)
+    if is_gsm_project_allowed(project):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=_build_secret_ref_project_not_allowed_detail(secret_ref=secret_ref, project=project),
+    )
 
 
 def _enforce_secret_ref_tenant_scope(
@@ -1060,21 +1120,24 @@ def _enforce_secret_ref_tenant_scope(
     unconfigured target fails dispatch with the existing actionable
     "no secret_ref configured" error, not a Vault denial.
 
-    The check only applies to refs that resolve through the **Vault**
-    credential backend. #2585 (Initiative #2592): the constraint is a
-    Vault KV path convention, so a ref bound to another store — a
-    ``gsm:<project>/<secret>`` ref, or any ref on a
-    ``CREDENTIAL_BACKEND=gsm`` deploy — has no Vault subtree to enforce
-    and is passed through untouched. Backend resolution reuses
-    :func:`~meho_backplane.connectors._shared.credential_backend.split_credential_ref`
-    with the deploy default (:func:`_vault_kv_candidate`), so the
-    write-time gate's *applicability* and the path it checks track the
-    same backend and path dispatch resolves at read time
-    (:func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`).
+    The tenant-subtree rule only applies to refs that resolve through the
+    **Vault** backend (#2585: it is a Vault KV path convention). A ref
+    that resolves through **Google Secret Manager** (``gsm:`` scheme, or
+    any ref on a ``CREDENTIAL_BACKEND=gsm`` deploy) must instead name a
+    project listed in ``GSM_PARAM_ALLOWED_PROJECTS``
+    (:func:`_enforce_gsm_project_allowed`), as the dispatch-time read
+    requires. :func:`_resolve_store` splits the ref the way dispatch does
+    (:func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`),
+    so the gate checks the same backend and path.
 
-    Raises a structured 422 (``kind="secret_ref_outside_tenant_scope"``)
-    on violation; returns ``None`` otherwise.
+    Raises a structured 422 (``kind="secret_ref_outside_tenant_scope"`` or
+    ``kind="secret_ref_project_not_allowed"``) on violation; returns
+    ``None`` otherwise.
     """
+    kind, store_ref = _resolve_store(secret_ref)
+    if kind == "gsm":
+        _enforce_gsm_project_allowed(secret_ref, store_ref)
+        return
     candidate = _vault_kv_candidate(secret_ref)
     if candidate is None:
         return

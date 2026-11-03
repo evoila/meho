@@ -108,6 +108,12 @@ from meho_backplane.connectors._shared.credential_backend import (
     resolve_credential_backend,
     split_credential_ref,
 )
+from meho_backplane.connectors._shared.gsm_creds import (
+    ALLOWED_PROJECTS_SETTING,
+    check_gsm_target_ref,
+    gsm_project_of,
+    is_gsm_project_allowed,
+)
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -595,6 +601,11 @@ async def _resolve_and_load(
     scheme = parse_credential_scheme(ref)
     default_backend = scheme if scheme is not None else get_settings().credential_backend
     kind, store_ref = split_credential_ref(ref, default_backend=default_backend)
+    if kind == "gsm":
+        # A target's own gsm: login is read only from an allowed project, as
+        # a gsm: ref in a parameter is. Checked here, not in the backend, so
+        # the readiness probe's own probe secret stays outside the rule.
+        check_gsm_target_ref(store_ref, target_name=target.name)
     backend = resolve_credential_backend(kind)
     secret_data = await backend.load_secret_data(
         store_ref, operator, target_name=target.name, mount=mount
@@ -798,7 +809,9 @@ def check_param_secret_ref(
     * **Google Secret Manager** (``gsm:`` or a schemeless ref on a
       ``credentialBackend=gsm`` install): the project must be listed in
       ``GSM_PARAM_ALLOWED_PROJECTS``. An empty list refuses every one,
-      because MEHO reads these secrets with its own Google identity.
+      because MEHO reads these secrets with its own Google identity. The
+      same list limits a target's own ``gsm:`` login
+      (:func:`~meho_backplane.connectors._shared.gsm_creds.check_gsm_target_ref`).
     * **Any other store kind** is refused.
 
     An empty ref passes: the read itself then fails with its own "no
@@ -824,13 +837,12 @@ def check_param_secret_ref(
             raise SecretRefScopeError(param=param, secret_ref=ref, reason=exc.reason) from exc
         return
     if kind == "gsm":
-        project = store_ref.partition("#")[0].partition("/")[0].strip()
-        if project and project in get_settings().gsm_param_allowed_project_set:
+        if is_gsm_project_allowed(gsm_project_of(store_ref)):
             return
         raise SecretRefScopeError(
             param=param,
             secret_ref=ref,
-            reason="the Google Cloud project is not listed in GSM_PARAM_ALLOWED_PROJECTS",
+            reason=f"the Google Cloud project is not listed in {ALLOWED_PROJECTS_SETTING}",
         )
     raise SecretRefScopeError(
         param=param,

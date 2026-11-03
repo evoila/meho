@@ -387,6 +387,9 @@ def test_default_loader_dispatches_gsm_ref_through_seam(
 
     fake_backend = _FakeGsmBackend()
     monkeypatch.setitem(cb.CREDENTIAL_BACKEND_REGISTRY, "gsm", fake_backend)
+    # A target's gsm: login is read only from an allowed project.
+    monkeypatch.setenv("GSM_PARAM_ALLOWED_PROJECTS", "my-project")
+    get_settings.cache_clear()
 
     gsm_target = _StubTarget(
         name="gke-meho",

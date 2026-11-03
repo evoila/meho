@@ -19,7 +19,10 @@ there as well:
   written. So every resume of an approved call, by the person from an
   approvals surface or by the agent itself, runs a call that a person
   with the role approved. The approve-and-run path (``dispatcher.py``)
-  checks the person who runs it from an approvals surface once more.
+  checks the reviewer who runs it from an approvals surface once more.
+  The requester's own run of the approved call is not checked again:
+  the agent's resume, a hosted agent run, and a re-run of a failed call
+  by the requester, also a service login with a lower role.
 
 The floor applies to people. An agent login parks or is refused by the
 policy gate as before, and a service login parks or runs under a grant a

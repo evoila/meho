@@ -310,15 +310,20 @@ service logins are not checked here; they park or run under a grant, and
 a person decides. The approval queue (`approve_request`,
 `_check_approver_role_floor`) checks that person against the same floor
 at the decision, on every approve surface (REST `/approve` and `/decide`,
-the MCP by-id approve, the console): an approver below the floor gets
-403, the request stays pending and no decision is recorded. So the
-approved call runs a decision a person with the role made, whichever
-resume path wins. When that person runs the approved call from an
-approvals surface, the dispatcher's approve-and-run path
+the console; approval decisions have no MCP path): an approver below the
+floor gets 403, the request stays pending and no decision is recorded.
+So the approved call runs a decision a person with the role made,
+whichever resume path wins. When that person runs the approved call from
+an approvals surface, the dispatcher's approve-and-run path
 (`_approved=True`) checks their role once more and refuses with a
-`denied` audit row. An agent's own resume of an approved call
-(`agent/approval_wait.py`, an agent principal or a hosted agent run) is
-not checked again: the person's approval is the authorization.
+`denied` audit row. The requester's own run of an approved call is not
+checked again, the person's approval is the authorization: an agent's
+own resume (`agent/approval_wait.py`, an agent principal or a hosted
+agent run), and the requester's re-run of a failed approved call
+(`POST /api/v1/approvals/{id}/rerun`, `operations/approval_rerun.py`),
+which runs under the requester, also a service login with the `operator`
+role. The dispatcher tells the two apart by the requester the resume
+helper binds (`secondary_target_policy.approved_requester_sub`).
 
 `policy_gate` (`_validate.py`) opens its own DB session (same
 `get_sessionmaker()` pattern as `audit_and_broadcast_safe`) and calls

@@ -412,6 +412,7 @@ from meho_backplane.operations.reducer import (
 )
 from meho_backplane.operations.result_document import json_text_bytes
 from meho_backplane.operations.role_floors import role_floor_denial
+from meho_backplane.operations.secondary_target_policy import approved_requester_sub
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
     apply_connector_boundary_redaction,
@@ -1043,6 +1044,17 @@ def _secret_view(*, makes_new_secret: bool, reveal_secret: bool) -> SecretView |
 def _agent_acts(operator: Operator) -> bool:
     """True when an agent makes this call: an agent principal, or a hosted agent run."""
     return operator.principal_kind is PrincipalKind.AGENT or resolve_actor_sub() is not None
+
+
+def _requester_runs_approved_call(operator: Operator) -> bool:
+    """True when the requester of an approved call runs it, not a reviewer.
+
+    The agent's own resume and a hosted agent run (:func:`_agent_acts`), and
+    the requester's re-run of a failed approved call, which binds the
+    requester of the row (:func:`approved_requester_sub`). A reviewer who
+    runs the call from an approvals surface is not the requester.
+    """
+    return _agent_acts(operator) or approved_requester_sub() == operator.sub
 
 
 async def _refuse_agent_reveal(
@@ -3783,11 +3795,14 @@ async def dispatch(
             # The approval queue refuses an approver below the op's role
             # floor at the decision, so an approved call was approved by a
             # person with the role. From an approvals surface the call runs
-            # under that person; check the role again here as a backstop.
-            # An agent's own resume (an agent principal, or a hosted agent
-            # run) keeps the person's approval as the authorization.
+            # under that reviewer; check the role again here as a backstop.
+            # The requester's own run (an agent's resume, a hosted agent
+            # run, or a re-run of a failed call by the requester, also a
+            # service login) keeps the approval as the authorization.
             role_denial = (
-                None if _agent_acts(operator) else role_floor_denial(op_id, operator.tenant_role)
+                None
+                if _requester_runs_approved_call(operator)
+                else role_floor_denial(op_id, operator.tenant_role)
             )
             if role_denial is not None:
                 duration_ms = _elapsed_ms(started)

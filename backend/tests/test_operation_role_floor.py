@@ -20,8 +20,10 @@ checks it (:mod:`meho_backplane.operations.role_floors`).
   ``tenant_admin`` approves it, and the agent's own resume then runs.
 * **After approval** -- the approver's role counts again when a person
   runs the approved call: an ``operator`` approver is refused, a
-  ``tenant_admin`` approver runs the call. An agent's own resume runs:
-  the person's approval is the authorization.
+  ``tenant_admin`` approver runs the call. The requester's own run is
+  not checked again, the person's approval is the authorization: an
+  agent's own resume runs, and a service login with the ``operator``
+  role runs its approved call again after a failed run.
 * **The topology writes** -- the same rule on all five.
 """
 
@@ -29,6 +31,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -61,8 +64,10 @@ from meho_backplane.db.models import ApprovalRequest, AuditLog, GraphNode, Tenan
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.approval_queue import ApprovalRoleFloorError, approve_request
+from meho_backplane.operations.approval_rerun import rerun_failed_request
 from meho_backplane.operations.meta_tools import preview_operation
 from meho_backplane.operations.role_floors import role_floor_denial, role_floor_for
+from meho_backplane.operations.secondary_target_policy import bind_approved_requester
 from meho_backplane.settings import get_settings
 
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000000f1")
@@ -183,8 +188,8 @@ async def _decision_audit_rows() -> list[AuditLog]:
         return list(rows.scalars().all())
 
 
-async def _park_as_agent(agent: Operator) -> uuid.UUID:
-    parked = await _register(agent)
+async def _park_for_approval(requester: Operator) -> uuid.UUID:
+    parked = await _register(requester)
     assert parked.status == "awaiting_approval", parked
     return uuid.UUID(parked.extras["approval_request_id"])
 
@@ -193,6 +198,26 @@ async def _approve(request_id: uuid.UUID, approver: Operator) -> None:
     async with get_sessionmaker()() as session:
         await approve_request(session, request_id, operator=approver, params=dict(_REGISTER_PARAMS))
         await session.commit()
+
+
+async def _approval_row(request_id: uuid.UUID) -> ApprovalRequest:
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+    assert row is not None
+    return row
+
+
+async def _store_failed_run(request_id: uuid.UUID) -> None:
+    """Record that the approved call ran and failed, so the requester may run it again."""
+    async with get_sessionmaker()() as session, session.begin():
+        row = await session.get(ApprovalRequest, request_id)
+        assert row is not None
+        row.resumed_at = datetime.now(UTC)
+        row.resume_result = {
+            "status": "error",
+            "op_id": TARGETS_REGISTER_OP_ID,
+            "error": "connector_error: not yet",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +316,7 @@ async def test_a_person_below_the_floor_cannot_approve_the_parked_call(
 ) -> None:
     """The approval is the authorization for every resume, so the approver needs the role."""
     agent = _person(TenantRole.OPERATOR, kind=PrincipalKind.AGENT, sub="agent:a")
-    request_id = await _park_as_agent(agent)
+    request_id = await _park_for_approval(agent)
     # ``approver=True`` lets a ``read_only`` person decide requests at all.
     approver = _person(role, sub="approver", approver=True)
 
@@ -308,7 +333,7 @@ async def test_a_person_below_the_floor_cannot_approve_the_parked_call(
 async def test_a_tenant_admin_approves_and_the_agent_resume_runs(_registered_ops: None) -> None:
     """A real approval by a ``tenant_admin``, then the agent's own resume of the call."""
     agent = _person(TenantRole.OPERATOR, kind=PrincipalKind.AGENT, sub="agent:a")
-    request_id = await _park_as_agent(agent)
+    request_id = await _park_for_approval(agent)
 
     await _approve(request_id, _person(TenantRole.TENANT_ADMIN, sub="approver"))
     result = await _register(agent, approved=True)
@@ -358,6 +383,40 @@ async def test_a_hosted_agent_run_resumes_an_approved_call(_registered_ops: None
 
     assert result.status == "ok", result
     assert len(await _target_rows()) == 1
+
+
+async def test_a_service_login_runs_its_approved_call_again_after_a_failed_run(
+    _registered_ops: None,
+) -> None:
+    """The re-run runs under the requester; the ``tenant_admin`` approval counts."""
+    service = _person(TenantRole.OPERATOR, kind=PrincipalKind.SERVICE, sub="svc:a")
+    request_id = await _park_for_approval(service)
+    await _approve(request_id, _person(TenantRole.TENANT_ADMIN, sub="approver"))
+    await _store_failed_run(request_id)
+
+    outcome = await rerun_failed_request(operator=service, request_id=request_id)
+
+    assert outcome.result.status == "ok", outcome.result
+    assert outcome.attempt == 2
+    assert len(await _target_rows()) == 1
+    row = await _approval_row(request_id)
+    assert row.resume_result is not None
+    assert row.resume_result["status"] == "ok"
+
+
+async def test_another_person_below_the_floor_is_refused_on_a_service_login_call(
+    _registered_ops: None,
+) -> None:
+    """Only the requester's own run skips the check; a reviewer's run is checked."""
+    service = _person(TenantRole.OPERATOR, kind=PrincipalKind.SERVICE, sub="svc:a")
+    request_id = await _park_for_approval(service)
+
+    with bind_approved_requester(await _approval_row(request_id)):
+        result = await _register(_person(TenantRole.OPERATOR, sub="reviewer"), approved=True)
+
+    assert result.status == "denied", result
+    assert "tenant_admin" in str(result.error)
+    assert await _target_rows() == []
 
 
 # ---------------------------------------------------------------------------

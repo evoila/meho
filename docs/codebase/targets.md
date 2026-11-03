@@ -44,7 +44,9 @@ under a grant. The approval queue checks the approver against the same
 floor at the decision: a person below it cannot approve the request, so
 the approved call, run by the agent itself or by the person from an
 approvals surface, was approved by a `tenant_admin`. The dispatcher
-checks the person who runs it from an approvals surface once more.
+checks the person who runs it from an approvals surface once more. The
+requester's own run is not checked again: the agent's resume, and the
+re-run of a failed approved call by the requester, also a service login.
 
 This document covers the two **list** paths, how `list_targets`
 bounds its response (#3858), how the single-target REST routes find a

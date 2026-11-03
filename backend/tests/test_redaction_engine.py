@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import textwrap
 import time
+from collections.abc import Iterator
 
 import pytest
 
@@ -28,6 +29,7 @@ from meho_backplane.redaction import (
     parse_policy,
     redact,
 )
+from meho_backplane.settings import get_settings
 
 
 def _policy_with_rules(*rules_yaml: str) -> RedactionPolicy:
@@ -373,7 +375,18 @@ def test_value_group_limits_the_replacement_to_the_secret() -> None:
     assert leaf[start:end] == '"abcdefghijkl"'
 
 
-def test_hash_action_returns_stable_sha_prefix() -> None:
+@pytest.fixture
+def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The ``hash`` action reads the server key from the settings."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def test_hash_action_returns_stable_keyed_prefix(_required_settings_env: None) -> None:
     policy = _policy_with_rules(
         textwrap.dedent(
             """
@@ -388,12 +401,12 @@ def test_hash_action_returns_stable_sha_prefix() -> None:
     first = redact(leaf, policy)
     second = redact(leaf, policy)
     # Same input => same hashed string. The redacted suffix is
-    # ``sha256:<12-hex>``; the prefix proves the format.
+    # ``hmac-sha256:<12-hex>``; the prefix proves the format.
     assert first.redacted == second.redacted
     redacted_str = str(first.redacted)
-    assert "sha256:" in redacted_str
+    assert "hmac-sha256:" in redacted_str
     # The hex suffix is 12 lowercase hex characters.
-    after_marker = redacted_str.split("sha256:", 1)[1][:12]
+    after_marker = redacted_str.split("hmac-sha256:", 1)[1][:12]
     assert all(c in "0123456789abcdef" for c in after_marker)
 
 

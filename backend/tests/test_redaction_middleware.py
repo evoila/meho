@@ -32,6 +32,7 @@ from meho_backplane.redaction import (
     parse_policy,
     register_policy,
 )
+from meho_backplane.settings import get_settings
 
 
 @pytest.fixture(autouse=True)
@@ -84,7 +85,18 @@ def test_manifest_records_every_rule_firing() -> None:
     assert {"strip-bearer-token", "strip-api-key"}.issubset(rule_names)
 
 
-def test_override_policy_takes_effect() -> None:
+@pytest.fixture
+def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The ``hash`` action reads the server key from the settings."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def test_override_policy_takes_effect(_required_settings_env: None) -> None:
     """A registered override on the call's connector_id is what the
     middleware applies, not the default."""
     minimal = parse_policy(
@@ -115,8 +127,8 @@ def test_override_policy_takes_effect() -> None:
     assert result.policy_id == "minimal-uuid-only"
     # The override has no bearer-token rule, so the bearer survives.
     assert "Bearer eyJ" in str(result.redacted["authorization"])
-    # The UUID is hashed.
-    assert "sha256:" in result.redacted["id"]
+    # The UUID is hashed with the server key.
+    assert "hmac-sha256:" in result.redacted["id"]
 
 
 def test_normalize_pydantic_model_flattens_to_dict() -> None:

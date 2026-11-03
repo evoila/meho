@@ -1,0 +1,3 @@
+[
+  {"rule": "mask-uuid", "pattern": "uuid", "action": "mask", "count": 1, "path": "run_id"}
+]

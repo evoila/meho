@@ -150,7 +150,8 @@ log in with (`meho-cli`, `meho-mcp`, `meho-web`), the same way as the
 
 ## Several tenants
 
-Design: `docs/decisions/2026-10-28-several-tenants-per-person.md`.
+Design: `docs/decisions/2026-10-28-several-tenants-per-person.md`. Admin
+guide (add a tenant, put a person in two tenants, switch): `docs-site/guides/several-tenants.md`.
 
 - The five role groups carry `meho_tenant` =
   `<tenant-uuid>:<tenant>:<Role>`, from the placeholders

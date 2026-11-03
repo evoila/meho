@@ -10,8 +10,8 @@ starts (``operations/approval_object_check.py``):
   the system has no id. Counts and yes/no flags do not count.
 * Right before the run, MEHO builds the card again against the live
   system. A live object with another identity refuses the run and nothing
-  is sent. The same object runs. A gone object runs, so the handler can
-  answer "already absent". A card that does not build refuses the run.
+  is sent. The same object runs. A gone object runs, and so does a card
+  that does not build, so the handler can answer "already absent" itself.
 * All three run paths check: the approve surfaces, the agent's own resume
   and the re-run after a failure.
 """
@@ -40,7 +40,6 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_object_check import (
     REASON_CHANGED,
-    REASON_NOT_READABLE,
     card_object,
     live_card,
     object_identity,
@@ -401,10 +400,11 @@ async def test_operator_resume_runs_when_the_object_is_gone(
     assert len(calls) == 1
 
 
-async def test_operator_resume_is_refused_when_the_card_does_not_build(
+async def test_operator_resume_runs_when_the_card_does_not_build(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    target_id = await _persist_target("kc-unreadable")
+    """A builder that declines means the object is gone; the handler answers itself."""
+    target_id = await _persist_target("kc-no-card")
     request = await _park_approved(target_id)
     _same_preview(monkeypatch)
     _live_object(monkeypatch, None, builds=False)
@@ -414,10 +414,8 @@ async def test_operator_resume_is_refused_when_the_card_does_not_build(
         operator=_operator("op-approver"), request=await _row(request.id)
     )
 
-    assert calls == []
-    assert result.status == "denied"
-    assert result.extras["error_code"] == "object_changed_since_approval"
-    assert result.extras["reason"] == REASON_NOT_READABLE
+    assert result.status == "ok"
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize(

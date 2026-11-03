@@ -234,14 +234,13 @@ names (`proposed_effect.blast_radius.object`) with the live one
   without counts and yes/no flags. pfSense alias, gateway and static-route
   deletes, DNS record deletes, a Vault secret path, a Kubernetes Secret.
 - The live object is gone (the card says `present: false` or has an empty
-  id): the run goes ahead and the handler answers "already absent".
-- The card does not build now (the object cannot be read, or the name no
-  longer matches exactly one object): the run is refused.
+  id), or the card does not build now (a builder declines when the name
+  matches no object): the run goes ahead and the handler answers "already
+  absent" or "not found" itself.
 
-A changed or unreadable object refuses the run with
-`error_code = "object_changed_since_approval"`; `extras.reason` says which
-of the two it was. The refusal is stored as the run result like the
-preview refusal. A request without a card object (no blast radius) is not
+A changed object refuses the run with
+`error_code = "object_changed_since_approval"`. The refusal is stored as
+the run result like the preview refusal. A request without a card object (no blast radius) is not
 checked. The re-run path reports the three checks as `target_changed`,
 `preview_changed` and `object_changed`.
 

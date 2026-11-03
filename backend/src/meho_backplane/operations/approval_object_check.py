@@ -15,11 +15,10 @@ card again against the live system and compares the object with the card:
   record): the live object must have the same fields. Counts and yes/no
   flags do not count; they change on their own and do not say which
   object it is.
-* The live object is gone: the run goes ahead, and the handler answers as
-  it does for an absent object ("already absent" / "not found").
-* The card does not build now (the object cannot be read, or the name no
-  longer matches exactly one object): the run is refused, because MEHO
-  cannot tell which object the handler would find.
+* The live object is gone, or the card does not build now (a builder
+  declines when the name matches no object): the run goes ahead, and the
+  handler answers as it does for an absent object ("already absent" /
+  "not found"), or reports its own error.
 
 Like the preview check in
 :mod:`~meho_backplane.operations.approval_resume_checks`, the check runs
@@ -52,7 +51,6 @@ if TYPE_CHECKING:
 __all__ = [
     "IDENTITY_FIELDS",
     "REASON_CHANGED",
-    "REASON_NOT_READABLE",
     "card_object",
     "live_card",
     "object_changed_since_request",
@@ -70,12 +68,6 @@ REASON_CHANGED: Final[str] = (
     "The object this call would change is not the one on the approval card: "
     "it changed after the request was made. The operation did not run. "
     "Send a new request."
-)
-
-#: Why a run was refused: the card could not be built again.
-REASON_NOT_READABLE: Final[str] = (
-    "MEHO could not read the object to check that it is still the one on the "
-    "approval card. The operation did not run. Send a new request."
 )
 
 
@@ -177,10 +169,10 @@ async def object_changed_since_request(
     """Why the run must be refused, or ``None`` when the object is the approved one.
 
     Returns :data:`REASON_CHANGED` when the live object has another
-    identity than the card, and :data:`REASON_NOT_READABLE` when the card
-    does not build now. Returns ``None`` when the request stored no preview
-    hash or no card object, when the card already said the object is
-    absent, when the live object is gone, and when the identities match.
+    identity than the card. Returns ``None`` when the request stored no
+    preview hash or no card object, when the card already said the object
+    is absent, when the live object is gone or the card does not build
+    now, and when the identities match.
     """
     if request.preview_hash is None:
         return None
@@ -200,13 +192,15 @@ async def object_changed_since_request(
         )
     )
     if live is None:
-        _log.warning(
-            "approval_resume_object_not_readable",
+        # The builder declined or failed: the object is gone, or cannot be
+        # read now. The handler finds that out itself and answers.
+        _log.info(
+            "approval_resume_object_card_not_built",
             approval_request_id=str(request.id),
             op_id=request.op_id,
             connector_id=request.connector_id,
         )
-        return REASON_NOT_READABLE
+        return None
     live_identity = object_identity(live)
     if live_identity is None or live_identity == approved_identity:
         return None

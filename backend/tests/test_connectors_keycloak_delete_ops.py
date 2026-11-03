@@ -847,3 +847,58 @@ async def test_user_delete_waits_for_a_second_person_then_runs(kc: KeycloakConne
         "already_absent": False,
     }
     assert del_route.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_user_delete_is_refused_when_a_new_user_has_the_approved_name(
+    kc: KeycloakConnector,
+) -> None:
+    """Park by name, a new user appears under that name, approve: nothing is deleted.
+
+    The card named the first user by id. Right before the run, MEHO looks
+    the name up again, finds another id, and refuses; the new user keeps
+    their account.
+    """
+    args = _args("keycloak.user.delete", {"username": "event-guest"})
+    requester = _operator("kc-delete-requester")
+    approver = _operator("kc-delete-approver").model_copy(update={"self_approver": True})
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        search = mock.get(f"/admin/realms/{_REALM}/users").respond(200, json=[_user()])
+        mock.get(f"/admin/realms/{_REALM}/users/{_USER_UUID}/groups").respond(200, json=[])
+        mock.get(f"/admin/realms/{_REALM}/users/{_OTHER_USER_UUID}/groups").respond(200, json=[])
+        del_old = mock.delete(f"/admin/realms/{_REALM}/users/{_USER_UUID}").respond(204)
+        del_new = mock.delete(f"/admin/realms/{_REALM}/users/{_OTHER_USER_UUID}").respond(204)
+
+        preview = await preview_operation(requester, args)
+        assert preview["status"] == "ok", preview
+        call = await call_operation(requester, {**args, "preview_hash": preview["preview_hash"]})
+        assert call["status"] == "awaiting_approval", call
+        request_id = uuid.UUID(call["extras"]["approval_request_id"])
+        async with get_sessionmaker()() as session:
+            row = await session.get(ApprovalRequest, request_id)
+            assert row is not None
+            assert dict(row.proposed_effect)["blast_radius"]["object"]["id"] == _USER_UUID
+
+        # While the request waited, the first user was removed and a new one
+        # was made under the same name.
+        search.respond(200, json=[_user(uuid_=_OTHER_USER_UUID)])
+
+        async with get_sessionmaker()() as session:
+            await approve_request(session, request_id, operator=approver, params=None)
+            await session.commit()
+        async with get_sessionmaker()() as session:
+            row = await session.get(ApprovalRequest, request_id)
+            assert row is not None
+            resumed = await resume_dispatch_after_approval(
+                operator=approver, request=row, params=None
+            )
+    assert resumed.status == "denied", resumed
+    assert resumed.extras["error_code"] == "object_changed_since_approval"
+    assert not del_old.called
+    assert not del_new.called
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+        assert row is not None
+        assert row.resume_result is not None
+        assert row.resume_result["extras"]["error_code"] == "object_changed_since_approval"

@@ -22,6 +22,43 @@ bodies; use synchronous SQLAlchemy Core (`op.get_bind()` / `bind.execute()`).
 Sequence is zero-padded to four digits (`0001`, `0018`, …). The slug is
 lower-case with underscores. Every new migration increments the sequence by one.
 
+## Module names in `__all__` (#5683)
+
+Every new migration lists its module names in `__all__`. The template
+`backend/alembic/script.py.mako` writes this block:
+
+```python
+__all__ = [
+    "branch_labels",
+    "depends_on",
+    "down_revision",
+    "downgrade",
+    "revision",
+    "upgrade",
+]
+```
+
+Why: Alembic reads `revision`, `down_revision`, `branch_labels` and
+`depends_on` from the module itself. Nothing in the file uses them, so the
+code-quality check (the CodeQL rule `py/unused-global-variable`) opened four
+"Unused global variable" review threads on every pull request with a new
+migration. The rule skips names that the module exports. A name in
+`__all__` counts as exported. Without `__all__`, only names set with a plain
+`=` count, and the template sets these names with a type annotation
+(`revision: str = ...`), so they did not count.
+
+Rules for the block:
+
+- Use a plain `__all__ = [...]`, with no type annotation. The check does not
+  read `__all__: list[str] = [...]`.
+- Use a list of string literals, not a tuple. With a tuple the rule turns off
+  for the whole file.
+- Copy the block into a migration you write by hand.
+
+`backend/tests/migrations/test_alembic_migration_exports.py` checks the
+template and every migration after `0134`. Migrations up to `0134` are older
+than the rule and stay as they are.
+
 ## UUID binding convention
 
 **The most important rule for data migrations.**
@@ -616,6 +653,8 @@ avoid "event loop already running" errors.
   twin check on a partial-unique natural key, documented no-op downgrade).
 - `backend/tests/migrations/conftest.py`: the `copy_migrated_db` fixture (saved databases per revision, #5295).
 - `backend/tests/migrations/test_alembic_uuid_param_consistency.py`: drift-guard test.
+- `backend/tests/migrations/test_alembic_migration_exports.py`: `__all__` check for new migrations (#5683).
+- CodeQL rule `py/unused-global-variable`: <https://github.com/github/codeql/blob/main/python/ql/src/Variables/UnusedModuleVariable.ql>.
 - `backend/tests/migrations/test_alembic_seed_rdc_conventions.py`: 0018 behavioural tests.
 - `backend/tests/migrations/test_migration_compat.py`: additive-only CI guard tests.
 - `backend/tests/migrations/test_migration_heads.py`: single-head CI guard tests (#4204).

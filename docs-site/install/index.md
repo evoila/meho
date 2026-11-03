@@ -19,7 +19,7 @@ need it, and each of those pages sends you back here.
 |---|---|
 | **Kubernetes cluster** | Any conformant cluster with an ingress controller (the examples assume ingress-nginx). [Helm](https://helm.sh/) 3.8+ on your workstation; Helm 4 recommended — the [upgrades](upgrades.md) page's server-side-apply guidance assumes it. |
 | **PostgreSQL** | A reachable PostgreSQL server with the [pgvector](https://github.com/pgvector/pgvector) extension *available* (installed as a server package — Step 1 covers enabling it). MEHO does not bundle a database. |
-| **Keycloak** | A [Keycloak](https://www.keycloak.org/) you administer, with a realm for MEHO (an existing realm works). Step 4 covers the realm configuration. |
+| **Keycloak** | A [Keycloak](https://www.keycloak.org/) you administer, with a realm for MEHO (an existing realm works), or the built-in one (`coreKeycloak.enabled: true`). Step 4 covers the realm configuration. |
 | **Credential backend** | HashiCorp Vault **or** access to Google Secret Manager. Step 2 helps you choose. |
 | **A DNS name + TLS story** | A hostname for the backplane (e.g. `meho.example.com`) and a certificate for it — public CA or internal CA both work; [TLS and ingress](tls-ingress.md) covers the differences. |
 
@@ -129,8 +129,12 @@ exists before you install.
 
 ## Step 4 — Set up the Keycloak realm
 
-MEHO authenticates every caller against your Keycloak. Before the
-backplane can be logged into, the realm needs:
+MEHO authenticates every caller against Keycloak, and MEHO ships a
+built-in one: set `coreKeycloak.enabled: true` in your values and the chart
+makes the realm `meho` at install, with everything listed below. Skip
+to the end of this step.
+
+Before the backplane can be logged into, the realm needs:
 
 1. the **confidential `meho-backplane` client** — the resource-server
    identity MEHO validates tokens against;
@@ -138,12 +142,16 @@ backplane can be logged into, the realm needs:
    `meho login` uses;
 3. a **public `meho-mcp`** client with authorization-code + PKCE —
    what browser-capable MCP clients use;
-4. six **protocol mappers** and four **default client scopes** on the
-   public clients, so issued tokens carry the claims MEHO validates;
-5. five **groups** (`MEHO-Readers`, `MEHO-Operators`,
+4. a **confidential `meho-web`** client for the web UI;
+5. seven **protocol mappers** and four **default client scopes** on the
+   login clients, so issued tokens carry the claims MEHO validates;
+6. five **groups** (`MEHO-Readers`, `MEHO-Operators`,
    `MEHO-SA-Operators`, `MEHO-Admins`, `MEHO-Approvers`) that give each
-   person their tenant and role;
-6. at least one **user** in the `MEHO-Admins` group.
+   person their tenant and role. The groups are the only source: no
+   login client carries a fixed tenant or role;
+7. a first **user** in `MEHO-Admins` and `MEHO-Platform-Admins`, and a
+   second one in `MEHO-SA-Operators` who can approve the first one's
+   changes.
 
 **Follow [Keycloak realm setup](keycloak-realm.md) now** — it is the
 step-by-step recipe, including the non-obvious Keycloak 25+ `basic`
@@ -156,6 +164,10 @@ verification block at the end of that page passes.
     authentik group decide their MEHO role, follow
     [Company login with authentik](company-login-authentik.md) after
     the realm works. It also covers the built-in Keycloak of the chart.
+
+Then let people log in with their company account (local users, Active
+Directory / LDAP, Entra ID, authentik): see
+[Company login](login/index.md).
 
 ## Step 5 — Decide ingress, TLS, and trust
 

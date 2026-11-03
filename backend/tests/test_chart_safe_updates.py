@@ -10,6 +10,8 @@
   both drain limits (MEHO's and uvicorn's) get the same value.
 * The same holds for the Linux-server install (form 2), which renders the
   chart with its own values files.
+* An upgrade with ``--reuse-values`` from a release older than these
+  values still renders, with the defaults.
 * An operator can still pick ``RollingUpdate``. ``Recreate`` with a
   ``rollingUpdate`` block is refused, as Kubernetes would refuse it.
 
@@ -115,6 +117,36 @@ def test_default_render_waits_drains_and_has_room_for_both() -> None:
     assert env["SHUTDOWN_DRAIN_SECONDS"] == "60"
     assert env["UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN"] == "60"
     assert pod["terminationGracePeriodSeconds"] == 5 + 60 + 30
+
+
+def test_upgrade_from_a_release_without_the_new_values_renders_the_defaults() -> None:
+    # ``helm upgrade --reuse-values`` from an older release has no shutdown
+    # or updateStrategy value; null removes the key the same way.
+    deployment = _deployment(*_BASE, "--set", "shutdown=null", "--set", "updateStrategy=null")
+    pod = deployment["spec"]["template"]["spec"]
+    backplane = _backplane(deployment)
+
+    assert deployment["spec"]["strategy"] == {"type": "Recreate"}
+    assert pod["terminationGracePeriodSeconds"] == 95
+    env = _env(backplane)
+    assert env["SHUTDOWN_DRAIN_SECONDS"] == "60"
+    assert env["UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN"] == "60"
+    assert backplane["lifecycle"] == {"preStop": {"exec": {"command": ["sleep", "5"]}}}
+
+
+def test_zero_shutdown_values_are_kept() -> None:
+    deployment = _deployment(
+        *_BASE,
+        "--set",
+        "shutdown.preStopSleepSeconds=0",
+        "--set",
+        "shutdown.drainSeconds=0",
+    )
+    backplane = _backplane(deployment)
+
+    assert "lifecycle" not in backplane
+    assert _env(backplane)["SHUTDOWN_DRAIN_SECONDS"] == "0"
+    assert deployment["spec"]["template"]["spec"]["terminationGracePeriodSeconds"] == 30
 
 
 def test_shutdown_values_set_every_limit() -> None:

@@ -553,6 +553,7 @@ render against the session tenant) as a regression guard.
 One login can list several tenants (the `meho_tenants` claim). The web
 session works in one of them at a time. Design:
 `docs/decisions/2026-10-28-several-tenants-per-person.md`, section 2.
+Admin guide: `docs-site/guides/several-tenants.md`.
 
 **Where the tenant lives.** `web_session.tenant_id` is the session's
 current tenant. Two columns (migration `0133`) go with it:

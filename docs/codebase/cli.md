@@ -1105,7 +1105,8 @@ One login can list several tenants. The backplane works in one current
 tenant per request, named by the `Meho-Tenant` header (a tenant name or
 ID). With several tenants and no header it answers `400
 tenant_not_chosen`; a tenant outside the login's list gets `403
-tenant_not_member` (#5239, `docs/codebase/backend.md`). The CLI side:
+tenant_not_member` (#5239, `docs/codebase/backend.md`). The admin guide
+is `docs-site/guides/several-tenants.md`. The CLI side:
 
 - `meho tenants use <name|id>` (`internal/cmd/tenants/use.go`) reads the
   person's tenants from `GET /api/v1/health` **without** the header (the

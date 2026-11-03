@@ -275,6 +275,12 @@ ID). These answers come after a valid login:
 | `tenant_not_chosen: …` (HTTP 400) | The login is in several tenants and the request named none. The message lists your tenants. `meho status` and the MCP tool `meho_status` still answer and list your tenants with the role in each. | Choose a tenant with `meho tenants use <name>`, or send the `Meho-Tenant` header. For MCP, set the tenant in the connection settings and start a new session. |
 | `tenant_not_member: …` (HTTP 403) | The `Meho-Tenant` header names a tenant you are not in. Agent, service and runner logins always stay in their own tenant. | Pick one of the tenants the message lists. If you need another tenant, ask your admin to put you in one role group of that tenant, then log in again. |
 | `tenant_not_found: …` (HTTP 403) | You are a platform admin and the header names a tenant that does not exist. MEHO never creates a tenant from this header. | Check the tenant name or ID. |
+| `meho tenants use` lists no tenant or only one, but you are in the groups of several tenants | The token has no tenant list: the realm has no `meho-tenants` mapper. Or you did not log in again after the group change. | Add the mapper ([One person in several tenants, Step 1](../guides/several-tenants.md#step-1-add-the-tenant-in-keycloak)), then log in again. A new group shows at the next token refresh, at the latest at the next login. |
+| Web interface: "The tenant changed. Reload the page." (HTTP 409) | You switched the tenant in another browser tab. This tab still shows the old tenant, so MEHO did not run the request. | Reload the page, then do the step again. |
+| Web interface: "You are no longer in the tenant you worked in." | A refreshed token no longer lists the tenant: you were taken out of its role group. MEHO moved you to the one tenant left, or shows the tenant picker. | Pick a tenant. Ask your admin if you still need the old one. |
+
+The full steps for an admin are in
+[One person in several tenants](../guides/several-tenants.md).
 
 ## `meho login` times out before you can approve (W4)
 

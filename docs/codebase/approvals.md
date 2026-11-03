@@ -219,8 +219,31 @@ builds the preview again with the target and params of the run
 longer builds, the run is refused with
 `error_code = "preview_changed_since_approval"`. The one-resumer claim is
 already taken at that point, so the refusal is stored as the request's run
-result and the request never runs later. The re-run path reports the same
-two checks as `target_changed` and `preview_changed`.
+result and the request never runs later.
+
+**Object.** The preview hash of a typed or multi-step op covers the call's
+parameters, not the object they name. So, for the same requests (a
+`preview_hash` is stored), MEHO also builds the approval card again right
+before the run, against the live system, and compares the object the card
+names (`proposed_effect.blast_radius.object`) with the live one
+(`operations/approval_object_check.py`, `object_changed_since_request`):
+
+- The card has an `id` or `key`: the live object must have the same value.
+  Keycloak user, group and client deletes by name, Harbor robot deletes.
+- The card has no id or key: the live object must have the same fields,
+  without counts and yes/no flags. pfSense alias, gateway and static-route
+  deletes, DNS record deletes, a Vault secret path, a Kubernetes Secret.
+- The live object is gone (the card says `present: false` or has an empty
+  id): the run goes ahead and the handler answers "already absent".
+- The card does not build now (the object cannot be read, or the name no
+  longer matches exactly one object): the run is refused.
+
+A changed or unreadable object refuses the run with
+`error_code = "object_changed_since_approval"`; `extras.reason` says which
+of the two it was. The refusal is stored as the run result like the
+preview refusal. A request without a card object (no blast radius) is not
+checked. The re-run path reports the three checks as `target_changed`,
+`preview_changed` and `object_changed`.
 
 ## The params hash on requests and audit rows
 
@@ -1076,6 +1099,7 @@ There is no MCP tool for it; the agent working surface is unchanged.
 | The saved target still resolves. | same (`target_gone`) |
 | The saved target has the connection settings it had when the request was made (`target_hash`, same check as every approved run). | same (`target_changed`) |
 | A `destructive` request: a new server-side preview has the approved `preview_hash`. | same (`preview_changed`) |
+| A `destructive` request: the object the approval card names is still the live object, or is gone (`approval_object_check.py`, same check as every approved run). | same (`object_changed`) |
 
 The operation, connector and target always come from the request, so the
 caller cannot change them. A refused re-run runs nothing.

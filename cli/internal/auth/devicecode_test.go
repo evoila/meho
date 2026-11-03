@@ -683,12 +683,11 @@ func TestNextCheck(t *testing.T) {
 // TestRunDeviceFlowSendsPKCE pins the PKCE contract a Keycloak client
 // with "PKCE challenge method: S256" enforces on the device flow: the
 // device request carries an S256 code_challenge, and every token poll
-// carries the matching code_verifier.
+// carries the matching code_verifier. The fake server refuses both
+// mismatches itself, as Keycloak's DeviceEndpoint and DeviceGrantType do,
+// so a successful login is the proof.
 func TestRunDeviceFlowSendsPKCE(t *testing.T) {
-	var (
-		challenge string
-		verifiers []string
-	)
+	var challenge string
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
@@ -698,7 +697,7 @@ func TestRunDeviceFlowSendsPKCE(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/auth/device":
-			if got := r.PostForm.Get("code_challenge_method"); got != "S256" {
+			if r.PostForm.Get("code_challenge_method") != "S256" || r.PostForm.Get("code_challenge") == "" {
 				w.WriteHeader(http.StatusBadRequest)
 				_ = json.NewEncoder(w).Encode(map[string]string{
 					"error":             "invalid_request",
@@ -715,7 +714,15 @@ func TestRunDeviceFlowSendsPKCE(t *testing.T) {
 				"interval":         1,
 			})
 		case "/token":
-			verifiers = append(verifiers, r.PostForm.Get("code_verifier"))
+			sum := sha256.Sum256([]byte(r.PostForm.Get("code_verifier")))
+			if base64.RawURLEncoding.EncodeToString(sum[:]) != challenge {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error":             "invalid_grant",
+					"error_description": "PKCE verification failed",
+				})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"access_token": "at-from-fake-idp",
 				"token_type":   "Bearer",
@@ -740,18 +747,7 @@ func TestRunDeviceFlowSendsPKCE(t *testing.T) {
 		HTTPClient: srv.Client(),
 		Prompter:   func(context.Context, *oauth2.DeviceAuthResponse) error { return nil },
 	}); err != nil {
-		t.Fatalf("RunDeviceFlow: %v", err)
-	}
-
-	if challenge == "" {
-		t.Fatal("device request carried no code_challenge")
-	}
-	if len(verifiers) == 0 || verifiers[0] == "" {
-		t.Fatalf("token request carried no code_verifier: %q", verifiers)
-	}
-	sum := sha256.Sum256([]byte(verifiers[0]))
-	if want := base64.RawURLEncoding.EncodeToString(sum[:]); challenge != want {
-		t.Errorf("code_challenge %q does not match S256(code_verifier) %q", challenge, want)
+		t.Fatalf("RunDeviceFlow against a server that requires PKCE: %v", err)
 	}
 }
 

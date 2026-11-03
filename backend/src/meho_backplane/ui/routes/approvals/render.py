@@ -29,6 +29,7 @@ from meho_backplane.operations.approval_outcome import (
 from meho_backplane.operations.approval_queue import (
     EXPIRED_REASON_MESSAGES,
     ApprovalNotFoundError,
+    ApprovalResultState,
     ChainPosition,
     Delegation,
     approval_expired_reason,
@@ -46,6 +47,7 @@ __all__ = [
     "project_outcome",
     "project_request_to_view",
     "project_run_result",
+    "project_stored_run_result",
     "set_csrf_cookie",
 ]
 
@@ -132,8 +134,9 @@ def project_run_result(result: Any, *, parked_op_id: str) -> dict[str, Any] | No
     outcome is read off the returned result, not off the row.
 
     Returns ``None`` when another resumer (usually the waiting requester)
-    already ran the operation (``already_resumed``). That is not a failure,
-    so the fragment shows the normal "Request approved" card.
+    won the run claim (``already_resumed``). That result says nothing about
+    the run itself: the caller reads the stored result off the row instead
+    (:func:`project_stored_run_result`).
     """
     if getattr(result, "status", None) == "already_resumed":
         return None
@@ -151,6 +154,27 @@ def project_run_result(result: Any, *, parked_op_id: str) -> dict[str, Any] | No
         "result_state": "executed" if outcome.result_status == "ok" else "failed",
         "outcome": project_outcome(outcome),
     }
+
+
+async def project_stored_run_result(request: ApprovalRequest) -> dict[str, Any]:
+    """Project the run of a request that another resumer claimed.
+
+    Used by the decision-outcome fragment when the resume answered
+    ``already_resumed``: another caller (usually the waiting requester) won
+    the run claim. That caller may have recorded a refusal (the target
+    changed or is gone, MEHO was updated) or a failed run, so the card must
+    not say the operation was re-dispatched. The row is read again. A
+    stored result gives ``result_state`` ``executed`` or ``failed`` with its
+    summary, the same as the detail modal shows. No stored result yet gives
+    ``result_state`` ``started`` and no outcome: the card says the run is
+    still going and where its result will show.
+    """
+    async with get_sessionmaker()() as db_session:
+        fresh = await get_request(db_session, tenant_id=request.tenant_id, request_id=request.id)
+    state = approval_result_state(fresh)
+    if state in (ApprovalResultState.EXECUTED, ApprovalResultState.FAILED):
+        return {"result_state": state.value, "outcome": project_outcome(resume_outcome(fresh))}
+    return {"result_state": ApprovalResultState.STARTED.value, "outcome": None}
 
 
 def project_request_to_view(

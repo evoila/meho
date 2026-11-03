@@ -69,7 +69,11 @@ from meho_backplane.db.models import (
     Target,
     Tenant,
 )
-from meho_backplane.operations._errors import result_already_resumed
+from meho_backplane.operations._errors import (
+    result_already_resumed,
+    result_target_gone_since_approval,
+)
+from meho_backplane.operations.approval_queue import claim_resume, persist_resume_result
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import (
     SESSION_COOKIE_NAME,
@@ -2961,32 +2965,100 @@ def test_approve_whose_run_fails_shows_a_failed_card() -> None:
     assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
 
 
-def test_approve_already_resumed_elsewhere_shows_the_approved_card() -> None:
-    """Another resumer won the run claim: that is not a failed run."""
-    _seed_tenant(_TENANT_A, "tenant-a")
-    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+def _post_approve_with_resume(rid: uuid.UUID, resume_mock: AsyncMock) -> str:
+    """Approve *rid* in the console with *resume_mock* as the resume; return the card."""
     session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
     csrf = _csrf_token(session_id)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
-    already = result_already_resumed("vsphere.vm.create", rid, 1.0)
-
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         client.cookies.set(CSRF_COOKIE_NAME, csrf)
         with (
             patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
-            patch(_RESUME_DISPATCH, AsyncMock(return_value=already)),
+            patch(_RESUME_DISPATCH, resume_mock),
         ):
             response = client.post(
                 f"/ui/approvals/{rid}/approve",
                 data={"reason": "looks safe"},
                 headers={CSRF_HEADER_NAME: csrf},
             )
-
     assert response.status_code == 200, response.text
-    body = response.text
+    return response.text
+
+
+def _resume_lost_to(rid: uuid.UUID, stored: object | None) -> AsyncMock:
+    """A resume that loses the run claim to another caller.
+
+    Plays the waiting requester: before the console's resume answers
+    ``already_resumed``, it takes the claim and, when *stored* is given,
+    records that result on the row, as the agent waiter does.
+    """
+
+    async def _lose(**_: object) -> object:
+        assert await claim_resume(rid)
+        if stored is not None:
+            await persist_resume_result(rid, stored, parked_op_id="vsphere.vm.create")
+        return result_already_resumed("vsphere.vm.create", rid, 1.0)
+
+    return AsyncMock(side_effect=_lose)
+
+
+def test_approve_already_resumed_elsewhere_says_the_run_is_still_going() -> None:
+    """Another resumer won the run claim and no result is stored yet.
+
+    The card must not say the operation was re-dispatched: it says the run
+    is still going and where its result will show.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+
+    body = _post_approve_with_resume(rid, _resume_lost_to(rid, None))
+
+    assert 'data-testid="approval-run-started"' in body
+    assert "Approved, the run is still going" in body
+    assert "Request approved" not in body
+    assert "re-dispatched" not in body
+    assert "the run failed" not in body
+    assert 'data-testid="approval-outcome"' not in body
+
+
+def test_approve_already_resumed_by_a_target_refusal_says_nothing_ran() -> None:
+    """The waiting requester recorded a target refusal before the console resumed.
+
+    The console's resume loses the claim and answers ``already_resumed``.
+    The card reads the stored result off the row and says MEHO did not run
+    the operation and why, instead of "Request approved".
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    refusal = result_target_gone_since_approval(
+        "vsphere.vm.create", approval_request_id=rid, target_id=uuid.uuid4()
+    ).model_copy(update={"audit_id": uuid.UUID(_RUN_AUDIT_ID)})
+
+    body = _post_approve_with_resume(rid, _resume_lost_to(rid, refusal))
+
+    assert "Approved, but MEHO did not run it" in body
+    assert 'data-testid="approval-run-refused"' in body
+    assert "The target of this request no longer exists" in body
+    assert "The operation did not run." in body
+    assert "target_gone_since_approval" in body
+    assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
+    assert "Request approved" not in body
+    assert "re-dispatched" not in body
+    assert "Approved, but the run failed" not in body
+
+
+def test_approve_already_resumed_elsewhere_and_landed_shows_the_approved_card() -> None:
+    """The waiting requester ran the operation and it landed: a plain approved card."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    landed = {"status": "ok", "op_id": "vsphere.vm.create", "result": {"vm": "vm-1"}}
+
+    body = _post_approve_with_resume(rid, _resume_lost_to(rid, landed))
+
     assert "Request approved" in body
     assert "the run failed" not in body
+    assert 'data-testid="approval-run-started"' not in body
     assert 'data-testid="approval-outcome"' not in body
 
 

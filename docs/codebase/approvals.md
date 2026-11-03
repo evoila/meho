@@ -1495,8 +1495,13 @@ Where it shows:
   row (`/ui/audit?audit_id=<id>`). The card after an approve says "Approved,
   but the run failed" when the run returned an error. Both show a "Next
   step" line with the `guidance`, when set. When another resumer
-  (usually the waiting requester) already ran the operation
-  (`already_resumed`), it shows the normal "Request approved" card.
+  (usually the waiting requester) won the run claim (`already_resumed`),
+  the card reads the request again and shows its stored result: the same
+  refused or failed card, or the normal "Request approved" card when the
+  run landed. No stored result yet gives an "Approved, the run is still
+  going" card that names the approvals history as the place where the
+  result will show. The card never says the operation was re-dispatched
+  when another caller may have refused it.
 
 **Decision: reads of an approval request stay as they are here.** A client
 that polls `GET /api/v1/approvals/{id}` until the run ends makes one

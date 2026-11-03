@@ -32,6 +32,11 @@ Fail-closed: any missing header, malformed value, unparseable timestamp, or
 mismatch raises :class:`IngestAuthError`. The endpoint maps it to a uniform
 ``401`` -- the reason is logged server-side, never returned, so the response
 is the same shape whatever failed (no oracle for *why* auth failed).
+
+On success :func:`verify_ingest_auth` returns the **signed message**: the
+bytes the sender's signature covers (``"<ts>." + body`` with a timestamp,
+else the raw body). The ingest service hashes it into the dedupe key, so
+the key depends only on data the credential vouches for.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import math
 from collections.abc import Mapping
 
 from pydantic import SecretStr
@@ -79,15 +85,16 @@ def _verify_hmac_sha256(
     raw_body: bytes,
     config: IngestConfig,
     now: float,
-) -> None:
+) -> bytes:
     """Verify an HMAC-SHA256 signature over the (optionally timestamped) body.
 
     When ``config.require_timestamp`` is set, the timestamp header is
-    mandatory, must parse as unix seconds, must fall inside the replay
-    window, and is bound into the signed message (``"<ts>." + body``) so an
-    attacker cannot swap a fresh timestamp onto a captured body. When it is
-    unset (a body-only vendor scheme), the signature covers the raw body
-    alone and no replay check applies.
+    mandatory, must parse as a finite number of unix seconds, must fall
+    inside the replay window, and is bound into the signed message
+    (``"<ts>." + body``). When it is unset (a body-only vendor scheme), the
+    signature covers the raw body alone and no replay check applies.
+
+    Returns the signed message.
     """
     provided = _require_header(headers, config.signature_header, "missing_signature")
 
@@ -98,6 +105,10 @@ def _verify_hmac_sha256(
             ts = float(ts_raw)
         except ValueError as exc:
             raise IngestAuthError("bad_timestamp") from exc
+        # ``nan`` compares false against every bound, and ``inf`` is never
+        # inside a window either; both are a bad timestamp, not a stale one.
+        if not math.isfinite(ts):
+            raise IngestAuthError("bad_timestamp")
         if abs(now - ts) > config.replay_window_seconds:
             raise IngestAuthError("stale_timestamp")
         signed = ts_raw.encode("utf-8") + b"." + raw_body
@@ -106,10 +117,12 @@ def _verify_hmac_sha256(
         secret.get_secret_value().encode("utf-8"), signed, hashlib.sha256
     ).hexdigest()
     # Hex is case-insensitive; normalise both sides so a sender emitting
-    # upper-case hex is not spuriously rejected. compare_digest on unequal
-    # lengths returns False without leaking the length difference by timing.
-    if not hmac.compare_digest(expected.encode("ascii"), provided.lower().encode("ascii")):
+    # upper-case hex is not spuriously rejected. Both sides are UTF-8 bytes,
+    # so a header value outside ASCII is a plain mismatch (every str
+    # encodes to UTF-8). compare_digest handles unequal lengths itself.
+    if not hmac.compare_digest(expected.encode("utf-8"), provided.lower().encode("utf-8")):
         raise IngestAuthError("bad_signature")
+    return signed
 
 
 def _verify_static_header(
@@ -158,20 +171,23 @@ def verify_ingest_auth(
     raw_body: bytes,
     config: IngestConfig,
     now: float,
-) -> None:
+) -> bytes:
     """Verify the sender against the source's *strategy*. Raise on any failure.
 
     ``headers`` is the request's case-insensitive header map, ``raw_body`` the
     exact bytes the signature is computed over (never a re-serialised view),
-    ``now`` the current unix time for the replay window. Returns ``None`` on
-    success; raises :class:`IngestAuthError` (uniform ``401`` at the boundary)
-    otherwise.
+    ``now`` the current unix time for the replay window. Returns the signed
+    message on success: the timestamped message for ``hmac-sha256`` with a
+    timestamp, else the raw body (the other strategies sign nothing, so the
+    body is all the dedupe key can be built from). Raises
+    :class:`IngestAuthError` (uniform ``401`` at the boundary) otherwise.
     """
     if strategy is EventSourceAuthStrategy.HMAC_SHA256:
-        _verify_hmac_sha256(secret, headers, raw_body, config, now)
-    elif strategy is EventSourceAuthStrategy.STATIC_HEADER:
+        return _verify_hmac_sha256(secret, headers, raw_body, config, now)
+    if strategy is EventSourceAuthStrategy.STATIC_HEADER:
         _verify_static_header(secret, headers, config)
-    elif strategy is EventSourceAuthStrategy.BASIC:
+        return raw_body
+    if strategy is EventSourceAuthStrategy.BASIC:
         _verify_basic(secret, headers, config)
-    else:  # pragma: no cover -- exhaustive over the closed StrEnum
-        raise IngestAuthError("unsupported_strategy")
+        return raw_body
+    raise IngestAuthError("unsupported_strategy")  # pragma: no cover -- closed StrEnum

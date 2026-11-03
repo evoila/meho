@@ -144,6 +144,24 @@
         }
       }
     },
+    "metricsAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The metrics token. With `enabled: true` (default) the backplane gets `METRICS_AUTH_TOKEN` from a Secret: `existingSecret` when set, else the chart-made `<release>-metrics-auth`. `/metrics` answers only a caller that sends the token as a bearer; `/ready` shows its `features` block only to such a caller and gives every caller the verdict and the checks. The ServiceMonitor (when on) sends the token from the same Secret.",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "existingSecret": {
+          "type": "string",
+          "description": "Name of your own Secret holding the token under `secretKey`. Empty: the chart makes `<release>-metrics-auth`."
+        },
+        "secretKey": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Key in the Secret that holds the token."
+        }
+      }
+    },
     "prometheusRule": {
       "type": "object",
       "additionalProperties": false,
@@ -940,10 +958,11 @@
         "firstLogin": {
           "type": "object",
           "additionalProperties": false,
-          "description": "The two people the bootstrap Job makes at the first start (docs/codebase/core-bootstrap.md). Their temporary passwords are in <release>-core-first-login.",
+          "description": "The users the bootstrap Job makes at the first start (docs/codebase/core-bootstrap.md): two people, with temporary passwords in <release>-core-first-login, and the console admin (a user of realm master), with its temporary password in <release>-core-console-admin.",
           "properties": {
-            "adminUsername": { "type": "string", "minLength": 1, "description": "User name of the first admin (MEHO-Admins, with platform_admin)." },
-            "approverUsername": { "type": "string", "minLength": 1, "description": "User name of the second person, who can approve (MEHO-SA-Operators)." }
+            "adminUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "User name of the first admin (MEHO-Admins, with platform_admin)." },
+            "approverUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "User name of the second person, who can approve (MEHO-SA-Operators)." },
+            "consoleAdminUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "User name of the console admin: a user of realm master with every role of the master client meho-realm except impersonation, so it administers realm meho in the Keycloak admin console. Its temporary password is in <release>-core-console-admin; it sets up an authenticator code at the first login." }
           }
         },
         "ci": {

@@ -813,23 +813,6 @@ func TestBootstrap_RefusesTrailingSlashOnMCPURI(t *testing.T) {
 	}
 }
 
-func TestBootstrap_DryRunDoesNotCallKeycloak(t *testing.T) {
-	opts := fullOpts()
-	opts.DryRun = true
-	fake := newFakeKeycloak()
-	_, stdout, err := runBootstrapOnce(t, fake, opts)
-	if err != nil {
-		t.Fatalf("Bootstrap dry-run: %v", err)
-	}
-	if len(fake.calls) != 0 {
-		t.Errorf("dry-run made %d Keycloak calls, want 0: %v",
-			len(fake.calls), fake.calls)
-	}
-	if !strings.Contains(stdout, "DRY RUN") {
-		t.Errorf("dry-run stdout missing banner; got:\n%s", stdout)
-	}
-}
-
 // Skipping the user step still creates the five groups: they carry the
 // tenant and the role for people who come from a directory.
 func TestBootstrap_SkipUserProvisioningKeepsGroupsOmitsUser(t *testing.T) {
@@ -1255,8 +1238,9 @@ func TestBootstrap_CLIClientHasDeviceGrantAttribute(t *testing.T) {
 	if cliClient.StandardFlowEnabled == nil || !*cliClient.StandardFlowEnabled {
 		t.Errorf("CLI client standardFlow should be on")
 	}
-	// `meho login` sends no PKCE, and Keycloak checks PKCE at the device
-	// login too. So the login client must not require a PKCE method.
+	// CLI versions before 0.44.0 send no PKCE at the device login, and
+	// Keycloak checks it there. So the login client must not require a
+	// PKCE method.
 	if got, ok := cliClient.Attributes["pkce.code.challenge.method"]; ok {
 		t.Errorf("CLI client PKCE method = %q, want none", got)
 	}
@@ -1803,15 +1787,18 @@ func TestBootstrap_FixesChangedGroupAttributes(t *testing.T) {
 	if n := fake.calls["POST /groups"]; n != 4 {
 		t.Errorf("POST /groups called %d times, want 4 (the missing groups)", n)
 	}
-	for _, name := range []string{"MEHO-Operators", "MEHO-Readers"} {
+	for name, change := range map[string]string{
+		"MEHO-Operators": "tenant_role: [tenant_admin] -> [operator]",
+		"MEHO-Readers":   "approver: [true] -> (removed)",
+	} {
 		found := false
 		for _, line := range res.MapperEventsLog {
-			if strings.HasPrefix(line, "[updated] group "+name+" ") {
+			if strings.HasPrefix(line, "[updated] group "+name+": ") && strings.Contains(line, change) {
 				found = true
 			}
 		}
 		if !found {
-			t.Errorf("no [updated] event for %s: %v", name, res.MapperEventsLog)
+			t.Errorf("no [updated] event for %s with %q: %v", name, change, res.MapperEventsLog)
 		}
 	}
 }

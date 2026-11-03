@@ -62,7 +62,7 @@ def expected_classes() -> dict[str, str]:
 
 
 def test_fixture_is_not_empty(expected_classes: dict[str, str]) -> None:
-    assert len(expected_classes) > 900
+    assert len(expected_classes) > 500
 
 
 def test_every_known_operation_keeps_its_class(expected_classes: dict[str, str]) -> None:

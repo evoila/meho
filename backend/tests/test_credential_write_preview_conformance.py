@@ -60,9 +60,6 @@ _KNOWN_PARKABLE_CREDENTIAL_WRITES: frozenset[str] = frozenset(
         "keycloak.user.reset_password",
         "vault.auth.userpass.write",
         "k8s.secret.create",
-        "sddc.host.commission",
-        "holodeck.router.patch",
-        "vmware.composite.vm.guest.file.read",
     }
 )
 

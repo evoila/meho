@@ -21,7 +21,8 @@ pinned file is not a step before coding.**
   internet research, and live exploration in the sandbox or the lab.
 - A live test is the proof that a path works.
 - The guards that exist stay as they are. CI keeps its list of required
-  spec files for the files that exist.
+  spec files for the files that exist, in `ci/spec-shelf/` (one small
+  file per product version; step 3 below).
 
 Why it changed: the old rule made a pinned file a step before coding, so
 build Tasks waited for separate file Tasks. Now one Task per capability
@@ -115,12 +116,12 @@ Two cost classes of shelf-backed test, two CI homes:
   when armed (a full two-spec ingest measures ~164 s on CI runners,
   amortised once per module — see the shared-corpus pattern below).
   They run in exactly one armed lane: `python-integration` (its pytest
-  step selects the canary module alongside `tests/integration/`), and
-  the unit sweep opts out via `MEHO_SKIP_SPEC_INGEST_TESTS=1`, honored
-  by a collection-time `skipif` marker on every full-ingest test (so
-  an opted-out lane never even spins the module-scoped Postgres
-  container), with backstop re-checks in the canary's shared
-  `_canary_corpus` fixture and its `vcenter_spec_path` fixture.
+  step runs `tests/integration/`). A full-ingest test placed in the unit
+  sweep must opt out there with a collection-time `skipif` marker, so an
+  opted-out lane never even spins the module-scoped Postgres container.
+  (The vSphere canary that set this pattern left the public tree with
+  evoila's own connectors, #3345; its `MEHO_SKIP_SPEC_INGEST_TESTS`
+  opt-out left with it.)
   Everywhere the var is unset (local dev, the integration lane) the
   armed-shelf contract is unchanged.
 
@@ -189,13 +190,18 @@ it chooses to add a spec file.
    `MANIFEST.md` provenance. Freely-licensed (OSS) specs need only that
    provenance note; vendor-licensed specs follow the signoff model
    below.
-3. **CI checkout widened** — one line per job in
-   `.github/workflows/ci.yml`: add the product dir to the spec-shelf
-   `sparse-checkout` list, and one line in the fail-loud verify step so
-   a shelf-layout move fails the job instead of silently regressing the
-   lane to skip. Same `SPEC_SHELF_TOKEN`; **no new secret, ever** — the
-   PAT already reads the whole private shelf repo. These one-liners
-   collide trivially across parallel lane tasks; rebase, don't battle.
+3. **CI checkout widened** — one new list file
+   `ci/spec-shelf/<product>-<version>.txt`. Each line names one required
+   file, as a path from the shelf repo root
+   (`docs/<product>-<version>/<spec-file>`). `scripts/ci/spec_shelf.sh`
+   reads every list: both Python test jobs in
+   `.github/workflows/ci.yml` check out the listed shelf folders, and
+   the fail-loud verify step fails the job with the "Spec-shelf layout
+   drift" error when a listed file is missing, so a shelf-layout move
+   fails the job instead of silently regressing the lane to skip.
+   `ci.yml` itself names no shelf file, so this step changes no line
+   there. Same `SPEC_SHELF_TOKEN`; **no new secret, ever** — the
+   PAT already reads the whole private shelf repo.
 4. **Signoff extended** — one paragraph per vendor appended to
    [`vendor-spec-ci-provisioning.md`](vendor-spec-ci-provisioning.md)'s
    signoff of record (what is fetched, same ephemeral-use conditions).
@@ -777,6 +783,38 @@ call twelve hand-written path constants (twelve `METHOD:/path` pairs).
   in MEHO is made on purpose.
 - **Activation:** a vendor API file for either product. Then the file goes on
   the shelf, the check gets a compare test, and this entry is withdrawn.
+
+### freeipa-jsonrpc-4.x — command list exists, GPL-3.0, so it lives on the shelf; check ships skipping (#5357)
+
+The `freeipa-jsonrpc-4.x` connector (product `freeipa`) calls FreeIPA's
+JSON-RPC API. It has no HTTP paths per operation: every call is
+`POST /ipa/session/json` with an IPA command name in the body. So the check
+compares command names, not paths. FreeIPA publishes the contract of each
+release in `API.txt`, one block per command. The file is GPL-3.0 licensed
+(FreeIPA's license), so it is not copied into this Apache-2.0 repository.
+It goes on the private spec shelf, and the check ships now and skips until
+the file is there.
+
+- **Check file:** `backend/tests/test_connectors_freeipa_spec_reconcile.py`.
+  It reads the `*_COMMAND` constants of `connectors/freeipa/rpc.py` live and
+  pins the set (17 commands), with the login and JSON paths. These tests run
+  always. The compare test reads `freeipa-4.13.4/API.txt` from the shelf,
+  takes every `command: <name>/<version>` line, and skips while the file is
+  missing.
+- **What was checked (2026-10-29).** `API.txt` at the tag `release-4-13-4`
+  of [`freeipa/freeipa`](https://github.com/freeipa/freeipa) (commit
+  `ad8e56f5cc414fcaf54b468ebbc629192414a623`, tagged 2026-09-07). Size
+  361,558 bytes, sha256
+  `bcd63e5b9c31a1142345dbabe1b416676db3ef1cc2d5c51ffd5311dc347666f8`,
+  506 commands, API version 2.257. All 17 commands are in it. The compare
+  test passed against this file with `MEHO_CONSUMER_DOCS_ROOT` pointed at a
+  local folder that held it.
+- **Residual risk, named.** Until the file is on the shelf, CI does not
+  compare a new or renamed command with FreeIPA. The always-on manifest test
+  still makes sure every new `*_COMMAND` constant shows up in the pinned
+  list, so a change cannot slip past the check without an edit here.
+- **Activation:** the file lands on the shelf at `freeipa-4.13.4/API.txt`,
+  with its source commit and sha256. The compare test then runs for real.
 
 ## Red lane = finding (the protocol)
 

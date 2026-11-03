@@ -80,11 +80,12 @@ Next steps:
 {{- if .Values.coreKeycloak.enabled }}
 
 First login (built-in Keycloak):
-  The install made two people with temporary passwords:
-    - {{ .Values.coreKeycloak.firstLogin.adminUsername }}: the first admin (group MEHO-Admins, with platform_admin)
-    - {{ .Values.coreKeycloak.firstLogin.approverUsername }}: a second person who can approve (group MEHO-SA-Operators)
-  Their passwords are in the Secret {{ printf "%s-core-first-login" .Release.Name }}. Read one with:
-       kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-first-login" .Release.Name }} -o jsonpath='{.data.admin_password}' | base64 -d
+  The install made two people with temporary passwords: the first admin
+  (groups MEHO-Admins and MEHO-Platform-Admins, with platform_admin) and a
+  second person who can approve (group MEHO-SA-Operators). The Secret
+  {{ printf "%s-core-first-login" .Release.Name }} holds their user names and passwords; it keeps the names
+  from the first install even when coreKeycloak.firstLogin changes later. Read one with:
+       kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-first-login" .Release.Name }} -o jsonpath='{.data.admin_username}' | base64 -d
   (keys: admin_username, admin_password, approver_username, approver_password)
   Then log in with `meho login https://{{ .Values.coreKeycloak.hostname }}` or open https://{{ .Values.coreKeycloak.hostname }}/ui/.
   Keycloak asks for a new password, a name and an email at the first login.
@@ -99,6 +100,23 @@ Company login (built-in Keycloak):
   (for example when the company login is down), set coreKeycloak.companyLogin.autoRedirect=false and run helm upgrade.
 {{- end }}
 {{- end }}
+
+Keycloak admin console (realm meho):
+  The first install also made the console admin, a user of realm master who
+  administers realm meho in the Keycloak admin console (for example to connect
+  a user directory, LDAP). MEHO refuses it. The Secret {{ printf "%s-core-console-admin" .Release.Name }} holds
+  its user name and temporary password. At the first login it sets a new
+  password and an authenticator code:
+       kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-console-admin" .Release.Name }} -o jsonpath='{.data.username}' | base64 -d
+  (keys: username, password)
+  The console is https://{{ .Values.coreKeycloak.hostname }}/auth/admin/master/console/#/meho
+{{- if .Values.coreKeycloak.ingress.exposeAdmin }}
+  (routed: coreKeycloak.ingress.exposeAdmin=true).
+{{- else }}
+  and needs coreKeycloak.ingress.exposeAdmin=true (helm upgrade --set coreKeycloak.ingress.exposeAdmin=true).
+{{- end }}
+  When the Secret is missing (an install older than the console admin), the
+  bootstrap Job log says how to add one by hand.
 {{- end }}
 {{- if and .Values.checkRunner.enabled (eq .Values.config.credentialBackend "vault") }}
 

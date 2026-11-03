@@ -171,7 +171,7 @@ Note this only **widens** VCF Automation's surface: the connector's
 curated 11-op read core is sourced from OpenAPI-3.x documents
 (`cloudapi.yaml` + `iaas.yaml`) and works without any 2.0
 conversion — see
-[`connectors-vcf-automation.md`](../codebase/connectors-vcf-automation.md).
+`connectors-vcf-automation.md`.
 The other shipped exemplar is Harbor 2.x, whose product-specific
 conversion runbook lives in
 [`harbor-onboarding.md`](harbor-onboarding.md#spec-ingest-swagger-20--openapi-3x-conversion).
@@ -310,7 +310,7 @@ meho operation groups vmware-rest-9.0
 meho operation search vmware-rest-9.0 "list virtual machines" --limit 10
 ```
 
-The first command returns the 8–15 enabled groups with their `when_to_use` hints. The second returns ranked hits — the load-bearing acceptance bar from the vSphere canary is "the canonical operation appears in the top-3". See the canary's [10 (query, canonical-op) pairs](g07-vsphere-canary.md#test-variant) for the working examples.
+The first command returns the 8–15 enabled groups with their `when_to_use` hints. The second returns ranked hits — the load-bearing acceptance bar from the vSphere canary is "the canonical operation appears in the top-3". See the canary's 10 (query, canonical-op) pairs for the working examples.
 
 To verify dispatch end-to-end against a real target:
 
@@ -404,7 +404,7 @@ Read paths require `operator`; write paths require `tenant_admin`. The REST rout
 
 ## Known gaps
 
-Documented inline pending formal Task filing. The vSphere canary (see [g07-vsphere-canary.md](g07-vsphere-canary.md)) is the test bed that surfaced each.
+Documented inline pending formal Task filing. The vSphere canary (see g07-vsphere-canary.md) is the test bed that surfaced each.
 
 ### Gap 1 — T1 `$ref` extension for `vi-json.yaml`
 
@@ -448,7 +448,7 @@ Routing the grouping pass through the G11.5 per-tenant model resolver (so air-ga
 
 - **Architecture doc:** [`docs/architecture/spec-ingestion.md`](../architecture/spec-ingestion.md) — the canonical reference for the pipeline's design.
 - **Sister architecture doc:** [`docs/architecture/operations-substrate.md`](../architecture/operations-substrate.md) — G0.6's substrate this pipeline writes into.
-- **vSphere canary runbook:** [`g07-vsphere-canary.md`](g07-vsphere-canary.md) — the worked example operators reproduce locally.
+- **vSphere canary runbook:** `g07-vsphere-canary.md` — the worked example operators reproduce locally.
 - **Internal codebase map:** [`docs/codebase/spec-ingestion.md`](../codebase/spec-ingestion.md) — symbol-level map of `backend/src/meho_backplane/operations/ingest/`.
 - **CLAUDE.md postulates:** postulate 1 (two connector kinds, both first-class); postulate 4 (operation grouping + LLM hints, operator-reviewable); postulate 5 (agent surface is meta-tools).
 - **Parent Initiative:** [#389 G0.7 Spec ingestion pipeline](https://github.com/evoila/meho/issues/389).

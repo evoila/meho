@@ -200,12 +200,14 @@ service:
 # install ships neither, so a cluster without the operator is unaffected.
 serviceMonitor:
   # -- Render a ServiceMonitor that scrapes the backplane `/metrics`
-  # endpoint (unauthenticated legacy-0.0.4 exposition — see
+  # endpoint (legacy-0.0.4 exposition — see
   # `backend/src/meho_backplane/metrics.py`). Default `false`: `/metrics`
   # stays dark until an operator running the Prometheus Operator flips
   # this on. The ServiceMonitor selects THIS release's Service via the
   # `app.kubernetes.io/name` + `app.kubernetes.io/instance` selector
-  # labels and scrapes the named `service.portName` port.
+  # labels and scrapes the named `service.portName` port. With
+  # `metricsAuth.enabled` (the default) it sends the metrics token from
+  # the Secret as a bearer token, so no scrape setting is needed.
   enabled: false
   # -- Extra labels applied to the ServiceMonitor metadata. REQUIRED in
   # most clusters: a Prometheus CR only discovers ServiceMonitors whose
@@ -222,6 +224,29 @@ serviceMonitor:
   # -- HTTP path scraped on the backplane Service port. `/metrics` matches
   # the backplane exposition route (main.py).
   path: /metrics
+
+# The metrics token. `/metrics` answers only a caller that sends it as a
+# bearer token (`Authorization: Bearer <token>`), and `/ready` shows its
+# `features` block only to such a caller. `/ready` still gives every caller
+# the verdict (200 or 503) and the checks, so the readiness probe needs no
+# header, and `/healthz` is always open. The backplane reads the token as
+# `METRICS_AUTH_TOKEN`.
+metricsAuth:
+  # -- Give the backplane a metrics token. `false` sets no token: `/metrics`
+  # and the whole `/ready` body then answer every caller.
+  enabled: true
+  # -- Name of a Secret you own that holds the token under `secretKey`.
+  # Empty: the chart makes `<release>-metrics-auth` with a random
+  # 32-character token on the first install, and keeps that value on every
+  # upgrade. Read it with
+  # `kubectl get secret <release>-metrics-auth -o jsonpath='{.data.token}' | base64 -d`
+  # when your own scrape config (not the chart's ServiceMonitor) needs it.
+  # A render with `helm template` has no cluster to look in, so every render
+  # makes a new token; the pod rolls with it, and the ServiceMonitor reads
+  # the Secret live.
+  existingSecret: ""
+  # -- Key in the Secret that holds the token.
+  secretKey: token
 
 # Optional starter alerting rules (Initiative #2884, #2885). Renders a
 # PrometheusRule with two conservative alerts so a fresh install has a
@@ -1286,6 +1311,13 @@ coreKeycloak:
     adminUsername: admin
     # -- User name of the second person, who can approve (MEHO-SA-Operators).
     approverUsername: approver
+    # -- User name of the console admin: a user of realm `master` who
+    # administers realm `meho` in the Keycloak admin console (every role of
+    # the master client `meho-realm` except `impersonation`), for example to connect a user
+    # directory (LDAP). It is not a user of realm `meho`, so MEHO refuses it and
+    # `meho-admin` cannot reach it. Its temporary password is in
+    # `<release>-core-console-admin`. Made at the first install only.
+    consoleAdminUsername: console-admin
   # A login for automated install proofs. Off by default; turn it on only
   # on a test install. When on, the bootstrap Job makes the service client
   # `meho-ci` (a tenant admin of the first tenant, secret in

@@ -45,7 +45,7 @@ from meho_backplane.broadcast import (
     reset_broadcast_client_for_testing,
 )
 from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
-from meho_backplane.broadcast.history import (
+from meho_backplane.broadcast.target_advisory import (
     ADVISORY_EXTRAS_KEY,
     build_target_activity_advisory,
 )
@@ -319,7 +319,7 @@ async def test_fail_open_on_valkey_teardown() -> None:
         # ``cache_logger_on_first_use=True`` config, so it intermittently
         # misses this warn (a test-observation flake, not a code bug —
         # the fail-open log IS emitted).
-        patch("meho_backplane.broadcast.history._log") as mock_log,
+        patch("meho_backplane.broadcast.target_advisory._log") as mock_log,
     ):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),

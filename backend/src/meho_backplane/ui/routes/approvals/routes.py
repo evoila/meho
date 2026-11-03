@@ -98,6 +98,12 @@ state is UX only -- the BFF re-checks server-side: ``approve_request`` ->
 ``_check_self_approval`` raises :class:`SelfApprovalForbiddenError`, which
 this module maps to a 403 surfaced in the re-rendered modal.
 
+Since #3328 the service also lets a MEHO-SA-Operator approve their own
+change, and refuses another person's ``dangerous`` or ``destructive``
+change to anyone outside the groups that may approve it
+(:class:`ApprovalGroupForbiddenError`, a 403 banner with the plain
+refusal text). The button state does not show these rules yet.
+
 Tenant isolation
 ----------------
 
@@ -143,6 +149,7 @@ from meho_backplane.operations.approval_context import (
 )
 from meho_backplane.operations.approval_queue import (
     MAX_REASON_LENGTH,
+    ApprovalGroupForbiddenError,
     ApprovalListOrder,
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
@@ -296,6 +303,7 @@ async def _resolve_operator(session: UISessionContext) -> Operator:
     _refreshed, operator = await verify_access_token_with_refresh(
         decrypted,
         expected_audience=settings.keycloak_audience,
+        request_tenant=session.tenant_id,
     )
     return operator
 
@@ -929,6 +937,10 @@ async def _commit_decision(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="approval_request_not_found",
         ) from exc
+    except ApprovalGroupForbiddenError as exc:
+        # #3328: another person's dangerous or destructive change, and this
+        # person is not in a group that may approve it. Name the groups.
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=exc.reason_text) from exc
     except UnauthorizedApprovalError as exc:
         # The console decide path admits the same principals the REST plane
         # does (#3243 / #3270): operator-or-higher, OR a principal carrying
@@ -944,11 +956,8 @@ async def _commit_decision(
         ) from exc
     except SelfApprovalForbiddenError as exc:
         # The disabled Approve button is UX only; a forged self-approve
-        # lands here. Surface the break-glass hint the exception carries.
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=("You cannot approve your own request (requester and approver must differ)."),
-        ) from exc
+        # lands here. Show the plain text: who may approve instead (#3328).
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=exc.reason_text) from exc
     except ApprovalRequestAlreadyDecidedError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

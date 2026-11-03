@@ -867,7 +867,7 @@ One login can list several tenants (the `meho_tenants` claim). An MCP
 session works in **one** tenant, fixed at the start by the `Meho-Tenant`
 request header (a tenant name or UUID). To switch, the client changes the
 setting and starts a new session. There is no tool to switch tenants, so
-the working surface stays at its size.
+the working surface stays at its size. Admin guide: `docs-site/guides/several-tenants.md`.
 
 The two connection helpers send the header (#5242): the Claude Code plugin
 shim from `MEHO_TENANT` (`clients/claude-code-plugin/bin/meho-mcp-remote`),
@@ -1257,6 +1257,7 @@ Five synthetic connectors follow this mould (natural key
 | `topology-graph-1.x` | `topology.create_node` / `.annotate` / … | `meho_topology_create_node` / `_annotate` / … | #2537 |
 | `targets-registry-1.x` | `targets.register` | `meho_targets_register` | #2861 |
 | `targets-registry-1.x` | `targets.remove` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves) | #4623 |
+| `targets-registry-1.x` | `targets.probe` | (dispatch-only; a `safe` op that detects a target's product and version and stores them, the same code as `POST /api/v1/targets/{name}/probe`) | #5653 |
 | `audit-integrity-1.x` | `audit.loose_rows` | (dispatch-only; a `safe` read a Sensor pins) | #4670 |
 | `inventory-1.x` | `inventory.export` | (dispatch-only; a `safe` read that turns stored or inline inventories into a file in a named format) | #5218 |
 

@@ -106,9 +106,10 @@ secure state (each is stated once, in full, on the published docs site's
 - **Deploy by digest + verify signature** — pin `image.digest`
   (`sha256:…`) and `cosign verify` it before rollout, beyond the immutable
   `image.tag`.
-- **Realm mappers** — on a shared public client derive `tenant_role` from
-  group membership; never hardcode a privileged `tenant_role` (see the
-  auth-onramp section below).
+- **Realm mappers** — on a shared public client, let a User Attribute
+  mapper (`tenant_role`, Aggregate attribute values off) read the
+  `tenant_role` attribute of the person's MEHO group; never hardcode a
+  privileged `tenant_role` (see the auth-onramp section below).
 
 ## ESO sync patterns
 
@@ -670,7 +671,7 @@ TOKEN=$(meho login --print-token https://meho.example.com)
 # tls_ca_pin field; --rawfile keeps the multi-line cert intact as a JSON
 # string.
 jq -n --rawfile pin /path/to/appliance-ca.pem \
-  '{name:"vcf-logs-lab", product:"vmware-rest", host:"vrli.nested.lab",
+  '{name:"harbor-lab", product:"harbor", host:"harbor.example.internal",
     auth_model:"shared_service_account", tls_ca_pin:$pin}' \
 | curl -sf -X POST https://meho.example.com/api/v1/targets \
     -H "Authorization: Bearer $TOKEN" \
@@ -680,12 +681,12 @@ jq -n --rawfile pin /path/to/appliance-ca.pem \
 # PEM. The pooled client is rebuilt — the pin digest is part of the
 # client-pool cache key, so the old client is never reused.
 jq -n --rawfile pin /path/to/new-appliance-ca.pem '{tls_ca_pin:$pin}' \
-| curl -sf -X PATCH https://meho.example.com/api/v1/targets/vcf-logs-lab \
+| curl -sf -X PATCH https://meho.example.com/api/v1/targets/harbor-lab \
     -H "Authorization: Bearer $TOKEN" \
     -H 'Content-Type: application/json' -d @-
 
 # Clear the pin (the CA is now in the global bundle, say): send null.
-curl -sf -X PATCH https://meho.example.com/api/v1/targets/vcf-logs-lab \
+curl -sf -X PATCH https://meho.example.com/api/v1/targets/harbor-lab \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"tls_ca_pin": null}'
@@ -713,15 +714,15 @@ curl -sf -X POST https://meho.example.com/api/v1/targets \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
-        "name": "vcf-logs-lab",
-        "product": "vmware-rest",
-        "host": "vrli.nested.lab",
+        "name": "harbor-lab",
+        "product": "harbor",
+        "host": "harbor.example.internal",
         "auth_model": "shared_service_account",
         "verify_tls": false
       }'
 
 # Flip an existing target back to secure once its CA is in the bundle.
-curl -sf -X PATCH https://meho.example.com/api/v1/targets/vcf-logs-lab \
+curl -sf -X PATCH https://meho.example.com/api/v1/targets/harbor-lab \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"verify_tls": true}'
@@ -756,9 +757,9 @@ descriptor below are the two supported ways to set these.
 targets:
   # Secure path: pin the appliance CA. Verification stays ON (chain +
   # hostname) against the pinned CA. Prefer this over verify_tls: false.
-  - name: vcf-logs-lab
-    product: vmware-rest
-    host: vrli.nested.lab
+  - name: harbor-lab
+    product: harbor
+    host: harbor.example.internal
     auth_model: shared_service_account
     tls_ca_pin: |
       -----BEGIN CERTIFICATE-----
@@ -768,8 +769,8 @@ targets:
   # Last resort: verification OFF for this one target. Read the MITM /
   # credential-exposure caveat above before setting this.
   - name: legacy-appliance
-    product: vmware-rest
-    host: appliance.nested.lab
+    product: proxmox
+    host: appliance.example.internal
     auth_model: shared_service_account
     verify_tls: false
 ```
@@ -875,7 +876,7 @@ In the Keycloak realm that hosts `meho-backplane`, create a new
 | --- | --- | --- |
 | Client ID | `meho-cli` (suggested) | Matches the default in `values-rdc-example.yaml`. Any short identifier works — set `config.keycloakCliClientId` (`KEYCLOAK_CLI_CLIENT_ID`) to whatever you choose. |
 | Client authentication | **Off** (public client) | The device grant cannot be completed by a confidential client; the CLI has nowhere to store a secret. Confidential client + device-grant → `401 unauthorized_client` from Keycloak's device endpoint (Wall #1). |
-| Authentication flow → Standard flow | **On**, PKCE method empty | Older CLI versions use it for the fresh browser sign-in an approval needs (#3979); the current CLI uses `meho-cli-approve`. `meho login` uses the device grant and sends no PKCE. Keycloak checks PKCE at the device login too, so a required PKCE method refuses every `meho login`. |
+| Authentication flow → Standard flow | **On**, PKCE method empty (or `S256` once every person runs CLI 0.44.0 or later) | Older CLI versions use it for the fresh browser sign-in an approval needs (#3979); the current CLI uses `meho-cli-approve`. `meho login` uses the device grant. From CLI 0.44.0 it sends PKCE (`S256`) there; older versions send none. Keycloak checks PKCE at the device login too, so a required PKCE method refuses `meho login` of older versions. |
 | Authentication flow → Direct access grants | Off | Resource-owner password is explicitly out of scope. |
 | Authentication flow → Implicit flow | Off | Deprecated by OAuth 2.1. |
 | Authentication flow → Service accounts roles | Off | Public clients can't hold credentials. |

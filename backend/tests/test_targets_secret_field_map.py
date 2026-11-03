@@ -50,7 +50,6 @@ from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
-from meho_backplane.connectors.vmware_rest.composites import _guest
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.middleware import RequestContextMiddleware
@@ -166,43 +165,6 @@ async def test_ssh_key_resolves_through_the_map(monkeypatch: pytest.MonkeyPatch)
 # ---------------------------------------------------------------------------
 # (b) guest-ops target backed by a plain ``username`` / ``password`` secret
 # ---------------------------------------------------------------------------
-
-
-async def test_guest_credentials_resolve_through_the_map(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``guest_username`` / ``guest_password`` read the plain fields."""
-    install_fake_client(
-        monkeypatch, secret={"username": _CANARY_USER, "password": _CANARY_PASSWORD}
-    )
-    target = _Target(secret_field_map={"guest_username": "username", "guest_password": "password"})
-
-    auth = await _guest._guest_auth(
-        None,  # type: ignore[arg-type]  # credentials resolve off the target
-        target,
-        _operator(),
-        guest_secret_ref=None,
-    )
-
-    assert auth["username"] == _CANARY_USER
-    assert auth["password"] == _CANARY_PASSWORD
-
-
-async def test_guest_credentials_missing_without_the_map(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Without the map the same secret still fails, naming the guest field."""
-    install_fake_client(
-        monkeypatch, secret={"username": _CANARY_USER, "password": _CANARY_PASSWORD}
-    )
-
-    with pytest.raises(VaultCredentialsReadError, match="guest_username"):
-        await _guest._guest_auth(
-            None,  # type: ignore[arg-type]
-            _Target(),
-            _operator(),
-            guest_secret_ref=None,
-        )
 
 
 async def test_mapped_missing_source_error_names_both_fields(

@@ -13,6 +13,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,15 +115,18 @@ func TestBootstrapClientsCmd_CABundleAndInsecureAreMutuallyExclusive(t *testing.
 
 // TestBootstrapClientsCmd_InsecureFlagWarnsLoudly asserts the escape
 // hatch prints a loud stderr warning (F08 AC: the flag stays opt-in and
-// warned). Runs under --dry-run so no Keycloak call is made.
+// warned). Runs under --dry-run against a fake Keycloak with a
+// self-signed certificate, so nothing is changed.
 func TestBootstrapClientsCmd_InsecureFlagWarnsLoudly(t *testing.T) {
 	t.Setenv("KEYCLOAK_ADMIN_PASSWORD", "pw") //nolint:gosec // test-only literal
+	srv := httptest.NewTLSServer(newFakeKeycloak().handler())
+	t.Cleanup(srv.Close)
 	cmd := newBootstrapClientsCmd()
 	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 	cmd.SetArgs([]string{
-		"--keycloak-base-url", "https://kc.example.com",
+		"--keycloak-base-url", srv.URL,
 		"--realm", "evba",
 		"--admin-username", "admin",
 		"--mcp-resource-uri", "https://meho.example.com/mcp",

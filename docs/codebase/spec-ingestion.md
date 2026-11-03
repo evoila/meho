@@ -92,8 +92,8 @@ The pipeline is broken into work items per Initiative #389:
   operator review + benchmark expansion) is tracked under #227 G3.1
   T3 — out of scope for the canary itself. Three of 10 queries
   currently `xfail` pending a T3 per-op `llm_instructions`
-  enhancement. See the [vSphere canary
-  runbook](../cross-repo/g07-vsphere-canary.md) for the operator
+  enhancement. See the vSphere canary
+  runbook for the operator
   procedure.
 * **T9 — Docs** (#409). Two new docs:
   [docs/architecture/spec-ingestion.md](../architecture/spec-ingestion.md)
@@ -192,6 +192,18 @@ same wheel-and-source-portable shape `load_catalog()` uses for the
 catalog YAML. The field validator pins each value to a single path
 segment (no `/`, `\`, or `..`) so a resource name can't escape its
 package root.
+
+A connector package (a wheel that adds a folder under
+`meho_backplane/connectors/`) can bring catalog rows of its own: its
+folder's `__init__` calls the kit's `register_connector_catalog`, and
+`load_catalog()` reads the package's YAML file with the built-in one.
+The `spec_resource` and `profile_resource` of such a row name files in
+the package's folder, not in the two resource packages above. So code
+that reads a row's files uses `load_entry_spec(entry)` and
+`load_entry_profile(entry)`, which look in the right place for either
+kind of row (`entry.source_package` says which package brought it;
+`None` is a built-in row). See
+[connector-packages.md](connector-packages.md), "Bring catalog rows".
 
 **Why:** `vmware/9.0` and `sddc/9.0` have an `upstream` the backend
 can't dereference (HTML developer portal / fqdn-templated appliance
@@ -529,8 +541,8 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `tags` | `tags` | Spec tags + optional `spec:<source>` marker |
 | `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc`; `additionalProperties: false` (#293) |
 | `response_schema` | `response_schema` | Success-response schema or `None` |
-| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay` |
-| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE` (#3827), destructive-action hints, a connector-owned minimum safety floor, or a catalog `safety_overlay` rule |
+| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay`, then the op class floor (a `credential_read` is at least `caution`) |
+| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE`, destructive-action hints, a connector-owned minimum safety floor, a catalog `safety_overlay` rule, or a `credential_read` op class |
 | `llm_instructions` | `llm_instructions` | `None` from the parser; set only by a connector-owned spec correction |
 
 Every `DELETE` lands `dangerous` with `requires_approval=True` (#3827). A
@@ -607,7 +619,7 @@ VMware's corrections live in `connectors/vmware_rest/ingest_corrections.py`:
 - a VI-JSON operation whose summary another operation of the same spec shares
   gets its managed object type in front.
 
-See [connectors-vmware-rest.md](connectors-vmware-rest.md).
+See connectors-vmware-rest.md.
 
 #### Catalog safety overlay (#3340)
 
@@ -641,6 +653,21 @@ Installer bring-up spec read `GET:/v1/sddcs/{id}/spec`; it has no catalog
 row, so a manual ingest of it gets the redaction guard only. Stored rows
 change at the next ingest (see "Applying corrected floors to existing
 rows" below).
+
+#### Op class floor for credential reads
+
+The op class is the third and last floor. An ingested operation that a
+connector declares as `credential_read` (`declare_op_classes` in its
+`op_classes.py`, read through `classify_op`) is at least `caution` and
+waits for a person's approval. `apply_safety_floor` applies it after the
+connector floor and the catalog overlay, and it only raises. So the same
+marker that makes the dispatcher hide the values of the answer also sets
+the lowest risk level of the read. A catalog row and its `safety_overlay`
+can raise such a read further, but a product without a row, or a row
+without a list, no longer leaves a credential read at `safe`. A declared
+credential read counts as governed in `has_safety_floor`, so a re-ingest
+never lowers a stricter stored row. Tests:
+`tests/test_credential_read_safety_floor.py`.
 
 #### Applying corrected floors to existing rows
 
@@ -1543,10 +1570,14 @@ op came from vi-json.yaml" during review.
 
 **Spec-vs-label cross-check (G0.9-T8).** Before parse/register/group
 runs, `_validate_spec_versions` reads each spec's `info.version` via
-the lightweight `read_spec_info_version` helper and compares it
+the `read_spec_info_version` helper and compares it
 against the operator-supplied `IngestRequest.version` label using the
 same `packaging.version.Version` semantics the resolver uses at
-dispatch time. Three outcomes:
+dispatch time. The helper downloads and parses the whole spec, so
+`ingest()` runs the check in a worker thread (`asyncio.to_thread`).
+The event loop keeps serving other requests (health checks included)
+on every path: background, blocking (`async=false`) and dry run. Three
+outcomes:
 
 * **Exact** (`spec=9.0.3`, `label=9.0.3` / `9.0` / `9`) — proceed.
 * **Compatible** (same major, different minor, e.g. `spec=9.0.3`,
@@ -3332,7 +3363,7 @@ All three delegate to `ReviewService.delete_connector`
   canonical architecture doc; companion to this codebase map.
 * [docs/cross-repo/connector-ingestion.md](../cross-repo/connector-ingestion.md) —
   operator runbook for adding a new vendor surface end-to-end.
-* [docs/cross-repo/g07-vsphere-canary.md](../cross-repo/g07-vsphere-canary.md) —
+* docs/cross-repo/g07-vsphere-canary.md —
   the worked-example canary procedure operators reproduce locally.
 * `meho_backplane/db/models.py::EndpointDescriptor` — the ORM target.
 * `meho_backplane/operations/typed_register.py` — typed-connector

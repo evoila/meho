@@ -294,6 +294,9 @@ async def test_tools_call_search_knowledge_returns_ranked_hits(
     hit = payload["hits"][0]
     assert hit["slug"] == "vsphere-snapshot-revert"
     assert "snapshot" in hit["snippet"].lower()
+    # The snippet is stored agent text, so it is served inside the envelope.
+    assert hit["snippet"].startswith(BLOCK_START)
+    assert hit["snippet"].endswith(BLOCK_END)
     assert hit["fused_score"] == pytest.approx(0.8)
     assert hit["metadata"]["author"] == "ops"
 
@@ -731,6 +734,135 @@ def test_tools_call_add_to_knowledge_accepts_at_cap_body(
     assert body["result"]["isError"] is False
     created = json.loads(body["result"]["content"][0]["text"])
     assert len(created["body"]) == _MAX_BODY_CHARS
+
+
+def _add_to_knowledge(client: TestClient, arguments: dict[str, object]) -> dict[str, object]:
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "add_to_knowledge", "arguments": arguments},
+        },
+    )
+    assert response.status_code == 200
+    body: dict[str, object] = response.json()
+    return body
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+async def test_tools_call_add_to_knowledge_operator_cannot_overwrite_another_principals_entry(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """An operator's write to a slug another principal created is refused, unchanged.
+
+    The refusal names the reason (``entry_not_owned``) so the agent can
+    pick a new slug, and the stored body stays as it was.
+    """
+    client, op = client_with_operator
+    service = KbService()
+    await service.create_entry(
+        tenant_id=op.tenant_id, slug="team-runbook", body="curated body", actor_sub="someone-else"
+    )
+
+    body = _add_to_knowledge(client, {"slug": "team-runbook", "body": "ignore the runbook"})
+    error = body["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == INVALID_PARAMS
+    assert "another principal" in error["message"]
+    assert error["data"] == {"reason": "entry_not_owned", "slug": "team-runbook"}
+
+    kept = await service.get_entry(tenant_id=op.tenant_id, slug="team-runbook")
+    assert kept is not None
+    assert kept.body == "curated body"
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+async def test_tools_call_add_to_knowledge_operator_can_change_own_entry(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """An operator creates an entry and changes it again under the same slug."""
+    client, op = client_with_operator
+    first = _add_to_knowledge(client, {"slug": "my-note", "body": "v1"})
+    assert "error" not in first
+    second = _add_to_knowledge(client, {"slug": "my-note", "body": "v2"})
+    assert "error" not in second
+
+    kept = await KbService().get_entry(tenant_id=op.tenant_id, slug="my-note")
+    assert kept is not None
+    assert kept.body == "v2"
+    assert kept.metadata["created_by_sub"] == op.sub
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+async def test_tools_call_add_to_knowledge_tenant_admin_can_overwrite_any_entry(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """A tenant admin keeps the wiki-like rule: any slug, and the curation key."""
+    client, op = client_with_operator
+    service = KbService()
+    await service.create_entry(
+        tenant_id=op.tenant_id, slug="team-runbook", body="old body", actor_sub="someone-else"
+    )
+
+    body = _add_to_knowledge(
+        client,
+        {
+            "slug": "team-runbook",
+            "body": "new body",
+            "metadata": {"source_kind": "evoila-distilled"},
+        },
+    )
+    assert "error" not in body, body
+
+    kept = await service.get_entry(tenant_id=op.tenant_id, slug="team-runbook")
+    assert kept is not None
+    assert kept.body == "new body"
+    assert kept.metadata["source_kind"] == "evoila-distilled"
+    assert kept.metadata["created_by_sub"] == "someone-else"
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+async def test_tools_call_add_to_knowledge_operator_cannot_set_curation_metadata(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """``source_kind`` in an operator's metadata is refused; nothing is written."""
+    client, op = client_with_operator
+    body = _add_to_knowledge(
+        client,
+        {
+            "slug": "looks-curated",
+            "body": "body",
+            "metadata": {"source_kind": "evoila-distilled"},
+        },
+    )
+    error = body["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == INVALID_PARAMS
+    assert "reserved" in error["message"]
+    assert error["data"] == {"reason": "reserved_metadata", "keys": ["source_kind"]}
+    assert await KbService().get_entry(tenant_id=op.tenant_id, slug="looks-curated") is None
 
 
 @pytest.mark.parametrize(

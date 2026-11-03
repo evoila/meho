@@ -598,7 +598,7 @@ def test_catalog_entry_not_found_panel() -> None:
         detail={
             "detail": "catalog_entry_not_found",
             "catalog_entry": "bogus/1.0",
-            "available_entries": ["vmware/9.0", "github/v3"],
+            "available_entries": ["harbor/2.x", "github/v3"],
             "message": "catalog_entry_not_found: 'bogus/1.0' is not in the catalog.",
         },
     )
@@ -620,7 +620,7 @@ def test_catalog_entry_not_found_panel() -> None:
     assert "Traceback" not in body
     # The available_entries[] are enumerated for the operator.
     assert "data-available-entries" in body
-    assert "vmware/9.0" in body
+    assert "harbor/2.x" in body
     assert "github/v3" in body
 
 
@@ -939,7 +939,7 @@ def test_ingest_modal_renders_for_admin() -> None:
     """The admin ingest modal loads with both modes + a re-minted CSRF cookie.
 
     Uses the real in-process ``catalog_endpoint`` (the packaged catalog
-    carries ``vmware/9.0``) so the production modal-GET path -- including
+    carries ``harbor/2.x``) so the production modal-GET path -- including
     the real catalog read + projection -- is exercised end to end.
     """
     client, mock, _csrf = _client_with_role(
@@ -960,7 +960,7 @@ def test_ingest_modal_renders_for_admin() -> None:
     assert 'data-mode-tab="catalog"' in body
     assert 'data-mode-tab="explicit"' in body
     # The catalog dropdown carries a real packaged catalog ref.
-    assert "vmware/9.0" in body
+    assert "harbor/2.x" in body
     # A dry-run toggle + the spec-uri repeater render.
     assert "data-dry-run-toggle" in body
     assert "data-spec-uris" in body

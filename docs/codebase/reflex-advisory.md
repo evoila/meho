@@ -27,25 +27,25 @@ dedupe where a dedupe applies.
 
 ## Key types
 
-- `meho_backplane.broadcast.reflex.build_reflex_advisory(operator, *, op_id, target_name)`
+- `meho_backplane.broadcast.reflex.build_reflex_advisory(operator, *, op_class, target_name)`
   — the advisory builder; returns `{"reflex_advisory": "<line>"}` or `{}`.
 - `REFLEX_ADVISORY_EXTRAS_KEY = "reflex_advisory"` — the extras key,
   sibling of `ADVISORY_EXTRAS_KEY` (`target_activity_advisory`) and
   `CHECKS_ADVISORY_EXTRAS_KEY` (`checks_alert_advisory`).
 - `settings.reflex_advisory_window_minutes` — dedupe window, default
   `30`, `ge=0`; `0` disables the advisory before any I/O.
-- `meho_backplane.broadcast.announce_gate.announce_gate_blocks(operator, *, op_id, safety_level, target_name)`
+- `meho_backplane.broadcast.announce_gate.announce_gate_blocks(operator, *, op_class, safety_level, target_name)`
   — the gate decision; returns a remediation string (block) or `None`.
 - `announce_gate_enabled(tenant_id) -> bool` — the cache-aware, fail-open
   per-tenant enablement resolver.
 - `tenant.announce_gate_enabled` — the structured per-tenant policy flag
   (Boolean, default `False`), migration `0077`.
-- `announce_claim_gap(operator, *, op_id, target_name)`
-  (`broadcast/history.py`) — the shared active-claim lookup. Returns
+- `announce_claim_gap(operator, *, op_class, target_name)`
+  (`broadcast/announce_claim_lookup.py`) — the shared active-claim lookup. Returns
   `None` when an active claim of the caller covers the op, else the
   reason (`ClaimGap`): `no_claim`, `expired`, `other_target` or
   `other_op_class`. The advisory uses the reason in its message.
-- `caller_has_active_announce_claim(operator, *, op_id, target_name)` —
+- `caller_has_active_announce_claim(operator, *, op_class, target_name)` —
   the yes/no form of the same lookup, used by the gate.
 - `result_announce_required(op_id, remediation, duration_ms)`
   (`operations/_errors.py`) — the `denied` envelope the gate returns,
@@ -129,7 +129,11 @@ dispatch(...)   # Step 4, verdict == AUTO_EXECUTE, not the _approved resume
   `audit_log` (the `audit_log_agent_session_id_idx` b-tree). The announce
   heuristic and the gate share one archive query (`announce_claim_gap`):
   the caller's own `agent_announcement` rows of the last 1440 minutes,
-  newest first, at most 500 rows. The enablement flag is read through a
+  newest first, at most 500 rows. The index
+  `agent_announcement_tenant_principal_created_at_idx` on `(tenant_id,
+  principal_sub, created_at DESC)` (migration `0135`, #5005) matches this
+  query, so it reads only the caller's rows, already in order. The
+  enablement flag is read through a
   60s per-tenant TTL cache. A read-class dispatch or a disabled tenant
   pays nothing on the gate.
 - **`0` disables the advisory.** `REFLEX_ADVISORY_WINDOW_MINUTES` (default
@@ -268,8 +272,10 @@ surface on the human render.
   correlation, migration `0014`). Boundary: #2546 (announce rate limit).
 - Code: `backend/src/meho_backplane/broadcast/reflex.py`,
   `backend/src/meho_backplane/broadcast/announce_gate.py`,
-  `caller_has_active_announce_claim` in
-  `backend/src/meho_backplane/broadcast/history.py`,
+  `announce_claim_gap` and `caller_has_active_announce_claim` in
+  `backend/src/meho_backplane/broadcast/announce_claim_lookup.py`
+  (moved out of `broadcast/history.py` in #5005),
+  the claim lookup's index (migration `0135`),
   the merge seam + gate in
   `backend/src/meho_backplane/operations/dispatcher.py`,
   `result_announce_required` in
@@ -278,4 +284,6 @@ surface on the human render.
 - Tests: `backend/tests/test_reflex_advisory.py`,
   `backend/tests/test_announce_gate.py`,
   `backend/tests/test_announce_claim_lookup.py` (the archive claim lookup,
-  #4091).
+  #4091),
+  `backend/tests/integration/test_announce_claim_lookup_pg.py` (on a real
+  PostgreSQL, `EXPLAIN` shows the lookup uses its index, #5005).

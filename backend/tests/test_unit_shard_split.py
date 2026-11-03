@@ -16,7 +16,6 @@ from tests import _unit_shard_split as splitter
 TESTS_DIR = Path(__file__).parent
 CI_WORKFLOW = TESTS_DIR.parent.parent / ".github" / "workflows" / "ci.yml"
 INTEGRATION_DURATIONS = TESTS_DIR / "_integration_shard_durations.json"
-CANARY_FILE = "tests/acceptance/test_g07_vsphere_canary.py"
 
 
 def _ci_unit_files() -> list[str]:
@@ -35,7 +34,7 @@ def _ci_integration_files() -> list[str]:
         str(path.relative_to(TESTS_DIR.parent))
         for path in (TESTS_DIR / "integration").rglob("test_*.py")
     }
-    return sorted(files | {CANARY_FILE})
+    return sorted(files)
 
 
 UNIT_SHARDS = 6
@@ -202,7 +201,6 @@ def test_ci_integration_shards_match_the_split_in_the_workflow() -> None:
     assert shards == list(range(1, len(shards) + 1))
     assert f"TOTAL={len(shards)}\n" in run
     assert "find tests/integration -name 'test_*.py'" in run
-    assert f"echo {CANARY_FILE}" in run
     assert "--durations tests/_integration_shard_durations.json" in run
 
 

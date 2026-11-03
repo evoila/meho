@@ -50,26 +50,17 @@ _SECRET_CLASSES: Final[frozenset[str]] = frozenset(
 #: work, so it is pinned ``write`` in ``broadcast/events.py`` (``_WRITE_OPS``).
 _SAFE_OPERATIONS_THAT_CHANGE_THINGS: Final[frozenset[str]] = frozenset(
     {
-        "vmware.composite.datastore.refresh",
         "rke2.etcd-snapshot.save",
-        "vcfa.tenant.cloud_account.enumerate_images",
-        "hcx.service_mesh.diagnose",
     }
 )
 
 #: Operations named in the bug reports, with the class they must get.
 _EXPECTED: Final[dict[str, str]] = {
-    "vmware.host.usage": "read",
-    "vmware.object.collect": "read",
-    "vmware.composite.event.tail": "read",
-    "vmware.vm.hardware.show": "read",
     "pfsense.firewall.rules": "read",
     "azure.vm.show": "read",
-    "vmware.composite.vm.destroy": "write",
     "k8s.apply": "write",
     "winsrv.power.reboot": "write",
     "k8s.scale": "write",
-    "vmware.composite.datastore.refresh": "write",
     "vault.kv.read": "credential_read",
     "vault.kv.put": "credential_write",
 }

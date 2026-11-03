@@ -178,7 +178,9 @@ upcoming T4 login flow writes to:
   `operator_sub` (Keycloak `sub` claim), `tenant_id`,
   `created_at`, `expires_at`, `access_token` (bytea, Fernet
   ciphertext), `refresh_token` (bytea, Fernet ciphertext),
-  `last_seen_at`, `revoked_at` (nullable; non-null = soft-deleted).
+  `last_seen_at`, `revoked_at` (nullable; non-null = soft-deleted),
+  and since migration `0133` (#5240) `tenant_chosen` and
+  `can_switch_tenant` (see "Current tenant, picker and switch").
   Indexes on `operator_sub` and `expires_at` (future
   bulk-revoke / idle-sweep surfaces).
 - **ORM model** — [`WebSession` in
@@ -514,14 +516,16 @@ The middleware itself
 loads tenant slug + name in the same transaction as the session row
 (a PK lookup on the tiny `tenant` table); both fields land on
 `UISessionContext` so every render is IO-free at the processor seam.
-Cross-tenant switching is a future Initiative — today the chip is a
-read-only label, not a selector.
+With more than one tenant, or for a platform admin, the chip is a link
+to the tenant picker (see "Current tenant, picker and switch" below);
+otherwise it is a read-only label.
 
-The chip is the visible face of a hard invariant: a console session is
-bound to exactly the tenant in its token's `tenant_id` claim, and every
-tenant-scoped surface filters on `session_ctx.tenant_id` — there is no
-query-param, referer, or instance-default tenant override anywhere in
-`/ui/*`. That includes the approvals view: both the reads (bell count,
+The chip is the visible face of a hard invariant: a console session
+works in exactly one current tenant, stored on its `web_session` row,
+and every tenant-scoped surface filters on `session_ctx.tenant_id` —
+there is no query-param, referer, or instance-default tenant override
+anywhere in `/ui/*`. Only the switch route changes the session's
+tenant. That includes the approvals view: both the reads (bell count,
 panel, history, detail modal) and the approve/reject **decision** POST
 scope on the session tenant, so a cross-tenant request id is a 404 on
 every one of them (`_load_for_tenant` in
@@ -543,6 +547,109 @@ were a measurement artifact of the consumer running with seed data
 that didn't match the active tenant. The `test_ui_tenant_chip.py`
 suite pins the cascade contract (Memory and Broadcast surfaces both
 render against the session tenant) as a regression guard.
+
+### Current tenant, picker and switch (#5240)
+
+One login can list several tenants (the `meho_tenants` claim). The web
+session works in one of them at a time. Design:
+`docs/decisions/2026-10-28-several-tenants-per-person.md`, section 2.
+Admin guide: `docs-site/guides/several-tenants.md`.
+
+**Where the tenant lives.** `web_session.tenant_id` is the session's
+current tenant. Two columns (migration `0133`) go with it:
+
+- `tenant_chosen` — `false` while a person with several tenants has not
+  picked one after login.
+- `can_switch_tenant` — `true` with more than one tenant, or for a
+  platform admin. Only a hint for the sidebar; the switch checks the
+  token itself.
+
+**Every token check uses it.** `verify_access_token_with_refresh`
+(`ui/auth/refresh.py`) passes the session's tenant to the shared tenant
+choice of the REST and MCP paths
+(`auth/current_tenant.py::select_current_tenant`), like a `Meho-Tenant`
+header. So every lifted `Operator` (role probes, write gates, the
+approvals and runbooks lifts) carries the role of the current tenant.
+A session without a chosen tenant is checked with `allow_unchosen`.
+
+Every gate that works in a tenant also passes `request_tenant`, the
+tenant the session middleware loaded the request with
+(`UISessionContext.tenant_id`). The gate loads the session row again;
+when the row names another tenant by then (a switch in another browser
+tab between the two loads), the check raises `TenantChangedError` (409,
+"The tenant changed. Reload the page.", header `x-meho-tenant-changed`)
+before any role is returned. So a write never runs in the old tenant
+with the new tenant's role. Only the picker and the switch route check
+without `request_tenant`.
+
+**Login.** `_persist_session_from_tokens` checks the token with
+`allow_unchosen=True`. With several tenants the row gets
+`tenant_chosen=false` (and the first tenant as a placeholder), and the
+callback redirects to `/ui/tenant`. With one tenant nothing changes.
+
+**Picker and switch** (`ui/routes/tenant.py`, `ui/auth/tenant.py`):
+
+- `GET /ui/tenant` — "Choose a tenant". A standalone page (no sidebar,
+  no background requests). It lists the person's tenants with the role
+  in each; a platform admin also sees every other existing tenant
+  (role "Admin (platform admin)"). When the row still waits for the
+  first choice but a refreshed token lists one tenant only, the page
+  saves that tenant on the row first (`_settle_single_tenant`), so the
+  dashboard link it then shows does not lead back to the picker.
+- `POST /ui/tenant/switch` — a plain form with the CSRF token and the
+  `tenant` field. It checks the token again (with a refresh on expiry),
+  then once more with the wanted tenant. A tenant the token does not
+  allow gives a 403 page and nothing changes. On success it writes the
+  row, binds an audit row (`op_id` `meho.ui.tenant.switch`, payload
+  `from_tenant_id`, `to_tenant_id`, `summary`, and `tenant_role_source`
+  for a platform admin; the row lands in the new tenant) and redirects
+  to the dashboard (`303 /ui/`).
+- While `tenant_chosen` is false, `UISessionMiddleware` redirects every
+  other `/ui/*` request to `/ui/tenant` (302, or 204 + `HX-Redirect`
+  for htmx).
+
+**Old browser tabs.** `base.html` puts the tenant a page was made for on
+`<body data-meho-tenant>`. `static/src/app/page-tenant.js` sends it in
+the `Meho-Tenant` header of every htmx request and as the hidden
+`meho_tenant` field of every plain POST form (the run console's cancel
+`fetch` sends the header too). `CSRFMiddleware` compares it with the
+session's tenant, for read and write methods. A mismatch gives `409`
+with `{"detail": "The tenant changed. Reload the page."}` and the header
+`x-meho-tenant-changed`; nothing runs, and the script shows a reload
+banner. A request without the marker passes. The switch route is not
+checked.
+
+The broadcast live feed connects with the browser's `EventSource`, which
+sends no header. So the feed page puts the marker on the stream URL as
+the `meho_tenant` query parameter (`_stream_url` in
+`ui/routes/broadcast/feed.py`), and the middleware reads that parameter
+too. An old tab's reconnect after a switch is refused the same way, and
+the stream route never reads the parameter. The standalone wall page
+carries `data-meho-tenant` like `base.html`. An `EventSource` reports no
+status code, so on a stream error the feed controller calls
+`mehoPageTenant.probeTenantChanged()` (one `HEAD` request for the page
+with the header); a 409 shows the reload banner.
+
+**Removed from a tenant.** At the next check of a refreshed token (the
+drift-gated read revalidation in the middleware, or any route lift),
+the shared choice answers `403 tenant_not_member` (or
+`tenant_not_found`). `fall_back_after_removal` then moves the row to the
+only tenant left (or back to "not chosen") and raises
+`TenantRemovedError` (409 `tenant_removed`). The middleware and the
+app-level handler in `ui/auth/errors.py` answer with a redirect to
+`/ui/tenant?notice=removed`, where the picker says so in plain words.
+The shared role probes (`ui/roles.py`, the connectors, agents and
+runbooks lifts, the account page) let this error through instead of
+failing soft. Other fail-soft lifts may still render one page of the
+old tenant before the next request moves on; that is the same read lag
+the revalidation module accepts for a role change.
+
+**Account page.** `/ui/account` lists the person's tenants with the role
+in each (login group kind, or the role value for a token without a
+list), marks the current one, and links to the picker when the person
+can switch.
+
+Tests: `tests/test_ui_tenant_switch.py`.
 
 ### Tenant on the audit and approvals pages (#5238)
 
@@ -941,8 +1048,19 @@ body (`_require_ui_role`):
   runs or queues an operation, or starts, advances or aborts a runbook
   run, declares it: `POST /ui/operations/call` and `/preview`,
   `POST /ui/vault/put`, `/delete` and `/move`, `POST /ui/runbooks/runs`,
-  `POST /ui/runbooks/runs/{run_id}/next` and `/abort`. The confirm
-  modals and every read page stay on the session floor.
+  `POST /ui/runbooks/runs/{run_id}/next` and `/abort`. So does every
+  console page that reads through an operation or the audit log, because
+  the REST route it mirrors has the same floor: the whole Vault console
+  (`/ui/vault`, `/list`, `/read`, `/versions`, `/status`, `/auth` and the
+  three write confirm modals), the Keycloak read pages (`/ui/keycloak`,
+  `/clients/{client_uuid}`, `/users`), and the audit console (`/ui/audit`,
+  `/results`, `/my-recent`, `/show/{audit_id}`; the replay tree keeps its
+  own tenant_admin check). A `read_only` person gets `403
+  operator_required` on these pages before any operation runs or any
+  audit row is read. Read pages that do not run an operation (dashboard,
+  connectors, knowledge, memory, topology, runbook catalog) stay on the
+  session floor, and so does the approvals list, which a `read_only`
+  approver needs.
 
 Upload routes chain `require_ui_admin` on top:
 
@@ -3328,7 +3446,9 @@ out-of-scope path — and the generic `extras.error_code`); and the inline
 ### RBAC (operator tier; the gate is policy, not role)
 
 The write verbs are OPERATOR-tier (like the operations Run surface) — there
-is **no** `tenant_admin` hard-403 on the write POST. Safety is enforced by
+is **no** `tenant_admin` hard-403 on the write POST. The confirm modals sit
+on the same `require_ui_operator` floor as the POSTs and every other Vault
+console page, so a `read_only` person never reaches a Vault form. Safety is enforced by
 the confirm modal + the dispatcher's `policy_gate` → approval queue, not by
 `TenantRole`; a role gate here would contradict the backend gate and the
 operations console. Tenant scoping derives from `operator.tenant_id` only

@@ -574,8 +574,10 @@ def _project_spec_bytes_to_protos(
 def read_spec_info_version(spec_path_or_uri: str, *, content: str | None = None) -> str | None:
     """Return the spec's ``info.version`` string, or ``None`` if absent.
 
-    Lightweight companion to :func:`parse_openapi` for the ingest
-    pipeline's spec-vs-label cross-check (G0.9-T8). Loads the spec
+    Companion to :func:`parse_openapi` for the ingest pipeline's
+    spec-vs-label cross-check (G0.9-T8). It is blocking and not light:
+    it downloads and parses the whole spec, so async callers must run
+    it in a worker thread (``asyncio.to_thread``). Loads the spec
     bytes the same way :func:`parse_openapi` does, decodes them, runs
     the supported-OpenAPI-version gate so callers don't need to
     re-validate, and returns ``info.version`` verbatim.

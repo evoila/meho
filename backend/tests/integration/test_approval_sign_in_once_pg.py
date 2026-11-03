@@ -75,6 +75,7 @@ def _requester() -> Operator:
 
 
 def _reviewer() -> Operator:
+    # A MEHO-SA-Operator may approve another person's destructive change (#3328).
     return Operator(
         sub="op-sign-in-race",
         name="Sign-in Race Reviewer",
@@ -82,6 +83,7 @@ def _reviewer() -> Operator:
         raw_jwt="<test-raw-jwt>",
         tenant_id=_TENANT,
         tenant_role=TenantRole.OPERATOR,
+        self_approver=True,
     )
 
 

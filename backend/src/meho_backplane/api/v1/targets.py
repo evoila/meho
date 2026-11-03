@@ -24,7 +24,7 @@ Alias resolution
 ----------------
 
 ``GET``, ``PATCH``, ``POST .../probe`` and ``DELETE`` on ``/{name}`` pass the
-caller-supplied value to :func:`_resolve_route_target`. It calls
+caller-supplied value to :func:`resolve_route_target`. It calls
 :func:`~meho_backplane.targets.resolver.resolve_target` (exact name → alias
 element-equality → near-miss 404) and, when that finds nothing and the value
 is a UUID, looks the target up by id. Callers can address a target by its
@@ -36,7 +36,7 @@ Audit enrichment
 
 Routes that call ``resolve_target`` get the resolved target's id bound
 into structlog contextvars at the resolver's single exit point (an id
-lookup in :func:`_resolve_route_target` binds the same keys);
+lookup in :func:`resolve_route_target` binds the same keys);
 :class:`~meho_backplane.audit.AuditMiddleware` reads ``target_id`` via
 :func:`~meho_backplane.audit._resolve_target_id` and writes it to
 ``audit_log.target_id``. ``create_target`` does not call
@@ -150,6 +150,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.connectors._shared.credential_backend import split_credential_ref
+from meho_backplane.connectors._shared.gsm_creds import (
+    ALLOWED_PROJECTS_SETTING,
+    gsm_project_of,
+    is_gsm_project_allowed,
+)
 from meho_backplane.connectors._shared.vault_creds import DEFAULT_KV_MOUNT
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import (
@@ -187,7 +192,13 @@ from meho_backplane.targets.secret_field_map import (
 )
 from meho_backplane.targets.vault_login_extras import enforce_vault_login_extras_platform_admin
 
-__all__ = ["count_graph_node_refs", "router", "soft_delete_target"]
+__all__ = [
+    "count_graph_node_refs",
+    "probe_and_store_fingerprint",
+    "resolve_route_target",
+    "router",
+    "soft_delete_target",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -422,7 +433,7 @@ def _to_full(t: TargetORM) -> Target:
 _NO_TARGET_BY_ID_MESSAGE: Final[str] = "No target has this name, alias or id."
 
 
-async def _resolve_route_target(
+async def resolve_route_target(
     session: AsyncSession, tenant_id: uuid.UUID, value: str
 ) -> TargetORM:
     """Find one target for the describe, update, probe and delete routes.
@@ -985,6 +996,19 @@ def _tenant_prefix_or_empty(operator: Operator) -> str:
     return rendered_tenant_prefix(operator, template=template).strip().strip("/")
 
 
+def _resolve_store(secret_ref: str) -> tuple[str, str]:
+    """Split *secret_ref* into ``(kind, store_ref)`` as the dispatch-time read does.
+
+    Surrounding whitespace is cut before the scheme is read, as the
+    dispatch-time read cuts it, so a leading blank cannot hide the scheme.
+    A schemeless ref resolves through the deploy default
+    (``CREDENTIAL_BACKEND``).
+    """
+    return split_credential_ref(
+        secret_ref.strip(), default_backend=get_settings().credential_backend
+    )
+
+
 def _vault_kv_candidate(secret_ref: str) -> str | None:
     """Return the normalised ``<mount>/<path>`` the Vault read of *secret_ref* addresses.
 
@@ -993,16 +1017,58 @@ def _vault_kv_candidate(secret_ref: str) -> str | None:
     tenant-subtree convention does not apply there. The path is the
     scheme-stripped store ref, the same one the dispatch-time read sends
     to Vault, so a ``vault:`` scheme on the ref cannot hide a ``.`` or
-    ``..`` in the first segment. Surrounding whitespace is cut before the
-    scheme is read, as the dispatch-time read cuts it, so a leading blank
-    cannot hide the scheme either.
+    ``..`` in the first segment.
     """
-    kind, store_ref = split_credential_ref(
-        secret_ref.strip(), default_backend=get_settings().credential_backend
-    )
+    kind, store_ref = _resolve_store(secret_ref)
     if kind != "vault":
         return None
     return f"{DEFAULT_KV_MOUNT}/{store_ref.strip('/')}"
+
+
+def _build_secret_ref_project_not_allowed_detail(
+    *, secret_ref: str, project: str
+) -> dict[str, object]:
+    """Build the structured 422 detail for a ``gsm:`` ref in a project not allowed.
+
+    Same shape convention as :func:`_build_secret_ref_outside_tenant_scope_detail`:
+    a stable snake_case ``kind``, the offending value, the project it
+    names, the setting that lists the allowed projects, and a human
+    ``message`` with the remediation. Pure builder, no I/O.
+    """
+    return {
+        "kind": "secret_ref_project_not_allowed",
+        "secret_ref": secret_ref,
+        "project": project,
+        "setting": ALLOWED_PROJECTS_SETTING,
+        "message": (
+            f"secret_ref={secret_ref!r} names the Google Cloud project {project!r}, "
+            f"which {ALLOWED_PROJECTS_SETTING} does not list. MEHO reads a target's "
+            f"Google Secret Manager login only from a listed project, so this "
+            f"target could never dispatch. List the project in "
+            f"{ALLOWED_PROJECTS_SETTING} (comma-separated project ids) and restart "
+            f"the backplane, or point secret_ref at a secret in a listed project. "
+            f"See docs/codebase/connectors-vault-tenant-scope.md for the rule and "
+            f"docs/codebase/error-message-shape.md for the error convention."
+        ),
+    }
+
+
+def _enforce_gsm_project_allowed(secret_ref: str, store_ref: str) -> None:
+    """Reject a ``gsm:`` ``secret_ref`` whose project is not in the allowed list.
+
+    The dispatch-time read of a target's ``gsm:`` login runs the same check
+    (:func:`~meho_backplane.connectors._shared.gsm_creds.check_gsm_target_ref`),
+    so a target that would be refused at every read is refused when it is
+    saved instead. Raises a structured 422
+    (``kind="secret_ref_project_not_allowed"``) on violation.
+    """
+    project = gsm_project_of(store_ref)
+    if is_gsm_project_allowed(project):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=_build_secret_ref_project_not_allowed_detail(secret_ref=secret_ref, project=project),
+    )
 
 
 def _enforce_secret_ref_tenant_scope(
@@ -1054,21 +1120,24 @@ def _enforce_secret_ref_tenant_scope(
     unconfigured target fails dispatch with the existing actionable
     "no secret_ref configured" error, not a Vault denial.
 
-    The check only applies to refs that resolve through the **Vault**
-    credential backend. #2585 (Initiative #2592): the constraint is a
-    Vault KV path convention, so a ref bound to another store — a
-    ``gsm:<project>/<secret>`` ref, or any ref on a
-    ``CREDENTIAL_BACKEND=gsm`` deploy — has no Vault subtree to enforce
-    and is passed through untouched. Backend resolution reuses
-    :func:`~meho_backplane.connectors._shared.credential_backend.split_credential_ref`
-    with the deploy default (:func:`_vault_kv_candidate`), so the
-    write-time gate's *applicability* and the path it checks track the
-    same backend and path dispatch resolves at read time
-    (:func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`).
+    The tenant-subtree rule only applies to refs that resolve through the
+    **Vault** backend (#2585: it is a Vault KV path convention). A ref
+    that resolves through **Google Secret Manager** (``gsm:`` scheme, or
+    any ref on a ``CREDENTIAL_BACKEND=gsm`` deploy) must instead name a
+    project listed in ``GSM_PARAM_ALLOWED_PROJECTS``
+    (:func:`_enforce_gsm_project_allowed`), as the dispatch-time read
+    requires. :func:`_resolve_store` splits the ref the way dispatch does
+    (:func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`),
+    so the gate checks the same backend and path.
 
-    Raises a structured 422 (``kind="secret_ref_outside_tenant_scope"``)
-    on violation; returns ``None`` otherwise.
+    Raises a structured 422 (``kind="secret_ref_outside_tenant_scope"`` or
+    ``kind="secret_ref_project_not_allowed"``) on violation; returns
+    ``None`` otherwise.
     """
+    kind, store_ref = _resolve_store(secret_ref)
+    if kind == "gsm":
+        _enforce_gsm_project_allowed(secret_ref, store_ref)
+        return
     candidate = _vault_kv_candidate(secret_ref)
     if candidate is None:
         return
@@ -1260,11 +1329,11 @@ async def describe_target(
 ) -> Target:
     """Describe a target by name, alias or id.
 
-    Uses :func:`_resolve_route_target`: exact name, then alias, then
+    Uses :func:`resolve_route_target`: exact name, then alias, then
     id (only when the value is a UUID). Returns 404 with near-misses
     when nothing matches.
     """
-    t = await _resolve_route_target(session, operator.tenant_id, name)
+    t = await resolve_route_target(session, operator.tenant_id, name)
     return _to_full(t)
 
 
@@ -1326,9 +1395,29 @@ async def probe_target(
 
     No error branch writes to the DB row, so the column always
     reflects the *last successful* probe. The path value is a name,
-    an alias or an id (:func:`_resolve_route_target`); no match is 404.
+    an alias or an id (:func:`resolve_route_target`); no match is 404.
+    The work is done by :func:`probe_and_store_fingerprint`, which the
+    ``targets.probe`` operation calls too.
     """
-    t = await _resolve_route_target(session, operator.tenant_id, name)
+    t = await resolve_route_target(session, operator.tenant_id, name)
+    fp = await probe_and_store_fingerprint(session, t, operator=operator)
+    return fp
+
+
+async def probe_and_store_fingerprint(
+    session: AsyncSession, t: TargetORM, *, operator: Operator
+) -> FingerprintResult:
+    """Detect a target's product and version and store it on the target row.
+
+    The one code path behind ``POST /api/v1/targets/{name}/probe`` and the
+    ``targets.probe`` operation. *t* is the target row, found with
+    :func:`resolve_route_target`. The caller finds the row first, so the
+    operation can check MEHO's policy for that target before the system
+    is contacted. Returns the detected fingerprint. Raises
+    :class:`HTTPException` with the status codes :func:`probe_target`
+    lists. The caller owns the transaction: this function only
+    ``flush``-es.
+    """
     cls, label, exception_message = resolve_connector_or_label(t)
     if label == "no_connector":
         raise HTTPException(
@@ -1656,15 +1745,14 @@ async def update_target(
     diagnostic at PATCH time that they would see at probe time.
     ``updated_at`` is always refreshed on a successful write.
 
-    #2091. An explicit non-null ``secret_ref`` outside the operator's
-    tenant subtree is rejected with a structured 422
-    (``kind="secret_ref_outside_tenant_scope"``) — the same write-time
-    gate as POST. An explicit ``{"secret_ref": null}`` (clear) and a
-    PATCH not sending the field are untouched; no-op when the guard is
-    disabled. See :func:`_enforce_secret_ref_tenant_scope`. The path
-    value is a name, an alias or an id (:func:`_resolve_route_target`).
+    #2091. An explicit non-null ``secret_ref`` outside the operator's tenant subtree
+    is rejected with a structured 422 (``kind="secret_ref_outside_tenant_scope"``) — the
+    same write-time gate as POST. An explicit ``{"secret_ref": null}`` (clear) and a
+    PATCH not sending the field are untouched; no-op when the guard is disabled. See
+    :func:`_enforce_secret_ref_tenant_scope`. The path value is a name, an alias or an
+    id (:func:`resolve_route_target`).
     """
-    t = await _resolve_route_target(session, operator.tenant_id, name)
+    t = await resolve_route_target(session, operator.tenant_id, name)
     updates = body.model_dump(exclude_unset=True)
     # T1 (#1780). Snapshot the pre-patch TLS-verification state *before*
     # the ``setattr`` loop below mutates the row, so the audit fold-in
@@ -1835,7 +1923,7 @@ async def delete_target(
     queries can filter by op id prefix).
 
     The path value is a name, an alias or an id (see
-    :func:`_resolve_route_target`). Re-deletes collapse to 404 —
+    :func:`resolve_route_target`). Re-deletes collapse to 404 —
     every lookup step filters ``deleted_at IS NULL``, so the row no
     longer resolves once the first DELETE flushes.
 
@@ -1846,7 +1934,7 @@ async def delete_target(
         audit_op_id=_DELETE_OP_ID,
         audit_op_class="write",
     )
-    t = await _resolve_route_target(session, operator.tenant_id, name)
+    t = await resolve_route_target(session, operator.tenant_id, name)
     await soft_delete_target(session, t, operator=operator, force=force)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

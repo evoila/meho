@@ -4,8 +4,8 @@
 """pytest fixtures for the acceptance suite.
 
 The acceptance tests verify shipped substrates against the consumer's
-real input (e.g. the G0.7 vSphere canary feeds the actual vCenter
-OpenAPI specs through the ingestion pipeline). Most of the chassis
+real input (e.g. the Hetzner Robot canary drives the real connector
+through the dispatch path). Most of the chassis
 plumbing they need — a real PostgreSQL container with pgvector + FTS,
 the production audit middleware, the JWKS / Keycloak mock — already
 exists in :mod:`tests.integration.conftest`.
@@ -56,25 +56,11 @@ from meho_backplane.db.engine import (
     reset_engine_for_testing,
 )
 from meho_backplane.settings import get_settings
-from tests.acceptance._canary_fixtures import (
-    CANARY_CONNECTOR_ID,
-    CANARY_OPERATOR_TENANT,
-    IngestedCanaryVcsim,
-    acceptance_operator,
-    ingested_canary_vcsim,
-    prewarmed_embeddings,
-)
 from tests.acceptance._harbor_canary_fixtures import (
     HARBOR_CANARY_OPERATOR_TENANT,
     TypedHarborCanary,
     harbor_acceptance_operator,
     typed_harbor_canary,
-)
-from tests.acceptance._nsx_canary_fixtures import (
-    NSX_CANARY_OPERATOR_TENANT,
-    IngestedNsxCanary,
-    ingested_nsx_canary,
-    nsx_acceptance_operator,
 )
 from tests.acceptance._robot_canary_fixtures import (
     ROBOT_CANARY_OPERATOR_TENANT,
@@ -82,24 +68,6 @@ from tests.acceptance._robot_canary_fixtures import (
     ingested_robot_canary,
     ingested_robot_canary_sandbox,
     robot_acceptance_operator,
-)
-from tests.acceptance._sddc_canary_fixtures import (
-    SDDC_CANARY_OPERATOR_TENANT,
-    IngestedSddcCanary,
-    ingested_sddc_canary,
-    sddc_acceptance_operator,
-)
-from tests.acceptance._vcsim import (
-    DEFAULT_VCSIM_TOPOLOGY,
-    VcsimEndpoint,
-    VcsimTopology,
-    resolve_vcsim_endpoint,
-)
-from tests.acceptance._vrops_canary_fixtures import (
-    VROPS_CANARY_OPERATOR_TENANT,
-    IngestedVropsCanary,
-    ingested_vrops_canary,
-    vrops_acceptance_operator,
 )
 from tests.integration.conftest import (
     _CHASSIS_ENV,
@@ -110,42 +78,20 @@ from tests.integration.conftest import (
 )
 
 __all__ = [
-    "CANARY_CONNECTOR_ID",
-    "CANARY_OPERATOR_TENANT",
-    "DEFAULT_VCSIM_TOPOLOGY",
     "DOCKER_AVAILABLE",
     "HARBOR_CANARY_OPERATOR_TENANT",
-    "NSX_CANARY_OPERATOR_TENANT",
     "ROBOT_CANARY_OPERATOR_TENANT",
-    "SDDC_CANARY_OPERATOR_TENANT",
     "SKIP_REASON",
-    "VROPS_CANARY_OPERATOR_TENANT",
-    "IngestedCanaryVcsim",
-    "IngestedNsxCanary",
     "IngestedRobotCanary",
-    "IngestedSddcCanary",
-    "IngestedVropsCanary",
     "TypedHarborCanary",
-    "VcsimEndpoint",
-    "VcsimTopology",
-    "acceptance_operator",
     "async_pg_url",
     "harbor_acceptance_operator",
-    "ingested_canary_vcsim",
-    "ingested_nsx_canary",
     "ingested_robot_canary",
     "ingested_robot_canary_sandbox",
-    "ingested_sddc_canary",
-    "ingested_vrops_canary",
     "integration_env",
-    "nsx_acceptance_operator",
     "pg_engine",
-    "prewarmed_embeddings",
     "robot_acceptance_operator",
-    "sddc_acceptance_operator",
     "typed_harbor_canary",
-    "vcsim_endpoint",
-    "vrops_acceptance_operator",
 ]
 
 
@@ -458,28 +404,3 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
     finally:
         await dispose_engine()
         reset_engine_for_testing()
-
-
-@pytest.fixture(scope="session")
-def vcsim_endpoint() -> Iterator[VcsimEndpoint]:
-    """Yield a session-scoped :class:`VcsimEndpoint` for vcsim-backed tests.
-
-    Boots ``vmware/vcsim`` once per pytest invocation (or returns a
-    cached endpoint when ``MEHO_VCSIM_URL`` overrides) and tears the
-    container down on session teardown. Session scope amortises the
-    ~3-second boot across every dispatch / handle / agent-flow test
-    in the acceptance suite; per-test isolation comes from the seed
-    topology being immutable (read-only ops only).
-
-    Mirrors the ``pg_engine`` skip pattern: missing Docker socket
-    plus missing env-override yields a clean ``pytest.skip`` from
-    inside :func:`resolve_vcsim_endpoint`, so the consuming test is
-    marked SKIPPED rather than failed.
-
-    The 50-VM / 3-host / 1-cluster / 2-datastore / 2-folder topology
-    in :data:`DEFAULT_VCSIM_TOPOLOGY` matches the issue body's
-    canary fixture; tests that need a different seed boot their own
-    container with :func:`resolve_vcsim_endpoint` directly.
-    """
-    with resolve_vcsim_endpoint(DEFAULT_VCSIM_TOPOLOGY) as endpoint:
-        yield endpoint

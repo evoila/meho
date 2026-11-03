@@ -632,22 +632,32 @@ model, or resume endpoint):
    the params-hash check, so a self-approver gets the precise refusal
    reason.
 
-   **How to audit a break-glass self-approval (#2087).** There is
-   **no** `self_approved` field on the audit row — do not filter for
-   one. When break-glass is enabled and a self-approval goes through,
-   `_check_self_approval` (`approval_queue.py`) emits the structured
-   **log event** `approval_self_approval_break_glass` (WARNING, with
-   `approval_request_id`, `op_id`, `operator_sub`, `tenant_id`) and
-   returns; the decision audit row written by `approve_request` via
-   `_write_audit_row` carries the ordinary payload
-   (`approval_request_id`, `op_id`, `connector_id`, `principal_sub`,
-   `result_status`, `decision`, `reviewed_by`, optional `reason`).
-   A self-approval is therefore identified **on the ledger** as the
-   `approval.decision` row where the requester equals the approver —
-   `payload.principal_sub == payload.reviewed_by` (the approver's
-   `operator.sub`). A first-class `self_approved` audit marker would
-   be net-new, separately scoped work. Whether the deploy currently
-   allows self-approval at all is visible without grepping the values
+   **Who may approve, by group (#3328).** `_check_approver_group`
+   (`approval_queue.py`) decides, after the role check. The rules come
+   from [the decision record](../decisions/approval-groups-and-self-approval.md):
+   - A MEHO-SA-Operator (`Operator.may_self_approve`) may approve their
+     own change at every risk level. Everyone else gets
+     `SelfApprovalForbiddenError` for their own change, unless break-glass
+     covers it (`safe` and `caution` only).
+   - Another person's `dangerous` or `destructive` change may be approved
+     only by a MEHO-SA-Operator or a tenant admin. Everyone else gets
+     `ApprovalGroupForbiddenError` (a subclass of
+     `UnauthorizedApprovalError`; REST answers 403
+     `approval_group_required: <text>`).
+   - Another person's lower-risk change keeps the reviewer rule
+     (operator-or-higher, or the `approver` flag). A request without a
+     stamped `safety_level` counts as lower-risk.
+
+   **How to audit a self-approval.** The `approval.decision` audit row
+   carries `reviewed_by` (the approver's `sub`), `self_approved` (true
+   when requester and approver are the same `sub`) and `approval_rule`:
+   `sa_operator_self_approval`, `break_glass_self_approval`,
+   `sa_operator_or_admin` or `reviewer`. The `approval.approved` add-on
+   step event carries the same three fields.
+   A break-glass self-approval also logs the WARNING event
+   `approval_self_approval_break_glass` (with `approval_request_id`,
+   `op_id`, `operator_sub`, `tenant_id`). Whether the deploy currently
+   allows break-glass at all is visible without grepping the values
    file: `GET /ready` → `features.approval_queue.effective_posture`
    is `"single_operator_break_glass"` when
    `APPROVAL_ALLOW_SELF_APPROVAL=true`, `"four_eyes_enforced"`
@@ -1651,7 +1661,7 @@ fan-out composites (`vm.power.bulk`, `host.evacuate`,
 the same read-only listing helpers the handlers use — `{..., resolved,
 total_resolved}` with the list capped — and the single-entity
 composites echo their params; see
-[`connectors-vmware-rest.md`](connectors-vmware-rest.md) "Park-time
+`connectors-vmware-rest.md` "Park-time
 approval previews". The Keycloak write ops register bespoke builders in
 `connectors/keycloak/ops_write_preview.py` (#1857): `keycloak.realm.create`
 populates `{resource, realm, representation}`, `keycloak.user.create`
@@ -1692,7 +1702,7 @@ got one in #4850; `k8s.secret.update` came later with its own builder
 | `vault.auth.userpass.write` | every call | mount, username, `sets_password`, `token_policies` and whether they are replaced or kept | the password |
 | `k8s.secret.create` | every call | name, namespace, type, all key names, inline key names, the `labels` and `annotations` maps, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts | any value |
 | `k8s.secret.update` | every call | name, namespace, `mode`, the key names that are set, inline key names, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts, the key names the Secret has now, in `replace` mode the key names that are removed | any value |
-| `k8s.job.create` | every call | name, namespace, service account, per container: name, image, env var names, `envFrom` Secret / ConfigMap names, command size in bytes | env values, the command and args text |
+| `k8s.job.create` | every call | name, namespace and the whole Job `spec` as it will be created: Job settings (`backoffLimit`, ...), node choice (`nodeName`, `nodeSelector`, `tolerations`, `affinity`), `hostPID` / `hostNetwork` / `hostIPC`, service account, pod and container `securityContext`, image, `command`, `args`, `volumes`, `volumeMounts`, env var names, `envFrom` and `valueFrom` references (Secret or ConfigMap name and key) | every inline `env` value and probe `httpHeaders` value (the name stays); on `command` and `args`, read as one command line: the value of a `NAME=VALUE` or `--name=value` whose name holds a secret word (`PGPASSWORD=...`, `--password=...`, any length), the argument after a secret flag (`--password x`, `-p x`; also across the end of `command`), the password in `user:password` after `-u` / `--user`, the password in a URL, tokens with a known vendor prefix (`ghp_...`). A list item is one argument of the program, so such a value runs to the end of the item, spaces and shell operators included (`PGPASSWORD=x;tail` is hidden whole); only in the item after `-c` (alone or in a short option group such as `-ec` or `-lc`), a shell command string, is the value one shell word, quotes and escapes included, and an unquoted shell operator such as `;` or `&&` ends it, so the commands after it stay visible; secret-shaped text anywhere in the spec (JWTs, bearer tokens); the value of a field with a secret-shaped name (a `secret` volume, `imagePullSecrets`). A secret on a command line with no known shape is shown. |
 | `sddc.host.validate` | an agent's call | host count; per host: `fqdn`, `username`, `storageType`, `networkPoolId` | the ESXi password and any other spec field |
 | `sddc.host.commission` | every call | the same as `sddc.host.validate` | the same |
 | `holodeck.router.patch` | every call | HoloRouter version, whether the call only checks (`verify_only`, a 9.1 router), the patch ids and the module file each one edits | nothing secret exists; the op takes no params |
@@ -1919,7 +1929,7 @@ Requirement 1 of
 `vmware.composite.vm.destroy` (`safety_level="destructive"`,
 `requires_approval=True`; the dual-arm handler + blast-radius preview
 builder are documented in
-[`connectors-vmware-rest.md`](connectors-vmware-rest.md)). Wiring it in
+`connectors-vmware-rest.md`). Wiring it in
 surfaced — and this task closed — three gaps in the tier's *human*-side
 enforcement that #3196/#3197 left, plus one machinery limitation:
 

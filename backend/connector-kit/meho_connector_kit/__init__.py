@@ -59,6 +59,7 @@ from meho_backplane.operations._preview import (
     register_preview_builder,
 )
 from meho_backplane.operations._validate import compute_audit_digest_hash
+from meho_backplane.operations.ingest.catalog import register_connector_catalog
 from meho_backplane.operations.typed_register import (
     register_typed_op_registrar,
     register_typed_operation,
@@ -152,6 +153,7 @@ __all__ = [
     "is_system_operator",
     "load_param_secret_data",
     "load_vault_secret_data",
+    "register_connector_catalog",
     "register_connector_v2",
     "register_permission_preflight",
     "register_preview_builder",

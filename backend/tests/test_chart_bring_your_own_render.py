@@ -12,8 +12,9 @@ it with the saved copy in ``fixtures/chart/bring-your-own-render.golden``.
 Two things are evened out before the compare, and nothing else:
 
 * blank lines and trailing spaces (Helm 3 and Helm 4 differ only there);
-* the broadcast password, which the chart makes at random on every render
-  when no Secret is given.
+* the broadcast password and the metrics token, which the chart makes at
+  random on every render when no Secret is given, and the checksum of the
+  metrics token on the Deployment.
 
 When a change to the bring-your-own render is wanted, write the new copy
 and commit it with the change, so the review shows the difference::
@@ -39,7 +40,11 @@ _CHART_DIR = _REPO_ROOT / "deploy" / "charts" / "meho"
 _FIXTURE = _REPO_ROOT / "deploy" / "values-examples" / "values-bring-your-own-fixture.yaml"
 _GOLDEN = Path(__file__).resolve().parent / "fixtures" / "chart" / "bring-your-own-render.golden"
 
-_RANDOM_PASSWORD = re.compile(r'^(\s+requirepass: )"[^"]*"$')
+_RANDOM_VALUES = (
+    re.compile(r'^(\s+requirepass: )"[^"]*"$'),
+    re.compile(r'^(\s+token: )"[^"]*"$'),
+    re.compile(r"^(\s+checksum/metrics-auth: )[0-9a-f]+$"),
+)
 
 pytestmark = pytest.mark.skipif(
     shutil.which("helm") is None and os.environ.get("MEHO_REQUIRE_HELM") != "1",
@@ -53,7 +58,9 @@ def _normalise(rendered: str) -> str:
         line = raw.rstrip()
         if not line:
             continue
-        lines.append(_RANDOM_PASSWORD.sub(r'\1"<random>"', line))
+        for pattern in _RANDOM_VALUES:
+            line = pattern.sub(r'\1"<random>"', line)
+        lines.append(line)
     return "\n".join(lines) + "\n"
 
 
@@ -97,6 +104,13 @@ def test_fixture_renders_no_built_in_part() -> None:
     assert "-core-postgres-" not in rendered
 
 
-def test_normalise_masks_only_the_random_password() -> None:
-    text = 'a: 1\n\n  requirepass: "c2VjcmV0"   \nb:   \n  requirepassword: "x"\n'
-    assert _normalise(text) == 'a: 1\n  requirepass: "<random>"\nb:\n  requirepassword: "x"\n'
+def test_normalise_masks_only_the_random_values() -> None:
+    text = (
+        'a: 1\n\n  requirepass: "c2VjcmV0"   \nb:   \n  requirepassword: "x"\n'
+        '  token: "dG9r"\n  tokens: "x"\n  checksum/metrics-auth: 0abc\n  checksum/config: 0abc\n'
+    )
+    assert _normalise(text) == (
+        'a: 1\n  requirepass: "<random>"\nb:\n  requirepassword: "x"\n'
+        '  token: "<random>"\n  tokens: "x"\n  checksum/metrics-auth: "<random>"\n'
+        "  checksum/config: 0abc\n"
+    )

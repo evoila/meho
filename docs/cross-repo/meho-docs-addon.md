@@ -301,6 +301,7 @@ The legacy global corpus settings remain as the `corpus-http` fallback
 |---|---|---|
 | `corpus_url` (`CORPUS_URL`) | `""` | Fallback corpus search URL for a `corpus-http` collection without its own `backend.ref` endpoint. Empty **and** no per-collection endpoint → the backend is unconfigured: a query fails closed as `CorpusUnavailable` → 503 at the route / `-32603` at the MCP face. |
 | `corpus_audience` (`CORPUS_AUDIENCE`) | `""` | Optional RFC 8707 resource indicator (`aud`) the backend binds the forwarded token to. Empty forwards no audience. |
+| `corpus_allowed_hosts` (`CORPUS_ALLOWED_HOSTS`) | `""` | The docs-service hosts of this deployment, beside the host of `CORPUS_URL`: a comma-separated list of host names or IP addresses, with no scheme, port or path. MEHO dials a corpus endpoint, and sends `CORPUS_SERVICE_TOKEN`, only to a host on this list or the host of `CORPUS_URL`. A collection endpoint on any other host is refused with 422 at create and update. |
 | `corpus_timeout_seconds` (`CORPUS_TIMEOUT_SECONDS`) | `10.0` | Bound on the backend HTTP request. A slow backend raises `CorpusUnavailable` rather than blocking the event loop. |
 | `corpus_answer_timeout_seconds` (`CORPUS_ANSWER_TIMEOUT_SECONDS`) | `60.0` | Bound on the **answer** request of an opted-in collection (#3911): a grounded answer runs retrieval plus model calls on the corpus side. Keep it below any proxy read timeout in front of the corpus. |
 | `corpus_require_filters` (`CORPUS_REQUIRE_FILTERS`) | `true` | Legacy REQUIRE_FILTERS posture. Note: under the catalogue model the **mandatory** scope is `collection`; `product` / `version` are optional refinements within a collection, so the binary anti-drown guarantee now rides `collection`, not product/version. |
@@ -312,6 +313,15 @@ pass the corpus destination screen. Otherwise each `search_docs` /
 `ask_docs` / `read_docs` call fails with 503, and a `backend.ref`
 endpoint is refused with 422 when you create or update the collection.
 
+The host must also be a docs-service host of the deployment: the host of
+`CORPUS_URL`, or an entry of `CORPUS_ALLOWED_HOSTS`. This holds for all
+three endpoint fields of a collection (`endpoint`, `answer_endpoint`,
+`read_endpoint`). So when your collections use a docs service on another
+host than `CORPUS_URL`, or `CORPUS_URL` is empty, list each such host in
+`CORPUS_ALLOWED_HOSTS` before you create the collection. The entry is the
+bare host: `docs.corpus-ns.svc.cluster.local`, not a URL and not
+`host:port`.
+
 | Corpus endpoint | Allowed? | What you must do |
 |---|---|---|
 | `https://` + a public host | Yes | Nothing. |
@@ -319,6 +329,7 @@ endpoint is refused with 422 when you create or update the collection.
 | `http://` + a host listed as an **exact entry** on `MEHO_TARGET_SSRF_ALLOWLIST` | Yes | List the host itself: the service name (for example `docs.corpus-ns.svc.cluster.local`), or the single IP (bare, `/32`, or `/128`). An IP that only falls inside a listed range does not count. |
 | `http://` + any other host | No | Use `https`, or name the host on the allowlist. |
 | Any other scheme | No | Use `https` or `http` as above. |
+| Any scheme + a host that is not the `CORPUS_URL` host and not in `CORPUS_ALLOWED_HOSTS` | No | Add the host to `CORPUS_ALLOWED_HOSTS`, or set `CORPUS_URL` to it. |
 
 Notes:
 

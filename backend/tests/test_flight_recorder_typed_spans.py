@@ -461,17 +461,10 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "azure-arm",
         "bind9-ssh",
         "entra-graph",
-        "fleet-lcm",
-        "fleet-rest",
+        "freeipa-jsonrpc",
         "gcloud-rest",
         "harbor-rest",
-        "hcx-rest",
-        "holodeck-ssh",
-        "idb-rest",
-        "idb-wsa",
         "hyperv-ssh",
-        "installer-cb",
-        "installer-rest",
         "inventory",
         "k8s",
         "keycloak-admin",
@@ -482,7 +475,6 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "msad-ssh",
         "mssql-tds",
         "net-probe",
-        "nsx-rest",
         "pfsense-ssh",
         "phpipam-rest",
         "postgres-wire",
@@ -490,40 +482,15 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "proxmox-api",
         "rabbitmq-management",
         "rke2-ssh",
-        "salt-raas",
-        "sddc-rest",
-        "sddc-vcf5",
         "secret-broker",
-        "srm-rest",
         "targets-registry",
         "tempo-api",
         "topology-graph",
         "vault",
-        "vcd-rest",
-        "vcfa-rest",
-        "vcfa-vra8",
-        "vmware-rest",
-        "vr-rest",
-        "vrli-rest",
-        "vrli-vrli8",
-        "vrops-rest",
-        "vrops-vrops8",
-        "vro-rest",
         "windns-ssh",
         "winsrv-ssh",
         "wsfc-ssh",
     }
-)
-
-#: Dual-impl products whose two implementations both register typed ops under
-#: distinct ``impl_id``s (F8: keyed on impl_id, both covered).
-_DUAL_IMPL_PAIRS: tuple[tuple[str, str], ...] = (
-    ("fleet-rest", "fleet-lcm"),
-    ("installer-rest", "installer-cb"),
-    ("sddc-rest", "sddc-vcf5"),
-    ("vcfa-rest", "vcfa-vra8"),
-    ("vrli-rest", "vrli-vrli8"),
-    ("vrops-rest", "vrops-vrops8"),
 )
 
 
@@ -596,16 +563,6 @@ async def test_expected_typed_families_are_covered(typed_descriptors: list[_Desc
         "new typed connector family/families not covered by the F8 wave -- add the "
         f"impl_id(s) to _EXPECTED_TYPED_IMPLS after confirming the seam spans them: {sorted(added)}"
     )
-
-
-@pytest.mark.asyncio
-async def test_dual_impl_products_have_both_impls(typed_descriptors: list[_DescRef]) -> None:
-    """Both implementations of each dual-impl product register typed ops (F8)."""
-    impls = {d.impl_id for d in typed_descriptors}
-    for modern, legacy in _DUAL_IMPL_PAIRS:
-        assert modern in impls and legacy in impls, (
-            f"dual-impl product incomplete: {modern}/{legacy}"
-        )
 
 
 @pytest.mark.asyncio

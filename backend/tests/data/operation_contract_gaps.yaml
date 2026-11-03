@@ -13,6 +13,9 @@
 # A 'requires_approval' or 'write_name' entry is a safety gap. Each one has
 # a comment with the reason it is still open. Fixing one changes who must
 # approve the operation, so the pull request that fixes it names the operation.
+#
+# The 'example_placeholders' entries were on main when that rule came in. Fix
+# one by putting a placeholder such as <vm-id> in place of the real-looking value.
 
 argocd-api:
   argocd.app.delete:
@@ -86,6 +89,9 @@ audit-integrity:
     - llm_instructions
     - examples
 
+azure-arm:
+  azure.operation.status:
+    - example_placeholders
 bind9-ssh:
   bind9.about:
     - summary
@@ -324,10 +330,9 @@ hyperv-ssh:
   hyperv.vms.state:
     - llm_instructions
     - examples
-installer-rest:
-  # A check that writes nothing; kept at caution without approval as today.
-  installer.sddc.spec.validate:
-    - requires_approval
+inventory:
+  inventory.export:
+    - example_placeholders
 k8s:
   k8s.about:
     - summary
@@ -1210,13 +1215,6 @@ rke2-ssh:
     - summary
     - llm_instructions
     - examples
-sddc-rest:
-  # A check that writes nothing; kept at caution without approval as today.
-  sddc.domain.validate:
-    - requires_approval
-  # A check that writes nothing; kept at caution without approval as today.
-  sddc.host.validate:
-    - requires_approval
 secret-broker:
   secret.move:
     - summary
@@ -1443,10 +1441,6 @@ vault:
     - summary
     - llm_instructions
     - examples
-vmware-rest:
-  # Kept on purpose: reads a file from a guest; an agent's call waits for approval, a person's call runs at once.
-  vmware.composite.vm.guest.file.read:
-    - requires_approval
 windns-ssh:
   windns.about:
     - summary

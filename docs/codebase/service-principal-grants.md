@@ -238,7 +238,7 @@ NULL-vs-NULL portability across Postgres / SQLite.
 **A grant that has ended does not block a new one (#5424).** A grant whose
 `expires_at` is in the past gives no rights, but an index cannot compare with
 the current time. So both indexes also carry `AND replaced_at IS NULL`
-(migration `0133`, on `service_principal_grant` and `sandbox_delete_grant`).
+(migration `0134`, on `service_principal_grant` and `sandbox_delete_grant`).
 When a grant is created, `_insert` first sets `replaced_at` on every ended,
 never revoked row with the exact same key (target id and both selector
 columns matched NULL-safe), in the same transaction. The selector check skips

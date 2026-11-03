@@ -84,6 +84,8 @@ def _plan(realm_file: Path, **overrides: Any) -> Plan:
             "first_login_secret": "rel-core-first-login",
             "admin_username": "admin",
             "approver_username": "approver",
+            "console_admin_secret": "rel-core-console-admin",
+            "console_admin_username": "console-admin",
             **overrides,
         }
     )
@@ -132,6 +134,22 @@ class FakeKeycloak:
         self.groups: dict[str, dict[str, Any]] = {}
         self.clients: dict[str, dict[str, Any]] = {}
         self.users: dict[str, dict[str, Any]] = {}
+        # Realm master: its users and the client Keycloak makes there for
+        # realm meho, whose roles administer realm meho.
+        self.master_users: dict[str, dict[str, Any]] = {}
+        self.meho_realm_client: dict[str, Any] = {
+            "id": str(uuid.uuid4()),
+            "clientId": "meho-realm",
+            "roles": {
+                name: {"id": str(uuid.uuid4()), "name": name, "clientRole": True}
+                for name in (
+                    "manage-realm",
+                    "manage-users",
+                    "manage-identity-providers",
+                    "impersonation",
+                )
+            },
+        }
         self.calls: list[tuple[str, str]] = []
         self.session: str | None = None
         self.ignore_secret_updates = ignore_secret_updates
@@ -224,6 +242,16 @@ class FakeKeycloak:
     def _client_by_id(self, client_id: str) -> dict[str, Any] | None:
         return next((c for c in self.clients.values() if c["id"] == client_id), None)
 
+    def _users(self, realm: str) -> dict[str, dict[str, Any]]:
+        return self.master_users if realm == "master" else self.users
+
+    def _master_user_by_id(self, user_id: str) -> dict[str, Any] | None:
+        return next((u for u in self.master_users.values() if u["id"] == user_id), None)
+
+    def console_roles(self, username: str) -> list[str]:
+        """The ``meho-realm`` roles a master user holds directly."""
+        return list(self.master_users[username].get("clientRoles", {}).get("meho-realm", []))
+
     def state(self) -> dict[str, Any]:
         return copy.deepcopy(
             {
@@ -233,6 +261,7 @@ class FakeKeycloak:
                 "clients": self.clients,
                 "users": self.users,
                 "flows": self.flows,
+                "master_users": self.master_users,
             }
         )
 
@@ -270,6 +299,9 @@ class FakeKeycloak:
         self.calls.append((method, path))
         if self.session is None:
             return Reply(401, {"error": "HTTP 401 Unauthorized"})
+        if path.startswith("/admin/realms/master/") and not self.session.startswith("master/"):
+            # meho-admin is a client of realm meho: realm master is not its own.
+            return Reply(403, {"error": "HTTP 403 Forbidden"})
         params = dict(params or {})
         if path.startswith("/admin/realms/meho/authentication/"):
             self.flow_calls += 1
@@ -280,6 +312,8 @@ class FakeKeycloak:
         return result
 
     def _get(self, path: str, body: Any, params: dict[str, str]) -> Reply:
+        if path == "/admin/realms/master/clients" and params["clientId"] == "meho-realm":
+            return Reply(200, [copy.deepcopy(self.meho_realm_client)])
         if path == "/admin/realms/master/clients":
             client = self.master_clients.get(params["clientId"])
             return Reply(
@@ -294,9 +328,9 @@ class FakeKeycloak:
         if path == "/admin/realms/meho/clients":
             client = self.clients.get(params["clientId"])
             return Reply(200, [copy.deepcopy(client)] if client else [])
-        if path == "/admin/realms/meho/users":
+        if match := re.fullmatch(r"/admin/realms/(meho|master)/users", path):
             assert params == {"username": params["username"], "exact": "true"}
-            user = self.users.get(params["username"])
+            user = self._users(match.group(1)).get(params["username"])
             return Reply(200, [{"id": user["id"], "username": user["username"]}] if user else [])
         if path.startswith("/admin/realms/meho/authentication/") and not self.flow_rights:
             return Reply(403, {"error": "HTTP 403 Forbidden"})
@@ -314,6 +348,18 @@ class FakeKeycloak:
             if group is None:
                 return Reply(404, {"error": "Could not find group by id"})
             return Reply(200, copy.deepcopy(group))
+        if path == f"/admin/realms/master/clients/{self.meho_realm_client['id']}/roles":
+            return Reply(200, copy.deepcopy(list(self.meho_realm_client["roles"].values())))
+        if match := re.fullmatch(
+            r"/admin/realms/master/users/([^/]+)/role-mappings/clients/([^/]+)/composite", path
+        ):
+            user = self._master_user_by_id(match.group(1))
+            assert user is not None and match.group(2) == self.meho_realm_client["id"]
+            # Effective roles: direct ones and the ones a group brings.
+            names = set(user.get("clientRoles", {}).get("meho-realm", []))
+            names |= set(user.get("groupClientRoles", {}).get("meho-realm", []))
+            roles = self.meho_realm_client["roles"]
+            return Reply(200, [copy.deepcopy(roles[n]) for n in sorted(names)])
         if match := re.fullmatch(r"/admin/realms/meho/clients/([^/]+)(/.*)?", path):
             client = self._client_by_id(match.group(1))
             if client is None:
@@ -369,8 +415,9 @@ class FakeKeycloak:
             known = {f["id"] for f in self.flows.values()}
             assert set((body.get("authenticationFlowBindingOverrides") or {}).values()) <= known
             return Reply(201, None, f"{path}/{self._add_client(body)}")
-        if path == "/admin/realms/meho/users":
-            if body["username"] in self.users:
+        if match := re.fullmatch(r"/admin/realms/(meho|master)/users", path):
+            users = self._users(match.group(1))
+            if body["username"] in users:
                 return Reply(409, {"errorMessage": "User exists with same username"})
             # Keycloak joins the groups of a new user in the same request and
             # the same transaction: a failure makes no user at all.
@@ -382,7 +429,7 @@ class FakeKeycloak:
                 return Reply(500, {"error": "unknown_error"})
             new_id = str(uuid.uuid4())
             user = {"id": new_id, **copy.deepcopy(body), "groups": groups}
-            self.users[body["username"]] = user
+            users[body["username"]] = user
             return Reply(201, None, f"{path}/{new_id}")
         if match := re.fullmatch(
             r"/admin/realms/meho/clients/([^/]+)/protocol-mappers/models", path
@@ -394,6 +441,17 @@ class FakeKeycloak:
             mapper = {"id": str(uuid.uuid4()), **copy.deepcopy(body)}
             client.setdefault("protocolMappers", []).append(mapper)
             return Reply(201, None, f"{path}/{mapper['id']}")
+        if match := re.fullmatch(
+            r"/admin/realms/master/users/([^/]+)/role-mappings/clients/([^/]+)", path
+        ):
+            user = self._master_user_by_id(match.group(1))
+            assert user is not None and match.group(2) == self.meho_realm_client["id"]
+            held = user.setdefault("clientRoles", {}).setdefault("meho-realm", [])
+            for role in body:
+                assert self.meho_realm_client["roles"][role["name"]]["id"] == role["id"]
+                assert role["name"] not in held, f"{role['name']} granted twice"
+                held.append(role["name"])
+            return Reply(204, None)
         raise AssertionError(f"unexpected POST {path}")
 
     def _put(self, path: str, body: Any, params: dict[str, str]) -> Reply:
@@ -520,8 +578,9 @@ async def test_each_person_is_in_exactly_one_role_group(realm_file: Path) -> Non
     kc = _fresh()
     await finish_realm(_plan(realm_file), _ENV, kc, FakeStore())
 
-    for user in kc.users.values():
-        assert len(_ROLE_GROUPS & set(user["groups"])) == 1, user["username"]
+    for name in ("admin", "approver"):
+        assert len(_ROLE_GROUPS & set(kc.users[name]["groups"])) == 1, name
+    assert "console-admin" not in kc.users, "the console admin is not a user of realm meho"
     assert set(kc.groups) > _ROLE_GROUPS
     assert set(kc.groups["MEHO-Platform-Admins"]["attributes"]) == {"platform_admin"}
 
@@ -542,13 +601,14 @@ async def test_second_run_changes_nothing(
 
     assert kc.state() == first
     assert store.secrets == first_secrets
-    assert store.created == ["rel-core-first-login"]
+    assert store.created == ["rel-core-first-login", "rel-core-console-admin"]
     assert not [c for c in kc.calls if c[0] in ("POST", "DELETE")]
     out = capfd.readouterr().out
     assert "login: meho-admin" in out
     assert "created" not in out
     assert "user admin: kept" in out
     assert "secret rel-core-first-login: kept" in out
+    assert "console admin: kept (realm master, out of reach of meho-admin)" in out
 
 
 async def test_upgrade_adds_what_a_newer_realm_file_brings(
@@ -857,7 +917,7 @@ async def test_output_never_contains_a_secret_value(
     values = [v for k, v in _ENV.items() if "SECRET" in k]
     values += [v for data in store.secrets.values() for k, v in data.items() if "password" in k]
     values += [store.secrets["rel-core-ci-login"]["client_secret"]]
-    assert len(values) == 7
+    assert len(values) == 8
     for value in values:
         assert value not in output
     assert "\n" in output
@@ -910,7 +970,7 @@ async def test_existing_first_login_secret_is_the_source_for_missing_people(
 
     await finish_realm(_plan(realm_file), _ENV, kc, store)
 
-    assert store.created == []
+    assert store.created == ["rel-core-console-admin"]
     assert store.secrets["rel-core-first-login"] == stored
     assert set(kc.users) == {"root-person", "second"}
     assert kc.users["root-person"]["credentials"][0]["value"] == "P" * 32
@@ -1000,6 +1060,187 @@ async def test_first_login_secret_without_a_key_stops_the_stage(realm_file: Path
 
     assert '"rel-core-first-login"' in str(caught.value)
     assert '"admin_password"' in str(caught.value)
+
+
+async def test_fresh_install_makes_the_console_admin_in_realm_master(
+    realm_file: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    kc = _fresh()
+    store = FakeStore()
+
+    await finish_realm(_plan(realm_file), _ENV, kc, store)
+
+    secret = store.secrets["rel-core-console-admin"]
+    assert set(secret) == {"username", "password"}
+    assert secret["username"] == "console-admin"
+    assert _ALNUM_32.match(secret["password"])
+    assert "console-admin" not in kc.users
+    user = kc.master_users["console-admin"]
+    assert user["enabled"] is True
+    assert user["groups"] == []
+    assert user["credentials"] == [
+        {"type": "password", "value": secret["password"], "temporary": True}
+    ]
+    assert user["requiredActions"] == ["UPDATE_PASSWORD", "CONFIGURE_TOTP"]
+    assert sorted(kc.console_roles("console-admin")) == [
+        "manage-identity-providers",
+        "manage-realm",
+        "manage-users",
+    ], "every role but impersonation"
+    assert kc.master_clients == {}, "made before the first-start account goes"
+    out = capfd.readouterr().out
+    assert "secret rel-core-console-admin: created" in out
+    assert "user console-admin: created (in no group)" in out
+    assert "user console-admin: 3 meho-realm roles granted" in out
+    assert out.index("meho-realm roles granted") < out.index("first-start account: removed")
+
+
+async def test_meho_admin_cannot_reach_the_console_admin(realm_file: Path) -> None:
+    """The takeover a user of realm meho was open to: meho-admin resets its password."""
+    kc = _fresh()
+    await finish_realm(_plan(realm_file), _ENV, kc, FakeStore())
+    user_id = kc.master_users["console-admin"]["id"]
+
+    assert await kc.login("meho", "meho-admin", _ENV[ADMIN_SECRET_ENV])
+    found = await kc.call(
+        "GET", "/admin/realms/master/users", params={"username": "console-admin", "exact": "true"}
+    )
+    reset = await kc.call(
+        "PUT",
+        f"/admin/realms/master/users/{user_id}/reset-password",
+        json={"type": "password", "value": "x", "temporary": False},
+    )
+
+    assert (found.status, reset.status) == (403, 403)
+
+
+async def test_upgrade_as_meho_admin_makes_no_console_admin_and_says_how(
+    realm_file: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """An older install: meho-admin cannot make users in realm master, so it makes none."""
+    kc = _fresh(bootstrap=False)
+    env = {k: v for k, v in _ENV.items() if not k.startswith("MEHO_CORE_BOOTSTRAP")}
+    store = FakeStore()
+    plan = _plan(realm_file)
+
+    await finish_realm(plan, env, kc, store)
+
+    assert kc.session == "meho/meho-admin"
+    assert kc.master_users == {}
+    assert "console-admin" not in kc.users
+    assert "rel-core-console-admin" not in store.secrets
+    assert not [c for c in kc.calls if c[1].startswith("/admin/realms/master/")]
+    out = capfd.readouterr().out
+    assert "console admin: none, and meho-admin cannot make users in realm master" in out
+    assert "'Console admin on an older install'" in out
+
+    # Once someone adds it by hand and stores its Secret, the stage keeps it.
+    store.secrets["rel-core-console-admin"] = {"username": "console-admin", "password": "K" * 32}
+    await finish_realm(plan, env, kc, store)
+    out = capfd.readouterr().out
+    assert "console admin: kept" in out
+    assert "add one by hand" not in out
+
+
+async def test_a_role_held_through_a_group_counts_and_only_missing_roles_are_granted(
+    realm_file: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """The check reads effective roles, so a grant through a group is not granted again."""
+    kc = _fresh()
+    store = FakeStore()
+    store.secrets["rel-core-console-admin"] = {"username": "console-admin", "password": "K" * 32}
+    kc.master_users["console-admin"] = {
+        "id": "u9",
+        "username": "console-admin",
+        "groups": ["realm-admins"],
+        "groupClientRoles": {"meho-realm": ["manage-realm", "manage-users"]},
+    }
+
+    await finish_realm(_plan(realm_file), _ENV, kc, store)
+
+    assert kc.console_roles("console-admin") == ["manage-identity-providers"]
+    assert "user console-admin: 1 meho-realm roles granted" in capfd.readouterr().out
+
+    kc.master_users["console-admin"]["groupClientRoles"]["meho-realm"].append(
+        "manage-identity-providers"
+    )
+    kc.master_users["console-admin"]["clientRoles"] = {}
+    kc.master_clients["boot-client"] = {"id": "b2", "secret": _ENV[BOOTSTRAP_SECRET_ENV]}
+    await finish_realm(_plan(realm_file), _ENV, kc, store)
+    assert kc.console_roles("console-admin") == []
+    assert (
+        "user console-admin: has every meho-realm role but impersonation" in capfd.readouterr().out
+    )
+
+
+async def test_a_master_user_this_install_did_not_make_is_never_adopted(
+    realm_file: Path,
+) -> None:
+    kc = _fresh()
+    kc.master_users["console-admin"] = {"id": "u9", "username": "console-admin", "groups": []}
+    store = FakeStore()
+
+    for _ in range(2):  # the Job's retry refuses too
+        with pytest.raises(RealmStageError, match="already has a user console-admin"):
+            await finish_realm(_plan(realm_file), _ENV, kc, store)
+
+    assert "rel-core-console-admin" not in store.secrets
+    assert kc.console_roles("console-admin") == []
+    assert "boot-client" in kc.master_clients
+
+
+@pytest.mark.parametrize("field", ["admin_username", "approver_username", "console_admin_username"])
+@pytest.mark.parametrize("name", ["service-account-meho-admin", " Service-Account-x"])
+async def test_a_service_account_name_stops_the_stage_before_any_change(
+    realm_file: Path, field: str, name: str
+) -> None:
+    kc = _fresh()
+    store = FakeStore()
+    plan = _plan(realm_file, **{field: name})
+
+    with pytest.raises(RealmStageError, match=r"the chart names .*service-account-"):
+        await finish_realm(plan, _ENV, kc, store)
+
+    assert kc.calls == []
+    assert store.secrets == {}
+
+
+async def test_a_console_secret_naming_a_service_account_stops_the_stage(
+    realm_file: Path,
+) -> None:
+    store = FakeStore(
+        existing={
+            "rel-core-console-admin": {
+                "username": "service-account-meho-admin",
+                "password": "K" * 32,
+            }
+        }
+    )
+    kc = _fresh()
+
+    with pytest.raises(RealmStageError, match='Secret "rel-core-console-admin" names'):
+        await finish_realm(_plan(realm_file), _ENV, kc, store)
+    assert kc.master_users == {}
+    assert "boot-client" in kc.master_clients
+
+
+async def test_a_secret_that_keeps_another_name_says_so(
+    realm_file: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    kc = _fresh()
+    store = FakeStore()
+    await finish_realm(_plan(realm_file), _ENV, kc, store)
+    capfd.readouterr()
+
+    renamed = _plan(realm_file, admin_username="boss", console_admin_username="root-console")
+    await finish_realm(renamed, _ENV, kc, store)
+
+    out = capfd.readouterr().out
+    assert "secret rel-core-first-login: keeps user admin; the chart names boss (not used)" in out
+    assert "user boss" not in out
+    # meho-admin cannot read realm master, so a renamed console admin is only kept.
+    assert "console admin: kept" in out
+    assert "root-console" not in kc.master_users
 
 
 async def test_ci_login_makes_a_client_a_group_and_a_secret(
@@ -1098,7 +1339,8 @@ def test_load_realm_file_errors_name_the_file(tmp_path: Path) -> None:
         ('{"keycloak_url": "u"}', "realm_file"),
         (
             '{"keycloak_url": "u", "realm_file": "f", "first_login_secret": "s", '
-            '"admin_username": "a", "approver_username": "b", "extra": 1}',
+            '"admin_username": "a", "approver_username": "b", "console_admin_secret": "k", '
+            '"console_admin_username": "c", "extra": 1}',
             "extra",
         ),
     ],

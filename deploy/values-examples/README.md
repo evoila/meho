@@ -106,9 +106,10 @@ secure state (each is stated once, in full, on the published docs site's
 - **Deploy by digest + verify signature** — pin `image.digest`
   (`sha256:…`) and `cosign verify` it before rollout, beyond the immutable
   `image.tag`.
-- **Realm mappers** — on a shared public client derive `tenant_role` from
-  group membership; never hardcode a privileged `tenant_role` (see the
-  auth-onramp section below).
+- **Realm mappers** — on a shared public client, let a User Attribute
+  mapper (`tenant_role`, Aggregate attribute values off) read the
+  `tenant_role` attribute of the person's MEHO group; never hardcode a
+  privileged `tenant_role` (see the auth-onramp section below).
 
 ## ESO sync patterns
 

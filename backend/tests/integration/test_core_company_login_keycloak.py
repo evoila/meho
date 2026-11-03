@@ -313,6 +313,8 @@ def _plan(**company: Any) -> Plan:
             "first_login_secret": "rel-core-first-login",
             "admin_username": "admin",
             "approver_username": "approver",
+            "console_admin_secret": "rel-core-console-admin",
+            "console_admin_username": "console-admin",
             "company_login": {
                 "enabled": True,
                 "discovery_url": _DISCOVERY,

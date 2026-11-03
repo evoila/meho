@@ -23154,7 +23154,7 @@
           "ui-vault-writes"
         ],
         "summary": "Vault Move",
-        "description": "Dispatch ``secret.move`` in-process; render the value-free result.\n\nCSRF-gated + ``require_ui_operator``-gated. Dispatches the SEPARATE\n``secret-broker-1.x`` connector with ``from`` / ``to`` references (+\noptional reason). VALUE-FREE: no value field is accepted, dispatched,\nlogged, or rendered -- only the ``{status, value_sha256, length}``\nconfirmation surfaces.",
+        "description": "Dispatch ``secret.move`` in-process; render the value-free result.\n\nCSRF-gated + ``require_ui_operator``-gated. Dispatches the SEPARATE\n``secret-broker-1.x`` connector with ``from`` / ``to`` references (+\noptional reason). VALUE-FREE: no value field is accepted, dispatched,\nlogged, or rendered -- only the ``{status, value_fingerprint, length}``\nconfirmation surfaces.",
         "operationId": "vault_move_ui_vault_move_post",
         "requestBody": {
           "content": {

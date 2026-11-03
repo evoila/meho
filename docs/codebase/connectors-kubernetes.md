@@ -726,7 +726,7 @@ under the `value` data key) in the Supervisor namespace.
 broker's core invariant (`connectors/secret`, #1577), it reads the value
 inside the backplane and writes it straight to a Vault `secret_ref`,
 returning only `{secret_ref, field, registered_as, name, namespace,
-data_key, value_sha256, length}`. So the kubeconfig never reaches the
+data_key, value_fingerprint, length}`. So the kubeconfig never reaches the
 `call_operation` result / the agent transcript at all -- not merely the
 audit row. This is a deliberate hardening of #3496's `read_data` sketch
 (which returned the value to the approval-gated caller); the round-trip

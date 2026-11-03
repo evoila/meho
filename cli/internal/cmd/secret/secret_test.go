@@ -151,7 +151,7 @@ func TestSecretMovePassesRefsNotValues(t *testing.T) {
 			}
 			writeJSON(t, w, 200, dispatch.CallResult{
 				Status: "ok", OpID: opMove,
-				Result: json.RawMessage(`{"status":"moved","value_sha256":"abc123","length":24}`),
+				Result: json.RawMessage(`{"status":"moved","value_fingerprint":"abc123","length":24}`),
 			})
 		},
 	})
@@ -238,7 +238,7 @@ func TestSecretMoveRendersValueFreeResult(t *testing.T) {
 		"POST /api/v1/operations/call": func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(t, w, 200, dispatch.CallResult{
 				Status: "ok", OpID: opMove, DurationMs: 12,
-				Result: json.RawMessage(`{"status":"moved","value_sha256":"deadbeef","length":24}`),
+				Result: json.RawMessage(`{"status":"moved","value_fingerprint":"deadbeef","length":24}`),
 			})
 		},
 	})

@@ -51,6 +51,7 @@ from meho_backplane.connectors.registry import (
     register_connector,
     register_connector_v2,
 )
+from meho_backplane.operations._validate import compute_value_fingerprint
 from meho_backplane.settings import get_settings
 
 from ._vault_fakes import install_fake_client
@@ -224,7 +225,7 @@ def test_result_fields_survive_the_credential_read_scrub() -> None:
         "name": "guest-kubeconfig",
         "namespace": "envision-ns",
         "data_key": "value",
-        "value_sha256": "deadbeef",
+        "value_fingerprint": "deadbeef",
         "length": 42,
     }
     scrubbed, found = scrub_secret_named_values(result)
@@ -265,7 +266,9 @@ async def test_reads_secret_and_stages_to_tenant_ref(monkeypatch: pytest.MonkeyP
     assert result["registered_as"] == "envision-guest"
     assert result["data_key"] == "value"
     assert result["length"] == len(_CANARY_KUBECONFIG.encode("utf-8"))
-    assert result["value_sha256"] == hashlib.sha256(_CANARY_KUBECONFIG.encode()).hexdigest()
+    assert result["value_fingerprint"] == compute_value_fingerprint(_CANARY_KUBECONFIG.encode())
+    # A keyed fingerprint, not the plain hash of the value.
+    assert result["value_fingerprint"] != hashlib.sha256(_CANARY_KUBECONFIG.encode()).hexdigest()
 
     # The decoded kubeconfig reached Vault (the point) — under the operator's
     # own JWT, at the derived tenant path, on the default 'secret' mount.
@@ -304,7 +307,7 @@ async def test_result_envelope_carries_no_secret_bytes(
     # The value never entered the op params either (only the ref does).
     assert _CANARY_TOKEN not in str(params)
     # Provenance is present so an approver/audit can correlate.
-    assert result["value_sha256"] and result["length"] > 0
+    assert result["value_fingerprint"] and result["length"] > 0
 
 
 @pytest.mark.asyncio

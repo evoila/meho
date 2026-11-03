@@ -2710,9 +2710,9 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      The standard flow is on too, with the one redirect URI
      `http://127.0.0.1:*`: older CLI versions use it for the fresh
      browser sign-in an approval needs (#3979). The client requires no
-     PKCE method: `meho login` sends no PKCE, and Keycloak checks PKCE
-     at the device login too, so a required method would refuse every
-     `meho login`. The run sends `pkce.code.challenge.method` as an
+     PKCE method: CLI versions before 0.44.0 send no PKCE at the
+     device login, and Keycloak checks PKCE there too, so a required
+     method would refuse their `meho login`. The run sends `pkce.code.challenge.method` as an
      empty value, so Keycloak drops the `S256` that a run of 0.40.0,
      0.41.0 or 0.42.0 set. Implicit, password and service-account flows
      stay off.

@@ -248,9 +248,10 @@ def test_cli_client_uses_device_flow(realm: dict[str, Any]) -> None:
 
 
 def test_cli_client_requires_no_pkce(realm: dict[str, Any]) -> None:
-    """`meho login` sends no PKCE, and Keycloak checks PKCE at the device login too.
+    """CLI versions before 0.44.0 send no PKCE at the device login, and Keycloak checks it there.
 
-    The clients without a device login keep the PKCE method.
+    So the shipped realm leaves the method empty on `meho-cli`, and older
+    CLIs keep working. The clients without a device login keep the PKCE method.
     """
     client = _client(realm, "meho-cli")
     assert "pkce.code.challenge.method" not in client["attributes"]

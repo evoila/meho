@@ -35,9 +35,13 @@ __all__ = [
 _MIN_TTL_SECONDS: Final[int] = 60
 _MAX_TTL_SECONDS: Final[int] = 86400
 
-_SHA256_PROPERTY: dict[str, Any] = {
+_FINGERPRINT_PROPERTY: dict[str, Any] = {
     "type": "string",
-    "description": "Hex SHA-256 of the value, never the value.",
+    "description": (
+        "Keyed fingerprint of the value (HMAC-SHA256 under a random key that "
+        "lives only in the handoff, 64 hex characters), never the value. The "
+        "export and the import answer the same fingerprint."
+    ),
 }
 
 _LENGTH_PROPERTY: dict[str, Any] = {
@@ -82,7 +86,7 @@ _EXPORT_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "status": {"type": "string", "const": "exported"},
-        "value_sha256": _SHA256_PROPERTY,
+        "value_fingerprint": _FINGERPRINT_PROPERTY,
         "length": _LENGTH_PROPERTY,
         "handoff_token": {
             "type": "string",
@@ -96,7 +100,13 @@ _EXPORT_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": "Seconds the handoff stays usable.",
         },
     },
-    "required": ["status", "value_sha256", "length", "handoff_token", "handoff_ttl_seconds"],
+    "required": [
+        "status",
+        "value_fingerprint",
+        "length",
+        "handoff_token",
+        "handoff_ttl_seconds",
+    ],
     "additionalProperties": False,
 }
 
@@ -120,12 +130,12 @@ SECRET_HANDOFF_IMPORT_PARAMETER_SCHEMA: dict[str, Any] = {
             ),
         },
         "to": SECRET_REF_PROPERTY,
-        "expect_sha256": {
+        "expect_fingerprint": {
             "type": "string",
             "pattern": "^[0-9a-fA-F]{64}$",
             "description": (
-                "The value_sha256 the export returned. When set, nothing is "
-                "written if the value does not match."
+                "The value_fingerprint the export returned. When set, nothing is "
+                "written if the handoff does not give the same value."
             ),
         },
         "reason": _REASON_PROPERTY,
@@ -137,7 +147,7 @@ SECRET_HANDOFF_IMPORT_PARAMETER_SCHEMA: dict[str, Any] = {
             "handoff_token": "<handoff_token from secret.handoff.export>",
             "store": "old-instance-vault",
             "to": "vault:tenants/<tenant-id>/targets/db-prod#password",
-            "expect_sha256": "0" * 64,
+            "expect_fingerprint": "0" * 64,
             "reason": "move target db-prod from the old MEHO instance",
         }
     ],
@@ -147,10 +157,10 @@ _IMPORT_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "status": {"type": "string", "const": "imported"},
-        "value_sha256": _SHA256_PROPERTY,
+        "value_fingerprint": _FINGERPRINT_PROPERTY,
         "length": _LENGTH_PROPERTY,
     },
-    "required": ["status", "value_sha256", "length"],
+    "required": ["status", "value_fingerprint", "length"],
     "additionalProperties": False,
 }
 
@@ -171,13 +181,13 @@ _EXPORT_LLM_INSTRUCTIONS: dict[str, Any] = {
         "reason": "Optional. Shown to the approver.",
     },
     "output_shape": (
-        "{'status': 'exported', 'value_sha256', 'length', 'handoff_token', "
+        "{'status': 'exported', 'value_fingerprint', 'length', 'handoff_token', "
         "'handoff_ttl_seconds'}. The value never appears."
     ),
     "next_step": (
         "On the other instance call secret.handoff.import with this "
         "handoff_token, a 'store' target that points at this instance's Vault, "
-        "the sink 'to', and expect_sha256 set to this value_sha256."
+        "the sink 'to', and expect_fingerprint set to this value_fingerprint."
     ),
 }
 
@@ -195,13 +205,15 @@ _IMPORT_LLM_INSTRUCTIONS: dict[str, Any] = {
         "handoff_token": "Required. The handoff_token from secret.handoff.export.",
         "store": "Required. Name of the target here that points at the other Vault.",
         "to": "Required. Sink '<kind>:<ref>', e.g. 'vault:tenants/<tenant-id>/...#password'.",
-        "expect_sha256": "Recommended. The value_sha256 from the export.",
+        "expect_fingerprint": "Recommended. The value_fingerprint from the export.",
         "reason": "Optional. Shown to the approver.",
     },
-    "output_shape": ("{'status': 'imported', 'value_sha256', 'length'}. The value never appears."),
+    "output_shape": (
+        "{'status': 'imported', 'value_fingerprint', 'length'}. The value never appears."
+    ),
     "next_step": (
-        "Compare value_sha256 with the export's value_sha256, then register or "
-        "update the target here with its secret_ref pointing at the sink path."
+        "Compare value_fingerprint with the export's value_fingerprint, then register "
+        "or update the target here with its secret_ref pointing at the sink path."
     ),
 }
 

@@ -110,8 +110,8 @@ newline never rides into the credential — the same artifact the
 credential loaders strip), and never returned. Each adapter's structlog
 events carry only the target name, realm, and username / clientId —
 never the value, and never the bytes the :class:`SecretMaterial` wraps.
-The ``secret.move`` handler returns only ``status`` + ``value_sha256`` +
-``length``; the audit row stores a ``params_hash`` of the (value-free)
+The ``secret.move`` handler returns only ``status`` + ``value_fingerprint``
++ ``length``; the audit row stores a ``params_hash`` of the (value-free)
 references, so the value reaches neither the response nor the audit row.
 """
 

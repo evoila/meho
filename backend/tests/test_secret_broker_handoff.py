@@ -21,6 +21,7 @@ runs.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import secrets
 from collections.abc import AsyncIterator, Iterator
@@ -64,6 +65,7 @@ from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._preview import PreviewContext
+from meho_backplane.operations._validate import compute_value_fingerprint
 from meho_backplane.operations._vendor_text import VENDOR_TEXT_WITHHELD
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.ssrf_guard import TARGET_SSRF_ALLOWLIST_ENV
@@ -71,6 +73,13 @@ from meho_backplane.targets.ssrf_guard import TARGET_SSRF_ALLOWLIST_ENV
 #: The moved value. Generated so no literal secret sits in the source.
 _VALUE = f"handoff-value-{secrets.token_hex(6)}"
 _VALUE_SHA256 = hashlib.sha256(_VALUE.encode()).hexdigest()
+
+
+def _handoff_fingerprint(store: _FakeStore, token: str) -> str:
+    """The fingerprint both steps answer: HMAC of the value under the key in the handoff."""
+    check_key = bytes.fromhex(store.handoffs[token]["check_key"])
+    return hmac.new(check_key, _VALUE.encode(), hashlib.sha256).hexdigest()
+
 
 _TENANT_A = UUID("aaaaaaaa-0000-0000-0000-00000000000a")
 _TENANT_B = UUID("bbbbbbbb-0000-0000-0000-00000000000b")
@@ -347,20 +356,36 @@ def test_steps_are_pinned_as_credential_classes() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_export_returns_handoff_hash_and_length_never_the_value(
+async def test_export_returns_handoff_fingerprint_and_length_never_the_value(
     instances: _Instances,
 ) -> None:
     with structlog.testing.capture_logs() as logs:
         result = await _export_on_a(instances)
 
     assert result["status"] == "exported"
-    assert result["value_sha256"] == _VALUE_SHA256
     assert result["length"] == len(_VALUE.encode())
     assert result["handoff_ttl_seconds"] == 3600
-    # The handoff is a reference into store A, not the value.
-    assert instances.store_a.handoffs[result["handoff_token"]] == {"value": _VALUE}
+    # The handoff is a reference into store A, not the value. It carries the
+    # value and the random key the fingerprint is computed under.
+    handoff = instances.store_a.handoffs[result["handoff_token"]]
+    assert handoff == {"value": _VALUE, "check_key": handoff["check_key"]}
+    assert len(bytes.fromhex(handoff["check_key"])) == 32
+    assert result["value_fingerprint"] == _handoff_fingerprint(
+        instances.store_a, result["handoff_token"]
+    )
+    # Not the plain hash of the value, in the answer or in the audit row.
+    assert result["value_fingerprint"] != _VALUE_SHA256
+    assert _VALUE_SHA256 not in json.dumps(result)
     assert _VALUE not in json.dumps(result)
     assert _VALUE not in repr(logs)
+
+
+async def test_two_exports_of_the_same_value_give_different_fingerprints(
+    instances: _Instances,
+) -> None:
+    first = await _export_on_a(instances)
+    second = await _export_on_a(instances)
+    assert first["value_fingerprint"] != second["value_fingerprint"]
 
 
 async def test_export_keeps_the_source_tenant_guard(instances: _Instances) -> None:
@@ -439,12 +464,14 @@ async def test_import_writes_value_into_the_other_store(
         result = await secret_handoff_import(
             _operator(_TENANT_B),
             None,
-            _import_params(exported["handoff_token"], expect_sha256=exported["value_sha256"]),
+            _import_params(
+                exported["handoff_token"], expect_fingerprint=exported["value_fingerprint"]
+            ),
         )
 
     assert result == {
         "status": "imported",
-        "value_sha256": _VALUE_SHA256,
+        "value_fingerprint": exported["value_fingerprint"],
         "length": len(_VALUE.encode()),
     }
     assert instances.store_b.kv[_SINK_PATH] == {"password": _VALUE}
@@ -564,8 +591,79 @@ async def test_import_digest_mismatch_writes_nothing(
         await secret_handoff_import(
             _operator(_TENANT_B),
             None,
-            _import_params(exported["handoff_token"], expect_sha256="f" * 64),
+            _import_params(exported["handoff_token"], expect_fingerprint="f" * 64),
         )
+
+    assert _VALUE not in str(excinfo.value)
+    assert instances.store_b.writes == []
+    assert instances.store_a.handoffs == {}
+
+
+async def test_import_checks_the_fingerprint_without_case(
+    instances: _Instances, store_target: None
+) -> None:
+    exported = await _export_on_a(instances)
+    instances.on_b()
+
+    result = await secret_handoff_import(
+        _operator(_TENANT_B),
+        None,
+        _import_params(
+            exported["handoff_token"], expect_fingerprint=exported["value_fingerprint"].upper()
+        ),
+    )
+
+    assert result["value_fingerprint"] == exported["value_fingerprint"]
+    assert instances.store_b.kv[_SINK_PATH] == {"password": _VALUE}
+
+
+async def test_import_of_a_handoff_without_key_refuses_the_fingerprint_check(
+    instances: _Instances, store_target: None
+) -> None:
+    """A handoff made by an older MEHO has no key, so expect_fingerprint cannot be checked."""
+    token = f"wrap-{secrets.token_hex(8)}"
+    instances.store_a.handoffs[token] = {"value": _VALUE}
+    instances.on_b()
+
+    with pytest.raises(SecretHandoffDigestMismatchError, match="older MEHO version") as excinfo:
+        await secret_handoff_import(
+            _operator(_TENANT_B), None, _import_params(token, expect_fingerprint="f" * 64)
+        )
+
+    assert _VALUE not in str(excinfo.value)
+    assert "leave expect_fingerprint out" in str(excinfo.value)
+    assert instances.store_b.writes == []
+    assert instances.store_a.handoffs == {}
+
+
+async def test_import_of_a_handoff_without_key_answers_this_installs_fingerprint(
+    instances: _Instances, store_target: None
+) -> None:
+    token = f"wrap-{secrets.token_hex(8)}"
+    instances.store_a.handoffs[token] = {"value": _VALUE}
+    instances.on_b()
+
+    result = await secret_handoff_import(_operator(_TENANT_B), None, _import_params(token))
+
+    assert result == {
+        "status": "imported",
+        "value_fingerprint": compute_value_fingerprint(_VALUE.encode()),
+        "length": len(_VALUE.encode()),
+    }
+    assert result["value_fingerprint"] != _VALUE_SHA256
+    assert instances.store_b.kv[_SINK_PATH] == {"password": _VALUE}
+
+
+@pytest.mark.parametrize("check_key", ["not-hex", 7, "ab" * 16])
+async def test_import_refuses_a_handoff_with_a_broken_key(
+    instances: _Instances, store_target: None, check_key: Any
+) -> None:
+    token = f"wrap-{secrets.token_hex(8)}"
+    instances.store_a.handoffs[token] = {"value": _VALUE, "check_key": check_key}
+    instances.on_b()
+
+    with pytest.raises(SecretHandoffStoreError, match="check_key") as excinfo:
+        await secret_handoff_import(_operator(_TENANT_B), None, _import_params(token))
 
     assert _VALUE not in str(excinfo.value)
     assert instances.store_b.writes == []
@@ -709,12 +807,14 @@ async def test_move_between_two_stores_with_matching_audit_hashes(
     imported = await _dispatch(
         _TENANT_B,
         "secret.handoff.import",
-        _import_params(token, expect_sha256=exported.result["value_sha256"], reason="move db"),
+        _import_params(
+            token, expect_fingerprint=exported.result["value_fingerprint"], reason="move db"
+        ),
     )
     assert imported.status == "ok", imported.error
     assert imported.result == {
         "status": "imported",
-        "value_sha256": _VALUE_SHA256,
+        "value_fingerprint": exported.result["value_fingerprint"],
         "length": len(_VALUE.encode()),
     }
 
@@ -723,21 +823,26 @@ async def test_move_between_two_stores_with_matching_audit_hashes(
     assert _SINK_PATH not in instances.store_a.kv
     assert instances.store_a.handoffs == {}
 
-    # Each side wrote its own audit record; both carry the same SHA-256.
+    # Each side wrote its own audit record; both carry the same fingerprint.
     export_rows = await _audit_rows("secret.handoff.export")
     import_rows = await _audit_rows("secret.handoff.import")
     assert len(export_rows) == 1
     assert len(import_rows) == 1
     assert export_rows[0].tenant_id == _TENANT_A
     assert import_rows[0].tenant_id == _TENANT_B
-    assert export_rows[0].raw_payload["value_sha256"] == _VALUE_SHA256
-    assert import_rows[0].raw_payload["value_sha256"] == _VALUE_SHA256
+    fingerprint = exported.result["value_fingerprint"]
+    assert export_rows[0].raw_payload["value_fingerprint"] == fingerprint
+    assert import_rows[0].raw_payload["value_fingerprint"] == fingerprint
 
-    # The value is in no result and no audit column on either side.
+    # The value is in no result and no audit column on either side, and
+    # neither is its plain hash.
     for result in (exported, imported):
         assert _VALUE not in result.model_dump_json()
+        assert _VALUE_SHA256 not in result.model_dump_json()
     for row in (*export_rows, *import_rows):
         assert _VALUE not in json.dumps(row.payload, default=str)
+        assert _VALUE_SHA256 not in json.dumps(row.payload, default=str)
+        assert _VALUE_SHA256 not in json.dumps(row.raw_payload, default=str)
         assert _VALUE not in json.dumps(row.raw_payload, default=str)
 
 
@@ -925,13 +1030,13 @@ def _preview_ctx(params: dict[str, Any]) -> PreviewContext:
 async def test_import_preview_never_shows_the_handoff() -> None:
     token = f"wrap-{secrets.token_hex(8)}"
     preview = await build_secret_handoff_import_preview(
-        _preview_ctx(_import_params(token, expect_sha256="A" * 64, reason="move db"))
+        _preview_ctx(_import_params(token, expect_fingerprint="A" * 64, reason="move db"))
     )
     assert preview == {
         "action": "secret.handoff.import",
         "store_target": _STORE_TARGET,
         "sink": {"kind": "vault", "ref": f"{_SINK_PATH}#password"},
-        "expect_sha256": "a" * 64,
+        "expect_fingerprint": "a" * 64,
         "reason": "move db",
     }
     assert token not in json.dumps(preview)

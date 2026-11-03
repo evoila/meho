@@ -62,6 +62,7 @@ __all__ = [
     "compute_audit_digest_hash",
     "compute_audit_params_hash",
     "compute_params_hash",
+    "compute_value_fingerprint",
     "ingested_schema_for_validation",
     "params_check_errors",
     "params_hash_candidates",
@@ -86,6 +87,10 @@ _PARAMS_HASH_KEY_LABEL: Final[bytes] = b"meho-params-hash-key-v1"
 #: Prefix for :func:`compute_audit_digest_hash`, so its output never equals a
 #: params hash of the same text.
 _DIGEST_HASH_PREFIX: Final[bytes] = b"meho-audit-digest-v1\x00"
+
+#: Prefix for :func:`compute_value_fingerprint`, so a value's fingerprint never
+#: equals a params hash or a digest hash of the same bytes.
+_VALUE_FINGERPRINT_PREFIX: Final[bytes] = b"meho-secret-value-v1\x00"
 
 
 class InvalidOpSchemaError(Exception):
@@ -191,6 +196,22 @@ def compute_audit_digest_hash(value: str) -> str:
     install.
     """
     message = _DIGEST_HASH_PREFIX + value.encode("utf-8")
+    return hmac.new(_params_hash_key(), message, hashlib.sha256).hexdigest()
+
+
+def compute_value_fingerprint(value: bytes) -> str:
+    """Return the keyed fingerprint an answer carries in place of a secret value.
+
+    For an operation that moves or stages a secret value and must say which
+    value it was without showing it: the secret broker and the Kubernetes
+    kubeconfig read. HMAC-SHA256 under the server key, with its own prefix,
+    over the exact bytes. Equal values give equal fingerprints inside one
+    install, so an auditor can match two rows that carried the same value.
+    Without the server key the fingerprint cannot be computed again from a
+    value, so a stored fingerprint tells nothing about a short or common
+    value.
+    """
+    message = _VALUE_FINGERPRINT_PREFIX + value
     return hmac.new(_params_hash_key(), message, hashlib.sha256).hexdigest()
 
 

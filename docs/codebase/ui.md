@@ -3398,7 +3398,7 @@ routers are included ahead of the stubs aggregate in
   `secret-broker-1.x` connector with the schema's `from` / `to` references
   (+ optional `reason`). **Value-free**: no value input exists, no value
   reaches the dispatched params, and the render surfaces only the
-  `{status, value_sha256, length}` confirmation — the no-`--value` invariant
+  `{status, value_fingerprint, length}` confirmation — the no-`--value` invariant
   the CLI keeps.
 
 ### Two connector ids (load-bearing)
@@ -3435,7 +3435,7 @@ shared result fragment (`vault/_write_result.html`) surfaces it as a banner
 + a deep-link into `/ui/approvals/{approval_request_id}` (the surface #1778
 shipped, `hx-get` into `#meho-approvals-modal-container`), so the operator
 never thinks the write silently no-op'd. The fragment's other branches:
-the value-free `secret.move` `ok` render (status / value_sha256 / length
+the value-free `secret.move` `ok` render (status / value_fingerprint / length
 only); the put / delete `ok` render (a plain success, no secret value); the
 `error` / `denied` render via the shared `vault/_envelope_error.html` macro
 (which carries the `VaultTenantScopeError` "outside your tenant scope"
@@ -3491,7 +3491,7 @@ discipline is pinned.
   the token, 200 with it); route ordering (`put/confirm` → confirm handler);
   the CAS rule (carried only when set, blank ≠ `cas=0`); the `secret.move`
   value-free contract (dispatches `secret-broker-1.x` with refs only, a
-  smuggled `value` field dropped, render carries only status/value_sha256/
+  smuggled `value` field dropped, render carries only status/value_fingerprint/
   length); RBAC (a plain operator runs all three writes, no `tenant_admin`
   403); the `VaultTenantScopeError` friendly-message render branch; inline
   400 form errors for malformed `data` / empty `versions` / missing

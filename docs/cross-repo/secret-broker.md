@@ -30,7 +30,7 @@ never observes it, with provenance."*
 Do **not** reach for it to *read* a secret — there is no read verb, by
 design. A read would land the value in the transcript. The broker only
 *moves*. It also moves a **single named field**, not a whole secret body:
-naming the field is what keeps the `value_sha256` / `length` in the
+naming the field is what keeps the `value_fingerprint` / `length` in the
 response meaningful as provenance.
 
 The op is operator-only on the CLI surface (per CLAUDE.md postulate 5);
@@ -130,21 +130,24 @@ Keycloak.
 On success the op returns **only**:
 
 ```json
-{ "status": "moved", "value_sha256": "<hex>", "length": <int> }
+{ "status": "moved", "value_fingerprint": "<hex>", "length": <int> }
 ```
 
 The response schema is `additionalProperties: false` over exactly these
 three fields ([`ops.py`](../../backend/src/meho_backplane/connectors/secret/ops.py),
 `_SECRET_MOVE_RESPONSE_SCHEMA`), so nothing value-derived beyond the
-SHA-256 and the byte length can ride out. The CLI renders the same three
-scalars and nothing else
+fingerprint and the byte length can ride out. The CLI renders the same
+three scalars and nothing else
 ([`move.go`](../../cli/internal/cmd/secret/move.go), `moveResultKeyOrder`).
 
-`value_sha256` is the **provenance** signal: an auditor can confirm the
-value that landed at the sink is the value that was read from the source
-(the SHA-256 is computed over the exact bytes written, after whitespace
-normalization), without anyone ever seeing the value. `length` is the
-byte length of the same bytes.
+`value_fingerprint` is the **provenance** signal: an auditor can confirm
+the value that landed at the sink is the value that was read from the
+source, without anyone ever seeing the value. It is a keyed fingerprint
+(HMAC-SHA256 under a key only the backplane holds, computed over the
+exact bytes written, after whitespace normalization), not a plain hash:
+the same value gives the same fingerprint on one install, and without
+the key it cannot be computed from a value. `length` is the byte length of
+the same bytes.
 
 ### 1.4 What the agent submits vs. what the backplane does
 
@@ -153,7 +156,7 @@ byte length of the same bytes.
 | `from` `<kind>:<ref>` — an **address** | parse → resolve the kind's adapter → `read_secret` into an in-memory `SecretMaterial` |
 | `to` `<kind>:<ref>` — an **address** | resolve the kind's adapter → `write_secret(material)` into the sink |
 | `reason` — audit justification | record it on the audit row (via the params hash) + surface it to the approver |
-| *(nothing else — no value)* | hash + measure the bytes; return `{status, value_sha256, length}` |
+| *(nothing else — no value)* | fingerprint + measure the bytes; return `{status, value_fingerprint, length}` |
 
 The value enters memory **only** as a `SecretMaterial` between the source
 read and the sink write
@@ -172,9 +175,9 @@ Each claim below ties to the mechanism that enforces it.
 | --- | --- |
 | **CLI args / argv / shell history / `ps`** | there is no value-bearing flag — `--from`/`--to`/`--reason` carry only addresses + a reason ([`move.go`](../../cli/internal/cmd/secret/move.go)). The value is never typed. |
 | **Op params** | `additionalProperties: false` on the param schema rejects a smuggled value field; the params carry only references + reason ([`ops.py`](../../backend/src/meho_backplane/connectors/secret/ops.py), `SECRET_MOVE_PARAMETER_SCHEMA`). |
-| **The op response** | the handler returns only `{status, value_sha256, length}`; the response schema is `additionalProperties: false` over those three ([`ops.py`](../../backend/src/meho_backplane/connectors/secret/ops.py)). |
-| **Logs** | the only in-memory carrier, [`SecretMaterial`](../../backend/src/meho_backplane/connectors/secret/endpoints.py), overrides `__repr__`/`__str__` to render `<SecretMaterial len=N sha256=…>` — so a stray `logger.info(..., material=m)` or f-string renders the redacted form, never the value. Adapters log only field **names**/paths, never values, mirroring [`strip_credential_value`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py#L104)'s "No secret in logs" discipline. |
-| **The audit row** | this is the load-bearing distinction. The generic dispatch path persists the raw payload behind redaction ([`dispatcher.py`](../../backend/src/meho_backplane/operations/dispatcher.py) module docstring, step 9). For `secret.move` there is **no raw value for the audit row to carry in the first place**: the value was never in the params (only references) and never in the response (only hash + length). The audit row stores the value-free params + the value-free return. There is nothing to redact. |
+| **The op response** | the handler returns only `{status, value_fingerprint, length}`; the response schema is `additionalProperties: false` over those three ([`ops.py`](../../backend/src/meho_backplane/connectors/secret/ops.py)). |
+| **Logs** | the only in-memory carrier, [`SecretMaterial`](../../backend/src/meho_backplane/connectors/secret/endpoints.py), overrides `__repr__`/`__str__` to render `<SecretMaterial len=N fingerprint=…>` — so a stray `logger.info(..., material=m)` or f-string renders the redacted form, never the value. Adapters log only field **names**/paths, never values, mirroring [`strip_credential_value`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py#L104)'s "No secret in logs" discipline. |
+| **The audit row** | this is the load-bearing distinction. The generic dispatch path persists the raw payload behind redaction ([`dispatcher.py`](../../backend/src/meho_backplane/operations/dispatcher.py) module docstring, step 9). For `secret.move` there is **no raw value for the audit row to carry in the first place**: the value was never in the params (only references) and never in the response (only a keyed fingerprint + length). The audit row stores the value-free params + the value-free return. There is nothing to redact. |
 | **The approval `proposed_effect`** | the park-time preview builder ([`move_preview.py`](../../backend/src/meho_backplane/connectors/secret/move_preview.py)) summarises only the parsed `{kind, ref}` of `--from`/`--to` plus the operator `reason`. It does **no store I/O at all**, so it cannot observe a value to leak. |
 | **Broadcast / event payloads** | [`classify_op("secret.move")`](../../backend/src/meho_backplane/broadcast/events.py) returns `"other"` (`.move` is in neither the read- nor write-suffix set, and `secret.move` is in no credential allowlist). The broadcast carries the same value-free params + response the audit row sees — there is no value in them to broadcast. |
 
@@ -344,14 +347,14 @@ On a successful approved execution the value-free confirmation is:
 ```text
 secret-broker-1.x secret.move — status=moved (34ms)
   status:        moved
-  value_sha256:  2c6136bb6fb27fb8f45b46fb566e9ce3501e838dc9199e11b761d6425367e35c
+  value_fingerprint: 2c6136bb6fb27fb8f45b46fb566e9ce3501e838dc9199e11b761d6425367e35c
   length:        14
 ```
 
-(The `value_sha256` is the SHA-256 of the moved bytes; `length` is their
-byte count — here a 14-byte credential. An auditor can confirm the value
-that landed at the sink matches the value read from the source by
-comparing this digest, without ever seeing the value.)
+(The `value_fingerprint` is the keyed fingerprint of the moved bytes;
+`length` is their byte count — here a 14-byte credential. An auditor can
+confirm the value that landed at the sink matches the value read from the
+source by comparing this fingerprint, without ever seeing the value.)
 
 ## 5. Move a target to another MEHO instance
 
@@ -408,10 +411,12 @@ In this section, **A** is the instance that has the login now, and
    ```
 
    A second person on A approves it. The result is
-   `{status: "exported", value_sha256, length, handoff_token,
+   `{status: "exported", value_fingerprint, length, handoff_token,
    handoff_ttl_seconds}`.
 3. **On B**, run the import before the handoff expires. Set
-   `expect_sha256` to the export's `value_sha256`:
+   `expect_fingerprint` to the export's `value_fingerprint` (both
+   instances must run a MEHO version that answers it; with an older
+   instance on A, leave it out):
 
    ```text
    call_operation(connector_id="secret-broker-1.x",
@@ -419,13 +424,13 @@ In this section, **A** is the instance that has the login now, and
                   params={"handoff_token": "<handoff_token from step 2>",
                           "store": "instance-a-vault",
                           "to": "vault:tenants/<tenant-b>/targets/db#password",
-                          "expect_sha256": "<value_sha256 from step 2>",
+                          "expect_fingerprint": "<value_fingerprint from step 2>",
                           "reason": "move target db from instance A"})
    ```
 
    A second person on B approves it. The result is
-   `{status: "imported", value_sha256, length}`. Check that
-   `value_sha256` is the same as in step 2.
+   `{status: "imported", value_fingerprint, length}`. Check that
+   `value_fingerprint` is the same as in step 2.
 4. **On B**, import the target row (`meho targets import`) with
    `secret_ref` set to the sink path from step 3.
 
@@ -441,7 +446,7 @@ In this section, **A** is the instance that has the login now, and
   `credential_mint` and the import `credential_write`, so the handoff
   stays off the activity feed. While the import waits for approval, its
   params are stored encrypted, and the approver sees only the store
-  target, the sink and `expect_sha256`, never the handoff.
+  target, the sink and `expect_fingerprint`, never the handoff.
 
 ### 5.4 When it fails
 

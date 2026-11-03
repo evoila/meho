@@ -26,7 +26,7 @@
       (#3596), the request is step k of N pending requests under its change
       ticket: say so and link first to the ticket's oldest-first view.
     * ``status == "ok"`` -> the write executed (uncommon for these governed
-      ops). ``move`` renders ONLY {status, value_sha256, length} (value-free);
+      ops). ``move`` renders ONLY {status, value_fingerprint, length} (value-free);
       put / delete render a plain success.
     * ``status in ("error", "denied")`` -> the structured fault, via the
       shared ``vault_envelope_error`` macro (which renders the tenant-scope
@@ -156,7 +156,7 @@
 {% elif envelope.status == "ok" %}
   {%- set result = envelope.get("result") or {} -%}
   {% if verb == "move" %}
-    {#- VALUE-FREE move confirmation: render ONLY {status, value_sha256,
+    {#- VALUE-FREE move confirmation: render ONLY {status, value_fingerprint,
         length}, never an inline value. The backend response carries exactly
         these three keys; the value never reaches this template. -#}
     <div class="space-y-2" data-vault-write-status="ok" data-vault-move-result>
@@ -169,8 +169,8 @@
           <dd class="font-mono" data-move-status>{{ result.get("status") }}</dd>
         </div>
         <div class="flex gap-2">
-          <dt class="opacity-60">Value SHA-256</dt>
-          <dd class="font-mono [overflow-wrap:anywhere]" data-move-value-sha256>{{ result.get("value_sha256") }}</dd>
+          <dt class="opacity-60">Value fingerprint</dt>
+          <dd class="font-mono [overflow-wrap:anywhere]" data-move-value-fingerprint>{{ result.get("value_fingerprint") }}</dd>
         </div>
         <div class="flex gap-2">
           <dt class="opacity-60">Length</dt>

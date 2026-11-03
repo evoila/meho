@@ -152,7 +152,11 @@ MEHO keeps a tenant's passwords in Vault under
 [Add a tenant, Step 6](tenant-bootstrap.md#step-6-give-each-person-access-to-the-tenants-secrets-in-vault)
 read the tenant from the person's Vault identity, and one identity holds
 one tenant. So a person in two tenants needs **one Vault login role per
-tenant**. Each role can read only its own tenant's path.
+tenant**. Each role can read only its own tenant's path. The rights of
+Step 6 do not go away on their own: Vault keeps them on the person's
+identity and adds them to every login, with any role. So the person also
+leaves the Vault groups of Step 6 (item 4), and you check each role
+(item 5).
 
 1. **Write a policy for this tenant's path only.** Put the tenant UUID
    into the path itself. A read-only example:
@@ -165,10 +169,21 @@ tenant**. Each role can read only its own tenant's path.
     path "secret/metadata/tenants/<tenant-uuid>/*" {
       capabilities = ["read", "list"]
     }
+    # privileged/ holds the admin-only secrets. The two rules above
+    # cover it too, so refuse it here. The more exact path wins.
+    path "secret/data/tenants/<tenant-uuid>/privileged/*" {
+      capabilities = ["deny"]
+    }
+    path "secret/metadata/tenants/<tenant-uuid>/privileged/*" {
+      capabilities = ["deny"]
+    }
     ```
 
-    Add the write rights the tenant needs in the same way. The rights
-    per role are in the
+    The login role of item 2 accepts every role group of the tenant, so
+    every member gets the same rights from this policy. Keep it at the
+    lowest level the tenant needs. Add the write rights the tenant
+    needs in the same way. The rights per role, and the `privileged/`
+    rule, are in the
     [per-tenant Vault policies runbook](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md),
     section 1. Use the fixed UUID where that runbook has the
     `{{identity.entity.metadata.tenant_id}}` template.
@@ -216,6 +231,46 @@ tenant**. Each role can read only its own tenant's path.
     about this setting is in
     [deploying.md](https://github.com/evoila/meho/blob/main/docs/deploying.md#version-specific-upgrade-notes)
     (row v0.35.13).
+
+4. **Take the person out of the Vault groups of Step 6.** The roles
+   above log in with `user_claim: sub` on the same auth mount as the
+   shared role. So every login of the person, with any role, lands on
+   the same Vault identity. Vault adds the policies of that identity's
+   groups to each login. A person who is still in a group
+   `meho-tenant-<first-tenant-uuid>-<role>` can then read the first
+   tenant's secrets through the `team-b` role too, also after you take
+   them out of the first tenant's Keycloak group. So give every tenant
+   the person works in its own role (item 3), and take the person out
+   of every group of Step 6. Read the group, then write it again with
+   the other members only. The member list replaces the old one.
+
+    ```bash
+    meho operation call vault-1.x vault.identity.group.read --target vault-main \
+      --params '{"name": "meho-tenant-<first-tenant-uuid>-read_only"}'
+    meho operation call vault-1.x vault.identity.group.write --target vault-main \
+      --params '{"name": "meho-tenant-<first-tenant-uuid>-read_only", "policies": ["meho-tenant-read-only"], "member_entity_ids": ["<entity-id of each other member>"]}'
+    ```
+
+    Each write waits for the second person. The `tenant_id` metadata
+    on the identity may stay: without the groups, no policy uses it.
+
+5. **Check that each role stops at its own tenant.** Get the person's
+   Keycloak token as in the
+   [connector Vault policy runbook](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-policy.md),
+   section 4. Log in to Vault with it against each role, and ask Vault
+   what the token may do. `deny` means no access.
+
+    ```bash
+    TOKEN_B=$(vault write -field=token auth/jwt/login role=meho-tenant-team-b jwt="$PERSON_JWT")
+    vault token capabilities "$TOKEN_B" "secret/data/tenants/<tenant-uuid>/<target>"             # expect: read
+    vault token capabilities "$TOKEN_B" "secret/data/tenants/<first-tenant-uuid>/<target>"       # expect: deny
+    vault token capabilities "$TOKEN_B" "secret/data/tenants/<tenant-uuid>/privileged/<target>"  # expect: deny
+    ```
+
+    Then do the same with `meho-tenant-main`, with the two tenants
+    swapped. A `read` on the other tenant's path means the person is
+    still in a Vault group of that tenant (item 4), or the policy has
+    the wrong UUID (item 1).
 
 Agent, service and runner logins have no `meho_tenants` list, so Vault
 refuses them for a role that is bound only on `meho_tenants`. Plan their
@@ -361,6 +416,7 @@ What the person sees after a removal:
 | `multiple_role_groups … of the same tenant …` | Two role groups of one tenant. | Keep one group per tenant, then log in again. |
 | `meho tenants use` lists no tenants, or only one | The realm has no `meho-tenants` mapper, or you did not log in again after the group change. | Step 1 (the mapper), then log in again. |
 | Vault refuses the login in the new tenant | The Vault role is missing, its `bound_claims` do not match, or `VAULT_OIDC_ROLE_BY_TENANT` has no entry for the tenant. | Step 2. |
+| A person reads the first tenant's secrets through the second tenant's Vault role | The person is still in a Vault group of the first tenant. Vault adds the group's rights to every login of the person. | Step 2, item 4. Then check with item 5. |
 
 More answers are in
 [Troubleshooting auth walls](../clients/troubleshooting.md#calls-answer-tenant_not_chosen-or-tenant_not_member).

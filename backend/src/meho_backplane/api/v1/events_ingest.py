@@ -15,42 +15,31 @@ Request path (the order is load-bearing)
 =======================================
 
 1. **Resolve** the source by slug (global, tenant-less -- the webhook carries
-   no tenant). A missing *or* paused source returns the identical uniform
-   ``404`` so the two are indistinguishable (no paused-vs-missing oracle).
+   no tenant). A missing or paused source does not stop the request here:
+   it continues with the default config and fails at the auth step below,
+   so a missing, a paused and a wrongly signed delivery all get the same
+   uniform ``401`` with the same body.
 2. **Body cap** (``413``) enforced *before* buffering the whole body -- a
    ``Content-Length`` fast-reject plus a streaming running-total guard so a
-   lying/absent length header cannot bypass it (the ``ui/csrf.py`` DoS
-   lesson). The cap is the source's ``extras`` override clamped to 256 KiB.
-3-6. **Auth / rate-limit / dedupe / publish+audit / broadcast** run in
+   lying/absent length header cannot get an oversize body past it (the
+   ``ui/csrf.py`` DoS lesson). The cap is the source's ``extras`` override
+   clamped to 256 KiB; the default cap applies when there is no source.
+3-6. **Rate limit / auth / dedupe / publish+audit** run in
    :func:`~meho_backplane.events.ingest.service.accept_ingest_event`.
 
 CSRF does not apply: ``/api/*`` is structurally outside the ``/ui/`` prefix
 the CSRF middleware guards.
 
-Reconciliation note (404 vs 401)
-================================
+One answer for every refusal
+============================
 
-The #2880 resolver's docstring suggests mapping a missing slug to the *same*
-response as an auth failure. This endpoint instead follows the #2881 issue
-contract: missing/paused -> ``404``, bad signature -> ``401``. That leaves a
-residual oracle -- a ``404`` vs ``401`` tells a prober whether a slug is
-registered, and because the ``404`` short-circuits *before* the Vault secret
-read the difference is observable in latency as well as in status.
-
-This is **not** defended by slug entropy: slugs are operator-named and
-guessable (``grafana``, ``harbor``, ...), so an attacker can enumerate the
-likely ones. The oracle is acceptable for two other, load-bearing reasons:
-
-1. The backplane is internal-only (never publicly exposed), so a prober must
-   already be inside the trust boundary to reach this route at all.
-2. Confirming a slug exists grants nothing by itself: forging any event still
-   requires that source's per-source secret, which is Vault-custodied and
-   never leaves the backplane.
-
-The uniform ``404`` still hides the operationally sensitive paused-vs-missing
-distinction. If this endpoint were ever exposed externally, the 404-vs-401
-(and the pre-Vault timing) split would have to be closed first -- e.g. by
-enforcing slug entropy or emitting a uniform response before the resolver read.
+A missing source, a paused source, a source with no secret, and a bad or
+missing credential all answer ``401`` with the same body. The reason
+(``unknown_source``, ``source_paused``, ``bad_signature``, ...) is logged
+server-side only. The body cap runs before that answer, so an oversize body
+gets ``413`` whether or not the slug exists. What still differs is work: an
+active source costs a rate-limit count and a Vault read before its answer,
+a missing one does not.
 """
 
 from __future__ import annotations
@@ -64,7 +53,7 @@ from meho_backplane.db.engine import get_raw_session
 from meho_backplane.event_source.resolver import resolve_event_source_by_slug
 from meho_backplane.event_source.schemas import EventSourceAuthStrategy, EventSourceStatus
 from meho_backplane.events.ingest.auth import IngestAuthError
-from meho_backplane.events.ingest.config import resolve_ingest_config
+from meho_backplane.events.ingest.config import IngestConfig, resolve_ingest_config
 from meho_backplane.events.ingest.rate_limit import IngestRateLimitError
 from meho_backplane.events.ingest.service import (
     IngestPayloadError,
@@ -78,10 +67,6 @@ __all__ = ["router"]
 _log = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/events", tags=["events"])
-
-#: Uniform not-found detail. Missing and paused sources return this same
-#: body so the response leaks neither existence nor pause-state.
-_NOT_FOUND_DETAIL = {"error": "no_event_source"}
 
 
 class EventIngestResponse(BaseModel):
@@ -141,6 +126,25 @@ def _snapshot_source(row: object) -> ResolvedSource:
     )
 
 
+async def _resolve_source(
+    session: AsyncSession, source_slug: str
+) -> tuple[ResolvedSource | None, IngestConfig, str | None]:
+    """Resolve the active source for *source_slug*.
+
+    Returns ``(source, config, reason)``. For an active source *reason* is
+    ``None``. For a missing or paused one *source* is ``None``, *config* is
+    the default config (so the body cap still applies), and *reason* is the
+    server-side log token the auth step refuses with.
+    """
+    row = await resolve_event_source_by_slug(session, source_slug)
+    if row is None:
+        return None, resolve_ingest_config({}), "unknown_source"
+    if row.status != EventSourceStatus.ACTIVE.value:
+        return None, resolve_ingest_config({}), "source_paused"
+    source = _snapshot_source(row)
+    return source, resolve_ingest_config(source.extras), None
+
+
 @router.post(
     "/ingest/{source_slug}",
     response_model=EventIngestResponse,
@@ -153,13 +157,7 @@ async def ingest_event(
     session: AsyncSession = Depends(get_raw_session),
 ) -> EventIngestResponse:
     """Accept one external event for *source_slug*. See the module docstring."""
-    row = await resolve_event_source_by_slug(session, source_slug)
-    if row is None or row.status != EventSourceStatus.ACTIVE.value:
-        # Uniform 404 for both missing and paused -- no existence oracle.
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
-
-    source = _snapshot_source(row)
-    config = resolve_ingest_config(source.extras)
+    source, config, refusal = await _resolve_source(session, source_slug)
 
     try:
         raw_body = await _read_capped_body(request, config.max_body_bytes)
@@ -170,12 +168,14 @@ async def ingest_event(
         ) from exc
 
     try:
+        if source is None:
+            raise IngestAuthError(refusal or "unknown_source")
         outcome = await accept_ingest_event(
             source=source, config=config, headers=request.headers, raw_body=raw_body
         )
     except IngestAuthError as exc:
         # Uniform 401; the specific reason is logged, never returned.
-        _log.info("ingest_auth_rejected", slug=source.slug, reason=exc.reason)
+        _log.info("ingest_auth_rejected", slug=source_slug[:120], reason=exc.reason)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail={"error": "unauthorized"}
         ) from exc

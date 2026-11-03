@@ -56,6 +56,7 @@ from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
+from meho_backplane.operations.approval_object_check import REASON_UNREADABLE
 from meho_backplane.operations.approval_queue import (
     SelfApprovalForbiddenError,
     approve_request,
@@ -810,8 +811,10 @@ async def test_rule_recreated_between_park_and_approval_invalidates() -> None:
     delete of tracker T (present at park, so the blast radius builds), then
     simulate the rule being deleted-and-recreated with a NEW tracker before
     approval by swapping the live config to one that no longer carries T. At
-    resume the identity re-match finds T absent -> ``not_found``; the recreated
-    rule (a different identity) is untouched and no playback runs.
+    resume the approval card is built again; the builder declines because T
+    matches no rule, so MEHO cannot confirm the object and refuses the run.
+    The recreated rule (a different identity) is untouched and no playback
+    runs.
     """
     recorder = _RecordingPfSense(config_before=_CONFIG_TWO_NAT, config_after=_CONFIG_ONE_NAT)
     await _bootstrap(recorder)
@@ -842,9 +845,9 @@ async def test_rule_recreated_between_park_and_approval_invalidates() -> None:
         row = await s.get(ApprovalRequest, request_id)
         assert row is not None
         resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
-    assert resume.status == "ok", resume.error
-    assert resume.result["status"] == "not_found"
-    assert resume.result["matched"] == 0
+    assert resume.status == "denied", resume
+    assert resume.extras["error_code"] == "object_changed_since_approval"
+    assert resume.extras["reason"] == REASON_UNREADABLE
     assert not recorder.playback_ran  # the stale/recreated rule is never touched
 
 

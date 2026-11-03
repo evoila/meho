@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime
 import json
 import socket
+import tracemalloc
 from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import patch
@@ -43,6 +44,7 @@ from meho_backplane.operations.ingest.openapi import (
     _INLINE_SPEC_ONRAMP_REMEDIATION,
     _MAX_REDIRECTS,
     _assert_fetchable_remote_url,
+    _decode_spec,
     _pin_fetch_addresses,
     _screen_fetch_host,
     _server_base_path,
@@ -2555,3 +2557,119 @@ def test_fetch_pins_and_blocks_resolver_flip_to_loopback() -> None:
         parse_openapi("https://spec.example.test/openapi.yaml")
     # Both the pre-fetch screen and the connect-time pin resolved the name.
     assert calls["n"] >= 2
+
+
+# ---------------------------------------------------------------------------
+# YAML alias expansion cap
+# ---------------------------------------------------------------------------
+
+_ALIAS_HEAVY_YAML = b"""\
+openapi: 3.0.0
+a: &a [x, x, x, x, x, x, x, x, x, x]
+b: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]
+c: &c [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]
+d: [*c, *c, *c, *c, *c, *c, *c, *c, *c, *c]
+"""
+
+
+def test_yaml_spec_with_many_aliases_is_refused() -> None:
+    """A small file that expands to many nodes through aliases is refused."""
+    with pytest.raises(InvalidSpecError, match="too many YAML aliases"):
+        _decode_spec(_ALIAS_HEAVY_YAML)
+
+
+_MERGE_HEAVY_YAML = b"""\
+openapi: 3.0.0
+a: &a {k0: v, k1: v, k2: v, k3: v, k4: v, k5: v, k6: v, k7: v, k8: v, k9: v}
+b: &b {<<: [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]}
+c: &c {<<: [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]}
+d: {<<: [*c, *c, *c, *c, *c, *c, *c, *c, *c, *c]}
+"""
+
+
+def test_yaml_spec_with_many_merge_aliases_is_refused() -> None:
+    """A chain of ``<<`` merge aliases is refused before the mapping is built.
+
+    The merge keys copy every merged entry into the mapping while the
+    nodes are turned into objects, and the duplicate keys collapse in the
+    result (``d`` would end up with ten keys). The cap must fire on the
+    composed nodes, before that copy happens.
+    """
+    with pytest.raises(InvalidSpecError, match="too many YAML aliases"):
+        _decode_spec(_MERGE_HEAVY_YAML)
+
+
+_RECURSIVE_ALIAS_YAML = b"openapi: 3.0.0\na: &a [" + b", ".join([b"*a"] * 600) + b"]\n"
+
+
+def test_yaml_spec_with_a_recursive_alias_is_refused() -> None:
+    """A sequence whose items are aliases to itself is refused as recursive.
+
+    Such a document never finishes expanding. The check must refuse it
+    the first time the alias points back at an ancestor, not after the
+    node cap, because every visit of the list queued another 600 items
+    and the check itself grew to tens of megabytes before it stopped.
+    """
+    with pytest.raises(InvalidSpecError, match="recursive YAML alias"):
+        _decode_spec(_RECURSIVE_ALIAS_YAML)
+
+
+def test_yaml_spec_recursive_alias_check_holds_little_memory() -> None:
+    """Refusing the recursive document costs kilobytes, not megabytes."""
+    tracemalloc.start()
+    try:
+        with pytest.raises(InvalidSpecError, match="recursive YAML alias"):
+            _decode_spec(_RECURSIVE_ALIAS_YAML)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(b"openapi: 3.0.0\na: &a {b: *a}\n", id="mapping-value"),
+        pytest.param(b"openapi: 3.0.0\na: &a {b: {c: [*a]}}\n", id="nested-two-levels-down"),
+        pytest.param(b"openapi: 3.0.0\na: &a {<<: *a, k: v}\n", id="merge-key"),
+    ],
+)
+def test_yaml_spec_with_a_recursive_alias_in_a_mapping_is_refused(content: bytes) -> None:
+    """A mapping that refers to itself, directly or through a merge key, is refused."""
+    with pytest.raises(InvalidSpecError, match="recursive YAML alias"):
+        _decode_spec(content)
+
+
+def test_yaml_spec_with_a_shared_anchor_is_not_recursive() -> None:
+    """An anchor used in several places, but not inside itself, still loads."""
+    parsed = _decode_spec(
+        b"openapi: 3.0.0\nbase: &base {type: object}\none: *base\ntwo: {inner: *base}\n"
+    )
+    assert parsed["one"] == {"type": "object"}
+    assert parsed["two"] == {"inner": {"type": "object"}}
+
+
+def test_yaml_spec_with_a_small_merge_key_still_merges() -> None:
+    """An ordinary ``<<`` merge inside the cap keeps its merge semantics."""
+    parsed = _decode_spec(
+        b"openapi: 3.0.0\n"
+        b"base: &base {type: object, required: [id]}\n"
+        b"thing: {<<: *base, properties: {id: {type: string}}}\n"
+    )
+    assert parsed["thing"] == {
+        "type": "object",
+        "required": ["id"],
+        "properties": {"id": {"type": "string"}},
+    }
+
+
+def test_yaml_spec_without_aliases_passes_the_expansion_cap() -> None:
+    """A plain document has at most one node per byte, so it passes."""
+    parsed = _decode_spec(b"openapi: 3.0.0\ninfo: {title: t, version: '1'}\npaths: {}\n")
+    assert parsed["openapi"] == "3.0.0"
+
+
+def test_yaml_spec_keeps_the_timestamp_scalar_as_text_after_the_two_step_parse() -> None:
+    """Composing and constructing in two steps keeps the loader's date handling."""
+    parsed = _decode_spec(b"openapi: 3.0.0\nexample: 2024-01-15\n")
+    assert parsed["example"] == "2024-01-15"

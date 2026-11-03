@@ -181,18 +181,23 @@ the folder:
 ### Write path — `create_entry`
 
 1. `validate_slug(slug)` — fail closed on a bad slug before the
-   substrate is touched.
-2. One natural-key `get_entry` SELECT — yields the **created-vs-
-   overwrite** signal (no prior row ⇒ `created=True`) and the prior
-   `created_by_sub` to preserve.
-3. `merge_attribution(...)` (in `kb/attribution.py`) folds the
-   attribution keys into the metadata to persist. When the caller sent
-   no metadata and no actor, the existing metadata is kept.
-4. `stamp_provenance(..., source_kind="direct")` replaces any
-   caller-sent `provenance` key with the service's own block.
-5. `kb/revisions.py::write_entry` runs in three steps (#3761):
-   - **Read** the entry: head `body_hash`, latest revision, and the
-     revision and indexing generation of its passages.
+   substrate is touched. With `own_entries_only`, caller metadata
+   with a curation key is refused here too.
+2. `kb/revisions.py::write_entry` runs in three steps (#3761). It
+   takes a function (`service.py::_direct_write_metadata`) that builds
+   the metadata to store from the entry's current metadata, and calls
+   it on every try, after the read:
+   - **Read** the entry: head `body_hash` and metadata, latest
+     revision, and the revision and indexing generation of its
+     passages. No head row ⇒ `created=True`. Then the metadata
+     function runs: with `own_entries_only`, an existing entry that
+     `actor_sub` did not create raises `KbEntryNotOwnedError` and
+     nothing is written; `merge_attribution(...)` (in
+     `kb/attribution.py`) folds the attribution keys into the
+     metadata to persist (when the caller sent no metadata and no
+     actor, the existing metadata is kept); and
+     `stamp_provenance(..., source_kind="direct")` replaces any
+     caller-sent `provenance` key with the service's own block.
    - **Prepare** with no transaction open: when the passages do not
      belong to the current revision, chunker and model, split the body
      (`kb/passages.py`) and count tokens with the model's own tokenizer
@@ -209,14 +214,21 @@ the folder:
    older text adds a new revision; it does not reuse the old one. A
    failed prepare or publish keeps the old head, revision and passages.
    Two writes to the same entry at the same time do not mix. When the
-   entry moved between read and publish (another write committed; on
-   SQLite, which has no row lock, this is also caught by the read-back
-   after the writes), or the next `revision_number` is already taken,
-   the write rolls back and runs again from the start, up to three
-   times. The returned `revision_id` always names the body that was
-   written.
-6. Return `(_doc_to_entry(doc, revision_id), created)`. The REST route maps
-   `created` to **HTTP 201** (fresh slug) vs **200** (in-place
+   entry moved between read and publish (another write committed, or
+   its metadata changed; on SQLite, which has no row lock, this is
+   also caught by the read-back after the writes), or the next
+   `revision_number` is already taken, the write rolls back and runs
+   again from the start, up to three times. Each rerun reads the
+   entry again and runs the metadata function again, so the
+   ownership check always decides against the entry the publish step
+   then verifies. Two operators that both see a new slug as unused
+   cannot both create it: the one that loses the race reads the
+   other's entry on its rerun and is refused, and that entry keeps
+   its body and creator. The returned `revision_id` always names the
+   body that was written.
+3. Return `(_doc_to_entry(doc, revision_id), created)`. `created`
+   comes from the read of the try that went through. The REST route
+   maps it to **HTTP 201** (fresh slug) vs **200** (in-place
    overwrite) and records `audit_created`; the MCP / UI callers
    discard it.
 

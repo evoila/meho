@@ -323,8 +323,8 @@ class KbService:
         *own_entries_only*: when ``True`` (the MCP ``add_to_knowledge``
         tool for an ``operator``), an existing row whose
         ``created_by_sub`` is missing or differs from *actor_sub* raises
-        :class:`~meho_backplane.kb.schemas.KbEntryNotOwnedError` before
-        anything is written, and caller *metadata* with a key from
+        :class:`~meho_backplane.kb.schemas.KbEntryNotOwnedError` and
+        nothing is written, and caller *metadata* with a key from
         :data:`~meho_backplane.kb.schemas.CURATION_METADATA_KEYS` raises
         :class:`~meho_backplane.kb.schemas.KbReservedMetadataError`. So
         an operator can create entries and change only its own, and
@@ -334,54 +334,39 @@ class KbService:
         ``last_updated_by_sub`` rewritten each write, both in
         ``doc_metadata`` and un-forgeable from caller ``metadata``.
 
+        The ownership check and the attribution merge run inside
+        :func:`~meho_backplane.kb.revisions.write_entry`, on every try,
+        against the entry as that try read it (see
+        :func:`_direct_write_metadata`). The publish step verifies that
+        state under the row lock before it writes. So two principals
+        that both see a slug as unused cannot both create it: the one
+        that loses the race reads the other's entry on its rerun and
+        is refused, and the first entry stays as it was.
+
         Returns ``(entry, created)`` where ``created`` is ``True`` only
-        when no row existed for ``(tenant_id, slug)`` -- the route maps
-        it to HTTP ``201`` vs ``200`` (#1845 ask 1). *actor_sub* is the
-        writing principal's OIDC ``sub`` (``Operator.sub``); ``None``
-        leaves the row unattributed. *metadata* ``None`` keeps the
-        existing caller-metadata, ``{}`` clears it; *slug* is validated
-        (raises :class:`~meho_backplane.kb.schemas.InvalidKbSlugError`).
+        when no row existed for ``(tenant_id, slug)`` when the write
+        that went through read it -- the route maps it to HTTP ``201``
+        vs ``200`` (#1845 ask 1). *actor_sub* is the writing principal's
+        OIDC ``sub`` (``Operator.sub``); ``None`` leaves the row
+        unattributed. *metadata* ``None`` keeps the existing
+        caller-metadata, ``{}`` clears it; *slug* is validated (raises
+        :class:`~meho_backplane.kb.schemas.InvalidKbSlugError`).
         """
         validate_slug(slug)
         if own_entries_only:
             _refuse_reserved_metadata(metadata)
 
-        # One natural-key SELECT, ahead of the substrate upsert. It
-        # serves two purposes: (1) the created-vs-overwrite signal for
-        # the route's 201/200 decision, and (2) the prior
-        # ``created_by_sub`` to preserve across an overwrite. The
-        # substrate's own SELECT inside ``index_document`` is a second
-        # round-trip; collapsing the two is a v0.2.next optimisation
-        # (index_document would have to return the action + prior
-        # metadata), not worth the wider blast radius here.
-        existing = await self.get_entry(tenant_id=tenant_id, slug=slug)
-        created = existing is None
-        if own_entries_only and existing is not None:
-            _refuse_if_not_own(existing, actor_sub)
-
-        merged = merge_attribution(
-            caller_metadata=metadata,
-            existing_metadata=existing.metadata if existing is not None else None,
-            actor_sub=actor_sub,
-            created=created,
-        )
-        if merged is None:
-            # No caller metadata and no actor: keep the existing keys,
-            # as ``index_document(metadata=None)`` would, but still
-            # record this write's provenance.
-            merged = dict(existing.metadata) if existing is not None else {}
-        merged = stamp_provenance(
-            merged,
-            source_kind="direct",
-            relative_path=None,
-            ingested_at=datetime.now(UTC),
-        )
-
-        doc, revision_id = await write_entry(
+        doc, revision_id, created = await write_entry(
             tenant_id=tenant_id,
             slug=slug,
             body=body,
-            metadata=merged,
+            metadata_for=lambda existing: _direct_write_metadata(
+                existing,
+                slug=slug,
+                caller_metadata=metadata,
+                actor_sub=actor_sub,
+                own_entries_only=own_entries_only,
+            ),
         )
         return _doc_to_entry(doc, revision_id), created
 
@@ -490,15 +475,56 @@ def _refuse_reserved_metadata(metadata: dict[str, object] | None) -> None:
         raise KbReservedMetadataError(frozenset(reserved))
 
 
-def _refuse_if_not_own(existing: KbEntry, actor_sub: str | None) -> None:
-    """Raise :class:`KbEntryNotOwnedError` unless *actor_sub* created *existing*.
+def _direct_write_metadata(
+    existing: dict[str, object] | None,
+    *,
+    slug: str,
+    caller_metadata: dict[str, object] | None,
+    actor_sub: str | None,
+    own_entries_only: bool,
+) -> dict[str, object]:
+    """Build the metadata a direct create stores, from the entry's current metadata.
 
-    A row with no ``created_by_sub`` (a curated or legacy row) belongs
-    to nobody, so a caller limited to own entries may not change it.
+    *existing* is the head's stored metadata as the current write try
+    read it, or ``None`` when the entry does not exist yet.
+    :func:`~meho_backplane.kb.revisions.write_entry` calls this on
+    every try, so a rerun after an overlapping write decides again
+    against the entry that write left. Raises
+    :class:`KbEntryNotOwnedError` when *own_entries_only* is set and
+    *actor_sub* did not create the existing entry.
     """
-    creator = existing.metadata.get(META_CREATED_BY_SUB)
+    created = existing is None
+    if own_entries_only and existing is not None:
+        _refuse_if_not_own(slug, existing, actor_sub)
+
+    merged = merge_attribution(
+        caller_metadata=caller_metadata,
+        existing_metadata=existing,
+        actor_sub=actor_sub,
+        created=created,
+    )
+    if merged is None:
+        # No caller metadata and no actor: keep the existing keys, but
+        # still record this write's provenance.
+        merged = dict(existing) if existing is not None else {}
+    return stamp_provenance(
+        merged,
+        source_kind="direct",
+        relative_path=None,
+        ingested_at=datetime.now(UTC),
+    )
+
+
+def _refuse_if_not_own(slug: str, existing: dict[str, object], actor_sub: str | None) -> None:
+    """Raise :class:`KbEntryNotOwnedError` unless *actor_sub* created the entry.
+
+    *existing* is the stored metadata of the entry *slug*. A row with no
+    ``created_by_sub`` (a curated or legacy row) belongs to nobody, so a
+    caller limited to own entries may not change it.
+    """
+    creator = existing.get(META_CREATED_BY_SUB)
     if not isinstance(creator, str) or creator != actor_sub:
-        raise KbEntryNotOwnedError(existing.slug, creator if isinstance(creator, str) else None)
+        raise KbEntryNotOwnedError(slug, creator if isinstance(creator, str) else None)
 
 
 def _group_by_entry(ranked: list[RetrievalHit], limit: int) -> list[KbEntrySearchHit]:

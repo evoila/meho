@@ -37,12 +37,21 @@ from the start. The unique index on ``(entry_id, revision_number)`` and
 the unique natural key on ``documents`` are the last guards; a clash
 there also triggers a rerun. The id that is returned always names the
 body that was written.
+
+The metadata of a write is not fixed up front. :func:`write_entry`
+takes a function that builds it from the head's current metadata, and
+calls it on every try, after the read. So a caller's rule about the
+existing entry (who created it, what to keep from it) is decided
+against the same state the publish step verifies under the lock. A
+rule that refuses the write raises from that function; the error
+propagates at once and nothing is written.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -80,6 +89,7 @@ from meho_backplane.settings import get_settings
 
 __all__ = [
     "CHUNKER_VERSION",
+    "MetadataForWrite",
     "current_revision_id",
     "delete_entry_rows",
     "get_revision",
@@ -91,6 +101,10 @@ __all__ = [
 #: tries cover one overlap; the third is slack.
 _WRITE_ATTEMPTS: Final[int] = 3
 
+#: Builds the metadata to store from the head's current metadata
+#: (``None`` when the entry does not exist yet). Called on every try.
+MetadataForWrite = Callable[[dict[str, Any] | None], dict[str, Any]]
+
 
 class _StaleHeadError(RuntimeError):
     """The entry changed after this write read it."""
@@ -100,12 +114,16 @@ class _StaleHeadError(RuntimeError):
 class _Snapshot:
     """What one write saw of an entry before it prepared its rows.
 
-    ``passage_key`` is ``(revision_id, index_generation)`` of the
-    entry's passage rows, or ``None`` when it has none.
+    ``metadata`` is the head's stored metadata; the caller's metadata
+    rule reads it, so a change to it between read and publish makes
+    the write run again. ``passage_key`` is ``(revision_id,
+    index_generation)`` of the entry's passage rows, or ``None`` when
+    it has none.
     """
 
     entry_id: uuid.UUID | None = None
     body_hash: str | None = None
+    metadata: dict[str, Any] | None = None
     revision_id: uuid.UUID | None = None
     revision_number: int = 0
     revision_hash: str | None = None
@@ -129,31 +147,38 @@ async def write_entry(
     tenant_id: uuid.UUID,
     slug: str,
     body: str,
-    metadata: dict[str, Any],
-) -> tuple[Document, uuid.UUID]:
+    metadata_for: MetadataForWrite,
+) -> tuple[Document, uuid.UUID, bool]:
     """Publish the head, its current revision and its passages together.
 
     Three steps:
 
-    1. Read the entry as it is now (:class:`_Snapshot`).
+    1. Read the entry as it is now (:class:`_Snapshot`), and call
+       *metadata_for* with the head's metadata (``None`` for a new
+       entry) to get the metadata to store. An error it raises
+       propagates at once; nothing is written.
     2. Prepare: split the body into passages and compute every
        embedding. No transaction is open, and nothing is written.
     3. Publish in one short transaction: lock the head, check it still
-       matches the snapshot, write the head, add the revision, swap the
-       passage rows, commit.
+       matches the snapshot (metadata included), write the head, add
+       the revision, swap the passage rows, commit.
 
     A failure in step 2 or 3 leaves the old head, revision and passages
     as they were. When another write to the same entry got in between,
-    this write runs again from step 1 (see the module docstring). After
+    this write runs again from step 1 (see the module docstring), so
+    *metadata_for* sees the entry that write left. After
     :data:`_WRITE_ATTEMPTS` failed tries the last error propagates.
-    Returns the head row and the id of the revision that holds its body.
+    Returns the head row, the id of the revision that holds its body,
+    and whether the entry was new when this write read it.
     """
     log = structlog.get_logger()
     for attempt in range(1, _WRITE_ATTEMPTS + 1):
         try:
             snapshot = await _read_snapshot(tenant_id, slug)
+            metadata = metadata_for(snapshot.metadata)
             plan = await _prepare(tenant_id, slug, body, metadata, snapshot)
-            return await _publish(tenant_id, slug, body, metadata, snapshot, plan)
+            doc, revision_id = await _publish(tenant_id, slug, body, metadata, snapshot, plan)
+            return doc, revision_id, snapshot.entry_id is None
         except (IntegrityError, _StaleHeadError) as exc:
             if attempt == _WRITE_ATTEMPTS:
                 raise
@@ -182,7 +207,7 @@ async def _snapshot_in(session: AsyncSession, tenant_id: uuid.UUID, slug: str) -
     """
     head = (
         await session.execute(
-            select(Document.id, Document.body_hash).where(
+            select(Document.id, Document.body_hash, Document.doc_metadata).where(
                 Document.tenant_id == tenant_id,
                 Document.source == KB_SOURCE,
                 Document.source_id == slug,
@@ -212,6 +237,7 @@ async def _snapshot_in(session: AsyncSession, tenant_id: uuid.UUID, slug: str) -
     return _Snapshot(
         entry_id=head.id,
         body_hash=head.body_hash,
+        metadata=dict(head.doc_metadata),
         revision_id=latest.id if latest is not None else None,
         revision_number=latest.revision_number if latest is not None else 0,
         revision_hash=latest.body_hash if latest is not None else None,

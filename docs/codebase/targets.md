@@ -31,6 +31,18 @@ shown to the people and agents that read the target (#5075). Every
 through `resolve_target` (`targets/resolver.py`). Destination checks
 are covered in [`target-ssrf-guard.md`](target-ssrf-guard.md).
 
+`targets.register` needs the `tenant_admin` role from a person, the same
+as `POST /api/v1/targets` and the MCP tool. The REST route and the tool
+check the role at the door. `call_operation`, the REST dispatch route and
+the CLI reach the operation through `dispatch`, where the policy gate
+checks the **per-op role floor** (`operations/role_floors.py`;
+`connectors/targets/ops.py` registers it at import): a person with a
+lower role gets `denied`, nothing is written, and the audit row says
+`denied`. `preview_operation` shows the same verdict. An agent's call
+still waits for approval; a service login's call still waits or runs
+under a grant. The approved call runs under the person who approved it,
+so the dispatcher checks that person's role against the same floor.
+
 This document covers the two **list** paths, how `list_targets`
 bounds its response (#3858), how the single-target REST routes find a
 target, the name and host rules for new targets (#5244), the per-target

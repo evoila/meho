@@ -28,6 +28,12 @@ Approval posture — the load-bearing dial (#2537):
   a human / service principal rides the default-allow branch in
   :func:`~meho_backplane.operations._validate.policy_gate` and executes
   immediately — today's zero-friction tenant_admin UX, unchanged.
+* The role floor of all five writes is ``tenant_admin``, the same as
+  their REST routes and MCP tools. It is registered below with
+  :func:`~meho_backplane.operations.role_floors.register_role_floor`, so
+  the policy gate refuses a person with a lower role on every path
+  (``call_operation``, the REST dispatch route, the CLI), and the
+  approve-and-run path refuses an approver with a lower role.
 * NOT ``requires_approval=True`` — that would park humans too (G11.7-T1
   #1401), which the task explicitly rejects.
 * NOT ``safety_level="dangerous"`` — that would DENY agents by default
@@ -61,6 +67,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from meho_backplane.auth.operator import TenantRole
 from meho_backplane.connectors.topology.schemas import (
     ANNOTATE_PARAMETER_SCHEMA,
     ANNOTATE_RESPONSE_SCHEMA,
@@ -75,6 +82,7 @@ from meho_backplane.connectors.topology.schemas import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphNode
+from meho_backplane.operations.role_floors import register_role_floor
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.topology.annotate import NodeRef, annotate_edge_with_plan, unannotate_edge
 from meho_backplane.topology.bulk_import import (
@@ -116,6 +124,17 @@ TOPOLOGY_CREATE_NODE_OP_ID = "topology.create_node"
 TOPOLOGY_DELETE_NODE_OP_ID = "topology.delete_node"
 TOPOLOGY_UNANNOTATE_OP_ID = "topology.unannotate"
 TOPOLOGY_BULK_IMPORT_OP_ID = "topology.bulk_import"
+
+# The policy gate checks the floor for a person on every path, and the
+# approve-and-run path checks it for the approver.
+for _op_id in (
+    TOPOLOGY_ANNOTATE_OP_ID,
+    TOPOLOGY_CREATE_NODE_OP_ID,
+    TOPOLOGY_DELETE_NODE_OP_ID,
+    TOPOLOGY_UNANNOTATE_OP_ID,
+    TOPOLOGY_BULK_IMPORT_OP_ID,
+):
+    register_role_floor(_op_id, TenantRole.TENANT_ADMIN)
 
 _GROUP_KEY = "graph"
 _GROUP_WHEN_TO_USE = (

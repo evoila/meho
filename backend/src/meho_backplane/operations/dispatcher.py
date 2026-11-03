@@ -411,6 +411,7 @@ from meho_backplane.operations.reducer import (
     handle_owner_sub_var,
 )
 from meho_backplane.operations.result_document import json_text_bytes
+from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
     apply_connector_boundary_redaction,
@@ -3779,6 +3780,23 @@ async def dispatch(
             # executed row honestly records it was four-eyes-gated, not
             # auto-executed.
             policy_decision_var.set(PermissionVerdict.NEEDS_APPROVAL.value)
+            # The call runs under the person who approved it, so that
+            # person's role must meet the op's role floor (the gate checked
+            # the asker's role; an agent or service asker has none to check).
+            role_denial = role_floor_denial(op_id, operator.tenant_role)
+            if role_denial is not None:
+                duration_ms = _elapsed_ms(started)
+                receipt = await audit_safe(
+                    audit_id=uuid.uuid4(),
+                    event_class=AuditEventClass.POLICY_DECISION,
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    params_hash=params_hash,
+                    result_status="denied",
+                    duration_ms=duration_ms,
+                )
+                return with_audit_receipt(result_denied(op_id, role_denial, duration_ms), receipt)
 
         # --- Step 5: connector resolution ---------------------------------
         connector_instance: Connector | None

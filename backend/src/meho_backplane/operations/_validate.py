@@ -38,13 +38,14 @@ from jsonschema import Draft202012Validator
 from referencing.exceptions import Unresolvable
 
 from meho_backplane.auth.delegation import resolve_actor_sub
-from meho_backplane.auth.operator import Operator, PrincipalKind
+from meho_backplane.auth.operator import Operator, PrincipalKind, is_human_principal
 from meho_backplane.auth.permissions import _more_restrictive, resolve_verdict
 from meho_backplane.broadcast.events import scrub_secret_named_values
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._errors import _sanitize_free_text
 from meho_backplane.operations._param_errors import describe_violation
+from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.sandbox_mode import sandbox_mode_active
 from meho_backplane.settings import get_settings
 
@@ -623,6 +624,33 @@ async def _service_read_scope_denial(*, operator: Operator, target: Any) -> str 
     return await read_scope_denial(operator=operator, target=target)
 
 
+def _person_role_floor_denial(
+    operator: Operator, descriptor: EndpointDescriptor, target_id_str: str | None
+) -> str | None:
+    """Why a person may not run this op, or ``None`` (also for a machine login).
+
+    The op's role floor (:mod:`meho_backplane.operations.role_floors`) is
+    the same role its dedicated REST route and MCP tool ask for at the
+    door; here it holds for ``call_operation``, the REST dispatch route
+    and the CLI too. Agents and service logins are not checked: they park
+    or run under a grant, and the person who approves is checked by the
+    dispatcher's approve-and-run path.
+    """
+    if not is_human_principal(operator):
+        return None
+    denial = role_floor_denial(descriptor.op_id, operator.tenant_role)
+    if denial is not None:
+        _log.info(
+            "policy_gate_role_floor_denied",
+            operator_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+            op_id=descriptor.op_id,
+            actual_role=operator.tenant_role.value,
+            target_id=target_id_str,
+        )
+    return denial
+
+
 async def _non_agent_verdict(
     *,
     operator: Operator,
@@ -651,11 +679,18 @@ async def _non_agent_verdict(
     or a read-only ``caution`` op) is first checked against the
     principal's **read scope** (#4992): when a person has set one and it
     does not cover the call's target, the verdict is ``DENY`` with a
-    ``read_scope_denied`` reason. This is the one ``DENY`` this branch
-    returns. Calls that park keep today's rules (grants or approval).
+    ``read_scope_denied`` reason. Calls that park keep today's rules
+    (grants or approval).
+
+    A person below the op's role floor (:func:`_person_role_floor_denial`)
+    is ``DENY`` before any other rule. These two are the only ``DENY``
+    verdicts this branch returns.
     """
     target_id_str = str(getattr(target, "id", None)) if target is not None else None
     is_service = operator.principal_kind is PrincipalKind.SERVICE
+    role_denial = _person_role_floor_denial(operator, descriptor, target_id_str)
+    if role_denial is not None:
+        return PermissionVerdict.DENY, role_denial
     gate_reason = _non_agent_park_reason(descriptor, is_service=is_service, decide_only=decide_only)
 
     if gate_reason is None and is_service:

@@ -296,6 +296,21 @@ instead and stores nothing:
 See [approvals.md](approvals.md) for the queue, the approve and reject
 verbs, and the resume path.
 
+### Per-op role floor (`operations/role_floors.py`)
+
+A few operations need a role above `operator` from the person who runs
+them: `targets.register` and the five `topology.*` writes need
+`tenant_admin`, like their REST routes and MCP tools. Their connector
+module registers the floor at import (`register_role_floor`). The
+non-agent branch of `policy_gate` checks it first for a person
+(`is_human_principal`): a role below the floor is `deny`, so the call is
+refused on every path (`call_operation`, the REST dispatch route, the
+CLI, `preview_operation`) and the audit row says `denied`. Agents and
+service logins are not checked here; they park or run under a grant, and
+a person decides. The approved call runs under that person, so the
+dispatcher's approve-and-run path (`_approved=True`) checks the approver
+against the same floor and refuses with a `denied` audit row.
+
 `policy_gate` (`_validate.py`) opens its own DB session (same
 `get_sessionmaker()` pattern as `audit_and_broadcast_safe`) and calls
 `resolve_verdict` for agent principals.

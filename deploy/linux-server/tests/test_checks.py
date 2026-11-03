@@ -23,7 +23,8 @@ PASSING_LINES = {
     "other runtime": "[ok]   no other Kubernetes or container runtime",
     "ports": (
         "[ok]   the ports RKE2 needs are free: "
-        "TCP 80, 443, 6443, 9345, 10250, 2379, 2380, 2381, 9099; UDP 8472"
+        "TCP 80, 443, 6443, 9345, 10250, 2379, 2380, 2381, 9099, 8081, 9091,"
+        " 2382, 10010, 10248, 10249, 10256, 10257, 10258, 10259; UDP 8472"
     ),
     "clock": "[ok]   the clock is synchronised",
     "host name": "[ok]   meho.example.com is a fully qualified name",
@@ -181,6 +182,15 @@ class FailingChecksTests(InstallTestCase):
         self.assert_fails_once(
             self.machine.run(), "in use: 443/tcp, 6443/tcp, 8472/udp.", "ss -tulpn"
         )
+
+    def test_a_port_of_canal_or_of_a_part_on_127_0_0_1_in_use(self) -> None:
+        # Canal's flanneld listens on 8081 on every address, and the kubelet
+        # on 127.0.0.1:10248. A program on either port stops that part.
+        self.machine.answer(
+            "ss_tcp", "LISTEN 0 4096 0.0.0.0:8081 0.0.0.0:*\nLISTEN 0 4096 [::1]:10248 [::]:*\n"
+        )
+
+        self.assert_fails_once(self.machine.run(), "in use: 8081/tcp, 10248/tcp.", "ss -tulpn")
 
     def test_clock_not_synchronised(self) -> None:
         self.machine.answer("ntp_synchronized", "no")

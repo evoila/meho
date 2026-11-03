@@ -68,8 +68,9 @@ each change is approved and stored in the audit log.
   above. Step 8 needs a `tenant_admin` approver in the new tenant too,
   because an approval belongs to one tenant. Step 8 explains the
   choices.
-- Today one person has one tenant. A person who should work in two
-  tenants needs a second Keycloak user for now.
+- This guide gives each person one tenant. For a person who works in
+  two or more tenants with one login, follow
+  [One person in several tenants](several-tenants.md).
 
 ## Step 1: Make the tenant UUID
 

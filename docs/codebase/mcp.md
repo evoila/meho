@@ -867,7 +867,7 @@ One login can list several tenants (the `meho_tenants` claim). An MCP
 session works in **one** tenant, fixed at the start by the `Meho-Tenant`
 request header (a tenant name or UUID). To switch, the client changes the
 setting and starts a new session. There is no tool to switch tenants, so
-the working surface stays at its size.
+the working surface stays at its size. Admin guide: `docs-site/guides/several-tenants.md`.
 
 The two connection helpers send the header (#5242): the Claude Code plugin
 shim from `MEHO_TENANT` (`clients/claude-code-plugin/bin/meho-mcp-remote`),

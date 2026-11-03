@@ -294,8 +294,9 @@ The realm side:
 - **A site with one tenant** gets a list with one entry. Every other
   claim stays the same.
 
-How MEHO reads the list is a separate step; until then MEHO keeps
-reading `tenant_id` and `tenant_role` only.
+MEHO reads the list and works in one current tenant per request. The
+steps for an admin are in the guide
+[One person in several tenants](../../docs-site/guides/several-tenants.md).
 
 ### Upgrading a realm that still has fixed values
 

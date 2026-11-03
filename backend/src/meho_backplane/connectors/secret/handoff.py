@@ -500,7 +500,9 @@ def _import_fingerprint(
             )
         return material.fingerprint
     fingerprint = handoff_fingerprint(check_key, material.value)
-    if isinstance(expected, str) and not hmac.compare_digest(expected.lower(), fingerprint):
+    if isinstance(expected, str) and not hmac.compare_digest(
+        expected.lower().encode("utf-8"), fingerprint.encode("utf-8")
+    ):
         raise SecretHandoffDigestMismatchError(
             f"the value from {store.label} has fingerprint {fingerprint}, not the expected "
             f"{expected.lower()}; nothing was written to {sink_name}. The handoff is used "

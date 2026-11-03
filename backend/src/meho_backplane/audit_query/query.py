@@ -39,7 +39,7 @@ Filter coverage
   ``op_id``. The OR-shaped predicate keeps the substrate honest across both
   write paths.
 * ``result_status`` (one of ``"ok"`` / ``"pending"`` / ``"error"`` /
-  ``"denied"`` / ``"withdrawn"``) maps to ``status_code`` ranges that mirror
+  ``"denied"`` / ``"withdrawn"``). Most values map to ``status_code`` ranges that mirror
   :func:`~meho_backplane.audit._classify_http_status` (``"pending"`` is
   the G11.2-T3/T4 202 "awaiting approval" synthetic code). ``"withdrawn"``
   is the ``approval.withdraw`` row: the sender took its request back
@@ -378,6 +378,15 @@ def _is_withdraw_predicate() -> sa.ColumnElement[bool]:
     return sa.and_(AuditLog.method == _WITHDRAW_METHOD, AuditLog.path == _WITHDRAW_PATH)
 
 
+def is_withdraw_row(row: AuditLog) -> bool:
+    """``True`` for an ``approval.withdraw`` row (#5717).
+
+    The Python twin of :func:`_is_withdraw_predicate`. The console audit
+    drawer uses it too, so the list and the drawer follow one rule.
+    """
+    return row.method == _WITHDRAW_METHOD and row.path == _WITHDRAW_PATH
+
+
 def _result_status_predicate(result_status: str) -> sa.ColumnElement[bool]:
     """Translate the broadcast-shape result_status to a status_code predicate.
 
@@ -496,7 +505,7 @@ def _derive_result_status(row: AuditLog) -> str:
     side, so the read path must derive the same rather than collapsing
     202 (a 2xx) to ``ok``.
     """
-    if row.method == _WITHDRAW_METHOD and row.path == _WITHDRAW_PATH:
+    if is_withdraw_row(row):
         return "withdrawn"
     status_code = row.status_code
     if status_code in (401, 403):

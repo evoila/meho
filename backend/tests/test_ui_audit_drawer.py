@@ -173,6 +173,8 @@ def _seed_audit_row(
     run_id: uuid.UUID | None = None,
     actor_sub: str | None = None,
     row_id: uuid.UUID | None = None,
+    method: str = "POST",
+    path: str = "/mcp",
 ) -> uuid.UUID:
     """Insert one ``audit_log`` row at ``_BASE + second``; return its id.
 
@@ -194,8 +196,8 @@ def _seed_audit_row(
                     occurred_at=_BASE + timedelta(seconds=second),
                     operator_sub=operator_sub,
                     tenant_id=tenant_id,
-                    method="POST",
-                    path="/mcp",
+                    method=method,
+                    path=path,
                     status_code=status_code,
                     duration_ms=Decimal("1.0"),
                     payload=payload,
@@ -787,3 +789,32 @@ def test_drawer_parent_lineage_is_labelled_not_bare_uuid() -> None:
     assert f"/ui/audit/show/{parent_id}" in body
     # ...but labelled with the parent op, not a bare UUID.
     assert "parent: vsphere.vm.create" in body
+
+
+def test_drawer_shows_withdraw_row_as_withdrawn_not_as_a_run() -> None:
+    """#5717: a withdraw row says "Withdrawn" and that the operation did not run."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    target_id = _seed_target(tenant_id=_TENANT_A, name="edge-gateway-01")
+    row_id = _seed_audit_row(
+        tenant_id=_TENANT_A,
+        op_id="vsphere.vm.delete",
+        op_class="write",
+        operator_sub="op-sender",
+        target_id=target_id,
+        method="APPROVAL",
+        path="approval.withdraw",
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/audit/show/{row_id}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Withdrawn" in body
+    assert (
+        "withdrew the approval request for vsphere.vm.delete on edge-gateway-01. "
+        "The operation did not run." in body
+    )
+    assert " ran vsphere.vm.delete" not in body
+    assert "→ OK" not in body

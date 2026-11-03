@@ -42,6 +42,7 @@ from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     WithdrawForbiddenError,
+    approve_request,
     create_pending_request,
     get_request,
     reject_request,
@@ -214,6 +215,39 @@ async def test_audit_query_shows_withdraw_as_withdrawn_not_as_an_operation_run()
     assert await ids(result_status="ok") == []
     assert await ids(result_status="withdrawn") == [audit.id]
     assert await ids(event_class=AuditEventClass.APPROVAL_DECISION) == [audit.id]
+
+
+@pytest.mark.asyncio
+async def test_audit_query_keeps_an_approve_decision_ok_not_withdrawn() -> None:
+    """#5717: only the withdraw row is ``withdrawn``; an approve decision stays ``ok``."""
+    request_id = await _park()
+    async with get_sessionmaker()() as s:
+        await approve_request(
+            s, request_id, operator=_operator(sub=_APPROVER_SUB, kind=PrincipalKind.USER)
+        )
+        await s.commit()
+    (decision,) = await _audit_rows(request_id, "approval.decision")
+    assert decision.method == "APPROVAL"
+    assert decision.status_code == 200
+
+    async def ids(**filters: Any) -> list[uuid.UUID]:
+        async with get_sessionmaker()() as s:
+            result = await query_audit(
+                AuditQueryFilters(audit_id=decision.id, **filters),
+                tenant_id=_TENANT_ID,
+                session=s,
+            )
+        return [row.id for row in result.rows]
+
+    async with get_sessionmaker()() as s:
+        (entry,) = (
+            await query_audit(
+                AuditQueryFilters(audit_id=decision.id), tenant_id=_TENANT_ID, session=s
+            )
+        ).rows
+    assert entry.result_status == "ok"
+    assert await ids(result_status="ok") == [decision.id]
+    assert await ids(result_status="withdrawn") == []
 
 
 @pytest.mark.asyncio

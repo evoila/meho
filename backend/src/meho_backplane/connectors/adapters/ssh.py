@@ -87,7 +87,7 @@ host by default. The host-key material is threaded through
 ``_auth_config``'s return dict alongside the auth kwargs (subclasses
 that override ``_auth_config`` MUST include a ``known_hosts`` entry).
 
-**Timeouts.** ``_run_command`` wraps ``conn.run()`` in
+**Timeouts.** ``_run_command`` wraps :func:`run_capped` in
 ``asyncio.wait_for``; expiry raises :exc:`asyncio.TimeoutError`.
 """
 
@@ -272,33 +272,82 @@ def _record_ssh_span(
         logger.warning("flight_recorder_ssh_span_failed", exc_info=True)
 
 
-#: Cap on the characters of stdout plus stderr one SSH command may
-#: return. A command whose output crosses it fails with
-#: :class:`SshOutputTooLargeError` instead of handing the whole output to
-#: the connector, the flight recorder and the result path. Measured on the
-#: decoded text asyncssh returns, so it is a character count that bounds
-#: the memory held after the read.
-_MAX_OUTPUT_CHARS: Final[int] = 16 * 1024 * 1024
+#: Cap on the bytes of stdout plus stderr one SSH command may return. The
+#: output is read in chunks against this budget, and the command is cut
+#: off the moment the budget is crossed, so the memory held for one
+#: command's output never goes much past the cap. A command that crosses
+#: it fails with :class:`SshOutputTooLargeError` before any output is
+#: decoded, recorded or handed to the connector.
+_MAX_OUTPUT_BYTES: Final[int] = 16 * 1024 * 1024
+
+#: Size of one read from an SSH output stream.
+_OUTPUT_READ_CHUNK: Final[int] = 64 * 1024
 
 
 class SshOutputTooLargeError(RuntimeError):
-    """A command's output crossed :data:`_MAX_OUTPUT_CHARS`."""
+    """A command's output crossed :data:`_MAX_OUTPUT_BYTES`."""
 
-    def __init__(self, target_name: str, size: int) -> None:
+    def __init__(self, target_name: str) -> None:
         super().__init__(
-            f"ssh command output on {target_name!r} is {size} characters, "
-            f"above the {_MAX_OUTPUT_CHARS}-character cap"
+            f"ssh command output on {target_name!r} is above the {_MAX_OUTPUT_BYTES}-byte cap"
         )
 
 
-def _output_size(result: Any) -> int:
-    """Length of a completed process's stdout plus stderr, never raising."""
-    size = 0
-    for attr in ("stdout", "stderr"):
-        value = getattr(result, attr, None)
-        if isinstance(value, (str, bytes)):
-            size += len(value)
-    return size
+async def run_capped(
+    conn: asyncssh.SSHClientConnection,
+    cmd: str,
+    *,
+    target_name: str,
+    stdin: str | None = None,
+    max_bytes: int | None = None,
+) -> asyncssh.SSHCompletedProcess:
+    """Run *cmd* on *conn* and collect its output, stopping at the byte cap.
+
+    The one way to run a command on a pooled connection: every caller
+    goes through here so no command can hand back an unbounded output.
+    Both streams are read as bytes, in chunks, against one shared budget
+    (*max_bytes*, :data:`_MAX_OUTPUT_BYTES` by default). The reads run
+    side by side so a command that fills one stream while the other is
+    quiet never stalls on the channel window. Crossing the budget closes
+    the channel, which ends the remote command, and raises
+    :class:`SshOutputTooLargeError`; the output is decoded only after
+    both streams ended under the cap. *stdin*, when set, is written to
+    the command's standard input followed by end-of-file.
+    """
+    cap = _MAX_OUTPUT_BYTES if max_bytes is None else max_bytes
+    total = 0
+
+    async def drain(stream: asyncssh.SSHReader[bytes]) -> bytes:
+        nonlocal total
+        chunks: list[bytes] = []
+        while chunk := await stream.read(_OUTPUT_READ_CHUNK):
+            total += len(chunk)
+            if total > cap:
+                logger.warning("ssh_command_output_too_large", target=target_name, max_bytes=cap)
+                raise SshOutputTooLargeError(target_name)
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    async with conn.create_process(cmd, input=stdin, encoding=None) as process:
+        try:
+            async with asyncio.TaskGroup() as group:
+                stdout_task = group.create_task(drain(process.stdout))
+                stderr_task = group.create_task(drain(process.stderr))
+        except ExceptionGroup as failures:
+            # The group holds the read that failed first; the task group
+            # cancelled the other read. Callers expect the plain error.
+            raise failures.exceptions[0] from None
+        await process.wait_closed()
+    return asyncssh.SSHCompletedProcess(
+        process.env,
+        process.command,
+        process.subsystem,
+        process.exit_status,
+        process.exit_signal,
+        process.returncode,
+        stdout_task.result().decode("utf-8"),
+        stderr_task.result().decode("utf-8"),
+    )
 
 
 class SshTargetChangedError(RuntimeError):
@@ -559,12 +608,9 @@ class SshConnector(Connector):
         # omits both and degrades the trace to operator-only (F5) -- an SSH
         # command / its output never reaches a span un-redacted.
         _fr_start = flight_recorder_typed.typed_span_start(f"ssh {getattr(target, 'name', '?')}")
-        if stdin is None:
-            result = await asyncio.wait_for(conn.run(cmd, check=False), timeout=timeout)
-        else:
-            result = await asyncio.wait_for(
-                conn.run(cmd, input=stdin, check=False), timeout=timeout
-            )
+        result = await asyncio.wait_for(
+            run_capped(conn, cmd, target_name=target.name, stdin=stdin), timeout=timeout
+        )
         _record_ssh_span(_fr_start, cmd=cmd, result=result)
         logger.info(
             "ssh_command_executed",
@@ -572,15 +618,6 @@ class SshConnector(Connector):
             cmd_len=len(cmd),
             exit_code=result.exit_status,
         )
-        size = _output_size(result)
-        if size > _MAX_OUTPUT_CHARS:
-            logger.warning(
-                "ssh_command_output_too_large",
-                target=target.name,
-                output_chars=size,
-                max_chars=_MAX_OUTPUT_CHARS,
-            )
-            raise SshOutputTooLargeError(target.name, size)
         return result
 
     def _assert_reachable(self, result: FingerprintResult) -> None:

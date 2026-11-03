@@ -302,7 +302,8 @@ async def test_standing_grant_for_a_membership_op_is_refused(op_id: str) -> None
 async def test_a_parked_change_reaches_robot_exactly_once() -> None:
     target = await _setup(ADD_OP)
     request_id = await _park(target, make_operator("robot-requester"))
-    approver = make_operator("robot-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+    approver = make_operator("robot-approver").model_copy(update={"self_approver": True})
 
     async with get_sessionmaker()() as session:
         await approve_request(session, request_id, operator=approver, params=None)

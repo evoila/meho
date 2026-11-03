@@ -1146,7 +1146,9 @@ async def test_add_waits_for_approval_then_runs() -> None:
     assert not recorder.playback_ran
     request_id = UUID(call["extras"]["approval_request_id"])
 
-    approver = _make_operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()
@@ -1187,7 +1189,9 @@ async def test_delete_full_governed_flow() -> None:
         assert row is not None
         assert row.proposed_effect["blast_radius"]["object"]["ridentifier"] == _RID
 
-    approver = _make_operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()

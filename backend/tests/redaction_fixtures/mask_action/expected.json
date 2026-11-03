@@ -1,5 +1,5 @@
 {
   "run_id": "********************************90ab",
-  "target": "sha256:f421b0e21d6f",
+  "target": "api.tenant.example.com",
   "ok": true
 }

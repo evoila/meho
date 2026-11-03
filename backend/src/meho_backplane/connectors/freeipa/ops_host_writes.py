@@ -10,47 +10,23 @@ delete is ``dangerous``. The bodies live in
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from meho_backplane.connectors.freeipa._op_common import (
+    APPROVAL_NOTE,
+    COMPLETED_SCHEMA,
+    DESCRIPTION_SCHEMA,
     GROUP_HOSTS,
     UNTRUSTED_TEXT_NOTE,
-    WRITE_TAGS,
     FreeipaTypedOp,
+    entry_schema,
     name_schema,
+    names_schema,
+    write_op,
 )
 from meho_backplane.connectors.freeipa.writes import HOST_DELETE_OP_ID
 
 __all__ = ["HOST_WRITE_OPS"]
-
-_APPROVAL_NOTE = "A second person must approve the call."
-
-_DESCRIPTION_SCHEMA: dict[str, Any] = {
-    "type": "string",
-    "minLength": 1,
-    "maxLength": 1024,
-    "description": "Optional. A short text that says what it is for.",
-}
-
-
-def _names(description: str, item: str) -> dict[str, Any]:
-    return {
-        "type": "array",
-        "minItems": 1,
-        "uniqueItems": True,
-        "description": description,
-        "items": name_schema(item),
-    }
-
-
-def _entry(description: str) -> dict[str, Any]:
-    return {"type": "object", "description": description}
-
-
-_COMPLETED: dict[str, Any] = {
-    "type": "integer",
-    "description": "How many values FreeIPA added: all that were sent, or the call fails.",
-}
 
 _DELETE_RESPONSE: dict[str, Any] = {
     "deleted": {
@@ -66,48 +42,9 @@ _DELETE_RESPONSE: dict[str, Any] = {
 }
 
 
-def _write_op(
-    *,
-    op_id: str,
-    handler_attr: str,
-    summary: str,
-    description: str,
-    properties: dict[str, Any],
-    required: list[str],
-    example: dict[str, Any],
-    response: dict[str, Any],
-    tags: tuple[str, ...],
-    safety_level: Literal["caution", "dangerous"],
-    llm_instructions: dict[str, Any],
-    any_of: list[dict[str, Any]] | None = None,
-) -> FreeipaTypedOp:
-    """A write in the ``hosts`` group. It always waits until a second person approves."""
-    parameter_schema: dict[str, Any] = {
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": False,
-        "examples": [example],
-    }
-    if any_of:
-        parameter_schema["anyOf"] = any_of
-    return FreeipaTypedOp(
-        op_id=op_id,
-        handler_attr=handler_attr,
-        summary=summary,
-        description=description,
-        parameter_schema=parameter_schema,
-        response_schema={"type": "object", "properties": response},
-        group_key=GROUP_HOSTS,
-        tags=(*WRITE_TAGS, *tags),
-        safety_level=safety_level,
-        requires_approval=True,
-        llm_instructions=llm_instructions,
-    )
-
-
 HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
-    _write_op(
+    write_op(
+        group_key=GROUP_HOSTS,
         op_id="freeipa.hostgroup.create",
         handler_attr="hostgroup_create",
         summary=(
@@ -122,11 +59,11 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
                 "The new host group's name, for example webservers. FreeIPA stores it in "
                 "lower case."
             ),
-            "description": _DESCRIPTION_SCHEMA,
+            "description": DESCRIPTION_SCHEMA,
         },
         required=["name"],
         example={"name": "webservers", "description": "Web servers of the lab"},
-        response={"entry": _entry("The new host group, with FreeIPA's default attributes.")},
+        response={"entry": entry_schema("The new host group, with FreeIPA's default attributes.")},
         tags=("hostgroup",),
         safety_level="caution",
         llm_instructions={
@@ -135,7 +72,7 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
                 "add hosts to it or make an automember rule for it."
             ),
             "preconditions": (
-                f"{_APPROVAL_NOTE} No host group with this name may exist; check with "
+                f"{APPROVAL_NOTE} No host group with this name may exist; check with "
                 "freeipa.hostgroup.list."
             ),
             "output_shape": "{entry}: the new host group; cn holds its name.",
@@ -146,7 +83,8 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
             ),
         },
     ),
-    _write_op(
+    write_op(
+        group_key=GROUP_HOSTS,
         op_id="freeipa.hostgroup.member.add",
         handler_attr="hostgroup_member_add",
         summary=(
@@ -159,11 +97,11 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         ),
         properties={
             "name": name_schema("The host group's name."),
-            "hosts": _names(
+            "hosts": names_schema(
                 "Hosts to add, by their fully qualified names. Each host must exist.",
                 "One host's fully qualified name, for example web01.example.test.",
             ),
-            "hostgroups": _names(
+            "hostgroups": names_schema(
                 "Host groups to add as members of this host group, by name.",
                 "One host group's name.",
             ),
@@ -172,11 +110,11 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         any_of=[{"required": ["hosts"]}, {"required": ["hostgroups"]}],
         example={"name": "webservers", "hosts": ["web01.example.test", "web02.example.test"]},
         response={
-            "entry": _entry(
+            "entry": entry_schema(
                 "The host group after the change, with its members in member_host and "
                 "member_hostgroup."
             ),
-            "completed": _COMPLETED,
+            "completed": COMPLETED_SCHEMA,
         },
         tags=("hostgroup", "host", "membership"),
         safety_level="caution",
@@ -186,7 +124,7 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
                 "group's members. It never creates a host."
             ),
             "preconditions": (
-                f"{_APPROVAL_NOTE} The host group and every member must exist. Give hosts, "
+                f"{APPROVAL_NOTE} The host group and every member must exist. Give hosts, "
                 "hostgroups or both."
             ),
             "output_shape": (
@@ -198,7 +136,8 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
             "next_step": f"Check the members with freeipa.hostgroup.show. {UNTRUSTED_TEXT_NOTE}",
         },
     ),
-    _write_op(
+    write_op(
+        group_key=GROUP_HOSTS,
         op_id="freeipa.automember.rule.create",
         handler_attr="automember_rule_create",
         summary=(
@@ -214,12 +153,12 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
                 "The host group the rule fills. The rule gets the same name; a host group has at "
                 "most one rule."
             ),
-            "description": _DESCRIPTION_SCHEMA,
+            "description": DESCRIPTION_SCHEMA,
         },
         required=["hostgroup"],
         example={"hostgroup": "webservers", "description": "Web servers by host name"},
         response={
-            "entry": _entry(
+            "entry": entry_schema(
                 "The new rule: cn is the host group's name, automembertargetgroup the group's "
                 "LDAP name (DN)."
             ),
@@ -232,7 +171,7 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
                 "every new web server into webservers. It adds a rule to the IPA domain."
             ),
             "preconditions": (
-                f"{_APPROVAL_NOTE} The host group must exist (freeipa.hostgroup.create) and must "
+                f"{APPROVAL_NOTE} The host group must exist (freeipa.hostgroup.create) and must "
                 "not have a rule yet."
             ),
             "output_shape": "{entry}: the new rule with FreeIPA's default attributes.",
@@ -242,7 +181,8 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
             ),
         },
     ),
-    _write_op(
+    write_op(
+        group_key=GROUP_HOSTS,
         op_id="freeipa.automember.condition.add",
         handler_attr="automember_condition_add",
         summary=(
@@ -260,11 +200,11 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
                 "The host attribute the regular expressions are matched against, for example "
                 "fqdn (the host's full name)."
             ),
-            "inclusive_regex": _names(
+            "inclusive_regex": names_schema(
                 "Regular expressions. A new host whose key matches one of them joins the group.",
                 "One regular expression, for example ^web.",
             ),
-            "exclusive_regex": _names(
+            "exclusive_regex": names_schema(
                 "Regular expressions. A new host whose key matches one of them never joins, also "
                 "when an inclusive one matches.",
                 "One regular expression, for example ^webtest.",
@@ -274,11 +214,11 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         any_of=[{"required": ["inclusive_regex"]}, {"required": ["exclusive_regex"]}],
         example={"hostgroup": "webservers", "key": "fqdn", "inclusive_regex": ["^web"]},
         response={
-            "entry": _entry(
+            "entry": entry_schema(
                 "The rule after the change. Its conditions are in automemberinclusiveregex and "
                 "automemberexclusiveregex, each as <key>=<regex>."
             ),
-            "completed": _COMPLETED,
+            "completed": COMPLETED_SCHEMA,
         },
         tags=("automember", "hostgroup"),
         safety_level="caution",
@@ -288,7 +228,7 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
                 "into its host group. It changes the rule's conditions."
             ),
             "preconditions": (
-                f"{_APPROVAL_NOTE} The rule must exist. FreeIPA checks that key is an attribute "
+                f"{APPROVAL_NOTE} The rule must exist. FreeIPA checks that key is an attribute "
                 "it knows. Give inclusive_regex, exclusive_regex or both."
             ),
             "output_shape": (
@@ -302,7 +242,8 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
             ),
         },
     ),
-    _write_op(
+    write_op(
+        group_key=GROUP_HOSTS,
         op_id=HOST_DELETE_OP_ID,
         handler_attr="host_delete",
         summary=(
@@ -336,7 +277,7 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
                 "torn down. It deletes the host entry; the host leaves every host group and rule."
             ),
             "preconditions": (
-                f"{_APPROVAL_NOTE} The approval shows the host and its host groups. Make sure the "
+                f"{APPROVAL_NOTE} The approval shows the host and its host groups. Make sure the "
                 "machine is gone or will join again: a joined machine can no longer log users in "
                 "through IPA. FreeIPA refuses to delete an IPA server."
             ),
@@ -347,7 +288,8 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
             ),
         },
     ),
-    _write_op(
+    write_op(
+        group_key=GROUP_HOSTS,
         op_id="freeipa.hostgroup.delete",
         handler_attr="hostgroup_delete",
         summary=(
@@ -371,7 +313,7 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
                 "hosts only leave it."
             ),
             "preconditions": (
-                f"{_APPROVAL_NOTE} Read the group first with freeipa.hostgroup.show. Check "
+                f"{APPROVAL_NOTE} Read the group first with freeipa.hostgroup.show. Check "
                 "which sudo rules and access rules use it (freeipa.sudorule.list, "
                 "freeipa.hbacrule.list): they lose the group, so its hosts may lose access."
             ),

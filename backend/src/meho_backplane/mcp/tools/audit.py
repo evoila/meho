@@ -159,8 +159,10 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
         "result_status": {
             "type": ["string", "null"],
             "description": (
-                'One of "ok" / "error" / "denied" / "pending". Maps to '
-                'status-code ranges on the substrate side. "pending" is '
+                'One of "ok" / "error" / "denied" / "pending" / "withdrawn". '
+                "Maps to status-code ranges on the substrate side. "
+                '"withdrawn" is the `approval.withdraw` row: the sender took '
+                'its approval request back and the operation never ran. "pending" is '
                 "history: the run stopped to wait for approval (the "
                 "`approval.request` row, and the stopped operation's own "
                 "`operation_execution` row). It stays "

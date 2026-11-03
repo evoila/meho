@@ -24,7 +24,7 @@ class it knows. Nothing is guessed from `method` / `path`.
 |---|---|
 | `operation_execution` | Dispatch rows that ran (`ok` or `error`), the row of a multi-step operation that stopped part-way because a step waits for approval (`awaiting_approval`) or was denied (`denied`, #4275), runbook abort, gateway command mint / result, satellite effect rows, topology / ingest / add-on writes, sweepers and reapers. |
 | `policy_decision` | Dispatch rows a gate refused (`denied`, rate limit, unqualified target version), the `approval.request` park row, and the `denied` row of a step inside a multi-step operation. |
-| `approval_decision` | `approval.decision` rows (approve, reject, expire) and the standing-grant auto-approval row. |
+| `approval_decision` | `approval.decision` rows (approve, reject, expire), the `approval.withdraw` row (the sender took its request back, #5717), and the standing-grant auto-approval row. |
 | `security_event` | Refresh-token replay, broken satellite effect chain, un-reported gateway mint alarm. |
 | `legacy_request` | Every row written before `0106` (server default; old rows are not reclassified), the REST and MCP request wrapper rows, and the `approval.result` read row. |
 
@@ -196,7 +196,7 @@ take `event_class` as a required argument.
 | `principal_sub` | `str \| None` | `audit_log.operator_sub = value` (exact). Only the "my recent" views set it, from the caller's own token. Not on the REST body or the MCP input schema. |
 | `op_id` | `str \| None` | Glob (`*` ↔ `%`). Matched against `payload->>'op_id'` (MCP rows) **OR** derived `http.<method>:<path>` (HTTP rows). |
 | `op_class` | `str \| None` | Exact match against `payload->>'op_class'`. |
-| `result_status` | `str \| None` | One of `"ok"` / `"error"` / `"denied"` / `"pending"`. Maps to status-code ranges. `pending` (202) is history: the run stopped to wait for approval, and the row stays `pending` after the decision. It matches the `approval.request` row and, since #4275, the stopped operation's own `operation_execution` row; add `event_class` to pick one. To see what waits now, use the approval queue (`meho approvals list`). |
+| `result_status` | `str \| None` | One of `"ok"` / `"error"` / `"denied"` / `"pending"` / `"withdrawn"`. Maps to status-code ranges. `withdrawn` matches the `approval.withdraw` rows (`method = APPROVAL`, `path = approval.withdraw`), and `ok` never does (#5717). `pending` (202) is history: the run stopped to wait for approval, and the row stays `pending` after the decision. It matches the `approval.request` row and, since #4275, the stopped operation's own `operation_execution` row; add `event_class` to pick one. To see what waits now, use the approval queue (`meho approvals list`). |
 | `since` / `until` | `datetime \| None` | `audit_log.occurred_at` bracket. **Absolute datetimes only** — `"24h"` / `"7d"` shorthand is parsed in the T2 / T3 router. |
 | `audit_id` | `UUID \| None` | Exact-id lookup. |
 | `parent_audit_id` | `UUID \| None` | `audit_log.parent_audit_id = :value` — **exact match**, so it returns the direct children of one row, not the whole subtree. Uses the `audit_log_parent_audit_id_idx` index. Main use: find the decision row and the run row of one approval request, which are linked only by this column (#4030). The replay CTE walks the full subtree. |
@@ -228,7 +228,7 @@ Field-to-source mapping:
 | `method` / `path` / `status_code` / `request_id` / `duration_ms` / `payload` | Columns of the same name on `audit_log`. |
 | `op_id` | `payload['op_id']` if a string, else `f"http.{method.lower()}:{path}"`. |
 | `op_class` | `payload['op_class']` if a string, else `classify_op(op_id)` from `broadcast.events`. MCP, dispatch and route-declared HTTP rows store the class the broadcast event carries (`resolve_op_class`, see [broadcast.md](broadcast.md)), so the `op_class` filter finds them. A dispatch row of a hand-written (typed or multi-step) operation stores the class that follows from its risk level: `read` for `safe`, `write` for `caution` and higher (#4979, #5064, see [broadcast.md](broadcast.md)). For the MCP `call_operation` outer-wrapper row this is `"tool_call"` (G0.15-T3 #1212) — the inner DISPATCH row carries the domain `read` / `write` class. |
-| `result_status` | Derived from `status_code` — 401/403 → `"denied"`, 202 → `"pending"`, 4xx/5xx else → `"error"`, otherwise `"ok"`. `pending` is history (the run stopped to wait for approval; it stays `pending` after the decision), so check the approval queue for what waits now. `denied` on an `operation_execution` row means a step was refused; earlier steps may have written (#4275). |
+| `result_status` | An `approval.withdraw` row → `"withdrawn"` (#5717): the operation never ran. Every other row is derived from `status_code` — 401/403 → `"denied"`, 202 → `"pending"`, 4xx/5xx else → `"error"`, otherwise `"ok"`. `pending` is history (the run stopped to wait for approval; it stays `pending` after the decision), so check the approval queue for what waits now. `denied` on an `operation_execution` row means a step was refused; earlier steps may have written (#4275). |
 | `principal_name` | `payload['principal_name']` when present. Three writers set it from `Operator.name` (the token's `name` claim): MCP rows (#1212, `write_mcp_audit_row`), approval request and decision rows (#3300), and `DISPATCH` operation run rows (#4029, `operations/_audit.py:write_audit_row`). The name always belongs to the row's `operator_sub`. On an approved run that is the approver when a person approves through the console, CLI or REST (`resume_dispatch_after_approval`), and the agent when MEHO's own agent waits for the approval and resumes the run itself (`agent/approval_wait.py:_resume_approved_or_already_resumed`). It is `None` when the token has no name. HTTP-chassis rows remain `None` — the `verify_jwt_and_bind` middleware does not bind `name` to contextvars, so the audit middleware sees no source for it. |
 | `parent_audit_id` | `audit_log.parent_audit_id` — composite-operation lineage column (G0.6-T7 #398, migration `0006`). Surfaced on the row since G8.2-T3 (#1011); exact-match filterable since #4030. |
 | `agent_session_id` | `audit_log.agent_session_id` — MCP-session correlation column (G8.2-T1 #1009, migration `0014`). Surfaced + filterable since G8.2-T3 (#1011). |
@@ -283,7 +283,7 @@ query_audit(filters, tenant_id, session)
   │   ┌─ payload = dict(row.payload or {})
   │   ├─ op_id = payload['op_id'] if str else f"http.{method.lower()}:{path}"
   │   ├─ op_class = payload['op_class'] if str else classify_op(op_id)
-  │   ├─ result_status = _derive_result_status(status_code)
+  │   ├─ result_status = _derive_result_status(row)
   │   ├─ principal_name = payload['principal_name'] if str
   │   │                  else None   # MCP, approval and DISPATCH rows
   │   │                              # carry it in payload; HTTP-chassis

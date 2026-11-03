@@ -11,7 +11,8 @@ on a withdrawn request, and the agent waiter. The rules:
   else, an approver included, gets 403. A person, an agent and a service
   principal can each withdraw their own request.
 * Only a ``pending`` request; a closed one gets 409.
-* One ``approval.withdraw`` audit row, which is not a decision row.
+* One ``approval.withdraw`` audit row, which is not a decision row and
+  not an operation run: the audit query shows it as ``withdrawn`` (#5717).
 * Approve / reject / decide on a withdrawn request answer 409, and the
   operation never runs.
 """
@@ -30,6 +31,7 @@ from httpx import ASGITransport
 from sqlalchemy import select
 
 from meho_backplane.agent.approval_wait import resume_or_surface_awaiting_approval
+from meho_backplane.audit_query import AuditQueryFilters, query_audit
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -176,12 +178,42 @@ async def test_sender_withdraws_and_one_non_decision_audit_row_is_written() -> N
     assert len(rows) == 1
     audit = rows[0]
     assert audit.operator_sub == _SENDER_SUB
-    assert audit.event_class == AuditEventClass.OPERATION_EXECUTION
+    assert audit.event_class == AuditEventClass.APPROVAL_DECISION
     assert audit.payload["withdrawn_by"] == _SENDER_SUB
     assert audit.payload["reason"] == "plan changed"
     assert "reviewed_by" not in audit.payload
     assert "decision" not in audit.payload
     assert await _audit_rows(request_id, "approval.decision") == []
+
+
+@pytest.mark.asyncio
+async def test_audit_query_shows_withdraw_as_withdrawn_not_as_an_operation_run() -> None:
+    """#5717: the withdraw row is not an operation run and its result is not ``ok``."""
+    request_id = await _park()
+    async with get_sessionmaker()() as s:
+        await withdraw_request(s, request_id, operator=_operator())
+        await s.commit()
+    (audit,) = await _audit_rows(request_id, "approval.withdraw")
+
+    async def ids(**filters: Any) -> list[uuid.UUID]:
+        async with get_sessionmaker()() as s:
+            result = await query_audit(
+                AuditQueryFilters(audit_id=audit.id, **filters), tenant_id=_TENANT_ID, session=s
+            )
+        return [row.id for row in result.rows]
+
+    async with get_sessionmaker()() as s:
+        (entry,) = (
+            await query_audit(AuditQueryFilters(audit_id=audit.id), tenant_id=_TENANT_ID, session=s)
+        ).rows
+    assert entry.event_class == AuditEventClass.APPROVAL_DECISION
+    assert entry.result_status == "withdrawn"
+    assert entry.op_id == _OP_ID
+
+    assert await ids(event_class=AuditEventClass.OPERATION_EXECUTION) == []
+    assert await ids(result_status="ok") == []
+    assert await ids(result_status="withdrawn") == [audit.id]
+    assert await ids(event_class=AuditEventClass.APPROVAL_DECISION) == [audit.id]
 
 
 @pytest.mark.asyncio

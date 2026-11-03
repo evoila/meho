@@ -566,6 +566,12 @@ jobs:
         with:
           version: "0.13.0"
           enable-cache: true
+          # The Python problem matcher of setup-uv turns log lines such as
+          # "raise RuntimeError('Event loop is closed')" from a pytest
+          # warning into red error notes. Those notes hide the real reason a
+          # job failed. Job results do not depend on it, so it is off in
+          # every setup-uv step.
+          add-problem-matchers: false
 
       - name: Sync Python environment (locked)
         # --locked refuses to update uv.lock; if pyproject.toml drifted from the
@@ -892,6 +898,7 @@ jobs:
         with:
           version: "0.13.0"
           enable-cache: true
+          add-problem-matchers: false
 
       - name: Sync Python environment (locked)
         # --locked refuses to update uv.lock; if pyproject.toml drifted
@@ -1282,6 +1289,7 @@ jobs:
         with:
           version: "0.13.0"
           enable-cache: true
+          add-problem-matchers: false
 
       - name: Sync Python environment (locked)
         run: uv sync --locked --all-groups
@@ -1345,6 +1353,7 @@ jobs:
         with:
           version: "0.13.0"
           enable-cache: true
+          add-problem-matchers: false
 
       - name: Sync Python environment (locked)
         run: uv sync --locked --all-groups
@@ -1762,6 +1771,7 @@ jobs:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
           enable-cache: true
+          add-problem-matchers: false
 
       - name: Sync Python environment (locked)
         run: uv sync --locked --all-groups
@@ -2019,6 +2029,7 @@ jobs:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
           enable-cache: true
+          add-problem-matchers: false
 
       - name: Sync Python environment (locked)
         # The combine/xml pass needs only the coverage binary from the locked
@@ -2382,6 +2393,7 @@ jobs:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
           enable-cache: true
+          add-problem-matchers: false
 
       - name: Sync Python environment (locked)
         run: uv sync --locked --all-groups
@@ -2565,6 +2577,7 @@ jobs:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
           enable-cache: true
+          add-problem-matchers: false
 
       - name: Sync Python environment (locked)
         run: uv sync --locked --all-groups
@@ -2793,6 +2806,7 @@ jobs:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
           enable-cache: true
+          add-problem-matchers: false
 
       - name: Sync backend environment (locked)
         working-directory: backend

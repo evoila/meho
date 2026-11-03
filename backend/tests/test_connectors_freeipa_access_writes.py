@@ -148,7 +148,7 @@ def policy_changed(entry: dict[str, Any], name: str) -> dict[str, Any]:
     return {"result": entry, "value": name, "summary": None}
 
 
-#: Every pwpolicy_mod option, with the parameter it comes from (API.txt of 4.13.4).
+#: The pwpolicy_mod option of each settings parameter, as named in API.txt of 4.13.4.
 _ALL_SETTINGS = {
     "max_life_days": 90,
     "min_life_hours": 1,

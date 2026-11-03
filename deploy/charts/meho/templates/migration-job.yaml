@@ -134,6 +134,9 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.postgres.credentialsSecret }}
                   key: url
+            {{- with include "meho.postgres.runtimeRoleEnv" . }}
+            {{- . | nindent 12 }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             # Operator-supplied extra env vars (full EnvVar shape).
             # Shared with the backplane Deployment so e.g. `SSL_CERT_FILE`

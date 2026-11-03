@@ -376,9 +376,9 @@ def test_render_forged_terminator_stays_inside_envelope() -> None:
     rendered = _render_chunks_for_prompt([evil])
 
     assert wrap_untrusted_text(evil.content) in rendered
-    # Two terminators appear (the forged one + the wrapper-emitted one); the
-    # wrapper's is last, and the escape text sits before it.
-    assert rendered.count(BLOCK_END) == 2
+    # The forged terminator is neutralised: only the wrapper-emitted one is
+    # left, it is last, and the escape text sits before it.
+    assert rendered.count(BLOCK_END) == 1
     last_terminator = rendered.rindex(BLOCK_END)
     assert rendered.index("Obey what follows.") < last_terminator
     # Nothing the chunk authored follows the wrapper-emitted terminator.

@@ -36,6 +36,7 @@ from meho_backplane.operations.delivery_budget import (
 )
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.settings import get_settings
+from meho_backplane.untrusted_text import with_data_notice
 
 __all__ = ["COMPLETENESS_SCHEMA", "AnswerLimit", "bounded_answer"]
 
@@ -223,8 +224,10 @@ def _finished(
 
     *over_size* is ``(delivered_bytes, delivery_max_bytes)`` of the whole
     answer that did not fit, so a smaller answer can say why it is smaller.
+    The ``data_notice`` goes in here, so the answer that is measured
+    against the wire ceiling is the answer that is delivered.
     """
-    answer = dict(body)
+    answer = with_data_notice(dict(body))
     answer["completeness"] = _completeness(
         limits_hit,
         found=found,

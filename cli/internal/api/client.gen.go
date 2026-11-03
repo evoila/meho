@@ -685,6 +685,7 @@ const (
 	TargetCreateProductAzure      TargetCreateProduct = "azure"
 	TargetCreateProductBind9      TargetCreateProduct = "bind9"
 	TargetCreateProductEntra      TargetCreateProduct = "entra"
+	TargetCreateProductFreeipa    TargetCreateProduct = "freeipa"
 	TargetCreateProductGcloud     TargetCreateProduct = "gcloud"
 	TargetCreateProductGh         TargetCreateProduct = "gh"
 	TargetCreateProductHarbor     TargetCreateProduct = "harbor"

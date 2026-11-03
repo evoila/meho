@@ -194,7 +194,9 @@ async def _run_governed(args: dict[str, Any]) -> Any:
     assert call["status"] == "awaiting_approval", call
     request_id = UUID(call["extras"]["approval_request_id"])
 
-    approver = _make_operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         approved = await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()
@@ -239,7 +241,8 @@ async def test_pool_create_runs_through_call_operation_with_approval(
         assert create.call_count == 0
 
         request_id = UUID(call["extras"]["approval_request_id"])
-        approver = _make_operator(sub="op-approver")
+        # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+        approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
         async with get_sessionmaker()() as s:
             approved = await approve_request(s, request_id, operator=approver, params=None)
             await s.commit()

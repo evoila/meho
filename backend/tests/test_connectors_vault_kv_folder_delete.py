@@ -1055,7 +1055,8 @@ async def test_full_flow_one_approval_and_a_late_key_is_left_alone(
     tree.add(f"secret/{_FOLDER}/run3/late")
 
     # 4) A second person approves; the resume runs once.
-    approver = _operator("op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+    approver = _operator("op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         approved = await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()

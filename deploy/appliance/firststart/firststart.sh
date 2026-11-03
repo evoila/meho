@@ -416,7 +416,11 @@ write_time_servers() {
 set_up_admin() {
     local home="${HOST_ROOT}/home/$ADMIN_USER"
     if ! getent passwd "$ADMIN_USER" >/dev/null; then
-        useradd --create-home --shell /bin/bash --groups sudo "$ADMIN_USER"
+        # Ubuntu's cloud image has an empty group admin already, and useradd
+        # stops (exit 9) rather than make a second one: the account joins it.
+        local group=()
+        getent group "$ADMIN_USER" >/dev/null && group=(--gid "$ADMIN_USER")
+        useradd --create-home --shell /bin/bash --groups sudo "${group[@]}" "$ADMIN_USER"
     fi
     # printf is a shell builtin, so the password is in no process's arguments.
     printf '%s:%s\n' "$ADMIN_USER" "$(field admin.password)" | chpasswd

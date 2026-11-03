@@ -130,12 +130,19 @@ STUBS = {
         case "$1" in
           passwd) grep "^$2:" "$MEHO_FAKE/passwd" ;;
           shadow) grep "^$2:" "$MEHO_FAKE/shadow" ;;
+          group) grep "^$2:" "$MEHO_FAKE/group" ;;
         esac
         """),
-    "useradd": (
-        'eval "user=\\${$#}"; '
-        'printf "%s:x:1000:1000::/home/%s:/bin/bash\\n" "$user" "$user" >> "$MEHO_FAKE/passwd"'
-    ),
+    # Like the real useradd: a group of the user's name that exists already
+    # stops it with exit 9, unless --gid names a group to join.
+    "useradd": textwrap.dedent("""\
+        eval "user=\\${$#}"
+        case " $* " in
+          *" --gid "*) ;;
+          *) grep -q "^$user:" "$MEHO_FAKE/group" && exit 9 ;;
+        esac
+        printf "%s:x:1000:1000::/home/%s:/bin/bash\\n" "$user" "$user" >> "$MEHO_FAKE/passwd"
+        """),
     "chpasswd": 'cat > "$MEHO_FAKE/chpasswd_input"',
     "passwd": "",
     "chown": "",
@@ -221,6 +228,8 @@ class FakeAppliance:
         self.answer("install_rc", "0")
         self.answer("passwd", "root:x:0:0::/root:/bin/bash\n")
         self.answer("shadow", "root:*:20000:0:99999:7:::\n")
+        # The groups of Ubuntu's 24.04 cloud image that matter here.
+        self.answer("group", "root:x:0:\nsudo:x:27:\nadmin:x:110:\n")
         self.answer("calls.log", "")
 
     def close(self) -> None:

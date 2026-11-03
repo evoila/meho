@@ -45,7 +45,8 @@ class FirstStartTests(FirstStartTestCase):
             self.vm.read("/etc/systemd/timesyncd.conf.d/50-meho.conf"),
         )
         self.assertIn(
-            "useradd --create-home --shell /bin/bash --groups sudo admin", self.vm.calls()
+            "useradd --create-home --shell /bin/bash --groups sudo --gid admin admin",
+            self.vm.calls(),
         )
         self.assertIn("passwd --expire admin", self.vm.calls())
         self.assertEqual(f"{SSH_KEY}\n", self.vm.read("/home/admin/.ssh/authorized_keys"))
@@ -57,6 +58,15 @@ class FirstStartTests(FirstStartTestCase):
         )
         self.assertEqual(ALL_MARKERS, self.vm.markers())
         self.assertTrue(self.vm.host_path("/var/lib/meho/firststart.done").is_file())
+
+    def test_without_an_admin_group_useradd_makes_its_own(self) -> None:
+        self.vm.answer("group", "root:x:0:\nsudo:x:27:\n")
+
+        self.assert_succeeds(self.vm.run())
+
+        self.assertIn(
+            "useradd --create-home --shell /bin/bash --groups sudo admin", self.vm.calls()
+        )
 
     def test_the_steps_run_in_the_order_of_the_design(self) -> None:
         self.assert_succeeds(self.vm.run())

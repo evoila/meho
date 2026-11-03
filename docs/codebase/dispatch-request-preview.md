@@ -44,7 +44,8 @@ governed approval tier (`safety_level='destructive'` #3198, or a
 like `vault.kv.put` stays `unavailable` because its secret rides in the
 params), a **synthetic preview** — a params-bound projection (the hash
 binding) plus the reused park-time `proposed_effect` (`_composite_preview.py`,
-egress-free).
+egress-free). Its `redacted_body` is a safe view of the params, not a copy
+(see Redaction below).
 
 Out of scope (honouring #1683's dispositions):
 
@@ -201,6 +202,12 @@ An ingested read whose path names licences answers `error` with
 `extras.error_code=license_read_off` and no governance fields: the read
 never runs (see `spec-ingestion.md`, "Ingested licence reads stay off").
 
+**`params_digest` (synthetic previews only).** A governed-tier typed /
+composite preview also carries `params_digest`, a keyed hash of the full
+params. `compute_preview_hash` includes it when present, so a value the
+safe view of `redacted_body` hides still changes `preview_hash`. An
+ingested preview has no digest and its hash is unchanged. See Redaction.
+
 **Governance fields (#3973 / #4923).** Every envelope whose op resolved
 carries, unhashed: `safety_level` (`safe` / `caution` / `dangerous` /
 `destructive`) and `requires_approval` from the descriptor, `policy_verdict`
@@ -270,6 +277,34 @@ name: a bare `{"password": "…"}` field is not masked by the default
 policy unless its *value* matches a named pattern; a `{"upstream_auth":
 "Bearer eyJ…"}` value is. See `docs/codebase/redaction.md` for the
 named-pattern catalogue and policy resolution.
+
+**Synthetic preview.** The `redacted_body` of a governed-tier typed /
+composite op is the safe view `safe_params_view` builds
+(`_composite_preview.py`), the same view the generic plan (`params_echo`)
+shows, plus one schema rule:
+
+1. Every value of a **free-form map** is replaced by `***REDACTED***` and
+   its keys stay. A free-form map is a parameter the descriptor's
+   `parameter_schema` types as an object without fixed `properties` (for
+   example the OVF properties of an appliance deploy, typed
+   `additionalProperties: {type: string}`), a key an object schema does not
+   name, or a map the schema does not describe at all (fails closed). The
+   top-level keys are the operation's parameter names and always stay;
+   scalars and lists of scalars pass through; a list is walked with its
+   `items` schema.
+2. A value under a secret-shaped name (`password`, `client_secret`,
+   `api_key`, ...) is masked (`_scrub_secret_param_keys`, the broadcast
+   name check).
+3. The connector-boundary value-shape engine runs on the result.
+
+The `preview_hash` still binds every value: the envelope carries
+`params_digest`, the keyed params hash of the approval queue
+(`compute_params_hash`, HMAC under the server key), and
+`compute_preview_hash` includes it when present. Two previews that differ
+only in a hidden value show the same `redacted_body` and bind different
+hashes; the digest cannot be computed again from a guessed value without
+the server key. The dispatcher and the approval resume check recompute the
+hash by building the preview again, so they stay in step.
 
 ## Surfaces
 

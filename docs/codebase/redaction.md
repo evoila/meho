@@ -994,12 +994,18 @@ not identifier-shaped is dropped. The parse uses `defusedxml` and streams,
 so a body cut at the size cap still counts the faults before the cut. This
 lets an operator see, for example, that every property of a host came back
 in `missingSet` with `NoPermission`. One structural rule runs
-without any per-connector config: every property `value` inside an OVF
-`PropertyParams` block (`additional_parameters[] {type: "PropertyParams",
-properties: [{id, value}]}`) is redacted — those are OVF property inputs
-which commonly carry appliance credentials under a vendor-specific `id` no
-key-name heuristic or shape net can place — keeping the `id` and every
-non-secret field (network mappings, name, placement) intact.
+without any per-connector config: every OVF property `value` is redacted —
+those are OVF property inputs which commonly carry appliance credentials
+under a vendor-specific `id` no key-name heuristic or shape net can
+place — keeping the `id` / `key` and every non-secret field (network
+mappings, name, placement) intact. The rule covers the three shapes vSphere
+carries the values in: the `PropertyParams` block of the REST OVF deploy
+(`additional_parameters[] {type: "PropertyParams", properties: [{id,
+value}]}`), the `propertyMapping` list of the VI/JSON
+`OvfManager.CreateImportSpec` call (`[{_typeName: "KeyValue", key, value}]`),
+and every `VAppPropertyInfo` object (`value` and `defaultValue`) inside the
+import spec that call answers and `ResourcePool.ImportVApp` sends back. The
+trace stays certain, so an agent may read it.
 
 A connector can also mask a body itself before the span is recorded.
 `HttpConnector.trace_response_body(response)` returns the body the trace

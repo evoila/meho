@@ -481,7 +481,7 @@ async def test_401_in_the_fingerprint_drops_the_session() -> None:
 
 
 @pytest.mark.asyncio
-async def test_registered_ops_are_typed_safe_and_documented(
+async def test_registered_ops_are_typed_and_documented_and_writes_need_approval(
     _stub_embedding: AsyncMock, session: AsyncSession
 ) -> None:
     await register_freeipa_typed_operations()
@@ -498,16 +498,22 @@ async def test_registered_ops_are_typed_safe_and_documented(
         .all()
     )
     assert {r.op_id for r in rows} == {op.op_id for op in FREEIPA_TYPED_OPS}
-    assert len(rows) == 17
+    assert len(rows) == 23
     for row in rows:
         assert row.source_kind == "typed"
         assert row.handler_ref is not None
-        assert row.safety_level == "safe"
-        assert row.requires_approval is False
-        assert "read-only" in row.tags
         assert row.parameter_schema["additionalProperties"] is False
         assert row.parameter_schema["examples"]
         assert {"when_to_call", "output_shape", "next_step"} <= set(row.llm_instructions)
+        if row.safety_level == "safe":
+            assert row.requires_approval is False
+            assert "read-only" in row.tags
+        else:
+            assert row.safety_level in {"caution", "dangerous"}
+            assert row.requires_approval is True
+            assert "write" in row.tags
+            assert "preconditions" in row.llm_instructions
+    assert sum(row.safety_level == "safe" for row in rows) == 17
 
 
 def test_every_op_has_a_group_text_and_names_only_its_own_ops() -> None:

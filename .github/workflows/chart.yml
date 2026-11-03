@@ -753,7 +753,9 @@ jobs:
        needs.changes.outputs.chart == 'true')
     # Pinned 2026-10-29: kind image load fails on ubuntu-26.04's Docker (ubuntu-latest moved there); revisit when kind/docker support it.
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # 30 minutes: the update and rollback proofs of #5024 start the
+    # backplane pod three more times.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -1233,6 +1235,146 @@ jobs:
             --timeout=60s
           echo "recovery-probe logs:"
           kubectl -n meho-test logs pod/broadcast-recovery-probe
+
+      - name: Update with Recreate - the old pod stops before the new one starts (#5024)
+        # The chart's default update strategy is Recreate. A watcher reads
+        # the backplane pods twice a second during a real `helm upgrade`.
+        # The step fails when a sample shows an old and a new pod at the
+        # same time, or when the new pod appears before the old one is gone.
+        # It writes the time without a ready MEHO pod into the job summary.
+        run: |
+          set -euo pipefail
+          samples=/tmp/update-samples.txt
+          stop=/tmp/update-samples.stop
+          : > "$samples"
+          rm -f "$stop"
+          (
+            while [ ! -f "$stop" ]; do
+              now=$(date +%s.%N)
+              kubectl -n meho-test get pods \
+                -l app.kubernetes.io/name=meho,app.kubernetes.io/instance=meho-test \
+                -o jsonpath='{range .items[?(@.metadata.ownerReferences[0].kind=="ReplicaSet")]}{.metadata.name}{","}{.metadata.deletionTimestamp}{","}{.status.conditions[?(@.type=="Ready")].status}{";"}{end}' \
+                2>/dev/null | sed "s/^/${now} /" >> "$samples" || true
+              echo >> "$samples"
+              sleep 0.5
+            done
+          ) &
+          watcher=$!
+          old_pod=$(kubectl -n meho-test get pods \
+            -l app.kubernetes.io/name=meho,app.kubernetes.io/instance=meho-test \
+            -o jsonpath='{.items[?(@.metadata.ownerReferences[0].kind=="ReplicaSet")].metadata.name}')
+          echo ">> old pod: ${old_pod}"
+          helm upgrade meho-test ./deploy/charts/meho \
+            --namespace meho-test \
+            --kube-as-user meho-installer \
+            --reuse-values \
+            --set-string podAnnotations.update-proof=recreate \
+            --wait \
+            --timeout 10m
+          touch "$stop"
+          wait "$watcher"
+          python3 - "$samples" "$old_pod" <<'PY'
+          import os
+          import sys
+
+          path, old = sys.argv[1], sys.argv[2]
+          rows = []
+          for line in open(path):
+              line = line.strip()
+              if not line or " " not in line:
+                  continue
+              stamp, pods = line.split(" ", 1)
+              entries = [p.split(",") for p in pods.split(";") if p]
+              rows.append((float(stamp), {e[0]: (e[1], e[2]) for e in entries}))
+          both = [t for t, pods in rows if old in pods and len(pods) > 1]
+          if both:
+              sys.exit(f"old and new pod at the same time at {both[0]}")
+          old_seen = [t for t, pods in rows if old in pods]
+          new_seen = [t for t, pods in rows if any(name != old for name in pods)]
+          if not old_seen or not new_seen:
+              sys.exit("the watcher did not see both the old and the new pod")
+          if min(new_seen) <= max(old_seen):
+              sys.exit("the new pod appeared before the old pod was gone")
+          stopping = [t for t, pods in rows if old in pods and pods[old][0]]
+          start = min(stopping) if stopping else max(old_seen)
+          ready = [
+              t for t, pods in rows
+              if any(name != old and state[1] == "True" for name, state in pods.items())
+          ]
+          if not ready:
+              sys.exit("the new pod never reported ready while the watcher ran")
+          downtime = min(ready) - start
+          report = (
+              f"Recreate update: the old pod was gone {max(old_seen) - start:.1f} s after it "
+              f"began to stop; the new pod appeared {min(new_seen) - max(old_seen):.1f} s later; "
+              f"no ready MEHO pod for {downtime:.1f} s in total."
+          )
+          print(">> " + report)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(report + "\n")
+          PY
+
+      - name: A failed start is recovered with helm rollback (#5024)
+        # Start a release whose start fails (MEHO cannot work out its MCP
+        # address, so the start stops). With Recreate the old pod is already
+        # gone. The operation rows and the release that wrote them must stay
+        # as they were, and `helm rollback` must bring the previous release
+        # back. This start fails before its registration step; the case of a
+        # failure after it is covered by test_operation_catalog_atomic.py.
+        run: |
+          set -euo pipefail
+          sel=app.kubernetes.io/name=meho,app.kubernetes.io/instance=meho-test
+          catalog() {
+            kubectl -n meho-test exec meho-test-postgres-0 -c postgres -- \
+              psql -X -tA -h /var/run/postgresql -U postgres -d meho -c "
+                SELECT count(*) || ' ' || md5(coalesce(string_agg(concat_ws('|',
+                  product, version, impl_id, op_id, handler_ref, safety_level,
+                  requires_approval, is_enabled, parameter_schema::text),
+                  E'\n' ORDER BY product, version, impl_id, op_id), ''))
+                  || ' ' || (SELECT coalesce(max(written_by_release), '-') FROM operation_catalog_state)
+                FROM endpoint_descriptor WHERE tenant_id IS NULL"
+          }
+          good_rev=$(helm history meho-test -n meho-test -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)[-1]["revision"])')
+          before=$(catalog)
+          echo ">> operation rows before: ${before}"
+          helm upgrade meho-test ./deploy/charts/meho \
+            --namespace meho-test \
+            --kube-as-user meho-installer \
+            --reuse-values \
+            --set-json 'extraEnv=[{"name":"MCP_RESOURCE_URI","value":""},{"name":"BACKPLANE_URL","value":""}]'
+          failed=""
+          for _ in $(seq 1 90); do
+            restarts=$(kubectl -n meho-test get pods -l "$sel" \
+              -o jsonpath='{.items[?(@.metadata.ownerReferences[0].kind=="ReplicaSet")].status.containerStatuses[?(@.name=="backplane")].restartCount}' || true)
+            if [ -n "$restarts" ] && [ "$restarts" -ge 1 ]; then failed=yes; break; fi
+            sleep 4
+          done
+          [ -n "$failed" ] || { echo "::error::the broken release did not fail its start"; exit 1; }
+          kubectl -n meho-test logs deploy/meho-test -c backplane --previous --tail=20 || true
+          after_failed=$(catalog)
+          echo ">> operation rows after the failed start: ${after_failed}"
+          [ "$after_failed" = "$before" ] \
+            || { echo "::error::a failed start changed the operation rows"; exit 1; }
+          started=$(date +%s)
+          helm rollback meho-test "$good_rev" \
+            --namespace meho-test \
+            --kube-as-user meho-installer \
+            --wait \
+            --timeout 10m
+          kubectl -n meho-test rollout status deployment/meho-test --timeout=5m
+          pod=$(kubectl -n meho-test get pods -l "$sel" \
+            -o jsonpath='{.items[?(@.metadata.ownerReferences[0].kind=="ReplicaSet")].metadata.name}')
+          kubectl -n meho-test exec "$pod" -c backplane -- python -c '
+          import urllib.request
+          print(urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=10).read().decode())
+          '
+          after_rollback=$(catalog)
+          echo ">> operation rows after the rollback: ${after_rollback}"
+          [ "$after_rollback" = "$before" ] \
+            || { echo "::error::the operation rows differ after the rollback"; exit 1; }
+          report="Failed start: the operation rows stayed the same, and helm rollback served again after $(( $(date +%s) - started )) s."
+          echo ">> ${report}"
+          echo "${report}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Dump diagnostics on failure
         if: failure()

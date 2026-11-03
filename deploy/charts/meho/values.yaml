@@ -40,6 +40,29 @@ global:
 # -- Number of backplane replicas. v0.1 is single-replica; HA lands in v0.2.
 replicaCount: 1
 
+# -- How Kubernetes replaces the backplane pod on an update (#5024).
+# `Recreate` (the default) stops the old pod before it starts the new one.
+# So two releases never work on the database at the same time, and a start
+# that fails leaves the operation rows of the old release as they were. The
+# cost is about one to two minutes without MEHO per update. Set
+# `type: RollingUpdate` (with an optional `rollingUpdate` block) only for an
+# install with several pods; see docs/acceptance/rollback.md first.
+updateStrategy:
+  type: Recreate
+
+# -- How the backplane pod stops (#5024, docs/codebase/shutdown-drain.md).
+# The pod's grace period is preStopSleepSeconds + drainSeconds + 30 seconds.
+shutdown:
+  # Seconds the pod keeps serving after Kubernetes decided to stop it, so the
+  # Service and the ingress stop sending it new requests first. Without this
+  # wait, a request can reach the pod while it closes, and the caller gets a
+  # short 502. 0 turns the wait off.
+  preStopSleepSeconds: 5
+  # Seconds running operations may take to finish after the stop signal.
+  # New calls are refused from the signal on. An operation that still runs
+  # at the limit is recorded as unfinished (a log line and an audit row).
+  drainSeconds: 60
+
 image:
   # -- Image repository. The G2.4 pipeline publishes to `ghcr.io/evoila/meho`.
   repository: ghcr.io/evoila/meho

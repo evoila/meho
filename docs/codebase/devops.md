@@ -266,6 +266,22 @@ probes — that's the fail-closed chassis state, not a bug. During chassis-
 stage dev installs the readinessProbe will hold the Pod out of rotation
 until those probes land; that's the intended signal.
 
+### Update strategy and pod stop (#5024)
+
+The Deployment sets `strategy` from `updateStrategy` (default `Recreate`),
+so the old pod has stopped before the new one starts: two releases never
+work on the shared database at the same time. The backplane container
+has a `preStop` hook that sleeps `shutdown.preStopSleepSeconds` (default
+5), so the Service and the ingress drop the pod before it closes; without
+it a request can reach the closing pod and get a short 502. The pod's
+`terminationGracePeriodSeconds` is `preStopSleepSeconds + drainSeconds +
+30`. Both drain limits get `shutdown.drainSeconds`: `SHUTDOWN_DRAIN_SECONDS`
+for MEHO and `UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN` for uvicorn's wait on open
+requests. What the backplane does in that time is in
+[shutdown-drain.md](shutdown-drain.md). Render tests:
+`backend/tests/test_chart_safe_updates.py`. The `helm-test` CI job proves
+the order and the rollback after a failed start on a kind cluster.
+
 ### Security context
 
 The Pod runs with `runAsNonRoot: true`, `runAsUser: 1001`,
@@ -388,8 +404,10 @@ mode the chart renders no Job; the backplane Deployment
 - `migrationJob.backoffLimit` and `ttlSecondsAfterFinished` do not apply;
   the kubelet restarts a failed init container with back-off.
 - **Failure semantics.** A failed migration keeps the pod out of Ready.
-  `helm install --wait` / `helm upgrade --wait` fail at their timeout, and
-  on an upgrade the old pods keep serving. Without `--wait`, Helm reports
+  `helm install --wait` / `helm upgrade --wait` fail at their timeout. On
+  an upgrade with the default `Recreate` strategy (#5024) the old pod has
+  already stopped, so MEHO is down until `helm rollback`
+  ([rollback.md](../acceptance/rollback.md)). Without `--wait`, Helm reports
   success and only the pod status shows the failure, so install the
   built-in core with `--wait` (the form-2 installer does). Logs:
   `kubectl logs <pod> -c migrate`.
@@ -1250,6 +1268,8 @@ them).
 | Path | Default | Notes |
 | --- | --- | --- |
 | `replicaCount` | `1` | Single-replica baseline. |
+| `updateStrategy` | `{type: Recreate}` | The old pod stops before the new one starts (#5024). `RollingUpdate` only for installs with several pods. See [shutdown-drain.md](shutdown-drain.md). |
+| `shutdown.preStopSleepSeconds` / `shutdown.drainSeconds` | `5` / `60` | The `preStop` sleep and the drain limit (`SHUTDOWN_DRAIN_SECONDS`, `UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN`). The grace period is their sum plus 30 seconds. |
 | `image.repository` | `ghcr.io/evoila/meho` | OCI repo from the image pipeline. |
 | `image.pullPolicy` | `IfNotPresent` | `Always` \| `IfNotPresent` \| `Never`. |
 | `service.type` / `service.port` | `ClusterIP` / `8000` | Service shape. |

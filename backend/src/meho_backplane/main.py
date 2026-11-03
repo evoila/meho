@@ -210,6 +210,14 @@ from meho_backplane.operations.result_read_admission import (
     configure_result_read_admission,
     shutdown_result_read_admission,
 )
+from meho_backplane.operations.shutdown_drain import (
+    begin_drain,
+    drain_deadline,
+    install_stop_signal_hook,
+    record_unfinished_operations,
+    reset_drain_state,
+    wait_for_running_operations,
+)
 from meho_backplane.request_usage.retention import (
     start_request_usage_retention_sweeper,
     stop_request_usage_retention_sweeper,
@@ -795,6 +803,21 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
     await _run_lifespan_shutdown()
 
 
+async def _drain_running_operations() -> None:
+    """Let running operations finish before the background loops stop (#5024).
+
+    uvicorn has already waited for the open HTTP requests. This waits for
+    the operations that run in the background (async runs, sensor checks)
+    until ``SHUTDOWN_DRAIN_SECONDS`` after the stop signal, then records
+    every operation that did not finish. See
+    :mod:`meho_backplane.operations.shutdown_drain`.
+    """
+    begin_drain()
+    deadline = drain_deadline(get_settings().shutdown_drain_seconds)
+    still_running = await wait_for_running_operations(deadline)
+    await record_unfinished_operations(still_running)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Application lifespan hook.
@@ -824,6 +847,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     refactor when adding a fourth background loop.
     """
     await _run_lifespan_startup()
+    reset_drain_state()
+    undo_stop_hook = install_stop_signal_hook()
     tasks: _BackgroundTasks | None = None
     try:
         async with operation_catalog_write():
@@ -831,7 +856,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         if tasks is not None:
+            await _drain_running_operations()
             await _stop_background_tasks(tasks)
+        undo_stop_hook()
+        reset_drain_state()
 
 
 app: FastAPI = FastAPI(

@@ -459,9 +459,11 @@ with the line `migration_failed: <ExcClass>: <msg>` on stderr.
 at the hook step, also without `--wait`. With the init container, the
 container exits `1` and the kubelet restarts it with back-off. The pod never
 gets Ready, so `helm install --wait` or `helm upgrade --wait` fails at its
-timeout, and on an upgrade the old pods keep serving (the Deployment's
-rolling update takes no old pod away before a new one is Ready, with one
-replica). Without `--wait`, Helm reports success and only the pod status
+timeout. On an upgrade with the chart's default `Recreate` strategy
+(#5024) the old pod has already stopped, so MEHO is down until
+`helm rollback` (see `docs/acceptance/rollback.md`). Only with
+`updateStrategy.type: RollingUpdate` do the old pods keep serving. Without
+`--wait`, Helm reports success and only the pod status
 shows the failure: install the built-in core with `--wait`. The form-2
 installer does (`deploy/linux-server/lib/core.sh`, `install_core`). To read
 the error: `kubectl logs <pod> -c migrate` (add `--previous` after a

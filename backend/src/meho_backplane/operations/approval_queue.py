@@ -145,6 +145,7 @@ from meho_backplane.operations.approval_resume_checks import (
     target_changed_since_request,
 )
 from meho_backplane.operations.reducer import handle_owner_sub_var
+from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_result
 from meho_backplane.version import running_release_id
 
 __all__ = [
@@ -2168,6 +2169,10 @@ async def resume_dispatch_after_approval(
     # The requester's reveal choice is on the request row, outside the
     # params and the hash (``create_pending_request``). It goes on the
     # params of the run only.
+    # #5024: a stopping pod starts no new run. The claim stays free, so
+    # nothing is used up and nothing was sent.
+    if is_draining():
+        return shutting_down_result(request.op_id)
     effective_params, reveal_secret = _stored_call(request, params)
     if effective_params is None and request.execution_handle is None:
         return _resume_pre0036_denied(operator, request)

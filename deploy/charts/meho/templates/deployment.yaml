@@ -6,6 +6,10 @@ metadata:
     {{- include "meho.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  # Recreate by default (#5024): the old pod has stopped before the new one
+  # starts, so old and new code never share the database.
+  strategy:
+    {{- toYaml .Values.updateStrategy | nindent 4 }}
   selector:
     matchLabels:
       {{- include "meho.selectorLabels" . | nindent 6 }}
@@ -32,6 +36,9 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "meho.serviceAccountName" . }}
+      # The pre-stop wait, the drain and 30 seconds for the rest of the
+      # shutdown (#5024). Kubernetes kills the pod when this time is over.
+      terminationGracePeriodSeconds: {{ add .Values.shutdown.preStopSleepSeconds .Values.shutdown.drainSeconds 30 }}
       automountServiceAccountToken: false
       {{- with include "meho.core.imagePullSecrets" . }}
       imagePullSecrets:
@@ -61,8 +68,10 @@ spec:
         # runner waits for the database (`MIGRATION_DB_WAIT_SECONDS`,
         # default 300 s) and holds a PostgreSQL advisory lock while it
         # migrates, so a second replica waits and then changes nothing. A
-        # failed migration keeps the pod out of Ready: `helm --wait` fails
-        # and, on upgrade, the old pods keep serving. An older image after
+        # failed migration keeps the pod out of Ready: `helm --wait` fails.
+        # With the default Recreate strategy the old pod has already stopped,
+        # so MEHO is down until `helm rollback` (docs/acceptance/rollback.md).
+        # An older image after
         # `helm rollback` leaves a newer schema alone (rollback contract,
         # docs/codebase/migrations.md). Same container as the Job: image
         # and digest pin, command, environment, security context, volumes
@@ -125,6 +134,13 @@ spec:
             # container (the image build does not know its chart release).
             - name: CHART_VERSION
               value: {{ .Chart.Version | quote }}
+            # How long running operations may take to finish after the stop
+            # signal (#5024). uvicorn reads its own limit for open requests
+            # from UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN; both get the same value.
+            - name: SHUTDOWN_DRAIN_SECONDS
+              value: {{ .Values.shutdown.drainSeconds | quote }}
+            - name: UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN
+              value: {{ .Values.shutdown.drainSeconds | quote }}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -304,6 +320,16 @@ spec:
             {{- toYaml .Values.probes.liveness | nindent 12 }}
           readinessProbe:
             {{- toYaml .Values.probes.readiness | nindent 12 }}
+          {{- if gt (int .Values.shutdown.preStopSleepSeconds) 0 }}
+          # Keep serving for a few seconds after Kubernetes decided to stop
+          # the pod, so the Service and the ingress stop sending it requests
+          # before it closes (#5024). Without it, a request can still reach
+          # the closing pod and the caller gets a short 502.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", {{ .Values.shutdown.preStopSleepSeconds | quote }}]
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:

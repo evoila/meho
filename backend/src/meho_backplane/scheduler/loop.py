@@ -155,6 +155,7 @@ from meho_backplane.db.models import (
     ScheduledTriggerStatus,
 )
 from meho_backplane.metrics import note_loop_tick
+from meho_backplane.operations.shutdown_drain import is_draining
 from meho_backplane.scheduler.credentials import (
     AgentCredentialsUnresolvedError,
     resolve_agent_credentials,
@@ -815,6 +816,9 @@ async def run_one_tick(invoker: AgentInvoker | None = None) -> int:
     deterministic :class:`AgentInvoker` over a ``FunctionModel`` so the
     fire path executes end-to-end without a real LLM call.
     """
+    if is_draining():
+        # #5024: a stopping pod fires no trigger. The next pod fires it.
+        return 0
     if invoker is None:
         invoker = get_agent_invoker()
     fires = 0

@@ -496,9 +496,10 @@ command and key rotation:
    - With the hook Job, the new Deployment rolls only after the migration
      succeeds.
    - With the built-in PostgreSQL, a failed migration keeps the new pod
-     out of Ready, and the old pods keep serving. Helm sees this failure
-     only with `--wait`. Without it, Helm reports success and only the
-     pod status shows the failure. So run `helm upgrade` with `--wait`.
+     out of Ready. The old pod has already stopped (step 4), so MEHO is
+     down until you run `helm rollback`. Helm sees this failure only with
+     `--wait`. Without it, Helm reports success and only the pod status
+     shows the failure. So run `helm upgrade` with `--wait`.
 3. The new version ends the approval requests that still wait (#5030). A
    person approves one exact release, so at start-up every `pending`
    request from an older release expires with the reason
@@ -506,6 +507,19 @@ command and key rotation:
    has not run is refused before any vendor call. The requester asks
    again. See
    [`codebase/approvals.md`](codebase/approvals.md#an-approval-covers-one-exact-release-5030).
+4. The old pod stops before the new pod starts (#5024). The chart's
+   update strategy is `Recreate` (`updateStrategy`), so two releases never
+   work on the database at the same time. The old pod first keeps serving
+   for 5 seconds (`shutdown.preStopSleepSeconds`), so the Service and the
+   ingress stop sending it requests. Then it takes no new calls and lets
+   running operations finish, for up to 60 seconds
+   (`shutdown.drainSeconds`). An operation that still runs then is
+   recorded as unfinished: a log line `operation_unfinished_at_shutdown`
+   and an audit row with `result_status: unfinished`. Check its target
+   before you run it again. An update therefore costs about one to two
+   minutes without MEHO: the drain, plus the start of the new pod. Plan
+   updates for a quiet time. Details:
+   [`codebase/shutdown-drain.md`](codebase/shutdown-drain.md).
 
 ### Helm 4 / server-side-apply field-conflict caveat
 
@@ -549,7 +563,9 @@ migration hook has no pre-rollback `alembic downgrade`, so the schema stays
 at `N+1` after a rollback to an app version that expects `N`. The chart
 relies on backend forward-compat (an `N` app tolerating an `N+1` schema).
 See the [`helm rollback meho` acceptance contract](acceptance/rollback.md)
-for what "verified" means and the schema-check fallback.
+for what "verified" means and the schema-check fallback. When a new
+release fails to start, the old pod has already stopped (step 4 above), so
+MEHO is down until you roll back; the contract lists the recovery steps.
 
 ## Version-specific upgrade notes
 

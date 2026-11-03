@@ -567,7 +567,24 @@ async def ready(request: Request) -> JSONResponse:
     ``sandbox_mode`` (#4622) sits at the top level, for every caller, on
     purpose: when the metrics token is set, ``features`` is hidden from a
     caller without it, and the mode must be readable on every instance.
+
+    Once the pod got its stop signal (#5024), ``/ready`` answers 503 with
+    ``{"status": "draining", "checks": []}`` and runs no probe, so no new
+    traffic is sent to a pod that is stopping.
     """
+    # Imported here: the drain module needs the database layer, which
+    # imports this module.
+    from meho_backplane.operations.shutdown_drain import is_draining
+
+    if is_draining():
+        return JSONResponse(
+            content={
+                "status": "draining",
+                "checks": [],
+                "sandbox_mode": sandbox_mode_label(),
+            },
+            status_code=503,
+        )
     results = await run_probes_async()
     ready_ok = bool(results) and all(r.ok for r in results)
     payload: dict[str, object] = {

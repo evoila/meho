@@ -19,6 +19,19 @@ helm upgrade meho oci://ghcr.io/evoila/meho-chart \
    application version. Failed Jobs are retained for ten minutes for
    `kubectl logs`.
 2. Only after migrations succeed does the new Deployment roll.
+3. The old Pod stops before the new Pod starts (update strategy
+   `Recreate`). Old and new code never share the database. The old Pod
+   keeps serving for 5 seconds, so no request runs into a closed Pod.
+   Then it takes no new calls and lets running operations finish, for up
+   to 60 seconds. An operation that still runs then is written to the
+   audit log as `unfinished`: check its target before you run it again.
+   Then the new Pod starts.
+
+**What an update costs:** about one to two minutes without MEHO: the
+drain of the old Pod plus the start of the new one. This is the price of
+never running two versions against one database. Plan updates for a quiet
+time, and tell the people who use MEHO. The values `shutdown.drainSeconds`
+and `shutdown.preStopSleepSeconds` set the two limits.
 
 An upgrade ends the approval requests that still wait. A person approves
 one exact release of MEHO, so when the new version starts, every request
@@ -78,6 +91,18 @@ does change them, so during an update the old pod serves the new settings
 until it stops. `GET /api/v1/health` shows which release wrote the rows
 (`operation_catalog`). After a rollback, if it names another release,
 restart the pods you keep. The rollback contract above has the steps.
+
+**When the new version does not start**, MEHO is down, because the old
+Pod has already stopped. A start that fails changes no operation row, so
+roll back to the last good revision and wait for it:
+
+```bash
+helm history meho -n meho
+helm rollback meho <revision> -n meho --wait --timeout 10m
+```
+
+Then check that `/healthz` answers and `/version` shows the previous
+release. The rollback contract has the full checklist.
 
 ## Version-specific notes
 

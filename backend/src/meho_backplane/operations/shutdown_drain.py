@@ -51,6 +51,13 @@ import structlog
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
+from meho_backplane.operations._audit import (
+    parent_audit_id_var,
+    resolve_agent_session_id,
+    run_id_var,
+    step_id_var,
+    work_ref_var,
+)
 from meho_backplane.request_usage.collector import current_request_id
 
 __all__ = [
@@ -89,7 +96,13 @@ _STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
 @dataclass
 class RunningOperation:
-    """One top-level operation call that runs in this process."""
+    """One top-level operation call that runs in this process.
+
+    Carries the same links as the audit row the call would have written
+    (agent session, parent row, runbook run and step, change ticket), so
+    the row of an unfinished call is found by the same queries: the
+    session replay and the audit filters by session, run or ticket.
+    """
 
     op_id: str
     connector_id: str
@@ -98,6 +111,11 @@ class RunningOperation:
     request_id: uuid.UUID | None
     started_at: datetime
     approved_run: bool
+    agent_session_id: uuid.UUID | None = None
+    parent_audit_id: uuid.UUID | None = None
+    run_id: uuid.UUID | None = None
+    step_id: str | None = None
+    work_ref: str | None = None
     recorded: bool = False
 
 
@@ -196,6 +214,11 @@ async def track_operation(
         request_id=current_request_id(),
         started_at=datetime.now(UTC),
         approved_run=approved_run,
+        agent_session_id=resolve_agent_session_id(),
+        parent_audit_id=parent_audit_id_var.get(),
+        run_id=run_id_var.get(),
+        step_id=step_id_var.get(),
+        work_ref=work_ref_var.get(),
     )
     state = _state
     state.running[key] = entry
@@ -240,6 +263,7 @@ async def record_unfinished_operations(still_running: list[RunningOperation]) ->
             operator_sub=entry.operator_sub,
             tenant_id=str(entry.tenant_id) if entry.tenant_id else None,
             request_id=str(entry.request_id) if entry.request_id else None,
+            agent_session_id=str(entry.agent_session_id) if entry.agent_session_id else None,
             started_at=entry.started_at.isoformat(),
             approved_run=entry.approved_run,
         )
@@ -273,6 +297,11 @@ def _audit_row(entry: RunningOperation, stopped_at: datetime) -> AuditLog:
             "the target. Check the target before you run it again."
         ),
     }
+    # The same mirrors a finished call's row carries in its payload.
+    if entry.parent_audit_id is not None:
+        payload["parent_audit_id"] = str(entry.parent_audit_id)
+    if entry.agent_session_id is not None:
+        payload["agent_session_id"] = str(entry.agent_session_id)
     duration_ms = (stopped_at - entry.started_at).total_seconds() * 1000
     return AuditLog(
         id=uuid.uuid4(),
@@ -280,6 +309,11 @@ def _audit_row(entry: RunningOperation, stopped_at: datetime) -> AuditLog:
         occurred_at=stopped_at,
         operator_sub=entry.operator_sub,
         tenant_id=entry.tenant_id,
+        parent_audit_id=entry.parent_audit_id,
+        agent_session_id=entry.agent_session_id,
+        run_id=entry.run_id,
+        step_id=entry.step_id,
+        work_ref=entry.work_ref,
         method="DISPATCH",
         path=entry.op_id,
         status_code=503,

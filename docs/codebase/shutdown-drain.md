@@ -38,8 +38,15 @@ Tests: `backend/tests/test_shutdown_drain.py`,
      error before they take the run claim, so the claim stays free: the
      operator path (`resume_dispatch_after_approval`) and the agent that
      waits for the approval (`agent/approval_wait.py`, which also leaves
-     the stored run input of a credential write in place);
+     the stored run input of a credential write in place). Both check
+     twice: once on entry and once more right before the claim, because
+     the stop can come during the release and target lookups in between;
    - the sensor runner claims no sensor and the scheduler fires no trigger.
+     The scheduler checks before each trigger of a batch and again after
+     a trigger's preparation (definition and credentials lookup): the stop
+     can come while an earlier run of the batch is awaited. A trigger that
+     was not yet advanced or marked fired stays due for the next pod; a
+     run whose fire state was written goes on.
 
    Not refused, because it is part of work that already runs: a step of a
    running multi-step operation (`composite_depth_var > 0`), and an
@@ -58,7 +65,12 @@ Tests: `backend/tests/test_shutdown_drain.py`,
      tenant, request id, start time);
    - an audit row: `method=DISPATCH`, `path=<op_id>`, `status_code=503`,
      payload `result_status: unfinished`, `execution_outcome: uncertain`,
-     `retry: false`, `started_at`, `stopped_at` and a plain reason.
+     `retry: false`, `started_at`, `stopped_at` and a plain reason. The
+     row carries the same links as the row a finished call writes
+     (`agent_session_id`, `parent_audit_id`, `run_id`, `step_id`,
+     `work_ref`), taken when the call started. So the session replay and
+     the audit filters by session, runbook run or change ticket find an
+     interrupted agent, MCP or runbook call.
 
    The audit write has a 5-second limit and never raises; the log lines
    come first.
@@ -84,7 +96,8 @@ reached the target. The lasting records stay as they are:
 ## Key types
 
 - `RunningOperation`: one running top-level call (op, connector, caller,
-  tenant, request id, start time, approved run or not).
+  tenant, request id, start time, approved run or not, and the audit
+  links: agent session, parent row, runbook run and step, change ticket).
 - `SHUTTING_DOWN_ERROR_CODE` = `meho_shutting_down`.
 - Setting `shutdown_drain_seconds` (`SHUTDOWN_DRAIN_SECONDS`, default 60).
 

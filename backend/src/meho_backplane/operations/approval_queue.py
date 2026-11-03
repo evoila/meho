@@ -2193,6 +2193,12 @@ async def resume_dispatch_after_approval(
     # that read the same approved row, or a racing operator
     # surface), so no-op with a benign already_resumed result rather than
     # double-dispatching the approved write.
+    #
+    # #5024, checked again: the stop may have come during the lookups
+    # above. The claim is the last step before the run, so this is the
+    # last point at which nothing is used up yet.
+    if is_draining():
+        return shutting_down_result(request.op_id)
     if not await claim_resume(request.id):
         _log().info(
             "approval_resume_already_claimed",

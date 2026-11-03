@@ -590,6 +590,21 @@ async def _prepare_invocation(
     )
 
 
+def _stopping(row: ScheduledTrigger) -> bool:
+    """True when the pod got its stop signal; the trigger then stays as it is.
+
+    #5024: checked before each trigger of a tick and again after its
+    preparation, because the stop can come while an earlier trigger's run
+    is awaited or while the definition and credentials are looked up. A
+    trigger that is not advanced or marked fired is due again for the
+    next pod. Once a trigger's fire state is written, its run goes on.
+    """
+    if not is_draining():
+        return False
+    _log.info("scheduler_trigger_left_for_next_pod", trigger_id=str(row.id), kind=row.kind)
+    return True
+
+
 async def _fire_cron(
     session: AsyncSession,
     row: ScheduledTrigger,
@@ -625,6 +640,8 @@ async def _fire_cron(
         # untouched -- a transient miss self-heals on the next tick.
         await _record_skip(session, row, reason=prepared.reason)
         await session.commit()
+        return False
+    if _stopping(row):
         return False
     # The precondition cause (if any) has cleared -- break the skip streak.
     if (row.skip_count or 0) > 0:
@@ -686,6 +703,8 @@ async def _fire_one_off(
         # consumed -- so it still fires once the operator fixes the cause.
         await _record_skip(session, row, reason=prepared.reason)
         await session.commit()
+        return False
+    if _stopping(row):
         return False
     # The precondition cause (if any) has cleared -- break the skip streak.
     if (row.skip_count or 0) > 0:
@@ -840,6 +859,10 @@ async def run_one_tick(invoker: AgentInvoker | None = None) -> int:
                 limit=_CLAIM_BATCH_LIMIT,
             )
             for row in rows:
+                if _stopping(row):
+                    # The stop came while an earlier run of this batch was
+                    # awaited. The rest of the batch stays due.
+                    break
                 try:
                     if row.kind == ScheduledTriggerKind.CRON.value:
                         fired = await _fire_cron(

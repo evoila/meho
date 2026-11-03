@@ -466,12 +466,16 @@ class UnauthorizedApprovalError(ApprovalError):
     ``approver=true``, passes. The route layer maps this to 403.
     """
 
-    def __init__(self, *, operator_sub: str, role: str) -> None:
+    def __init__(self, *, operator_sub: str, role: str, message: str | None = None) -> None:
         self.operator_sub = operator_sub
         self.role = role
         super().__init__(
-            f"operator {operator_sub!r} with role {role!r} may not approve/reject "
-            "an approval request (requires at least 'operator')"
+            message
+            if message is not None
+            else (
+                f"operator {operator_sub!r} with role {role!r} may not "
+                "approve/reject an approval request (requires at least 'operator')"
+            )
         )
 
 
@@ -495,8 +499,6 @@ class ApprovalGroupForbiddenError(UnauthorizedApprovalError):
         safety_level: str,
     ) -> None:
         self.request_id = request_id
-        self.operator_sub = operator_sub
-        self.role = role
         self.safety_level = safety_level
         #: The plain refusal text, without ids, for the web interface.
         self.reason_text = (
@@ -504,10 +506,13 @@ class ApprovalGroupForbiddenError(UnauthorizedApprovalError):
             f"Only {_HIGH_RISK_APPROVERS_TEXT} may approve dangerous and "
             "destructive changes."
         )
-        ApprovalError.__init__(
-            self,
-            f"operator {operator_sub!r} may not approve approval_request "
-            f"{request_id}: {self.reason_text}",
+        super().__init__(
+            operator_sub=operator_sub,
+            role=role,
+            message=(
+                f"operator {operator_sub!r} may not approve approval_request "
+                f"{request_id}: {self.reason_text}"
+            ),
         )
 
 

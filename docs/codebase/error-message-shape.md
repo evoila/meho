@@ -66,6 +66,14 @@ Examples in current use:
   connector-bound typed/composite op. Message:
   `target_required: this operation needs a target; call list_targets and
   pass a target name` — #1506, #4139)
+- `license_read_off` (`call_operation` and `preview_operation`: an
+  ingested read whose path names licences; its answer would carry licence
+  keys in full, so MEHO keeps it off. Refused before the target check and
+  any vendor call, no audit row. Message: `license_read_off: MEHO keeps
+  this ingested read off because its answer carries licence keys; use the
+  connector's hand-written licence read, which shows each key masked` —
+  see `docs/codebase/spec-ingestion.md`, "Ingested licence reads stay
+  off")
 - `receipt_too_large` (`call_operation`: the receipt of a completed run
   could not fit `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`, so the call is
   refused before dispatch and nothing runs — #3641)

@@ -139,6 +139,10 @@ SECRET_FAMILY_PATTERNS: Final[tuple[str, ...]] = (
     "*.keys.*",
     "*:*/key",
     "*:*/keys",
+    # licence keys: a licence read names licences in its path or its op
+    # id (``GET:/v1/license-keys``, ``sddc.license.list``). The stem
+    # covers license, licenses, licensing and licence.
+    "*licen*",
     # VCF deployment specs, logins and depot accounts. The typed operations
     # that send these bodies carry the ``credential`` tag. These globs give
     # the ingested copies of the same vendor calls the same result: SDDC

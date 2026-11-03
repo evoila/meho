@@ -669,6 +669,32 @@ credential read counts as governed in `has_safety_floor`, so a re-ingest
 never lowers a stricter stored row. Tests:
 `tests/test_credential_read_safety_floor.py`.
 
+#### Ingested licence reads stay off
+
+A vendor file can describe a read whose answer carries the product's
+licence keys in full (SDDC Manager `GET /v1/license-keys`, the vCenter
+licence manager's `licenses` property, an NSX `/licenses` list). The
+ingest would give it the `safe` level of its HTTP method. A licence key
+is a paid secret, so MEHO never runs such a read. The rule is one word:
+a `GET` or `HEAD` whose path names licences (`license-keys`, `licenses`,
+`licensing`, `licence`) is a licence read
+(`operations/license_reads.py`). It is broad by design, like the flight
+recorder's family rule, and needs no list of vendor paths. Three places
+apply it:
+
+- `enable-reads` (`bulk_enable_read_ops`) leaves such a row off and turns
+  the other reads on.
+- `call_operation` and `preview_operation` answer `license_read_off`
+  before the target check, the catalog guard, the policy gate and any
+  vendor call, also when an operator turned the row on by hand. Nothing
+  runs, so no audit row is written. The message names the way to read
+  licences: the connector's hand-written licence read, which shows each
+  key masked.
+- The flight recorder never records the body of an op whose id names
+  licences (`*licen*` in `SECRET_FAMILY_PATTERNS`).
+
+Tests: `tests/test_operations_license_reads_stay_off.py`.
+
 #### Applying corrected floors to existing rows
 
 Deploying a corrected connector floor or catalog safety overlay does not rewrite rows that were already

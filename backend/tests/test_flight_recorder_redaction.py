@@ -559,6 +559,9 @@ _SECRET_FAMILY_OPS = [
     "GET:/key",
     "GET:/api/keys",
     "POST:/auth/login",
+    "GET:/v1/license-keys",
+    "GET:/v1/license-keys/{key}",
+    "sddc.license.list",
 ]
 
 

@@ -83,6 +83,7 @@ __all__ = [
     "result_idempotency_key_conflict",
     "result_invalid_op_schema",
     "result_invalid_params",
+    "result_license_read_off",
     "result_no_connector",
     "result_no_target",
     "result_preview_changed_since_approval",
@@ -408,6 +409,32 @@ def result_target_required(op_id: str, duration_ms: float) -> OperationResult:
         ),
         duration_ms=duration_ms,
         extras={"error_code": "target_required", "op_id": op_id},
+    )
+
+
+def result_license_read_off(op_id: str, duration_ms: float) -> OperationResult:
+    """An ingested read of licence keys; MEHO keeps it off.
+
+    The answer of such a read carries the product's licence keys in full,
+    and the ingest would give it the ``safe`` level of its HTTP method. So
+    ``call_operation`` and ``preview_operation`` refuse it before the
+    catalog guard, the policy gate and any vendor call, also when an
+    operator turned the row on by hand (see
+    :mod:`meho_backplane.operations.license_reads`). The message names the
+    way to read licences: the connector's hand-written licence read, which
+    shows each key masked. Same envelope as ``target_required``: no audit
+    row, because nothing ran.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            "license_read_off: MEHO keeps this ingested read off because its "
+            "answer carries licence keys; use the connector's hand-written "
+            "licence read, which shows each key masked"
+        ),
+        duration_ms=duration_ms,
+        extras={"error_code": "license_read_off", "op_id": op_id},
     )
 
 

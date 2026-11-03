@@ -100,8 +100,14 @@ said the opposite; that was wrong.
 The CLI does Steps 1 and 2 for you, and puts the first admin user in
 `MEHO-Admins` and `MEHO-Platform-Admins`. It also adds the
 `meho_tenant` attribute and the `meho-tenants` mapper (see
-[Several tenants](#several-tenants-the-meho_tenants-list)). It is safe
-to run twice:
+[Several tenants](#several-tenants-the-meho_tenants-list)). Use it for
+a new realm. On a realm that already works, update the sign-in clients
+and groups one setting at a time, for example with the operation
+`keycloak.client.update` or in the admin console: the command sets its
+values again on every run and overwrites what an admin changed, such as
+the redirect URIs of `meho-mcp` and the `tenant-id` and `tenant-role`
+mappers. `--dry-run` reads the realm and prints each change first,
+without changing anything.
 
 ```bash
 KEYCLOAK_ADMIN_PASSWORD=... KEYCLOAK_ADMIN_USER_PASSWORD=... \
@@ -297,8 +303,17 @@ Older realms often have **Hardcoded claim** mappers that put the same
 `tenant_id` and `tenant_role` into every token of the client. Remove
 them:
 
-- **Run `meho admin keycloak bootstrap-clients` again.** It turns the
-  fixed-value `tenant-id` and `tenant-role` mappers it made earlier
+- **Prefer to update the sign-in clients by hand** (the last point
+  below), for example in the admin console and with the operation
+  `keycloak.client.update`. Use `meho admin keycloak bootstrap-clients`
+  only for a new realm, or for a realm that it set up and that nobody
+  changed since.
+- **If you run `meho admin keycloak bootstrap-clients` again,** run it
+  with `--dry-run` first. It reads the realm and prints each change,
+  with the old and the new value. A real run also rewrites the
+  redirect URIs, web origins and flow switches of `meho-cli`,
+  `meho-cli-approve` and `meho-mcp`, and all eight mappers. It turns
+  the fixed-value `tenant-id` and `tenant-role` mappers it made earlier
   into User Attribute mappers, adds the `approver` mapper, creates the
   five groups, and puts the first admin user in `MEHO-Admins`. It
   prints `[updated] mapper tenant-id (replaced
@@ -462,7 +477,7 @@ Practical consequences for an operator standing up a v0.2 deploy:
 | `401 unknown_tenant_role` | The group's `tenant_role` attribute is not exactly `tenant_admin` / `operator` / `read_only` (for example `read-only` with a hyphen), or a leftover **User Realm Role** mapper forwards realm-role names like `meho-operator` | Fix the group attribute ([Step 1](#step-1--create-the-five-groups)); delete the User Realm Role mapper |
 | `401 multiple_role_groups` for one person only | The person is in two or more of the five groups (the message names them) | Keep the person in exactly one group, then log in again |
 | A person gets the wrong role, or a different role from one login to the next | The person has their own `tenant_role` attribute (which wins over the group) | Clear the person's own `tenant_id` / `tenant_role` / `approver` attributes |
-| Every person gets the same role, whatever their group | A **Hardcoded claim** mapper for `tenant_role` or `tenant_id` is still on the client or one of its client scopes | Delete it, or re-run `meho admin keycloak bootstrap-clients` ([upgrading](#upgrading-a-realm-that-still-has-fixed-values)) |
+| Every person gets the same role, whatever their group | A **Hardcoded claim** mapper for `tenant_role` or `tenant_id` is still on the client or one of its client scopes | Delete it and add the User Attribute mapper by hand ([upgrading](#upgrading-a-realm-that-still-has-fixed-values)). Use `meho admin keycloak bootstrap-clients` for this only on a new realm. |
 | `403 Forbidden` on a route that worked before | The person's `tenant_role` is now below what the route requires (for example they moved to `MEHO-Readers`) | Move the person to the right group. Tokens already issued keep the old role until they expire (or the person runs `meho login` again). |
 | Claims appear on userinfo but not on the access token | Mapper has **Add to userinfo: on** but **Add to access token: off** | Toggle both on |
 | Mapper changes don't take effect for already-logged-in operators | Cached access tokens are still being sent until they expire | Wait for token expiry (or invoke `meho login` again to mint a fresh token) |

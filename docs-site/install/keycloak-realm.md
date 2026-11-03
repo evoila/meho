@@ -53,6 +53,16 @@ the end, then return to the trail.
     once you have an admin credential wired up, use this page to
     understand or verify what it did.
 
+    Use the helper only for a **new realm**. On a realm that already
+    works, update the sign-in clients one setting at a time, for
+    example with the operation `keycloak.client.update` or in the admin
+    console. The helper sets its values again on every run: it
+    overwrites the redirect URIs, web origins and flow switches of the
+    three clients, and the eight mappers, also `tenant-id` and
+    `tenant-role`. If you do run it on an existing realm, run it with
+    `--dry-run` first: it reads the realm and prints each change, with
+    the old and the new value, and changes nothing.
+
 ## Step 1 — Trust the deployment's CA on your workstation
 
 Skip this step if your backplane and Keycloak present certificates
@@ -164,13 +174,17 @@ Create flow**:
 People who sign in with a company login see its button on the form and
 click it.
 
-**On an existing realm.** `meho admin keycloak bootstrap-clients` creates
-`meho-cli-approve` and its login flow when you run it again, and sets
-the two token settings above on an existing `meho-cli-approve`. A run
-that stopped half-way leaves a flow with missing steps; the next run
-finishes it. A flow `meho approval sign-in` with other steps than the
-ones above is left as it is, and the client is not bound to it: fix the
-flow by hand, then run the command again. The
+**On an existing realm.** Create `meho-cli-approve` by hand as above,
+or with the operation `keycloak.client.create`, and set the two token
+settings on an existing `meho-cli-approve` with
+`keycloak.client.update`. Add its login flow as the next section says.
+Do not
+run `meho admin keycloak bootstrap-clients` for this: on an existing
+realm it also rewrites the `meho-cli` and `meho-mcp` clients and their
+tenant and role mappers. Use it only for a new realm. On a new realm,
+a run that stopped half-way leaves a flow with missing steps; the next
+run finishes it. A flow `meho approval sign-in` with other steps than
+the ones above is left as it is, and the client is not bound to it. The
 Keycloak that ships with the MEHO chart creates the client on the next
 upgrade (the realm finishing job adds a client that is missing, and sets
 the two token settings on an existing one). The job makes
@@ -554,8 +568,9 @@ If the realm does not offer `offline_access` to `meho-cli` (an older
 realm), `meho login` logs in without it. It prints one line: the login
 ends after a short time without use, and how to fix the realm. MEHO's
 built-in login setup gets the scope at the next upgrade. On your own
-Keycloak, assign it as described in Step 2, or run
-`meho admin keycloak bootstrap-clients`.
+Keycloak, assign it as described in Step 2, in the admin console. Do
+not run `meho admin keycloak bootstrap-clients` on a realm that already
+works: it also rewrites the other sign-in clients and their mappers.
 
 ### How long an MCP login lasts
 
@@ -893,13 +908,13 @@ usually appear:
 | `unauthorized_client` at login start | The client is confidential, or the device grant is off | Step 2 — public client, device grant **On**. |
 | `meho login` fails at once with `invalid_request` and "Missing parameter: code_challenge_method" | The login client (`meho-cli`) requires a PKCE method. `meho login` sends no PKCE, and Keycloak checks PKCE at the device login too. A realm made with MEHO 0.40.0, 0.41.0 or 0.42.0 (the built-in Keycloak, or `meho admin keycloak bootstrap-clients`) set `S256` on it. | Clear the PKCE method on the login client: in the admin console (Advanced → Proof Key for Code Exchange, set it to empty), or with the operation `keycloak.client.update` and the representation `{"attributes": {"pkce.code.challenge.method": ""}}` (an empty value removes the attribute). Step 2. |
 | Token issued, every call 401s with `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` | Missing protocol mappers, or the person is in none of the five groups | Step 3 — add all the mappers; Step 5 — put the person in one group. Then log out and back in. |
-| Everyone gets the same role, whatever their group | A fixed-value (Hardcoded claim) `tenant_role` mapper is still on the client | Delete it, or re-run `meho admin keycloak bootstrap-clients`, which replaces it. |
+| Everyone gets the same role, whatever their group | A fixed-value (Hardcoded claim) `tenant_role` mapper is still on the client | Delete it, and add the User Attribute mapper of Step 3 in the admin console. On an existing realm, do not run `meho admin keycloak bootstrap-clients` for this: it rewrites all the mappers and clients. |
 | Token issued, every call 401s with `invalid_token` or `missing_sub`; the decoded token has no `sub` | The `basic` scope is not a default scope on the client | Step 4 — assign it, re-login (existing tokens stay broken). |
 | `meho approvals approve` fails with `fresh_sign_in_required` right after you signed in again | The access token has no `auth_time` or no `acr` (the `basic` or `acr` scope is missing), or it was not made for the approval client (the chart's `config.keycloakCliApproveClientId` does not name the client), or the client does not use its own login flow | Step 4 — assign `basic` and `acr` to `meho-cli-approve`; check the client ID and its login flow in Step 2. Or approve in the web interface. |
 | The console shows **Sign in to approve** right after you signed in with your password | The access token of `meho-web` has no `auth_time` or no `acr` (the `basic` or `acr` scope is missing on `meho-web`), or `FRESH_SIGN_IN_MAX_AGE_SECONDS` is very short | Step 4 — assign `basic` and `acr` to `meho-web` as default scopes, then sign in again. |
-| The browser shows "Client not found" or "Invalid parameter: redirect_uri" during `meho approvals approve` | `meho-cli-approve` is missing, or `http://127.0.0.1:*` is not one of its redirect URIs | Step 2 — create it, or re-run `meho admin keycloak bootstrap-clients`. |
+| The browser shows "Client not found" or "Invalid parameter: redirect_uri" during `meho approvals approve` | `meho-cli-approve` is missing, or `http://127.0.0.1:*` is not one of its redirect URIs | Step 2 — create it, or add the redirect URI with `keycloak.client.update`. Use `meho admin keycloak bootstrap-clients` only on a new realm. |
 | `meho login` times out before you can approve | An ambient wrapper timeout (CI step, IDE task) shorter than the approval wait | Run `meho login` in a real terminal, or raise the wrapper timeout. |
-| MCP login fails with `invalid_scope` ("Invalid scopes: …") and the Keycloak login page never appears | The client asked for a scope that `meho-mcp` does not offer: `offline_access`, `mcp:read`, `mcp:execute` or `mcp:admin` | Create the scope if it is missing, then assign it as an **optional** scope on `meho-mcp` (see the MCP client table above). Or re-run `meho admin keycloak bootstrap-clients`. |
+| MCP login fails with `invalid_scope` ("Invalid scopes: …") and the Keycloak login page never appears | The client asked for a scope that `meho-mcp` does not offer: `offline_access`, `mcp:read`, `mcp:execute` or `mcp:admin` | Create the scope if it is missing (for example with `keycloak.client_scope.create`), then assign it as an **optional** scope on `meho-mcp` (see the MCP client table above). On a new realm, `meho admin keycloak bootstrap-clients` does both. |
 | `x509: certificate signed by unknown authority` | Workstation OS trust store missing your CA | Step 1 / [TLS and ingress](tls-ingress.md#your-workstation-os-trust-store). |
 
 A fuller, client-by-client troubleshooting page ships with the

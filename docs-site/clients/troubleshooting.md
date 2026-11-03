@@ -116,12 +116,15 @@ scope silently. Four scopes can cause this:
 Keycloak ships `offline_access`, but not the three `mcp:*` scopes. A realm
 set up by hand often misses them.
 
-**Fix.** Re-run `meho admin keycloak bootstrap-clients`. It creates the
-missing `mcp:*` scopes and adds all four scopes to `meho-mcp` as
-**optional**. Or do it by hand: create each missing `mcp:*` scope under
-**Client scopes → Create client scope**, then add each scope the error
-names to `meho-mcp` as an **optional** scope (not default — only flows
-that ask for a scope should get it). See
+**Fix.** Update the sign-in client `meho-mcp`: create each missing
+`mcp:*` scope under **Client scopes → Create client scope** (or with
+the operation `keycloak.client_scope.create`), then add each scope the
+error names to `meho-mcp` as an **optional** scope (not default — only
+flows that ask for a scope should get it). Use
+`meho admin keycloak bootstrap-clients` only for a new realm: it does
+all of this, but on a realm that already works it also rewrites the
+`meho-cli` and `meho-mcp` clients and their tenant and role mappers.
+To see what it would change, run it with `--dry-run`. See
 [Keycloak realm setup](../install/keycloak-realm.md#the-mcp-client-meho-mcp).
 `meho-cli` does not get these scopes by default.
 

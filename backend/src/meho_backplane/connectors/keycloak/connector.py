@@ -85,7 +85,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 
 import httpx
 import structlog
@@ -112,6 +112,7 @@ from meho_backplane.connectors.keycloak._paths import (
     _USERS_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakAdminCredentialsLoader,
@@ -150,6 +151,12 @@ _DEFAULT_TOKEN_TTL_SECONDS: float = 60.0
 #: idempotent-GET retry decorator (re-firing a side effect on a transient
 #: 5xx is the bug that guard prevents).
 _MUTATING_METHODS: frozenset[str] = frozenset({"POST", "PUT", "DELETE"})
+
+#: What the flight recorder stores in place of an Admin REST answer that is
+#: not JSON, or that the mask could not walk. Keycloak answers JSON on every
+#: recorded call; anything else is left out of the trace rather than stored
+#: unread.
+_TRACE_BODY_WITHHELD: Final[str] = "<response body left out: MEHO could not mask it>"
 
 
 @dataclass(frozen=True)
@@ -613,6 +620,32 @@ class KeycloakConnector(HttpConnector):
             reason=str(fp.extras.get("error", "unreachable")),
             probed_at=fp.probed_at,
         )
+
+    # -- flight recorder trace mask -------------------------------------
+
+    def trace_response_body(self, response: httpx.Response) -> Any:
+        """Record Admin REST answers with every secret field masked.
+
+        The flight recorder stores the vendor answer of each recorded call.
+        A client representation carries the confidential client's
+        ``secret``, a user representation can carry ``credentials``, and a
+        realm's ``smtpServer`` map carries a ``password``. The trace gets
+        the same scrub the operation result gets
+        (:func:`~meho_backplane.connectors.keycloak.redaction.redact_secret_fields`),
+        so the stored trace and the agent copy hold ``***REDACTED***`` where
+        the result does. An empty body is recorded as it is. A body that is
+        not JSON is replaced by a fixed marker. Never raises.
+        """
+        if not response.content:
+            return None
+        try:
+            body = response.json()
+        except ValueError:
+            return _TRACE_BODY_WITHHELD
+        try:
+            return redact_secret_fields(body)
+        except Exception:  # a trace must never break the call, and never hold a secret
+            return _TRACE_BODY_WITHHELD
 
     # -- admin-auth JSON GET helpers ------------------------------------
 

@@ -81,6 +81,49 @@ def _declared_length(scope: Scope) -> int | None:
     return None
 
 
+class _Cap:
+    """The byte cap, read from the settings only once a request carries body bytes.
+
+    A body-less request (``GET /``, the probes) never touches the
+    settings, so the app answers those before its settings exist.
+    """
+
+    def __init__(self) -> None:
+        self._value: int | None = None
+
+    @property
+    def value(self) -> int:
+        if self._value is None:
+            self._value = get_settings().http_max_request_body_bytes
+        return self._value
+
+
+class _BodyGuard:
+    """Counts the body bytes the app reads and notes when the response starts."""
+
+    def __init__(self, receive: Receive, send: Send, cap: _Cap) -> None:
+        self._receive = receive
+        self._send = send
+        self._cap = cap
+        self.total = 0
+        self.response_started = False
+
+    async def receive(self) -> Message:
+        message = await self._receive()
+        if message["type"] == "http.request":
+            body = message.get("body", b"")
+            if body:
+                self.total += len(body)
+                if self.total > self._cap.value:
+                    raise RequestBodyTooLargeError(self._cap.value)
+        return message
+
+    async def send(self, message: Message) -> None:
+        if message["type"] == "http.response.start":
+            self.response_started = True
+        await self._send(message)
+
+
 class RequestBodyLimitMiddleware:
     """Refuse HTTP request bodies above the configured byte cap with ``413``."""
 
@@ -92,48 +135,31 @@ class RequestBodyLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        max_bytes = get_settings().http_max_request_body_bytes
+        cap = _Cap()
         declared = _declared_length(scope)
-        if declared is not None and declared > max_bytes:
+        if declared is not None and declared > 0 and declared > cap.value:
             _log.warning(
                 "request_body_too_large",
                 path=scope.get("path"),
                 declared_bytes=declared,
-                max_bytes=max_bytes,
+                max_bytes=cap.value,
             )
-            await self._send_too_large(send, max_bytes)
+            await self._send_too_large(send, cap.value)
             return
 
-        response_started = False
-        total = 0
-
-        async def receive_capped() -> Message:
-            nonlocal total
-            message = await receive()
-            if message["type"] == "http.request":
-                total += len(message.get("body", b""))
-                if total > max_bytes:
-                    raise RequestBodyTooLargeError(max_bytes)
-            return message
-
-        async def send_tracking(message: Message) -> None:
-            nonlocal response_started
-            if message["type"] == "http.response.start":
-                response_started = True
-            await send(message)
-
+        guard = _BodyGuard(receive, send, cap)
         try:
-            await self.app(scope, receive_capped, send_tracking)
-        except RequestBodyTooLargeError:
+            await self.app(scope, guard.receive, guard.send)
+        except RequestBodyTooLargeError as exc:
             _log.warning(
                 "request_body_too_large",
                 path=scope.get("path"),
-                read_bytes=total,
-                max_bytes=max_bytes,
+                read_bytes=guard.total,
+                max_bytes=exc.max_bytes,
             )
-            if response_started:
+            if guard.response_started:
                 raise
-            await self._send_too_large(send, max_bytes)
+            await self._send_too_large(send, exc.max_bytes)
 
     @staticmethod
     async def _send_too_large(send: Send, max_bytes: int) -> None:

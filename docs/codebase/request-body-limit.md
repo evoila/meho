@@ -15,7 +15,7 @@ the one backstop for all routes; routes with a tighter cap keep it.
 
 | Symbol | Role |
 |---|---|
-| `RequestBodyLimitMiddleware` | Pure-ASGI middleware. Reads the cap from `Settings.http_max_request_body_bytes` on each request. |
+| `RequestBodyLimitMiddleware` | Pure-ASGI middleware. Reads the cap from `Settings.http_max_request_body_bytes` once a request carries body bytes; a body-less request needs no settings. |
 | `RequestBodyTooLargeError` | Raised from the wrapped `receive` when the running byte total crosses the cap. An `HTTPException` with status `413`. |
 
 ## Control flow

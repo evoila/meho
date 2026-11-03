@@ -132,3 +132,22 @@ def test_declared_form_body_over_cap_is_refused_with_413(client: TestClient) -> 
     assert response.status_code == 413
     assert response.json() == {"detail": f"request body exceeds {_CAP} bytes"}
     assert client.app.state.calls == []
+
+
+def test_body_less_request_never_reads_the_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A request without body bytes needs no settings, so the app starts without them."""
+
+    def no_settings() -> SimpleNamespace:
+        raise KeyError("KEYCLOAK_ISSUER_URL")
+
+    monkeypatch.setattr("meho_backplane.request_body_limit.get_settings", no_settings)
+    app = FastAPI()
+    app.add_middleware(RequestBodyLimitMiddleware)
+
+    @app.get("/")
+    async def root() -> dict[str, str]:
+        return {"name": "meho-backplane"}
+
+    with TestClient(app) as test_client:
+        assert test_client.get("/").status_code == 200
+        assert test_client.post("/", content=b"").status_code == 405

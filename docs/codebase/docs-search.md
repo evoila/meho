@@ -169,6 +169,25 @@ read from a *tenant-configurable* `backend.ref`, so two controls stop a
   corpus requiring auth then fails closed). Tradeoff: the corpus's own
   audit attributes the call to the service principal, not the operator;
   MEHO's central `audit_log` is unaffected.
+- **Docs-service hosts named by the deployment.** The token goes only to
+  a host the deployment named: the host of `CORPUS_URL`, or an entry of
+  `CORPUS_ALLOWED_HOSTS` (`corpus_allowed_hosts`, read by
+  `corpus_allowed_hosts()` in `auth/corpus.py`). Every dial (search, ask,
+  read and the readiness probe) checks this first, in
+  `assert_corpus_host_allowed`, before the public-address screen; any
+  other host is `CorpusUnavailable` → 503 and no request is sent. The
+  collection create and update paths run the same check on all three
+  endpoint fields (`endpoint`, `answer_endpoint`, `read_endpoint`), so a
+  collection can only point at a docs service the deployment runs. The
+  match is exact on the host name or IP literal (case and a trailing dot
+  ignored); a name that only resolves to a listed address does not count.
+- **Pinned connection.** Each dial runs over a client built by
+  `_corpus_client`: an httpx client whose transport
+  (`build_pinned_async_transport`, shared with the connector dial path)
+  checks the host again when the TCP connection opens and connects only
+  to an address from that same check. A refused address surfaces as
+  `CorpusDialBlockedError`, an `httpx.ConnectError`, which `_dial_corpus`
+  maps onto `CorpusUnavailable` like any other failed connect.
 
 ### `ask_corpus(...)` (`meho_backplane.auth.corpus`, #3911)
 

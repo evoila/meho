@@ -2214,6 +2214,16 @@ class Settings(BaseModel):
     #: 503) rather than receiving the operator bearer. ``repr=False`` keeps
     #: the secret out of ``Settings`` reprs / structured logs.
     corpus_service_token: str = Field(default="", repr=False)
+    #: Hosts of the docs services this deployment uses, as a comma-separated
+    #: list of host names or IP addresses (no scheme, port or path). MEHO
+    #: dials a docs-service endpoint, and sends ``corpus_service_token``,
+    #: only when the endpoint's host is on this list or is the host of
+    #: ``corpus_url``. A tenant's doc collection can therefore only point at
+    #: a docs service the deployment named. Matching is exact and ignores
+    #: case and a trailing dot; a host that only resolves to a listed
+    #: address does not count. Empty ("") allows the host of ``corpus_url``
+    #: alone. Read via :func:`~meho_backplane.auth.corpus.corpus_allowed_hosts`.
+    corpus_allowed_hosts: str = ""
     #: Bound on the corpus HTTP request (connect / read / write), in
     #: seconds. A slow corpus raises ``CorpusUnavailable`` rather than
     #: blocking the event loop.
@@ -3140,6 +3150,7 @@ def get_settings() -> Settings:
         corpus_url=os.environ.get("CORPUS_URL", "").strip(),
         corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),
         corpus_service_token=os.environ.get("CORPUS_SERVICE_TOKEN", "").strip(),
+        corpus_allowed_hosts=os.environ.get("CORPUS_ALLOWED_HOSTS", "").strip(),
         corpus_timeout_seconds=float(
             os.environ.get("CORPUS_TIMEOUT_SECONDS", "10.0"),
         ),

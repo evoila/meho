@@ -34,6 +34,18 @@ credential-capture + SSRF path). Two controls close it here:
   bearer. An empty setting sends no ``Authorization`` header (a corpus
   that requires auth then fails closed) rather than falling back to the
   operator JWT.
+* **Deployment-named docs-service hosts.** The credential goes only to a
+  host the deployment named: the host of ``settings.corpus_url``, or an
+  entry of ``settings.corpus_allowed_hosts`` (``CORPUS_ALLOWED_HOSTS``).
+  Every corpus dial checks this first
+  (:func:`assert_corpus_host_allowed`), and the doc-collection create and
+  update paths refuse an endpoint on any other host, so a tenant's
+  collection can only point at a docs service the deployment runs.
+* **Pinned connection.** The dial connects only to an address the
+  destination guard checked at connect time
+  (:func:`~meho_backplane.connectors._shared.pinned_transport.build_pinned_async_transport`),
+  so a name that changes its answer between the check and the connect
+  cannot steer the socket elsewhere.
 
 The tradeoff of no longer forwarding the operator JWT: the corpus's own
 audit log now attributes the call to the service principal, not the
@@ -90,19 +102,24 @@ from pydantic import (
 )
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.pinned_transport import build_pinned_async_transport
 from meho_backplane.settings import Settings, get_settings
 from meho_backplane.targets.ssrf_guard import (
     TARGET_SSRF_ALLOWLIST_ENV,
     TargetDestinationBlockedError,
     assert_public_destination_async,
     is_allowlisted,
+    screen_and_resolve,
 )
 
 __all__ = [
+    "CORPUS_ALLOWED_HOSTS_ENV",
     "READ_CALLER_HEADER",
     "CorpusAnswerError",
     "CorpusChunk",
+    "CorpusDialBlockedError",
     "CorpusEndpointBlockedError",
+    "CorpusHostNotAllowedError",
     "CorpusReadError",
     "CorpusSearchResponse",
     "CorpusStatusResponse",
@@ -116,6 +133,8 @@ __all__ = [
     "UpstreamCitation",
     "UpstreamRead",
     "ask_corpus",
+    "assert_corpus_host_allowed",
+    "corpus_allowed_hosts",
     "corpus_endpoint_host",
     "corpus_status",
     "derive_answer_url",
@@ -234,19 +253,153 @@ def corpus_endpoint_host(url: str) -> str:
     )
 
 
-async def _screen_corpus_dial(url: str) -> None:
-    """Fail closed unless *url* is an ``https`` public corpus destination.
+#: Env var behind ``settings.corpus_allowed_hosts``: the docs-service hosts
+#: this deployment uses, beside the host of ``CORPUS_URL``.
+CORPUS_ALLOWED_HOSTS_ENV: Final[str] = "CORPUS_ALLOWED_HOSTS"
 
-    The connect-time enforcement point for both the search and the
-    readiness dial: requires ``https`` + a public host (allowlist-aware;
-    an allowlisted host may also use ``http``, see :func:`corpus_endpoint_host`)
-    and maps any rejection onto :class:`CorpusUnavailable` so the consuming
-    route renders a 503. The message never echoes the resolved address (no
-    internal-topology oracle — the guard's posture).
+
+class CorpusHostNotAllowedError(CorpusEndpointBlockedError):
+    """A corpus endpoint names a host this deployment did not name as a docs service.
+
+    Raised by :func:`assert_corpus_host_allowed`. A subclass of
+    :class:`CorpusEndpointBlockedError`, so the create path's one ``except``
+    renders it as the same 422 and the dial path maps it onto
+    :class:`CorpusUnavailable`.
+    """
+
+
+def _normalise_host(value: str) -> str:
+    """Return *value* as the host form the allowed-hosts set compares on."""
+    host = value.strip().rstrip(".").lower()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    return host
+
+
+def corpus_allowed_hosts(settings: Settings) -> frozenset[str]:
+    """Return the docs-service hosts a corpus dial may go to.
+
+    The set is the host of ``settings.corpus_url`` (when set and parseable)
+    plus each entry of ``settings.corpus_allowed_hosts``, each as a
+    lower-case host name or IP literal without a trailing dot. Entries are
+    exact hosts: no scheme, port, path or address range.
+    """
+    hosts: set[str] = set()
+    if settings.corpus_url:
+        try:
+            base = urlsplit(settings.corpus_url).hostname
+        except ValueError:
+            base = None
+        if base:
+            hosts.add(_normalise_host(base))
+    for entry in settings.corpus_allowed_hosts.split(","):
+        host = _normalise_host(entry)
+        if host:
+            hosts.add(host)
+    return frozenset(hosts)
+
+
+def assert_corpus_host_allowed(host: str, settings: Settings) -> None:
+    """Refuse *host* unless it is one of :func:`corpus_allowed_hosts`.
+
+    *host* is the bare host of a corpus endpoint, as
+    :func:`corpus_endpoint_host` returns it. The check is an exact match
+    on the name or IP literal; no DNS lookup is made, so a name that only
+    resolves to a listed address does not count.
+
+    Raises:
+        CorpusHostNotAllowedError: *host* is not a docs-service host of
+            this deployment. The message names the two settings that add
+            one and never echoes the host.
+    """
+    if _normalise_host(host) not in corpus_allowed_hosts(settings):
+        raise CorpusHostNotAllowedError(
+            "corpus endpoint host is not a docs-service host of this deployment: "
+            f"set CORPUS_URL to it, or list it in {CORPUS_ALLOWED_HOSTS_ENV}"
+        )
+
+
+class CorpusDialBlockedError(httpx.ConnectError):
+    """The connect-time check refused the address a corpus dial was about to use.
+
+    Raised inside the pinned transport's ``connect_tcp``. An
+    :class:`httpx.ConnectError` subclass, so httpx hands it back unchanged
+    and the dial's ``except httpx.HTTPError`` arm maps it onto
+    :class:`CorpusUnavailable` like any other failed connect.
+    """
+
+
+def _pin_corpus_addresses(host: str) -> list[str] | None:
+    """Connect-time check for the pinned corpus transport.
+
+    Returns the checked addresses the socket may dial, or ``None`` to dial
+    an allowlisted name unchanged. A blocked answer becomes
+    :class:`CorpusDialBlockedError`; its message never names an address.
+    """
+    try:
+        return screen_and_resolve(host)
+    except TargetDestinationBlockedError as exc:
+        raise CorpusDialBlockedError(str(exc)) from exc
+
+
+def _corpus_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
+    """Build the client for one corpus dial.
+
+    Its transport checks the host again when the connection opens and
+    connects only to an address from that same check, so the address the
+    socket reaches is the address that was checked.
+    """
+    return httpx.AsyncClient(
+        transport=build_pinned_async_transport(_pin_corpus_addresses),
+        timeout=timeout,
+    )
+
+
+async def _dial_corpus(
+    method: str,
+    url: str,
+    *,
+    timeout: httpx.Timeout,
+    headers: dict[str, str],
+    event: str,
+    json: Any | None = None,
+    params: dict[str, str] | None = None,
+) -> httpx.Response:
+    """Send one request to the corpus over the pinned client.
+
+    The pre-dial screen (:func:`_screen_corpus_dial`) has already run. A
+    connect error, a timeout, a refused address from the pinned transport,
+    or any other transport failure is logged under *event* by exception
+    type only (never the credential or the body) and maps onto
+    :class:`CorpusUnavailable`, so the consuming route renders a 503.
+    """
+    try:
+        async with _corpus_client(timeout) as client:
+            return await client.request(method, url, json=json, params=params, headers=headers)
+    except httpx.HTTPError as exc:
+        _log.warning(event, error=type(exc).__name__)
+        raise CorpusUnavailable(f"corpus unreachable: {type(exc).__name__}") from exc
+
+
+async def _screen_corpus_dial(url: str) -> None:
+    """Fail closed unless *url* is an allowed corpus destination.
+
+    The pre-dial enforcement point for the search, answer, read and
+    readiness dials: requires ``https`` + a public host (allowlist-aware;
+    an allowlisted host may also use ``http``, see :func:`corpus_endpoint_host`),
+    a host this deployment named as a docs service
+    (:func:`assert_corpus_host_allowed`), and maps any rejection onto
+    :class:`CorpusUnavailable` so the consuming route renders a 503. The
+    message never echoes the resolved address (no internal-topology
+    oracle — the guard's posture).
     """
     try:
         host = corpus_endpoint_host(url)
+        assert_corpus_host_allowed(host, get_settings())
         await assert_public_destination_async(host)
+    except CorpusHostNotAllowedError as exc:
+        _log.warning("corpus_endpoint_host_not_allowed")
+        raise CorpusUnavailable(str(exc)) from exc
     except TargetDestinationBlockedError as exc:
         _log.warning("corpus_endpoint_blocked")
         raise CorpusUnavailable(
@@ -662,27 +815,32 @@ async def search_corpus(
     headers = _corpus_auth_headers(settings)
     timeout = httpx.Timeout(settings.corpus_timeout_seconds)
 
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(resolved_url, json=payload, headers=headers)
-    except httpx.HTTPError as exc:
-        # ConnectError / TimeoutException / any transport failure — the
-        # corpus is unreachable. Log the cause by type (never the service
-        # credential or the query body) and fail closed.
-        _log.warning("corpus_unreachable", error=type(exc).__name__)
-        raise CorpusUnavailable(f"corpus unreachable: {type(exc).__name__}") from exc
+    response = await _dial_corpus(
+        "POST",
+        resolved_url,
+        timeout=timeout,
+        headers=headers,
+        event="corpus_unreachable",
+        json=payload,
+    )
 
+    _raise_unless_2xx(response, event_prefix="corpus")
+    return _parse_2xx_body(response, CorpusSearchResponse, event_prefix="corpus")
+
+
+def _raise_unless_2xx(response: httpx.Response, *, event_prefix: str) -> None:
+    """Map a non-2xx corpus answer onto :class:`CorpusUnavailable` carrying the status.
+
+    The status is logged and carried for observability, but never the
+    response body: a corpus error page must not ride out through the 503
+    the route renders. *event_prefix* namespaces the structlog event.
+    """
     if response.status_code // 100 != 2:
-        # Non-2xx: surface the status for observability, but never the
-        # response body — a corpus error page must not leak through the
-        # 503 the route renders.
-        _log.warning("corpus_request_failed", status=response.status_code)
+        _log.warning(f"{event_prefix}_request_failed", status=response.status_code)
         raise CorpusUnavailable(
             f"corpus returned HTTP {response.status_code}",
             status=response.status_code,
         )
-
-    return _parse_2xx_body(response, CorpusSearchResponse, event_prefix="corpus")
 
 
 class UpstreamCitation(BaseModel):
@@ -945,17 +1103,15 @@ async def ask_corpus(
     headers = _corpus_auth_headers(settings)
     timeout = httpx.Timeout(settings.corpus_answer_timeout_seconds)
 
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                answer_url,
-                json=payload,
-                headers=headers,
-                params={"include": "hits"},
-            )
-    except httpx.HTTPError as exc:
-        _log.warning("corpus_answer_unreachable", error=type(exc).__name__)
-        raise CorpusUnavailable(f"corpus unreachable: {type(exc).__name__}") from exc
+    response = await _dial_corpus(
+        "POST",
+        answer_url,
+        timeout=timeout,
+        headers=headers,
+        event="corpus_answer_unreachable",
+        json=payload,
+        params={"include": "hits"},
+    )
 
     if response.status_code // 100 != 2:
         failure = _classify_answer_failure(response)
@@ -965,7 +1121,11 @@ async def ask_corpus(
             kind=failure.kind,
         )
         raise failure
+    return _parse_answer_body(response)
 
+
+def _parse_answer_body(response: httpx.Response) -> UpstreamAnswer:
+    """Decode a 2xx answer body; a non-JSON or off-schema body is a typed ``malformed``."""
     try:
         body: Any = response.json()
     except ValueError as exc:
@@ -1264,12 +1424,14 @@ async def read_corpus(
     headers = {**_corpus_auth_headers(settings), READ_CALLER_HEADER: caller}
     timeout = httpx.Timeout(settings.corpus_timeout_seconds)
 
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(read_url, json=payload, headers=headers)
-    except httpx.HTTPError as exc:
-        _log.warning("corpus_read_unreachable", error=type(exc).__name__)
-        raise CorpusUnavailable(f"corpus unreachable: {type(exc).__name__}") from exc
+    response = await _dial_corpus(
+        "POST",
+        read_url,
+        timeout=timeout,
+        headers=headers,
+        event="corpus_read_unreachable",
+        json=payload,
+    )
 
     if response.status_code // 100 != 2:
         failure = _classify_read_failure(response)
@@ -1392,18 +1554,14 @@ async def corpus_status(
     headers = _corpus_auth_headers(settings)
     timeout = httpx.Timeout(settings.corpus_timeout_seconds)
 
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.get(status_url, params=params, headers=headers)
-    except httpx.HTTPError as exc:
-        _log.warning("corpus_status_unreachable", error=type(exc).__name__)
-        raise CorpusUnavailable(f"corpus unreachable: {type(exc).__name__}") from exc
+    response = await _dial_corpus(
+        "GET",
+        status_url,
+        timeout=timeout,
+        headers=headers,
+        event="corpus_status_unreachable",
+        params=params,
+    )
 
-    if response.status_code // 100 != 2:
-        _log.warning("corpus_status_request_failed", status=response.status_code)
-        raise CorpusUnavailable(
-            f"corpus returned HTTP {response.status_code}",
-            status=response.status_code,
-        )
-
+    _raise_unless_2xx(response, event_prefix="corpus_status")
     return _parse_2xx_body(response, CorpusStatusResponse, event_prefix="corpus_status")

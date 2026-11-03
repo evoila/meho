@@ -28,6 +28,7 @@ from meho_backplane.auth.corpus import (
     READ_CALLER_HEADER,
     CorpusAnswerError,
     CorpusChunk,
+    CorpusDialBlockedError,
     CorpusReadError,
     CorpusSearchResponse,
     CorpusStatusResponse,
@@ -35,6 +36,7 @@ from meho_backplane.auth.corpus import (
     UpstreamAnswer,
     UpstreamRead,
     ask_corpus,
+    corpus_allowed_hosts,
     corpus_status,
     derive_answer_url,
     derive_read_url,
@@ -44,6 +46,7 @@ from meho_backplane.auth.corpus import (
     search_corpus,
 )
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.pinned_transport import _PinnedAsyncBackend
 from meho_backplane.settings import Settings, get_settings
 
 _CORPUS_URL = "https://corpus.test/search"
@@ -72,6 +75,8 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    # The host the answer and read dials below go to when no corpus_url is pinned.
+    monkeypatch.setenv("CORPUS_ALLOWED_HOSTS", "corpus.test")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -429,6 +434,156 @@ async def test_connect_error_fails_closed(monkeypatch: pytest.MonkeyPatch) -> No
     with pytest.raises(CorpusUnavailable) as exc:
         await search_corpus(_make_operator(), "q")
     assert exc.value.status is None
+
+
+# ---------------------------------------------------------------------------
+# Docs-service hosts: the token goes only to a host the deployment named
+# ---------------------------------------------------------------------------
+
+
+def test_allowed_hosts_are_the_corpus_url_host_plus_the_listed_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The set is the corpus_url host plus each entry, exact, lower-case, no trailing dot."""
+    settings = _pin_settings(
+        monkeypatch,
+        corpus_url="https://Corpus.Test:9443/v1/search",
+        corpus_allowed_hosts=" Docs.Example. ,, 203.0.113.9, [2001:db8::1] ,",
+    )
+    assert corpus_allowed_hosts(settings) == frozenset(
+        {"corpus.test", "docs.example", "203.0.113.9", "2001:db8::1"}
+    )
+
+
+def test_allowed_hosts_without_corpus_url_are_the_listed_entries_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No corpus_url and no entries → no host at all; entries alone → those hosts."""
+    settings = _pin_settings(monkeypatch, corpus_url="", corpus_allowed_hosts="")
+    assert corpus_allowed_hosts(settings) == frozenset()
+    settings = _pin_settings(monkeypatch, corpus_url="", corpus_allowed_hosts="docs.example")
+    assert corpus_allowed_hosts(settings) == frozenset({"docs.example"})
+
+
+async def _dial_search(url: str) -> object:
+    return await search_corpus(_make_operator(), "q", corpus_url=url)
+
+
+async def _dial_ask(url: str) -> object:
+    return await ask_corpus(_make_operator(), "q", answer_url=url)
+
+
+async def _dial_read(url: str) -> object:
+    return await read_corpus(_make_operator(), _HANDLE, read_url=url)
+
+
+async def _dial_status(url: str) -> object:
+    return await corpus_status(_make_operator(), corpus_url=url)
+
+
+@pytest.mark.parametrize(
+    "dial",
+    [_dial_search, _dial_ask, _dial_read, _dial_status],
+    ids=["search", "ask", "read", "status"],
+)
+@pytest.mark.asyncio
+async def test_dial_to_a_host_the_deployment_did_not_name_sends_nothing(
+    monkeypatch: pytest.MonkeyPatch, dial: object
+) -> None:
+    """Every dial refuses a public host that is not a docs-service host: no request, no token."""
+    _pin_settings(
+        monkeypatch,
+        corpus_url=_CORPUS_URL,
+        corpus_service_token=_SERVICE_TOKEN,
+        corpus_allowed_hosts="",
+        ui_session_encryption_key=_CALLER_KEY,
+    )
+    captured: list[httpx.Request] = []
+    _patch_async_client(monkeypatch, _transport_capturing(captured, httpx.Response(200)), [])
+
+    with structlog.testing.capture_logs() as logs, pytest.raises(CorpusUnavailable) as exc:
+        await dial("https://other.test/v1/search")  # type: ignore[operator]
+    assert "not a docs-service host of this deployment" in str(exc.value)
+    assert "CORPUS_ALLOWED_HOSTS" in str(exc.value)
+    assert "other.test" not in str(exc.value)
+    assert captured == []
+    assert any(log["event"] == "corpus_endpoint_host_not_allowed" for log in logs)
+
+
+@pytest.mark.parametrize(
+    "dial",
+    [_dial_search, _dial_ask, _dial_read, _dial_status],
+    ids=["search", "ask", "read", "status"],
+)
+@pytest.mark.asyncio
+async def test_dial_to_a_listed_host_sends_the_token(
+    monkeypatch: pytest.MonkeyPatch, dial: object
+) -> None:
+    """A host on CORPUS_ALLOWED_HOSTS gets the request and the token, like the corpus_url host."""
+    _pin_settings(
+        monkeypatch,
+        corpus_url=_CORPUS_URL,
+        corpus_service_token=_SERVICE_TOKEN,
+        corpus_allowed_hosts="Other.Test",
+        ui_session_encryption_key=_CALLER_KEY,
+    )
+    captured: list[httpx.Request] = []
+    _patch_async_client(monkeypatch, _transport_capturing(captured, httpx.Response(200)), [])
+
+    # The 200 body is empty, so each dial fails on the answer; the request itself is the proof.
+    with pytest.raises((CorpusUnavailable, CorpusAnswerError, CorpusReadError)):
+        await dial("https://other.test/v1/search")  # type: ignore[operator]
+    assert len(captured) == 1
+    assert captured[0].url.host == "other.test"
+    assert captured[0].headers["Authorization"] == f"Bearer {_SERVICE_TOKEN}"
+
+
+@pytest.mark.asyncio
+async def test_corpus_client_dials_only_a_checked_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dial's transport checks the host when the connection opens and pins the address."""
+    monkeypatch.setattr(guard_mod, "_parse_allowlist", lambda: ((), frozenset()))
+    client = corpus_mod._corpus_client(httpx.Timeout(1.0))
+    try:
+        backend = client._transport._pool._network_backend  # type: ignore[attr-defined]
+        assert isinstance(backend, _PinnedAsyncBackend)
+
+        monkeypatch.setattr(
+            guard_mod, "_resolve_addrs", lambda _host: [ipaddress.ip_address("93.184.216.34")]
+        )
+        assert backend._resolver("corpus.test") == ["93.184.216.34"]
+
+        # The name now answers with a private address: the connect is refused, not re-resolved.
+        monkeypatch.setattr(
+            guard_mod, "_resolve_addrs", lambda _host: [ipaddress.ip_address("10.0.0.5")]
+        )
+        with pytest.raises(CorpusDialBlockedError) as exc:
+            backend._resolver("corpus.test")
+        assert isinstance(exc.value, httpx.ConnectError)
+        assert "10.0.0.5" not in str(exc.value)
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_blocked_connect_is_corpus_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refused connect from the pinned transport maps to CorpusUnavailable."""
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        raise CorpusDialBlockedError("refused at connect", request=request)
+
+    _patch_async_client(monkeypatch, httpx.MockTransport(_handler), [])
+
+    with structlog.testing.capture_logs() as logs, pytest.raises(CorpusUnavailable) as exc:
+        await search_corpus(_make_operator(), "q")
+    assert exc.value.status is None
+    assert "CorpusDialBlockedError" in str(exc.value)
+    assert any(
+        log["event"] == "corpus_unreachable" and log["error"] == "CorpusDialBlockedError"
+        for log in logs
+    )
 
 
 @pytest.mark.asyncio
@@ -1264,7 +1419,7 @@ async def test_ask_corpus_screens_endpoint_and_fails_closed(
 ) -> None:
     """The answer dial runs the same SSRF screen as search, before any request."""
     monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
-    _pin_settings(monkeypatch)
+    _pin_settings(monkeypatch, corpus_allowed_hosts="127.0.0.1,169.254.169.254")
 
     with pytest.raises(CorpusUnavailable) as exc:
         await ask_corpus(_make_operator(), "q", answer_url=bad_url)
@@ -1684,7 +1839,11 @@ async def test_read_corpus_screens_endpoint_and_fails_closed(
 ) -> None:
     """A non-https / non-public read endpoint is refused before any dial."""
     monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
-    _pin_settings(monkeypatch, ui_session_encryption_key=_CALLER_KEY)
+    _pin_settings(
+        monkeypatch,
+        ui_session_encryption_key=_CALLER_KEY,
+        corpus_allowed_hosts="127.0.0.1,169.254.169.254",
+    )
     with pytest.raises(CorpusUnavailable) as exc:
         await read_corpus(_make_operator(), _HANDLE, read_url=bad_url)
     assert "not an allowed https public destination" in str(exc.value)

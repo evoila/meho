@@ -3284,7 +3284,7 @@ class AgentAnnouncement(Base):
       ``agent_run_tenant_work_ref_idx``.
     * ``agent_announcement_tenant_principal_created_at_idx`` --
       ``(tenant_id, principal_sub, created_at DESC)`` (migration
-      ``0134``, #5005). Drives the caller's active-claim lookup
+      ``0135``, #5005). Drives the caller's active-claim lookup
       (:mod:`meho_backplane.broadcast.announce_claim_lookup`), which
       reads only the caller's own rows, newest first.
 

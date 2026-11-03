@@ -4,7 +4,7 @@
 """Real-PostgreSQL check that the claim lookup uses its index (#5005).
 
 The caller's active-claim lookup (:func:`announce_claim_gap`) runs on every
-write from an agent session. Migration ``0134`` added
+write from an agent session. Migration ``0135`` added
 ``agent_announcement_tenant_principal_created_at_idx`` so the lookup reads
 only the caller's own rows. Before it, the only fitting index was
 ``(tenant_id, created_at DESC)``, and on a busy tenant PostgreSQL walked

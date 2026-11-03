@@ -131,7 +131,7 @@ dispatch(...)   # Step 4, verdict == AUTO_EXECUTE, not the _approved resume
   the caller's own `agent_announcement` rows of the last 1440 minutes,
   newest first, at most 500 rows. The index
   `agent_announcement_tenant_principal_created_at_idx` on `(tenant_id,
-  principal_sub, created_at DESC)` (migration `0134`, #5005) matches this
+  principal_sub, created_at DESC)` (migration `0135`, #5005) matches this
   query, so it reads only the caller's rows, already in order. The
   enablement flag is read through a
   60s per-tenant TTL cache. A read-class dispatch or a disabled tenant
@@ -275,7 +275,7 @@ surface on the human render.
   `announce_claim_gap` and `caller_has_active_announce_claim` in
   `backend/src/meho_backplane/broadcast/announce_claim_lookup.py`
   (moved out of `broadcast/history.py` in #5005),
-  the claim lookup's index (migration `0134`),
+  the claim lookup's index (migration `0135`),
   the merge seam + gate in
   `backend/src/meho_backplane/operations/dispatcher.py`,
   `result_announce_required` in

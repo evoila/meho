@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0134_add_agent_announcement_principal_index`` (#5005).
+"""Tests for Alembic migration ``0135_add_agent_announcement_principal_index`` (#5005).
 
 The migration adds ``agent_announcement_tenant_principal_created_at_idx``
 for the caller's active-claim lookup. The tests check that ``upgrade``
@@ -27,8 +27,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0134"
-_DOWN_REVISION = "0133"
+_REVISION = "0135"
+_DOWN_REVISION = "0134"
 _TABLE = "agent_announcement"
 _INDEX = "agent_announcement_tenant_principal_created_at_idx"
 
@@ -36,7 +36,7 @@ _INDEX = "agent_announcement_tenant_principal_created_at_idx"
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0134.db"
+    db_path = tmp_path / "migration_0135.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)

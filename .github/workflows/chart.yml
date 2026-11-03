@@ -1321,13 +1321,17 @@ jobs:
               summary.write(report + "\n")
           PY
 
-      - name: A failed start is recovered with helm rollback (#5024)
-        # Start a release whose start fails (MEHO cannot work out its MCP
-        # address, so the start stops). With Recreate the old pod is already
-        # gone. The operation rows and the release that wrote them must stay
-        # as they were, and `helm rollback` must bring the previous release
-        # back. This start fails before its registration step; the case of a
-        # failure after it is covered by test_operation_catalog_atomic.py.
+      - name: A failed start after registration is recovered with helm rollback (#5024)
+        # Start a release whose start fails on purpose right after it wrote
+        # its operation rows and its release stamp, inside their
+        # transaction (the test-only setting
+        # MEHO_TEST_FAIL_START_AFTER_REGISTRATION). The broken release
+        # disables every built-in row before it fails and stamps another
+        # release name, so this proves the rollback of attempted changes,
+        # not a rewrite of the same rows. With Recreate the old pod is
+        # already gone. The rows and the stamp must stay as they were,
+        # `helm rollback` must bring the previous release back, and an
+        # operation must work again.
         run: |
           set -euo pipefail
           sel=app.kubernetes.io/name=meho,app.kubernetes.io/instance=meho-test
@@ -1339,6 +1343,7 @@ jobs:
                   requires_approval, is_enabled, parameter_schema::text),
                   E'\n' ORDER BY product, version, impl_id, op_id), ''))
                   || ' ' || (SELECT coalesce(max(written_by_release), '-') FROM operation_catalog_state)
+                  || ' enabled=' || count(*) FILTER (WHERE is_enabled)
                 FROM endpoint_descriptor WHERE tenant_id IS NULL"
           }
           good_rev=$(helm history meho-test -n meho-test -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)[-1]["revision"])')
@@ -1348,7 +1353,7 @@ jobs:
             --namespace meho-test \
             --kube-as-user meho-installer \
             --reuse-values \
-            --set-json 'extraEnv=[{"name":"MCP_RESOURCE_URI","value":""},{"name":"BACKPLANE_URL","value":""}]'
+            --set-json 'extraEnv=[{"name":"MEHO_TEST_FAIL_START_AFTER_REGISTRATION","value":"1"},{"name":"GIT_SHA","value":"broken-release-for-this-proof"}]'
           failed=""
           for _ in $(seq 1 90); do
             restarts=$(kubectl -n meho-test get pods -l "$sel" \
@@ -1357,11 +1362,20 @@ jobs:
             sleep 4
           done
           [ -n "$failed" ] || { echo "::error::the broken release did not fail its start"; exit 1; }
-          kubectl -n meho-test logs deploy/meho-test -c backplane --previous --tail=20 || true
+          log=$(kubectl -n meho-test logs deploy/meho-test -c backplane --previous --tail=300 || true)
+          grep -E 'operation_catalog_test_failure|operation_catalog_unchanged' <<<"$log" || true
+          grep -q 'operation_catalog_test_failure' <<<"$log" \
+            || { echo "::error::the broken release did not reach its failure after registration"; exit 1; }
+          grep -q 'operation_catalog_unchanged' <<<"$log" \
+            || { echo "::error::the broken release did not log that it changed no row"; exit 1; }
+          changed=$(grep -oE 'rows_changed["=: ]+[0-9]+' <<<"$log" | grep -oE '[0-9]+$' | head -1)
+          [ "${changed:-0}" -gt 0 ] \
+            || { echo "::error::the broken release changed no row before it failed (rows_changed=${changed:-none})"; exit 1; }
+          echo ">> the broken release changed ${changed} rows and stamped its release before it failed"
           after_failed=$(catalog)
           echo ">> operation rows after the failed start: ${after_failed}"
           [ "$after_failed" = "$before" ] \
-            || { echo "::error::a failed start changed the operation rows"; exit 1; }
+            || { echo "::error::a failed start changed the operation rows or the release stamp"; exit 1; }
           started=$(date +%s)
           helm rollback meho-test "$good_rev" \
             --namespace meho-test \
@@ -1379,7 +1393,38 @@ jobs:
           echo ">> operation rows after the rollback: ${after_rollback}"
           [ "$after_rollback" = "$before" ] \
             || { echo "::error::the operation rows differ after the rollback"; exit 1; }
-          report="Failed start: the operation rows stayed the same, and helm rollback served again after $(( $(date +%s) - started )) s."
+          # An operation works again: a safe built-in operation that needs no
+          # target, run through the same dispatcher every call uses. This
+          # install has no Keycloak, so the call is made inside the pod.
+          kubectl -n meho-test exec -i "$pod" -c backplane -- python - <<'PY'
+          import asyncio
+          import uuid
+
+          from meho_backplane.auth.operator import Operator, TenantRole
+          from meho_backplane.operations.dispatcher import dispatch
+
+
+          async def main() -> int:
+              operator = Operator(
+                  sub="chart-proof",
+                  raw_jwt="",
+                  tenant_id=uuid.uuid4(),
+                  tenant_role=TenantRole.OPERATOR,
+              )
+              result = await dispatch(
+                  operator=operator,
+                  connector_id="audit-integrity-1.x",
+                  op_id="audit.loose_rows",
+                  target=None,
+                  params={"limit": 1},
+              )
+              print(">> audit.loose_rows after the rollback:", result.status, result.error or "")
+              return 0 if result.status == "ok" else 1
+
+
+          raise SystemExit(asyncio.run(main()))
+          PY
+          report="Failed start after registration: the attempted change to ${changed} rows was rolled back, the rows and the release stamp stayed the same, and helm rollback served again after $(( $(date +%s) - started )) s (an operation ran)."
           echo ">> ${report}"
           echo "${report}" >> "$GITHUB_STEP_SUMMARY"
 

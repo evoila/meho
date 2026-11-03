@@ -160,6 +160,7 @@ from meho_backplane.operations.embed import (
 )
 from meho_backplane.retrieval.embedding import EmbeddingService
 from meho_backplane.settings import get_settings
+from meho_backplane.version import build_git_sha
 
 if TYPE_CHECKING:
     from meho_backplane.connectors import OperationResult
@@ -514,6 +515,7 @@ async def operation_catalog_write(
                 await retire_dead_handler_rows(session=session)
                 await assert_registered_composites_have_no_ingested_dispatch(session=session)
                 await record_catalog_release(session)
+                await _fail_start_for_test(session)
             yield
             await session.commit()
     except Exception as exc:
@@ -523,6 +525,38 @@ async def operation_catalog_write(
             error_class=type(exc).__name__,
         )
         raise
+
+
+async def _fail_start_for_test(session: AsyncSession) -> None:
+    """Fail the start on purpose after the rows were written. Test-only.
+
+    Runs only when ``MEHO_TEST_FAIL_START_AFTER_REGISTRATION`` is set. It
+    first disables every built-in operation row in *session*, so the
+    attempted change is visible and differs from the rows a good start
+    writes, logs what it attempted, and then raises. The caller's
+    transaction rolls back: the rows and the release stamp stay as the
+    last good start left them. The CI proof on a throwaway install checks
+    exactly that (#5024).
+    """
+    if not get_settings().test_fail_start_after_registration:
+        return
+    result = await session.execute(
+        update(EndpointDescriptor)
+        .where(
+            EndpointDescriptor.tenant_id.is_(None),
+            EndpointDescriptor.source_kind.in_(("typed", "composite")),
+        )
+        .values(is_enabled=False)
+    )
+    structlog.get_logger(__name__).warning(
+        "operation_catalog_test_failure",
+        reason="MEHO_TEST_FAIL_START_AFTER_REGISTRATION is set; failing the start on purpose",
+        rows_changed=getattr(result, "rowcount", None),
+        attempted_release=build_git_sha(),
+    )
+    raise RuntimeError(
+        "start failed on purpose after registration: MEHO_TEST_FAIL_START_AFTER_REGISTRATION is set"
+    )
 
 
 #: The session of the start-up registration transaction while

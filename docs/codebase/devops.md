@@ -280,7 +280,10 @@ for MEHO and `UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN` for uvicorn's wait on open
 requests. What the backplane does in that time is in
 [shutdown-drain.md](shutdown-drain.md). Render tests:
 `backend/tests/test_chart_safe_updates.py`. The `helm-test` CI job proves
-the order and the rollback after a failed start on a kind cluster.
+the order on a kind cluster, and the rollback after a start that fails
+right after it wrote its operation rows (the test-only setting
+`MEHO_TEST_FAIL_START_AFTER_REGISTRATION`, see
+[rollback.md](../acceptance/rollback.md)).
 
 ### Security context
 

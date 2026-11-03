@@ -224,9 +224,14 @@ operation row, so the previous release can simply run again:
    again.
 
 CI runs this recovery on every chart change: the `helm-test` job in
-`.github/workflows/chart.yml` updates a throwaway install, checks that the
-old pod has stopped before the new one starts, then starts a release that
-fails, checks that the operation rows did not change, and rolls back.
+`.github/workflows/chart.yml` updates a throwaway install and checks that
+the old pod has stopped before the new one starts. Then it starts a
+release that fails on purpose right after it wrote its operation rows and
+its release stamp (the test-only setting
+`MEHO_TEST_FAIL_START_AFTER_REGISTRATION`; the broken release disables
+every built-in row and stamps another release name before it fails). It
+checks that the rows and the stamp did not change, rolls back, and runs an
+operation on the restored release.
 
 **What to do when a pod reports `other_release`:**
 

@@ -1425,6 +1425,15 @@ class Settings(BaseModel):
     #: a prior boot would mask a connector's registration change. See
     #: ``run_typed_op_registrars`` for the snapshot/replay contract.
     test_amortize_typed_op_registrars: bool = False
+    #: Test-only: when True, the start fails on purpose right after the
+    #: built-in operation rows and the release stamp were written, inside
+    #: their transaction, after changing every built-in row in a visible
+    #: way. The CI proof on a throwaway install (``helm-test`` in
+    #: ``chart.yml``) sets ``MEHO_TEST_FAIL_START_AFTER_REGISTRATION=1``
+    #: on a broken release to show that a failed start changes no row and
+    #: that ``helm rollback`` serves again (#5024). NEVER set in production:
+    #: the pod never starts.
+    test_fail_start_after_registration: bool = False
     backplane_url: str = ""
     mcp_resource_uri: str = ""
     vault_addr: HttpUrl | None = Field(default=None)
@@ -2693,6 +2702,9 @@ def get_settings() -> Settings:
         ),
         test_amortize_typed_op_registrars=parse_bool_env(
             os.environ.get("MEHO_TEST_AMORTIZE_TYPED_OP_REGISTRARS"),
+        ),
+        test_fail_start_after_registration=parse_bool_env(
+            os.environ.get("MEHO_TEST_FAIL_START_AFTER_REGISTRATION"),
         ),
         backplane_url=os.environ.get("BACKPLANE_URL", ""),
         mcp_resource_uri=os.environ.get("MCP_RESOURCE_URI", ""),

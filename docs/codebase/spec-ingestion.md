@@ -2505,11 +2505,15 @@ activity:
    exceeds 20 MiB (`_MAX_SPEC_BYTES`), preventing a redirect to a large
    internal endpoint from exhausting pod memory. A YAML spec is also
    refused when it expands to more than two nodes per byte of input
-   (`_MAX_SPEC_NODES_PER_BYTE`, checked by `_assert_expanded_size` right
-   after the parse): YAML anchors and aliases let a small file stand for
-   a document with many times more nodes, and the later full walks of
-   the pipeline do not share them. A document without aliases always has
-   fewer nodes than bytes, so a real spec never hits this cap.
+   (`_MAX_SPEC_NODES_PER_BYTE`, checked by `_assert_expanded_size`): YAML
+   anchors and aliases let a small file stand for a document with many
+   times more nodes, and the later full walks of the pipeline do not
+   share them. The check runs on the composed node graph, before the
+   nodes are turned into Python objects (`_load_yaml_spec`), because a
+   `<<` merge key copies every merged entry during that step, and the
+   duplicate keys then collapse in the result. A document without
+   aliases has at most one node per byte, so a real spec never hits
+   this cap.
 
 6. **Oracle-free error messages that name the inline remedy.** Error
    messages never echo the operator-supplied URI, the resolved IP /

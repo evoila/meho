@@ -2577,7 +2577,48 @@ def test_yaml_spec_with_many_aliases_is_refused() -> None:
         _decode_spec(_ALIAS_HEAVY_YAML)
 
 
+_MERGE_HEAVY_YAML = b"""\
+openapi: 3.0.0
+a: &a {k0: v, k1: v, k2: v, k3: v, k4: v, k5: v, k6: v, k7: v, k8: v, k9: v}
+b: &b {<<: [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]}
+c: &c {<<: [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]}
+d: {<<: [*c, *c, *c, *c, *c, *c, *c, *c, *c, *c]}
+"""
+
+
+def test_yaml_spec_with_many_merge_aliases_is_refused() -> None:
+    """A chain of ``<<`` merge aliases is refused before the mapping is built.
+
+    The merge keys copy every merged entry into the mapping while the
+    nodes are turned into objects, and the duplicate keys collapse in the
+    result (``d`` would end up with ten keys). The cap must fire on the
+    composed nodes, before that copy happens.
+    """
+    with pytest.raises(InvalidSpecError, match="too many YAML aliases"):
+        _decode_spec(_MERGE_HEAVY_YAML)
+
+
+def test_yaml_spec_with_a_small_merge_key_still_merges() -> None:
+    """An ordinary ``<<`` merge inside the cap keeps its merge semantics."""
+    parsed = _decode_spec(
+        b"openapi: 3.0.0\n"
+        b"base: &base {type: object, required: [id]}\n"
+        b"thing: {<<: *base, properties: {id: {type: string}}}\n"
+    )
+    assert parsed["thing"] == {
+        "type": "object",
+        "required": ["id"],
+        "properties": {"id": {"type": "string"}},
+    }
+
+
 def test_yaml_spec_without_aliases_passes_the_expansion_cap() -> None:
-    """A plain document always has fewer nodes than bytes, so it passes."""
+    """A plain document has at most one node per byte, so it passes."""
     parsed = _decode_spec(b"openapi: 3.0.0\ninfo: {title: t, version: '1'}\npaths: {}\n")
     assert parsed["openapi"] == "3.0.0"
+
+
+def test_yaml_spec_keeps_the_timestamp_scalar_as_text_after_the_two_step_parse() -> None:
+    """Composing and constructing in two steps keeps the loader's date handling."""
+    parsed = _decode_spec(b"openapi: 3.0.0\nexample: 2024-01-15\n")
+    assert parsed["example"] == "2024-01-15"

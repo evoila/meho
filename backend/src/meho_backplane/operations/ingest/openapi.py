@@ -397,8 +397,10 @@ _MAX_SPEC_BYTES = 20 * 1024 * 1024  # 20 MiB
 #: anchors and aliases let a small file stand for a document with many
 #: times more nodes once every alias is walked (the later full walks of
 #: the ingest pipeline do not share them). A document without aliases
-#: has fewer nodes than bytes, so a cap of this many nodes per byte never
-#: touches a real spec and bounds the walks to the size of the file.
+#: has at most one node per byte, so a cap of this many nodes per byte
+#: never touches a real spec and bounds the walks to the size of the
+#: file. Checked on the composed node graph, before any object is built
+#: (:func:`_load_yaml_spec`).
 _MAX_SPEC_NODES_PER_BYTE = 2
 
 
@@ -931,12 +933,7 @@ def _decode_spec(content: bytes) -> dict[str, Any]:
         json.JSONDecodeError: Malformed JSON.
     """
     fmt = detect_spec_format(content)
-    parsed: Any
-    if fmt == "json":
-        parsed = json.loads(content)
-    else:
-        parsed = yaml.load(io.BytesIO(content), Loader=_SpecYamlLoader)
-        _assert_expanded_size(parsed, max_nodes=len(content) * _MAX_SPEC_NODES_PER_BYTE)
+    parsed: Any = json.loads(content) if fmt == "json" else _load_yaml_spec(content)
     if not isinstance(parsed, dict):
         raise InvalidSpecError(
             f"OpenAPI document must parse to a mapping, got {type(parsed).__name__}"
@@ -944,18 +941,49 @@ def _decode_spec(content: bytes) -> dict[str, Any]:
     return parsed
 
 
-def _assert_expanded_size(parsed: Any, *, max_nodes: int) -> None:
-    """Refuse a parsed YAML document with more than *max_nodes* nodes once expanded.
+def _load_yaml_spec(content: bytes) -> Any:
+    """Parse YAML spec bytes, refusing a document that expands past the node cap.
 
-    Walks the document the way the ingest pipeline will: every alias is
-    visited again at each place it is used. The walk stops at the cap,
-    so its cost is bounded by *max_nodes* whatever the document holds.
+    The parse runs in two steps on purpose. The loader first composes
+    the node graph, where every anchor is one node and every alias a
+    reference to it, so the graph is never larger than the input. The
+    expanded size is checked on that graph, and only then are the nodes
+    turned into Python objects. Checking after the objects exist would
+    be too late: a ``<<`` merge key copies every merged entry into the
+    mapping during that step, so a chain of merge aliases can grow
+    without bound there, and the duplicate keys collapse in the
+    finished ``dict``, hiding the growth from a check on the result.
+
+    Raises:
+        InvalidSpecError: The expanded document is over the cap.
+        yaml.YAMLError: Malformed YAML.
+    """
+    loader = _SpecYamlLoader(io.BytesIO(content))
+    try:
+        node = loader.get_single_node()
+        if node is None:
+            return None
+        _assert_expanded_size(node, max_nodes=len(content) * _MAX_SPEC_NODES_PER_BYTE)
+        return loader.construct_document(node)
+    finally:
+        loader.dispose()
+
+
+def _assert_expanded_size(root: yaml.Node, *, max_nodes: int) -> None:
+    """Refuse a composed YAML graph with more than *max_nodes* nodes once expanded.
+
+    Walks the graph the way the ingest pipeline will walk the result:
+    every alias is visited again at each place it is used, and every
+    entry a ``<<`` merge key would copy in is visited too, so the count
+    is never below the size the constructor would build. The walk stops
+    at the cap, so its cost is bounded by *max_nodes* whatever the
+    document holds.
 
     Raises:
         InvalidSpecError: The expanded document is over the cap.
     """
     count = 0
-    stack: list[Any] = [parsed]
+    stack: list[yaml.Node] = [root]
     while stack:
         node = stack.pop()
         count += 1
@@ -963,10 +991,12 @@ def _assert_expanded_size(parsed: Any, *, max_nodes: int) -> None:
             raise InvalidSpecError(
                 f"spec expands to more than {max_nodes} nodes (too many YAML aliases for its size)"
             )
-        if isinstance(node, dict):
-            stack.extend(node.values())
-        elif isinstance(node, list):
-            stack.extend(node)
+        if isinstance(node, yaml.MappingNode):
+            for key_node, value_node in node.value:
+                stack.append(key_node)
+                stack.append(value_node)
+        elif isinstance(node, yaml.SequenceNode):
+            stack.extend(node.value)
 
 
 def _validate_openapi_version(spec: dict[str, Any]) -> None:

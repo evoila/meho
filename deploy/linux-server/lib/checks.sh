@@ -17,8 +17,18 @@ readonly MIN_DISK_FREE_KIB=$((80 * 1000 * 1000 * 1000 / 1024))
 readonly MIN_DISK_FREE_TEXT="80 GB"
 readonly OTHER_RUNTIMES=(k3s rke2 kubelet containerd dockerd crio)
 # RKE2's inbound ports, and 80 and 443, which RKE2's Traefik takes on the host.
-readonly REQUIRED_TCP_PORTS=(80 443 6443 9345 10250 2379 2380 2381 9099)
+# Canal also listens on every address: flanneld on 8081 and calico-node on
+# 9091 (ss -tulpn on the week-4 install, RKE2 v1.37.1+rke2r1, #4741).
+readonly REQUIRED_TCP_PORTS=(80 443 6443 9345 10250 2379 2380 2381 9099 8081 9091)
 readonly REQUIRED_UDP_PORTS=(8472)
+# The ports that parts of RKE2 listen on only on 127.0.0.1, on the same
+# install: etcd 2382, containerd 10010, the kubelet 10248, kube-proxy 10249
+# and 10256, the controller manager 10257, the cloud controller manager
+# 10258 and the scheduler 10259. A program that listens on one of them, on
+# any address, takes the port from that part: some parts then do not start,
+# others lose their health or metrics endpoint. They never answer from
+# another machine, so the port list of the firewall leaves them out.
+readonly REQUIRED_LOCAL_TCP_PORTS=(2382 10010 10248 10249 10256 10257 10258 10259)
 readonly IPV4_IN_TEXT_RE='([0-9]{1,3}\.){3}[0-9]{1,3}'
 readonly HOSTNAME_FIX="pass the full DNS name with --hostname, for example --hostname meho.example.com."
 
@@ -135,7 +145,7 @@ check_ports() {
     local tcp udp port busy=()
     tcp=$(listening_ports tcp)
     udp=$(listening_ports udp)
-    for port in "${REQUIRED_TCP_PORTS[@]}"; do
+    for port in "${REQUIRED_TCP_PORTS[@]}" "${REQUIRED_LOCAL_TCP_PORTS[@]}"; do
         if grep -qxF -- "$port" <<<"$tcp"; then
             busy+=("$port/tcp")
         fi
@@ -149,7 +159,7 @@ check_ports() {
         fail "Ports that RKE2 needs are in use: $(join_by ', ' "${busy[@]}")." \
             "stop the programs that use them. 'ss -tulpn' shows which programs they are."
     fi
-    ok "the ports RKE2 needs are free: TCP $(join_by ', ' "${REQUIRED_TCP_PORTS[@]}"); UDP $(join_by ', ' "${REQUIRED_UDP_PORTS[@]}")"
+    ok "the ports RKE2 needs are free: TCP $(join_by ', ' "${REQUIRED_TCP_PORTS[@]}" "${REQUIRED_LOCAL_TCP_PORTS[@]}"); UDP $(join_by ', ' "${REQUIRED_UDP_PORTS[@]}")"
 }
 
 check_clock() {

@@ -193,7 +193,7 @@ write is in the `identity` group, next to its read; the others are in the
 | `freeipa.hbacrule.host.add` | `hbacrule_add_host` | `name`, `hosts`, `hostgroups`; at least one of the two | `{entry, completed}` |
 | `freeipa.hbacrule.service.add` | `hbacrule_add_service` | `name`, `services` (sent as `hbacsvc`), `service_groups` (sent as `hbacsvcgroup`); at least one of the two | `{entry, completed}` |
 | `freeipa.hbacrule.disable` | `hbacrule_disable` | `name` | `{disabled}` |
-| `freeipa.pwpolicy.set` | `pwpolicy_mod` | `group` (none: the global policy) and at least one setting | `{entry}` |
+| `freeipa.pwpolicy.set` | `pwpolicy_mod` | `group` (none or `global_policy`: the global policy) and at least one setting | `{entry}` |
 
 - A new sudo rule or access rule is enabled but empty, so it allows nothing
   until it gets members. A sudo rule's commands run as root.
@@ -269,10 +269,13 @@ connector (`preview_operation`) the builder declines.
   none, it says that no IPA user can log in to any host that uses IPA. For
   `allow_all` the builder declines without a live connector, and a failed
   read gives the "preview unavailable" marker, as for a host delete.
-- `freeipa.pwpolicy.set` stores `{policy, changes}`. For the global policy
-  (no `group`), `policy` is `global_policy` and a `warning` says that the
-  policy applies to every user whose groups have no policy of their own. It
-  reads only the parameters, so it needs no live connector.
+- `freeipa.pwpolicy.set` stores `{policy, changes}`. For the global policy,
+  `policy` is `global_policy` and a `warning` says that the policy applies
+  to every user whose groups have no policy of their own. The global policy
+  is the one without `group`, and also with `group` `global_policy` in any
+  case: FreeIPA builds the policy's LDAP name from the group name, and that
+  name is the global policy. It reads only the parameters, so it needs no
+  live connector.
 
 The other writes show the generic echo of their parameters.
 

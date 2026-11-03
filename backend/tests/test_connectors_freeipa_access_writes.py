@@ -637,6 +637,28 @@ async def test_hbacrule_disable_preview_without_a_live_connector(
             },
         ),
         (
+            {"group": "global_policy", "min_length": 12},
+            {
+                "policy": "global_policy",
+                "warning": (
+                    "This changes the global password policy. It applies to every user whose "
+                    "groups have no password policy of their own."
+                ),
+                "changes": {"min_length": 12},
+            },
+        ),
+        (
+            {"group": "Global_Policy", "history_size": 6},
+            {
+                "policy": "global_policy",
+                "warning": (
+                    "This changes the global password policy. It applies to every user whose "
+                    "groups have no password policy of their own."
+                ),
+                "changes": {"history_size": 6},
+            },
+        ),
+        (
             {"group": "admins", "min_length": 12, "priority": 5},
             {"policy": "admins", "changes": {"min_length": 12, "priority": 5}},
         ),

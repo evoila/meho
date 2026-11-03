@@ -81,9 +81,10 @@ Initiative #4772.
   on every host. The approval lists the other enabled access rules: after the
   change, only they let users in. When the list is empty, the approval says
   that no IPA user can log in to any host that uses IPA.
-- **The global password policy.** A change without a group is for the
-  global policy. The approval says so: it applies to every user whose groups
-  have no password policy of their own.
+- **The global password policy.** A change without a group, or for the
+  group name `global_policy`, is for the global policy. The approval says
+  so: it applies to every user whose groups have no password policy of
+  their own.
 
 ## Step 1: make an IPA user for MEHO
 

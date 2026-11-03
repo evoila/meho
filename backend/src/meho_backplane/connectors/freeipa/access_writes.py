@@ -305,12 +305,15 @@ async def hbacrule_disable_preview(ctx: PreviewContext) -> dict[str, Any] | None
 async def pwpolicy_set_preview(ctx: PreviewContext) -> dict[str, Any]:
     """The approval preview of ``freeipa.pwpolicy.set``: the policy and its new values.
 
-    For the global policy it adds a warning. It reads only the parameters,
-    so it also runs without a live connector.
+    For the global policy it adds a warning. That is the policy without
+    ``group``, and also with the group name ``global_policy`` in any case:
+    FreeIPA builds the policy's LDAP name from the group name, which then
+    names the global policy. It reads only the parameters, so it also runs
+    without a live connector.
     """
     changes = {key: ctx.params[key] for key in PWPOLICY_OPTIONS if key in ctx.params}
     group = ctx.params.get("group")
-    if group:
+    if isinstance(group, str) and group and group.lower() != _GLOBAL_POLICY:
         return {"policy": group, "changes": changes}
     return {"policy": _GLOBAL_POLICY, "warning": _GLOBAL_POLICY_WARNING, "changes": changes}
 

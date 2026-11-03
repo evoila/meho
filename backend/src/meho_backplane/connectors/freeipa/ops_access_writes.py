@@ -528,8 +528,8 @@ ACCESS_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         group_key=GROUP_IDENTITY,
         properties={
             "group": name_schema(
-                "The user group whose policy to change. Leave it out for the global policy. The "
-                "group must have a policy already."
+                "The user group whose policy to change. Leave it out, or give global_policy, for "
+                "the global policy. The group must have a policy already."
             ),
             **_PWPOLICY_SETTINGS,
         },
@@ -553,9 +553,9 @@ ACCESS_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
             ),
             "preconditions": (
                 f"{APPROVAL_NOTE} Give at least one value; read the policy first with "
-                "freeipa.pwpolicy.show. Without group, the change is for the global policy, which "
-                "applies to every user whose groups have no policy of their own; the approval "
-                "says so. priority needs group."
+                "freeipa.pwpolicy.show. Without group, or with group global_policy, the change is "
+                "for the global policy, which applies to every user whose groups have no policy of "
+                "their own; the approval says so. priority needs a group other than global_policy."
             ),
             "output_shape": (
                 "{entry}: the policy after the change, with FreeIPA's attribute names, for "

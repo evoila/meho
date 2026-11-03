@@ -17,7 +17,10 @@ card again against the live system and compares the object with the card:
   object it is.
 * The card says the object is absent (the approver saw "nothing to
   delete"): the live card must say so too. An object that appeared under
-  that name since the request refuses the run.
+  that name since the request refuses the run. A card says "absent" with
+  ``present: false``, an empty id, or ``match_count: 0`` (a DNS card keeps
+  the same object fields whether or not records are there; the count says
+  how many values the call removes).
 * The live card says the object is gone: the run goes ahead, and the
   handler answers as it does for an absent object ("already absent" /
   "not found").
@@ -56,6 +59,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "IDENTITY_FIELDS",
+    "MATCH_COUNT_KEY",
     "REASON_APPEARED",
     "REASON_CHANGED",
     "REASON_UNREADABLE",
@@ -70,6 +74,10 @@ _log = structlog.get_logger(__name__)
 #: The card fields that name one object on its own. The first one the
 #: card has is the identity; its value must be the same at run time.
 IDENTITY_FIELDS: Final[tuple[str, ...]] = ("id", "key")
+
+#: The blast-radius field that counts the values the call removes. Zero
+#: means the object is absent, whatever its fields say.
+MATCH_COUNT_KEY: Final[str] = "match_count"
 
 #: Why a run was refused: the live object is not the one on the card.
 REASON_CHANGED: Final[str] = (
@@ -100,6 +108,12 @@ def card_object(proposed_effect: Mapping[str, Any] | None) -> Mapping[str, Any] 
     The dispatcher stores the block at the top level of the card and inside
     its ``preview`` body; a card built by the preview hook alone has only
     the second. Both places are read.
+
+    The block's absence state is kept on the object: a block whose
+    ``match_count`` is ``0`` (the call removes no value) returns the object
+    with ``present: false``, so :func:`object_identity` reads it as absent.
+    The DNS cards state absence this way; their object names the record set
+    and stays the same whether or not records are there.
     """
     if not isinstance(proposed_effect, Mapping):
         return None
@@ -110,14 +124,20 @@ def card_object(proposed_effect: Mapping[str, Any] | None) -> Mapping[str, Any] 
     if not isinstance(block, Mapping):
         return None
     obj = block.get("object")
-    return obj if isinstance(obj, Mapping) else None
+    if not isinstance(obj, Mapping):
+        return None
+    count = block.get(MATCH_COUNT_KEY)
+    if isinstance(count, int) and not isinstance(count, bool) and count == 0:
+        return {**obj, "present": False}
+    return obj
 
 
 def object_identity(obj: Mapping[str, Any]) -> dict[str, Any] | None:
     """What names the one object *obj* describes; ``None`` when the card says it is absent.
 
     The id or key when the card has one (:data:`IDENTITY_FIELDS`). A card
-    that has the field with no value, or ``present: false``, describes an
+    that has the field with no value, or ``present: false`` (also what
+    :func:`card_object` sets for a ``match_count`` of zero), describes an
     object that is not there. A card without such a field names its object
     by its other fields, without counts and yes/no flags.
     """

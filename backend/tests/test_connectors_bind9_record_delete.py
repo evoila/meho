@@ -54,12 +54,17 @@ from meho_backplane.connectors.bind9.ops_record import (
     _soa_serial_from_text,
     bind9_record_delete,
 )
+from meho_backplane.connectors.bind9.ops_record_delete_preview import (
+    _bind9_record_delete_preview,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations import typed_register as tr_module
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
+from meho_backplane.operations._preview import PreviewContext
+from meho_backplane.operations.approval_object_check import REASON_APPEARED
 from meho_backplane.operations.approval_queue import (
     SelfApprovalForbiddenError,
     approve_request,
@@ -957,6 +962,98 @@ async def test_preview_hash_is_param_sensitive() -> None:
     assert p1["status"] == "ok"
     assert p1["preview_hash"] == p1b["preview_hash"]  # stable for identical args
     assert p1["preview_hash"] != p2["preview_hash"]  # a different delete → different hash
+
+
+# ===========================================================================
+# The approved run acts only on the record the approver saw
+# ===========================================================================
+
+
+def _preview_ctx(recorder: _RecordingBind9Connector, *, params: dict[str, Any]) -> PreviewContext:
+    """A PreviewContext wired to the recording connector for a direct builder call."""
+    return PreviewContext(
+        descriptor=MagicMock(op_id=_OP_ID),
+        connector_instance=recorder,
+        operator=_make_operator(),
+        target=_FakeBind9Target(),
+        params=params,
+        connector_id=_CONNECTOR_ID,
+    )
+
+
+async def test_preview_with_pinned_rdata_counts_only_that_value() -> None:
+    """``match_count`` is what the delete removes: the pinned value, not its siblings."""
+    recorder = _RecordingBind9Connector()
+    present = await _bind9_record_delete_preview(
+        _preview_ctx(
+            recorder, params={"fqdn": "api.example.test", "type": "A", "rdata": "192.0.2.10"}
+        )
+    )
+    absent = await _bind9_record_delete_preview(
+        _preview_ctx(
+            recorder, params={"fqdn": "api.example.test", "type": "A", "rdata": "192.0.2.12"}
+        )
+    )
+    assert present is not None and absent is not None
+    assert present["blast_radius"]["match_count"] == 1
+    assert absent["blast_radius"]["match_count"] == 0
+    # The children still show the approver every value at the name.
+    assert {c["rdata"] for c in absent["blast_radius"]["children"]} == {
+        "192.0.2.10",
+        "192.0.2.11",
+    }
+
+
+@pytest.mark.parametrize(
+    ("params", "added_line"),
+    [
+        pytest.param(
+            {"fqdn": "nope.example.test", "type": "A"},
+            "nope IN A 192.0.2.40\n",
+            id="absent-name",
+        ),
+        pytest.param(
+            {"fqdn": "api.example.test", "type": "A", "rdata": "192.0.2.12"},
+            "api IN A 192.0.2.12\n",
+            id="absent-value-with-siblings",
+        ),
+    ],
+)
+async def test_approved_delete_of_an_absent_record_is_refused_when_it_appears(
+    params: dict[str, Any], added_line: str
+) -> None:
+    """Park a delete of a record that is not there, it appears, approve: nothing is deleted."""
+    recorder = _RecordingBind9Connector()
+    await _bootstrap(recorder)
+    await _seed_target()
+
+    requester = _make_operator(sub="op-requester")
+    args = _args(params=params)
+    preview = await preview_operation(requester, args)
+    assert preview["status"] == "ok", preview
+    call = await call_operation(requester, {**args, "preview_hash": preview["preview_hash"]})
+    assert call["status"] == "awaiting_approval", call
+    request_id = UUID(call["extras"]["approval_request_id"])
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        assert dict(row.proposed_effect)["blast_radius"]["match_count"] == 0
+
+    # While the request waited, someone added the record.
+    recorder._zonefile = _ZONEFILE + added_line
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=approver, params=None)
+        await s.commit()
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
+    assert resume.status == "denied", resume
+    assert resume.extras["error_code"] == "object_changed_since_approval"
+    assert resume.extras["reason"] == REASON_APPEARED
+    assert recorder.sudo_calls == [], "nothing may be staged"
 
 
 # ===========================================================================

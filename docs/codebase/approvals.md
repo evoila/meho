@@ -233,10 +233,15 @@ names (`proposed_effect.blast_radius.object`) with the live one
 - The card has no id or key: the live object must have the same fields,
   without counts and yes/no flags. pfSense alias, gateway and static-route
   deletes, DNS record deletes, a Vault secret path, a Kubernetes Secret.
-- The card says the object is absent (`present: false` or an empty id; the
-  approver saw "nothing to delete"): the live card must say so too. An
-  object that appeared under that name since the request refuses the run
-  (`REASON_APPEARED`).
+- The card says the object is absent (`present: false`, an empty id, or a
+  `match_count` of zero; the approver saw "nothing to delete"): the live
+  card must say so too. An object that appeared under that name since the
+  request refuses the run (`REASON_APPEARED`). The DNS cards (BIND9 and
+  Windows DNS) name the record set, so their object stays the same with or
+  without records; `match_count` says how many values the call removes,
+  and `card_object` keeps a zero as `present: false` on the object. For a
+  BIND9 delete with a pinned `rdata`, the count is the values equal to it,
+  not the sibling values the children list.
 - The live card says the object is gone: the run goes ahead and the
   handler answers "already absent" or "not found" itself.
 - The card does not build now (the op does not resolve, the builder

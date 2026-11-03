@@ -93,6 +93,14 @@ _ABSENT_USER_CARD: dict[str, Any] = {
     "id": None,
     "present": False,
 }
+#: A card of a DNS record set: the fields stay the same with or without records.
+_DNS_CARD: dict[str, Any] = {
+    "kind": "dns_record",
+    "zone": "example.test",
+    "name": "web.example.test.",
+    "type": "A",
+    "view": None,
+}
 #: A card of an object whose system has no id (a firewall alias).
 _ALIAS_CARD: dict[str, Any] = {
     "kind": "alias",
@@ -345,6 +353,35 @@ async def test_card_object_is_read_from_the_top_level_or_the_preview_body() -> N
     assert card_object(None) is None
 
 
+@pytest.mark.parametrize(
+    ("block", "absent"),
+    [
+        pytest.param({"object": _DNS_CARD, "children": [], "match_count": 0}, True, id="zero"),
+        pytest.param(
+            {"object": _DNS_CARD, "children": [{"rdata": "192.0.2.1"}], "match_count": 1},
+            False,
+            id="one",
+        ),
+        pytest.param({"object": _DNS_CARD, "children": []}, False, id="no-count"),
+        pytest.param({"object": _DNS_CARD, "match_count": "0"}, False, id="not-a-number"),
+        pytest.param({"object": _DNS_CARD, "match_count": False}, False, id="a-flag"),
+    ],
+)
+async def test_card_object_keeps_the_absence_a_zero_count_states(
+    block: dict[str, Any], absent: bool
+) -> None:
+    """A DNS card says "nothing there" only through its count; the object must keep that."""
+    obj = card_object({"blast_radius": block})
+
+    assert obj is not None
+    if absent:
+        assert obj == {**_DNS_CARD, "present": False}
+        assert object_identity(obj) is None
+    else:
+        assert obj == _DNS_CARD
+        assert object_identity(obj) == _DNS_CARD
+
+
 async def test_live_card_is_none_when_the_op_does_not_resolve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -547,6 +584,55 @@ async def test_object_without_id_is_compared_by_its_fields(
     else:
         assert calls == []
         assert result.extras["error_code"] == "object_changed_since_approval"
+
+
+@pytest.mark.parametrize(
+    ("approved_count", "live_count", "runs", "reason"),
+    [
+        pytest.param(0, 2, False, REASON_APPEARED, id="appeared"),
+        pytest.param(0, 0, True, None, id="still-absent"),
+        pytest.param(2, 0, True, None, id="gone"),
+        pytest.param(2, 1, True, None, id="fewer-values"),
+    ],
+)
+async def test_record_set_card_is_compared_by_its_count_as_well(
+    monkeypatch: pytest.MonkeyPatch,
+    approved_count: int,
+    live_count: int,
+    runs: bool,
+    reason: str | None,
+) -> None:
+    """The record set keeps its name; only the count says whether records are there."""
+    target_id = await _persist_target(f"dns-{uuid.uuid4().hex[:6]}")
+    request = await _park_approved(target_id, card=_DNS_CARD)
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request.id)
+        assert row is not None
+        effect = dict(row.proposed_effect)
+        effect["blast_radius"] = {**effect["blast_radius"], "match_count": approved_count}
+        row.proposed_effect = effect
+        await s.commit()
+    _same_preview(monkeypatch)
+    live_block = {"object": _DNS_CARD, "children": [], "match_count": live_count}
+    _live_object(monkeypatch, None)
+
+    async def _fake_live_card(operator: Operator, **_kwargs: Any) -> dict[str, Any]:
+        return {**_card(None), "blast_radius": live_block}
+
+    monkeypatch.setattr(object_check_module, "live_card", _fake_live_card)
+    calls = _spy_dispatch(monkeypatch)
+
+    result = await resume_dispatch_after_approval(
+        operator=_operator("op-approver"), request=await _row(request.id)
+    )
+
+    if runs:
+        assert result.status == "ok"
+        assert len(calls) == 1
+    else:
+        assert calls == [], "the vendor must get no call"
+        assert result.extras["error_code"] == "object_changed_since_approval"
+        assert result.extras["reason"] == reason
 
 
 async def test_request_without_preview_hash_is_not_checked(

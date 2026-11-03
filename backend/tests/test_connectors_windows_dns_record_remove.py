@@ -57,6 +57,7 @@ from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations import typed_register as tr_module
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations._preview import PreviewContext
+from meho_backplane.operations.approval_object_check import REASON_APPEARED
 from meho_backplane.operations.approval_queue import (
     SelfApprovalForbiddenError,
     approve_request,
@@ -407,6 +408,43 @@ async def test_full_governed_flow_preview_park_approve_resume() -> None:
     assert resume.result["op_class"] == "write"
     assert resume.result["type"] == "A"
     assert len(recorder.remove_calls) == 1
+
+
+async def test_approved_remove_of_an_absent_name_is_refused_when_records_appear() -> None:
+    """Park a remove of a name with no records, records appear, approve: nothing is cleared."""
+    recorder = _RecordingWindowsDnsConnector(get_output=_GET_EMPTY)
+    await _bootstrap(recorder)
+    await _seed_target()
+
+    requester = _make_operator(sub="op-requester")
+    args = _args(params={"zone": _ZONE, "name": "nope", "type": "A"})
+    preview = await preview_operation(requester, args)
+    assert preview["status"] == "ok", preview
+    call = await call_operation(requester, {**args, "preview_hash": preview["preview_hash"]})
+    assert call["status"] == "awaiting_approval", call
+    request_id = UUID(call["extras"]["approval_request_id"])
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        blast = dict(row.proposed_effect)["blast_radius"]
+    assert blast["children"] == []
+    assert blast["match_count"] == 0
+
+    # While the request waited, someone added records at the name.
+    recorder._get_output = _GET_TWO_A
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=approver, params=None)
+        await s.commit()
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
+    assert resume.status == "denied", resume
+    assert resume.extras["error_code"] == "object_changed_since_approval"
+    assert resume.extras["reason"] == REASON_APPEARED
+    assert recorder.remove_calls == [], "nothing may be cleared"
 
 
 # ===========================================================================

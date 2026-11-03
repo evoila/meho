@@ -90,6 +90,7 @@ def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("UI_SESSION_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("UI_KEYCLOAK_CLIENT_ID", "meho-web")
     monkeypatch.setenv("UI_KEYCLOAK_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("CORPUS_ALLOWED_HOSTS", "corpus")
     get_settings.cache_clear()
     reset_fernet_cache_for_testing()
     reset_verifier_store_for_testing()

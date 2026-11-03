@@ -138,7 +138,7 @@ _SHOW_READS: list[tuple[str, dict[str, Any], str, list[Any]]] = [
 def test_every_read_is_covered_here() -> None:
     covered = {row[0] for row in _LIST_READS} | {row[0] for row in _SHOW_READS}
     covered |= {"freeipa.about", "freeipa.hbac.test"}
-    assert covered == {op.op_id for op in FREEIPA_TYPED_OPS}
+    assert covered == {op.op_id for op in FREEIPA_TYPED_OPS if op.safety_level == "safe"}
 
 
 @pytest.mark.asyncio

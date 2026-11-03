@@ -193,6 +193,18 @@ catalog YAML. The field validator pins each value to a single path
 segment (no `/`, `\`, or `..`) so a resource name can't escape its
 package root.
 
+A connector package (a wheel that adds a folder under
+`meho_backplane/connectors/`) can bring catalog rows of its own: its
+folder's `__init__` calls the kit's `register_connector_catalog`, and
+`load_catalog()` reads the package's YAML file with the built-in one.
+The `spec_resource` and `profile_resource` of such a row name files in
+the package's folder, not in the two resource packages above. So code
+that reads a row's files uses `load_entry_spec(entry)` and
+`load_entry_profile(entry)`, which look in the right place for either
+kind of row (`entry.source_package` says which package brought it;
+`None` is a built-in row). See
+[connector-packages.md](connector-packages.md), "Bring catalog rows".
+
 **Why:** `vmware/9.0` and `sddc/9.0` have an `upstream` the backend
 can't dereference (HTML developer portal / fqdn-templated appliance
 URL) — the `catalog_entry_upstream_not_spec` /
@@ -529,8 +541,8 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `tags` | `tags` | Spec tags + optional `spec:<source>` marker |
 | `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc`; `additionalProperties: false` (#293) |
 | `response_schema` | `response_schema` | Success-response schema or `None` |
-| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay` |
-| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE` (#3827), destructive-action hints, a connector-owned minimum safety floor, or a catalog `safety_overlay` rule |
+| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay`, then the op class floor (a `credential_read` is at least `caution`) |
+| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE`, destructive-action hints, a connector-owned minimum safety floor, a catalog `safety_overlay` rule, or a `credential_read` op class |
 | `llm_instructions` | `llm_instructions` | `None` from the parser; set only by a connector-owned spec correction |
 
 Every `DELETE` lands `dangerous` with `requires_approval=True` (#3827). A
@@ -641,6 +653,21 @@ Installer bring-up spec read `GET:/v1/sddcs/{id}/spec`; it has no catalog
 row, so a manual ingest of it gets the redaction guard only. Stored rows
 change at the next ingest (see "Applying corrected floors to existing
 rows" below).
+
+#### Op class floor for credential reads
+
+The op class is the third and last floor. An ingested operation that a
+connector declares as `credential_read` (`declare_op_classes` in its
+`op_classes.py`, read through `classify_op`) is at least `caution` and
+waits for a person's approval. `apply_safety_floor` applies it after the
+connector floor and the catalog overlay, and it only raises. So the same
+marker that makes the dispatcher hide the values of the answer also sets
+the lowest risk level of the read. A catalog row and its `safety_overlay`
+can raise such a read further, but a product without a row, or a row
+without a list, no longer leaves a credential read at `safe`. A declared
+credential read counts as governed in `has_safety_floor`, so a re-ingest
+never lowers a stricter stored row. Tests:
+`tests/test_credential_read_safety_floor.py`.
 
 #### Applying corrected floors to existing rows
 

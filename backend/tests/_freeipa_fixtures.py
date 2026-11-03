@@ -204,25 +204,29 @@ ALL_ANSWERS: Answers = {
 }
 
 
-async def dispatch_op(op_id: str, params: dict[str, Any], target: Target | None = None) -> Any:
+async def dispatch_op(
+    op_id: str, params: dict[str, Any], target: Target | None = None, *, approved: bool = False
+) -> Any:
+    """Dispatch one op. ``approved=True`` runs it as the call after a second person approved."""
     return await dispatch(
         operator=make_operator(),
         connector_id=FREEIPA_CONNECTOR_ID,
         op_id=op_id,
         target=target or Target(),
         params=params,
+        _approved=approved,
     )
 
 
 async def run(
-    op_id: str, params: dict[str, Any], answers: Answers | None = None
+    op_id: str, params: dict[str, Any], answers: Answers | None = None, *, approved: bool = False
 ) -> tuple[Any, list[dict[str, Any]], respx.Route]:
     """Dispatch one op against the fake server. Returns the result, the calls and the login."""
     calls: list[dict[str, Any]] = []
     async with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         login = mock.post(LOGIN).mock(return_value=login_response())
         mock.post(JSON).mock(side_effect=fake_ipa(answers or ALL_ANSWERS, calls))
-        result = await dispatch_op(op_id, params)
+        result = await dispatch_op(op_id, params, approved=approved)
     return result, calls, login
 
 

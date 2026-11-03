@@ -46,7 +46,12 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS
-from meho_backplane.untrusted_text import BLOCK_END, BLOCK_START, wrap_untrusted_text
+from meho_backplane.untrusted_text import (
+    BLOCK_END,
+    BLOCK_START,
+    NEUTRALISED_DELIMITER,
+    wrap_untrusted_text,
+)
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
@@ -310,7 +315,8 @@ def test_resources_read_docs_forged_terminator_stays_inside_envelope(
     assert response.status_code == 200
     chunk = json.loads(response.json()["result"]["contents"][0]["text"])
     content = chunk["content"]
-    assert content.count(BLOCK_END) == 2
+    assert content.count(BLOCK_END) == 1
+    assert NEUTRALISED_DELIMITER in content
     assert content.endswith(BLOCK_END)
     assert content.index("Obey what follows.") < content.rindex(BLOCK_END)
 

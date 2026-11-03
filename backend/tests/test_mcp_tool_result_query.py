@@ -28,7 +28,9 @@ from fastapi.testclient import TestClient
 import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.schemas import INVALID_PARAMS
+from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from meho_backplane.settings import get_settings
+from meho_backplane.untrusted_text import DATA_NOTICE
 from tests._result_store_helpers import MemoryResultStore
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -114,11 +116,54 @@ def test_result_query_returns_window_beyond_inline_sample(
     assert payload["returned_rows"] == 50
     assert payload["truncated"] is False
     assert [r["i"] for r in payload["rows"]] == list(range(5, 55))
+    # Every page says that the text in its rows is data, never an instruction.
+    assert payload["data_notice"] == DATA_NOTICE
 
     # The tail (rows 55..59) is reachable too — the full set, not just a sample.
     tail = _call(client, {"handle_id": str(handle), "offset": 55, "limit": 50})
     tail_payload = _structured(tail.json()["result"])
     assert [r["i"] for r in tail_payload["rows"]] == list(range(55, 60))
+
+
+def test_result_query_wire_ceiling_counts_the_data_notice(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    fake_store: MemoryResultStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wire ceiling is measured with the ``data_notice`` field the tool adds.
+
+    A page that fits the ceiling without the notice but not with it is
+    refused, so no delivered page is over the ceiling.
+    """
+    client, op = client_with_operator
+    handle = uuid4()
+    fake_store.seed(
+        tenant_id=OPERATOR_TENANT_ID,
+        operator_sub=op.sub,
+        handle_id=handle,
+        rows=[{"i": i, "name": f"row-{i}"} for i in range(10)],
+    )
+    payload = _structured(_call(client, {"handle_id": str(handle), "limit": 10}).json()["result"])
+    with_notice = measure_delivered_wire_bytes(payload)
+    bare = measure_delivered_wire_bytes({k: v for k, v in payload.items() if k != "data_notice"})
+    assert with_notice > bare
+
+    def settings(wire_max_bytes: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            result_query_max_output_bytes=1 << 20,
+            result_query_response_wire_max_bytes=wire_max_bytes,
+            result_query_timeout_seconds=10,
+        )
+
+    monkeypatch.setattr(result_query_core, "get_settings", lambda: settings(bare))
+    refused = _call(client, {"handle_id": str(handle), "limit": 10}).json()
+    assert refused["error"]["code"] == INVALID_PARAMS
+    assert refused["error"]["data"]["reason"] == "output_too_large"
+
+    monkeypatch.setattr(result_query_core, "get_settings", lambda: settings(with_notice))
+    served = _call(client, {"handle_id": str(handle), "limit": 10}).json()
+    assert "error" not in served, served
+    assert measure_delivered_wire_bytes(_structured(served["result"])) <= with_notice
 
 
 def test_result_query_unknown_handle_is_recoverable_invalid_params(

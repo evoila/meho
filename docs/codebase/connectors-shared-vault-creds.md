@@ -105,7 +105,8 @@ dispatcher's `connector_error` branch.
   checks a secret ref taken from the op params before any read: a Vault
   ref must sit in the caller's tenant subtree (`enforce_tenant_scope`), a
   `gsm:` ref must name a project in `GSM_PARAM_ALLOWED_PROJECTS` (empty by
-  default, so all are refused), any other store kind is refused. Raises
+  default, so all are refused; the same list limits a target's own `gsm:`
+  login, see below), any other store kind is refused. Raises
   `SecretRefScopeError` (a `SecretRefReadError`, so the dispatcher answers
   `vault_credentials_read_error`). `load_param_secret_data` calls it
   first. See `connectors-vault-tenant-scope.md`, "Secret refs in
@@ -248,12 +249,28 @@ second backend on the seam, so a GCP-native adopter runs Vault-free. The
 `_shared` package `__init__` imports the module so the `register_credential_backend("gsm", ...)`
 call runs eagerly, exactly as `vault_creds` does for `vault`.
 
-**`gsm:` refs named in op params.** A target's own `gsm:` ref is read as
-described below. A `gsm:` ref taken from an op parameter (for example a
-`password_secret_ref`) is read only when its project is listed in
-`GSM_PARAM_ALLOWED_PROJECTS` (`Settings.gsm_param_allowed_projects`,
-comma-separated, empty by default). With the default every such ref is
-refused before any Google call (`check_param_secret_ref`).
+**Only listed Google projects.** A `gsm:` ref is read only when its
+project is listed in `GSM_PARAM_ALLOWED_PROJECTS`
+(`Settings.gsm_param_allowed_projects`, comma-separated, empty by
+default). With the default every `gsm:` ref is refused before any Google
+call. The rule runs in two places, both with the helpers
+`gsm_project_of` / `is_gsm_project_allowed` of `gsm_creds.py`:
+
+- a `gsm:` ref taken from an op parameter (for example a
+  `password_secret_ref`): `check_param_secret_ref` raises
+  `SecretRefScopeError`;
+- a target's own `gsm:` login: `_resolve_and_load` calls
+  `check_gsm_target_ref` before it dispatches to the backend, which raises
+  `GcpSecretManagerReadError` naming the target, the project and the
+  setting. The targets write surface refuses such a `secret_ref` when the
+  target is saved (`api/v1/targets.py`, 422
+  `secret_ref_project_not_allowed`), so a target that could never log in
+  is not stored.
+
+The check sits in the shared loader, not in `GcpSecretManagerBackend`, so
+the readiness probe's own probe secret (`gsm:<GSM_PROJECT>/meho-test-federation`,
+read through the backend directly by `api/v1/health.py`) stays outside
+the rule, as the Vault probe path stays outside the tenant check.
 
 **Auth model — SA-direct under GKE Workload Identity (Phase 1).** The read
 runs under MEHO's *own* identity: the pod's Application Default Credentials

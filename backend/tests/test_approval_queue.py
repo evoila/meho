@@ -867,8 +867,9 @@ async def test_approve_and_reject_reason_payloads_are_symmetric(
     assert reject_payload["decision"] == "rejected"
     assert approve_payload["reason"] == "why-approve"
     assert reject_payload["reason"] == "why-reject"
-    # Same key set up to the decision-specific value.
-    assert set(approve_payload) == set(reject_payload)
+    # Same key set up to the decision-specific value, plus the two
+    # approval-only fields (#3328).
+    assert set(approve_payload) == set(reject_payload) | {"self_approved", "approval_rule"}
 
 
 @pytest.mark.asyncio
@@ -1565,12 +1566,11 @@ async def test_self_approval_still_honours_break_glass_for_low_tiers(
 async def test_different_sub_approval_on_dangerous_tier_passes(
     session: AsyncSession,
 ) -> None:
-    """A *different* operator approving a ``dangerous`` request is genuine four-eyes.
+    """A *different* admin approving a ``dangerous`` request is genuine four-eyes.
 
     The guard keys on the stable ``sub`` claim: a distinct reviewer clears
-    the self-approval check and the approval proceeds normally — the #3290
-    widening only refuses *self*-approval, never a real second operator.
-    Break-glass is irrelevant here (default off).
+    the self-approval check. An admin may approve another person's
+    ``dangerous`` change (#3328). Break-glass is irrelevant here (default off).
     """
     requester = _make_operator(sub="requester-sub", role=TenantRole.OPERATOR)
     params = {"name": "test"}
@@ -1588,7 +1588,7 @@ async def test_different_sub_approval_on_dangerous_tier_passes(
     )
     await session.commit()
 
-    approver = _make_operator(sub="approver-sub", role=TenantRole.OPERATOR)
+    approver = _make_operator(sub="approver-sub", role=TenantRole.TENANT_ADMIN)
     async with get_sessionmaker()() as s2:
         row = await approve_request(s2, pending.id, operator=approver, params=params)
         await s2.commit()

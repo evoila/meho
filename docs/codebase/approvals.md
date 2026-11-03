@@ -632,22 +632,31 @@ model, or resume endpoint):
    the params-hash check, so a self-approver gets the precise refusal
    reason.
 
-   **How to audit a break-glass self-approval (#2087).** There is
-   **no** `self_approved` field on the audit row — do not filter for
-   one. When break-glass is enabled and a self-approval goes through,
-   `_check_self_approval` (`approval_queue.py`) emits the structured
-   **log event** `approval_self_approval_break_glass` (WARNING, with
-   `approval_request_id`, `op_id`, `operator_sub`, `tenant_id`) and
-   returns; the decision audit row written by `approve_request` via
-   `_write_audit_row` carries the ordinary payload
-   (`approval_request_id`, `op_id`, `connector_id`, `principal_sub`,
-   `result_status`, `decision`, `reviewed_by`, optional `reason`).
-   A self-approval is therefore identified **on the ledger** as the
-   `approval.decision` row where the requester equals the approver —
-   `payload.principal_sub == payload.reviewed_by` (the approver's
-   `operator.sub`). A first-class `self_approved` audit marker would
-   be net-new, separately scoped work. Whether the deploy currently
-   allows self-approval at all is visible without grepping the values
+   **Who may approve, by group (#3328).** `_check_approver_group`
+   (`approval_queue.py`) decides, after the role check. The rules come
+   from [the decision record](../decisions/approval-groups-and-self-approval.md):
+   - A MEHO-SA-Operator (`Operator.may_self_approve`) may approve their
+     own change at every risk level. Everyone else gets
+     `SelfApprovalForbiddenError` for their own change, unless break-glass
+     covers it (`safe` and `caution` only).
+   - Another person's `dangerous` or `destructive` change may be approved
+     only by a MEHO-SA-Operator or a tenant admin. Everyone else gets
+     `ApprovalGroupForbiddenError` (a subclass of
+     `UnauthorizedApprovalError`; REST answers 403
+     `approval_group_required: <text>`).
+   - Another person's lower-risk change keeps the reviewer rule
+     (operator-or-higher, or the `approver` flag). A request without a
+     stamped `safety_level` counts as lower-risk.
+
+   **How to audit a self-approval.** The `approval.decision` audit row
+   carries `self_approved` (true when requester and approver are the same
+   `sub`) and `approval_rule`: `sa_operator_self_approval`,
+   `break_glass_self_approval`, `sa_operator_or_admin` or `reviewer`.
+   The `approval.approved` add-on step event carries the same two fields.
+   A break-glass self-approval also logs the WARNING event
+   `approval_self_approval_break_glass` (with `approval_request_id`,
+   `op_id`, `operator_sub`, `tenant_id`). Whether the deploy currently
+   allows break-glass at all is visible without grepping the values
    file: `GET /ready` → `features.approval_queue.effective_posture`
    is `"single_operator_break_glass"` when
    `APPROVAL_ALLOW_SELF_APPROVAL=true`, `"four_eyes_enforced"`

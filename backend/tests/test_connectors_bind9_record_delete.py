@@ -593,7 +593,8 @@ async def test_full_governed_flow_preview_park_approve_resume() -> None:
     assert blast["irreversibility"] == "recreatable"
 
     # 4) A DIFFERENT operator approves (four-eyes) — the binding re-verifies.
-    approver = _make_operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         approved = await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()
@@ -718,7 +719,8 @@ async def test_park_resolves_parent_hosted_subdomain_to_owning_zone() -> None:
 
     # Post-approval resume deletes it — the shared resolver means execution
     # walks to the same parent zone the park named.
-    approver = _make_operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         approved = await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()
@@ -985,7 +987,9 @@ async def test_multi_value_park_blast_radius_then_scoped_delete() -> None:
     assert blast["object"]["rdata"] == "192.0.2.10"
     assert {c["rdata"] for c in blast["children"]} == {"192.0.2.10", "192.0.2.11"}
 
-    approver = _make_operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()

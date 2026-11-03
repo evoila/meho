@@ -258,7 +258,9 @@ async def test_full_governed_flow_park_approve_resume() -> None:
     request_id = UUID(call["extras"]["approval_request_id"])
     assert recorder.uninstall_calls == []  # nothing uninstalled pre-approval
 
-    approver = _make_operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         approved = await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()

@@ -796,7 +796,8 @@ async def test_user_delete_waits_for_a_second_person_then_runs(kc: KeycloakConne
     """Preview → wait for approval → a second person approves → the delete runs once."""
     args = _args("keycloak.user.delete", {"username": "event-guest"})
     requester = _operator("kc-delete-requester")
-    approver = _operator("kc-delete-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+    approver = _operator("kc-delete-approver").model_copy(update={"self_approver": True})
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         mock.get(f"/admin/realms/{_REALM}/users").respond(200, json=[_user()])

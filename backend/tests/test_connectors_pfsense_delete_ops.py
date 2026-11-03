@@ -782,7 +782,9 @@ async def test_full_governed_flow_nat_delete() -> None:
     # The associated filter rule is enumerated (left in place, surfaced).
     assert {c["kind"] for c in blast["children"]} == {"associated_filter_rule"}
 
-    approver = _make_operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         approved = await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()
@@ -830,7 +832,9 @@ async def test_rule_recreated_between_park_and_approval_invalidates() -> None:
     # a different tracker) -- the live config no longer carries T.
     recorder._config_before = _CONFIG_ONE_NAT  # only tracker 1585165240 remains
 
-    approver = _make_operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()
@@ -872,7 +876,9 @@ async def test_full_governed_flow_alias_delete() -> None:
     assert blast["reference_count"] == 0
     assert blast["children"] == []
 
-    approver = _make_operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()
@@ -910,7 +916,9 @@ async def test_referenced_alias_refused_post_approval_fail_closed() -> None:
         blast = dict(row.proposed_effect)["blast_radius"]
     assert blast["reference_count"] == 2
 
-    approver = _make_operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()

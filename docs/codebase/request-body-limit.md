@@ -16,7 +16,7 @@ the one backstop for all routes; routes with a tighter cap keep it.
 | Symbol | Role |
 |---|---|
 | `RequestBodyLimitMiddleware` | Pure-ASGI middleware. Reads the cap from `Settings.http_max_request_body_bytes` on each request. |
-| `RequestBodyTooLargeError` | Raised from the wrapped `receive` when the running byte total crosses the cap. |
+| `RequestBodyTooLargeError` | Raised from the wrapped `receive` when the running byte total crosses the cap. An `HTTPException` with status `413`. |
 
 ## Control flow
 
@@ -26,9 +26,13 @@ the one backstop for all routes; routes with a tighter cap keep it.
    understates the size), the middleware counts the bytes of every
    `http.request` message the handler reads. When the total crosses
    the cap, the read raises `RequestBodyTooLargeError`.
-3. The middleware catches that error. When the response has not
-   started yet it sends the `413`; otherwise it re-raises, because a
-   second response cannot be sent.
+3. The error is an `HTTPException` with status `413`. When a route
+   reads the body, FastAPI's body parsing re-raises it as is (any other
+   error from the read would become its generic `400`), and the app's
+   exception handler answers `413`. When an inner middleware reads the
+   body, the error escapes the app and this middleware catches it: when
+   the response has not started yet it sends the `413`; otherwise it
+   re-raises, because a second response cannot be sent.
 
 The `413` body is `{"detail": "request body exceeds <N> bytes"}`. Each
 refusal logs one `request_body_too_large` warning with the path and the

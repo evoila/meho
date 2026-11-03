@@ -16,9 +16,14 @@ Two arms, like the ``/mcp`` cap it mirrors:
 * A body without a trustworthy length (chunked transfer, or a header
   that understates the size) is counted as the handler reads it. The
   moment the running total crosses the cap the read raises
-  :class:`RequestBodyTooLargeError`; the middleware turns that into a
-  ``413`` when the response has not started yet, and re-raises
-  otherwise.
+  :class:`RequestBodyTooLargeError`. It is an ``HTTPException`` with
+  status ``413``, so when a route reads the body (FastAPI parsing a
+  declared JSON or form body, or a handler calling ``request.body()``)
+  the app's own exception handler answers ``413``; FastAPI re-raises an
+  ``HTTPException`` from body parsing instead of folding it into its
+  ``400``. When the error escapes the app (an inner middleware read the
+  body), this middleware sends the ``413`` itself if the response has
+  not started yet, and re-raises otherwise.
 
 Routes that already carry a tighter cap (``/mcp`` at 1 MiB, event
 ingest at 256 KiB, the kb upload at 512 KiB) keep it: this cap is the
@@ -33,6 +38,7 @@ import json
 from typing import Final
 
 import structlog
+from starlette.exceptions import HTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from meho_backplane.settings import get_settings
@@ -44,16 +50,25 @@ _log = structlog.get_logger()
 _STATUS_TOO_LARGE: Final[int] = 413
 
 
-class RequestBodyTooLargeError(Exception):
-    """Raised from the wrapped ``receive`` when the body crosses the cap."""
+def _too_large_detail(max_bytes: int) -> str:
+    return f"request body exceeds {max_bytes} bytes"
+
+
+class RequestBodyTooLargeError(HTTPException):
+    """Raised from the wrapped ``receive`` when the body crosses the cap.
+
+    An ``HTTPException`` so the ``413`` survives FastAPI's body parsing:
+    it re-raises an ``HTTPException`` as is, while any other error from
+    the read becomes its generic ``400``.
+    """
 
     def __init__(self, max_bytes: int) -> None:
-        super().__init__(f"request body exceeds {max_bytes} bytes")
+        super().__init__(status_code=_STATUS_TOO_LARGE, detail=_too_large_detail(max_bytes))
         self.max_bytes = max_bytes
 
 
 def _too_large_body(max_bytes: int) -> bytes:
-    return json.dumps({"detail": f"request body exceeds {max_bytes} bytes"}).encode("utf-8")
+    return json.dumps({"detail": _too_large_detail(max_bytes)}).encode("utf-8")
 
 
 def _declared_length(scope: Scope) -> int | None:

@@ -70,7 +70,8 @@ if TYPE_CHECKING:
             command: str,
             args: list[Any] | None = None,
             options: dict[str, Any] | None = None,
-        ) -> FreeipaAnswer: ...
+        ) -> FreeipaAnswer:
+            """Run one IPA command: :meth:`FreeipaConnector.call`."""
 
     _Base = _Connector
 else:

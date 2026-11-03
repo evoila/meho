@@ -1161,3 +1161,22 @@ def _make_stub() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
+
+
+@pytest.mark.parametrize(
+    "path", ["/ui/vault/put/confirm", "/ui/vault/delete/confirm", "/ui/vault/move/confirm"]
+)
+def test_vault_write_confirm_modals_read_only_forbidden_403(path: str) -> None:
+    """A ``read_only`` session gets ``403 operator_required`` on the confirm modals too.
+
+    The whole vault console is for operators: the modal that leads to a
+    write is refused on the same floor as the write itself.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    client, mock, _csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_READ_ONLY, role=TenantRole.READ_ONLY
+    )
+    with mock:
+        response = client.get(path, params={"target": "vault-prod", "path": "app/db"})
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "operator_required"}

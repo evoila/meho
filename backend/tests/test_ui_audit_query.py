@@ -210,14 +210,46 @@ def _seed_rows(*, tenant_id: uuid.UUID, count: int, op_id: str = "vsphere.vm.lis
         _seed_audit_row(tenant_id=tenant_id, second=i, op_id=f"{op_id}.{i}")
 
 
+# One keypair for the whole module. Every seeded session carries a real
+# ``operator`` JWT signed with it (unless a test passes its own token), and
+# the autouse fixture below serves its JWKS, so the console's operator gate
+# can lift the role on every request.
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    _KEYPAIR = _make_rsa_keypair("ui-audit-test-kid")
+_JWKS = _public_jwks(_KEYPAIR)
+
+
+@pytest.fixture(autouse=True)
+def _jwks_mock(_bff_env: None) -> Iterator[None]:
+    """Serve the module keypair's JWKS so the operator role lift succeeds."""
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, _JWKS)
+        yield
+
+
+def _operator_token(operator_sub: str, tenant_id: uuid.UUID) -> str:
+    """A real ``operator`` JWT for *operator_sub* signed with the module keypair."""
+    return _mint_token(
+        _KEYPAIR,
+        sub=operator_sub,
+        tenant_id=str(tenant_id),
+        tenant_role=TenantRole.OPERATOR.value,
+    )
+
+
 def _seed_session_sync(
     *,
     tenant_id: uuid.UUID,
     operator_sub: str = _OPERATOR_SUB,
-    access_token: str = "access-token-plaintext",
+    access_token: str | None = None,
     lifetime: timedelta = timedelta(hours=1),
 ) -> uuid.UUID:
-    """Create a ``web_session`` row carrying *access_token*; return its UUID."""
+    """Create a ``web_session`` row carrying *access_token*; return its UUID.
+
+    Without *access_token* the row carries a real ``operator`` JWT, so the
+    session passes the console's operator gate.
+    """
 
     async def _do() -> uuid.UUID:
         sessionmaker = get_sessionmaker()
@@ -226,7 +258,7 @@ def _seed_session_sync(
                 session,
                 operator_sub=operator_sub,
                 tenant_id=tenant_id,
-                access_token=access_token,
+                access_token=access_token or _operator_token(operator_sub, tenant_id),
                 refresh_token="refresh-token-plaintext",
                 lifetime=lifetime,
             )
@@ -254,12 +286,8 @@ def _role_session(
     ``TENANT_ADMIN`` token lifts to admin; an ``OPERATOR`` token decodes
     cleanly but is not admin.
     """
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        keypair = _make_rsa_keypair("ui-audit-test-kid")
-    jwks = _public_jwks(keypair)
     access_token = _mint_token(
-        keypair,
+        _KEYPAIR,
         sub=operator_sub,
         tenant_id=str(tenant_id),
         tenant_role=role.value,
@@ -267,7 +295,7 @@ def _role_session(
     session_id = _seed_session_sync(
         tenant_id=tenant_id, operator_sub=operator_sub, access_token=access_token
     )
-    return session_id, jwks
+    return session_id, _JWKS
 
 
 def _tampered_cursor() -> str:
@@ -609,16 +637,14 @@ def test_audit_results_rejects_unknown_partial() -> None:
 def test_replay_pivot_disabled_for_operator() -> None:
     """AC3: an operator-role lift renders the replay pivot disabled.
 
-    A plaintext access token cannot be JWT-verified, so the role lift fails
-    soft to operator and the replay pivot renders disabled with a tooltip --
-    not an enabled deep-link.
+    The session carries an ``operator`` token, so the replay pivot renders
+    disabled with a tooltip -- not an enabled deep-link.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     session_uuid = uuid.uuid4()
     _seed_audit_row(
         tenant_id=_TENANT_A, second=0, op_id="agent.session.op", agent_session_id=session_uuid
     )
-    # Plaintext token -> soft role lift fails to operator.
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
@@ -760,3 +786,31 @@ def _seed_audit_row_with_target(
         return row_id
 
     return asyncio.run(_do())
+
+
+# ===========================================================================
+# Role floor: read_only gets 403 on every audit page, and no row is read
+# ===========================================================================
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/ui/audit", "/ui/audit/results", "/ui/audit/my-recent", "/ui/audit/show/{audit_id}"],
+)
+def test_audit_pages_read_only_forbidden_403_no_rows(path: str) -> None:
+    """A ``read_only`` session gets ``403 operator_required``; no audit row reaches the body.
+
+    The console audit pages sit on the same ``operator`` floor as the REST
+    audit routes (``require_role(TenantRole.OPERATOR)``), so a ``read_only``
+    person reads no audit row through the console either.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    audit_id = _seed_audit_row(tenant_id=_TENANT_A, second=0, op_id="hidden.from.readers")
+    session_id, jwks = _role_session(TenantRole.READ_ONLY)
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        response = client.get(path.format(audit_id=audit_id))
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "operator_required"}
+    assert "hidden.from.readers" not in response.text

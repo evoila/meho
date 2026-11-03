@@ -70,13 +70,14 @@ guarantee.
 RBAC: reads are operator-tier
 -----------------------------
 
-The dispatch is gated only by :func:`require_ui_session`; the underlying
-``POST /api/v1/operations/call`` is ``_require_operator``
-(``TenantRole.OPERATOR``), so a plain operator can read every surface
-here. The page still threads an ``is_tenant_admin`` flag (via the
-soft-failing :func:`resolve_role_probe`) so T2/T3 can hide their write
-affordances from operators -- but a non-admin render must succeed, which
-the RBAC test asserts.
+The read pages (index, client detail, user list) are gated by
+:func:`require_ui_operator`, the console twin of the underlying
+``POST /api/v1/operations/call`` floor (``TenantRole.OPERATOR``): a plain
+operator can read every surface here, and a ``read_only`` session gets
+``403 operator_required`` before any dispatch. The page still threads an
+``is_tenant_admin`` flag (via the soft-failing :func:`resolve_role_probe`)
+so T2/T3 can hide their write affordances from operators -- but a
+non-admin render must succeed, which the RBAC test asserts.
 
 Tenant isolation
 ----------------
@@ -116,7 +117,11 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.settings import get_settings
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import (
+    UISessionContext,
+    require_ui_operator,
+    require_ui_session,
+)
 from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
@@ -195,6 +200,9 @@ async def _resolve_admin_or_403(
 #: Module-level ``Depends`` closures -- built once (rather than inline) to
 #: satisfy ruff B008, matching the operations / approvals / kb routers.
 _require_session = Depends(require_ui_session)
+#: The ``operator`` floor of the read pages (index / client detail / user
+#: list): ``read_only`` gets ``403 operator_required`` before any dispatch.
+_require_operator = Depends(require_ui_operator)
 _role_probe_dep = Depends(resolve_role_probe)
 _require_admin = Depends(_resolve_admin_or_403)
 
@@ -411,7 +419,7 @@ def build_keycloak_router() -> APIRouter:
     async def keycloak_client_detail(
         request: Request,
         client_uuid: str,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         target: str = Query(default="", max_length=_MAX_TARGET_LENGTH),
         role_probe: OperatorRoleProbe = _role_probe_dep,
     ) -> HTMLResponse:
@@ -428,7 +436,7 @@ def build_keycloak_router() -> APIRouter:
     @router.get("/ui/keycloak", response_class=HTMLResponse)
     async def keycloak_index(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         target: str = Query(default="", max_length=_MAX_TARGET_LENGTH),
         role_probe: OperatorRoleProbe = _role_probe_dep,
     ) -> HTMLResponse:
@@ -468,7 +476,7 @@ def _register_user_routes(router: APIRouter) -> None:
     @router.get("/ui/keycloak/users", response_class=HTMLResponse)
     async def keycloak_user_list(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         target: str = Query(default="", max_length=_MAX_TARGET_LENGTH),
         username: str = Query(default="", max_length=_MAX_FORM_FIELD_LENGTH),
         role_probe: OperatorRoleProbe = _role_probe_dep,

@@ -154,6 +154,7 @@ from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ApprovalRequestExpiredError,
+    ApprovalRoleFloorError,
     ApprovalSignInReusedError,
     ApprovalSignInTooOldError,
     ChainPosition,
@@ -947,6 +948,10 @@ async def _commit_decision(
     except ApprovalGroupForbiddenError as exc:
         # #3328: another person's dangerous or destructive change, and this
         # person is not in a group that may approve it. Name the groups.
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=exc.reason_text) from exc
+    except ApprovalRoleFloorError as exc:
+        # The operation needs a role from the person who runs it, and the
+        # approved call runs with this approval. Name the role it needs.
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=exc.reason_text) from exc
     except UnauthorizedApprovalError as exc:
         # The console decide path admits the same principals the REST plane

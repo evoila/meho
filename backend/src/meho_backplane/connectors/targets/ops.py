@@ -42,6 +42,12 @@ Approval posture — the load-bearing dial (mirrors ``topology.*`` #2537):
   ``needs-approval`` in :mod:`meho_backplane.auth.permissions`), while a
   human ``tenant_admin`` rides the default-allow branch and executes
   immediately.
+* The role floor is ``tenant_admin``, the same as REST ``POST
+  /api/v1/targets`` and the MCP tool. It is registered below with
+  :func:`~meho_backplane.operations.role_floors.register_role_floor`, so
+  the policy gate refuses a person with a lower role on every path
+  (``call_operation``, the REST dispatch route, the CLI), and the
+  approval queue refuses an approver with a lower role.
 * NOT ``requires_approval=True`` — that would park humans too.
 * NOT ``safety_level="dangerous"`` — that would DENY agents by default
   rather than park them. Target registration is reversible
@@ -95,6 +101,7 @@ from meho_backplane.connectors.targets.schemas import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import PermissionVerdict
 from meho_backplane.operations._audit import policy_decision_var
+from meho_backplane.operations.role_floors import register_role_floor
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.sandbox_mode import sandbox_mode_active
 from meho_backplane.targets.resolver import resolve_target_by_id
@@ -147,7 +154,8 @@ _DESCRIPTION = (
     "`host`/`fqdn`, and the JWT-derived `tenant_id` all apply. "
     "Tenant-scoped automatically — no `tenant_id` argument (cross-tenant "
     "registration is structurally impossible). `fingerprint` is "
-    "server-managed and rejected. Agent-principal calls park as approval "
+    "server-managed and rejected. Needs the `tenant_admin` role, like the "
+    "REST route. Agent-principal calls park as approval "
     "requests; human tenant_admin calls execute immediately."
 )
 
@@ -157,6 +165,10 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
         "back to a raw REST POST. Supply name + product + host (plus any "
         "optional connection detail); the tenant is taken from your "
         "identity."
+    ),
+    "preconditions": (
+        "A person needs the `tenant_admin` role; any lower role is refused. "
+        "An agent's call waits until a person with that role approves it."
     ),
     "parameter_hints": {
         "name": "Required. Unique within the tenant; the dispatch handle.",
@@ -320,6 +332,11 @@ _REMOVE_DESCRIPTION = (
     "Needs `tenant_admin`; a second person approves each call. In sandbox "
     "mode a service principal with a delete grant runs it at once, with any role."
 )
+
+# The policy gate checks the floor for a person on every path, and the
+# approval queue checks it for the approver.
+register_role_floor(TARGETS_REGISTER_OP_ID, TenantRole.TENANT_ADMIN)
+
 
 _REMOVE_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_call": (

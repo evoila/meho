@@ -23,7 +23,9 @@ most restrictive across all three:
    ``auto-execute`` on safe ops by policy — they cannot self-grant
    ``needs-approval`` access, only a tenant-admin can do that by
    inserting an explicit row. The role gate never *widens* — it can only
-   tighten or leave unchanged.
+   tighten or leave unchanged. An op can also carry its own role floor
+   (:mod:`meho_backplane.operations.role_floors`); the policy gate's
+   non-agent branch refuses a person below it on every dispatch path.
 
 2. **Agent-permission gate.** Load all :class:`AgentPermission` rows
    for ``(tenant_id, principal_sub)``. Evaluate every row's

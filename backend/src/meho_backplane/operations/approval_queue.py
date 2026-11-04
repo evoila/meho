@@ -3364,7 +3364,9 @@ def _request_safety_level(request: ApprovalRequest) -> str | None:
     return level if isinstance(level, str) else None
 
 
-def _check_self_approval(operator: Operator, request: ApprovalRequest) -> ApprovalRule | None:
+def _check_self_approval(
+    operator: Operator, request: ApprovalRequest, *, log_break_glass: bool = True
+) -> ApprovalRule | None:
     """Check a self-approval; return its rule, or ``None`` when it is not one.
 
     A self-approval is ``operator.sub == request.principal_sub``. The
@@ -3385,6 +3387,10 @@ def _check_self_approval(operator: Operator, request: ApprovalRequest) -> Approv
     The level is read off the ``proposed_effect`` envelope the dispatcher
     stamped at park time. Settings are imported lazily to keep the queue
     module decoupled from settings at import time.
+
+    *log_break_glass* is ``False`` when MEHO only shows whether a person
+    may approve (:mod:`~meho_backplane.operations.approval_rights`): that
+    read approves nothing, so it logs no break-glass warning.
     """
     if operator.sub != request.principal_sub:
         return None
@@ -3396,6 +3402,8 @@ def _check_self_approval(operator: Operator, request: ApprovalRequest) -> Approv
     from meho_backplane.settings import get_settings
 
     if not high_risk and get_settings().approval_allow_self_approval:
+        if not log_break_glass:
+            return ApprovalRule.BREAK_GLASS_SELF_APPROVAL
         _log().warning(
             "approval_self_approval_break_glass",
             approval_request_id=str(request.id),
@@ -3408,7 +3416,9 @@ def _check_self_approval(operator: Operator, request: ApprovalRequest) -> Approv
     raise SelfApprovalForbiddenError(request.id, principal_sub=operator.sub, high_risk=high_risk)
 
 
-def _check_approver_group(operator: Operator, request: ApprovalRequest) -> ApprovalRule:
+def _check_approver_group(
+    operator: Operator, request: ApprovalRequest, *, log_break_glass: bool = True
+) -> ApprovalRule:
     """Return the rule that lets *operator* approve *request*, or raise (#3328).
 
     Runs after :func:`_check_reviewer_role`, so a machine principal is
@@ -3428,7 +3438,7 @@ def _check_approver_group(operator: Operator, request: ApprovalRequest) -> Appro
     A request without a stamped level is treated as lower-risk, the same
     as the break-glass check and :func:`_check_destructive_preview_binding`.
     """
-    self_rule = _check_self_approval(operator, request)
+    self_rule = _check_self_approval(operator, request, log_break_glass=log_break_glass)
     if self_rule is not None:
         return self_rule
     level = _request_safety_level(request)

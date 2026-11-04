@@ -149,6 +149,7 @@ from meho_backplane.operations.approval_rerun import (
     RerunParamsRequiredError,
     rerun_failed_request,
 )
+from meho_backplane.operations.approval_rights import ApproveRight, approve_right
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 from meho_backplane.settings import get_settings
 
@@ -346,6 +347,17 @@ class ApprovalRequestView(BaseModel):
     #: who instructed the approver, their words, and the refs. ``None`` on
     #: the list view, before a decision, and for an ordinary decision.
     delegation: DelegationView | None = None
+    #: Whether the caller may approve this request (#3329), worked out by
+    #: the server with the same checks as the approve. ``False`` for a
+    #: request that is not pending. ``None`` on the withdraw answer.
+    #: Additive; a client that ignores it is unaffected.
+    may_approve: bool | None = None
+    #: Why the caller may or may not approve (#3329): ``ok``,
+    #: ``own_change``, ``wrong_group``, ``role_too_low``,
+    #: ``no_approval_access``, ``not_a_person`` or ``not_pending``. With
+    #: ``may_approve`` true, ``own_change`` means a self-approval is
+    #: allowed. ``None`` when ``may_approve`` is ``None``.
+    may_approve_reason: str | None = None
 
 
 class ApprovalResultView(BaseModel):
@@ -503,6 +515,7 @@ def _view(
     row: ApprovalRequest,
     reviewer_context: ReviewerContextView | None = None,
     delegation: Delegation | None = None,
+    right: ApproveRight | None = None,
 ) -> ApprovalRequestView:
     """Convert an ORM row to a response view.
 
@@ -510,7 +523,8 @@ def _view(
     supplied only on the single-request path (its resolution runs a few
     tenant-scoped reads); the list view passes ``None`` and the field is
     simply absent there. *delegation* (#3692) is likewise single-request
-    only -- it is read off the decision audit row.
+    only -- it is read off the decision audit row. *right* (#3329) says
+    whether the caller may approve the request; list and show pass it.
     """
     expired_reason = approval_expired_reason(row)
     return ApprovalRequestView(
@@ -550,6 +564,8 @@ def _view(
             if delegation is not None
             else None
         ),
+        may_approve=right.may_approve if right is not None else None,
+        may_approve_reason=right.reason.value if right is not None else None,
     )
 
 
@@ -803,7 +819,7 @@ async def list_approvals(
         result = await session.execute(stmt)
         rows = list(result.scalars().all())
 
-    return [_view(r) for r in rows]
+    return [_view(r, right=approve_right(operator, r)) for r in rows]
 
 
 @router.get("/{request_id}", response_model=ApprovalRequestView)
@@ -838,7 +854,7 @@ async def get_approval_request(
         # resolver never raises, so a resolution miss just omits the block.
         reviewer_context = _reviewer_context_view(await resolve_reviewer_context(session, row))
         delegation = await get_decision_delegation(session, row)
-    return _view(row, reviewer_context, delegation)
+    return _view(row, reviewer_context, delegation, approve_right(operator, row))
 
 
 @router.get("/{request_id}/result", response_model=ApprovalResultView)
@@ -1392,6 +1408,13 @@ class DecideResponseBody(BaseModel):
     so a client renders *who* without resolving the GUID itself. ``None``
     when the token carried no name — the client fails open to ``decided_by``.
     Display name only: no email or other profile field is added here.
+
+    ``self_approved`` and ``approval_rule`` (#3329) are the same values the
+    ``approval.decision`` audit row records: whether the person approved
+    their own change, and the rule that allowed the approval
+    (``sa_operator_self_approval``, ``break_glass_self_approval``,
+    ``sa_operator_or_admin`` or ``reviewer``). The command line prints a
+    self-approval line from them. Both are ``None`` on a rejection.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -1405,6 +1428,8 @@ class DecideResponseBody(BaseModel):
     dispatch_op_id: str | None = None
     dispatch_result: dict[str, Any] | list[Any] | None = None
     dispatch_error: str | None = None
+    self_approved: bool | None = None
+    approval_rule: str | None = None
 
 
 @router.post(
@@ -1499,6 +1524,8 @@ async def decide_approval_request(
             dispatch_op_id=dispatch_result.op_id,
             dispatch_result=dispatch_result.result,
             dispatch_error=dispatch_result.error,
+            self_approved=request.principal_sub == operator.sub,
+            approval_rule=str(request._approval_rule),  # type: ignore[attr-defined]
         )
 
     return DecideResponseBody(

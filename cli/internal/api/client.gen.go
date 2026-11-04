@@ -1523,17 +1523,19 @@ type ApprovalRequestView struct {
 	//   while the request waited (:func:`expire_older_release_requests`).
 	//   Only this path expires a request before its deadline, so an
 	//   ``expired`` row with ``decided_at < expires_at`` is this case.
-	ExpiredReason  *ApprovalExpiredReason `json:"expired_reason,omitempty"`
-	ExpiresAt      *string                `json:"expires_at"`
-	Id             openapi_types.UUID     `json:"id"`
-	OpId           string                 `json:"op_id"`
-	ParamsHash     string                 `json:"params_hash"`
-	PreviewHash    *string                `json:"preview_hash"`
-	PrincipalAct   *string                `json:"principal_act"`
-	PrincipalName  *string                `json:"principal_name"`
-	PrincipalSub   string                 `json:"principal_sub"`
-	ProposedEffect map[string]interface{} `json:"proposed_effect"`
-	ReleaseId      *string                `json:"release_id"`
+	ExpiredReason    *ApprovalExpiredReason `json:"expired_reason,omitempty"`
+	ExpiresAt        *string                `json:"expires_at"`
+	Id               openapi_types.UUID     `json:"id"`
+	MayApprove       *bool                  `json:"may_approve"`
+	MayApproveReason *string                `json:"may_approve_reason"`
+	OpId             string                 `json:"op_id"`
+	ParamsHash       string                 `json:"params_hash"`
+	PreviewHash      *string                `json:"preview_hash"`
+	PrincipalAct     *string                `json:"principal_act"`
+	PrincipalName    *string                `json:"principal_name"`
+	PrincipalSub     string                 `json:"principal_sub"`
+	ProposedEffect   map[string]interface{} `json:"proposed_effect"`
+	ReleaseId        *string                `json:"release_id"`
 
 	// ResultState Whether an approved request has run yet (#3486).
 	//
@@ -4867,8 +4869,16 @@ type DecideRequestBody struct {
 // so a client renders *who* without resolving the GUID itself. “None“
 // when the token carried no name — the client fails open to “decided_by“.
 // Display name only: no email or other profile field is added here.
+//
+// “self_approved“ and “approval_rule“ (#3329) are the same values the
+// “approval.decision“ audit row records: whether the person approved
+// their own change, and the rule that allowed the approval
+// (“sa_operator_self_approval“, “break_glass_self_approval“,
+// “sa_operator_or_admin“ or “reviewer“). The command line prints a
+// self-approval line from them. Both are “None“ on a rejection.
 type DecideResponseBody struct {
 	ApprovalRequestId openapi_types.UUID                 `json:"approval_request_id"`
+	ApprovalRule      *string                            `json:"approval_rule"`
 	DecidedBy         *string                            `json:"decided_by"`
 	DecidedByName     *string                            `json:"decided_by_name"`
 	Decision          string                             `json:"decision"`
@@ -4877,6 +4887,7 @@ type DecideResponseBody struct {
 	DispatchResult    *DecideResponseBody_DispatchResult `json:"dispatch_result"`
 	DispatchStatus    *string                            `json:"dispatch_status"`
 	Reason            string                             `json:"reason"`
+	SelfApproved      *bool                              `json:"self_approved"`
 }
 
 // DecideResponseBodyDispatchResult0 defines model for .

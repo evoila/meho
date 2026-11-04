@@ -9,14 +9,16 @@
   request detail (op_id / connector_id / proposed_effect / requester
   principal_sub / created_at) and the Approve + Deny actions.
 
-  Self-approval invariant (#1401)
-    The **Approve** button is disabled (read-only) when the operator is the
-    requester and the audited break-glass is off
-    (``self_approval_blocked``); its ``aria-label`` names the
-    ``APPROVAL_ALLOW_SELF_APPROVAL`` flag so the operator learns the lever.
-    **Deny** stays enabled (withdrawing your own request is not an
-    escalation). The button state is UX only -- the BFF re-checks
-    server-side and 403s a forged self-approve, surfaced via ``error_*``.
+  "May I approve this?" sign (#1401, #3329)
+    A pending request shows whether this person may approve it and why not
+    (``approve_right``, the same service checks as the approve). The
+    **Approve** button is disabled (read-only) when the answer is no
+    (``approve_blocked``); its ``aria-label`` carries the reason. An own
+    change the person may not approve (``self_approval_blocked``) also gets
+    the single-operator guidance. **Deny** stays enabled (withdrawing your
+    own request is not an escalation). The button state is UX only -- the
+    BFF re-checks server-side and 403s a forged approve, surfaced via
+    ``error_*``.
 
   CSRF (#1693 / #1754)
     Each decision is its own ``<form>`` carrying its OWN ``hx-headers``
@@ -72,7 +74,10 @@
                              / work_ref / run_id / blast_radius / summary.
                              Every field fails open to None; ``.is_empty`` is
                              true when nothing resolved.
-    self_approval_blocked -- bool: disable the Approve button
+    approve_right         -- ApproveRight (#3329): may_approve / reason / message /
+                             self_approval -- whether this person may approve
+    approve_blocked       -- bool: the person may not approve; disable Approve
+    self_approval_blocked -- bool: the person may not approve their own change
     self_approval_setting -- str: the break-glass env-var name to name in the label
     self_approval_docs_url -- str: operator-docs deep link the single-operator
                              guidance points at (#2669)
@@ -171,7 +176,7 @@
           <div class="text-sm">
             <h4 class="font-semibold">You cannot approve your own request</h4>
             <p class="mt-1 opacity-90">
-              Requester and approver must differ (the four-eyes rule). You may still deny it.
+              {{ error_message }} You may still deny it.
             </p>
             {{ single_operator_choices(self_approval_docs_url, self_approval_setting) }}
           </div>
@@ -595,14 +600,28 @@
           solo deploy, the two single-operator patterns — instead of leaving the
           operator to infer it from a greyed-out button. Suppressed when the
           post-403 banner above already carries the same guidance. -#}
-      <div class="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-sm" role="note">
+      <div class="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-sm" role="note" data-approve-right="no" data-approve-reason="{{ approve_right.reason }}">
         <h4 class="font-semibold">You requested this — you cannot approve it</h4>
-        <p class="mt-1 opacity-90">On a team, another operator approves it.</p>
+        <p class="mt-1 opacity-90">{{ approve_right.message }}</p>
         {{ single_operator_choices(self_approval_docs_url, self_approval_setting) }}
+      </div>
+    {% elif request.status == "pending" and approve_blocked and not error_status %}
+      {#- #3329: the person may not approve this request (wrong group, a role
+          too low for the operation, no approvals access). The text is the one
+          the approve shows when it refuses. -#}
+      <div class="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-sm" role="note" data-approve-right="no" data-approve-reason="{{ approve_right.reason }}">
+        <h4 class="font-semibold">You cannot approve this request</h4>
+        <p class="mt-1 opacity-90">{{ approve_right.message }} You may still deny it.</p>
+      </div>
+    {% elif request.status == "pending" and not approve_blocked %}
+      {#- #3329: the person may approve. For an own change, say that the
+          approval is a self-approval and that the audit log records it. -#}
+      <div class="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-sm" role="note" data-approve-right="yes" data-approve-reason="{{ approve_right.reason }}">
+        <p>{{ approve_right.message }}</p>
       </div>
     {% endif %}
 
-    {% if request.status == "pending" and approve_needs_sign_in and not fresh_sign_in_error and not self_approval_blocked %}
+    {% if request.status == "pending" and approve_needs_sign_in and not fresh_sign_in_error and not approve_blocked %}
       {#- The session's sign-in is too old for an approval, or it did not ask
           for the password. The Approve button below is a sign-in link. -#}
       <div class="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-sm" role="note" data-testid="approval-sign-in-note">
@@ -700,7 +719,7 @@
           {{ icon("ban", class="size-4") }}
           Deny
         </button>
-        {% if approve_needs_sign_in and not self_approval_blocked %}
+        {% if approve_needs_sign_in and not approve_blocked %}
         {# The sign-in is too old for an approval: the Approve button is the
            link to a new sign-in. The POST checks the sign-in again anyway. #}
         <a
@@ -716,7 +735,7 @@
           type="button"
           class="btn btn-sm btn-primary gap-1"
           data-action="approve"
-          {% if self_approval_blocked %}disabled aria-disabled="true" aria-label="Approve disabled: you cannot approve your own request unless APPROVAL_ALLOW_SELF_APPROVAL is enabled"{% elif out_of_order %}x-on:click="armed = 'approve-early'"{% else %}x-on:click="armed = 'approve'"{% endif %}
+          {% if approve_blocked %}disabled aria-disabled="true" aria-label="Approve disabled: {{ approve_right.message }}"{% elif out_of_order %}x-on:click="armed = 'approve-early'"{% else %}x-on:click="armed = 'approve'"{% endif %}
         >
           {{ icon("check", class="size-4") }}
           Approve
@@ -750,10 +769,10 @@
         </div>
       </div>
 
-      {# Phase 2 -- armed Approve confirm. NOT rendered on a blocked self-approval
-         (#1401): with no approve armer above and no confirm block here, there is
-         no reachable approve confirm state at all. #}
-      {% if not self_approval_blocked and not approve_needs_sign_in %}
+      {# Phase 2 -- armed Approve confirm. NOT rendered when the person may not
+         approve (#1401, #3329): with no approve armer above and no confirm block
+         here, there is no reachable approve confirm state at all. #}
+      {% if not approve_blocked and not approve_needs_sign_in %}
       {# Out-of-order step (#3596): one more confirm before the normal approve
          confirm, when an earlier step of the same change ticket still waits. #}
       {% if out_of_order %}
@@ -782,6 +801,9 @@
           via <span class="font-mono">{{ request.connector_id }}</span> immediately{% if safety %}
           at safety level <span class="font-semibold">{{ safety }}</span>{% endif %}.
           There is no un-approve.
+          {% if approve_right.self_approval %}
+            <span class="font-semibold" data-approval-confirm="self-approval">This is your own change: the audit log records a self-approval.</span>
+          {% endif %}
         </p>
         <div class="flex items-center justify-end gap-2">
           <button type="button" class="btn btn-ghost btn-sm" x-on:click="armed = ''">Cancel</button>

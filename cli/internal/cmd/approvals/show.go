@@ -38,7 +38,10 @@ func newShowCmd() *cobra.Command {
 			"(connector, op, target, proposed_effect), its current " +
 			"status, the principal that triggered it, and the " +
 			"elicitation_url MCP clients can use to post a decision. " +
-			"--json emits the raw JSON envelope.",
+			"The \"May approve\" line says whether you may approve the " +
+			"request, and why not, as MEHO works it out with the same " +
+			"checks as the approve (may_approve and may_approve_reason " +
+			"in --json). --json emits the raw JSON envelope.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -143,6 +146,9 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 	}
 	fmt.Fprintf(w, "ID:           %s\n", d.Id.String())
 	fmt.Fprintf(w, "Status:       %s\n", string(d.Status))
+	if right := approveRightText(d.MayApprove, d.MayApproveReason); right != "" {
+		fmt.Fprintf(w, "May approve:  %s\n", right)
+	}
 	fmt.Fprintf(w, "Connector:    %s\n", d.ConnectorId)
 	fmt.Fprintf(w, "Operation:    %s\n", d.OpId)
 	// Resolved subject of a path-variable op (#3353): the concrete entity

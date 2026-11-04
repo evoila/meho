@@ -21,6 +21,9 @@
                 ``result_state`` "started" with no ``outcome`` means another
                 caller (usually the waiting requester) is running it and
                 no result is stored yet
+    self_approval_message -- str | None (#3329): the confirmation line after
+                a self-approval (the person approved their own change, and
+                the rule that allowed it); None for every other decision
 -#}
 {% from "_icons.html" import icon %}
 <dialog id="meho-approvals-modal" class="modal" aria-label="Decision recorded">
@@ -96,6 +99,11 @@
           The operation for <span class="font-mono">{{ request.op_id }}</span>
           was denied and will not run.
         </p>
+      {% endif %}
+      {#- Self-approval confirmation (#3329): the person approved their own
+          change. Shown on every approved card, also when the run failed. -#}
+      {% if self_approval_message %}
+        <p class="text-sm font-semibold" data-testid="approval-self-approved">{{ self_approval_message }}</p>
       {% endif %}
       {#- Delegated decision (#3692): the approver acted on another human's
           written instruction, parsed from the trailer block at the end of

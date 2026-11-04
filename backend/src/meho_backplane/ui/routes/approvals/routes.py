@@ -86,23 +86,24 @@ The ``params`` / ``params_hash`` columns are internal (swap-defence +
 re-dispatch input) and are **never** projected onto any of these views or
 the badge -- the projection in :mod:`.render` omits them by construction.
 
-Self-approval invariant (#1401)
--------------------------------
+"May I approve this?" sign and the Approve button (#1401, #3328, #3329)
+-------------------------------------------------------------------
 
-The **Approve** button is disabled in the modal when
-``operator.sub == request.principal_sub`` and the deployment has not
-enabled the audited single-operator break-glass
-(``Settings.approval_allow_self_approval``). **Deny** stays enabled (an
-operator withdrawing their own request is not an escalation). The button
-state is UX only -- the BFF re-checks server-side: ``approve_request`` ->
-``_check_self_approval`` raises :class:`SelfApprovalForbiddenError`, which
-this module maps to a 403 surfaced in the re-rendered modal.
+The modal shows, for a pending request, whether this person may approve
+it and why not. The answer comes from
+:func:`~meho_backplane.operations.approval_rights.approve_right`, which
+runs the same service checks as ``approve_request``: a MEHO-SA-Operator
+may approve their own change; another person's ``dangerous`` or
+``destructive`` change needs a MEHO-SA-Operator or an admin; the
+break-glass switch covers only an own ``safe`` / ``caution`` change. The
+**Approve** button is disabled when the answer is no. **Deny** stays
+enabled (an operator withdrawing their own request is not an escalation).
 
-Since #3328 the service also lets a MEHO-SA-Operator approve their own
-change, and refuses another person's ``dangerous`` or ``destructive``
-change to anyone outside the groups that may approve it
-(:class:`ApprovalGroupForbiddenError`, a 403 banner with the plain
-refusal text). The button state does not show these rules yet.
+This adds no new gate. The button state is UX only: the approve POST
+runs ``approve_request``, which checks again and answers 403
+(:class:`SelfApprovalForbiddenError`, :class:`ApprovalGroupForbiddenError`)
+with the plain refusal text in the re-rendered modal. After a
+self-approval the outcome card says so, with the rule that allowed it.
 
 Tenant isolation
 ----------------
@@ -173,6 +174,11 @@ from meho_backplane.operations.approval_queue import (
     record_approval_step_event,
     reject_request,
     resume_dispatch_after_approval,
+)
+from meho_backplane.operations.approval_rights import (
+    ApproveRightReason,
+    approve_right,
+    self_approval_confirmation,
 )
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
@@ -456,24 +462,6 @@ async def _get_request_with_context_or_404(
             )
             chain = positions.get(row.id)
     return row, reviewer_context, delegation, chain
-
-
-def _is_self_approval_blocked(operator: Operator, request: ApprovalRequest) -> bool:
-    """Return whether *operator* is barred from approving *request* in the UI.
-
-    Mirrors the service-layer
-    :func:`~meho_backplane.operations.approval_queue._check_self_approval`
-    contract exactly so the disabled-button state matches the server's
-    decision: blocked iff the approver is the requester
-    (``operator.sub == request.principal_sub``) **and** the audited
-    single-operator break-glass is off
-    (``Settings.approval_allow_self_approval``). The button state is UX
-    only; the service re-checks on the POST (never trust the disabled
-    button), so a forged self-approve still 403s.
-    """
-    if operator.sub != request.principal_sub:
-        return False
-    return not get_settings().approval_allow_self_approval
 
 
 def build_approvals_router() -> APIRouter:
@@ -768,7 +756,10 @@ async def _render_detail_modal(
         session, request_id
     )
 
-    self_approval_blocked = _is_self_approval_blocked(operator, approval)
+    # The same service checks as the approve (#3329): the sign and the
+    # button state match what the POST decides. The POST checks again.
+    right = approve_right(operator, approval)
+    self_approval_blocked = not right.may_approve and right.reason == ApproveRightReason.OWN_CHANGE
     approve_needs_sign_in = not has_fresh_web_approval_sign_in(operator, get_settings())
     csrf_token = mint_csrf_token(str(session.session_id))
     context: dict[str, object] = {
@@ -778,6 +769,8 @@ async def _render_detail_modal(
         # show`` does. Always present in this context (StrictUndefined-safe)
         # -- the template guards on ``.is_empty`` before drawing the block.
         "reviewer_context": reviewer_context,
+        "approve_right": right,
+        "approve_blocked": not right.may_approve,
         "self_approval_blocked": self_approval_blocked,
         "self_approval_setting": "APPROVAL_ALLOW_SELF_APPROVAL",
         "self_approval_docs_url": _SINGLE_OPERATOR_DOCS_URL,
@@ -838,10 +831,8 @@ async def _decide(
         # forging the disabled Approve button) is the one error worth more
         # than a bare banner: re-render with the actionable single-operator
         # guidance (both patterns + docs link) instead (#2669). Keyed on the
-        # stable ``self_approval_forbidden`` token both wire strings prefix.
-        self_approval_error = exc.status_code == status.HTTP_403_FORBIDDEN and detail.startswith(
-            "self_approval_forbidden"
-        )
+        # service error, because the detail is the plain refusal text (#3328).
+        self_approval_error = isinstance(exc.__cause__, SelfApprovalForbiddenError)
         # The session's sign-in is too old to approve, or it already
         # approved a destructive operation: the banner carries the link to
         # a new sign-in. Keyed on the machine-readable prefix of the 401.
@@ -887,6 +878,11 @@ async def _decide(
         "request": project_request_to_view(approval, parse_delegation(reason)),
         "decision": decision,
         "run": run,
+        # A self-approval says so on the outcome card (#3329), with the rule
+        # ``approve_request`` used; None for every other decision.
+        "self_approval_message": self_approval_confirmation(
+            getattr(approval, "_approval_rule", None)
+        ),
     }
     response = get_templates().TemplateResponse(request, "approvals/_decided.html", context)
     # Drive the app-shell bell: decrement the live count + close the modal.

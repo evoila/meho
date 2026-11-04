@@ -1261,6 +1261,25 @@ Five synthetic connectors follow this mould (natural key
 | `audit-integrity-1.x` | `audit.loose_rows` | (dispatch-only; a `safe` read a Sensor pins) | #4670 |
 | `inventory-1.x` | `inventory.export` | (dispatch-only; a `safe` read that turns stored or inline inventories into a file in a named format) | #5218 |
 
+**Per-op role floor.** `targets.register` and the five `topology.*`
+writes need the `tenant_admin` role from a person, the same as their
+REST routes and `meho_*` tools. Those fronts check the role at the door,
+but `call_operation` (and the REST dispatch route and the CLI) needs only
+`operator`, so the operations carry a role floor of their own
+(`operations/role_floors.py`, registered at import by the connector
+module). The policy gate (`_validate.py`) refuses a person below the
+floor with `denied` and a `denied` audit row; the approval queue refuses
+an approver below the floor at the decision (403, the request stays
+pending), so an approved call was approved by a person with the role
+whichever resume path runs it. Agents and service
+logins keep their park-for-approval behaviour. `secret.move` and the
+`secret.handoff.*` ops need no floor: they are `dangerous` with
+`requires_approval=True`, so a person's call always waits for a second
+person, and no front door of theirs asks for a higher role.
+`targets.remove` checks `tenant_admin` inside its handler (see below),
+because its sandbox-mode exception for a service login under a delete
+grant needs the gate's verdict.
+
 `meho_targets_register` (#2861,
 `mcp/tools/targets_register.py` + `connectors/targets/`) closes the last
 CRUD-shaped registry with no agent-surface write path: it reuses the

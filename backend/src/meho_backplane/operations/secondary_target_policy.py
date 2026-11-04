@@ -59,6 +59,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "SecondaryTargetWrite",
+    "approved_requester_sub",
     "bind_approved_requester",
     "requester_policy_preflight",
     "secondary_target_refusal",
@@ -197,6 +198,16 @@ def bind_approved_requester(request: ApprovalRequest) -> Iterator[None]:
         yield
     finally:
         _approved_requester_var.reset(token)
+
+
+def approved_requester_sub() -> str | None:
+    """The ``sub`` of the requester bound by :func:`bind_approved_requester`, else ``None``.
+
+    The dispatcher reads it on the approved resume path to tell the
+    requester's own re-run of a failed call from a reviewer's run.
+    """
+    requester = _approved_requester_var.get()
+    return None if requester is None else requester.sub
 
 
 def _requester_operator(requester: _Requester, subject: Mapping[str, Any]) -> Operator:

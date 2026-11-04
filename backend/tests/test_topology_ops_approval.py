@@ -214,8 +214,14 @@ async def _fetch_nodes(kind: str) -> list[GraphNode]:
         return list(result.scalars().all())
 
 
-def _decide(request_id: uuid.UUID, *, decider_sub: str) -> Any:
+def _decide(
+    request_id: uuid.UUID, *, decider_sub: str, role: TenantRole = TenantRole.TENANT_ADMIN
+) -> Any:
     """Drive the real ``/decide`` REST route as *decider_sub* (four-eyes).
+
+    The approved write runs under the decider, and the topology writes
+    need the ``tenant_admin`` role from the person who runs them, so the
+    decider is a ``tenant_admin`` unless a test says otherwise.
 
     Each call mints a fresh keypair under the same kid, so the JWKS
     cache from a prior call would fail signature verification — clear
@@ -229,7 +235,7 @@ def _decide(request_id: uuid.UUID, *, decider_sub: str) -> Any:
             key,
             fresh_sign_in=True,
             sub=decider_sub,
-            tenant_role=TenantRole.OPERATOR.value,
+            tenant_role=role.value,
             tenant_id=str(_TENANT_ID),
         )
         with TestClient(app) as client:
@@ -313,6 +319,29 @@ async def test_decide_executes_parked_annotate_once_then_409(
     assert second.status_code == 409, second.text
     assert second.json() == {"detail": "approval_request_already_approved"}
     assert len(await _fetch_edges()) == 1
+
+
+@pytest.mark.asyncio
+async def test_decide_by_an_operator_is_refused_and_writes_nothing(
+    _registered_topology_ops: None,
+    _seeded_tenant: None,
+) -> None:
+    """The topology writes need ``tenant_admin``, so the decider needs it too."""
+    await _seed_edge_endpoints()
+    agent = _make_operator("agent:proposer", principal_kind=PrincipalKind.AGENT)
+    parked = await _dispatch_topology(agent, TOPOLOGY_ANNOTATE_OP_ID, _ANNOTATE_PARAMS)
+    assert parked.status == "awaiting_approval", parked.error
+    request_id = uuid.UUID(parked.extras["approval_request_id"])
+
+    response = _decide(request_id, decider_sub="operator:decider", role=TenantRole.OPERATOR)
+
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"].startswith("role_floor_required: ")
+    assert "tenant_admin" in response.json()["detail"]
+    (row,) = await _fetch_approval_rows()
+    assert row.status == ApprovalRequestStatus.PENDING.value
+    assert row.reviewed_by is None
+    assert await _fetch_edges() == []
 
 
 @pytest.mark.asyncio

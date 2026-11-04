@@ -119,6 +119,7 @@ from meho_backplane.operations.approval_queue import (
     ApprovalRequestAlreadyDecidedError,
     ApprovalRequestExpiredError,
     ApprovalResultState,
+    ApprovalRoleFloorError,
     ApprovalSignInReusedError,
     ApprovalSignInTooOldError,
     DelegatedDecisionForbiddenError,
@@ -572,6 +573,18 @@ def _approval_group_http_error(exc: ApprovalGroupForbiddenError) -> HTTPExceptio
     )
 
 
+def _approval_role_floor_http_error(exc: ApprovalRoleFloorError) -> HTTPException:
+    """Map an approver below the operation's role floor to 403.
+
+    Caught before the generic ``insufficient_role`` mapping of its parent
+    class, so the detail names the role the operation needs.
+    """
+    return HTTPException(
+        status_code=http_status.HTTP_403_FORBIDDEN,
+        detail=f"role_floor_required: {exc}",
+    )
+
+
 def _delegated_forbidden_http_error(exc: DelegatedDecisionForbiddenError) -> HTTPException:
     """Map a delegated decision on a non-lab deployment to 403 (#3693)."""
     return HTTPException(
@@ -650,6 +663,8 @@ async def _capture_operator_decision(
         ) from exc
     except ApprovalGroupForbiddenError as exc:
         raise _approval_group_http_error(exc) from exc
+    except ApprovalRoleFloorError as exc:
+        raise _approval_role_floor_http_error(exc) from exc
     except UnauthorizedApprovalError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_403_FORBIDDEN,
@@ -930,6 +945,8 @@ async def _record_approval_decision(
         ) from exc
     except ApprovalGroupForbiddenError as exc:
         raise _approval_group_http_error(exc) from exc
+    except ApprovalRoleFloorError as exc:
+        raise _approval_role_floor_http_error(exc) from exc
     except UnauthorizedApprovalError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_403_FORBIDDEN,

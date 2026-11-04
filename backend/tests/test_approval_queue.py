@@ -911,7 +911,9 @@ async def test_approve_request_hash_mismatch_on_topology_op(session: AsyncSessio
     queued op has.
     """
     requester = _make_operator(sub="agent:proposer")
-    operator = _make_operator(sub="reviewer-sub")
+    # The topology writes need a ``tenant_admin`` approver; the role is
+    # checked before the hash, so the hash defence needs that role here.
+    operator = _make_operator(sub="reviewer-sub", role=TenantRole.TENANT_ADMIN)
     original_params = {"from_name": "svc-x", "kind": "depends-on", "to_name": "db-y"}
 
     pending = await create_pending_request(

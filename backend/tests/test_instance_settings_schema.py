@@ -181,3 +181,46 @@ def test_unreadable_values_are_mistakes(content: bytes) -> None:
     parsed = parse_settings_file(content)
     assert parsed.model is None or parsed.mistakes
     assert parsed.mistakes
+
+
+def test_binary_value_is_refused_without_decoding() -> None:
+    """``!!binary`` would hide a JWT from the secret check until after it ran."""
+    encoded = base64.b64encode(_JWT.encode()).decode()
+    parsed = parse_settings_file(
+        b"apiVersion: meho.evoila.com/v1\nkind: Settings\nspec:\n  tenants:\n"
+        b"    - targets:\n        - name: a\n          product: ssh\n          host: h\n"
+        b"          extras:\n            blob: !!binary " + encoded.encode() + b"\n"
+    )
+    assert parsed.model is None
+    assert parsed.mistakes == [
+        "Line 10: binary values (`!!binary`) are not accepted; the settings file holds text only."
+    ]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        f"apiVersion: meho.evoila.com/v1\nkind: Settings\nspec: !{_JWT} x\n",
+        f"apiVersion: meho.evoila.com/v1\nkind: !<tag:{_JWT}> Settings\n",
+        f"apiVersion: meho.evoila.com/v1\nkind: Settings\nspec: [{_JWT}\n",
+    ],
+)
+def test_yaml_errors_never_copy_the_input(content: str) -> None:
+    parsed = parse_settings_file(content.encode())
+    assert parsed.model is None
+    (mistake,) = parsed.mistakes
+    assert mistake.startswith("The file is not valid YAML")
+    assert _JWT.split(".")[1] not in mistake
+    assert "eyJ" not in mistake
+
+
+def test_secret_field_map_is_a_target_key() -> None:
+    parsed = parse_settings_file(
+        b"apiVersion: meho.evoila.com/v1\nkind: Settings\nspec:\n  tenants:\n"
+        b"    - targets:\n        - name: a\n          product: ssh\n          host: h\n"
+        b"          secret_field_map: {password: pw, username: user}\n"
+    )
+    assert parsed.mistakes == []
+    assert parsed.model is not None
+    (target,) = parsed.model.spec.tenants[0].targets or []
+    assert target.secret_field_map == {"password": "pw", "username": "user"}

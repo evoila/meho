@@ -76,6 +76,7 @@ from meho_backplane.instance_settings.schema import (
     parse_settings_file,
 )
 from meho_backplane.targets.schemas import TargetCreate, TargetUpdate
+from meho_backplane.targets.secret_field_map import merge_secret_field_map
 from meho_backplane.tenancy.ensure import ensure_tenant
 from meho_backplane.tenancy.policies import (
     set_announce_gate_enabled,
@@ -95,6 +96,7 @@ __all__ = [
     "dump_settings_yaml",
     "export_settings",
     "list_history",
+    "stored_secret_mistakes",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -110,6 +112,7 @@ TARGET_KEYS: Final[tuple[str, ...]] = (
     "aliases",
     "auth_model",
     "secret_ref",
+    "secret_field_map",
     "verify_tls",
     "tls_ca_pin",
     "tls_server_name",
@@ -243,6 +246,33 @@ async def _migration_head(session: AsyncSession) -> str | None:
         return (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar()
     except Exception:
         return None
+
+
+def stored_secret_mistakes(blocks: dict[str, dict[str, Any]]) -> list[str]:
+    """One sentence per stored value that looks like a secret, in *blocks*.
+
+    *blocks* is a spec view (tenant id -> export block). Paths name the tenant
+    id, the convention slug and the target name, since the stored data has no
+    file positions: ``stored.<tenant>.targets.vc-01.extras.password``.
+    """
+    mistakes: list[str] = []
+    for tid, block in blocks.items():
+        by_key = {
+            "policies": block.get("policies"),
+            "conventions": {c["slug"]: c for c in block.get("conventions") or []},
+            "targets": {t["name"]: t for t in block.get("targets") or []},
+        }
+        mistakes.extend(find_secret_shaped_values(by_key, ("stored", tid)))
+    return mistakes
+
+
+#: Leads the mistakes when stored data, not the file, holds a secret.
+STORED_SECRET_LEAD: Final[str] = (
+    "MEHO already stores a value that looks like a secret for a tenant this file "
+    "names; the preview, the import and the history never show or keep one, so move "
+    "it into OpenBao (change the target or convention through its own route) and try "
+    "again."
+)
 
 
 async def export_settings(session: AsyncSession, tenant_ids: list[uuid.UUID]) -> dict[str, Any]:
@@ -504,7 +534,17 @@ def _plan_existing_target(
     operator: Operator,
     mistakes: list[str],
 ) -> tuple[dict[str, Any], TargetUpdate | None] | None:
-    fields = {key: getattr(entry, key) for key in entry.model_fields_set if key != "name"}
+    fields: dict[str, Any] = {
+        key: getattr(entry, key) for key in entry.model_fields_set if key != "name"
+    }
+    if "secret_field_map" in fields:
+        # The file holds the whole map; the PATCH merges, so remove the stored
+        # entries the file leaves out (and clear the map when the file's is empty).
+        wanted = fields["secret_field_map"]
+        stored_map = row.secret_field_map or {}
+        fields["secret_field_map"] = (
+            {**{k: None for k in stored_map if k not in wanted}, **wanted} if wanted else None
+        )
     try:
         body = TargetUpdate(**fields)
     except ValidationError as exc:
@@ -523,6 +563,10 @@ def _plan_existing_target(
     current = _to_full(row).model_dump(mode="json")
     merged = {key: current[key] for key in TARGET_KEYS}
     merged.update(body.model_dump(exclude_unset=True, mode="json"))
+    if "secret_field_map" in updates:
+        merged["secret_field_map"] = (
+            merge_secret_field_map(row.secret_field_map, updates["secret_field_map"]) or {}
+        )
     desired = _canonical_target(row.tenant_id, merged)
     if desired == _target_block(row):
         return desired, None
@@ -596,6 +640,13 @@ async def build_plan(
         for tid in tenant_ids
         if tid in tenants
     }
+    stored = stored_secret_mistakes(plan.before)
+    if stored:
+        # A diff shows "before" values and a revision keeps them for good, so a
+        # stored secret must stop here, as the export does (no diff, no write).
+        plan.mistakes.extend([STORED_SECRET_LEAD, *stored])
+        plan.before = {}
+        return plan
 
     desired_view: dict[str, dict[str, Any]] = {}
     in_file: dict[str, dict[str, set[str]]] = {}

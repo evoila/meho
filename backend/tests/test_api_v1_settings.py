@@ -680,3 +680,77 @@ async def test_export_refuses_stored_secrets(
     assert f"`{path}`" in detail["mistakes"][0]
     assert _JWT.split(".")[1] not in resp.text
     assert "plain-text-key" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_stored_secret_stops_preview_apply_and_history(client: TestClient) -> None:
+    """A diff shows "before" values and a revision keeps them, so a stored secret stops both."""
+    await _insert_target(
+        tenant_id=_TENANT,
+        name="leaky",
+        product="ssh",
+        extras={"password": "stored-plain-pw"},  # gitleaks:allow -- made-up test value
+    )
+    content = _file_with_target(name="leaky", product="ssh", host="10.0.0.1", extras={})
+    key = make_rsa_keypair("kid-stored-leak")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        token = _token(key)
+        preview = _import(client, token, content, preview=True)
+        applied = _import(client, token, content)
+        history = client.get("/api/v1/settings/history", headers=_auth(token))
+
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["ok"] is False
+    assert body["diff"] is None
+    assert body["mistakes"][0].startswith("MEHO already stores a value that looks like a secret")
+    assert f"`stored.{_TENANT}.targets.leaky.extras.password`" in body["mistakes"][1]
+    assert applied.status_code == 422, applied.text
+    assert history.status_code == 200 and history.json() == []
+    for resp in (preview, applied, history):
+        assert "stored-plain-pw" not in resp.text
+    assert await _rows(InstanceSettingsRevision) == []
+    (row,) = [t for t in await _rows(Target) if t.name == "leaky"]
+    assert row.extras == {"password": "stored-plain-pw"}  # gitleaks:allow -- made-up
+
+
+@pytest.mark.asyncio
+async def test_secret_field_map_round_trips_and_replaces(client: TestClient) -> None:
+    await _insert_target(
+        tenant_id=_TENANT,
+        name="mapped",
+        product="ssh",
+        secret_field_map={"username": "user", "password": "pw"},
+    )
+    key = make_rsa_keypair("kid-field-map")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        token = _token(key)
+        first = _export(client, token)
+        (target,) = yaml.safe_load(first)["spec"]["tenants"][0]["targets"]
+        assert target["secret_field_map"] == {"username": "user", "password": "pw"}
+
+        # Restore onto a fresh install: the map comes back.
+        await _wipe_tenant_settings()
+        restored = _import(client, token, first)
+        assert restored.status_code == 200, restored.text
+        assert restored.json()["applied"] is True
+        assert _spec_yaml(_export(client, token)) == _spec_yaml(first)
+
+        # The file holds the whole map: an entry it leaves out is removed.
+        changed = _file_with_target(
+            name="mapped", product="ssh", host="10.0.0.1", secret_field_map={"password": "pass"}
+        )
+        preview = _import(client, token, changed, preview=True).json()
+        applied = _import(client, token, changed)
+        history = client.get("/api/v1/settings/history", headers=_auth(token)).json()
+
+    (change,) = preview["diff"]["targets"]["changed"]
+    assert change["before"] == {"secret_field_map": {"username": "user", "password": "pw"}}
+    assert change["after"] == {"secret_field_map": {"password": "pass"}}
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["diff"]["targets"]["changed"] == [change]
+    assert history[0]["diff"]["targets"]["changed"] == [change]
+    (row,) = [t for t in await _rows(Target) if t.name == "mapped"]
+    assert row.secret_field_map == {"password": "pass"}

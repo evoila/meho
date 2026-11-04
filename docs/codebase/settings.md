@@ -93,9 +93,12 @@ spec:
   never a password: export leaves it out when MEHO can work it out from the
   name (`tenants/<tenant_id>/<name>`), and writes `secret_ref: null` for a
   target with no credential. An explicit `secret_ref` must sit under the
-  tenant's own path (the same check as `POST /api/v1/targets`). The
-  product, `preferred_impl_id`, SSRF and TLS checks of the target routes all
-  apply.
+  tenant's own path (the same check as `POST /api/v1/targets`).
+  `secret_field_map` (#3711) maps the field names a connector reads to the
+  field names in the secret; names only, never values. The file holds the
+  whole map: an import removes stored entries the file leaves out, and an
+  empty map clears it. The product, `preferred_impl_id`, SSRF and TLS checks
+  of the target routes all apply.
 
 ### What an import does with each key
 
@@ -164,6 +167,17 @@ them at once.
   shown as `<redacted>` in every sentence.
 - A value YAML cannot convert, such as the date `2026-99-99`, is a mistake
   sentence with its line, never a server error.
+- A YAML syntax error, or an unknown tag, gives only its line: PyYAML's own
+  message can quote the input, and nothing has been checked for secrets yet.
+- A `!!binary` value is refused and never decoded: the bytes would pass the
+  secret check unseen and come out as text afterwards. Nothing else is
+  checked, as with a secret.
+- Stored data is checked too. When a tenant the file names already has a
+  secret-shaped value stored (a target's `extras.password`, a JWT in
+  `notes`, ...), the preview and the import stop with that path
+  (`stored.<tenant>.targets.<name>.extras.password`, never the value): a
+  diff shows "before" values and a revision keeps them for good. Fix the
+  target or convention through its own route, then import.
 - A refused value is never shown back: the models set
   `hide_input_in_errors=True`, and sentences are built from the path and the
   error type only.

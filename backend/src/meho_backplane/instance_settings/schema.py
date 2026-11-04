@@ -154,6 +154,9 @@ class SettingsTarget(_Strict):
     aliases: list[str] = Field(default_factory=list)
     auth_model: AuthModel = AuthModel.SHARED_SERVICE_ACCOUNT
     secret_ref: str | None = None
+    #: ``{connector_field: source_field}`` (#3711): field names, never values.
+    #: The file holds the whole map: an import removes stored entries it leaves out.
+    secret_field_map: dict[str, str] = Field(default_factory=dict)
     verify_tls: StrictBool = True
     tls_ca_pin: str | None = None
     tls_server_name: str | None = Field(default=None, max_length=512)
@@ -292,6 +295,7 @@ class _DuplicateKeyLoader(yaml.SafeLoader):  # type: ignore[misc]  # yaml has no
         super().__init__(stream)
         self.duplicates: list[tuple[str, int]] = []
         self.unreadable: list[int] = []
+        self.binary: list[int] = []
 
 
 def _construct_mapping_checked(loader: _DuplicateKeyLoader, node: yaml.MappingNode) -> Any:
@@ -319,6 +323,14 @@ def _construct_timestamp_checked(loader: _DuplicateKeyLoader, node: yaml.ScalarN
         return loader.construct_scalar(node)
 
 
+def _construct_binary_refused(loader: _DuplicateKeyLoader, node: yaml.ScalarNode) -> None:
+    # ``!!binary`` hides bytes from the secret check (a base64 JWT would decode
+    # to readable text after the check). The file has no binary setting, so
+    # record the line and never decode the value.
+    loader.binary.append(node.start_mark.line + 1)
+
+
+_DuplicateKeyLoader.add_constructor("tag:yaml.org,2002:binary", _construct_binary_refused)
 _DuplicateKeyLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
     _construct_mapping_checked,
@@ -520,7 +532,7 @@ def _repeated_item_mistakes(model: SettingsFile) -> list[str]:
 def parse_settings_file(content: bytes) -> ParsedSettings:
     """Parse and check *content*; collect every mistake as one sentence each.
 
-    Order: size and encoding, YAML syntax, repeated keys, ``apiVersion``,
+    Order: size and encoding, YAML syntax, repeated keys, binary values, ``apiVersion``,
     secret-shaped values, the model, repeated items. All checks that can run
     do run, so a file with an unknown key, an unknown ``apiVersion`` and a
     target with no host yields three sentences. The one exception is a
@@ -546,10 +558,11 @@ def parse_settings_file(content: bytes) -> ParsedSettings:
     try:
         raw = loader.get_single_data()
     except yaml.MarkedYAMLError as exc:
-        mark = exc.problem_mark
+        # Only the line: PyYAML's problem text can quote the input (an unknown
+        # tag, say), and nothing here has been checked for secrets yet.
+        mark = exc.problem_mark or exc.context_mark
         where = f" on line {mark.line + 1}" if mark is not None else ""
-        problem = exc.problem or "it cannot be read"
-        return ParsedSettings(None, [f"The file is not valid YAML{where}: {problem}."])
+        return ParsedSettings(None, [f"The file is not valid YAML{where}."])
     except (yaml.YAMLError, ValueError, TypeError, OverflowError, RecursionError):
         # Any other value PyYAML cannot convert; never a server error.
         return ParsedSettings(None, ["The file is not valid YAML."])
@@ -564,6 +577,14 @@ def parse_settings_file(content: bytes) -> ParsedSettings:
         f"Line {line}: the value looks like a date but is not a real date."
         for line in loader.unreadable
     )
+    if loader.binary:
+        # Stop like a secret does: the value was never decoded or checked.
+        mistakes.extend(
+            f"Line {line}: binary values (`!!binary`) are not accepted; the settings "
+            f"file holds text only."
+            for line in loader.binary
+        )
+        return ParsedSettings(None, mistakes)
     if not isinstance(raw, dict):
         mistakes.append("The file must be a mapping with apiVersion, kind, metadata and spec.")
         return ParsedSettings(None, mistakes, raw)

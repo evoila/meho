@@ -14,6 +14,9 @@
 #                     the console certificate (#4638)
 #   support-bundle    one file for evoila support, with no passwords in it
 #   admin-network     the addresses that may use SSH, in the MEHO firewall
+#   log-server        only on the appliance: send the logs of the machine to
+#                     the customer's log server, and open the MEHO firewall
+#                     to it (#5752)
 #   uninstall         remove MEHO and RKE2, and the host changes of RKE2's
 #                     CIS profile that the install made; the MEHO firewall
 #                     stays on
@@ -186,11 +189,38 @@ readonly OPENBAO_WAIT_TRIES=60
 readonly OPENBAO_WAIT_SECONDS=5
 readonly OPENBAO_WAIT_TEXT="5 minutes"
 readonly UNSEAL_COMMAND="sudo meho-host unseal"
+# The MEHO appliance (install form 1): its build puts its pieces in this
+# folder, and a form-2 machine never has it. log-server works only on the
+# appliance: on a form-2 machine the OS and its logging belong to the customer.
+readonly APPLIANCE_DIR=/opt/meho/appliance
+# log-server. rsyslog reads the *.conf files of /etc/rsyslog.d in name
+# order: 10- comes before Ubuntu's 50-default.conf and before any "stop" of a
+# later file. The CA file is in the same folder, because Ubuntu's AppArmor
+# profile of rsyslogd lets it read no other folder of settings.
+readonly LOG_SERVER_CONF=/etc/rsyslog.d/10-meho-log-server.conf
+readonly LOG_SERVER_CA=/etc/rsyslog.d/meho-log-server-ca.pem
+# The disk part of the forwarding queue, in Ubuntu's work folder of rsyslog.
+readonly LOG_SERVER_QUEUE=meho-log-server
+readonly RSYSLOG_SPOOL_DIR=/var/spool/rsyslog
+readonly RSYSLOG_UNIT=rsyslog.service
+readonly RSYSLOG_LOG_COMMAND="journalctl -u rsyslog.service -e"
+readonly LOG_SERVER_TCP_PORT=514
+readonly LOG_SERVER_TLS_PORT=6514
+# rsyslog's TLS module, of the package rsyslog-gnutls, which the appliance
+# build installs. "rsyslogd -N1" does not notice when it is missing.
+readonly RSYSLOG_GTLS_GLOB='/usr/lib/*/rsyslog/lmnsd_gtls.so'
+# log-server adds two lines to the chain output of the firewall file, in
+# front of the counter: this note with the host name, then the rule.
+readonly LOG_SERVER_NOTE='        # The log server, set with meho-host log-server: '
+readonly LOG_SERVER_RULE_RE='^        ip daddr \{ ([0-9., ]+) \} tcp dport ([0-9]+) accept$'
+readonly OUTPUT_COUNTER_NOTE='        # Counts the packets that reach the policy.'
+readonly HOSTNAME_RE='^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'
 
 COMMAND=""
 BUNDLE_WORK=""
 BUNDLE_SECRETS=""
 BUNDLE_SCRIPT=""
+LOG_SERVER_TEMPS=()
 CHECK_NAMES=()
 CHECK_STATUSES=()
 CHECK_DETAILS=()
@@ -211,6 +241,7 @@ Run it as root:
   sudo meho-host check
   sudo meho-host support-bundle
   sudo meho-host admin-network 10.0.50.0/24
+  sudo meho-host log-server logs.example.com
   sudo meho-host uninstall
   sudo meho-host certificate --cert chain.pem --key key.pem
   sudo meho-host keyholder on
@@ -221,7 +252,8 @@ Commands:
                     of this machine, and print a red/green list: the node,
                     the pods, the disk, RKE2's certificates, the MEHO
                     firewall, RKE2's CIS profile and the certificate of the
-                    console. Every line that is not ok says what to do.
+                    console, and on the appliance the log server. Every
+                    line that is not ok says what to do.
                     --json prints the list as JSON, for meho doctor.
   support-bundle    Write one file for evoila support to
                     /var/lib/meho/support/, for root only, and print its
@@ -239,6 +271,20 @@ Commands:
                     the SSH rule changes; every other rule stays. Over
                     SSH, it asks first when the new range does not hold
                     your own address.
+  log-server <host>[:<port>] [--tls <ca.pem>]
+  log-server none
+                    Only on the MEHO appliance. Send the logs of this
+                    machine to your log server over TCP, to port 514
+                    unless you give one, and let this machine reach that
+                    server through the MEHO firewall. With --tls, the logs
+                    go over TLS, to port 6514 unless you give one, and only
+                    to a server whose certificate the CA in <ca.pem> signed
+                    and that names <host>. A host name is looked up now:
+                    when its address changes, check warns, and you run the
+                    command again. Running it again replaces the server.
+                    none stops sending and closes the way out again. On a
+                    Linux server (install form 2) the OS and its logging
+                    are yours, so it changes nothing there.
   uninstall         Remove MEHO and the built-in Kubernetes from this
                     machine, with all their data. It asks twice. It also
                     removes RKE2's kernel settings file and the etcd user
@@ -653,6 +699,65 @@ check_console_certificate() {
     esac
 }
 
+# resolve_ipv4 <host name or IPv4 address>: the IPv4 addresses of the host,
+# sorted, one per line. An address is its own answer. Nothing when the name
+# does not resolve.
+resolve_ipv4() {
+    if is_ipv4 "$1"; then
+        printf '%s\n' "$1"
+    else
+        getent ahostsv4 "$1" 2>/dev/null | awk '{ print $1 }' | sort -u || true
+    fi
+}
+
+# log_server_lines <rules file>: the two lines of log-server in the chain
+# output of the firewall file, the note with the host name and the rule, or
+# nothing.
+log_server_lines() {
+    awk -v note="$LOG_SERVER_NOTE" '
+        /^    chain output \{/ { in_output = 1 }
+        in_output && /^    \}/ { in_output = 0 }
+        in_output && index($0, note) == 1 { print; if ((getline line) > 0) print line }
+    ' "$1" 2>/dev/null
+}
+
+# check_log_server: the log server of log-server, only on the appliance. Its
+# rule in the firewall file holds the addresses the name had when the
+# command ran, so the line warns when the name resolves to others now.
+check_log_server() {
+    [[ -d ${HOST_ROOT}${APPLIANCE_DIR} ]] || return 0
+    local lines name rule addresses port now=() detail conf="${HOST_ROOT}${LOG_SERVER_CONF}"
+    lines=$(log_server_lines "${HOST_ROOT}${MEHO_FIREWALL_FILE}") || lines=""
+    if [[ -z $lines && ! -f $conf ]]; then
+        result log-server ok "none set, so the logs stay on this machine. To send them to your log server: meho-host log-server <host>"
+        return 0
+    fi
+    name=${lines%%$'\n'*}
+    name=${name#"$LOG_SERVER_NOTE"}
+    rule=${lines#*$'\n'}
+    if [[ -z $lines || ! -f $conf ]] || ! [[ $rule =~ $LOG_SERVER_RULE_RE ]]; then
+        result log-server warn "set only in part: rsyslog's file $LOG_SERVER_CONF and the rule in the chain output of $MEHO_FIREWALL_FILE are not both there, so the logs may not reach a log server." \
+            "run meho-host log-server again with your log server, or meho-host log-server none."
+        return 0
+    fi
+    addresses=${BASH_REMATCH[1]}
+    port=${BASH_REMATCH[2]}
+    detail="$name:$port over TCP"
+    if grep -q 'StreamDriverMode="1"' "$conf"; then
+        detail="$name:$port over TLS"
+    fi
+    mapfile -t now < <(resolve_ipv4 "$name")
+    if ((${#now[@]} == 0)); then
+        result log-server warn "$detail, but $name does not resolve now, so rsyslog cannot reach it." \
+            "check the name and the DNS servers of this machine: getent ahostsv4 $name"
+    elif [[ $(join_by ', ' "${now[@]}") != "$addresses" ]]; then
+        result log-server warn "$detail, but $name resolves to $(join_by ', ' "${now[@]}") now, and the MEHO firewall lets the logs out only to $addresses." \
+            "run meho-host log-server again with the same server, so the firewall follows the new address."
+    else
+        result log-server ok "$detail, through the MEHO firewall to $addresses"
+    fi
+}
+
 run_checks() {
     check_node
     check_pods
@@ -661,6 +766,7 @@ run_checks() {
     check_firewall
     check_cis_profile
     check_console_certificate
+    check_log_server
 }
 
 print_checks() {
@@ -1053,6 +1159,186 @@ command_admin_network() {
     else
         ok "SSH is closed for every address; only the console works"
     fi
+}
+
+# rules_with_log_server <rules file> <host name, or "" for none> <rule>:
+# print the MEHO firewall file without the two lines of log-server in the
+# chain output, and with the new ones in front of the counter of that chain.
+# Every other line stays, so a customer's own rules survive.
+rules_with_log_server() {
+    awk -v note="$LOG_SERVER_NOTE" -v counter="$OUTPUT_COUNTER_NOTE" -v name="$2" -v rule="$3" '
+        /^    chain output \{/ { in_output = 1 }
+        in_output && /^    \}/ { in_output = 0 }
+        # The old note, its rule and the empty line after them go.
+        in_output && index($0, note) == 1 { old = 2; next }
+        old == 2 { old = 1; next }
+        old == 1 { old = 0; if ($0 == "") next }
+        in_output && $0 == counter && name != "" { print note name; print rule; print "" }
+        { print }
+    ' "$1"
+}
+
+# render_log_server_conf <host> <port> <1 for TLS, 0 for TCP>: rsyslog's
+# forwarding action, as in rsyslog's guide to reliable forwarding: its own
+# queue, so local logging goes on while the server is down, with the help of
+# the disk (at most 1 GB, so the disk never fills) and endless retries. With
+# TLS, rsyslog sends only to a server whose certificate the CA file signed
+# and that names the host.
+render_log_server_conf() {
+    local host=$1 port=$2 tls=$3
+    printf '# Written by meho-host log-server. Every log line of this machine also goes\n'
+    printf '# to the log server below. Remove it with: meho-host log-server none\n'
+    printf 'action(type="omfwd" target="%s" port="%s" protocol="tcp"\n' "$host" "$port"
+    if ((tls)); then
+        printf '    StreamDriver="gtls" StreamDriverMode="1" StreamDriverAuthMode="x509/name"\n'
+        printf '    StreamDriverPermittedPeers="%s" StreamDriver.CAFile="%s"\n' "$host" "$LOG_SERVER_CA"
+    fi
+    printf '    action.resumeRetryCount="-1" queue.type="LinkedList" queue.filename="%s"\n' "$LOG_SERVER_QUEUE"
+    printf '    queue.maxDiskSpace="1g" queue.saveOnShutdown="on")\n'
+}
+
+# certificates_of <PEM file>: only the certificates of the file. A private
+# key that is in the same file by mistake never reaches the CA file, which
+# every user may read.
+certificates_of() {
+    awk '{ sub(/\r$/, "") }
+        /^-----BEGIN CERTIFICATE-----$/ { in_certificate = 1 }
+        in_certificate { print }
+        /^-----END CERTIFICATE-----$/ { in_certificate = 0 }' "$1"
+}
+
+command_log_server() {
+    local server="" ca_file="" host="" port="" name="" rule="" tls=0 certificates=""
+    local addresses=() rules new_rules expected="" new_conf="" new_ca="" output how
+    local log_dir="${HOST_ROOT}${LOG_SERVER_CONF%/*}"
+    while (($# > 0)); do
+        case $1 in
+            --tls)
+                [[ -n ${2-} ]] || usage_error "log-server: --tls needs the CA file that signed the certificate of your log server."
+                ca_file=$2
+                shift
+                ;;
+            -*) usage_error "unknown option of log-server: $1" ;;
+            *)
+                [[ -z $server ]] || usage_error "log-server takes one log server, not both $server and $1."
+                server=$1
+                ;;
+        esac
+        shift
+    done
+    [[ -n $server ]] || usage_error "log-server needs your log server, <host>[:<port>], or none."
+    if [[ $server == none ]]; then
+        [[ -z $ca_file ]] || usage_error "log-server none takes no --tls."
+    else
+        host=$server
+        port=$LOG_SERVER_TCP_PORT
+        [[ -z $ca_file ]] || port=$LOG_SERVER_TLS_PORT
+        if [[ $server == *:* ]]; then
+            host=${server%:*}
+            port=${server##*:}
+        fi
+        [[ $host != *:* ]] ||
+            usage_error "log-server: $server is an IPv6 address. The appliance sends its logs over IPv4: give a host name or an IPv4 address."
+        if ! [[ $port =~ ^[0-9]{1,5}$ ]] || ((10#$port < 1 || 10#$port > 65535)); then
+            usage_error "log-server: '$port' is not a port. Give a number from 1 to 65535, or no port."
+        fi
+        port=$((10#$port))
+        if [[ $host =~ ^[0-9.]+$ ]]; then
+            is_ipv4 "$host" || usage_error "log-server: '$host' is not an IPv4 address."
+            [[ -z $ca_file ]] ||
+                usage_error "log-server: --tls needs the host name of your log server, the name in its certificate, not the address $host."
+        elif ((${#host} > 253)) || ! [[ $host =~ $HOSTNAME_RE ]]; then
+            usage_error "log-server: '$host' is not a host name or an IPv4 address."
+        fi
+    fi
+    check_root
+    [[ -d ${HOST_ROOT}${APPLIANCE_DIR} ]] ||
+        fail "This is a Linux server with MEHO (install form 2). Its operating system and its logging belong to you, so meho-host changes nothing." \
+            "send the logs to your log server with your own settings of rsyslog or journald, as on your other servers."
+    if [[ -n $ca_file ]]; then
+        certificates=$(certificates_of "$ca_file" 2>/dev/null) || certificates=""
+        openssl x509 -noout <<<"$certificates" >/dev/null 2>&1 ||
+            fail "$ca_file is not a file with a certificate that openssl can read. Nothing was changed." \
+                "give the CA file in PEM form (-----BEGIN CERTIFICATE-----) that signed the certificate of your log server."
+        compgen -G "${HOST_ROOT}${RSYSLOG_GTLS_GLOB}" >/dev/null ||
+            fail "rsyslog's TLS module (the package rsyslog-gnutls) is not on this machine, so rsyslog cannot send over TLS. Nothing was changed." \
+                "send without --tls, or $SUPPORT_HINT"
+        tls=1
+    fi
+    if [[ -n $host ]]; then
+        mapfile -t addresses < <(resolve_ipv4 "$host")
+        ((${#addresses[@]} > 0)) ||
+            fail "$host does not resolve to an IPv4 address on this machine. Nothing was changed." \
+                "check the name and the DNS servers of this machine: getent ahostsv4 $host"
+        name=$host
+        rule="        ip daddr { $(join_by ', ' "${addresses[@]}") } tcp dport $port accept"
+    fi
+    rules="${HOST_ROOT}${MEHO_FIREWALL_FILE}"
+    [[ -f $rules ]] ||
+        fail "$MEHO_FIREWALL_FILE is missing, so meho-host cannot change the way out to a log server. Nothing was changed." \
+            "check that the MEHO firewall is the one install.sh wrote. Then $SUPPORT_HINT"
+    # Every new file is checked before it takes the old one's place, so a
+    # file that nft or rsyslog refuses changes nothing.
+    trap 'rm -f "${LOG_SERVER_TEMPS[@]}"' EXIT
+    new_rules=$(mktemp "${rules}.XXXXXX")
+    LOG_SERVER_TEMPS+=("$new_rules")
+    rules_with_log_server "$rules" "$name" "$rule" >"$new_rules"
+    # The rewrite finds the chain output by the lines install.sh writes. After
+    # a hand edit it could put the rule nowhere, or twice.
+    [[ -z $name ]] || expected="${LOG_SERVER_NOTE}${name}"$'\n'"$rule"
+    if [[ $(log_server_lines "$new_rules") != "$expected" ]]; then
+        fail "the chain output in $MEHO_FIREWALL_FILE is not in the form install.sh writes, so meho-host cannot change its rule for the log server. Nothing was changed." \
+            "compare the chain output with the one install.sh writes. Then $SUPPORT_HINT"
+    fi
+    if ! output=$(nft -c -f "$new_rules" 2>&1); then
+        printf '%s\n' "$output" >&2
+        fail "nft does not accept the new firewall file. Nothing was changed." \
+            "read nft's message above. Then $SUPPORT_HINT"
+    fi
+    if [[ -n $name ]]; then
+        new_conf=$(mktemp "$log_dir/.meho-log-server.XXXXXX")
+        LOG_SERVER_TEMPS+=("$new_conf")
+        render_log_server_conf "$host" "$port" "$tls" >"$new_conf"
+        chmod 0644 "$new_conf"
+        if ! output=$(rsyslogd -N1 -f "$new_conf" 2>&1); then
+            printf '%s\n' "$output" >&2
+            fail "rsyslog does not accept the new settings. Nothing was changed." \
+                "read rsyslog's message above. Then $SUPPORT_HINT"
+        fi
+    fi
+    if ((tls)); then
+        new_ca=$(mktemp "$log_dir/.meho-log-server-ca.XXXXXX")
+        LOG_SERVER_TEMPS+=("$new_ca")
+        printf '%s\n' "$certificates" >"$new_ca"
+        # rsyslog reads it after it has dropped root for the user syslog.
+        chmod 0644 "$new_ca"
+    fi
+    # The way out opens before rsyslog sends, and closes before it stops.
+    mv -f "$new_rules" "$rules"
+    nft -f "$rules" ||
+        fail "nft could not load $MEHO_FIREWALL_FILE. The file holds the new rule for the log server, but the old rules are still loaded, and rsyslog is not changed." \
+            "run: systemctl reload $MEHO_FIREWALL_UNIT. Then run this command again."
+    if [[ -n $new_ca ]]; then
+        mv -f "$new_ca" "${HOST_ROOT}${LOG_SERVER_CA}"
+    else
+        rm -f "${HOST_ROOT}${LOG_SERVER_CA}"
+    fi
+    if [[ -n $new_conf ]]; then
+        mv -f "$new_conf" "${HOST_ROOT}${LOG_SERVER_CONF}"
+    else
+        rm -f "${HOST_ROOT}${LOG_SERVER_CONF}"
+    fi
+    systemctl restart "$RSYSLOG_UNIT" ||
+        fail "rsyslog did not start again with the new settings." "see its log: $RSYSLOG_LOG_COMMAND"
+    if [[ -z $name ]]; then
+        # The lines that waited on the disk for the old server go too.
+        rm -f "${HOST_ROOT}${RSYSLOG_SPOOL_DIR}/${LOG_SERVER_QUEUE}".*
+        ok "the logs stay on this machine: rsyslog sends them to no log server, and the MEHO firewall has no way out to one"
+        return 0
+    fi
+    how="over TCP"
+    ((tls == 0)) || how="over TLS, only to a server that names $host and whose certificate the CA of $ca_file signed"
+    ok "the logs of this machine go to $host:$port $how. The MEHO firewall lets this machine reach $(join_by ', ' "${addresses[@]}") on TCP port $port"
 }
 
 # remove_kernel_settings: RKE2's kernel settings file of its CIS profile.
@@ -1567,6 +1853,7 @@ main() {
         check) command_check "$@" ;;
         support-bundle) command_support_bundle "$@" ;;
         admin-network) command_admin_network "$@" ;;
+        log-server) command_log_server "$@" ;;
         uninstall) command_uninstall "$@" ;;
         certificate) command_certificate "$@" ;;
         keyholder) command_keyholder "$@" ;;

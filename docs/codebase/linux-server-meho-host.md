@@ -11,7 +11,7 @@ customer never needs kubectl: that is ADR 0007 decision 2 (the support rule)
 and the form-2 design, section 5, the `meho-host` table (meho-internal
 `docs/design/2026-10-10-install-forms/form-2-linux-server.md`).
 
-This version has seven commands:
+This version has eight commands:
 
 - **`meho-host check [--json]`** prints a red/green list of the built-in
   Kubernetes (RKE2): the node, the pods, the disk and RKE2's certificates.
@@ -28,6 +28,16 @@ This version has seven commands:
   or one address. `none` closes SSH from every address, so only the console
   works. Only the SSH rule changes. Over SSH, the command asks first when
   the new range does not hold the admin's own address.
+- **`meho-host log-server <host>[:<port>] [--tls <ca.pem>]`** and
+  **`meho-host log-server none`** (#5752) work only on the MEHO appliance
+  (install form 1). They send the logs of the machine to the customer's log
+  server, which CIS Ubuntu 24.04 rule 6.1.3.6 asks for. rsyslog sends them
+  over TCP, to port 514 unless one is given. With `--tls` it sends over TLS,
+  to port 6514 unless one is given, and only to a server whose certificate
+  the given CA signed and that names the host. The command also adds one
+  rule to the MEHO firewall, so the machine can reach that server and port.
+  `none` removes both. On a form-2 machine the OS and its logging belong to
+  the customer, so the command changes nothing there and says so.
 - **`meho-host uninstall`** (#4739) removes MEHO and the built-in Kubernetes
   from the machine, with all their data. It asks twice. It also removes the
   host changes of RKE2's CIS profile (#5133): the kernel settings file, and
@@ -69,18 +79,18 @@ the operating system against the CIS Linux benchmark, is not built yet
 
 | File | What it holds |
 | --- | --- |
-| `meho-host` | One bash script: the output helpers, the seven checks with the rule for the console certificate (`certificate_state`), the bundle and its scrub, the SSH rule rewrite, the uninstall, the certificate install, and the keyholder switch and the unseal of OpenBao. It sources `lib/firewall.sh` and `lib/cis.sh` (see [How meho-host finds its lib files](#how-meho-host-finds-its-lib-files)). It carries its own copies of the IPv4 helpers of `lib/net.sh` and of the paths of `lib/common.sh` that it needs. |
+| `meho-host` | One bash script: the output helpers, the checks with the rule for the console certificate (`certificate_state`), the bundle and its scrub, the SSH rule rewrite, the log server (rsyslog's file and its firewall rule), the uninstall, the certificate install, and the keyholder switch and the unseal of OpenBao. It sources `lib/firewall.sh` and `lib/cis.sh` (see [How meho-host finds its lib files](#how-meho-host-finds-its-lib-files)). It carries its own copies of the IPv4 helpers of `lib/net.sh` and of the paths of `lib/common.sh` that it needs. |
 | `lib/firewall.sh` | `firewall_state` (the firewall line) and the firewall paths `MEHO_FIREWALL_FILE`, `MEHO_FIREWALL_UNIT` and the others. |
 | `lib/cis.sh` | `cis_state` (the CIS profile line), and for the uninstall the paths of the CIS host changes and the `etcd` look-ups (`etcd_user_exists`, `etcd_group_exists`, `etcd_account_recorded`). It reads `RKE2_CONFIG_FILE`, which `meho-host` defines as `lib/common.sh` does. |
 | `lib/prepare.sh` | `install_meho_host`: the copy to `/usr/local/sbin`, mode 0755, and of the two lib files to `/usr/local/lib/meho-host`, mode 0644. |
 | `lib/common.sh` | `MEHO_HOST_FILE`, `MEHO_HOST_PATH`, `MEHO_HOST_LIB_DIR`, `MEHO_HOST_LIB_FILES`, and `meho-host` in `DOWNLOAD_FILES`. |
 | `packaging/parts.sh`, `packaging/common.sh` | The download ships `meho-host` next to `install.sh`, executable. |
-| `tests/host_harness.py` | A fake installed machine: stub `kubectl`, `rke2`, `journalctl`, `df`, `free`, `ip`, `date`, `nft`, `systemctl`, `userdel`, `groupdel` and friends, the files of RKE2's CIS profile, and the real `openssl`. `console_certificate()` makes test certificates with fixed dates. `run()` takes the answers to the questions (`stdin`) and an SSH session (`ssh_client`). |
-| `tests/test_meho_host.py` | The tests of `check`, `support-bundle`, `admin-network` and `uninstall`, of each hardening line, of the install by `install.sh`, and of the `etcd` record from the install through an update to `uninstall`. |
+| `tests/host_harness.py` | A fake installed machine: stub `kubectl`, `rke2`, `journalctl`, `df`, `free`, `ip`, `date`, `nft`, `systemctl`, `getent`, `rsyslogd`, `userdel`, `groupdel` and friends, the files of RKE2's CIS profile, and the real `openssl`. `console_certificate()` makes test certificates with fixed dates, and `certificate_with_key()` also gives the key of the server certificate. `make_appliance()` turns the form-2 machine into the appliance. `environment()` is the environment meho-host runs with, and `run()` takes the answers to the questions (`stdin`) and an SSH session (`ssh_client`). |
+| `tests/test_meho_host.py` | The tests of `check`, `support-bundle`, `admin-network`, `log-server` and `uninstall`, of each check line, of the install by `install.sh`, and of the `etcd` record from the install through an update to `uninstall`. |
 | `tests/fake_cluster.py`, `tests/cluster_harness.py` | A fake `kubectl` that keeps state: the Secrets of namespace `meho` and the one OpenBao pod, with its seal state, its uid and the chart's unseal helper. `ClusterHost` is the fake machine with it. |
 | `tests/test_meho_host_certificate.py` | The tests of `certificate`. |
 | `tests/test_meho_host_unseal.py` | The tests of `keyholder on`, `keyholder off` and `unseal`, and of the unseal key, which never appears in a command line, the output or a file. |
-| `tests/fixtures/firewall-admin-network.nft` | The firewall file `install.sh` writes with `--admin-network 10.0.50.0/24`; the `admin-network` and `uninstall` tests start from it. |
+| `tests/fixtures/firewall-admin-network.nft` | The firewall file `install.sh` writes with `--admin-network 10.0.50.0/24`; the `admin-network`, `log-server` and `uninstall` tests start from it. |
 
 The script has the same shape as `install.sh`: `set -Eeuo pipefail`, an ERR
 trap that prints one `[FAIL]` line, `fail` and `usage_error`, and the
@@ -90,8 +100,9 @@ trap that prints one `[FAIL]` line, `fail` and `usage_error`, and the
 
 ### `check`
 
-Each check calls `result <name> <status> <detail> [fix]`. The seven results
-are printed at the end, as text or as JSON, in this order:
+Each check calls `result <name> <status> <detail> [fix]`. The seven results,
+and on the appliance an eighth (`log-server`), are printed at the end, as
+text or as JSON, in this order:
 
 | Line | ok when | warn when | red when | Source of the facts |
 | --- | --- | --- | --- | --- |
@@ -102,6 +113,7 @@ are printed at the end, as text or as JSON, in this order:
 | `firewall` | `firewall_state` says `on`: the table `inet meho` is loaded, its chain `prerouting` filters the hook `prerouting` with `policy drop`, and `meho-firewall.service` is enabled | never | `firewall_state` says `off: <reason>`, also `off: nft not found` when `nft` is missing | `nft list table inet meho`, `nft list chain inet meho prerouting`, `systemctl is-enabled meho-firewall.service` |
 | `cis-profile` | `cis_state` says `on`: `config.yaml` sets `profile: cis`, the pod security file exists, the `etcd` user and group exist, `/etc/sysctl.d/60-rke2-cis.conf` exists and the kernel has its values | never | `cis_state` says `off: <reason>` | the files of [RKE2's CIS profile](linux-server-install.md#rke2s-cis-profile) and `/proc/sys` |
 | `console-certificate` | the rule below holds and more than 30 days are left | the rule holds, but 30 days or less are left | the certificate breaks the rule; the Secret cannot be read; the host name is not in `/etc/meho/install.json`; `openssl` is missing | the Secret `meho-core-tls` (`tls.crt`, `ca.crt`), `/etc/meho/install.json`, `openssl` |
+| `log-server` (only on the appliance) | no log server is set, or one is set and its name resolves to the addresses in the firewall rule | only one of rsyslog's file and the firewall rule is there; the name does not resolve now; it resolves to other addresses now | never | the two lines of `log-server` in the chain `output` of `/etc/meho/firewall.nft`, `/etc/rsyslog.d/10-meho-log-server.conf`, `getent ahostsv4` |
 
 **The rule for the console certificate.** `certificate_state` holds the
 rule in one place. The certificate is the one the console, the API and the
@@ -286,6 +298,73 @@ too. Output that is not this JSON gives one red doctor line. See
    which unit loads the file: on the appliance that is `nftables.service`.
    Packets of connections that are already open always pass the rules, so
    the SSH session that runs the command stays open.
+
+### `log-server`
+
+The design is ADR 0009's Work list (amended 2026-10-21 to 2026-10-23) and
+the form-2 design, section 5, the `meho-host` table. The command changes
+two things: rsyslog's settings, and one rule of the MEHO firewall. It
+checks each new file before it takes the old one's place, so a value that
+is wrong changes nothing.
+
+1. Check the values, before root is checked. `<host>` is a host name or an
+   IPv4 address; an IPv6 address is refused, because the appliance is IPv4
+   only. `<port>` is 1 to 65535. Without a port, it is 514, or 6514 with
+   `--tls`. `--tls` needs a host name: rsyslog checks that the server's
+   certificate names the host, and a certificate rarely names an address.
+   The checks also keep every value safe to write into rsyslog's file and
+   the firewall file.
+2. Stop with a `[FAIL]` line when `/opt/meho/appliance` is missing: then the
+   machine is a form-2 machine, where the OS and its logging belong to the
+   customer.
+3. With `--tls`: take only the certificates from the CA file (the lines
+   from `-----BEGIN CERTIFICATE-----` to `-----END CERTIFICATE-----`), so a
+   private key in the same file never reaches the CA file, which every user
+   may read. `openssl x509` must read them. rsyslog's TLS module
+   (`lmnsd_gtls.so`, the package `rsyslog-gnutls`) must be on the machine:
+   `rsyslogd -N1` does not notice when it is missing.
+4. Resolve a host name once, with `getent ahostsv4`. Every IPv4 address of
+   the name goes into the firewall rule, because rsyslog may connect to any
+   of them. The name goes into rsyslog's file and into the note above the
+   rule.
+5. Rewrite the firewall file into a new file next to it (`mktemp`, root
+   only). In the chain `output`, the old two lines of `log-server` and the
+   empty line after them go, and the new ones come in front of the
+   counter's comment line:
+
+   ```
+           # The log server, set with meho-host log-server: logs.example.com
+           ip daddr { 192.0.2.10 } tcp dport 514 accept
+   ```
+
+   `none` only removes them. A second run replaces the first server. The
+   new file must hold exactly these two lines in the chain `output`; after
+   a hand edit that moved the counter's comment, it does not, and the
+   command stops. Then `nft -c -f` checks the new file.
+6. Write rsyslog's new file next to the old one in `/etc/rsyslog.d`, with a
+   name that does not end in `.conf`, so rsyslog does not read it yet.
+   `rsyslogd -N1 -f` checks it. The action follows rsyslog's guide to
+   reliable forwarding: `omfwd` over TCP, with its own queue
+   (`queue.type="LinkedList"`), so local logging goes on while the server is
+   down, endless retries (`action.resumeRetryCount="-1"`), and the disk as a
+   help (`queue.filename`, in Ubuntu's work folder `/var/spool/rsyslog`), at
+   most 1 GB (`queue.maxDiskSpace`), so a server that stays down never
+   fills the disk. With TLS: `StreamDriver="gtls"`, `StreamDriverMode="1"`,
+   `StreamDriverAuthMode="x509/name"`, `StreamDriverPermittedPeers=<host>`
+   and `StreamDriver.CAFile`. The CA file goes to
+   `/etc/rsyslog.d/meho-log-server-ca.pem`, mode 0644: Ubuntu's AppArmor
+   profile of `rsyslogd` lets it read no other folder of settings, and
+   rsyslog reads the file after it has changed from root to the user
+   `syslog`.
+7. Move the firewall file into place and load it with `nft -f`, as
+   `admin-network` does. Then move rsyslog's files into place, or remove
+   them for `none`, and restart `rsyslog.service`. So the way out is open
+   before rsyslog sends. For `none`, the queue files of the old server in
+   `/var/spool/rsyslog` go too.
+
+rsyslog's file is `/etc/rsyslog.d/10-meho-log-server.conf`. rsyslog reads
+the files of that folder in name order, so `10-` comes before Ubuntu's
+`50-default.conf` and before a `stop` in a later file.
 
 ### `uninstall`
 
@@ -568,6 +647,31 @@ with the real `nft` on the loaded file, so its check of the chain
 installed `meho-host --help` from the fake root, which proves that it
 finds the files at `../lib/meho-host`.
 
+The `log-server` tests run on a fake appliance (`make_appliance()`: the
+folder `/opt/meho/appliance`, rsyslog's folders and a stand-in for its TLS
+module). The `getent` stub resolves every name to `192.0.2.10` unless a
+test gives other addresses, and the `rsyslogd` stub accepts or refuses the
+file it checks. The tests compare the whole firewall file and rsyslog's
+whole file with the expected text, and read the calls log to prove the
+order: both checks, then `nft -f`, then the restart of rsyslog. They cover
+a name, an address with a port, a name with two addresses, TLS with a
+private key in the CA file (only the certificate is copied), a second run,
+`none` with queue files left on the disk, each wrong value, a name that
+does not resolve, a CA file without a certificate, no TLS module, a file
+that nft or rsyslog refuses, a chain `output` that is not in the form
+`install.sh` writes, and a form-2 machine. Every failing case proves that
+nothing changed. The check tests cover the line with and without a log
+server, TCP and TLS, a name that resolves to another address or to none,
+and a log server set only in part; on a form-2 machine the list keeps its
+seven lines. `test_firewall_nft.py` runs `meho-host log-server` with the
+real `nft` too, for an address and for `none`.
+
+rsyslog's settings were also tried by hand on Ubuntu 24.04 with rsyslog
+8.2312.0 and `rsyslog-gnutls`, with `openssl s_server` as the log server:
+the line arrives at a server whose certificate the CA signed and that names
+the host; a server signed by another CA, and one with another name, get
+nothing.
+
 The tests of `certificate`, `keyholder` and `unseal` use `ClusterHost`
 (`tests/cluster_harness.py`). Its `kubectl` is `tests/fake_cluster.py`,
 which keeps state in one JSON file: the Secrets `meho-core-tls` and
@@ -625,7 +729,11 @@ which `install.sh` step 1 requires), `openssl` (Ubuntu's `ca-certificates`
 package depends on it), RKE2's own `kubectl` at
 `/var/lib/rancher/rke2/bin/kubectl` with `/etc/rancher/rke2/rke2.yaml`,
 `rke2` at `/usr/local/bin/rke2` and `rke2-uninstall.sh` next to it. Ubuntu
-24.04 has all of them.
+24.04 has all of them. `log-server` also needs `getent` (libc-bin), rsyslog
+(`rsyslogd`, `rsyslog.service`) and, for `--tls`, rsyslog's TLS module of
+the package `rsyslog-gnutls`, which the appliance build installs
+(`deploy/appliance/cis/harden.sh`), because the appliance cannot download
+packages later.
 
 ## Known issues
 
@@ -687,6 +795,20 @@ package depends on it), RKE2's own `kubectl` at
   A set that is not in the form `install.sh` writes gives a `[FAIL]` line,
   and nothing changes. The rewrite is meant for the file as `install.sh`
   wrote it.
+- **`log-server` resolves a host name once.** When the name moves to
+  another address, the firewall still lets the logs out only to the old
+  one. The check line warns, and running the command again fixes it.
+- **`log-server` has not run on a real appliance yet.** The tests use
+  stubs, and rsyslog's settings were tried in a container without the
+  firewall. The lab test of the first appliance import (#4815 part 2) or
+  the release test (#4816) proves that the logs reach a log server through
+  the firewall.
+- **`log-server --tls` needs a host name.** rsyslog checks that the
+  server's certificate names the host (`x509/name`). An address is
+  refused, because a certificate rarely names one.
+- **`uninstall` keeps the log server.** It leaves rsyslog's file and the
+  firewall rule, like the rest of the firewall. `log-server none` before
+  `uninstall` removes them.
 - **`uninstall` leaves the OS packages that RKE2's installer added** (out
   of scope in #4739).
 - **`uninstall` does not set the kernel values back.** It removes RKE2's
@@ -732,6 +854,24 @@ package depends on it), RKE2's own `kubectl` at
   (`admin-network`, `uninstall`) and section 11 (SSH and the admin network).
 - The MEHO firewall file and its unit: `docs/codebase/linux-server-install.md`, "The host firewall"
   (#4635), `lib/firewall.sh`.
+- rsyslog's `omfwd` (`target`, `port`, `protocol`, the `StreamDriver*`
+  parameters, `StreamDriver.CAFile` since 8.2108.0):
+  https://docs.rsyslog.com/doc//configuration/modules/omfwd.html
+- rsyslog's guide to reliable forwarding (`queue.type="LinkedList"`,
+  `queue.filename`, `queue.saveOnShutdown`, `action.resumeRetryCount="-1"`):
+  https://docs.rsyslog.com/doc/tutorials/reliable_forwarding.html
+- rsyslog's gtls driver (`x509/name` checks the certificate and the
+  name): https://www.rsyslog.com/doc/ns_gtls.html
+- Ubuntu 24.04's rsyslog 8.2312.0: `rsyslog-gnutls` is in `main`,
+  `rsyslog-openssl` only in `universe`; `/etc/rsyslog.conf` sets
+  `$WorkDirectory /var/spool/rsyslog` and includes
+  `/etc/rsyslog.d/*.conf`; the AppArmor profile
+  `/etc/apparmor.d/usr.sbin.rsyslogd` allows reading `/etc/rsyslog.d/**`
+  and writing `/var/spool/rsyslog/**` (read on 2026-11-04 in the
+  `ubuntu:24.04` image).
+- CIS Ubuntu Linux 24.04 LTS Benchmark v1.0.0, rule 6.1.3.6 (manual):
+  remote logging. ComplianceAsCode `controls/cis_ubuntu2404.yml` (v0.1.82)
+  lists it as manual, with the related rule `rsyslog_remote_loghost`.
 - RKE2 uninstall (`/usr/local/bin/rke2-uninstall.sh` for a tarball install):
   https://docs.rke2.io/install/uninstall. The script of v1.37.1 removes
   `/etc/rancher/rke2` and RKE2's `share/rke2` folder, not `/etc/sysctl.d`

@@ -4,9 +4,10 @@
 """Tests of meho-host: the check list, its JSON form and exit codes, the
 hardening lines of the check (the firewall, RKE2's CIS profile and the
 console certificate), the support bundle and what is removed from it, the
-SSH rule of the firewall (admin-network), uninstall with the host changes
-of RKE2's CIS profile (#5133), and the install of meho-host and the files
-of lib/ it sources by install.sh."""
+SSH rule of the firewall (admin-network), the log server of the appliance
+and its way out through the firewall (log-server, #5752), uninstall with the
+host changes of RKE2's CIS profile (#5133), and the install of meho-host and
+the files of lib/ it sources by install.sh."""
 
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ from host_harness import (
     INSTALL_RECORD,
     MEHO_PODS,
     PREROUTING_CHAIN,
+    GTLS_MODULE,
     TRAEFIK_POD,
     USERDEL_STUB,
     HostTestCase,
@@ -112,6 +114,29 @@ CERTIFICATE_FIX = (
     "Fix: install a certificate for the host name of this install that is valid for more than "
     "30 days: sudo meho-host certificate --cert <chain.pem> --key <key.pem>"
 )
+# log-server: rsyslog's file, the CA file, and the two lines in the chain
+# output of the firewall file, in front of its counter.
+LOG_CONF = "/etc/rsyslog.d/10-meho-log-server.conf"
+LOG_CA = "/etc/rsyslog.d/meho-log-server-ca.pem"
+LOG_NOTE = "        # The log server, set with meho-host log-server: "
+COUNTER_NOTE = "        # Counts the packets that reach the policy."
+CONF_HEAD = (
+    "# Written by meho-host log-server. Every log line of this machine also goes\n"
+    "# to the log server below. Remove it with: meho-host log-server none\n"
+)
+CONF_QUEUE = (
+    '    action.resumeRetryCount="-1" queue.type="LinkedList" queue.filename="meho-log-server"\n'
+    '    queue.maxDiskSpace="1g" queue.saveOnShutdown="on")\n'
+)
+FORM_2_FAIL = (
+    "[FAIL] This is a Linux server with MEHO (install form 2). Its operating system and its "
+    "logging belong to you, so meho-host changes nothing. Fix: send the logs to your log "
+    "server with your own settings of rsyslog or journald, as on your other servers."
+)
+NO_LOG_SERVER_LINE = (
+    "[ok]   log-server: none set, so the logs stay on this machine. To send them to your log "
+    "server: meho-host log-server <host>"
+)
 BUNDLE_PATH = "/var/lib/meho/support/meho-support-meho.example.com-20261023T120000Z.tar.gz"
 BUNDLE_FILES = {
     "check.json",
@@ -148,6 +173,7 @@ class UsageTests(HostTestCase):
             "check [--json]",
             "support-bundle",
             "admin-network",
+            "log-server <host>[:<port>] [--tls <ca.pem>]",
             "uninstall",
             "certificate --cert <chain.pem> --key <key.pem>",
             "keyholder on",
@@ -1044,6 +1070,378 @@ class AdminNetworkTests(HostTestCase):
             "[WARN] admin-network 0.0.0.0/0 allows SSH from every address.", result.stderr
         )
         self.assertIn("        elements = { 0.0.0.0/0 }\n", self.admin_set())
+
+
+def with_log_server(rules: str, name: str, rule: str) -> str:
+    """The firewall file with the two lines of log-server and an empty line
+    in front of the counter of the chain output."""
+    at = rules.index(COUNTER_NOTE, rules.index("    chain output {"))
+    return rules[:at] + f"{LOG_NOTE}{name}\n        {rule}\n\n" + rules[at:]
+
+
+def private_key() -> str:
+    """A new private key in PEM form, made by openssl for the test."""
+    return subprocess.run(
+        ["openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    ).stdout
+
+
+class LogServerTests(HostTestCase):
+    """log-server on the appliance, which starts from the firewall file of
+    install.sh and has no log server."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.host.host_file(RULES, RULES_FIXTURE.read_text())
+        self.host.make_appliance()
+
+    def rules(self) -> str:
+        return self.host.host_path(RULES).read_text()
+
+    def conf(self) -> str:
+        return self.host.host_path(LOG_CONF).read_text()
+
+    def listing(self, folder: str) -> list[str]:
+        return sorted(os.listdir(self.host.host_path(folder)))
+
+    def ca_file(self, content: str) -> str:
+        """The customer's CA file, outside the fake root, as given to --tls."""
+        path = self.host.fake / "customer-ca.pem"
+        path.write_text(content)
+        return str(path)
+
+    def assert_fails_unchanged(
+        self, args: tuple[str, ...], fail_line: str, rules: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        result = self.host.run("log-server", *args)
+
+        self.assertEqual(1, result.returncode, self.output(result))
+        self.assertIn(fail_line, result.stderr)
+        self.assertEqual(RULES_FIXTURE.read_text() if rules is None else rules, self.rules())
+        self.assertEqual([], self.listing("/etc/rsyslog.d"))
+        self.assertEqual(["firewall.nft"], self.listing("/etc/meho"))
+        self.assertNotIn("nft -f ", self.host.calls())
+        self.assertNotIn("systemctl restart", self.host.calls())
+        return result
+
+    def test_a_host_name_gets_the_rsyslog_line_and_one_way_out(self) -> None:
+        result = self.host.run("log-server", "logs.example.com")
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertEqual(
+            "[ok]   the logs of this machine go to logs.example.com:514 over TCP. The MEHO "
+            "firewall lets this machine reach 192.0.2.10 on TCP port 514\n",
+            result.stdout,
+        )
+        self.assertEqual(
+            with_log_server(
+                RULES_FIXTURE.read_text(),
+                "logs.example.com",
+                "ip daddr { 192.0.2.10 } tcp dport 514 accept",
+            ),
+            self.rules(),
+        )
+        self.assertEqual(
+            CONF_HEAD
+            + 'action(type="omfwd" target="logs.example.com" port="514" protocol="tcp"\n'
+            + CONF_QUEUE,
+            self.conf(),
+        )
+        self.assertEqual(0o644, stat.S_IMODE(self.host.host_path(LOG_CONF).stat().st_mode))
+        self.assertEqual(["10-meho-log-server.conf"], self.listing("/etc/rsyslog.d"))
+        self.assertEqual(["firewall.nft"], self.listing("/etc/meho"))
+        # Both new files are checked before they take their place, and the
+        # way out opens before rsyslog starts again.
+        calls = self.host.calls()
+        self.assertIn("getent ahostsv4 logs.example.com\n", calls)
+        self.assertRegex(calls, r"rsyslogd -N1 -f \S*/etc/rsyslog\.d/\.meho-log-server\.\S+\n")
+        order = [
+            calls.index(call)
+            for call in (
+                "nft -c -f",
+                "rsyslogd -N1",
+                "nft -f ",
+                "systemctl restart rsyslog.service",
+            )
+        ]
+        self.assertEqual(sorted(order), order)
+
+    def test_an_address_needs_no_lookup_and_takes_a_port(self) -> None:
+        result = self.host.run("log-server", "192.0.2.20:10514")
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertIn("        ip daddr { 192.0.2.20 } tcp dport 10514 accept\n", self.rules())
+        self.assertIn('target="192.0.2.20" port="10514" protocol="tcp"', self.conf())
+        self.assertNotIn("getent", self.host.calls())
+
+    def test_a_name_with_several_addresses_opens_the_way_to_each(self) -> None:
+        self.host.answer(
+            "getent_ahostsv4",
+            "192.0.2.11      STREAM logs.example.com\n192.0.2.11      DGRAM  \n"
+            "192.0.2.10      STREAM \n192.0.2.10      DGRAM  \n",
+        )
+
+        result = self.host.run("log-server", "logs.example.com")
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertIn(
+            "        ip daddr { 192.0.2.10, 192.0.2.11 } tcp dport 514 accept\n", self.rules()
+        )
+
+    def test_tls_sends_only_to_a_server_that_the_ca_signed(self) -> None:
+        _, ca = console_certificate()
+        # A private key in the same file must not reach the CA file, which
+        # every user may read.
+        path = self.ca_file(ca + private_key())
+
+        result = self.host.run("log-server", "--tls", path, "logs.example.com")
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertIn(
+            "go to logs.example.com:6514 over TLS, only to a server that names logs.example.com "
+            f"and whose certificate the CA of {path} signed.",
+            result.stdout,
+        )
+        self.assertIn("        ip daddr { 192.0.2.10 } tcp dport 6514 accept\n", self.rules())
+        self.assertEqual(
+            CONF_HEAD + 'action(type="omfwd" target="logs.example.com" port="6514" protocol="tcp"\n'
+            '    StreamDriver="gtls" StreamDriverMode="1" StreamDriverAuthMode="x509/name"\n'
+            '    StreamDriverPermittedPeers="logs.example.com" '
+            'StreamDriver.CAFile="/etc/rsyslog.d/meho-log-server-ca.pem"\n' + CONF_QUEUE,
+            self.conf(),
+        )
+        copied = self.host.host_path(LOG_CA)
+        self.assertEqual(ca, copied.read_text())
+        self.assertEqual(0o644, stat.S_IMODE(copied.stat().st_mode))
+
+    def test_a_second_run_replaces_the_first_server(self) -> None:
+        _, ca = console_certificate()
+        first = self.host.run("log-server", "logs.example.com", "--tls", self.ca_file(ca))
+        self.assertEqual(0, first.returncode, self.output(first))
+
+        result = self.host.run("log-server", "192.0.2.30")
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertEqual(
+            with_log_server(
+                RULES_FIXTURE.read_text(),
+                "192.0.2.30",
+                "ip daddr { 192.0.2.30 } tcp dport 514 accept",
+            ),
+            self.rules(),
+        )
+        self.assertEqual(["10-meho-log-server.conf"], self.listing("/etc/rsyslog.d"))
+        self.assertNotIn("StreamDriver", self.conf())
+
+    def test_none_removes_the_line_the_rule_and_the_waiting_lines(self) -> None:
+        _, ca = console_certificate()
+        first = self.host.run("log-server", "logs.example.com", "--tls", self.ca_file(ca))
+        self.assertEqual(0, first.returncode, self.output(first))
+        for name in ("meho-log-server.00000001", "meho-log-server.qi", "other.qi"):
+            self.host.host_file(f"/var/spool/rsyslog/{name}", "queued lines\n")
+
+        result = self.host.run("log-server", "none")
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertEqual(
+            "[ok]   the logs stay on this machine: rsyslog sends them to no log server, and the "
+            "MEHO firewall has no way out to one\n",
+            result.stdout,
+        )
+        self.assertEqual(RULES_FIXTURE.read_text(), self.rules())
+        self.assertEqual([], self.listing("/etc/rsyslog.d"))
+        self.assertEqual(["other.qi"], self.listing("/var/spool/rsyslog"))
+        self.assertEqual(2, self.host.calls().count("systemctl restart rsyslog.service"))
+
+    def test_none_without_a_log_server_succeeds_and_changes_nothing(self) -> None:
+        result = self.host.run("log-server", "none")
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertEqual(RULES_FIXTURE.read_text(), self.rules())
+        self.assertEqual([], self.listing("/etc/rsyslog.d"))
+
+    def test_a_wrong_value_is_a_usage_error_and_changes_nothing(self) -> None:
+        cases = {
+            (): "log-server needs your log server, <host>[:<port>], or none.",
+            ("logs.example.com:0",): "'0' is not a port.",
+            ("logs.example.com:65536",): "'65536' is not a port.",
+            ("logs.example.com:",): "'' is not a port.",
+            ("logs.example.com:syslog",): "'syslog' is not a port.",
+            ("fe80::1",): "fe80::1 is an IPv6 address.",
+            ("10.0.0",): "'10.0.0' is not an IPv4 address.",
+            ("logs..example.com",): "'logs..example.com' is not a host name or an IPv4 address.",
+            ("logs.example.com;reboot",): "is not a host name or an IPv4 address.",
+            ("logs.example.com", "other.example.com"): "takes one log server",
+            ("logs.example.com", "--tls"): "--tls needs the CA file",
+            ("none", "--tls", "ca.pem"): "log-server none takes no --tls.",
+            ("192.0.2.10", "--tls", "ca.pem"): "--tls needs the host name of your log server",
+            ("--udp", "logs.example.com"): "unknown option of log-server: --udp",
+        }
+        for args, fragment in cases.items():
+            with self.subTest(args=args):
+                self.assert_usage_error(self.host.run("log-server", *args), fragment)
+        self.assertEqual(RULES_FIXTURE.read_text(), self.rules())
+        # Wrong usage stops before root is checked and before any look-up.
+        for command in ("id -u", "getent", "nft", "rsyslogd", "systemctl"):
+            self.assertNotIn(f"\n{command}", "\n" + self.host.calls())
+
+    def test_a_name_that_does_not_resolve_changes_nothing(self) -> None:
+        self.host.answer("getent_ahostsv4", "")
+        self.host.answer("getent_rc", "2")
+
+        self.assert_fails_unchanged(
+            ("logs.example.com",),
+            "[FAIL] logs.example.com does not resolve to an IPv4 address on this machine. "
+            "Nothing was changed. Fix: check the name and the DNS servers of this machine: "
+            "getent ahostsv4 logs.example.com",
+        )
+
+    def test_a_ca_file_without_a_certificate_changes_nothing(self) -> None:
+        for name, path in {
+            "no file": str(self.host.fake / "missing.pem"),
+            "only a key": self.ca_file(private_key()),
+        }.items():
+            with self.subTest(case=name):
+                self.assert_fails_unchanged(
+                    ("logs.example.com", "--tls", path),
+                    f"[FAIL] {path} is not a file with a certificate that openssl can read. "
+                    "Nothing was changed.",
+                )
+
+    def test_without_rsyslogs_tls_module_tls_changes_nothing(self) -> None:
+        _, ca = console_certificate()
+        self.host.host_path(GTLS_MODULE).unlink()
+
+        self.assert_fails_unchanged(
+            ("logs.example.com", "--tls", self.ca_file(ca)),
+            "[FAIL] rsyslog's TLS module (the package rsyslog-gnutls) is not on this machine",
+        )
+
+    def test_a_firewall_file_nft_refuses_changes_nothing(self) -> None:
+        self.host.answer("nft_check_rc", "1")
+        self.host.answer("nft_check_out", "Error: syntax error, unexpected end of file\n")
+
+        result = self.assert_fails_unchanged(
+            ("logs.example.com",),
+            "[FAIL] nft does not accept the new firewall file. Nothing was changed.",
+        )
+
+        self.assertIn("Error: syntax error, unexpected end of file", result.stderr)
+
+    def test_settings_rsyslog_refuses_change_nothing(self) -> None:
+        self.host.answer("rsyslogd_check_rc", "1")
+        self.host.answer("rsyslogd_check_out", "rsyslogd: parameter 'x' not known\n")
+
+        result = self.assert_fails_unchanged(
+            ("logs.example.com",),
+            "[FAIL] rsyslog does not accept the new settings. Nothing was changed.",
+        )
+
+        self.assertIn("rsyslogd: parameter 'x' not known", result.stderr)
+
+    def test_a_chain_output_not_in_the_form_of_install_sh_changes_nothing(self) -> None:
+        fixture = RULES_FIXTURE.read_text()
+        at = fixture.index(COUNTER_NOTE, fixture.index("    chain output {"))
+        rules = fixture[:at] + fixture[at + len(COUNTER_NOTE) + 1 :]
+        self.host.host_file(RULES, rules)
+
+        self.assert_fails_unchanged(
+            ("logs.example.com",),
+            "[FAIL] the chain output in /etc/meho/firewall.nft is not in the form install.sh "
+            "writes, so meho-host cannot change its rule for the log server. Nothing was changed.",
+            rules,
+        )
+
+    def test_on_a_form_2_machine_it_changes_nothing(self) -> None:
+        shutil.rmtree(self.host.host_path("/opt/meho/appliance"))
+
+        for args in (("logs.example.com",), ("none",)):
+            with self.subTest(args=args):
+                self.assert_fails_unchanged(args, FORM_2_FAIL)
+        self.assertNotIn("getent", self.host.calls())
+
+
+class LogServerLineTests(CheckTestCase):
+    """The log-server line of check, which only the appliance has."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.host.host_file(RULES, RULES_FIXTURE.read_text())
+        self.host.make_appliance()
+
+    def set_log_server(self, *args: str) -> None:
+        result = self.host.run("log-server", *args)
+        self.assertEqual(0, result.returncode, self.output(result))
+
+    def test_on_the_appliance_without_a_log_server_it_is_green(self) -> None:
+        result = self.host.run("check")
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertEqual([*OK_LINES, NO_LOG_SERVER_LINE], result.stdout.splitlines())
+        checks = json.loads(self.host.run("check", "--json").stdout)["checks"]
+        self.assertEqual([*CHECK_NAMES, "log-server"], [check["name"] for check in checks])
+
+    def test_a_log_server_is_green_with_its_way_out(self) -> None:
+        self.set_log_server("logs.example.com")
+        self.assertEqual(
+            "[ok]   log-server: logs.example.com:514 over TCP, through the MEHO firewall to "
+            "192.0.2.10",
+            self.line("log-server"),
+        )
+
+        _, ca = console_certificate()
+        path = self.host.fake / "customer-ca.pem"
+        path.write_text(ca)
+        self.set_log_server("logs.example.com", "--tls", str(path))
+        self.assertEqual(
+            "[ok]   log-server: logs.example.com:6514 over TLS, through the MEHO firewall to "
+            "192.0.2.10",
+            self.line("log-server"),
+        )
+
+    def test_a_name_that_resolves_to_another_address_now_warns(self) -> None:
+        self.set_log_server("logs.example.com")
+        self.host.answer("getent_ahostsv4", "192.0.2.99      STREAM logs.example.com\n")
+
+        result = self.host.run("check")
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertIn(
+            "[WARN] log-server: logs.example.com:514 over TCP, but logs.example.com resolves to "
+            "192.0.2.99 now, and the MEHO firewall lets the logs out only to 192.0.2.10. Fix: "
+            "run meho-host log-server again with the same server, so the firewall follows the "
+            "new address.",
+            result.stdout.splitlines(),
+        )
+
+    def test_a_name_that_does_not_resolve_now_warns(self) -> None:
+        self.set_log_server("logs.example.com")
+        self.host.answer("getent_ahostsv4", "")
+        self.host.answer("getent_rc", "2")
+
+        self.assertEqual(
+            "[WARN] log-server: logs.example.com:514 over TCP, but logs.example.com does not "
+            "resolve now, so rsyslog cannot reach it. Fix: check the name and the DNS servers of "
+            "this machine: getent ahostsv4 logs.example.com",
+            self.line("log-server"),
+        )
+
+    def test_a_log_server_set_only_in_part_warns(self) -> None:
+        self.set_log_server("logs.example.com")
+        self.host.host_path(LOG_CONF).unlink()
+
+        line = self.line("log-server")
+
+        self.assertTrue(line.startswith("[WARN] log-server: set only in part: "), line)
+        self.assertIn(
+            "Fix: run meho-host log-server again with your log server, or meho-host log-server "
+            "none.",
+            line,
+        )
 
 
 def etcd_record(*parts: str) -> str:

@@ -15,7 +15,9 @@ network, and they change nothing on the machine that runs them:
   so a test can check that no secret value was on any command line. The
   date stub answers "now" from a file and passes every other call on to the
   real date, which parses the expiry dates of the certificates. The nft
-  stub accepts every file, and the systemctl stub only reloads. userdel and
+  stub accepts every file, and the systemctl stub only reloads and
+  restarts. The getent stub resolves every name to 192.0.2.10, and the
+  rsyslogd stub accepts every file it checks (log-server). userdel and
   groupdel remove their line from the fake /etc/passwd and /etc/group. Like
   the real userdel with USERGROUPS_ENAB yes in /etc/login.defs (the default
   of Ubuntu and RHEL), userdel also removes the group of the same name; the
@@ -32,7 +34,8 @@ their space free, and every RKE2 certificate is valid for a year or longer.
 The MEHO firewall is loaded and enabled, RKE2's CIS profile is set up as
 install.sh sets it up, and the console certificate names meho.example.com
 and has a year left. The tests of check add the install record, which
-holds the host name (INSTALL_RECORD).
+holds the host name (INSTALL_RECORD). The machine is a form-2 machine;
+make_appliance() turns it into the MEHO appliance.
 """
 
 from __future__ import annotations
@@ -61,6 +64,8 @@ MEHO_HOST = LINUX_SERVER / "meho-host"
 NOW = dt.datetime(2026, 10, 23, 12, 0, tzinfo=dt.UTC)
 HOST_REAL_TOOLS = (*REAL_TOOLS, "cp", "rm", "rmdir", "find", "tar", "gzip", "head", "openssl")
 HOSTNAME = "meho.example.com"
+# rsyslog's TLS module on Ubuntu 24.04 (amd64), from the package rsyslog-gnutls.
+GTLS_MODULE = "/usr/lib/x86_64-linux-gnu/rsyslog/lmnsd_gtls.so"
 
 # The files of RKE2's CIS profile as install.sh writes them (lib/cis.sh).
 RKE2_CONFIG = (
@@ -313,6 +318,19 @@ STUBS = {
         case "$1" in
           daemon-reload) exit 0 ;;
           is-enabled) grep -qxF -- "$3" "$MEHO_FAKE/enabled_units" ;;
+          restart) exit "$(cat "$MEHO_FAKE/systemctl_restart_rc")" ;;
+          *) exit 1 ;;
+        esac
+        """),
+    "getent": textwrap.dedent("""\
+        case "$1" in
+          ahostsv4) cat "$MEHO_FAKE/getent_ahostsv4"; exit "$(cat "$MEHO_FAKE/getent_rc")" ;;
+          *) exit 1 ;;
+        esac
+        """),
+    "rsyslogd": textwrap.dedent("""\
+        case "$1" in
+          -N1) cat "$MEHO_FAKE/rsyslogd_check_out"; exit "$(cat "$MEHO_FAKE/rsyslogd_check_rc")" ;;
           *) exit 1 ;;
         esac
         """),
@@ -453,6 +471,14 @@ DEFAULT_ANSWERS = {
     "nft_chain_out": PREROUTING_CHAIN,
     "enabled_units": "meho-firewall.service\n",
     "console_tls_rc": "0",
+    "systemctl_restart_rc": "0",
+    # What "getent ahostsv4 <name>" prints: each address once per socket type.
+    "getent_ahostsv4": (
+        "192.0.2.10      STREAM logs.example.com\n192.0.2.10      DGRAM  \n192.0.2.10      RAW    \n"
+    ),
+    "getent_rc": "0",
+    "rsyslogd_check_rc": "0",
+    "rsyslogd_check_out": "",
     **ACCOUNT_ANSWERS,
 }
 
@@ -499,6 +525,13 @@ class FakeHost:
     def answer(self, name: str, content: str) -> None:
         """Set what one stub command answers. The names are in DEFAULT_ANSWERS."""
         (self.fake / name).write_text(content)
+
+    def make_appliance(self) -> None:
+        """Make the machine the MEHO appliance: the folder of its pieces,
+        rsyslog's folders, and rsyslog's TLS module of rsyslog-gnutls."""
+        for folder in ("/opt/meho/appliance", "/etc/rsyslog.d", "/var/spool/rsyslog"):
+            self.host_path(folder).mkdir(parents=True, exist_ok=True)
+        self.host_file(GTLS_MODULE, "fake module\n")
 
     def console_certificate(self, chain: str, ca: str) -> None:
         """Set tls.crt and ca.crt of the console's TLS Secret."""

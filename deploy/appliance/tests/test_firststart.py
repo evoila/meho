@@ -7,10 +7,14 @@ that no secret reaches a log, and the console banner."""
 
 from __future__ import annotations
 
+import re
 import time
 import unittest
 
 from firststart_harness import (
+    APPLIANCE,
+    BANNER_SH,
+    DOWNLOAD,
     JOIN_TOKEN,
     PASSWORD,
     SSH_KEY,
@@ -23,6 +27,8 @@ from firststart_harness import (
 )
 
 ALL_MARKERS = sorted(f"{number}-{name}.done" for number, name in enumerate(STEPS, start=1))
+# 22 letters and digits: long enough, but no other character (#5749).
+LETTERS_AND_DIGITS = "Only20LettersAndDigit5"
 
 
 class FirstStartTests(FirstStartTestCase):
@@ -127,6 +133,27 @@ class FirstStartTests(FirstStartTestCase):
         self.assertEqual([], self.vm.calls("chpasswd"))
         self.assertEqual([], self.vm.calls("netplan"))
         self.assertNotIn("only13letters", self.output(result))
+
+    def test_a_password_of_letters_and_digits_only_is_refused_before_the_account_is_made(
+        self,
+    ) -> None:
+        self.vm.wizard({"admin.password": LETTERS_AND_DIGITS})
+
+        result = self.vm.run()
+
+        line = self.assert_fails_once(
+            result,
+            "Step 3 (wizard-fields)",
+            "refused: The password contains less than 1 non-alphanumeric characters.",
+            "It needs at least 14 characters, with an uppercase letter",
+            "power the VM off, correct the field in the VM's vApp options",
+        )
+        self.assertNotIn("sudo reboot", line)
+        self.assertEqual(["pwscore admin"], self.vm.calls("pwscore"))
+        self.assertEqual([], self.vm.calls("useradd"))
+        self.assertEqual([], self.vm.calls("chpasswd"))
+        self.assertEqual("ubuntu\n", self.vm.read("/etc/hostname"))
+        self.assertNotIn(LETTERS_AND_DIGITS, self.output(result))
 
     def test_each_wrong_field_is_refused_before_anything_changes(self) -> None:
         wrong = {
@@ -296,6 +323,16 @@ class FirstStartTests(FirstStartTestCase):
         self.assertEqual(ALL_MARKERS, self.vm.markers())
         self.assertFalse(self.vm.host_path(f"{STATE}/failed").exists())
 
+    def test_a_refused_chpasswd_says_to_restart_from_vcenter(self) -> None:
+        # The account exists, but it has no password, so nobody can log in.
+        self.vm.stub("chpasswd", "cat >/dev/null\nexit 1\n")
+
+        line = self.assert_fails_once(
+            self.vm.run(), "Step 3 (wizard-fields)", "power the VM off and on in vCenter"
+        )
+
+        self.assertNotIn("sudo reboot", line)
+
     def test_a_failed_meho_host_stops_step_3(self) -> None:
         self.vm.answer("meho_host_rc", "1")
 
@@ -421,15 +458,40 @@ class ConsoleSetupTests(FirstStartTestCase):
                 self.assertIn("Try again.", self.output(result))
                 self.assertEqual("meho.example.com\n", self.vm.read("/etc/hostname"))
 
-    def test_a_password_of_13_characters_is_asked_again(self) -> None:
-        answers = with_passwords("only13letters", "only13letters", PASSWORD, PASSWORD)
+    def test_a_password_that_breaks_a_rule_is_asked_again(self) -> None:
+        refused = {
+            "only13letters": "The password is shorter than 14 characters.",
+            LETTERS_AND_DIGITS: "less than 1 non-alphanumeric characters.",
+        }
+        for password, reason in refused.items():
+            with self.subTest(password=password):
+                for marker in self.vm.host_path(STATE).glob("*"):
+                    marker.unlink()
 
-        result = self.vm.run(console(*answers))
+                result = self.vm.run(
+                    console(*with_passwords(password, password, PASSWORD, PASSWORD))
+                )
+
+                self.assert_succeeds(result)
+                self.assertIn(f"{reason} It needs at least 14 characters", self.output(result))
+                self.assertIn("simple pattern. Try again.", self.output(result))
+                self.assertNotIn(password, self.output(result))
+                self.assertEqual(
+                    f"admin:{PASSWORD}\n", (self.vm.fake / "chpasswd_input").read_text()
+                )
+
+    def test_the_console_names_the_same_password_rules_as_the_wizard(self) -> None:
+        result = self.vm.run(console(*STATIC_ANSWERS.values()))
 
         self.assert_succeeds(result)
-        self.assertIn("shorter than 14 characters. Try again.", self.output(result))
-        self.assertNotIn("only13letters", self.output(result))
-        self.assertEqual(f"admin:{PASSWORD}\n", (self.vm.fake / "chpasswd_input").read_text())
+        rules = re.search(r"The appliance admin password needs (.+)\.\n", self.output(result))
+        self.assertIsNotNone(rules, self.output(result))
+        section = (APPLIANCE / "product-section.xml").read_text()
+        description = re.search(
+            r'ovf:key="admin\.password".*?<Description>(.*?)</Description>', section, re.DOTALL
+        )
+        self.assertIsNotNone(description)
+        self.assertIn(f"It needs {rules[1]}.", description[1])
 
     def test_two_different_passwords_are_asked_again(self) -> None:
         answers = with_passwords(PASSWORD, PASSWORD + "x", PASSWORD, PASSWORD)
@@ -548,8 +610,18 @@ class BannerTests(FirstStartTestCase):
         self.assertIn("First start stopped:\n", banner)
         self.assertIn(line, banner)
         self.assertNotIn("Console:", banner)
-        self.assertNotIn("Log in as admin", banner)
-        self.assertIn("The admin account does not exist yet.", banner)
+        self.assertNotIn("Log in", banner)
+        self.assertIn("Nobody can log in as admin yet. Follow the fix above from vCenter.", banner)
+
+    def test_a_failed_step_while_the_admin_has_no_password_does_not_say_to_log_in(self) -> None:
+        # What the lab saw: chpasswd refused the password after useradd.
+        self.vm.stub("chpasswd", "cat >/dev/null\nexit 1\n")
+        self.assert_fails_once(self.vm.run(), "Step 3 (wizard-fields)")
+
+        banner = self.vm.banner()
+
+        self.assertNotIn("Log in", banner)
+        self.assertIn("Nobody can log in as admin yet.", banner)
 
     def test_a_failed_step_after_the_admin_account_exists_says_to_log_in(self) -> None:
         self.vm.answer("install_rc", "1")
@@ -570,25 +642,95 @@ class BannerTests(FirstStartTestCase):
     def test_the_admin_password_expiry_warning(self) -> None:
         self.assert_succeeds(self.vm.run())
         today = int(time.time()) // 86400
-        cases = {
-            "must change at the first login": ("0", None),
-            "never expires": (str(today), "99999"),
-            "expires in 20 days": (str(today - 345), "365"),
-            "expired": (str(today - 400), "365"),
-            "expires in 100 days": (str(today - 265), "365"),
+        locked = (
+            "The admin account cannot log in with its password or use sudo: the password is"
+            " locked, or the account is disabled."
+        )
+        expired = "Nobody can log in as admin: the account has expired."
+        # What the boot menu's root shell must run for each of the two.
+        advice = {
+            locked: "and set a new password (passwd admin). The steps:",
+            expired: "and remove its expiry date (chage -E -1 admin) and set a new password"
+            " (passwd admin). The steps:",
         }
-        for name, (last_change, max_days) in cases.items():
+        # The shadow fields password, last change, maximum and inactive days and
+        # the account's expiry date (the CIS settings: 365 and 45 days), and the
+        # banner line, or None for no warning.
+        cases = {
+            "must change at the first login": ("$y$hash", 0, 365, 45, "", None),
+            "never expires": ("$y$hash", today, 99999, "", "", None),
+            "expires in 20 days": (
+                "$y$hash",
+                today - 345,
+                365,
+                45,
+                "",
+                "[WARN] The password of admin expires in 20 days. Log in",
+            ),
+            "expires in 100 days": ("$y$hash", today - 265, 365, 45, "", None),
+            "expired, not yet disabled": (
+                "$y$hash",
+                today - 410,
+                365,
+                45,
+                "",
+                "[WARN] The password of admin has expired. Log in",
+            ),
+            "disabled 45 days after it expired": ("$y$hash", today - 411, 365, 45, "", locked),
+            "locked": ("!$y$hash", today, 365, 45, "", locked),
+            "locked, no password": ("*", today, 365, 45, "", locked),
+            "the account expires tomorrow": ("$y$hash", today, 365, 45, today + 1, None),
+            "the account expired": ("$y$hash", today, 365, 45, today, expired),
+            "the account expired, and its password is locked": (
+                "!$y$hash",
+                today,
+                365,
+                45,
+                today - 1,
+                expired,
+            ),
+        }
+        for name, (password, last_change, max_days, inactive, expire, line) in cases.items():
             with self.subTest(case=name):
-                self.vm.answer("shadow", f"admin:$y$hash:{last_change}:0:{max_days or ''}:7:::\n")
+                self.vm.answer(
+                    "shadow",
+                    f"admin:{password}:{last_change}:0:{max_days}:7:{inactive}:{expire}:\n",
+                )
 
                 banner = self.vm.banner()
 
-                if name == "expires in 20 days":
-                    self.assertIn("[WARN] The password of admin expires in 20 days.", banner)
-                elif name == "expired":
-                    self.assertIn("[WARN] The password of admin has expired.", banner)
-                else:
+                if line is None:
                     self.assertNotIn("[WARN]", banner)
+                else:
+                    self.assertIn(line, banner)
+                if line in advice:
+                    self.assertNotIn("Log in", banner)
+                    self.assertIn(advice[line], banner)
+                    self.assertIn("appliance-firststart.md", banner)
+                if line == locked:
+                    self.assertNotIn("chage", banner)
+
+    def test_the_boot_menu_link_follows_the_commit_of_the_scripts_not_the_download(
+        self,
+    ) -> None:
+        self.assert_succeeds(self.vm.run())
+        self.vm.answer("shadow", "admin:!$y$hash:0:0:365:7:45::\n")
+        # Newer scripts on an older release download, whose tag has no such doc.
+        self.vm.host_file(f"{DOWNLOAD}/VERSION", "MEHO_VERSION=0.43.0\n")
+        link = "The steps: https://github.com/evoila/meho/blob/{}/docs/codebase/appliance-firststart.md,\n"
+
+        self.assertIn(link.format("main"), self.vm.banner())
+
+        # build.sh writes the commit of the scripts into this one line.
+        script = BANNER_SH.read_text()
+        self.assertEqual(1, script.count("\nreadonly DOCS_REF=main\n"))
+        stamped = self.vm.fake / "banner.sh"
+        stamped.write_text(
+            script.replace("\nreadonly DOCS_REF=main\n", "\nreadonly DOCS_REF=0123abc\n")
+        )
+        stamped.chmod(0o755)
+
+        self.assertIn(link.format("0123abc"), self.vm.banner(stamped))
 
 
 if __name__ == "__main__":

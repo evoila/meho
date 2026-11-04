@@ -48,11 +48,13 @@ class BuildWithoutVmInfoTest(unittest.TestCase):
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
         (bin_dir / "govc").write_text(STUB_GOVC)
-        for tool in ("ssh", "scp", "ssh-keygen", "curl"):
+        for tool in ("scp", "ssh-keygen", "curl"):
             (bin_dir / tool).write_text("#!/bin/sh\nexit 0\n")
+        (bin_dir / "ssh").write_text('#!/bin/sh\nprintf "%s\\n" "$*" >>"$SSH_LOG"\n')
         for tool in bin_dir.iterdir():
             tool.chmod(0o755)
         self.log = self.root / "govc.log"
+        self.ssh_log = self.root / "ssh.log"
         self.power_state = self.root / "power-state"
         self.found = self.root / "found"
         self.found.write_text("")
@@ -68,6 +70,7 @@ class BuildWithoutVmInfoTest(unittest.TestCase):
         self.env = {
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "GOVC_LOG": str(self.log),
+            "SSH_LOG": str(self.ssh_log),
             "GOVC_POWER_STATE": str(self.power_state),
             "GOVC_FOUND": str(self.found),
             "GOVC_OVF": str(OVF),
@@ -143,6 +146,23 @@ class BuildWithoutVmInfoTest(unittest.TestCase):
         sums = (out / "SHA256SUMS").read_text()
         self.assertEqual(f"{hashlib.sha256(ova.read_bytes()).hexdigest()}  {VM}.ova\n", sums)
         self.assertEqual(f"vm.destroy {VM}", self.govc_calls()[-1])
+
+    def test_the_banner_gets_the_commit_of_the_scripts_not_the_download_version(self) -> None:
+        commit = subprocess.run(
+            ["git", "-C", str(APPLIANCE), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+
+        # Step 3 stops later at the CIS content, which the stub curl does not fetch.
+        self.run_build("--from-step", "3")
+
+        self.assertIn(
+            f"sudo sed -i 's/^readonly DOCS_REF=main$/readonly DOCS_REF={commit or 'main'}/'"
+            " /opt/meho/appliance/firststart/banner.sh",
+            self.ssh_log.read_text(),
+        )
 
 
 if __name__ == "__main__":

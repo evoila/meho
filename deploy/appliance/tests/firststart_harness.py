@@ -13,8 +13,10 @@ machine that runs them:
   plain file that collects what the console would show.
 - PATH holds only stub commands and links to the real tools the scripts
   need. Each stub writes its arguments to calls.log, never its input, so a
-  password piped to chpasswd stays out of the log. vmtoolsd prints the OVF
-  environment of the test; the mount stub puts it on the fake CD-ROM.
+  password piped to chpasswd or pwscore stays out of the log. vmtoolsd prints
+  the OVF environment of the test; the mount stub puts it on the fake CD-ROM.
+  pwscore refuses a password the way the appliance's settings do, for two of
+  its rules: fewer than 14 characters, and letters and digits only.
 - Standard input holds what an admin types on the VM console, empty unless
   a test gives answers.
 """
@@ -143,7 +145,26 @@ STUBS = {
         esac
         printf "%s:x:1000:1000::/home/%s:/bin/bash\\n" "$user" "$user" >> "$MEHO_FAKE/passwd"
         """),
-    "chpasswd": 'cat > "$MEHO_FAKE/chpasswd_input"',
+    # Like pwscore with the appliance's CIS settings, for two of its rules,
+    # with pwquality's own messages. A password piped in stays out of the log.
+    "pwscore": textwrap.dedent("""\
+        IFS= read -r password
+        if [ ${#password} -lt 14 ]; then
+          reason="The password is shorter than 14 characters"
+        elif ! printf '%s' "$password" | grep -q '[^A-Za-z0-9]'; then
+          reason="The password contains less than 1 non-alphanumeric characters"
+        else
+          echo 80
+          exit 0
+        fi
+        printf 'Password quality check failed:\\n %s\\n' "$reason" >&2
+        exit 1
+        """),
+    # The account has its password now, to be changed at the first login.
+    "chpasswd": textwrap.dedent("""\
+        cat > "$MEHO_FAKE/chpasswd_input"
+        printf 'admin:$y$j9T$fakehash:0:1:365:7:45::\\n' >> "$MEHO_FAKE/shadow"
+        """),
     "passwd": "",
     "chown": "",
     "meho-host": 'exit "$(cat "$MEHO_FAKE/meho_host_rc")"',
@@ -301,8 +322,8 @@ class FakeAppliance:
         """Run first start; the answers are what an admin types on the VM console."""
         return self._run(FIRSTSTART_SH, answers)
 
-    def banner(self) -> str:
-        result = self._run(BANNER_SH)
+    def banner(self, script: Path = BANNER_SH) -> str:
+        result = self._run(script)
         if result.returncode != 0:
             raise AssertionError(result.stdout + result.stderr)
         return self.read("/etc/issue")

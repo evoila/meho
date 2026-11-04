@@ -232,7 +232,7 @@ class HardenTests(unittest.TestCase):
                 "apt-get update -q",
                 "apt-get install -y -q --no-install-recommends "
                 "aide aide-common openscap-scanner libpam-pwquality "
-                "cracklib-runtime apparmor-utils rsyslog-gnutls",
+                "libpwquality-tools cracklib-runtime apparmor-utils rsyslog-gnutls",
                 "apt-get purge -y -q ufw",
             ],
             self.vm.calls("apt-get"),

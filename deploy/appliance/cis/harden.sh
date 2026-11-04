@@ -56,7 +56,7 @@ readonly REMEDIATE_PROFILE=xccdf_com.evoila.meho_profile_appliance_remediate
 readonly RULE_PREFIX=xccdf_org.ssgproject.content_rule_
 # rsyslog-gnutls: the TLS module of rsyslog for meho-host log-server --tls
 # (#5752). The appliance has no way to the Ubuntu archive later.
-readonly PACKAGES=(aide aide-common openscap-scanner libpam-pwquality cracklib-runtime apparmor-utils rsyslog-gnutls)
+readonly PACKAGES=(aide aide-common openscap-scanner libpam-pwquality libpwquality-tools cracklib-runtime apparmor-utils rsyslog-gnutls)
 readonly FSTAB=/etc/fstab
 readonly UBUNTU_TMP_MOUNT=/usr/share/systemd/tmp.mount
 readonly TMP_MOUNT=/etc/systemd/system/tmp.mount

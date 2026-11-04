@@ -12,8 +12,9 @@
 #   3. the wizard fields: all are checked before anything changes. Without
 #      them (an import straight into an ESXi host), the same fields are asked
 #      on the VM console, and a wrong answer is asked again. Then the host
-#      name, the network, the time servers, the admin account (the password
-#      must be changed at the first login), its SSH key, and the SSH rule
+#      name, the network, the time servers, the admin account (pwscore checks
+#      the password against the appliance's password rules first; it must be
+#      changed at the first login), its SSH key, and the SSH rule
 #      (meho-host admin-network)
 #   4. wait until the clock is synchronised
 #   5. the core: install.sh --from-disk --hostname <host name>. It starts
@@ -59,7 +60,9 @@ readonly GRUB_LINUX_SCRIPT=/etc/grub.d/10_linux
 readonly GRUB_MENU_FILE=/etc/default/grub.d/90-meho-boot-menu.cfg
 readonly CONSOLE=/dev/tty1
 readonly ADMIN_USER=admin
-readonly MIN_PASSWORD_LENGTH=14
+# The rules of the CIS settings in /etc/security/pwquality.conf, which pwscore
+# checks. product-section.xml names the same rules; a test keeps them in step.
+readonly PASSWORD_RULES="at least 14 characters, with an uppercase letter, a lowercase letter, a digit and another character such as # or !; no character more than 3 times in a row; no run of more than 3 characters such as abcd or 4321; not the user name admin anywhere in it, in any letter case or reversed; and no dictionary word or simple pattern"
 readonly CLOCK_WAIT_SECONDS=600
 readonly OVF_ENV_NAMES=(ovf-env.xml ovf_env.xml OVF-ENV.XML OVF_ENV.XML)
 readonly STEPS=(ssh-host-keys disk wizard-fields clock core bootloader-password aide-database)
@@ -100,10 +103,12 @@ on_error() {
         "read the lines above on the console or with: journalctl -u meho-firststart. Correct the cause and $(how_to_restart); first start goes on from this step."
 }
 
-# how_to_restart: before step 3 makes the admin account, nobody can log in
-# to run sudo reboot.
+# how_to_restart: until step 3 gives the admin account its password, nobody
+# can log in to run sudo reboot. A locked password starts with ! or *.
 how_to_restart() {
-    if getent passwd "$ADMIN_USER" >/dev/null; then
+    local password=""
+    IFS=: read -r _ password _ < <(getent shadow "$ADMIN_USER") || true
+    if [[ -n $password && $password != [*!]* ]]; then
         printf 'restart the appliance (sudo reboot)'
     else
         printf 'power the VM off and on in vCenter'
@@ -234,7 +239,7 @@ normalize_field() {
 # field_problem <key>: print why the field's value is wrong, or nothing when
 # it is right. The text never holds the value of a password.
 field_problem() {
-    local value item
+    local value item reason
     value=$(field "$1")
     case $1 in
         hostname)
@@ -282,10 +287,13 @@ field_problem() {
                 printf '%s' "The admin network '$value' is not an IPv4 range that starts at its first address, such as 10.0.50.0/24, or one address."
             ;;
         admin.password)
-            if ((${#value} < MIN_PASSWORD_LENGTH)); then
-                printf '%s' "The appliance admin password is shorter than $MIN_PASSWORD_LENGTH characters."
-            elif [[ $value == *$'\n'* ]]; then
+            # pwscore reads the same pwquality settings as chpasswd, so a
+            # password it takes, chpasswd takes too. Its last line says why not.
+            if [[ $value == *$'\n'* ]]; then
                 printf '%s' "The appliance admin password holds a line break."
+            elif ! reason=$(printf '%s\n' "$value" | pwscore "$ADMIN_USER" 2>&1 >/dev/null); then
+                reason=${reason##*$'\n'}
+                printf '%s' "The appliance admin password is refused: ${reason# }. It needs $PASSWORD_RULES."
             fi
             ;;
         admin.ssh_key)
@@ -350,8 +358,9 @@ ask_field() {
 
 ask_password() {
     local first problem
+    printf 'The appliance admin password needs %s.\n' "$PASSWORD_RULES"
     while true; do
-        printf 'Appliance admin password, for the console and sudo (at least %d characters): ' "$MIN_PASSWORD_LENGTH"
+        printf 'Appliance admin password, for the console and sudo: '
         read_answer -s
         first=$ANSWER
         printf 'The same password again: '

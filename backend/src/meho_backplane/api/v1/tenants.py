@@ -60,7 +60,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.connectors.mail.allowlist import parse_recipient_allowlist
-from meho_backplane.connectors.mail.tenant_policy import invalidate_tenant_mail_policy_cache
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import Tenant
 from meho_backplane.flight_recorder.config import (
@@ -358,9 +357,9 @@ async def update_mail_recipient_policy(
     expressible -- no tenant id is accepted in the path or body).
     ``tenant_admin`` only. Applies the field only when present in the body; an
     applied change is folded into this request's ``audit_log`` row (field / old
-    / new, ``None`` -> ``inherit`` sentinel) and evicts the resolver's
-    per-tenant cache so the new value governs the next dispatched ``mail.send``
-    without a restart.
+    / new, ``None`` -> ``inherit`` sentinel). The resolver reads the committed
+    column on every send, so the new value governs the next dispatched
+    ``mail.send`` in every process as soon as this request commits.
     """
     tenant = await session.get(Tenant, operator.tenant_id)
     if tenant is None:
@@ -388,7 +387,6 @@ async def update_mail_recipient_policy(
             audit_mail_recipient_policy_changed=True,
             audit_tenant_id=str(operator.tenant_id),
         )
-        invalidate_tenant_mail_policy_cache(operator.tenant_id)
         _log.info(
             "tenant_mail_recipient_policy_updated",
             tenant_id=str(operator.tenant_id),

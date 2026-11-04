@@ -56,7 +56,7 @@ flight-recorder route).
 ## Resolution + narrowing (where it takes effect)
 
 `connectors/mail/tenant_policy.py::resolve_tenant_recipient_allowlist` reads the
-column per dispatch (60s-TTL cache) and the `mail.send` handler
+column on every dispatched send (one primary-key SELECT, never cached) and the `mail.send` handler
 (`connectors/mail/ops.py`) screens every recipient against the tenant's parsed
 set **before** the transport applies the instance floor. The tenant screen can
 only **narrow**: a recipient the tenant lists but the instance floor does not is
@@ -66,7 +66,7 @@ still refused by the transport. The checks notifier's direct-import
 **Fail-closed:** a DB read/parse error in the resolver resolves to deny (empty
 allowlist), never to inherit — a delivery-authorization decision where doubt
 reduces exposure (the opposite direction from the flight-recorder resolver's
-fail-open). The deny is not cached.
+fail-open). The deny holds for that one send only.
 
 ## Audit
 
@@ -77,12 +77,17 @@ builder drops `None` contextvars (mirroring the flight-recorder route and the
 target CA-pin `""` marker); an empty-string deny is bound verbatim. A no-op /
 absent field binds nothing.
 
-## Cache invalidation
+## When a change takes effect
 
-The resolver caches per-tenant policy for 60s. The route calls
-`invalidate_tenant_mail_policy_cache` on a change so the new value governs the
-**next dispatched `mail.send`** rather than waiting out the TTL or a restart
-(proven by the without-reset test in `test_api_v1_tenants_mail_recipient.py`).
+The resolver keeps no cache. It reads the committed column on every dispatched
+`mail.send`, so a PATCH governs the **next send** in every backplane process
+and replica as soon as the request commits. There is nothing to evict and no
+wait. A send is slow (it opens an SMTP session) and rare, so the one-row read
+costs nothing that matters. Proven by `test_patch_governs_the_next_resolve` in
+`test_api_v1_tenants_mail_recipient.py` and by
+`test_narrowed_policy_refuses_the_next_dispatched_send` in
+`test_connectors_mail.py`, which changes the row the way another process would
+and sees the next send refused.
 
 ## CLI
 

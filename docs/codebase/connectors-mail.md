@@ -194,8 +194,9 @@ floor.
 
 **Where it lives.** `tenant.mail_recipient_allowlist` (nullable `Text`,
 migration `0101`) resolved per dispatch by
-`connectors/mail/tenant_policy.py::resolve_tenant_recipient_allowlist` (a
-60s-TTL cache mirroring the flight-recorder resolver). Tri-state on the value:
+`connectors/mail/tenant_policy.py::resolve_tenant_recipient_allowlist` (one
+primary-key read per send, never cached, so a policy change governs the next
+send in every process). Tri-state on the value:
 
 | column | meaning |
 |---|---|
@@ -224,7 +225,7 @@ on doubt"), this resolver fails **closed** — a DB read/parse error resolves to
 deny (empty allowlist), never to inherit. Falling through to the instance floor
 on a read error would defeat the containment the override exists to provide;
 this is a delivery-authorization decision, so doubt reduces exposure. The deny
-is not cached, so a transient error does not pin the tenant to deny for the TTL.
+holds for that one send only, so a transient error does not pin the tenant.
 
 **Operator surface.** Set/clear the override through
 `PATCH /api/v1/tenants/mail-recipient-policy` (tenant_admin) or

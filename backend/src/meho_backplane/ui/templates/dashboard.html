@@ -22,6 +22,7 @@
 -#}
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
+{% from "_tenant_label.html" import tenant_label %}
 
 {% block page_title %}MEHO Operator Console{% endblock %}
 
@@ -42,7 +43,10 @@
       <span>Signed in as</span>
       <code class="rounded-md bg-base-100 px-1.5 py-0.5 font-mono text-xs text-base-content/80 ring-1 ring-base-content/10">{{ operator_sub }}</code>
       <span>in tenant</span>
-      <code class="rounded-md bg-base-100 px-1.5 py-0.5 font-mono text-xs text-base-content/80 ring-1 ring-base-content/10">{{ tenant_id }}</code>
+      <code
+        class="rounded-md bg-base-100 px-1.5 py-0.5 font-mono text-xs text-base-content/80 ring-1 ring-base-content/10"
+        title="{{ tenant_id }}"
+      >{% if session_tenant is not none %}{{ tenant_label(session_tenant) }}{% else %}{{ tenant_id }}{% endif %}</code>
     </p>
   </header>
 

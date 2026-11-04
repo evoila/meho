@@ -1,0 +1,26 @@
+{#- SPDX-License-Identifier: Apache-2.0
+    Copyright (c) 2026 evoila Group
+
+    How the console names the active tenant (#810).
+
+    ``session_tenant`` is injected into every render by
+    :func:`~meho_backplane.ui.templating._ui_session_context_processor`
+    and carries ``id`` / ``slug`` / ``name``. A UUID tells an operator
+    nothing about which tenant they are in -- and that is the one thing
+    on screen that matters when someone holds several tenants and is
+    about to run a write. So: the human name, the slug when the name is
+    unset, and the id only when a tenant has neither.
+
+    Text only, no markup. The four call sites wrap it in their own
+    element (``<code>`` on the dashboard, ``<a>`` / ``<div>`` in the
+    sidebar chip, ``<code class="badge">`` on the broadcast feed) and
+    each carries the id in ``title=``, so the UUID an operator needs for
+    a support thread is still one hover away.
+
+    Callers guard ``none`` themselves: the sidebar has its own
+    "(sign in to choose)" wording for the pre-session surfaces, which a
+    shared default would flatten.
+-#}
+{% macro tenant_label(tenant) -%}
+{{- tenant.name or tenant.slug or tenant.id -}}
+{%- endmacro %}

@@ -298,3 +298,108 @@ def test_broadcast_surface_renders_with_session_tenant_present() -> None:
     # _render_page flow (which also reads session_ctx.tenant_id when
     # building the target-name dropdown).
     assert "/ui/broadcast/stream" in body
+
+
+# ---------------------------------------------------------------------------
+# #810 -- the console names the tenant instead of printing its UUID.
+#
+# The dashboard header and the broadcast subtitle both used to render the
+# raw ``tenant_id``. A UUID says nothing about which tenant the operator is
+# in, which is the one thing on screen that matters when someone holds
+# several tenants and is about to run a write.
+# ---------------------------------------------------------------------------
+
+
+def _visible_text(markup: str) -> str:
+    """Return *markup* with tags and script/style bodies removed.
+
+    The tenant UUID legitimately stays in attributes (``data-meho-tenant``,
+    the SSE bridge URL, ``title=``) -- those are load-bearing. Asserting on
+    the rendered text is the only way to tell "the operator reads a UUID"
+    from "the DOM addresses a row by one".
+    """
+    import html as _html
+    import re as _re
+
+    without_scripts = _re.sub(r"(?s)<(script|style).*?</\1>", " ", markup)
+    return _html.unescape(_re.sub(r"(?s)<[^>]+>", " ", without_scripts))
+
+
+def test_dashboard_header_names_the_tenant_instead_of_its_uuid() -> None:
+    """``GET /ui/`` reads "in tenant <name>", never the bare UUID."""
+    _seed_tenant()
+    session_id = _seed_session_sync()
+    response = _authenticated_get("/ui/", session_id)
+    assert response.status_code == 200, response.text
+
+    text = _visible_text(response.text)
+    assert _TENANT_NAME in text
+    assert str(_TENANT_ID) not in text
+
+
+def test_dashboard_header_keeps_the_uuid_reachable() -> None:
+    """The id stays one hover away -- support threads still quote it."""
+    _seed_tenant()
+    session_id = _seed_session_sync()
+    response = _authenticated_get("/ui/", session_id)
+    assert f'title="{_TENANT_ID}"' in response.text
+
+
+def test_broadcast_subtitle_names_the_tenant_instead_of_its_uuid() -> None:
+    """``GET /ui/broadcast`` gets the same treatment through the same macro."""
+    _seed_tenant()
+    session_id = _seed_session_sync()
+    response = _authenticated_get("/ui/broadcast", session_id)
+    assert response.status_code == 200, response.text
+
+    text = _visible_text(response.text)
+    assert _TENANT_NAME in text
+    assert str(_TENANT_ID) not in text
+
+
+def test_tenant_uuid_still_addresses_the_dom() -> None:
+    """``data-meho-tenant`` is read by the client JS and must not change.
+
+    This is the regression that a naive "replace UUIDs with names" sweep
+    would cause: the console would read nicely and stop working.
+    """
+    _seed_tenant()
+    session_id = _seed_session_sync()
+    response = _authenticated_get("/ui/", session_id)
+    assert f'data-meho-tenant="{_TENANT_ID}"' in response.text
+
+
+@pytest.mark.parametrize(
+    ("name", "slug", "expected"),
+    [
+        ("Tenant Chip Fixture", "tenant-chip-fixture", "Tenant Chip Fixture"),
+        (None, "tenant-chip-fixture", "tenant-chip-fixture"),
+        ("", "tenant-chip-fixture", "tenant-chip-fixture"),
+        (None, None, str(_TENANT_ID)),
+        ("", "", str(_TENANT_ID)),
+    ],
+    ids=[
+        "name",
+        "slug-when-name-unset",
+        "slug-when-name-blank",
+        "id-when-both-unset",
+        "id-when-both-blank",
+    ],
+)
+def test_tenant_label_falls_back_name_then_slug_then_id(
+    name: str | None, slug: str | None, expected: str
+) -> None:
+    """The macro's fallback chain, exercised directly.
+
+    Both DB columns are ``NOT NULL``, so a nameless tenant cannot come
+    from the table -- but ``UISessionContext`` defaults both fields to
+    ``None`` and the pre-session surfaces render with them unset, so the
+    chain has to hold for ``None`` and for the empty string alike.
+    """
+    from meho_backplane.ui.templating import get_templates
+
+    template = get_templates().env.from_string(
+        '{% from "_tenant_label.html" import tenant_label %}{{ tenant_label(tenant) }}'
+    )
+    rendered = template.render(tenant={"id": str(_TENANT_ID), "slug": slug, "name": name})
+    assert rendered.strip() == expected

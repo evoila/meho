@@ -58,6 +58,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_chart_core_openbao.py",
     "tests/test_chart_core_postgres.py",
     "tests/test_chart_core_secrets.py",
+    "tests/test_chart_core_wiring.py",
     "tests/test_chart_dispatch_limits.py",
     "tests/test_chart_image_digest_pin.py",
     "tests/test_chart_image_registry.py",

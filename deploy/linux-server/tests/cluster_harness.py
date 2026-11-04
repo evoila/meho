@@ -66,6 +66,8 @@ def initial_state() -> dict[str, Any]:
             "answers": True,
             "boot_status_calls": 1,
             "terminating_calls": 2,
+            "boot_unsealed": False,
+            "stops_after_unseal": False,
             "starting": 0,
             "restarts": 0,
         },

@@ -21,7 +21,10 @@ CHAIN_HINT = (
     "and your CA certificate last. Then run: "
     "sudo meho-host certificate --cert <chain.pem> --key <key.pem>"
 )
-NAME_FIX = f"Fix: give a certificate for meho.example.com that is valid now, and {CHAIN_HINT}"
+NAME_FIX = (
+    "Fix: give a certificate for meho.example.com that is valid now and made for a TLS server, "
+    f"and {CHAIN_HINT}"
+)
 GREEN_LINE = (
     "[ok]   console-certificate: valid for meho.example.com until 2027-10-23 (365 days left)"
 )
@@ -178,6 +181,32 @@ class RefusedCertificateTests(CertificateTestCase):
             "Nothing was changed. " + NAME_FIX,
         )
 
+    def test_a_certificate_only_for_client_logins_is_refused_with_one_line(self) -> None:
+        # Browsers and the meho CLI refuse a server certificate whose extended
+        # key usage is only clientAuth; openssl verify -purpose sslserver too.
+        chain, root, key = customer_certificate(usage="clientAuth")
+        chain_file, key_file = self.files(chain + root, key)
+
+        result = self.host.run("certificate", "--cert", chain_file, "--key", key_file)
+
+        self.assert_refused(
+            result,
+            f"[FAIL] the certificate in {chain_file} cannot be used: it is not made for a TLS "
+            "server: its key usage does not allow it. Nothing was changed. " + NAME_FIX,
+        )
+
+    def test_without_openssl_nothing_changes(self) -> None:
+        (self.host.tools / "openssl").unlink()
+
+        result = self.install(self.chain + self.root, self.key)
+
+        self.assert_refused(
+            result,
+            "[FAIL] openssl not found, so the certificate cannot be checked. Nothing was changed. "
+            "Fix: install the package openssl from your distribution's mirror, then run the "
+            "command again.",
+        )
+
     def test_a_broken_chain_or_key_file_is_refused_with_one_line(self) -> None:
         server = self.chain.split("-----END CERTIFICATE-----\n")[0] + "-----END CERTIFICATE-----\n"
         encrypted = subprocess.run(
@@ -215,6 +244,12 @@ class RefusedCertificateTests(CertificateTestCase):
                 "is the server certificate again, so the chain to your CA is missing.",
             ),
             "no certificate": (self.key, self.key, "holds no certificate. Nothing was changed."),
+            "a first certificate that is not one": (
+                "-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydGlmaWNhdGU=\n-----END CERTIFICATE-----\n"
+                + self.root,
+                self.key,
+                "openssl cannot read the first certificate of ",
+            ),
             "an encrypted key": (self.chain + self.root, encrypted, no_pass_phrase),
             "a certificate as the key": (self.chain + self.root, self.root, no_pass_phrase),
         }

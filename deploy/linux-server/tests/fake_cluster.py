@@ -14,7 +14,9 @@ state is one JSON file, $MEHO_FAKE/cluster.json:
   "boot_status_calls": how many "bao status" calls a new pod answers with
   an error before its server is up. After a restart the old pod still
   answers, with its old uid and state, for "terminating_calls" calls, as a
-  pod that is shutting down does;
+  pod that is shutting down does. "boot_unsealed": the new pod is unsealed
+  at once, as when someone else unseals it. "stops_after_unseal": the server
+  stops answering after an unseal call;
 - "fail": the calls that fail: "patch", "delete", "create" and "restart";
 - "down": true when RKE2 does not answer at all;
 - "key_inputs": every call that got the unseal key on standard input.
@@ -161,7 +163,7 @@ def _rollout(state: State, words: list[str]) -> int:
     bao["old_pod"] = {"uid": bao["uid"], "sealed": bao["sealed"], "calls": bao["terminating_calls"]}
     bao["restarts"] += 1
     bao["uid"] = f"uid-of-pod-{bao['restarts'] + 1}"
-    bao["sealed"] = True
+    bao["sealed"] = not bao["boot_unsealed"]
     bao["starting"] = bao["boot_status_calls"]
     print("statefulset.apps/meho-vault restarted")
     return 0
@@ -189,6 +191,8 @@ def _bao(state: State, command: list[str], interactive: bool, stdin: str) -> int
         print(f"Sealed          {str(bao['sealed']).lower()}")
         return 2 if bao["sealed"] else 0
     if command == ["bao", "write", "sys/unseal", "key=-"] and interactive:
+        if bao["stops_after_unseal"]:
+            bao["answers"] = False
         if stdin == bao["key"]:
             bao["sealed"] = False
             print("Key        Value\nsealed     false")

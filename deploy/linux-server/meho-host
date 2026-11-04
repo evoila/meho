@@ -162,6 +162,10 @@ readonly TLS_CERTS_TEMPLATE='{{with index .data "tls.crt"}}{{base64decode .}}{{e
 # and X509_V_ERR_CERT_HAS_EXPIRED). certificate_state reports the time of the
 # server certificate itself, in its own words.
 readonly VERIFY_TIME_ERRORS_RE='^error (9|10) at 0 depth lookup:'
+# The openssl verify error code of a server certificate whose key usage does
+# not allow a TLS server (X509_V_ERR_INVALID_PURPOSE). openssl goes on after
+# it, so the other problems are still found.
+readonly VERIFY_SERVER_PURPOSE_ERROR_RE='^error 26 at 0 depth lookup:'
 readonly CERTIFICATE_COMMAND="sudo meho-host certificate --cert <chain.pem> --key <key.pem>"
 readonly CHAIN_HINT="put the server certificate first into one file, then every intermediate CA certificate, and your CA certificate last. Then run: $CERTIFICATE_COMMAND"
 readonly PEM_CERT_BEGIN='-----BEGIN CERTIFICATE-----'
@@ -596,16 +600,20 @@ utc_day() { date -u -d "@$1" +%F; }
 # can be); without one, the trust store of this machine is. With a CA
 # certificate, -no-CApath and -no-CAstore keep the machine's trust folder and
 # store out: otherwise a certificate from a public CA passes with an
-# unrelated ca.crt. (-CAfile already replaces the machine's trust file.) It
-# prints openssl's messages and returns its exit code.
+# unrelated ca.crt. (-CAfile already replaces the machine's trust file.)
+# -purpose sslserver checks that every certificate of the chain may be used
+# for a TLS server: without it, openssl checks no purpose, and a certificate
+# made only for client logins passes, which browsers refuse. It prints
+# openssl's messages and returns its exit code.
 verify_chain() {
     local chain=$1 ca=$2 now=$3
     if [[ -n $ca ]]; then
-        openssl verify -attime "$now" -partial_chain -no-CApath -no-CAstore \
+        openssl verify -attime "$now" -purpose sslserver -partial_chain -no-CApath -no-CAstore \
             -CAfile <(printf '%s\n' "$ca") \
             -untrusted <(printf '%s\n' "$chain") <(printf '%s\n' "$chain") 2>&1
     else
-        openssl verify -attime "$now" -untrusted <(printf '%s\n' "$chain") <(printf '%s\n' "$chain") 2>&1
+        openssl verify -attime "$now" -purpose sslserver \
+            -untrusted <(printf '%s\n' "$chain") <(printf '%s\n' "$chain") 2>&1
     fi
 }
 
@@ -622,6 +630,9 @@ verify_chain() {
 #   alternative names, with a wildcard only in the first label, and the
 #   common name only when there is no DNS name);
 # - its chain ends at the anchor, and every certificate of it is valid;
+# - it is made for a TLS server, and so is every CA of its chain (openssl
+#   verify -purpose sslserver: an extended key usage must allow serverAuth,
+#   and a key usage must allow a TLS server);
 # - it has more than 30 days left.
 #
 # It prints "ok: <detail>", "warn: <detail>" (the certificate is good, but
@@ -645,7 +656,11 @@ certificate_state() {
         problems+=("it does not name $host, the host name of this install")
     fi
     if ! errors=$(verify_chain "$chain" "$ca" "$now"); then
-        line=$(grep -E '^error [0-9]+ at [0-9]+ depth lookup:' <<<"$errors" | grep -vE "$VERIFY_TIME_ERRORS_RE" | head -n 1) || true
+        if grep -qE "$VERIFY_SERVER_PURPOSE_ERROR_RE" <<<"$errors"; then
+            problems+=("it is not made for a TLS server: its key usage does not allow it")
+        fi
+        line=$(grep -E '^error [0-9]+ at [0-9]+ depth lookup:' <<<"$errors" | grep -vE "$VERIFY_TIME_ERRORS_RE" |
+            grep -vE "$VERIFY_SERVER_PURPOSE_ERROR_RE" | head -n 1) || true
         if [[ -n $line ]]; then
             problems+=("its chain to ca.crt is not valid: ${line#*lookup: }")
         elif ((${#problems[@]} == 0)); then
@@ -1517,14 +1532,16 @@ check_new_certificate() {
     ca=$(pem_block "$chain" last)
     [[ $ca != "$(pem_block "$chain" first)" ]] ||
         fail "the last certificate of $cert_file is the server certificate again, so the chain to your CA is missing. Nothing was changed." "$CHAIN_HINT"
-    openssl x509 -noout <<<"$chain" 2>/dev/null ||
+    # Only the first block: given the whole chain, openssl 3 skips a block it
+    # cannot read and takes the next certificate as the server certificate.
+    openssl x509 -noout <<<"$(pem_block "$chain" first)" 2>/dev/null ||
         fail "openssl cannot read the first certificate of $cert_file. Nothing was changed." "$CHAIN_HINT"
     state=$(certificate_state "$host" "$chain" "$ca" "$(date -u +%s)")
     if [[ $state == fail:* ]]; then
         problems=${state#fail: }
         problems=${problems//"its chain to ca.crt"/"its chain to your CA, the last certificate of $cert_file,"}
         fail "the certificate in $cert_file cannot be used: $problems. Nothing was changed." \
-            "give a certificate for $host that is valid now, and $CHAIN_HINT"
+            "give a certificate for $host that is valid now and made for a TLS server, and $CHAIN_HINT"
     fi
 }
 
@@ -1746,12 +1763,29 @@ keyholder_on() {
     esac
 }
 
+# take_back_unseal_secret <problem> <fix>: keyholder off could not prove that
+# the key in the Secret unseals OpenBao, so the Secret goes again and the
+# mode stays keyholder. A Secret with a wrong key must not stay: keyholder
+# off would then say it is done, and keyholder on would refuse the right
+# key, because it compares with the key in the Secret. Stops with one
+# [FAIL] line that says whether the Secret went.
+take_back_unseal_secret() {
+    if delete_unseal_secret 2>/dev/null; then
+        fail "$1 meho-host deleted the Secret $UNSEAL_SECRET again: OpenBao stays in keyholder mode." "$2"
+    fi
+    fail "$1 The Secret $UNSEAL_SECRET could not be deleted again, so it holds a key that nothing checked." \
+        "unseal OpenBao with the right key from your key store when it is sealed: $UNSEAL_COMMAND. Then $SUPPORT_HINT"
+}
+
 # keyholder_off: the key goes into the Secret again, and OpenBao restarts,
 # which proves that the unseal helper unseals it with the key. When OpenBao
 # is sealed now, the key is checked first by unsealing it. When it is
-# unsealed, only the restart can check the key: when OpenBao stays sealed,
-# the Secret goes again, so the mode stays what OpenBao really does.
+# unsealed, only the restart can check the key. Whenever the key stays
+# unchecked, because the restart fails, the new pod gives no answer, or it
+# stays sealed, the Secret goes again (take_back_unseal_secret), so the mode
+# stays what OpenBao really does and a new run checks the key again.
 keyholder_off() {
+    local checked=0 again="Then run sudo meho-host keyholder off again."
     read_unseal_secret ||
         fail "RKE2 does not answer, so meho-host cannot read the Secret $UNSEAL_SECRET. Nothing was changed." \
             "check the node and pods lines: sudo meho-host check. Then $SUPPORT_HINT"
@@ -1771,6 +1805,7 @@ keyholder_off() {
             fail "OpenBao is still sealed after the key was sent, so this is not the unseal key of this OpenBao. Nothing was changed." \
                 "copy the key again from your key store, and run the command again."
         fi
+        checked=1
         ok "unsealed OpenBao with the key"
     fi
     if ! create_unseal_secret; then
@@ -1781,21 +1816,27 @@ keyholder_off() {
     forget_unseal_keys
     ok "created the Secret $UNSEAL_SECRET with the unseal key"
     note "restarting OpenBao. This can take up to $OPENBAO_WAIT_TEXT."
-    restart_openbao unsealed ||
-        fail "OpenBao could not be restarted. The Secret is there, so OpenBao unseals itself from its next restart on." \
-            "check the node and pods lines: sudo meho-host check. Then $SUPPORT_HINT"
+    if ! restart_openbao unsealed; then
+        if ((checked)); then
+            fail "OpenBao could not be restarted. The key unsealed OpenBao before, so it stays in the Secret, and OpenBao unseals itself from its next restart on." \
+                "check the node and pods lines: sudo meho-host check. Then $SUPPORT_HINT"
+        fi
+        take_back_unseal_secret "OpenBao could not be restarted, so the key was not checked." \
+            "check the node and pods lines: sudo meho-host check. $again"
+    fi
     case $SEAL_STATE in
         unsealed) ok "OpenBao restarted and unsealed itself: it does so after every restart now" ;;
         sealed)
-            delete_unseal_secret 2>/dev/null ||
-                fail "OpenBao is still sealed $OPENBAO_WAIT_TEXT after the restart, so the key in the Secret $UNSEAL_SECRET does not unseal it, and the Secret could not be deleted again." \
-                    "unseal OpenBao with the right key: $UNSEAL_COMMAND. Then $SUPPORT_HINT"
-            fail "OpenBao is still sealed $OPENBAO_WAIT_TEXT after the restart, so the key does not unseal it. meho-host deleted the Secret $UNSEAL_SECRET again: OpenBao stays in keyholder mode." \
+            take_back_unseal_secret "OpenBao is still sealed $OPENBAO_WAIT_TEXT after the restart, so the key does not unseal it." \
                 "unseal it with the right key from your key store: $UNSEAL_COMMAND. Then run sudo meho-host keyholder off again with the same key."
             ;;
         *)
-            fail "OpenBao did not answer within $OPENBAO_WAIT_TEXT after the restart. The Secret is there, so OpenBao unseals itself when it runs." \
-                "check the pods line: sudo meho-host check. If OpenBao does not start, $SUPPORT_HINT"
+            if ((checked)); then
+                fail "OpenBao did not answer within $OPENBAO_WAIT_TEXT after the restart. The key unsealed OpenBao before, so it stays in the Secret, and OpenBao unseals itself when it runs." \
+                    "check the pods line: sudo meho-host check. If OpenBao does not start, $SUPPORT_HINT"
+            fi
+            take_back_unseal_secret "OpenBao did not answer within $OPENBAO_WAIT_TEXT after the restart, so the key was not checked." \
+                "check the pods line: sudo meho-host check. When OpenBao runs, unseal it with: $UNSEAL_COMMAND. $again"
             ;;
     esac
 }

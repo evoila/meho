@@ -590,7 +590,8 @@ class ConsoleCertificateLineTests(CheckTestCase):
         self.assertIn("kubectl --kubeconfig", calls)
         self.assertIn("-n meho get secret meho-core-tls -o go-template=", calls)
         self.assertIn(
-            "openssl verify -attime 1792756800 -partial_chain -no-CApath -no-CAstore -CAfile ",
+            "openssl verify -attime 1792756800 -purpose sslserver -partial_chain -no-CApath "
+            "-no-CAstore -CAfile ",
             calls,
         )
         self.assertNotIn("tls.key", calls)
@@ -657,6 +658,15 @@ class ConsoleCertificateLineTests(CheckTestCase):
                 console_certificate("other.example.com", start=-400, end=-5),
                 "it expired on 2026-10-18; it does not name meho.example.com, the host name of "
                 "this install",
+            ),
+            "only for client logins": (
+                console_certificate(usage="clientAuth"),
+                "it is not made for a TLS server: its key usage does not allow it",
+            ),
+            "only for client logins, and expired": (
+                console_certificate(start=-400, end=-5, usage="clientAuth"),
+                "it expired on 2026-10-18; it is not made for a TLS server: its key usage does not "
+                "allow it",
             ),
             "signed by another CA": (
                 (console_certificate()[0], console_certificate(ca="Another CA")[1]),

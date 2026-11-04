@@ -135,15 +135,25 @@ because `meho doctor` gives the whole check 60 seconds. It never reads
    names, a wildcard only in the first label, and the common name only when
    there is no DNS name.
 3. Its chain ends at `ca.crt`, and every certificate of the chain is valid
-   now: `openssl verify -attime <now> -partial_chain -no-CApath -no-CAstore
-   -CAfile <ca.crt> -untrusted <tls.crt> <tls.crt>`. `-partial_chain` lets
+   now: `openssl verify -attime <now> -purpose sslserver -partial_chain
+   -no-CApath -no-CAstore -CAfile <ca.crt> -untrusted <tls.crt> <tls.crt>`.
+   `-partial_chain` lets
    `ca.crt` be an intermediate CA. `-no-CApath` and `-no-CAstore` stop
    OpenSSL from also trusting the machine's own CA folder and store, so a
    certificate from a public CA does not pass with an unrelated `ca.crt`.
    Without `ca.crt`, the trust store of the machine is the anchor.
-4. More than 30 days are left.
+4. It is made for a TLS server, and so is every CA of its chain:
+   `-purpose sslserver` in the same `openssl verify`. An extended key usage
+   must allow `serverAuth`, and a key usage must allow a TLS server.
+   Without `-purpose`, openssl checks no purpose, and a certificate made
+   only for client logins passes, which browsers and the meho CLI refuse.
+   Error 26 at depth 0 (the server certificate) gets its own words: "it is
+   not made for a TLS server". openssl goes on after it, so the other
+   problems are still named. The install's own certificate has
+   `serverAuth` (`backend/src/meho_backplane/core/tls.py`).
+5. More than 30 days are left.
 
-Points 1 to 3 make a red line, which names every problem it finds. Point 4
+Points 1 to 4 make a red line, which names every problem it finds. Point 5
 alone makes a warning. Every time check uses one "now", `date -u +%s`, so
 the tests can fix it. The first-start list (#4042) checks the console
 certificate in the backplane, in Python. It must use the same rule, with
@@ -443,10 +453,14 @@ and `Nothing was changed.` when it fails:
      certificate again. Without this, the next check would pass with the
      server certificate as its own CA, because `-partial_chain` accepts
      any certificate in `-CAfile` as the anchor;
-   - `openssl` can read the first certificate;
+   - `openssl` can read the first certificate. Only the first block goes to
+     `openssl x509` for this: given the whole chain, OpenSSL 3 skips a
+     block it cannot read and takes the next certificate as the server
+     certificate;
    - the rule of the console certificate, `certificate_state`, with the
      last certificate of the file as the CA: valid now, names the host
-     name, and its chain ends at the CA. The problems are named in the
+     name, its chain ends at the CA, and it is made for a TLS server
+     (`-purpose sslserver`). The problems are named in the
      words of the check line. "its chain to ca.crt" becomes "its chain to
      your CA, the last certificate of `<file>`".
 4. Check the key (`check_new_key`): `openssl pkey -passin pass: -pubout`
@@ -515,10 +529,20 @@ sealed after a restart until a keyholder unseals it.
 5. Restart OpenBao and wait until the new pod is unsealed. That proves
    that the unseal helper unseals it with the key in the Secret.
 6. When OpenBao is unsealed before the command, step 3 cannot check the
-   key: only the restart can. When the new pod stays sealed for 5 minutes,
-   the key is wrong. The command deletes the Secret again, so the mode
-   stays what OpenBao really does, and the `[FAIL]` line says to unseal
-   with the right key and run `keyholder off` again.
+   key: only the restart can. So whenever the restart does not prove the
+   key, the command deletes the Secret again (`take_back_unseal_secret`),
+   and the `[FAIL]` line says what to do before `keyholder off` runs
+   again:
+   - the new pod stays sealed for 5 minutes: the key is wrong;
+   - `kubectl rollout restart` fails, or the new pod gives no answer for 5
+     minutes: the key was not checked.
+
+   A Secret with a key that nothing checked must not stay. `keyholder off`
+   would then say that it is done, and `keyholder on` would refuse the
+   right key, because it compares with the key in the Secret. When step 3
+   checked the key, a failed restart or no answer keeps the Secret: the key
+   is right. When the Secret cannot be deleted again, the `[FAIL]` line
+   says so.
 
 `restart_openbao` runs `kubectl rollout restart statefulset/meho-vault`
 and then asks every 5 seconds, 60 times, for the uid of the pod and the
@@ -691,11 +715,21 @@ intermediate CA with `certificate_with_key()`, which also returns the key
 of the server certificate. They cover a valid chain, a chain of two, extra
 text and Windows line ends, 20 days left, and one `[FAIL]` line with no
 change for a wrong key, a wrong name, an expired certificate, a
-certificate that is not yet valid, a missing intermediate, only one
-certificate, the server certificate twice, no certificate, an encrypted key,
-a certificate as the key, a file that cannot be read, no install record and
-a failed write. The unseal tests cover each step of the three commands and
-each way it fails. One test runs `keyholder on`, `unseal` and `keyholder
+certificate only for client logins (`usage="clientAuth"`), a certificate
+that is not yet valid, a missing intermediate, only one certificate, the
+server certificate twice, no certificate, a first block that is not a
+certificate, an encrypted key, a certificate as the key, a file that cannot
+be read, no install record, no `openssl` and a failed write. The check
+line has the client-only case too, alone and with an expired certificate.
+The unseal tests cover each step of the three commands and each way it
+fails: in `keyholder on` RKE2 down, a Secret without a key, a wrong key, a
+failed delete, a failed restart, no answer and a pod that someone already
+unsealed; in `keyholder off` RKE2 down, a wrong key when sealed, a failed
+create, a wrong key found by the restart, a failed restart and no answer,
+each with a checked and an unchecked key, and a Secret that cannot be
+deleted again; in `unseal` a wrong key, no answer before and after the
+key. One test runs a wrong key with a failed restart, then `keyholder off`
+again, and proves that the second run asks for the key and checks it. One test runs `keyholder on`, `unseal` and `keyholder
 off` with a made-up key and proves that the key is in no line of
 `calls.log` (the arguments of every command that ran), in no output and in
 no file of the fake machine, and that only `exec -i ... sys/unseal` and
@@ -917,9 +951,16 @@ packages later.
 - Traefik v3 watches Secrets with an informer (traefik/traefik
   `pkg/provider/kubernetes/ingress/client.go`, v3.5), so a changed TLS
   Secret is served without a restart.
+- OpenSSL 3.0 `openssl-verification-options(1)`, `-purpose`: without it,
+  openssl does no purpose checks; for `sslserver`, an extended key usage
+  must allow `serverAuth`
+  (https://docs.openssl.org/3.0/man1/openssl-verification-options/).
+  Error 26 is `X509_V_ERR_INVALID_PURPOSE`. Checked with OpenSSL 3.0.13: a
+  certificate with only `clientAuth` passes without `-purpose` and fails
+  with it, and openssl goes on to report an expired certificate after it.
 - bash `read`: `-s` turns the echo off and `-p` prints the prompt, both
   only when the input comes from a terminal (bash(1), "read").
-- core.md (meho-internal `docs/design/2026-10-10-install-forms/`), section 4,
+- core.md (the internal design note of the core), section 4,
   sub-decisions 9 to 11 (the modes, the switch, the unseal by hand) and
   section 7, sub-decision 3 (the host command for the certificate); the
   form-2 design, section 5, the `meho-host` table.

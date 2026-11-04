@@ -157,6 +157,7 @@ def console_certificate(
     end: int = 365,
     ca: str = "MEHO install CA",
     intermediate_end: int | None = None,
+    usage: str = "serverAuth",
 ) -> tuple[str, str]:
     """(tls.crt, ca.crt) of a test certificate for the host, signed by a test
     CA with the given name, valid from NOW + start to NOW + end days. The
@@ -166,9 +167,11 @@ def console_certificate(
     certificate usually has: the CA is the root, it signs an intermediate CA
     that is valid until NOW + intermediate_end days, and the intermediate
     signs the server certificate. tls.crt is then the server certificate and
-    the intermediate; ca.crt is the root."""
+    the intermediate; ca.crt is the root. usage is the extended key usage
+    of the server certificate, for example clientAuth for one that is only
+    for client logins."""
     chain, ca_pem, _ = certificate_with_key(
-        host, start=start, end=end, ca=ca, intermediate_end=intermediate_end
+        host, start=start, end=end, ca=ca, intermediate_end=intermediate_end, usage=usage
     )
     return chain, ca_pem
 
@@ -181,6 +184,7 @@ def certificate_with_key(
     end: int = 365,
     ca: str = "MEHO install CA",
     intermediate_end: int | None = None,
+    usage: str = "serverAuth",
 ) -> tuple[str, str, str]:
     """The certificate of console_certificate, and the private key of the
     server certificate (PEM, PKCS#8, no pass phrase)."""
@@ -219,7 +223,7 @@ def certificate_with_key(
             issuer = "intermediate"
         (work / "leaf.ext").write_text(
             "basicConstraints = critical,CA:false\nkeyUsage = critical,digitalSignature\n"
-            f"extendedKeyUsage = serverAuth\nsubjectAltName = DNS:{host}\n"
+            f"extendedKeyUsage = {usage}\nsubjectAltName = DNS:{host}\n"
         )
         _request(work, "leaf", f"/CN={host}")
         leaf_pem = _sign(

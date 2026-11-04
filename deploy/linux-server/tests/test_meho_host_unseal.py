@@ -14,8 +14,7 @@ import select
 import subprocess
 import termios
 import time
-import unittest
-from unittest import mock
+import unittest.mock
 
 from cluster_harness import (
     CORE_LABELS,
@@ -45,6 +44,10 @@ OFF_INTRO = (
 )
 RESTARTING = "[note] restarting OpenBao. This can take up to 5 minutes.\n"
 NODE_FIX = f"Fix: check the node and pods lines: sudo meho-host check. Then {SUPPORT_HINT}"
+TAKEN_BACK = (
+    "meho-host deleted the Secret meho-core-vault-unseal again: OpenBao stays in keyholder mode."
+)
+AGAIN = "Then run sudo meho-host keyholder off again."
 EXEC_UNSEAL = "-n meho exec -i meho-vault-0 -c bao -- bao write sys/unseal key=-"
 WRONG_KEY_FIX = "Fix: copy the key again from your key store, and run sudo meho-host unseal again."
 
@@ -172,6 +175,34 @@ class KeyholderOnTests(ClusterTestCase):
         )
         self.assertEqual(60, self.host.calls().count("sleep 5\n"))
 
+    def test_a_secret_without_a_key_changes_nothing(self) -> None:
+        state = self.host.state()
+        state["objects"][UNSEAL_SECRET]["data"] = {}
+        self.host.save(state)
+
+        result = self.host.run("keyholder", "on", stdin=UNSEAL_KEY + "\n")
+
+        self.assert_one_fail_line(
+            result,
+            "[FAIL] the Secret meho-core-vault-unseal holds no unseal key, so meho-host cannot "
+            f"check yours. Nothing was changed. Fix: {SUPPORT_HINT}",
+        )
+        self.assertIsNotNone(self.host.secret(UNSEAL_SECRET))
+        self.assertEqual([], self.kubectl_calls(" rollout "))
+
+    def test_a_pod_that_someone_unsealed_after_the_restart_gets_a_warning(self) -> None:
+        self.host.change(boot_unsealed=True)
+
+        result = self.host.run("keyholder", "on", stdin=UNSEAL_KEY + "\n")
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertEqual(
+            "[WARN] OpenBao restarted and is unsealed already: someone unsealed it. From its "
+            "next restart on, a keyholder unseals it.\n",
+            result.stderr,
+        )
+        self.assertIsNone(self.host.secret(UNSEAL_SECRET))
+
     def test_a_failed_step_says_what_changed(self) -> None:
         cases = {
             "down": (
@@ -270,6 +301,98 @@ class KeyholderOffTests(ClusterTestCase):
         self.assertIsNone(self.host.secret(UNSEAL_SECRET))
         self.assertEqual(60, self.host.calls().count("sleep 5\n"))
 
+    def test_rke2_that_does_not_answer_changes_nothing(self) -> None:
+        state = self.host.state()
+        state["down"] = True
+        self.host.save(state)
+
+        result = self.host.run("keyholder", "off", stdin=UNSEAL_KEY + "\n")
+
+        self.assert_one_fail_line(
+            result,
+            "[FAIL] RKE2 does not answer, so meho-host cannot read the Secret "
+            f"meho-core-vault-unseal. Nothing was changed. {NODE_FIX}",
+        )
+
+    def test_a_wrong_key_with_a_failed_restart_goes_again_and_a_new_run_checks_it(self) -> None:
+        self.host.fail("restart")
+
+        failed = self.host.run("keyholder", "off", stdin=OTHER_KEY + "\n")
+
+        self.assertEqual(1, failed.returncode, self.output(failed))
+        self.assertEqual(
+            f"[FAIL] OpenBao could not be restarted, so the key was not checked. {TAKEN_BACK} "
+            f"Fix: check the node and pods lines: sudo meho-host check. {AGAIN}",
+            failed.stderr.splitlines()[-1],
+        )
+        self.assertIsNone(self.host.secret(UNSEAL_SECRET))
+        # The next run asks for the key again and checks it with the restart.
+        self.host.fail()
+        again = self.host.run("keyholder", "off", stdin=OTHER_KEY + "\n")
+        self.assertEqual(1, again.returncode, self.output(again))
+        self.assertIn(OFF_INTRO, again.stdout)
+        self.assertIn("so the key does not unseal it. " + TAKEN_BACK, again.stderr)
+        self.assertIsNone(self.host.secret(UNSEAL_SECRET))
+        right = self.host.run("keyholder", "off", stdin=UNSEAL_KEY + "\n")
+        self.assertEqual(0, right.returncode, self.output(right))
+        self.assertIsNotNone(self.host.secret(UNSEAL_SECRET))
+
+    def test_a_failed_restart_keeps_a_key_that_unsealed_openbao_before(self) -> None:
+        self.host.change(sealed=True)
+        self.host.fail("restart")
+
+        result = self.host.run("keyholder", "off", stdin=UNSEAL_KEY + "\n")
+
+        self.assertEqual(1, result.returncode, self.output(result))
+        self.assertEqual(
+            "[FAIL] OpenBao could not be restarted. The key unsealed OpenBao before, so it stays "
+            "in the Secret, and OpenBao unseals itself from its next restart on. " + NODE_FIX,
+            result.stderr.splitlines()[-1],
+        )
+        self.assertIsNotNone(self.host.secret(UNSEAL_SECRET))
+
+    def test_no_answer_after_the_restart_takes_an_unchecked_key_back(self) -> None:
+        self.host.change(boot_status_calls=1000)
+
+        result = self.host.run("keyholder", "off", stdin=UNSEAL_KEY + "\n")
+
+        self.assert_one_fail_line(
+            result,
+            "[FAIL] OpenBao did not answer within 5 minutes after the restart, so the key was not "
+            f"checked. {TAKEN_BACK} Fix: check the pods line: sudo meho-host check. When OpenBao "
+            f"runs, unseal it with: sudo meho-host unseal. {AGAIN}",
+        )
+        self.assertIsNone(self.host.secret(UNSEAL_SECRET))
+        self.assertEqual(60, self.host.calls().count("sleep 5\n"))
+
+    def test_no_answer_after_the_restart_keeps_a_key_that_unsealed_openbao_before(self) -> None:
+        self.host.change(sealed=True, boot_status_calls=1000)
+
+        result = self.host.run("keyholder", "off", stdin=UNSEAL_KEY + "\n")
+
+        self.assert_one_fail_line(
+            result,
+            "[FAIL] OpenBao did not answer within 5 minutes after the restart. The key unsealed "
+            "OpenBao before, so it stays in the Secret, and OpenBao unseals itself when it runs. "
+            f"Fix: check the pods line: sudo meho-host check. If OpenBao does not start, "
+            f"{SUPPORT_HINT}",
+        )
+        self.assertIsNotNone(self.host.secret(UNSEAL_SECRET))
+
+    def test_a_secret_that_cannot_be_deleted_again_is_named(self) -> None:
+        self.host.fail("delete")
+
+        result = self.host.run("keyholder", "off", stdin=OTHER_KEY + "\n")
+
+        self.assert_one_fail_line(
+            result,
+            "[FAIL] OpenBao is still sealed 5 minutes after the restart, so the key does not "
+            "unseal it. The Secret meho-core-vault-unseal could not be deleted again, so it holds "
+            "a key that nothing checked. Fix: unseal OpenBao with the right key from your key "
+            f"store when it is sealed: sudo meho-host unseal. Then {SUPPORT_HINT}",
+        )
+        self.assertIsNotNone(self.host.secret(UNSEAL_SECRET))
+
     def test_with_the_secret_already_it_changes_nothing(self) -> None:
         self.host.save(initial_state())
 
@@ -357,6 +480,17 @@ class UnsealTests(ClusterTestCase):
         )
         self.assertEqual([], self.kubectl_calls(EXEC_UNSEAL))
 
+    def test_openbao_that_stops_answering_after_the_key_is_red(self) -> None:
+        self.host.change(stops_after_unseal=True)
+
+        result = self.host.run("unseal", stdin=UNSEAL_KEY + "\n")
+
+        self.assert_one_fail_line(
+            result,
+            "[FAIL] OpenBao stopped answering, so meho-host cannot tell whether it is unsealed. "
+            f"Fix: run sudo meho-host unseal again. If OpenBao does not start, {SUPPORT_HINT}",
+        )
+
     def test_on_a_terminal_the_prompt_hides_the_key(self) -> None:
         code, shown = run_on_a_terminal(self.host, "unseal", typed=UNSEAL_KEY)
 
@@ -384,7 +518,7 @@ class FakeKubectlTests(unittest.TestCase):
     def test_the_stub_keeps_the_library_path_of_the_test_python(self) -> None:
         folders = [os.environ.get("LD_LIBRARY_PATH", ""), "/made-up/python lib"]
         library_path = os.pathsep.join(folder for folder in folders if folder)
-        with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": library_path}):
+        with unittest.mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": library_path}):
             host = ClusterHost()
         self.addCleanup(host.close)
 
@@ -399,7 +533,7 @@ class FakeKubectlTests(unittest.TestCase):
 
     def test_without_a_library_path_the_stub_sets_none(self) -> None:
         # Only the text: the Python of CI cannot start without its library path.
-        with mock.patch.dict(os.environ):
+        with unittest.mock.patch.dict(os.environ):
             os.environ.pop("LD_LIBRARY_PATH", None)
             stub = fake_kubectl_stub()
 

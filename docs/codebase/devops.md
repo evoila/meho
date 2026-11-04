@@ -1492,9 +1492,9 @@ replaces the waiting one.
 What it costs:
 
 - Two or three `main` image builds can run at the same time. They use
-  the `meho-runners-ci` pool (8 runners, the same pool as the
-  integration test shards), so they take two or three of its places
-  for about 25 minutes. The chart jobs on this pool take a few minutes.
+  the `meho-runners-ci` pool (the same pool as the integration test
+  shards), so they take two or three of its runners for about 25
+  minutes. The chart jobs on this pool take a few minutes.
 - Runs can finish out of order. The moving `:main` image alias then
   points at an older commit for a short time, until the newer run
   finishes. `:main` is never a deploy target: deploys pin

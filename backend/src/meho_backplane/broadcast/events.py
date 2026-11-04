@@ -944,15 +944,19 @@ def redact_payload(
 #: Name-tokens that mark a param key as secret-bearing wherever they
 #: appear in the normalised (snake-cased) token list: ``password`` /
 #: ``user_password`` / ``passphrase`` / ``kubeconfig`` are secret
-#: material in any position. ``key`` alone is deliberately NOT here
-#: (``ssh_public_key`` / ``label_key`` would over-match) -- key-ish
-#: names are covered by the pair combinations below.
+#: material in any position. The plurals ``passwords`` and
+#: ``passphrases`` are the same material as a list (a VPN session lists
+#: its pre-shared keys as ``passphrases``). ``key`` alone is deliberately
+#: NOT here (``ssh_public_key`` / ``label_key`` would over-match) --
+#: key-ish names are covered by the pair combinations below.
 _SECRET_NAME_TOKENS_ANYWHERE: Final[frozenset[str]] = frozenset(
     {
         "password",
+        "passwords",
         "passwd",
         "pwd",
         "passphrase",
+        "passphrases",
         "apikey",
         "kubeconfig",
     }
@@ -966,6 +970,8 @@ _SECRET_NAME_TOKENS_ANYWHERE: Final[frozenset[str]] = frozenset(
 #: Vault AppRole write surface, ``secret_name`` / ``secret_path`` as
 #: k8s/Vault references) -- those carry no secret material and must
 #: not collapse a vetted full-detail write broadcast to aggregate.
+#: ``psk`` is the pre-shared key of an IPsec VPN session (``psk``,
+#: ``ipsec_psk``); ``psk_length`` would be an attribute of it.
 _SECRET_NAME_TOKENS_FINAL: Final[frozenset[str]] = frozenset(
     {
         "secret",
@@ -973,6 +979,7 @@ _SECRET_NAME_TOKENS_FINAL: Final[frozenset[str]] = frozenset(
         "token",
         "credential",
         "credentials",
+        "psk",
     }
 )
 
@@ -995,6 +1002,21 @@ _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
         ("secret", "id"),
         ("secret", "value"),
         ("secret", "data"),
+    }
+)
+
+#: Adjacent token pairs that mark a key as secret-bearing only when they
+#: **end** the name. ``secret_key`` / ``sharedKey`` / ``pre_shared_key``
+#: name the key itself: an OSPF or BGP authentication secret, the
+#: pre-shared key of a VPN connection, the secret half of an access key
+#: pair. Followed by more tokens the pair is a reference, not the
+#: secret: the Kubernetes ``secret_key_ref`` names a Secret and a key in
+#: it, and must stay a plain field.
+_SECRET_NAME_FINAL_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
+    {
+        ("secret", "key"),
+        ("shared", "key"),
+        ("preshared", "key"),
     }
 )
 
@@ -1031,6 +1053,8 @@ def _tokens_are_secret(normalised: str) -> bool:
         return True
     if tokens[-1] in _SECRET_NAME_TOKENS_FINAL:
         return True
+    if tuple(tokens[-2:]) in _SECRET_NAME_FINAL_TOKEN_PAIRS:
+        return True
     return any(pair in _SECRET_NAME_TOKEN_PAIRS for pair in itertools.pairwise(tokens))
 
 
@@ -1043,6 +1067,14 @@ def is_secret_param_name(name: str) -> bool:
     broadcast scrub cannot disagree on what a secret-named param is.
     """
     return _is_secret_param_name(name)
+
+
+#: Every pair, in any position: the lowercased check below matches more
+#: names than the exact rule, never fewer, so a final-only pair counts
+#: anywhere there.
+_SECRET_NAME_TOKEN_PAIRS_LOOSE: Final[frozenset[tuple[str, str]]] = (
+    _SECRET_NAME_TOKEN_PAIRS | _SECRET_NAME_FINAL_TOKEN_PAIRS
+)
 
 
 def is_secret_name_value_pair(
@@ -1071,7 +1103,7 @@ def is_secret_name_value_pair(
 
 #: Each adjacent pair written as one word, for a name whose case is lost.
 _SECRET_NAME_PAIRS_JOINED: Final[frozenset[str]] = frozenset(
-    first + second for first, second in _SECRET_NAME_TOKEN_PAIRS
+    first + second for first, second in _SECRET_NAME_TOKEN_PAIRS_LOOSE
 )
 
 
@@ -1100,7 +1132,7 @@ def is_secret_param_name_lowercased(name: str) -> bool:
     return any(
         left.endswith(first) and right.startswith(second)
         for left, right in itertools.pairwise(tokens)
-        for first, second in _SECRET_NAME_TOKEN_PAIRS
+        for first, second in _SECRET_NAME_TOKEN_PAIRS_LOOSE
     )
 
 

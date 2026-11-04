@@ -87,6 +87,7 @@ __all__ = [
     "BroadcastEvent",
     "classify_op",
     "holds_hidden_param_values",
+    "is_secret_name_value_pair",
     "is_secret_param_name",
     "redact_payload",
     "resolve_op_class",
@@ -1044,6 +1045,30 @@ def is_secret_param_name(name: str) -> bool:
     return _is_secret_param_name(name)
 
 
+def is_secret_name_value_pair(
+    node: Mapping[Any, Any], *, plain_names: frozenset[str] = frozenset()
+) -> bool:
+    """True when *node* is a name/value pair whose ``name`` is a secret name.
+
+    A vendor often lists the fields of an object as pairs,
+    ``[{"name": "USER", "value": "root"}, {"name": "PASSWORD", "value": "..."}]``,
+    so the secret sits under the key ``value`` and the key-name rule
+    alone would keep it. Every walk that hides secret-named values asks
+    this before it looks at the keys of a mapping, and then hides the
+    ``value`` of such a pair as it hides the value of a secret-named key.
+    A name in *plain_names* is a field the operation declared as plain,
+    so its pair keeps the value. A pair without a ``value`` key has
+    nothing to hide.
+    """
+    name = node.get("name")
+    return (
+        "value" in node
+        and isinstance(name, str)
+        and name not in plain_names
+        and _is_secret_param_name(name)
+    )
+
+
 #: Each adjacent pair written as one word, for a name whose case is lost.
 _SECRET_NAME_PAIRS_JOINED: Final[frozenset[str]] = frozenset(
     first + second for first, second in _SECRET_NAME_TOKEN_PAIRS
@@ -1091,7 +1116,9 @@ def _scrub_secret_named_keys(
     key-name-aware complement: any mapping entry whose key is
     secret-shaped has its whole value subtree replaced (a nested value
     under a ``credentials`` key is secret material regardless of its
-    inner structure).
+    inner structure). The ``value`` of a name/value pair whose ``name`` is
+    secret-shaped (:func:`is_secret_name_value_pair`) is replaced the same
+    way.
 
     Bare scalars (bool / int / float / ``None``) under a secret-shaped
     key pass through unflagged: secret material is a string or a blob,
@@ -1108,12 +1135,14 @@ def _scrub_secret_named_keys(
     if isinstance(node, Mapping):
         found = False
         scrubbed: dict[str, Any] = {}
+        hide_pair_value = is_secret_name_value_pair(node, plain_names=plain_names)
         for key, value in node.items():
             name = str(key)
             if name in plain_names:
                 scrubbed[name] = value
                 continue
-            if _is_secret_param_name(name) and _is_secret_value(value, hide_numbers):
+            secret_named = _is_secret_param_name(name) or (hide_pair_value and name == "value")
+            if secret_named and _is_secret_value(value, hide_numbers):
                 scrubbed[name] = _REDACTED_PARAM
                 found = True
                 continue

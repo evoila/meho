@@ -206,6 +206,14 @@ an error body, where a quote sits between the name and the `:`.
 - `scrub_secret_fields(node)` walks a dict / list / str. An entry whose key
   is a secret name gets `[REDACTED:param_name]` in place of its value
   (a whole sub-tree, too). Each string goes through the text step.
+- A name/value pair counts as a secret field when its `name` is a secret
+  name (`broadcast.events.is_secret_name_value_pair`). Some vendors list
+  the fields of an object this way, `[{"name": "USER", "value": "root"},
+  {"name": "PASSWORD", "value": "..."}]`, so the secret sits under the key
+  `value`. The `value` of such a pair is replaced like the value of a
+  secret-named key; a pair without a `value` key stays. Every walk of the
+  name rule does this: this one, the default view of an answer
+  (`scrub_secret_named_values`) and the params echo of a waiting approval.
 - `scrub_secret_fields_in_text(text)` replaces the value of each quoted
   name-value pair whose name is a secret name. The name and the value may
   each use `"` or `'` (JSON `"name": "value"`, Python `'name': 'value'`,
@@ -430,7 +438,9 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     names are replaced with `[REDACTED:param_name]`
     (`broadcast.events.scrub_secret_named_values(..., hide_numbers=True)`),
     numbers included; booleans and `None` stay. The name rule is
-    `is_secret_param_name` ("One name rule for secret fields" above). The
+    `is_secret_param_name` ("One name rule for secret fields" above); the
+    `value` of a name/value pair whose `name` is a secret name is hidden
+    too. The
     reducer runs on this view, so the rows stored behind a result handle
     and its sample rows are clean too.
 - **Plain fields** (`register_plain_fields(op_id, names)`, exported by

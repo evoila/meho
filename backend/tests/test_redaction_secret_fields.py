@@ -214,3 +214,22 @@ def test_iter_quoted_secret_fields_lists_secret_names_only() -> None:
         ("sessionToken", "t1"),
     ]
     assert all(text[field.start : field.end] == field.value for field in fields)
+
+
+def test_value_of_a_secret_named_pair_is_replaced() -> None:
+    node = {
+        "fields": [
+            {"name": "USER", "value": "root"},
+            {"name": "PASSWORD", "value": "hunter2"},
+            {"name": "PASSWORD"},
+        ],
+        "name": "my-credential",
+    }
+    assert scrub_secret_fields(node) == {
+        "fields": [
+            {"name": "USER", "value": "root"},
+            {"name": "PASSWORD", "value": SECRET_FIELD_MARKER},
+            {"name": "PASSWORD"},
+        ],
+        "name": "my-credential",
+    }

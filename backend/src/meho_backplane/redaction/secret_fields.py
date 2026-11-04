@@ -108,6 +108,12 @@ def _is_secret_name(name: str) -> bool:
     return is_secret_param_name(name)
 
 
+def _is_secret_pair(node: Mapping[Any, Any]) -> bool:
+    from meho_backplane.broadcast.events import is_secret_name_value_pair
+
+    return is_secret_name_value_pair(node)
+
+
 class QuotedSecretField(NamedTuple):
     """A pair with a secret name: ``text[start:end]`` is the value.
 
@@ -257,16 +263,21 @@ def scrub_secret_fields(node: Any) -> Any:
     """Return a copy of *node* with every secret-named value replaced.
 
     A dict entry whose key is a secret name and whose value is a string, a
-    dict or a list gets :data:`SECRET_FIELD_MARKER`. Every other string goes
-    through :func:`scrub_secret_fields_in_text`. Other values stay as they are.
+    dict or a list gets :data:`SECRET_FIELD_MARKER`; so does the ``value``
+    of a name/value pair whose ``name`` is a secret name
+    (:func:`~meho_backplane.broadcast.events.is_secret_name_value_pair`).
+    Every other string goes through :func:`scrub_secret_fields_in_text`.
+    Other values stay as they are.
     """
     if isinstance(node, str):
         return scrub_secret_fields_in_text(node)
     if isinstance(node, Mapping):
+        hide_pair_value = _is_secret_pair(node)
         return {
             key: (
                 SECRET_FIELD_MARKER
-                if _is_secret_name(str(key)) and _can_hold_secret(value)
+                if (_is_secret_name(str(key)) or (hide_pair_value and key == "value"))
+                and _can_hold_secret(value)
                 else scrub_secret_fields(value)
             )
             for key, value in node.items()

@@ -130,7 +130,8 @@ cloud image's kernel line ends with `console=ttyS0`.
      letter, a digit and another character (`minclass = 4` and the four
      credits of -1), no character more than 3 times in a row
      (`maxrepeat = 3`), no run of more than 3 such as `abcd` or `4321`
-     (`maxsequence = 3`), not the user name (`usercheck`, on by default),
+     (`maxsequence = 3`), not the user name anywhere in it, in any letter case
+     or reversed (`usercheck`, on by default),
      and the dictionary check of cracklib (`dictcheck`), which also refuses
      simple patterns such as `Abc#1Abc#1Abc#1`. A refused password stops
      step 3 with the reason `pwscore` gives (its last line, such as "The

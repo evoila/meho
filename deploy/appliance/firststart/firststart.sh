@@ -62,7 +62,7 @@ readonly CONSOLE=/dev/tty1
 readonly ADMIN_USER=admin
 # The rules of the CIS settings in /etc/security/pwquality.conf, which pwscore
 # checks. product-section.xml names the same rules; a test keeps them in step.
-readonly PASSWORD_RULES="at least 14 characters, with an uppercase letter, a lowercase letter, a digit and another character such as # or !; no character more than 3 times in a row; no run of more than 3 characters such as abcd or 4321; not the user name admin; and no dictionary word or simple pattern"
+readonly PASSWORD_RULES="at least 14 characters, with an uppercase letter, a lowercase letter, a digit and another character such as # or !; no character more than 3 times in a row; no run of more than 3 characters such as abcd or 4321; not the user name admin anywhere in it, in any letter case or reversed; and no dictionary word or simple pattern"
 readonly CLOCK_WAIT_SECONDS=600
 readonly OVF_ENV_NAMES=(ovf-env.xml ovf_env.xml OVF-ENV.XML OVF_ENV.XML)
 readonly STEPS=(ssh-host-keys disk wizard-fields clock core bootloader-password aide-database)

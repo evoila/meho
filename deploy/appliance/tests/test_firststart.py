@@ -640,7 +640,10 @@ class BannerTests(FirstStartTestCase):
     def test_the_admin_password_expiry_warning(self) -> None:
         self.assert_succeeds(self.vm.run())
         today = int(time.time()) // 86400
-        locked = "Nobody can log in as admin: its password is locked, or the account is disabled."
+        locked = (
+            "The admin account cannot log in with its password or use sudo: the password is"
+            " locked, or the account is disabled."
+        )
         expired = "Nobody can log in as admin: the account has expired."
         # What the boot menu's root shell must run for each of the two.
         advice = {

@@ -68,7 +68,7 @@ days_until_password_expiry() {
 }
 
 banner() {
-    local version hostname file days reason fix
+    local version hostname file days problem fix
     version=$(sed -n 's/^MEHO_VERSION=//p' "${HOST_ROOT}${VERSION_FILE}" 2>/dev/null || true)
     printf 'MEHO appliance %s\n\n' "$version"
     if [[ -f ${HOST_ROOT}${FAILED_FILE} ]]; then
@@ -97,13 +97,15 @@ banner() {
     done
     days=$(days_until_password_expiry)
     if ! admin_can_log_in; then
-        reason="its password is locked, or the account is disabled"
+        # With a locked password an SSH key still logs in (UsePAM), but sudo
+        # needs the password.
+        problem="The $ADMIN_USER account cannot log in with its password or use sudo: the password is locked, or the account is disabled"
         fix="set a new password (passwd $ADMIN_USER)"
         if admin_account_expired; then
-            reason="the account has expired"
+            problem="Nobody can log in as $ADMIN_USER: the account has expired"
             fix="remove its expiry date (chage -E -1 $ADMIN_USER) and set a new password (passwd $ADMIN_USER)"
         fi
-        printf '\n  [WARN] Nobody can log in as %s: %s.\n' "$ADMIN_USER" "$reason"
+        printf '\n  [WARN] %s.\n' "$problem"
         printf '  To get back in, restart the VM, open the boot menu with the bootloader password from your key store,\n'
         printf '  and %s. The steps: %s,\n' "$fix" "$BOOT_MENU_DOC"
         printf '  section "The boot menu, after a lost password or a locked admin".\n'

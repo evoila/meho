@@ -230,6 +230,7 @@ from meho_backplane.ui.auth import (
 )
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
 from meho_backplane.ui.csrf import CSRFMiddleware
+from meho_backplane.ui.fragment_guard import FragmentNavigationMiddleware
 from meho_backplane.ui.paths import ensure_static_dist_dir, static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.security_headers import UIFramingHeadersMiddleware
@@ -846,7 +847,8 @@ app: FastAPI = FastAPI(
 # outermost layer (its ``__call__`` runs first on the request side and
 # last on the response side). The required runtime order for v0.2 is:
 #
-#   client → UIFramingHeadersMiddleware → UISessionMiddleware
+#   client → UIFramingHeadersMiddleware → FragmentNavigationMiddleware
+#          → UISessionMiddleware
 #          → CSRFMiddleware → RequestContextMiddleware
 #          → BroadcastDetailMiddleware → AuditMiddleware → router
 #          → handler
@@ -862,6 +864,13 @@ app: FastAPI = FastAPI(
 #   through unstamped) and is header-only: it never reads the body,
 #   the session, or the request context, so its position relative to
 #   the inner chain is not load-bearing beyond "outside the redirect".
+# - ``FragmentNavigationMiddleware`` (#769) outside
+#   ``UISessionMiddleware`` so it sees what a console route actually
+#   rendered. A navigation that lands on a fragment URL (a tab left on
+#   ``/ui/approvals/badge``, a bookmark) would otherwise show a bare
+#   partial as a whole page; the guard sends it to the parent page
+#   instead. It only acts on ``200 text/html``, so the inner
+#   middleware's 302-to-login passes through untouched.
 # - ``UISessionMiddleware`` (G10.0-T4 #865, mounted by T5 #866)
 #   outermost so unauthenticated ``/ui/*`` requests 302 to
 #   ``/ui/auth/login`` BEFORE any inner middleware does
@@ -902,6 +911,7 @@ app: FastAPI = FastAPI(
 # rule, ``AuditMiddleware`` is registered *first* (becomes innermost),
 # then ``BroadcastDetailMiddleware``, then ``RequestContextMiddleware``,
 # then ``CSRFMiddleware``, then ``UISessionMiddleware``, then
+# ``FragmentNavigationMiddleware``, then
 # ``UIFramingHeadersMiddleware`` (becomes outermost). Middleware is
 # registered before routers so every endpoint (including the Task #19
 # health/version/ready surfaces and the Task #20 ``/metrics`` route)
@@ -911,6 +921,7 @@ app.add_middleware(BroadcastDetailMiddleware)
 app.add_middleware(RequestContextMiddleware)
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(UISessionMiddleware)
+app.add_middleware(FragmentNavigationMiddleware)
 app.add_middleware(UIFramingHeadersMiddleware)
 
 # G0.25 (#1694): app-level HTTPException handler. Intercepts exactly

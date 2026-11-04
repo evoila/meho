@@ -2521,8 +2521,12 @@ mappers of `meho-cli` without the MCP
 audience, and its own login flow `meho approval sign-in`
 (`authenticationFlowBindingOverrides.browser`) — is set by `meho admin keycloak bootstrap-clients`, the
 bundled realm `deploy/charts/meho/charts/keycloak/files/meho-realm.json`
-(new installs; the realm finishing job creates it on a running realm),
-installs), and `docs-site/install/keycloak-realm.md` Step 2. `list`
+(new installs; the realm stage adds the flow to a running realm when it
+may change login flows, else `keycloak.authflow.ensure_approval_flow`
+does), and `docs-site/install/keycloak-realm.md` Step 2. The flow holds
+also when the realm's login goes straight to a company login: a
+command-line approval always signs in through its own flow
+(`tests/integration/test_core_company_login_keycloak.py`). `list`
 has a `RUN` column and `show` / `approve` print how the run of an approved
 request ended (#3543, see "Approved, but the run failed" above).
 `list` shows only pending requests unless `--status` is set; `--status all`

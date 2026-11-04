@@ -32,6 +32,14 @@ tokens carry one issuer, whichever port the browser used.
    the next login gives no MEHO group.
 6. With ``autoRedirect`` off, the Keycloak login form shows again, also
    when the request for the discovery document times out.
+7. A realm from before the approval sign-in flow gets the flow from the
+   next run of the stage, bound to ``meho-cli-approve``.
+8. With the company login as the default, the plain login goes straight to
+   the company login, and the approval sign-in shows Keycloak's own
+   password form.
+9. A person with a one-time code signs in for an approval with the password
+   and the code, never through the company login, and the token passes
+   MEHO's approval sign-in check.
 
 Set ``MEHO_TEST_CORE_KEYCLOAK_IMAGE`` to use a mirror of the subchart's
 image. Skips when Docker is missing or the container cannot start.
@@ -42,11 +50,13 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
+import hmac
 import html
 import json
 import os
 import re
 import secrets
+import struct
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
@@ -59,6 +69,7 @@ import httpx
 import pytest
 import yaml
 
+from meho_backplane.auth.approval_sign_in import check_fresh_approval_sign_in
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.core.company_login import (
@@ -88,6 +99,8 @@ _DISCOVERY = f"{_INSIDE}/realms/company/.well-known/openid-configuration"
 _BROKER_CLIENT = "meho-broker"
 _CALLBACK = "http://127.0.0.1:43123/callback"
 _PERSON = "jane"
+_APPROVAL_CLIENT = "meho-cli-approve"
+_APPROVAL_FLOW = "meho approval sign-in"
 
 
 @dataclass
@@ -755,3 +768,267 @@ async def test_auto_redirect_off_works_while_the_company_login_does_not_answer(
     assert after["provider"] == before["provider"]
     assert after["redirect"] is None
     _login_form_shows(keycloak)
+
+
+def _start_approval_sign_in(browser: _Browser, challenge: str) -> httpx.Response:
+    """The request ``meho approvals approve`` sends: the approval client, PKCE,
+    ``prompt=login`` and ``max_age=0``."""
+    return browser.send(
+        "GET",
+        f"{browser.kc.base_url}/realms/meho/protocol/openid-connect/auth",
+        params={
+            "client_id": _APPROVAL_CLIENT,
+            "response_type": "code",
+            "redirect_uri": _CALLBACK,
+            "scope": "openid",
+            "state": secrets.token_hex(8),
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "prompt": "login",
+            "max_age": "0",
+        },
+    )
+
+
+def _follow_inside_the_realm(
+    browser: _Browser, response: httpx.Response
+) -> tuple[httpx.Response, list[str]]:
+    """Follow redirects until a page, the company login or the callback; return the paths seen."""
+    seen: list[str] = []
+    for _ in range(5):
+        if not response.is_redirect:
+            break
+        location = urljoin(str(response.url), response.headers["location"])
+        seen.append(urlsplit(location).path)
+        if "/realms/meho/broker/" in location or location.startswith(_CALLBACK):
+            break
+        response = browser.send("GET", location)
+    return response, seen
+
+
+def _approval_client(kc: _Keycloak) -> dict[str, Any]:
+    admin = f"{kc.base_url}/admin/realms/meho"
+    headers = _master_headers(kc)
+    (found,) = httpx.get(
+        f"{admin}/clients", headers=headers, params={"clientId": _APPROVAL_CLIENT}
+    ).json()
+    client = httpx.get(f"{admin}/clients/{found['id']}", headers=headers)
+    client.raise_for_status()
+    return dict(client.json())
+
+
+def _flow_ids(kc: _Keycloak) -> dict[str, str]:
+    flows = httpx.get(
+        f"{kc.base_url}/admin/realms/meho/authentication/flows", headers=_master_headers(kc)
+    )
+    flows.raise_for_status()
+    return {flow["alias"]: flow["id"] for flow in flows.json()}
+
+
+def _take_the_approval_flow_out(kc: _Keycloak) -> None:
+    """Make the realm look like one from before the approval sign-in flow.
+
+    The client loses its flow binding first: Keycloak does not delete a flow
+    that a client uses. Then the flow goes, with its sub-flow.
+    """
+    admin = f"{kc.base_url}/admin/realms/meho"
+    headers = _master_headers(kc)
+    client = _approval_client(kc)
+    client["authenticationFlowBindingOverrides"] = {}
+    httpx.put(f"{admin}/clients/{client['id']}", headers=headers, json=client).raise_for_status()
+    for alias in (_APPROVAL_FLOW, f"{_APPROVAL_FLOW} - one-time code"):
+        flow_id = _flow_ids(kc).get(alias)
+        if flow_id is not None:
+            gone = httpx.delete(f"{admin}/authentication/flows/{flow_id}", headers=headers)
+            gone.raise_for_status()
+    assert _approval_client(kc).get("authenticationFlowBindingOverrides", {}) == {}
+    assert not {alias for alias in _flow_ids(kc) if alias.startswith(_APPROVAL_FLOW)}
+
+
+async def test_the_stage_gives_an_older_realm_the_approval_flow(
+    keycloak: _Keycloak, store: _FakeStore, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A realm from before the approval sign-in flow gets it from the next run of the
+    stage, and the approval client signs in with it from then on."""
+    _take_the_approval_flow_out(keycloak)
+    capfd.readouterr()
+
+    await _run_stage(keycloak, store)
+
+    output = capfd.readouterr().out
+    assert f"login flow {_APPROVAL_FLOW}: created" in output
+    assert f"client {_APPROVAL_CLIENT}: kept (login flow set" in output
+    assert _approval_client(keycloak)["authenticationFlowBindingOverrides"] == {
+        "browser": _flow_ids(keycloak)[_APPROVAL_FLOW]
+    }
+    assert _snapshot(keycloak)["redirect"]["config"]["defaultProvider"] == "company"
+
+
+def test_approval_sign_in_shows_the_password_form_while_the_login_goes_to_the_company_login(
+    keycloak: _Keycloak,
+) -> None:
+    """With the company login as the default, the plain login goes straight to it,
+    and the approval sign-in still shows Keycloak's own password form."""
+    browser = _Browser(keycloak)
+    try:
+        login, login_seen = _follow_inside_the_realm(browser, _start_login(browser, _pkce()[1]))
+        approval, approval_seen = _follow_inside_the_realm(
+            browser, _start_approval_sign_in(browser, _pkce()[1])
+        )
+    finally:
+        browser.close()
+
+    assert any("/realms/meho/broker/company/" in path for path in login_seen), (
+        login_seen,
+        _page_text(login.text),
+    )
+    assert not any("/broker/" in path for path in approval_seen), approval_seen
+    assert approval.status_code == 200, approval.headers.get("location")
+    assert "/realms/meho/" in _form(approval.text, "kc-form-login")
+
+
+def _one_time_code(secret: str) -> str:
+    """The code an authenticator app shows now for *secret* (TOTP, SHA-1, 6 digits,
+    30 seconds; Keycloak takes the secret's bytes as the key)."""
+    counter = int(time.time()) // 30
+    digest = hmac.new(secret.encode(), struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    number = int.from_bytes(digest[offset : offset + 4], "big") & 0x7FFFFFFF
+    return f"{number % 1_000_000:06d}"
+
+
+def _person_with_a_code(kc: _Keycloak, username: str) -> tuple[str, str]:
+    """A person in realm ``meho`` with a password and a one-time code set up.
+
+    Returns the password and the code's secret. Both are made up here.
+    """
+    password = secrets.token_urlsafe(18)
+    code_secret = secrets.token_urlsafe(20)
+    httpx.post(
+        f"{kc.base_url}/admin/realms/meho/users",
+        headers=_master_headers(kc),
+        json={
+            "username": username,
+            "enabled": True,
+            "email": f"{username}@example.com",
+            "emailVerified": True,
+            "firstName": "Test",
+            "lastName": username,
+            "credentials": [
+                {"type": "password", "value": password, "temporary": False},
+                {
+                    "type": "otp",
+                    "userLabel": "authenticator app",
+                    "secretData": json.dumps({"value": code_secret}),
+                    "credentialData": json.dumps(
+                        {
+                            "subType": "totp",
+                            "digits": 6,
+                            "counter": 0,
+                            "period": 30,
+                            "algorithm": "HmacSHA1",
+                        }
+                    ),
+                },
+            ],
+            "groups": ["/MEHO-Operators"],
+        },
+    ).raise_for_status()
+    return password, code_secret
+
+
+def _approval_sign_in(
+    kc: _Keycloak, username: str, password: str, code_secret: str
+) -> dict[str, Any]:
+    """The browser sign-in of ``meho approvals approve``; returns the token's claims.
+
+    Fails when a page other than the password form or the code form shows,
+    or when the sign-in passes through the company login.
+    """
+    verifier, challenge = _pkce()
+    browser = _Browser(kc)
+    seen: list[str] = []
+    pages: list[str] = []
+    code = ""
+    try:
+        response = _start_approval_sign_in(browser, challenge)
+        for _ in range(10):
+            if response.is_redirect:
+                location = urljoin(str(response.url), response.headers["location"])
+                seen.append(urlsplit(location).path)
+                if location.startswith(_CALLBACK):
+                    query = parse_qs(urlsplit(location).query)
+                    assert "code" in query, location
+                    code = query["code"][0]
+                    break
+                response = browser.send("GET", location)
+                continue
+            if response.status_code != 200:
+                pytest.fail(
+                    f"{response.status_code} after {seen}: {_page_text(response.text)}\n"
+                    f"Keycloak log:\n{kc.logs()}"
+                )
+            if 'id="kc-form-login"' in response.text:
+                pages.append("password")
+                response = browser.send(
+                    "POST",
+                    _form(response.text, "kc-form-login"),
+                    data={"username": username, "password": password, "credentialId": ""},
+                )
+            elif 'id="kc-otp-login-form"' in response.text:
+                pages.append("code")
+                response = browser.send(
+                    "POST",
+                    _form(response.text, "kc-otp-login-form"),
+                    data={"otp": _one_time_code(code_secret)},
+                )
+            else:
+                pytest.fail(f"unexpected page after {pages}: {_page_text(response.text)}")
+    finally:
+        browser.close()
+    assert code, (seen, pages)
+    assert pages == ["password", "code"]
+    assert not any("/broker/" in path for path in seen), seen
+    token = httpx.post(
+        f"{kc.base_url}/realms/meho/protocol/openid-connect/token",
+        data={
+            "grant_type": "authorization_code",
+            "client_id": _APPROVAL_CLIENT,
+            "code": code,
+            "redirect_uri": _CALLBACK,
+            "code_verifier": verifier,
+        },
+    )
+    assert token.status_code == 200, token.text
+    access = token.json()["access_token"]
+    payload = access.split(".")[1]
+    claims: dict[str, Any] = json.loads(
+        base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+    )
+    claims["_raw"] = access
+    return claims
+
+
+async def test_approval_sign_in_asks_for_the_password_and_the_code_and_passes_the_check(
+    keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A person with a one-time code signs in for an approval with the password and
+    the code, not through the company login, and MEHO accepts the token as a fresh
+    approval sign-in."""
+    password, code_secret = _person_with_a_code(keycloak, "code-person")
+
+    claims = _approval_sign_in(keycloak, "code-person", password, code_secret)
+
+    assert claims["azp"] == _APPROVAL_CLIENT
+    assert claims["acr"] == "1"
+    assert isinstance(claims["auth_time"], int)
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"{keycloak.base_url}/realms/meho")
+    get_settings.cache_clear()
+    clear_jwks_cache()
+    operator = await verify_jwt_for_audience(
+        f"Bearer {claims['_raw']}", expected_audience="meho-backplane"
+    )
+    proof = check_fresh_approval_sign_in(operator, get_settings())
+    assert proof.channel == "rest"
+    assert proof.method == "fresh_sign_in"
+    assert proof.auth_time == claims["auth_time"]

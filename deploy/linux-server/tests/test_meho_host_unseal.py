@@ -27,6 +27,7 @@ from cluster_harness import (
     UNSEAL_SECRET,
     ClusterHost,
     ClusterTestCase,
+    fake_kubectl_stub,
     initial_state,
 )
 from host_harness import MEHO_HOST
@@ -377,30 +378,33 @@ class UnsealTests(ClusterTestCase):
 
 
 class FakeKubectlTests(unittest.TestCase):
-    """The fake kubectl runs with the Python of the tests, also in CI."""
+    """The fake kubectl runs with the Python of the tests, also in CI, where
+    that Python needs its LD_LIBRARY_PATH to start."""
 
     def test_the_stub_keeps_the_library_path_of_the_test_python(self) -> None:
-        with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": "/made-up/python lib"}):
+        folders = [os.environ.get("LD_LIBRARY_PATH", ""), "/made-up/python lib"]
+        library_path = os.pathsep.join(folder for folder in folders if folder)
+        with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": library_path}):
             host = ClusterHost()
         self.addCleanup(host.close)
 
         result = host.run("unseal")
 
         self.assertIn(
-            "export LD_LIBRARY_PATH='/made-up/python lib'\n",
+            f"export LD_LIBRARY_PATH='{library_path}'\n",
             host.host_path(RKE2_KUBECTL).read_text(),
         )
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertNotIn("LD_LIBRARY_PATH", host.environment())
 
     def test_without_a_library_path_the_stub_sets_none(self) -> None:
+        # Only the text: the Python of CI cannot start without its library path.
         with mock.patch.dict(os.environ):
             os.environ.pop("LD_LIBRARY_PATH", None)
-            host = ClusterHost()
-        self.addCleanup(host.close)
+            stub = fake_kubectl_stub()
 
-        self.assertNotIn("LD_LIBRARY_PATH", host.host_path(RKE2_KUBECTL).read_text())
-        self.assertEqual(0, host.run("unseal").returncode)
+        self.assertNotIn("LD_LIBRARY_PATH", stub)
+        self.assertTrue(stub.startswith("exec "), stub)
 
 
 class TheKeyIsNeverShownTests(ClusterTestCase):

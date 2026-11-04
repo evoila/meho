@@ -233,6 +233,10 @@ an error body, where a quote sits between the name and the `:`.
   same object is replaced (`{"name": "PASSWORD", "value": "..."}`, also as
   Python text or escaped JSON). The two members may come in either order,
   with other members between them; a nested object's members do not count.
+  A name is checked by what it says, not by how it is written: JSON may
+  write a character as an escape (`"\u0050ASSWORD"` is `"PASSWORD"`), so
+  the key of a field, the `name` string of a pair and the `name` and
+  `value` member keys are decoded before the check.
   `iter_quoted_secret_fields(text)` lists the same pairs; the capture check
   uses it.
 

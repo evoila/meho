@@ -303,6 +303,65 @@ def test_value_of_a_secret_named_pair_in_text(text: str, expected: str | None) -
     assert scrub_secret_fields_in_text(text) == (text if expected is None else expected)
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # The name of a pair written with a JSON escape, in both member orders.
+        (
+            '[{"name":"\\u0050ASSWORD","value":"hunter2"}]',
+            f'[{{"name":"\\u0050ASSWORD","value":"{SECRET_FIELD_MARKER}"}}]',
+        ),
+        (
+            '[{"value":"hunter2","name":"\\u0050ASSWORD"}]',
+            f'[{{"value":"{SECRET_FIELD_MARKER}","name":"\\u0050ASSWORD"}}]',
+        ),
+        # The same pair as escaped JSON inside a JSON string: the escape is escaped once more.
+        (
+            '{"detail": "{\\"name\\": \\"\\\\u0050ASSWORD\\", \\"value\\": \\"hunter2\\"}"}',
+            '{"detail": "{\\"name\\": \\"\\\\u0050ASSWORD\\", '
+            f'\\"value\\": \\"{SECRET_FIELD_MARKER}\\"}}"}}',
+        ),
+        (
+            '{"detail": "{\\"value\\": \\"hunter2\\", \\"name\\": \\"\\\\u0050ASSWORD\\"}"}',
+            f'{{"detail": "{{\\"value\\": \\"{SECRET_FIELD_MARKER}\\", '
+            '\\"name\\": \\"\\\\u0050ASSWORD\\"}"}',
+        ),
+        # The member keys of the pair written with an escape.
+        (
+            '{"\\u006eame": "PASSWORD", "value": "hunter2"}',
+            f'{{"\\u006eame": "PASSWORD", "value": "{SECRET_FIELD_MARKER}"}}',
+        ),
+        (
+            '{"name": "PASSWORD", "\\u0076alue": "hunter2"}',
+            f'{{"name": "PASSWORD", "\\u0076alue": "{SECRET_FIELD_MARKER}"}}',
+        ),
+        # A secret-named key written with an escape, plain and inside a JSON string.
+        (
+            '{"\\u0050ASSWORD": "hunter2"}',
+            f'{{"\\u0050ASSWORD": "{SECRET_FIELD_MARKER}"}}',
+        ),
+        (
+            '{"detail": "{\\"\\\\u0050ASSWORD\\": \\"hunter2\\"}"}',
+            f'{{"detail": "{{\\"\\\\u0050ASSWORD\\": \\"{SECRET_FIELD_MARKER}\\"}}"}}',
+        ),
+        # A name that decodes to a plain name stays; so does a name that is no JSON string.
+        ('{"name": "\\u0055SER", "value": "root"}', None),
+        ('{"name": "\\u00ZZASSWORD", "value": "root"}', None),
+        ('{"\\u0055SER": "root"}', None),
+    ],
+)
+def test_escaped_name_is_decoded_before_the_check(text: str, expected: str | None) -> None:
+    assert scrub_secret_fields_in_text(text) == (text if expected is None else expected)
+
+
+def test_escaped_name_is_listed_decoded() -> None:
+    text = '{"\\u0050ASSWORD": "p1", "name": "\\u0054OKEN", "value": "t1"}'
+    assert [(field.name, field.value) for field in iter_quoted_secret_fields(text)] == [
+        ("PASSWORD", "p1"),
+        ("TOKEN", "t1"),
+    ]
+
+
 def test_secret_named_key_between_the_name_and_the_value_of_a_pair_is_replaced_too() -> None:
     text = '{"name": "PASSWORD", "token": "t1", "value": "hunter2"}'
     assert [(field.name, field.value) for field in iter_quoted_secret_fields(text)] == [

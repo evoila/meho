@@ -36,6 +36,11 @@ broadcast scrub and the approval echo already use.
   that is a secret name looks for the ``value`` member of the same object:
   the two may come in either order, with other members between them
   (:func:`_pair_value_field`).
+* A name is checked by what it says, not by how it is written. JSON may
+  write a character as an escape (``"\\u0050ASSWORD"`` is ``"PASSWORD"``),
+  so each name is decoded before the check (:func:`_decode_name`): the key
+  of a field, the ``name`` string of a pair, and the ``name`` and ``value``
+  member keys of a pair object.
 
 The value is read by a small scanner, not by a pattern: it walks the text
 from the opening quote to the closing quote and steps over each escape, so
@@ -59,6 +64,7 @@ every answer, with the fields an operation declared as plain left in place
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterator, Mapping, Sequence
 from typing import Any, Final, NamedTuple
@@ -75,7 +81,10 @@ __all__ = [
 #: broadcast scrub, so a reader sees one word for "a field with a secret name".
 SECRET_FIELD_MARKER: Final[str] = "[REDACTED:param_name]"
 
-_NAME: Final[str] = r"[A-Za-z0-9_.\-]{1,128}"
+#: A name: name characters and ``\uXXXX`` escapes (``\\uXXXX`` in escaped
+#: JSON). Only a ``\u`` escape can stand for a name character, so the other
+#: JSON escapes are not part of a name.
+_NAME: Final[str] = r"(?:[A-Za-z0-9_.\-]|\\+u[0-9A-Fa-f]{4}){1,128}"
 
 #: The start of a quoted name-value pair, up to and including what opens
 #: the value: the quote of a string (``"``, ``'`` or escaped JSON's ``\"``)
@@ -95,17 +104,15 @@ _BRACKETS: Final = "{["
 _KEY_STARTS: Final = "\"'\\"
 
 
-def _member_pattern(key: str, *, escaped: bool) -> re.Pattern[str]:
-    """The start of the member *key* of a pair object, up to what opens its value."""
-    if escaped:
-        return re.compile(r"\\\"" + key + r"\\\"\s*:\s*(?P<open>\\\"|[{\[])")
-    return re.compile(r"(?P<key_quote>[\"'])" + key + r"(?P=key_quote)\s*:\s*(?P<open>[\"'{\[])")
-
-
-_NAME_KEY: Final = _member_pattern("name", escaped=False)
-_VALUE_KEY: Final = _member_pattern("value", escaped=False)
-_ESCAPED_NAME_KEY: Final = _member_pattern("name", escaped=True)
-_ESCAPED_VALUE_KEY: Final = _member_pattern("value", escaped=True)
+#: The start of one member of an object, up to what opens its value: the
+#: same shape as :data:`_PAIR_START`, for one mode, with the key under
+#: ``key``. :func:`_sibling_member` matches it at each key of an object.
+_MEMBER: Final[re.Pattern[str]] = re.compile(
+    r"(?P<key_quote>[\"'])(?P<key>" + _NAME + r")(?P=key_quote)\s*:\s*(?P<open>[\"'{\[])"
+)
+_ESCAPED_MEMBER: Final[re.Pattern[str]] = re.compile(
+    r"\\\"(?P<key>" + _NAME + r")\\\"\s*:\s*(?P<open>\\\"|[{\[])"
+)
 
 #: A value some earlier step already masked: ``[REDACTED:...]``, the trace
 #: markers ``[MEHO-REDACTED:...]`` / ``[MEHO-OMITTED:...]`` and ``[redacted]``.
@@ -124,6 +131,27 @@ def _is_placeholder(value: str) -> bool:
     if core == "REDACTED":
         return value.startswith("*") and value.endswith("*")
     return _PLACEHOLDER.fullmatch(value) is not None
+
+
+def _decode_name(raw: str, *, escaped: bool) -> str:
+    """The string the JSON-written name *raw* stands for: ``\\u0050ASSWORD`` is ``PASSWORD``.
+
+    In escaped JSON inside a JSON string the escapes are escaped once more
+    (``\\\\u0050ASSWORD``), so the text is decoded twice. Text that is not a
+    JSON string (Python's ``'it\\'s'``) is kept as it is.
+    """
+    name = raw
+    for _ in range(2 if escaped else 1):
+        if "\\" not in name:
+            break
+        try:
+            decoded = json.loads(f'"{name}"', strict=False)
+        except ValueError:
+            break
+        if not isinstance(decoded, str):
+            break
+        name = decoded
+    return name
 
 
 def _is_secret_name(name: str) -> bool:
@@ -264,24 +292,27 @@ def _sibling_member(
     text: str,
     index: int,
     *,
-    want: re.Pattern[str],
-    stop: re.Pattern[str],
+    want: str,
+    stop: str,
     escaped: bool,
 ) -> re.Match[str] | None:
-    """The first *want* member from *index* on, in the same object; ``None`` when none.
+    """The first member with the key *want* from *index* on, in the same object; ``None`` when none.
 
     Nested objects, lists and strings are stepped over. The search ends at
     the bracket that closes the object, and at a *stop* member: a second
     member with the key of the one the search started from, so that member
-    starts its own search and each stretch of the text is walked once.
+    starts its own search and each stretch of the text is walked once. A
+    key is compared by what it says (:func:`_decode_name`).
     """
+    pattern = _ESCAPED_MEMBER if escaped else _MEMBER
     depth = 0
     while index < len(text):
         char = text[index]
-        if depth == 0 and char in _KEY_STARTS:
-            if (member := want.match(text, index)) is not None:
+        if depth == 0 and char in _KEY_STARTS and (member := pattern.match(text, index)):
+            key = _decode_name(member.group("key"), escaped=escaped)
+            if key == want:
                 return member
-            if stop.match(text, index) is not None:
+            if key == stop:
                 return None
         after = _after_string_or_escape(text, index, escaped=escaped)
         if after != index:
@@ -304,7 +335,7 @@ def _pair_name(text: str, match: re.Match[str], opener: str, *, escaped: bool) -
     end = _value_end(text, match, bracketed=False, escaped=escaped)
     if end == -1:
         return None
-    name = text[match.end() : end]
+    name = _decode_name(text[match.end() : end], escaped=escaped)
     return name if _is_secret_name(name) else None
 
 
@@ -319,21 +350,18 @@ def _pair_value_field(
     ``{"value": "...", "name": "PASSWORD"}`` from its ``value``, with other
     members between the two. ``None`` when the object is not such a pair.
     """
-    name_key, value_key = (
-        (_ESCAPED_NAME_KEY, _ESCAPED_VALUE_KEY) if escaped else (_NAME_KEY, _VALUE_KEY)
-    )
     if key == "name":
         name = _pair_name(text, match, opener, escaped=escaped)
         if name is None:
             return None
         after = _value_end(text, match, bracketed=False, escaped=escaped) + (2 if escaped else 1)
-        value = _sibling_member(text, after, want=value_key, stop=name_key, escaped=escaped)
+        value = _sibling_member(text, after, want="value", stop="name", escaped=escaped)
         if value is None:
             return None
         return _field_of(text, value, name, value.group("open"), escaped=escaped)
     field = _field_of(text, match, key, opener, escaped=escaped)
     after = _after_field(text, field)
-    name_member = _sibling_member(text, after, want=name_key, stop=value_key, escaped=escaped)
+    name_member = _sibling_member(text, after, want="name", stop="value", escaped=escaped)
     if name_member is None:
         return None
     name = _pair_name(text, name_member, name_member.group("open"), escaped=escaped)
@@ -353,7 +381,7 @@ def _find_secret_fields(text: str) -> Iterator[QuotedSecretField]:
         if match.start() < cursor:
             continue
         escaped = match.group("escaped_name") is not None
-        name = match.group("escaped_name" if escaped else "name")
+        name = _decode_name(match.group("escaped_name" if escaped else "name"), escaped=escaped)
         opener = match.group("escaped_open" if escaped else "open")
         if name in ("name", "value"):
             pair_value = _pair_value_field(text, match, name, opener, escaped=escaped)

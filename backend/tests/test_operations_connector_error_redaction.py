@@ -204,6 +204,37 @@ def test_http_403_upstream_body_of_name_value_pairs_hides_the_secret_pair_value(
     assert _PASSWORD_SECRET not in repr(result.model_dump())
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        '[{"name": "USER", "value": "root"}, {"name": "\\u0050ASSWORD", "value": "SECRET"}]',
+        '[{"name": "USER", "value": "root"}, {"value": "SECRET", "name": "\\u0050ASSWORD"}]',
+    ],
+)
+def test_http_403_upstream_body_with_an_escaped_pair_name_hides_the_secret_pair_value(
+    body: str,
+) -> None:
+    """A pair whose name is written with a JSON escape hides its value like a plain name.
+
+    The body text keeps the escape; the name is read by what it says. Both
+    member orders are covered.
+    """
+    request = httpx.Request("GET", "https://upstream.test/api/credentials")
+    response = httpx.Response(
+        403,
+        content=body.replace("SECRET", _PASSWORD_SECRET).encode(),
+        headers={"content-type": "application/json"},
+        request=request,
+    )
+    exc = httpx.HTTPStatusError("403", request=request, response=response)
+    result = result_connector_http_403("op.read", exc, 1.0)
+    upstream = result.extras["upstream_message"]
+    assert "\\u0050ASSWORD" in upstream
+    assert json.loads(upstream) == json.loads(body.replace("SECRET", "[REDACTED:param_name]"))
+    assert upstream in (result.error or "")
+    assert _PASSWORD_SECRET not in repr(result.model_dump())
+
+
 @pytest.mark.parametrize("credential_text", [_PASSWORD_TEXT, _BEARER_TEXT])
 def test_no_connector_exception_message_redacted(credential_text: str) -> None:
     """Resolver-diagnostic passthrough is sanitized at the builder."""

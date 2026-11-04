@@ -348,6 +348,24 @@ async def _module_pair_fields_http_error_handler(
     raise httpx.HTTPStatusError("500 Server Error", request=request, response=response)
 
 
+async def _module_escaped_pair_name_http_error_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """A read whose vendor error body writes the name of a pair with a JSON escape."""
+    request = httpx.Request("GET", "https://vendor.test/api/credentials")
+    body = (
+        '[{"name": "USER", "value": "root"}, '
+        '{"name": "\\u0050ASSWORD", "value": "' + _PASSWORD_SECRET + '"}, '
+        '{"value": "' + _PASSWORD_SECRET + '", "name": "\\u0050ASSWORD"}]'
+    )
+    response = httpx.Response(
+        500, content=body.encode(), headers={"content-type": "application/json"}, request=request
+    )
+    raise httpx.HTTPStatusError("500 Server Error", request=request, response=response)
+
+
 async def _register_pair_fields_read(
     stub_embedding_service: AsyncMock, handler: Any = _module_pair_fields_handler
 ) -> None:
@@ -570,6 +588,43 @@ async def test_read_op_http_error_body_hides_the_value_of_a_secret_named_pair(
     assert json.loads(result.extras["upstream_message"]) == [
         {"name": "USER", "value": "root"},
         {"name": "PASSWORD", "value": _REDACTED},
+    ]
+    assert _PASSWORD_SECRET not in result.model_dump_json()
+
+    row = await _audit_row("vault.kv.versions")
+    stored = json.dumps(
+        {column.name: getattr(row, column.name) for column in AuditLog.__table__.columns},
+        default=str,
+    )
+    assert _PASSWORD_SECRET not in stored
+    assert row.payload["result_status"] == "error"
+    assert _REDACTED in json.dumps(row.payload["error"])
+
+
+async def test_read_op_http_error_body_hides_the_value_of_a_pair_with_an_escaped_name(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A pair name written with a JSON escape is read by what it says.
+
+    The USER pair stays. Both PASSWORD pairs, name first and value first,
+    lose their value in the error envelope and in the audit row.
+    """
+    await _register_pair_fields_read(
+        stub_embedding_service, _module_escaped_pair_name_http_error_handler
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.versions",
+        target=None,
+        params={},
+    )
+    assert result.status == "error"
+    assert json.loads(result.extras["upstream_message"]) == [
+        {"name": "USER", "value": "root"},
+        {"name": "PASSWORD", "value": _REDACTED},
+        {"value": _REDACTED, "name": "PASSWORD"},
     ]
     assert _PASSWORD_SECRET not in result.model_dump_json()
 

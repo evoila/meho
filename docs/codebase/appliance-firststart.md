@@ -19,7 +19,8 @@ without the wizard" below.
 `banner.sh` writes the console banner at every boot: the console address,
 the appliance's address, the one-time files, and a warning before the
 `admin` password expires. While first start is not done, the banner shows
-the step that stopped and its fix.
+the step that stopped and its fix. It never tells the admin to log in when
+the `admin` account takes no login.
 
 The design is the internal design note `form-1-appliance.md`, section 2.
 
@@ -99,12 +100,12 @@ cloud image's kernel line ends with `console=ttyS0`.
    in the wizard), for static the address, gateway and DNS servers, the
    admin network, the password twice (not shown while typed), and the SSH
    key. Each answer goes through the wizard's own check of that field
-   (`field_problem`), and a wrong answer is asked again, so a password of 13
-   characters is refused. The SSH key may stay empty, because a key is hard
-   to type on a VM console: then no `authorized_keys` is written, and SSH
-   stays closed until the admin adds a key. If the input ends before the
-   last answer, the step stops with "power the VM off and on". The join
-   fields are not asked. Then:
+   (`field_problem`), and a wrong answer is asked again, so a password that
+   breaks a password rule is asked again. The SSH key may stay empty,
+   because a key is hard to type on a VM console: then no `authorized_keys`
+   is written, and SSH stays closed until the admin adds a key. If the
+   input ends before the last answer, the step stops with "power the VM off
+   and on". The join fields are not asked. Then:
    - `hostnamectl hostname <name>`. The name does not go into `/etc/hosts`,
      so the first-start list asks the site's DNS.
    - `/etc/netplan/50-meho.yaml` (0600, as netplan wants), matching the
@@ -117,11 +118,29 @@ cloud image's kernel line ends with `console=ttyS0`.
      second one, exit code 9, #5739), the wizard password through
      `chpasswd` on stdin, `passwd --expire` so the first login must change
      it, and the SSH key in `~admin/.ssh/authorized_keys` (0600). Without a
-     key the file is removed, in case an earlier try wrote one. The script
-     checks the 14 characters itself, before anything changes. `chpasswd`
-     then runs the CIS password checks too, also for root
-     (`enforce_for_root`), and refuses a dictionary word
-     ([appliance-cis.md](appliance-cis.md), #5744).
+     key the file is removed, in case an earlier try wrote one.
+   - **The password rules** (#5749). The CIS settings
+     ([appliance-cis.md](appliance-cis.md)) make `chpasswd` check the
+     password with `pam_pwquality`, also for root (`enforce_for_root`).
+     Before anything changes, the script checks the password with
+     `pwscore admin` (package `libpwquality-tools`), which reads the same
+     settings, so a password `pwscore` takes, `chpasswd` takes too. The
+     password goes to `pwscore` on stdin, never as an argument. The rules:
+     at least 14 characters (`minlen`), an uppercase letter, a lowercase
+     letter, a digit and another character (`minclass = 4` and the four
+     credits of -1), no character more than 3 times in a row
+     (`maxrepeat = 3`), no run of more than 3 such as `abcd` or `4321`
+     (`maxsequence = 3`), not the user name (`usercheck`, on by default),
+     and the dictionary check of cracklib (`dictcheck`), which also refuses
+     simple patterns such as `Abc#1Abc#1Abc#1`. A refused password stops
+     step 3 with the reason `pwscore` gives (its last line, such as "The
+     password contains less than 1 non-alphanumeric characters"), the list
+     of rules, and the vApp-options fix. On the console it is asked again.
+     The rules are one sentence, `PASSWORD_RULES` in `firststart.sh`; the
+     console prints it before the password question, and the wizard field's
+     description in `product-section.xml` holds the same sentence. A test
+     keeps the two in step. The wizard keeps `MinLen(14)`, the one rule
+     vCenter itself can check.
    - `meho-host admin-network <range>`: SSH answers only from the admin
      network.
 4. **The clock.** Waits up to 10 minutes until `timedatectl` says the clock
@@ -185,17 +204,29 @@ Writes `/etc/issue` (0644) in one step:
 
 - the version from the download's `VERSION` file;
 - with `firststart/failed`: that line (backslashes doubled, because agetty
-  reads `\` as an escape) and where to read more. Before step 3 makes the
-  `admin` account nobody can log in, so the banner then says to follow the
-  fix from vCenter, and the fix of a failed step 1 or 2 says to power the VM
-  off and on there instead of `sudo reboot`;
+  reads `\` as an escape) and where to read more. Until step 3 gives the
+  `admin` account its password nobody can log in, so the banner then says
+  to follow the fix from vCenter, and the fix of a step that failed before
+  then says to power the VM off and on there instead of `sudo reboot`
+  (`how_to_restart` in `firststart.sh` looks for a password hash in
+  `getent shadow admin`). In the first lab import, `useradd` had made the
+  account and then `chpasswd` refused the password, and the banner said to
+  log in (#5749);
 - before `firststart.done`: that first start has not finished;
 - after it: `https://<hostname>/ui/`, `\4` (agetty prints the IPv4 address,
   so a DHCP address shows), each one-time file that still exists, and a
   `[WARN]` line when the `admin` password expires in less than 30 days or
   has expired. The days come from `getent shadow admin` (last change plus
   maximum age); a password that must be changed at the next login gives no
-  warning.
+  warning;
+- in both cases, the banner says "log in" only when the `admin` account
+  takes a login, as `pam_unix` decides it (`check_shadow_expiry`): the
+  password is not locked (it does not start with `!` or `*`), the account
+  has not passed its expiry date, and the password did not expire longer
+  ago than its inactive days (45 with the CIS settings). Otherwise a
+  finished appliance shows a `[WARN]` with the way back in through the boot
+  menu and a link to the section below, in place of the expiry warning. A
+  disabled account also refuses SSH keys ("Your account has expired").
 
 ## Ways in without the wizard
 
@@ -233,7 +264,7 @@ ovftool --acceptAllEulas --name=meho --datastore=datastore1 \
   --prop:net.gateway=10.0.0.1 \
   --prop:net.dns=10.0.0.2 \
   --prop:net.admin_network=10.0.50.0/24 \
-  --prop:admin.password='at-least-14-characters' \
+  --prop:admin.password='<a password that follows the password rules>' \
   --prop:admin.ssh_key='ssh-ed25519 AAAA... admin@example.com' \
   meho-appliance-<version>.ova 'vi://root@esxi.example.com/'
 ```
@@ -280,7 +311,9 @@ hardening (#4640) moves it to the disk, add
 On the appliance, all in the Ubuntu 24.04 cloud image: `vmtoolsd`
 (open-vm-tools), `python3`, `netplan`, `systemd-timesyncd`,
 `cloud-guest-utils` (`growpart`), `e2fsprogs`, `openssh-server`,
-`grub2-common`, `plymouth`. From the form-2 download: `install.sh --from-disk`,
+`grub2-common`, `plymouth`. From the hardening (`cis/harden.sh`):
+`libpwquality-tools` (`pwscore`), `libpam-pwquality` and `cracklib-runtime`.
+From the form-2 download: `install.sh --from-disk`,
 `lib/net.sh`, `lib/checks.sh`, and `meho-host admin-network`.
 
 ## Known issues
@@ -318,6 +351,17 @@ commands as a wizard import, that each wrong answer and a 13-character or
 mistyped password are asked again, the empty SSH key, input that ends
 early, and that no password reaches the output or a command line.
 
+The `pwscore` stub refuses a password the way the appliance's settings do,
+with `pwquality`'s own messages, for two rules: fewer than 14 characters,
+and letters and digits only. So the tests cover a password of 22 letters
+and digits: the wizard path stops before `useradd`, the console asks again.
+That the real `pwscore` and `chpasswd` agree on every rule was checked by
+hand in an Ubuntu 24.04 container with the CIS values in
+`/etc/security/pwquality.conf` (#5749). A test checks that the console and
+the wizard name the same rules. The banner tests cover the `shadow` states:
+a password to change at the first login, expiring, expired, disabled after
+the inactive days, locked, and an expired account.
+
 On macOS run them in Docker, as `deploy/appliance/README.md` says.
 
 ## References
@@ -337,6 +381,15 @@ On macOS run them in Docker, as `deploy/appliance/README.md` says.
 - GRUB manual, "Simple configuration" (`GRUB_TIMEOUT_STYLE`,
   `GRUB_TIMEOUT`).
 - `faillock(8)` on Ubuntu 24.04 (the default folder `/var/run/faillock`).
+- libpwquality 1.4.5 (Ubuntu 24.04): `src/pwscore.c` (password on stdin,
+  optional user name, exit code 1 and "Password quality check failed:" on
+  a refused password), `pwquality.conf(5)` (`usercheck` and `dictcheck`
+  default to 1).
+- ComplianceAsCode 0.1.82 `controls/cis_ubuntu2404.yml`, CIS 5.3.3.2.1 to
+  5.3.3.2.8 (`difok = 2`, `minlen = 14`, `minclass = 4`, the four credits
+  -1, `maxrepeat = 3`, `maxsequence = 3`, `dictcheck`, `enforcing`,
+  `enforce_for_root`).
+- Linux-PAM 1.5.3 `modules/pam_unix/passverify.c` (`check_shadow_expiry`).
 - OVF environment: DMTF DSP0243 2.1.1 (the `Environment` and
   `PropertySection` elements; password values in clear text); open-vm-tools
   13.0.10 `services/vmtoolsd/cmdLine.c` (`--cmd` exits 1 when no value is set).

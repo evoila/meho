@@ -14,6 +14,9 @@
 #     (agetty's \4, so a DHCP address shows too), the one-time files that
 #     are still there, and a warning when the admin password expires in
 #     less than 30 days
+#   - it tells the admin to log in only when the admin account takes a
+#     login; a locked or disabled account gets the way in through the boot
+#     menu instead
 #
 # /etc/issue can be read by everyone, so it never holds a secret.
 
@@ -28,6 +31,25 @@ readonly VERSION_FILE=/opt/meho/appliance/download/VERSION
 readonly ONE_TIME_FILES=(/var/lib/meho/first-login-passwords /var/lib/meho/unseal-key /var/lib/meho/bootloader-password)
 readonly ADMIN_USER=admin
 readonly WARN_DAYS=30
+readonly BOOT_MENU_DOC="https://github.com/evoila/meho/blob/main/docs/codebase/appliance-firststart.md"
+
+# admin_can_log_in: whether the admin account takes a login, as pam_unix
+# decides it (check_shadow_expiry): it has a password that is not locked
+# (! or *), the account has not expired, and the password did not expire
+# longer ago than its inactive days.
+admin_can_log_in() {
+    local password="" last_change max_days inactive expire today
+    IFS=: read -r _ password last_change _ max_days _ inactive expire _ < <(getent shadow "$ADMIN_USER") || true
+    [[ -n $password && $password != [*!]* ]] || return 1
+    today=$(($(date +%s) / 86400))
+    if [[ $expire =~ ^[0-9]+$ ]] && ((today >= expire)); then
+        return 1
+    fi
+    if [[ $last_change =~ ^[1-9][0-9]*$ && $max_days =~ ^[0-9]+$ && $inactive =~ ^[0-9]+$ ]]; then
+        ((today - last_change <= max_days + inactive)) || return 1
+    fi
+    return 0
+}
 
 # days_until_password_expiry: the days until the admin password expires, or
 # nothing when it never does or must be changed at the next login anyway.
@@ -47,11 +69,11 @@ banner() {
         printf 'First start stopped:\n'
         # agetty reads a backslash as the start of an escape.
         sed 's/\\/\\\\/g' "${HOST_ROOT}${FAILED_FILE}"
-        # Step 3 makes the account; before that, nobody can log in.
-        if getent passwd "$ADMIN_USER" >/dev/null; then
+        # Step 3 gives the account its password; before that, nobody can log in.
+        if admin_can_log_in; then
             printf '\nLog in as %s to fix it, or see: journalctl -u meho-firststart\n\n' "$ADMIN_USER"
         else
-            printf '\nThe %s account does not exist yet. Follow the fix above from vCenter.\n\n' "$ADMIN_USER"
+            printf '\nNobody can log in as %s yet. Follow the fix above from vCenter.\n\n' "$ADMIN_USER"
         fi
         return 0
     fi
@@ -68,9 +90,14 @@ banner() {
         fi
     done
     days=$(days_until_password_expiry)
-    if [[ -n $days ]] && ((days < WARN_DAYS)); then
+    if ! admin_can_log_in; then
+        printf '\n  [WARN] Nobody can log in as %s: its password is locked, or the account is disabled.\n' "$ADMIN_USER"
+        printf '  To get back in, restart the VM, open the boot menu with the bootloader password from your key store,\n'
+        printf '  and set a new password. The steps: %s,\n' "$BOOT_MENU_DOC"
+        printf '  section "The boot menu, after a lost password or a locked admin".\n'
+    elif [[ -n $days ]] && ((days < WARN_DAYS)); then
         if ((days < 0)); then
-            printf '\n  [WARN] The password of %s has expired. Log in and set a new one before the account is locked.\n' "$ADMIN_USER"
+            printf '\n  [WARN] The password of %s has expired. Log in and set a new one before the account is disabled.\n' "$ADMIN_USER"
         else
             printf '\n  [WARN] The password of %s expires in %d days. Log in and set a new one.\n' "$ADMIN_USER" "$days"
         fi

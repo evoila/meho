@@ -54,13 +54,15 @@ under `/opt/meho/appliance/download`, for the firewall file's path, its
 unit and `firewall_state`. In order:
 
 1. **Packages.** `apt-get install` of `aide`, `aide-common`,
-   `openscap-scanner`, `libpam-pwquality`, `cracklib-runtime` and
-   `apparmor-utils`, which the cloud image does not have; `apt-get purge
-   ufw` (one firewall tool, CIS 4.1.1). The build VM must reach the Ubuntu
-   archive. `cracklib-runtime` builds the dictionary of the password check
-   that the CIS fixes turn on (`dictcheck`). Without it `chpasswd` refuses
-   every password, and first start stops at step 3 (#5744). The install
-   skips recommended packages, so it must be named.
+   `openscap-scanner`, `libpam-pwquality`, `libpwquality-tools`,
+   `cracklib-runtime` and `apparmor-utils`, which the cloud image does not
+   have; `apt-get purge ufw` (one firewall tool, CIS 4.1.1). The build VM
+   must reach the Ubuntu archive. `cracklib-runtime` builds the dictionary
+   of the password check that the CIS fixes turn on (`dictcheck`). Without
+   it `chpasswd` refuses every password, and first start stops at step 3
+   (#5744). The install skips recommended packages, so it must be named. `libpwquality-tools`
+   has `pwscore`, with which first start checks the admin password against
+   the same settings before `chpasswd` (#5749).
 2. **The scanner files** go to `/opt/meho/appliance/cis/`: the data stream,
    the tailoring and the two lists. They stay on the appliance, because
    `meho-host check` and the update scan with them later (#4737).
@@ -180,6 +182,7 @@ Ubuntu's OpenSCAP runs:
   same file is in the `.zip`; the `.tar.gz` needs only `tar` on the runner.
 - On the appliance, from Ubuntu 24.04: `openscap-scanner` 1.3.9 (with SCE),
   `aide` 0.18.6 (`aideinit`, `dailyaidecheck.timer`), `libpam-pwquality`,
+  `libpwquality-tools` 1.4.5 (`pwscore`),
   `cracklib-runtime` (the dictionary in `/var/cache/cracklib/`),
   `apparmor-utils`, `nftables` 1.0.9.
 - From the form-2 download: `lib/firewall.sh` (the firewall file, its unit,

@@ -60,6 +60,7 @@ from urllib.parse import quote
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.audit_query.query import is_withdraw_row
 from meho_backplane.db.models import (
     AuditLog,
     EndpointDescriptor,
@@ -555,9 +556,17 @@ def _op_id_of(row: AuditLog) -> str:
 
 
 def _build_what_happened(
-    *, principal: PrincipalRef, operation: OperationRef, target: TargetRef, status: StatusRef
+    *,
+    principal: PrincipalRef,
+    operation: OperationRef,
+    target: TargetRef,
+    status: StatusRef,
+    withdrawn: bool = False,
 ) -> str:
-    """Compose the plain-language "what happened" line (op + target + outcome)."""
+    """Compose the plain-language "what happened" line (op + target + outcome).
+
+    A withdrawn request (#5717) did not run, so it never says "ran".
+    """
     op_label = operation.summary or operation.op_id
     if target.name:
         target_clause = f" on {target.name}"
@@ -565,6 +574,11 @@ def _build_what_happened(
         target_clause = " on an unresolved target"
     else:
         target_clause = ""
+    if withdrawn:
+        return (
+            f"{principal.display} withdrew the approval request for {op_label}"
+            f"{target_clause}. The operation did not run."
+        )
     return f"{principal.display} ran {op_label}{target_clause} → {status.label}"
 
 
@@ -597,7 +611,12 @@ async def resolve_audit_references(
     work_ref = _resolve_work_ref(row)
     run = await _resolve_run(db_session, row)
     parent = await _resolve_parent(db_session, row)
-    status = resolve_status(row.status_code)
+    withdrawn = is_withdraw_row(row)
+    status = (
+        StatusRef(code=row.status_code, label="Withdrawn", tone="neutral")
+        if withdrawn
+        else resolve_status(row.status_code)
+    )
 
     session_id = str(row.agent_session_id) if row.agent_session_id is not None else None
     session = SessionRef(
@@ -625,7 +644,11 @@ async def resolve_audit_references(
         status=status,
         time=time,
         what_happened=_build_what_happened(
-            principal=principal, operation=operation, target=target, status=status
+            principal=principal,
+            operation=operation,
+            target=target,
+            status=status,
+            withdrawn=withdrawn,
         ),
         audit_href=f"/ui/audit?audit_id={row.id}",
     )

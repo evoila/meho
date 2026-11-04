@@ -904,9 +904,14 @@ person, and was a decision an agent must never make.
   `0119`), and drops a stored credential handoff (#3537).
   `reviewed_by` and `decided_at` stay NULL.
 - **Audit:** one row, `path = 'approval.withdraw'`,
-  `event_class = 'operation_execution'` (not `approval_decision`),
-  `operator_sub` = the sender. The payload has `withdrawn_by` and the
-  optional `reason`, and no `decision` or `reviewed_by` key. A paired
+  `event_class = 'approval_decision'`, `operator_sub` = the sender. The
+  payload has `withdrawn_by` and the optional `reason`, and no `decision`
+  or `reviewed_by` key. The audit query shows its result as `withdrawn`,
+  never `ok`, and a filter for operation runs
+  (`event_class = operation_execution`) does not return it: the
+  operation never ran (#5717). The class is the one of the other rows
+  that close a request (approve, reject, expiry). Rows written before
+  #5717 keep the class `operation_execution`; audit rows never change. A paired
   add-on gets the `approval.withdrawn` step event (#3027).
 - **Nothing runs:** approve, reject and decide on a withdrawn request
   see a closed row and answer 409 `approval_request_already_withdrawn`.

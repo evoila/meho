@@ -56,11 +56,14 @@ unit and `firewall_state`. In order:
 1. **Packages.** `apt-get install` of `aide`, `aide-common`,
    `openscap-scanner`, `libpam-pwquality`, `libpwquality-tools`,
    `cracklib-runtime` and `apparmor-utils`, which the cloud image does not
-   have; `apt-get purge ufw` (one firewall tool, CIS 4.1.1). The build VM
-   must reach the Ubuntu archive. `cracklib-runtime` builds the dictionary
-   of the password check that the CIS fixes turn on (`dictcheck`). Without
-   it `chpasswd` refuses every password, and first start stops at step 3
-   (#5744). The install skips recommended packages, so it must be named. `libpwquality-tools`
+   have, and `rsyslog-gnutls`, rsyslog's TLS module for
+   `meho-host log-server --tls` (#5752; CIS 6.1.3.6, a remote log server),
+   because the appliance cannot download packages later; `apt-get purge ufw`
+   (one firewall tool, CIS 4.1.1). The build VM must reach the Ubuntu
+   archive. `cracklib-runtime` builds the dictionary of the password check
+   that the CIS fixes turn on (`dictcheck`). Without it `chpasswd` refuses
+   every password, and first start stops at step 3 (#5744). The install
+   skips recommended packages, so it must be named. `libpwquality-tools`
    has `pwscore`, with which first start checks the admin password against
    the same settings before `chpasswd` (#5749).
 2. **The scanner files** go to `/opt/meho/appliance/cis/`: the data stream,
@@ -184,7 +187,8 @@ Ubuntu's OpenSCAP runs:
   `aide` 0.18.6 (`aideinit`, `dailyaidecheck.timer`), `libpam-pwquality`,
   `libpwquality-tools` 1.4.5 (`pwscore`),
   `cracklib-runtime` (the dictionary in `/var/cache/cracklib/`),
-  `apparmor-utils`, `nftables` 1.0.9.
+  `apparmor-utils`, `nftables` 1.0.9, `rsyslog-gnutls` 8.2312.0 (in
+  `main`; `rsyslog-openssl` is only in `universe`).
 - From the form-2 download: `lib/firewall.sh` (the firewall file, its unit,
   `firewall_state`).
 

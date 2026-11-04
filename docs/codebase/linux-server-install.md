@@ -618,8 +618,10 @@ customer's security team. `render_firewall_rules` writes it.
     clients, ping, IPv6 neighbour discovery, and the multicast listener
     reports of MLD versions 1 and 2. Linux sends version 2 by default
     (`force_mld_version` is 0), so the chain accepts
-    `mld2-listener-report` next to the design's list. The rule for the
-    customer's log server comes with `meho-host log-server` (#4739).
+    `mld2-listener-report` next to the design's list. On the appliance,
+    `meho-host log-server` (#5752) adds one more rule in front of the
+    counter: the way out to the customer's log server, to its addresses
+    and TCP port only ([linux-server-meho-host.md](linux-server-meho-host.md)).
   - `fib daddr type local` in `output` is for kube-proxy's destination
     NAT. A connection from this machine to a service whose endpoint is
     this machine, for example the Kubernetes API service `10.43.0.1:443`,

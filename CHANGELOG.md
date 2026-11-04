@@ -314,6 +314,9 @@ They only add columns and an index. The new head is `0135`. Read
   - The running backplane can use its own database login, which can add
     audit rows but cannot change or delete them (#5699).
   - More agent-facing text is marked as data, not instructions (#5693).
+  - MEHO reads a tenant's mail recipient allowlist on every `mail.send`.
+    A policy change holds for the next send in every backplane process
+    (#5756).
 - Install hardening:
   - The Linux server install checks the ports of Canal and the ports
     that RKE2 uses on 127.0.0.1 (#5650).
@@ -357,8 +360,10 @@ They only add columns and an index. The new head is `0135`. Read
   Entra ID and your own Keycloak (#5634).
 - Appliance: it sets itself up at its first boot from the wizard fields
   (#5137), asks for the fields on the VM console when there are none
-  (#5661), and is hardened to CIS Level 1 (#5671). The appliance is not
-  published yet.
+  (#5661), and is hardened to CIS Level 1 (#5671). `meho-host
+  log-server <host>[:<port>]` sends the appliance's own logs to your log
+  server, over TCP or TLS, and opens the firewall only for that server
+  (#5757). The appliance is not published yet.
 
 ### Fixed
 - A large API-file ingest keeps the health checks answering: the
@@ -379,6 +384,8 @@ They only add columns and an index. The new head is `0135`. Read
   it would make (#5686).
 - Appliance first start gets past step 3: the `admin` group and the
   password dictionary (#5750).
+- A browser that opens a console fragment URL directly, for example from
+  a bookmark or a reload, goes to the page that holds it (#5751).
 
 ### Changed
 - The claim lookup of the broadcast feed uses its own index (migration

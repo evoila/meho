@@ -27,6 +27,9 @@ notes.
   hidden in answers, previews and records. Request limits and a metrics
   token are on by default in the chart.
 - **New FreeIPA connector.** Reads, and writes that wait for approval.
+- **Smaller fixes.** A mail policy change holds for the next send. The
+  appliance can send its own logs to your log server. A console bookmark
+  of a page part opens the whole page.
 - **Read first.** Three database migrations, new chart defaults, and a
   few scripts must change. See "Breaking changes" and "Steps after the
   upgrade" in the release notes.

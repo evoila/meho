@@ -20,7 +20,9 @@ _JWT = (
     "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
 )
 _PEM_KEY = (
-    "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD9\n-----END RSA PRIVATE KEY-----\n"
+    "-----BEGIN RSA PRIVATE KEY-----\n"  # gitleaks:allow -- made-up test value
+    "MIIBOgIBAAJBAKj34GkxFhD9\n"
+    "-----END RSA PRIVATE KEY-----\n"
 )
 
 

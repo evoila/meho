@@ -531,7 +531,11 @@ _JWT = (
     "notes",
     [
         _JWT,
-        "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----",
+        (
+            "-----BEGIN PRIVATE KEY-----\n"  # gitleaks:allow -- made-up test value
+            "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n"
+            "-----END PRIVATE KEY-----"
+        ),
         "<keep>",
         "********",
     ],
@@ -585,7 +589,10 @@ def _file_with_target(**target: Any) -> str:
 @pytest.mark.parametrize("preview", [True, False])
 def test_plain_password_in_extras_is_refused(client: TestClient, preview: bool) -> None:
     content = _file_with_target(
-        name="x", product="ssh", host="10.0.0.5", extras={"password": "hunter2-plain"}
+        name="x",
+        product="ssh",
+        host="10.0.0.5",
+        extras={"password": "hunter2-plain"},  # gitleaks:allow -- made-up test value
     )
     key = make_rsa_keypair("kid-extras-pw")
     with respx.mock as r:

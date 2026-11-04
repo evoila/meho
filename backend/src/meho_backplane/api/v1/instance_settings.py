@@ -165,7 +165,11 @@ _IMPORT_BODY: Final[dict[str, Any]] = {
 @router.get(
     "/export",
     response_class=Response,
-    responses={200: {"content": {"application/yaml": {"schema": {"type": "string"}}}}},
+    # No schema on purpose: the body is a whole YAML file. With ``type: string``
+    # oapi-codegen would generate a YAML decode into a Go string, which fails on
+    # a mapping and needs gopkg.in/yaml.v2; without a schema the CLI client
+    # hands back the raw bytes, which is what saving the file needs.
+    responses={200: {"content": {"application/yaml": {}}}},
 )
 async def export(
     operator: Annotated[Operator, _settings_admin],

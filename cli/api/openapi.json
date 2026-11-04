@@ -1631,6 +1631,182 @@
         }
       }
     },
+    "/api/v1/settings/export": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Export",
+        "description": "Build ``meho-settings.yaml`` from the live state.\n\nA ``tenant_admin`` gets their own tenant. A ``platform_admin`` gets every\ntenant, or the one named by ``tenant_id``. 409 ``settings_export_refused``\nwhen stored data holds a secret; ``mistakes`` names each path.",
+        "operationId": "export_api_v1_settings_export_get",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/yaml": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/settings/import": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Import Settings",
+        "description": "Check the file and either show what it would change or apply it.\n\n``?preview=true`` changes nothing. Without it the import adds or updates\n(never deletes) in one transaction, or answers 422 with the mistakes and\nwrites nothing.",
+        "operationId": "import_settings_api_v1_settings_import_post",
+        "parameters": [
+          {
+            "name": "preview",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Preview"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsImportResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "The meho-settings.yaml file, as sent (YAML; JSON is valid YAML).",
+          "content": {
+            "application/yaml": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/settings/history": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "History",
+        "description": "The settings revisions the caller may see, newest first.",
+        "operationId": "history_api_v1_settings_history_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SettingsRevision"
+                  },
+                  "title": "Response History Api V1 Settings History Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/event-sources": {
       "get": {
         "tags": [
@@ -36432,6 +36608,128 @@
         "title": "ServiceReadScopeSet",
         "description": "Body for ``PUT /api/v1/service-principals/read-scopes/{principal_sub}``.\n\nReplaces the whole scope. At least one entry: a scope with no entry\nwould refuse every read, which is a job for revoking the principal."
       },
+      "SettingsImportResponse": {
+        "properties": {
+          "preview": {
+            "type": "boolean",
+            "title": "Preview"
+          },
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "mistakes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Mistakes"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          },
+          "diff": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Diff"
+          },
+          "applied": {
+            "type": "boolean",
+            "title": "Applied",
+            "default": false
+          },
+          "revision_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Revision Id"
+          },
+          "failed": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Failed",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "preview",
+          "ok",
+          "mistakes",
+          "warnings",
+          "diff"
+        ],
+        "title": "SettingsImportResponse",
+        "description": "The preview and the apply answer: plain JSON, the mistakes and the diff.\n\n``diff`` has one entry per section (``tenants``, ``policies``,\n``conventions``, ``targets``), each with ``added``, ``changed`` (``before``\nand ``after``) and ``not_in_file`` lists. It is ``null`` when the file has\nmistakes. On an apply, ``diff`` is what actually changed, ``failed`` lists\nthe items that could not be written (the rest were), and ``revision_id`` is\nthe new revision (``null`` when nothing changed)."
+      },
+      "SettingsRevision": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Ts"
+          },
+          "actor_sub": {
+            "type": "string",
+            "title": "Actor Sub"
+          },
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Audit Id"
+          },
+          "file_sha256": {
+            "type": "string",
+            "title": "File Sha256"
+          },
+          "api_version": {
+            "type": "string",
+            "title": "Api Version"
+          },
+          "exported_from": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Exported From"
+          },
+          "summary": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Summary"
+          },
+          "diff": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Diff"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "ts",
+          "actor_sub",
+          "audit_id",
+          "file_sha256",
+          "api_version",
+          "exported_from",
+          "summary",
+          "diff"
+        ],
+        "title": "SettingsRevision",
+        "description": "One ``instance_settings_revision`` row, with its diff worked out on read."
+      },
       "ShowTemplateResponse": {
         "properties": {
           "slug": {
@@ -39182,6 +39480,10 @@
     {
       "name": "service-principal-read-scopes",
       "x-maturity": "ga"
+    },
+    {
+      "name": "settings",
+      "x-maturity": "beta"
     },
     {
       "name": "targets",

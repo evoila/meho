@@ -274,7 +274,7 @@ async def test_export_shape_and_no_secrets(client: TestClient) -> None:
     assert doc["apiVersion"] == "meho.evoila.com/v1"
     assert doc["kind"] == "Settings"
     assert set(doc["metadata"]) == {"exportedAt", "exportedFrom"}
-    assert doc["metadata"]["exportedFrom"]["migrationHead"] == "0104"
+    assert doc["metadata"]["exportedFrom"]["migrationHead"] == "0136"
     (tenant,) = doc["spec"]["tenants"]
     assert tenant["id"] == str(_TENANT)
     assert tenant["policies"] == {
@@ -385,7 +385,7 @@ async def test_apply_records_revision_and_second_import_is_a_no_op(client: TestC
 
 
 @pytest.mark.asyncio
-async def test_convention_history_rows_share_the_import_audit_id(client: TestClient) -> None:
+async def test_convention_history_rows_share_the_import_request(client: TestClient) -> None:
     await _seed()
     content = f"""
 apiVersion: meho.evoila.com/v1
@@ -406,11 +406,13 @@ spec:
         mock_discovery_and_jwks(r, public_jwks(key))
         resp = _import(client, _token(key), content)
     assert resp.status_code == 200, resp.text
-    (revision,) = await _rows(InstanceSettingsRevision)
-    # The migration-seeded default conventions carry history rows without an audit id.
-    history = [h for h in await _rows(TenantConventionHistory) if h.audit_id is not None]
-    assert len(history) == 2
-    assert {h.audit_id for h in history} == {revision.audit_id}
+    assert len(await _rows(InstanceSettingsRevision)) == 1
+    # Migration-seeded default conventions carry history rows with no change_kind.
+    history = [h for h in await _rows(TenantConventionHistory) if h.change_kind is not None]
+    assert sorted(h.change_kind for h in history) == ["created", "updated"]
+    assert len({h.request_id for h in history}) == 1
+    assert history[0].request_id is not None
+    assert {h.actor_sub for h in history} == {"admin-person"}
 
 
 # ---------------------------------------------------------------------------
@@ -568,3 +570,106 @@ def test_ca_certificate_pin_is_not_secret_shaped() -> None:
     from meho_backplane.instance_settings.schema import find_secret_shaped_values
 
     assert find_secret_shaped_values({"tls_ca_pin": _CA_PEM}) == []
+
+
+def _file_with_target(**target: Any) -> str:
+    return yaml.safe_dump(
+        {
+            "apiVersion": "meho.evoila.com/v1",
+            "kind": "Settings",
+            "spec": {"tenants": [{"id": str(_TENANT), "targets": [target]}]},
+        }
+    )
+
+
+@pytest.mark.parametrize("preview", [True, False])
+def test_plain_password_in_extras_is_refused(client: TestClient, preview: bool) -> None:
+    content = _file_with_target(
+        name="x", product="ssh", host="10.0.0.5", extras={"password": "hunter2-plain"}
+    )
+    key = make_rsa_keypair("kid-extras-pw")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _import(client, _token(key), content, preview=preview)
+    assert resp.status_code == (200 if preview else 422)
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["mistakes"] == [
+        "`spec.tenants[0].targets[0].extras.password` is named like a credential; the "
+        "settings file never carries secrets, so store it in OpenBao and refer to it "
+        "with `secret_ref`."
+    ]
+    assert "hunter2-plain" not in resp.text
+
+
+def test_jwt_in_secret_ref_stops_before_the_scope_check(client: TestClient) -> None:
+    """A rejected secret reaches no later check, so no later message can repeat it."""
+    content = _file_with_target(name="x", product="ssh", host="10.0.0.5", secret_ref=_JWT)
+    key = make_rsa_keypair("kid-ref-jwt")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _import(client, _token(key), content, preview=True)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["mistakes"]) == 1, body
+    assert body["mistakes"][0].startswith("`spec.tenants[0].targets[0].secret_ref` has a value")
+    assert body["diff"] is None
+    assert _JWT not in resp.text
+    assert _JWT.split(".")[1] not in resp.text
+
+
+def test_secret_shaped_key_name_is_redacted(client: TestClient) -> None:
+    content = _file_with_target(name="x", product="ssh", host="10.0.0.5", extras={_JWT: "a"})
+    key = make_rsa_keypair("kid-key-jwt")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _import(client, _token(key), content, preview=True)
+    body = resp.json()
+    assert body["mistakes"] == [
+        "`spec.tenants[0].targets[0].extras.<redacted>` has a key name that looks like a "
+        "JWT; the settings file never carries secrets, so store it in OpenBao and refer "
+        "to it with `secret_ref`."
+    ]
+    assert _JWT.split(".")[1] not in resp.text
+
+
+def test_invalid_date_is_a_mistake_not_a_server_error(client: TestClient) -> None:
+    content = (
+        "apiVersion: meho.evoila.com/v1\nkind: Settings\n"
+        "metadata:\n  exportedAt: 2026-99-99\nspec:\n  tenants: []\n"
+    )
+    key = make_rsa_keypair("kid-bad-date")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        preview = _import(client, _token(key), content, preview=True)
+        applied = _import(client, _token(key), content)
+    assert preview.status_code == 200
+    assert preview.json()["mistakes"] == [
+        "Line 4: the value looks like a date but is not a real date."
+    ]
+    assert applied.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value", "path"),
+    [
+        ("notes", _JWT, "spec.tenants[0].targets[0].notes"),
+        ("extras", {"api_key": "plain-text-key"}, "spec.tenants[0].targets[0].extras.api_key"),
+    ],
+)
+async def test_export_refuses_stored_secrets(
+    client: TestClient, field: str, value: Any, path: str
+) -> None:
+    await _insert_target(tenant_id=_TENANT, name="leaky", product="ssh", **{field: value})
+    key = make_rsa_keypair("kid-export-leak")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.get("/api/v1/settings/export", headers=_auth(_token(key)))
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["kind"] == "settings_export_refused"
+    assert len(detail["mistakes"]) == 1
+    assert f"`{path}`" in detail["mistakes"][0]
+    assert _JWT.split(".")[1] not in resp.text
+    assert "plain-text-key" not in resp.text

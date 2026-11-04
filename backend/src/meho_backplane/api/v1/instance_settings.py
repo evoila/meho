@@ -46,6 +46,7 @@ from meho_backplane.db.models import Tenant
 from meho_backplane.instance_settings.schema import MAX_FILE_BYTES
 from meho_backplane.instance_settings.service import (
     ImportPlan,
+    SettingsExportRefusedError,
     SettingsForbiddenError,
     apply_import,
     build_plan,
@@ -77,7 +78,20 @@ def _require_settings_admin(operator: Operator = Depends(verify_jwt_and_bind)) -
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="insufficient_role")
 
 
+def _require_human_settings_admin(
+    operator: Operator = Depends(verify_jwt_and_bind),
+) -> Operator:
+    """The import's gate: a person first (403 ``human_principal_required``), then the role.
+
+    The human check runs first so a machine principal learns the real reason,
+    even though its role is capped below ``tenant_admin`` as well.
+    """
+    ensure_human_principal(operator)
+    return _require_settings_admin(operator)
+
+
 _settings_admin = Depends(_require_settings_admin)
+_human_settings_admin = Depends(_require_human_settings_admin)
 
 
 class SettingsImportResponse(BaseModel):
@@ -161,7 +175,8 @@ async def export(
     """Build ``meho-settings.yaml`` from the live state.
 
     A ``tenant_admin`` gets their own tenant. A ``platform_admin`` gets every
-    tenant, or the one named by ``tenant_id``.
+    tenant, or the one named by ``tenant_id``. 409 ``settings_export_refused``
+    when stored data holds a secret; ``mistakes`` names each path.
     """
     structlog.contextvars.bind_contextvars(audit_op_id=_OP_ID_EXPORT, audit_op_class="read")
     if tenant_id is not None:
@@ -170,7 +185,13 @@ async def export(
         tenant_ids = list((await session.execute(select(Tenant.id))).scalars())
     else:
         tenant_ids = [operator.tenant_id]
-    document = await export_settings(session, tenant_ids)
+    try:
+        document = await export_settings(session, tenant_ids)
+    except SettingsExportRefusedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"kind": "settings_export_refused", "mistakes": exc.mistakes},
+        ) from exc
     return Response(
         content=dump_settings_yaml(document),
         media_type="application/yaml",
@@ -181,7 +202,7 @@ async def export(
 @router.post("/import", response_model=SettingsImportResponse, openapi_extra=_IMPORT_BODY)
 async def import_settings(
     request: Request,
-    operator: Annotated[Operator, _settings_admin],
+    operator: Annotated[Operator, _human_settings_admin],
     session: Annotated[AsyncSession, Depends(get_session)],
     preview: Annotated[bool, Query()] = False,
 ) -> SettingsImportResponse | JSONResponse:
@@ -191,7 +212,6 @@ async def import_settings(
     (never deletes) in one transaction, or answers 422 with the mistakes and
     writes nothing.
     """
-    ensure_human_principal(operator)
     content = await _read_file(request)
     try:
         if preview:

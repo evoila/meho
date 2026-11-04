@@ -30,7 +30,7 @@ apiVersion: meho.evoila.com/v1
 kind: Settings
 metadata:                      # written by export, ignored by import
   exportedAt: 2026-10-14T12:00:00Z
-  exportedFrom: { mehoVersion: v0.35.22, migrationHead: "0104" }
+  exportedFrom: { mehoVersion: v0.35.22, migrationHead: "0136" }
 spec:
   tenants:
     - id: 4f0c…                 # the tenant's Keycloak id (UUID)
@@ -151,8 +151,19 @@ them at once.
   `PRIVATE KEY` PEM block, a JWT, the same after one base64 decode, and
   base64 that decodes to a raw or DER key. A `CERTIFICATE` block passes, so
   `tls_ca_pin` works.
+- Under `extras`, a key named like a credential (`password`, `api_key`,
+  `clientSecret`, `token`, ...) is refused whatever its value: an ordinary
+  password has no shape to find. A key that only names something about a
+  token or secret (`token_url`, `secret_path`) passes. The name rule is
+  `is_secret_param_name` in `broadcast/events.py`, the same one the broadcast
+  scrub and the approval echo use.
 - A mask such as `*`, `********` or `<keep>` is refused. It never means
   "keep the stored value".
+- Once a secret is found, nothing else is checked: no later check, and not
+  the import, ever handles the value. A key name that looks like a secret is
+  shown as `<redacted>` in every sentence.
+- A value YAML cannot convert, such as the date `2026-99-99`, is a mistake
+  sentence with its line, never a server error.
 - A refused value is never shown back: the models set
   `hide_input_in_errors=True`, and sentences are built from the path and the
   error type only.
@@ -182,7 +193,11 @@ settings page (#4048) or `meho settings import`.
 ### `GET /api/v1/settings/export`
 
 Builds the file from the live state (`application/yaml`, sent as
-`meho-settings.yaml`). Tenants are sorted by id, conventions by slug, targets
+`meho-settings.yaml`). Before the file is written, the same secret check runs
+on it: stored data that would be refused on import (a JWT in a target's
+`notes`, `extras.password`, a private key in a convention body) stops the
+export with 409 `settings_export_refused` and a `mistakes` list naming each
+path, never the value. Move the secret into OpenBao and export again. Tenants are sorted by id, conventions by slug, targets
 by name, and keys come in a fixed order, so the same state always gives the
 same `spec`.
 
@@ -233,8 +248,9 @@ body and writes nothing. Otherwise it adds or updates, never deletes:
   for conventions, and `create_target` / `update_target` for targets.
 - One `audit_log` row covers the whole import (`op_id=settings.import`). Its
   `op_class` is `write` only when something is written; a refused or
-  unchanged file leaves a `read` row. The revision row and every
-  `tenant_convention_history` row share its id.
+  unchanged file leaves a `read` row. The revision row keeps its id. Every
+  `tenant_convention_history` row the import writes keeps the import's
+  `request_id` (convention history no longer points at `audit_log`, #3747).
 - `diff` in the answer is what actually changed; `revision_id` is the new
   revision.
 - An unchanged file gives an empty diff and writes no revision.
@@ -248,7 +264,7 @@ The revisions the caller may see, newest first: `id`, `ts`, `actor_sub`,
 
 ## The table: `instance_settings_revision`
 
-Migration `0104`. Append-only: on PostgreSQL a `BEFORE UPDATE OR DELETE`
+Migration `0136`. Append-only: on PostgreSQL a `BEFORE UPDATE OR DELETE`
 trigger refuses any change (a copy of the `audit_log` trigger from `0100`);
 on SQLite it is append-only by convention.
 

@@ -118,3 +118,64 @@ def test_strict_booleans() -> None:
     assert parsed.mistakes == [
         "`spec.tenants[0].policies.announce_gate_enabled` must be true or false."
     ]
+
+
+@pytest.mark.parametrize(
+    ("key", "credential"),
+    [
+        ("password", True),
+        ("adminPassword", True),
+        ("api_key", True),
+        ("apiKey", True),
+        ("client-secret", True),
+        ("bearer_token", True),
+        ("private_key", True),
+        ("token_url", False),
+        ("secret_path", False),
+        ("basic_username", False),
+        ("signature_header", False),
+        ("vault_role", False),
+    ],
+)
+def test_credential_key_names_under_extras(key: str, credential: bool) -> None:
+    found = find_secret_shaped_values({"extras": {key: "plain"}})
+    assert bool(found) is credential
+
+
+def test_credential_key_outside_extras_is_left_to_the_schema() -> None:
+    # Outside ``extras`` the model refuses unknown keys anyway; ``secret_ref`` is legal.
+    assert find_secret_shaped_values({"secret_ref": "tenants/a/b"}) == []
+
+
+def test_secret_stops_all_later_checks() -> None:
+    parsed = parse_settings_file(
+        b"apiVersion: meho.evoila.com/v1\nkind: Settings\nspec:\n  tenants:\n"
+        b"    - targets:\n        - {name: a, product: ssh, extras: {password: x}}\n"
+    )
+    # No "host is required": once a secret is found nothing else runs.
+    assert parsed.model is None
+    assert len(parsed.mistakes) == 1
+    assert "extras.password" in parsed.mistakes[0]
+
+
+def test_repeated_secret_shaped_key_is_redacted() -> None:
+    parsed = parse_settings_file(
+        f"apiVersion: meho.evoila.com/v1\nkind: Settings\n{_JWT}: 1\n{_JWT}: 2\n".encode()
+    )
+    assert parsed.model is None
+    assert any("`<redacted>` appears twice" in m for m in parsed.mistakes)
+    assert not any(_JWT.split(".")[1] in m for m in parsed.mistakes)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"apiVersion: meho.evoila.com/v1\nkind: Settings\nmetadata: {exportedAt: 2026-99-99}\n",
+        b"apiVersion: meho.evoila.com/v1\nkind: Settings\nmetadata: {exportedAt: 2026-02-30}\n",
+        b"apiVersion: meho.evoila.com/v1\nkind: \x07Settings\n",
+    ],
+)
+def test_unreadable_values_are_mistakes(content: bytes) -> None:
+    parsed = parse_settings_file(content)
+    assert parsed.model is None or parsed.mistakes
+    assert parsed.mistakes

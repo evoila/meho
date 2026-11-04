@@ -11,8 +11,8 @@
   mistakes, adds or updates (never deletes) in the request's one transaction,
   in the order tenants, policies, conventions, targets, with a savepoint per
   item so one failed item does not spoil the rest. One ``audit_log`` row
-  covers the whole import; the revision row and every convention history row
-  share its id. An unchanged file writes no revision.
+  covers the whole import and the revision keeps its id; each convention
+  history row keeps the import's ``request_id``. An unchanged file writes no revision.
 * :func:`list_history` returns the revisions, newest first, each with its
   diff worked out on read.
 
@@ -70,6 +70,8 @@ from meho_backplane.instance_settings.schema import (
     SettingsFile,
     SettingsTarget,
     SettingsTenant,
+    contains_secret,
+    find_secret_shaped_values,
     format_validation_errors,
     parse_settings_file,
 )
@@ -86,6 +88,7 @@ __all__ = [
     "DEFAULT_POLICIES",
     "ImportPlan",
     "ImportResult",
+    "SettingsExportRefusedError",
     "SettingsForbiddenError",
     "apply_import",
     "build_plan",
@@ -122,6 +125,18 @@ _conventions = ConventionsService()
 
 class SettingsForbiddenError(Exception):
     """The caller may not import (or preview) this file. The route answers 403."""
+
+
+class SettingsExportRefusedError(Exception):
+    """Stored data holds a secret, so the file is not written. The route answers 409.
+
+    ``mistakes`` names each path (never the value), so an admin can move the
+    secret into OpenBao and export again.
+    """
+
+    def __init__(self, mistakes: list[str]) -> None:
+        super().__init__("; ".join(mistakes))
+        self.mistakes = mistakes
 
 
 # ---------------------------------------------------------------------------
@@ -231,8 +246,17 @@ async def _migration_head(session: AsyncSession) -> str | None:
 
 
 async def export_settings(session: AsyncSession, tenant_ids: list[uuid.UUID]) -> dict[str, Any]:
-    """Build the whole settings document for *tenant_ids* from the live state."""
+    """Build the whole settings document for *tenant_ids* from the live state.
+
+    Raises :class:`SettingsExportRefusedError` when stored data (a target's
+    ``notes`` or ``extras``, a convention body, ...) holds something the import
+    would refuse as a secret: the file must never carry one.
+    """
     blocks = await load_tenant_blocks(session, tenant_ids)
+    spec = {"tenants": list(blocks.values())}
+    mistakes = find_secret_shaped_values(spec, ("spec",))
+    if mistakes:
+        raise SettingsExportRefusedError(mistakes)
     return {
         "apiVersion": API_VERSION,
         "kind": KIND,
@@ -243,7 +267,7 @@ async def export_settings(session: AsyncSession, tenant_ids: list[uuid.UUID]) ->
                 "migrationHead": await _migration_head(session),
             },
         },
-        "spec": {"tenants": list(blocks.values())},
+        "spec": spec,
     }
 
 
@@ -302,6 +326,9 @@ def _detail_sentence(path: str, detail: Any) -> str:
     else:
         message = str(detail)
     message = message.strip().rstrip(".")
+    if contains_secret(message):
+        # A route message may quote the value it refused; never repeat a secret.
+        return f"`{path}` was refused."
     return f"`{path}`: {message}."
 
 
@@ -699,16 +726,17 @@ async def _apply_conventions(
     session: AsyncSession,
     operator: Operator,
     tenant_plan: _TenantPlan,
-    audit_id: uuid.UUID,
     failed: list[str],
 ) -> None:
+    # Each history row records ``request_id`` (#3747), so the rows of one
+    # import link to its request; they no longer carry an ``audit_id``.
     for i, slug, action in tenant_plan.conventions:
         path = f"spec.tenants[{tenant_plan.index}].conventions[{i}]"
         try:
             async with session.begin_nested():
                 if isinstance(action, ConventionCreate):
                     await _conventions.create_convention(
-                        session=session, operator=operator, body=action, audit_id=audit_id
+                        session=session, operator=operator, body=action
                     )
                 else:
                     await _conventions.update_convention(
@@ -716,11 +744,11 @@ async def _apply_conventions(
                         operator=operator,
                         slug=slug,
                         body=action,
-                        audit_id=audit_id,
                     )
         except Exception as exc:
             _log.warning("settings_import_convention_failed", slug=slug, error=str(exc))
-            failed.append(f"`{path}` ({slug}) could not be written: {exc}.")
+            reason = "" if contains_secret(str(exc)) else f": {exc}"
+            failed.append(f"`{path}` ({slug}) could not be written{reason}.")
 
 
 async def _apply_targets(
@@ -775,7 +803,6 @@ async def apply_import(
             session,
             _operator_for(operator, tenant_plan.tenant_id),
             tenant_plan,
-            audit_id,
             result.failed,
         )
     for tenant_plan in live:

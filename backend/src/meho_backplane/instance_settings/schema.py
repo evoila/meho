@@ -49,6 +49,7 @@ from pydantic import (
     field_validator,
 )
 
+from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.connectors.mail.allowlist import parse_recipient_allowlist
 from meho_backplane.conventions.schemas import ConventionKind
 from meho_backplane.targets.schemas import AuthModel
@@ -207,13 +208,18 @@ class SettingsFile(_Strict):
 
 
 def render_path(loc: tuple[int | str, ...] | list[int | str]) -> str:
-    """Render a location tuple as ``spec.tenants[0].targets[3].host``."""
+    """Render a location tuple as ``spec.tenants[0].targets[3].host``.
+
+    A key name that itself looks like a secret is shown as ``<redacted>``, so a
+    sentence about it never repeats it.
+    """
     out = ""
     for part in loc:
         if isinstance(part, int):
             out += f"[{part}]"
-        else:
-            out += f".{part}" if out else str(part)
+            continue
+        name = "<redacted>" if _secret_kind(str(part)) else str(part)
+        out += f".{name}" if out else name
     return out or "(file)"
 
 
@@ -285,6 +291,7 @@ class _DuplicateKeyLoader(yaml.SafeLoader):  # type: ignore[misc]  # yaml has no
     def __init__(self, stream: str) -> None:
         super().__init__(stream)
         self.duplicates: list[tuple[str, int]] = []
+        self.unreadable: list[int] = []
 
 
 def _construct_mapping_checked(loader: _DuplicateKeyLoader, node: yaml.MappingNode) -> Any:
@@ -302,10 +309,21 @@ def _construct_mapping_checked(loader: _DuplicateKeyLoader, node: yaml.MappingNo
     return loader.construct_mapping(node, deep=True)
 
 
+def _construct_timestamp_checked(loader: _DuplicateKeyLoader, node: yaml.ScalarNode) -> Any:
+    # A date-shaped value that is no real date (``2026-99-99``) makes PyYAML
+    # raise ValueError; record the line and keep the text instead.
+    try:
+        return loader.construct_yaml_timestamp(node)
+    except (ValueError, OverflowError):
+        loader.unreadable.append(node.start_mark.line + 1)
+        return loader.construct_scalar(node)
+
+
 _DuplicateKeyLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
     _construct_mapping_checked,
 )
+_DuplicateKeyLoader.add_constructor("tag:yaml.org,2002:timestamp", _construct_timestamp_checked)
 
 
 # ---------------------------------------------------------------------------
@@ -402,21 +420,40 @@ def _secret_kind(text: str) -> str | None:
     return None
 
 
+def contains_secret(text: str) -> bool:
+    """Whether *text*, or any word in it, looks like a secret (used to scrub messages)."""
+    return bool(_secret_kind(text)) or any(
+        _secret_kind(word) for word in re.split(r"[\s'\"`,;()]+", text) if word
+    )
+
+
 def find_secret_shaped_values(data: Any, loc: tuple[int | str, ...] = ()) -> list[str]:
     """Walk *data* and return one sentence per string that looks like a secret.
 
     Checks every string value and every mapping key: a full ``PRIVATE KEY``
     PEM block, a JWT, the same after one base64 decode, base64 that decodes
     to a raw or DER key, and masks such as ``*`` or ``<keep>``. A
-    ``CERTIFICATE`` block passes, so ``tls_ca_pin`` works. The sentence names
-    the path only, never the value.
+    ``CERTIFICATE`` block passes, so ``tls_ca_pin`` works. Under ``extras``, a
+    key named like a credential (``password``, ``api_key``, ...) is refused
+    whatever its value, since an ordinary password has no shape to find; the
+    name rule is :func:`~meho_backplane.broadcast.events.is_secret_param_name`,
+    the one the broadcast scrub and the approval echo use. The
+    sentence names the path only, never the value.
     """
     sentences: list[str] = []
     if isinstance(data, dict):
+        under_extras = "extras" in loc
         for key, value in data.items():
             child = (*loc, str(key))
             if isinstance(key, str) and (kind := _secret_kind(key)):
                 sentences.append(_secret_sentence(child, kind, is_key=True))
+            elif under_extras and isinstance(key, str) and is_secret_param_name(key):
+                sentences.append(
+                    f"`{render_path(child)}` is named like a credential; the settings file "
+                    f"never carries secrets, so store it in OpenBao and refer to it with "
+                    f"`secret_ref`."
+                )
+                continue
             sentences.extend(find_secret_shaped_values(value, child))
     elif isinstance(data, list):
         for index, item in enumerate(data):
@@ -486,7 +523,9 @@ def parse_settings_file(content: bytes) -> ParsedSettings:
     Order: size and encoding, YAML syntax, repeated keys, ``apiVersion``,
     secret-shaped values, the model, repeated items. All checks that can run
     do run, so a file with an unknown key, an unknown ``apiVersion`` and a
-    target with no host yields three sentences.
+    target with no host yields three sentences. The one exception is a
+    secret: once one is found nothing else is checked and no model is
+    returned, so no later check (or the import) ever handles the value.
     """
     if len(content) > MAX_FILE_BYTES:
         return ParsedSettings(
@@ -497,7 +536,13 @@ def parse_settings_file(content: bytes) -> ParsedSettings:
     except UnicodeDecodeError:
         return ParsedSettings(None, ["The file is not UTF-8 text."])
 
-    loader = _DuplicateKeyLoader(text)
+    try:
+        loader = _DuplicateKeyLoader(text)
+    except yaml.YAMLError:
+        # The reader refuses control characters before parsing starts.
+        return ParsedSettings(
+            None, ["The file is not valid YAML: it holds characters YAML refuses."]
+        )
     try:
         raw = loader.get_single_data()
     except yaml.MarkedYAMLError as exc:
@@ -505,15 +550,20 @@ def parse_settings_file(content: bytes) -> ParsedSettings:
         where = f" on line {mark.line + 1}" if mark is not None else ""
         problem = exc.problem or "it cannot be read"
         return ParsedSettings(None, [f"The file is not valid YAML{where}: {problem}."])
-    except yaml.YAMLError:
+    except (yaml.YAMLError, ValueError, TypeError, OverflowError, RecursionError):
+        # Any other value PyYAML cannot convert; never a server error.
         return ParsedSettings(None, ["The file is not valid YAML."])
     finally:
         loader.dispose()
 
     mistakes = [
-        f"Line {line}: the key `{key}` appears twice in the same block."
+        f"Line {line}: the key `{render_path((key,))}` appears twice in the same block."
         for key, line in loader.duplicates
     ]
+    mistakes.extend(
+        f"Line {line}: the value looks like a date but is not a real date."
+        for line in loader.unreadable
+    )
     if not isinstance(raw, dict):
         mistakes.append("The file must be a mapping with apiVersion, kind, metadata and spec.")
         return ParsedSettings(None, mistakes, raw)
@@ -521,7 +571,10 @@ def parse_settings_file(content: bytes) -> ParsedSettings:
     api_version = raw.get("apiVersion")
     if api_version is not None and api_version != API_VERSION:
         mistakes.append(f"`apiVersion` is not a file format this MEHO reads; use `{API_VERSION}`.")
-    mistakes.extend(find_secret_shaped_values(raw))
+    secrets = find_secret_shaped_values(raw)
+    if secrets:
+        # Stop here: no later check may see, and so repeat, a refused value.
+        return ParsedSettings(None, [*mistakes, *secrets])
 
     model: SettingsFile | None = None
     try:

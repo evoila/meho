@@ -11,8 +11,9 @@ columns, so the write lives here once. Each function:
 * binds ``audit_*`` contextvars naming field / old / new, which
   :class:`~meho_backplane.audit.AuditMiddleware` folds into this request's
   ``audit_log`` row (governance config never changes silently);
-* evicts the matching resolver cache so the change governs the next dispatch
-  without waiting out the 60s TTL.
+* evicts the matching resolver cache, where there is one (flight recorder,
+  announce gate), so the change governs the next dispatch without waiting out
+  the 60s TTL. The mail allowlist has no cache: it is read on every send.
 
 Validation (bounds, allowlist grammar) stays with the caller's input model;
 these functions trust their arguments.

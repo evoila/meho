@@ -3,8 +3,8 @@
 
 """Create ``instance_settings_revision`` -- the settings-file import history.
 
-Revision ID: 0104
-Revises: 0103
+Revision ID: 0136
+Revises: 0135
 Create Date: 2026-11-02
 
 One row per applied ``POST /api/v1/settings/import`` that changed something
@@ -13,8 +13,8 @@ One row per applied ``POST /api/v1/settings/import`` that changed something
 * ``id`` / ``ts`` -- the revision's identity and wall-clock time.
 * ``actor_sub`` -- NOT NULL; the human operator who ran the import (machine
   principals cannot import).
-* ``audit_id`` -- soft FK to the import request's ``audit_log`` row. Every
-  ``tenant_convention_history`` row the import writes carries the same id.
+* ``audit_id`` -- soft FK to the import request's ``audit_log`` row. (The
+  ``tenant_convention_history`` rows the import writes link by ``request_id``.)
 * ``file_sha256`` / ``api_version`` / ``exported_from`` -- what was imported:
   the digest of the file bytes, its ``apiVersion``, and its informational
   ``metadata.exportedFrom`` block (JSON, nullable).
@@ -48,10 +48,22 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "0104"
-down_revision: str | None = "0103"
+revision: str = "0136"
+down_revision: str | None = "0135"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+# Alembic reads these names itself. List them in __all__, so the code-quality
+# check does not report them as unused globals. Keep a plain list of strings
+# with no type annotation: the check reads only that form.
+__all__ = [
+    "branch_labels",
+    "depends_on",
+    "down_revision",
+    "downgrade",
+    "revision",
+    "upgrade",
+]
 
 _JSON = sa.JSON().with_variant(postgresql.JSONB(), "postgresql")
 

@@ -71,6 +71,16 @@ def client() -> Iterator[TestClient]:
     async def orphan_fragment() -> HTMLResponse:
         return HTMLResponse(_FRAGMENT_BODY)
 
+    # Target names are path segments and ASGI decodes them, so these two
+    # carry whatever the operator named the connector.
+    @app.get("/ui/connectors/{name}", response_class=HTMLResponse)
+    async def connector_page(name: str) -> HTMLResponse:
+        return HTMLResponse(_PAGE_BODY)
+
+    @app.get("/ui/connectors/{name}/edit", response_class=HTMLResponse)
+    async def connector_edit(name: str) -> HTMLResponse:
+        return HTMLResponse(_FRAGMENT_BODY)
+
     @app.get("/ui/auth/login", response_class=HTMLResponse)
     async def auth_surface() -> HTMLResponse:
         # Deliberately fragment-shaped: the exemption, not the body, is
@@ -199,6 +209,39 @@ def test_top_level_fragment_falls_back_to_the_console_root(client: TestClient) -
     response = client.get("/ui/orphan", headers=_NAVIGATION, follow_redirects=False)
     assert response.status_code == 303
     assert response.headers["location"] == "/ui/"
+
+
+@pytest.mark.parametrize(
+    ("encoded_name", "expected_location"),
+    [
+        # Non-ASCII: writing the decoded byte into the header raised
+        # UnicodeEncodeError -- a 500 after the inner app had answered.
+        ("caf%C3%A9", "/ui/connectors/caf%C3%A9"),
+        # Reserved characters are the quieter half: unencoded, the browser
+        # reads `#` as a fragment identifier and `?` as a query string, so
+        # it lands on /ui/connectors/na -- the wrong page, with no error.
+        ("na%23me", "/ui/connectors/na%23me"),
+        ("na%3Fme", "/ui/connectors/na%3Fme"),
+        ("na%20me", "/ui/connectors/na%20me"),
+    ],
+    ids=["non-ascii", "hash", "question-mark", "space"],
+)
+def test_redirect_target_is_percent_encoded(
+    client: TestClient, encoded_name: str, expected_location: str
+) -> None:
+    """``Location`` must be a URI, whatever the operator named the target."""
+    response = client.get(
+        f"/ui/connectors/{encoded_name}/edit", headers=_NAVIGATION, follow_redirects=False
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == expected_location
+
+
+def test_percent_encoded_target_resolves_back_to_the_page(client: TestClient) -> None:
+    """Following the redirect reaches the real page, not a truncated path."""
+    response = client.get("/ui/connectors/na%23me/edit", headers=_NAVIGATION, follow_redirects=True)
+    assert response.status_code == 200
+    assert response.text == _PAGE_BODY
 
 
 def test_route_templates_sees_the_console_routes() -> None:

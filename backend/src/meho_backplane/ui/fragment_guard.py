@@ -74,11 +74,24 @@ the browser's redirect cap.
 A ``303`` (not ``302``) because the result is a different resource than
 the one asked for, and ``303`` is the status that says so without
 inviting the browser to repeat the original request.
+
+The target is percent-encoded on its way into ``Location``. ASGI hands
+this middleware ``scope["path"]`` already **decoded**, and a target name
+is a path segment, so ``/ui/connectors/caf%C3%A9/edit`` arrives carrying
+a literal ``é`` and ``…/na%23me/edit`` a literal ``#``. Writing either
+straight out is wrong in two different ways: a non-ASCII byte cannot be
+encoded into a header at all (``UnicodeEncodeError``, a 500 raised after
+the inner app already answered), and a reserved character silently
+*changes where the browser goes* -- ``#`` starts a fragment identifier,
+``?`` a query string, so ``/ui/connectors/na#me`` navigates to
+``/ui/connectors/na``. The second is the worse failure: no error, just
+the wrong page.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
+from urllib.parse import quote
 
 import structlog
 
@@ -353,7 +366,7 @@ class FragmentNavigationMiddleware:
                     "type": "http.response.start",
                     "status": 303,
                     "headers": [
-                        (b"location", target.encode("ascii")),
+                        (b"location", quote(target, safe="/").encode("ascii")),
                         (b"content-length", b"0"),
                         (b"cache-control", b"no-store"),
                     ],

@@ -3680,7 +3680,8 @@ async def dispatch(
     _reveal_token = reveal_secret_var.set(reveal_secret if (secret_read or reveal_secret) else None)
     # #3980: a person approved this run, so the internal steps of a
     # multi-step operation go ahead under that approval
-    # (``composite.enforce_subop_policy``). A child dispatch inherits it.
+    # (``composite.enforce_subop_policy``). A child dispatch inherits it and
+    # reads it after its policy gate below.
     _approved_run_token = approved_run_var.set(True) if _approved else None
     try:
         if reveal_secret and _agent_acts(operator):
@@ -3707,6 +3708,20 @@ async def dispatch(
                 preview_hash=preview_hash,
                 params=params,
             )
+            # #3980: a child step of an approved multi-step run goes ahead
+            # under that approval, the same as a step checked by
+            # ``composite.enforce_subop_policy``. Only a step that would wait:
+            # a ``deny`` stays a deny, and a ``destructive`` or
+            # ``requires_approval`` step keeps its own approval.
+            if (
+                verdict is PermissionVerdict.NEEDS_APPROVAL
+                and composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
+                and approved_run_var.get()
+                and descriptor.safety_level != "destructive"
+                and not descriptor.requires_approval
+            ):
+                _log.info("composite_child_covered_by_approved_run", op_id=op_id)
+                verdict = PermissionVerdict.AUTO_EXECUTE
             policy_decision_var.set(verdict.value)
             if verdict == PermissionVerdict.DENY:
                 duration_ms = _elapsed_ms(started)

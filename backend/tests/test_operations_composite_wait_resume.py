@@ -369,3 +369,48 @@ async def test_one_approval_runs_both_dangerous_steps_once(
     async with get_sessionmaker()() as s:
         requests = (await s.execute(select(ApprovalRequest))).scalars().all()
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("how", ["web", "cli"])
+async def test_one_approval_runs_a_dangerous_child_dispatch_once(
+    stub_embedding_service: AsyncMock, session: AsyncSession, how: str
+) -> None:
+    """A ``dangerous`` child run through ``dispatch_child`` goes ahead under the approval.
+
+    The multi-step operation is ``dangerous`` and sent with a token, so the
+    whole run waits once. After one approval, given with a web click or on the
+    command line, the resume runs the child operation exactly once: its own
+    policy check does not make it wait again, and no second approval request
+    is written.
+    """
+    await h.register_child(stub_embedding_service)
+    await h.register_dangerous_child(stub_embedding_service)
+    await h.register_composite(
+        session,
+        h.DANGEROUS_CHILD_COMPOSITE_OP_ID,
+        "dangerous_child_composite",
+        safety_level="dangerous",
+    )
+    h.executed_steps.clear()
+
+    first = await h.run(h.DANGEROUS_CHILD_COMPOSITE_OP_ID)
+    assert first.status == "awaiting_approval", first.error
+    assert h.executed_steps == []
+
+    approver = _approver(how)
+    async with get_sessionmaker()() as s:
+        await approve_request(
+            s, UUID(first.extras["approval_request_id"]), operator=approver, params=None
+        )
+        await s.commit()
+    request = await h.request(UUID(first.extras["approval_request_id"]))
+
+    second = await resume_dispatch_after_approval(operator=approver, request=request, params=None)
+
+    assert second.status == "ok", second.error
+    assert h.executed_steps == [h.DANGEROUS_CHILD_OP_ID]
+    async with get_sessionmaker()() as s:
+        requests = (await s.execute(select(ApprovalRequest))).scalars().all()
+    assert len(requests) == 1
+    child_rows = await h.rows(h.DANGEROUS_CHILD_OP_ID)
+    assert [row.payload["result_status"] for row in child_rows] == ["ok"]

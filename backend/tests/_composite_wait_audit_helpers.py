@@ -52,6 +52,8 @@ DENY_OP_ID = "vault.composite.step_denied"
 PREFLIGHT_OP_ID = "vault.composite.step_refused_before_wait"
 TWO_WAIT_OP_ID = "vault.composite.two_waits"
 TWO_DANGEROUS_OP_ID = "vault.composite.two_dangerous_steps"
+DANGEROUS_CHILD_OP_ID = "vault.kv.destroy_versions"
+DANGEROUS_CHILD_COMPOSITE_OP_ID = "vault.composite.dangerous_child"
 STEP_A = "POST:/vcenter/vm"
 STEP_B = "POST:/vcenter/vm/{vm}/hardware/cdrom"
 STEP_DENIED = "DELETE:/vcenter/vm/{vm}"
@@ -218,6 +220,41 @@ async def two_dangerous_steps_composite(
             return gated
         executed_steps.append(step)
     return {"done": True}
+
+
+async def dangerous_child_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Typed ``dangerous`` child step; records itself in :data:`executed_steps` (#3980)."""
+    executed_steps.append(DANGEROUS_CHILD_OP_ID)
+    return {"done": True}
+
+
+async def dangerous_child_composite(
+    operator: Operator, target: Any, params: dict[str, Any], dispatch_child: DispatchChild
+) -> Any:
+    """One ``dangerous`` child operation run through ``dispatch_child`` (#3980)."""
+    result = await dispatch_child(
+        connector_id=CONNECTOR_ID, op_id=DANGEROUS_CHILD_OP_ID, params={"path": "/a"}
+    )
+    if result.status != "ok":
+        return result
+    return {"done": True}
+
+
+async def register_dangerous_child(embedding: Any) -> None:
+    """Register the typed ``dangerous`` child step of :func:`dangerous_child_composite`."""
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id=DANGEROUS_CHILD_OP_ID,
+        handler=dangerous_child_handler,
+        summary="Destroy versions.",
+        description="Destroy versions.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        safety_level="dangerous",
+        embedding_service=embedding,
+    )
 
 
 # ---------------------------------------------------------------------------

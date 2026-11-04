@@ -3106,7 +3106,10 @@ while the dispatcher runs it with `_approved=True` (it binds
 `approved_run_var`) or while `composite_resume_scope_var` is set (the
 re-entry of an approved step). Then a step whose gate says
 `NEEDS_APPROVAL` goes ahead, unless the step is `destructive` or marked
-`requires_approval`. A `DENY` stays a deny. This holds whoever runs the
+`requires_approval`. A `DENY` stays a deny. The same holds for a child
+operation the composite runs through `dispatch_child`: the child's own
+`dispatch()` reads `approved_run_var` right after its policy gate and goes
+ahead on `NEEDS_APPROVAL` under the same two exceptions. This holds whoever runs the
 resume and however the approval was given: a web click, or the command
 line with a fresh sign-in (#3979). It matters since #3980: a reviewer's
 token, and a `dangerous` step in the web interface, would otherwise wait

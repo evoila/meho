@@ -7,7 +7,7 @@ cluster_harness.py puts a shell stub at the path of RKE2's kubectl. The stub
 logs its arguments to calls.log, like every stub, and runs this script. The
 state is one JSON file, $MEHO_FAKE/cluster.json:
 
-- "secrets": the Secrets of namespace meho by name, each with its "type",
+- "objects": the Secrets of namespace meho by name, each with its "type",
   its "labels" and its "data", decoded;
 - "openbao": the one OpenBao pod: its "uid", whether it is "sealed", the
   unseal "key" that opens it, whether its server "answers" at all, and
@@ -23,6 +23,10 @@ Like the chart's unseal helper, the fake unseals a sealed server when the
 Secret meho-core-vault-unseal holds the right key; it does so at the next
 "bao status" call. A failed write quotes its request in the error text, as
 a real error can, so the tests prove that meho-host does not show it.
+
+The values of a Secret are the fake's answer to meho-host, as kubectl's are:
+_answer() writes them to file descriptor 1, the pipe meho-host reads. They
+are never a log line, so they never go through print or sys.stdout.
 """
 
 from __future__ import annotations
@@ -37,11 +41,19 @@ from typing import Any
 STATE = Path(os.environ["MEHO_FAKE"]) / "cluster.json"
 TLS_SECRET = "meho-core-tls"
 UNSEAL_SECRET = "meho-core-vault-unseal"
+UNSEAL_FIELD = "key"
 POD = "meho-vault-0"
 TLS_TEMPLATE_MARK = '{{"\\n#ca.crt\\n"}}'
 UNSEAL_TEMPLATE_MARK = '{{"present\\n"}}'
 
 State = dict[str, Any]
+
+
+def _answer(text: str) -> None:
+    """kubectl's answer to meho-host: written to file descriptor 1, which
+    meho-host reads, after anything print() keeps in its buffer."""
+    sys.stdout.flush()
+    os.write(1, text.encode())
 
 
 def _error(message: str) -> int:
@@ -79,15 +91,15 @@ def _get(state: State, words: list[str]) -> int:
     template = next((word for word in words if word.startswith("go-template=")), "")
     if kind != "secret" or not template:
         return _error(f"the fake kubectl does not know: get {' '.join(words[1:])}")
-    secret = state["secrets"].get(name)
-    if secret is None:
+    entry = state["objects"].get(name)
+    if entry is None:
         return 0 if "--ignore-not-found" in words else _error(f'secrets "{name}" not found')
-    data = secret["data"]
+    values = entry["data"]
     if name == TLS_SECRET and TLS_TEMPLATE_MARK in template:
-        sys.stdout.write(data.get("tls.crt", "") + "\n#ca.crt\n" + data.get("ca.crt", ""))
+        _answer(values.get("tls.crt", "") + "\n#ca.crt\n" + values.get("ca.crt", ""))
         return 0
     if name == UNSEAL_SECRET and UNSEAL_TEMPLATE_MARK in template:
-        sys.stdout.write("present\n" + data.get("key", ""))
+        _answer("present\n" + values.get(UNSEAL_FIELD, ""))
         return 0
     return _error("the fake kubectl gives Secret content only to the templates of meho-host")
 
@@ -99,11 +111,11 @@ def _patch(state: State, words: list[str], stdin: str) -> int:
         return _error("the fake kubectl takes only a merge patch of a Secret on standard input")
     if "patch" in state["fail"]:
         return _error(f"Internal error occurred: the patch {stdin.strip()} was not saved")
-    secret = state["secrets"].get(name)
-    if secret is None:
+    entry = state["objects"].get(name)
+    if entry is None:
         return _error(f'secrets "{name}" not found')
-    for key, value in json.loads(stdin)["data"].items():
-        secret["data"][key] = base64.b64decode(value, validate=True).decode()
+    for field, value in json.loads(stdin)["data"].items():
+        entry["data"][field] = base64.b64decode(value, validate=True).decode()
     print(f"secret/{name} patched")
     return 0
 
@@ -112,9 +124,9 @@ def _delete(state: State, words: list[str]) -> int:
     name = words[2]
     if "delete" in state["fail"]:
         return _error("Internal error occurred: the Secret was not deleted")
-    if name not in state["secrets"]:
+    if name not in state["objects"]:
         return 0 if "--ignore-not-found" in words else _error(f'secrets "{name}" not found')
-    del state["secrets"][name]
+    del state["objects"][name]
     print(f'secret "{name}" deleted')
     return 0
 
@@ -126,15 +138,15 @@ def _create(state: State, words: list[str], stdin: str) -> int:
         return _error(f"Internal error occurred: the object {stdin.strip()} was not saved")
     manifest = json.loads(stdin)
     name = manifest["metadata"]["name"]
-    if manifest["kind"] != "Secret" or name in state["secrets"]:
+    if manifest["kind"] != "Secret" or name in state["objects"]:
         return _error(f'secrets "{name}" already exists')
-    data = dict(manifest.get("stringData", {}))
-    for key, value in manifest.get("data", {}).items():
-        data[key] = base64.b64decode(value, validate=True).decode()
-    state["secrets"][name] = {
+    values = dict(manifest.get("stringData", {}))
+    for field, value in manifest.get("data", {}).items():
+        values[field] = base64.b64decode(value, validate=True).decode()
+    state["objects"][name] = {
         "type": manifest.get("type", "Opaque"),
         "labels": manifest["metadata"].get("labels", {}),
-        "data": data,
+        "data": values,
     }
     print(f"secret/{name} created")
     return 0
@@ -157,8 +169,9 @@ def _rollout(state: State, words: list[str]) -> int:
 
 def _unseal_helper(state: State) -> None:
     bao = state["openbao"]
-    secret = state["secrets"].get(UNSEAL_SECRET)
-    if bao["sealed"] and secret and "".join(secret["data"].get("key", "").split()) == bao["key"]:
+    entry = state["objects"].get(UNSEAL_SECRET)
+    stored = "".join(entry["data"].get(UNSEAL_FIELD, "").split()) if entry else None
+    if bao["sealed"] and stored == bao["key"]:
         bao["sealed"] = False
 
 

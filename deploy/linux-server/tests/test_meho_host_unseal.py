@@ -204,7 +204,7 @@ class KeyholderOnTests(ClusterTestCase):
                 self.assertEqual(1, result.returncode, self.output(result))
                 self.assertEqual(line, result.stderr.splitlines()[-1])
                 state = self.host.state()
-                self.assertEqual(secret_stays, UNSEAL_SECRET in state["secrets"])
+                self.assertEqual(secret_stays, UNSEAL_SECRET in state["objects"])
                 self.assertEqual(0, state["openbao"]["restarts"])
 
 

@@ -47,7 +47,7 @@ SUPPORT_HINT = "run 'meho-host support-bundle' and send the file to support."
 def initial_state() -> dict[str, Any]:
     chain, ca, key = certificate_with_key()
     return {
-        "secrets": {
+        "objects": {
             TLS_SECRET: {
                 "type": "kubernetes.io/tls",
                 "labels": dict(CORE_LABELS),
@@ -128,12 +128,12 @@ class ClusterHost(FakeHost):
     def keyholder_mode(self, *, sealed: bool) -> None:
         """No unseal Secret: a keyholder unseals OpenBao by hand."""
         state = self.state()
-        del state["secrets"][UNSEAL_SECRET]
+        del state["objects"][UNSEAL_SECRET]
         state["openbao"]["sealed"] = sealed
         self.save(state)
 
     def secret(self, name: str) -> dict[str, Any] | None:
-        secret: dict[str, Any] | None = self.state()["secrets"].get(name)
+        secret: dict[str, Any] | None = self.state()["objects"].get(name)
         return secret
 
 

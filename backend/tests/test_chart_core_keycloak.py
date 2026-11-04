@@ -3,8 +3,10 @@
 
 """Chart-render checks for the built-in Keycloak subchart (#4040).
 
-Off by default: the chart then renders no Keycloak object at all, so a
-bring-your-own install renders what it rendered before. With
+On by default since #4047. These tests start from bring-your-own values
+(every built-in part off) and turn on what they test. Off, the chart renders
+no Keycloak object at all, so a bring-your-own install renders what it
+rendered before. With
 ``coreKeycloak.enabled=true`` the subchart renders a one-replica StatefulSet
 on the official image (pinned by digest), the realm ConfigMap and a Service,
 and the backplane's Ingress gains ``/auth/realms/meho`` and
@@ -33,6 +35,13 @@ _REALM_FILE = _CHART_DIR / "charts" / "keycloak" / "files" / "meho-realm.json"
 _TENANT = "3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c"
 
 _BASE_OVERRIDES = [
+    # Bring-your-own unless a test turns a built-in part on (#4047).
+    "--set",
+    "corePostgres.enabled=false",
+    "--set",
+    "coreKeycloak.enabled=false",
+    "--set",
+    "coreVault.enabled=false",
     "--set",
     "image.tag=test",
     "--set",
@@ -69,6 +78,8 @@ _ON = [
     "coreKeycloak.enabled=true",
     "--set",
     "corePostgres.enabled=true",
+    "--set",
+    "postgres.credentialsSecret=",
     "--set",
     "coreKeycloak.hostname=meho.test",
     "--set",
@@ -121,14 +132,9 @@ def _env(container: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {e["name"]: e for e in container["env"]}
 
 
-def test_off_by_default_renders_nothing() -> None:
+def test_off_renders_nothing() -> None:
     docs = _render()
     assert not [d for d in docs if _is_keycloak(d)]
-    # Saying "off" out loud renders the same objects as leaving it out.
-    explicit = _render("--set", "coreKeycloak.enabled=false")
-    assert [(d["kind"], d["metadata"]["name"]) for d in explicit] == [
-        (d["kind"], d["metadata"]["name"]) for d in docs
-    ]
 
 
 def test_on_renders_statefulset_service_and_realm() -> None:

@@ -44,6 +44,13 @@ from meho_backplane.core.secrets import Plan
 _CHART_DIR = Path(__file__).resolve().parents[2] / "deploy" / "charts" / "meho"
 
 _BASE_OVERRIDES = [
+    # Bring-your-own unless a test turns a built-in part on (#4047).
+    "--set",
+    "corePostgres.enabled=false",
+    "--set",
+    "coreKeycloak.enabled=false",
+    "--set",
+    "coreVault.enabled=false",
     "--set",
     "image.tag=test",
     "--set",

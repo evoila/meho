@@ -76,11 +76,19 @@ data:
   # `config.vaultAddr` empty and runs no Vault, so the key is omitted
   # entirely — the backplane coerces a missing/blank VAULT_ADDR to None
   # and boots Vault-free.
-  {{- if .Values.config.vaultAddr }}
-  VAULT_ADDR: {{ .Values.config.vaultAddr | quote }}
+  {{- /* The three Vault keys below come from the built-in OpenBao when it is on (#4047). */}}
+  {{- $vault := include "meho.vaultSettings" . | fromYaml }}
+  {{- if $vault.addr }}
+  VAULT_ADDR: {{ $vault.addr | quote }}
   {{- end }}
-  VAULT_OIDC_ROLE: {{ .Values.config.vaultOidcRole | quote }}
-  VAULT_OIDC_MOUNT_PATH: {{ .Values.config.vaultOidcMountPath | quote }}
+  VAULT_OIDC_ROLE: {{ $vault.role | quote }}
+  VAULT_OIDC_MOUNT_PATH: {{ $vault.mountPath | quote }}
+  {{- if $vault.schedulerSecret }}
+  # The scheduler's token from <release>-core-vault-scheduler, mounted by
+  # the Deployment. VAULT_KV_TENANT_SCOPE_PREFIX is not set: the code
+  # default keeps each tenant inside secret/tenants/<tenant_id>/.
+  VAULT_SCHEDULER_TOKEN_FILE: /var/run/meho/vault-scheduler/token
+  {{- end }}
   VAULT_TIMEOUT_SECONDS: {{ .Values.config.vaultTimeoutSeconds | quote }}
   # Credential backend surface (Initiative #2227). `CREDENTIAL_BACKEND`
   # names the store a schemeless target `secret_ref` and the

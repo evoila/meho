@@ -180,16 +180,14 @@ command that shows RKE2's log.
 
 `write_place_values` writes `/etc/meho/values-place.yaml` (form-2 design,
 section 6): the host name as `ingress.host` and `coreKeycloak.hostname`,
-the first tenant's id, the two user names, and the pod range as the two
-network-policy ranges, so MEHO may reach the built-in PostgreSQL and
-OpenBao. Without `--first-tenant-id`, the id comes from an existing
-`values-place.yaml`, so a second run keeps the id Keycloak already uses;
-on a fresh machine it is a new UUID read once from
-`/proc/sys/kernel/random/uuid`. The two network-policy ranges are wiring
-until the chart derives them from its built-in parts (#4047), not a place
-answer. The update writes the file again from the answers in `install.json`,
-so when #4047 drops the two keys, the next update removes them from the
-file. The file holds no secret.
+the first tenant's id and the two user names. Without `--first-tenant-id`,
+the id comes from an existing `values-place.yaml`, so a second run keeps the
+id Keycloak already uses; on a fresh machine it is a new UUID read once from
+`/proc/sys/kernel/random/uuid`. The chart reaches its built-in parts by pod
+label (#4047), so the file holds no network-policy range. Older installs
+wrote the pod range there as `networkPolicy.postgresCIDR` and `vaultCIDR`;
+the update writes the file again from the answers in `install.json`, which
+removes them. The file holds no secret.
 
 `install_core` runs the download's Helm:
 
@@ -493,10 +491,9 @@ kernel, the script prints a note to restart the machine after the update.
 `networkPolicy.ingressControllerNamespace: kube-system` (RKE2's Traefik
 runs there) and `ingress.tls.secretName: meho-core-tls`, the self-signed
 certificate the install makes. Every storage class stays at the chart's
-default, empty, so the volumes use the default class. Until the chart
-derives them from its built-in parts (#4047), the file also names the
-PostgreSQL Secret the install makes (`postgres.credentialsSecret`) and the
-built-in OpenBao's address (`vault.address`, `config.vaultAddr`).
+default, empty, so the volumes use the default class. The chart points
+MEHO at the built-in parts itself (#4047), so the file names no database
+Secret and no OpenBao address.
 
 It also turns on the web console (`uiConsole`) and the approval hand-off
 key (`approvalHandoff`), with the Secrets that the chart's secrets Job
@@ -1110,12 +1107,9 @@ Tasks add in this folder are checked by the same job.
   an update refuses. A machine whose DNS record changed since the install
   is a case for support.
 
-- **Three parts of the core are not on `main` yet, so an install cannot be
-  green on a real machine until they land:** the OpenBao init Job and the
-  unseal Secret (#4044, #4046; the script warns and writes no key file),
-  the chart's own wiring of the built-in parts (#4047; three keys in
-  `values-single-node.yaml` do it by hand until then), and
-  `meho status --first-start` (#4042; the result names the list as missing).
+- **`meho status --first-start` is not on `main` yet** (#4042; the result
+  names the list as missing), so an install cannot show its first-start
+  checks until it lands.
 - **The Helm time limit is 15 minutes per operation:** the wait for the
   pods, and each hook Job, so the whole install may take longer. The
   week-4 install (#4741) shows whether a 4-processor machine needs more.

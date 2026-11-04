@@ -39,6 +39,13 @@ _FORM_2_VALUES = [
 ]
 
 _BASE_OVERRIDES = [
+    # Bring-your-own unless a test turns a built-in part on (#4047).
+    "--set",
+    "corePostgres.enabled=false",
+    "--set",
+    "coreKeycloak.enabled=false",
+    "--set",
+    "coreVault.enabled=false",
     "--set",
     "image.tag=test",
     "--set",
@@ -86,7 +93,7 @@ _EXTRAS = [
     'extraVolumes=[{"name":"trust","configMap":{"name":"trust-bundle"}}]',
 ]
 
-_CORE_ON = ["--set", "corePostgres.enabled=true"]
+_CORE_ON = ["--set", "corePostgres.enabled=true", "--set", "postgres.credentialsSecret="]
 
 # Everything that makes the runner's container; `name` is "migrate" in both.
 _SAME_FIELDS = (

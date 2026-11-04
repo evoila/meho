@@ -139,3 +139,12 @@ networkPolicy:
 extraEnv:
   - name: GSM_PARAM_ALLOWED_PROJECTS
     value: my-gcp-project # CHANGE ME (comma-separated project ids)
+
+# Bring-your-own: this file names its own PostgreSQL, Keycloak and Vault
+# (or GSM), so the built-in core parts (on by default, #4047) stay off.
+corePostgres:
+  enabled: false
+coreKeycloak:
+  enabled: false
+coreVault:
+  enabled: false

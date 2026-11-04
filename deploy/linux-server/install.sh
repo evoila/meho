@@ -416,7 +416,7 @@ update_meho() {
     wait_for_rke2 "$rke2_run"
 
     update_step "update the MEHO core"
-    write_place_values "$HOSTNAME_FQDN" "$FIRST_TENANT_ID" "$ADMIN_USER" "$APPROVER_USER" "$CLUSTER_CIDR"
+    write_place_values "$HOSTNAME_FQDN" "$FIRST_TENANT_ID" "$ADMIN_USER" "$APPROVER_USER"
     install_core "$DOWNLOAD_DIR"
 
     update_step "install the meho command and meho-host, and write the install record"
@@ -468,7 +468,7 @@ main() {
     if [[ -z $FIRST_TENANT_ID ]]; then
         FIRST_TENANT_ID=$(tenant_id)
     fi
-    write_place_values "$HOSTNAME_FQDN" "$FIRST_TENANT_ID" "$ADMIN_USER" "$APPROVER_USER" "$CLUSTER_CIDR"
+    write_place_values "$HOSTNAME_FQDN" "$FIRST_TENANT_ID" "$ADMIN_USER" "$APPROVER_USER"
     install_core "$DOWNLOAD_DIR"
 
     step "Step 5: write the two one-time files"

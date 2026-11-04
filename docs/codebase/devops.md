@@ -281,8 +281,14 @@ and they're the minimum surface that admits a Pod under the cluster's
 `networkPolicy.enabled: true` ships a default-deny policy with explicit
 egress rules to:
 
-- Postgres — `tcp/5432` to `networkPolicy.postgresCIDR`
-- Vault — `tcp/8200` to `networkPolicy.vaultCIDR`
+- Postgres — `tcp/5432` to `networkPolicy.postgresCIDR`; with the built-in
+  PostgreSQL (`corePostgres.enabled`) instead to a `podSelector` matching
+  its pod (`app.kubernetes.io/name: postgres` and the release), and
+  `postgresCIDR` is not used (#4047)
+- Vault — `tcp/8200` to `networkPolicy.vaultCIDR`; with the built-in
+  OpenBao (`coreVault.enabled`) instead to a `podSelector` matching its pod
+  (`app.kubernetes.io/name: openbao` and the release), and `vaultCIDR` is
+  not used (#4047)
 - Keycloak — `tcp/443` to `networkPolicy.keycloakCIDR`; with the built-in
   Keycloak (`coreKeycloak.enabled`) instead `tcp/8080` to a `podSelector`
   matching its pod (`app.kubernetes.io/name: keycloak` and the release),
@@ -484,6 +490,48 @@ ServiceAccount, Role and RoleBinding (weight -40, all four phases), which
 may create Secrets, read and patch only the `<release>-core-*` names, and
 read the Secrets the operator names in values.
 Secret table, rules and rights: [core-secrets.md](core-secrets.md).
+
+### Wiring the built-in core to the backplane (`templates/_core-wiring.tpl`, #4047)
+
+The three built-in parts are on by default (chart 0.2.0). With a part on,
+the chart derives the backplane's settings for it from the subchart, and
+the values keys of the bring-your-own part stay unused. The Keycloak half
+is `meho.keycloakSettings` in `_core-keycloak.tpl` (#4591).
+
+| Part on | The backplane gets | Must stay empty (the render stops otherwise) |
+| --- | --- | --- |
+| `corePostgres` | `DATABASE_URL` from `<release>-core-postgres-meho`, key `url` (`migrate` init container, helm test pod; the running backplane uses `<release>-core-postgres-meho-app`, #5699); NetworkPolicy egress by pod | `postgres.credentialsSecret` (or that name), `eso.enabled` |
+| `coreVault` | `VAULT_ADDR=http://<release>-vault:<coreVault.service.port>`, `VAULT_OIDC_ROLE=meho-mcp`, `VAULT_OIDC_MOUNT_PATH=jwt`, `VAULT_SCHEDULER_TOKEN_FILE` from `<release>-core-vault-scheduler` (an optional Secret volume, so the pod starts before the setup Job made it, and the file is read at every use); NetworkPolicy egress by pod | `vault.address`, `config.vaultAddr`; `config.credentialBackend` must be `vault`; `extraEnv` must not set `VAULT_KV_TENANT_SCOPE_PREFIX` empty |
+| any part | `APPROVAL_HANDOFF_ENCRYPTION_KEY` from `<release>-core-approval-handoff` while `approvalHandoff.enabled` is unset; the Ingress certificate `<release>-core-tls` while `ingress.tls.secretName` is empty | |
+
+**Tenant separation.** The setup Job makes one login role, `meho-mcp`, for
+every tenant: it copies the token's `tenant_id` into the login, and the
+tenant policies allow only `secret/tenants/<that id>/`
+([core-vault-init.md](core-vault-init.md)). So the chart leaves
+`VAULT_OIDC_ROLE_BY_TENANT` empty, and it never sets
+`VAULT_KV_TENANT_SCOPE_PREFIX`: the code default
+`secret/tenants/{tenant_id}/` makes the backplane refuse a path outside
+the caller's tenant before it asks OpenBao.
+
+**Bring-your-own.** Set `corePostgres.enabled`, `coreKeycloak.enabled` and
+`coreVault.enabled` to `false` and fill `postgres:`, `keycloak:` /
+`config.keycloak*`, `vault:` / `config.vaultAddr` and the three
+NetworkPolicy CIDRs as before. With all three off the chart renders
+exactly what it rendered before the built-in core;
+`backend/tests/test_chart_bring_your_own_render.py` compares the render of
+`deploy/values-examples/values-bring-your-own-fixture.yaml` with a saved
+copy, with only the chart version evened out.
+
+**Not wired yet.** Valkey and the backplane keep reading the broadcast
+subchart's own `<release>-broadcast-auth`, not `<release>-core-broadcast-auth`:
+the subchart cannot read the parent's `core*` switches, so it needs a
+`global` value or a subchart value first.
+
+**The scheduler's OpenBao token.** The scheduler renews it itself, every
+hour and after each successful read or write
+(`backend/src/meho_backplane/scheduler/vault_credentials.py`). If it has
+expired anyway, a later run of the setup Job makes a new one, and the
+backplane reads the new file without a restart.
 
 ### Broadcast subchart (`charts/broadcast/`)
 
@@ -689,21 +737,24 @@ Design: the internal core design note, §2 (one database server) and §1
   backplane pods (`networkPolicy.backplanePodLabels`; the `migrate` init
   container runs in the backplane pod, and the helm test pod carries the
   same labels) and the Keycloak pods
-  (`networkPolicy.keycloakPodLabels`) of the release. The parent policy's
-  egress rule to the built-in database (by pod, not CIDR) comes with #4050.
+  (`networkPolicy.keycloakPodLabels`) of the release. The parent policy
+  reaches the database by pod, not CIDR (#4047).
 - **Disk lifetime.** The PVC outlives `helm uninstall` (StatefulSet default).
   Delete the PVC and the generated Secrets together, or neither.
 - **After a restore.** A restored dump brings the role passwords of the
   dump. Restart the pod after a restore: the sidecar then sets the
   passwords from the Secrets again (it also does so on the next Secret
   change, but not on its own clock).
-- **What wires it to the backplane.** Not this subchart. The migration
-  runs as the backplane's `migrate` init container in this mode (#5233,
-  see [Migration Job](#migration-job-templatesmigration-jobyaml)), with
-  the owner login and `DATABASE_RUNTIME_ROLE=meho_app`; the backplane
-  container reads `DATABASE_URL` from `<release>-core-postgres-meho-app`
-  (parent helpers `meho.postgres.*` in `templates/_helpers.tpl`). The
-  `DATABASE_URL` default and the schema conditionals come with #4047.
+- **What wires it to the backplane.** Not this subchart, the parent. The
+  migration runs as the backplane's `migrate` init container in this mode
+  (#5233, see [Migration Job](#migration-job-templatesmigration-jobyaml)),
+  with the owner login from `<release>-core-postgres-meho` (key `url`,
+  `meho.databaseSecretName` in `templates/_core-wiring.tpl`, #4047) and
+  `DATABASE_RUNTIME_ROLE=meho_app`; the backplane container reads
+  `DATABASE_URL` from `<release>-core-postgres-meho-app` (parent helpers
+  `meho.postgres.*` in `templates/_helpers.tpl`). `postgres.credentialsSecret`
+  must stay empty or name `<release>-core-postgres-meho`, and `eso.enabled`
+  must be off; the render stops otherwise.
 
 **Helm test.** `templates/tests/test-pgvector.yaml` runs on the same
 image (`corePostgres.image`), in both modes, as user 999. It needs no

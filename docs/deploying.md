@@ -379,11 +379,10 @@ you need nothing outside the cluster. The kind example file
    Do not pass a tag on the `helm` command line (`--set image.tag=...`):
    it wins over the file and asks for an image the cluster does not have.
 
-3. **Keep the three keys at the end of `values-single-node.yaml`:**
-   `postgres.credentialsSecret`, `vault.address` and `config.vaultAddr`.
-   The chart needs them even with all built-in parts on, until it fills
-   them in itself (#4047). Without them, Helm refuses the values with
-   errors about empty or invalid fields, and does not say why.
+3. **Set nothing for the database or Vault.** The chart points MEHO at
+   the built-in PostgreSQL and OpenBao itself (#4047). Leave
+   `postgres.credentialsSecret`, `vault.address` and `config.vaultAddr`
+   unset: the render stops if they name anything else.
 4. **Install and wait:**
 
    ```bash

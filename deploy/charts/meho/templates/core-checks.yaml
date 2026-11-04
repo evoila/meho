@@ -1,0 +1,4 @@
+{{- /* Renders nothing: it only stops a render with values the built-in PostgreSQL or OpenBao cannot work with (see _core-wiring.tpl). */ -}}
+{{- if or .Values.corePostgres.enabled .Values.coreVault.enabled -}}
+{{- include "meho.coreWiringChecks" . -}}
+{{- end -}}

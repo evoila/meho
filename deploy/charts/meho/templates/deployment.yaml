@@ -84,7 +84,7 @@ spec:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.postgres.credentialsSecret }}
+                  name: {{ include "meho.databaseSecretName" . }}
                   key: url
             {{- with include "meho.postgres.runtimeRoleEnv" . }}
             {{- . | nindent 12 }}
@@ -265,12 +265,14 @@ spec:
                   name: {{ .Values.uiConsole.secretName | quote }}
                   key: {{ .Values.uiConsole.sessionEncryptionKey | quote }}
             {{- end }}
-            {{- if .Values.approvalHandoff.enabled }}
+            {{- /* On by default with a built-in part, from the Secret the install makes (#4047). */}}
+            {{- $handoff := include "meho.approvalHandoff" . | fromYaml }}
+            {{- if $handoff.enabled }}
             - name: APPROVAL_HANDOFF_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.approvalHandoff.secretName | quote }}
-                  key: {{ .Values.approvalHandoff.secretKey | quote }}
+                  name: {{ $handoff.secretName | quote }}
+                  key: {{ $handoff.secretKey | quote }}
             {{- end }}
             {{- if .Values.checkRunner.enabled }}
             # #2642 — the in-process check-runner's service-principal
@@ -345,6 +347,14 @@ spec:
             - name: fastembed-cache
               mountPath: {{ .Values.retrieval.modelCache.mountPath | quote }}
             {{- end }}
+            {{- if .Values.coreVault.enabled }}
+            # The scheduler's OpenBao token (#4047). VAULT_SCHEDULER_TOKEN_FILE
+            # in the ConfigMap points here; the backplane reads the file at
+            # every use, so a token the setup Job makes later needs no restart.
+            - name: vault-scheduler
+              mountPath: /var/run/meho/vault-scheduler
+              readOnly: true
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             # Operator-supplied extra VolumeMounts. Paired with
             # `extraVolumes` below — see Issue #209 for the trust-bundle
@@ -362,6 +372,17 @@ spec:
         - name: fastembed-cache
           persistentVolumeClaim:
             claimName: {{ include "meho.fullname" . }}-fastembed-cache
+        {{- end }}
+        {{- if .Values.coreVault.enabled }}
+        # Made by the OpenBao setup Job, which may finish after the pod
+        # starts; `optional` lets the pod start without it.
+        - name: vault-scheduler
+          secret:
+            secretName: {{ printf "%s-core-vault-scheduler" .Release.Name | quote }}
+            optional: true
+            items:
+              - key: token
+                path: token
         {{- end }}
         {{- with .Values.extraVolumes }}
         # Operator-supplied extra Volumes (full Volume shape). Most common

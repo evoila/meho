@@ -356,8 +356,10 @@ ingress:
   tls:
     enabled: true
     # -- Name of the Kubernetes Secret holding the TLS certificate. Required
-    # (non-empty) by the schema only when both `ingress.enabled` and
-    # `ingress.tls.enabled` are true. When cert-manager owns the certificate
+    # (non-empty) by the schema when both `ingress.enabled` and
+    # `ingress.tls.enabled` are true and no built-in core part is on. With
+    # one on, empty means `<release>-core-tls`: the install makes a
+    # self-signed certificate there (#4041). When cert-manager owns the certificate
     # lifecycle, this is the Secret cert-manager creates from the Certificate
     # resource (or from the Ingress annotations on first reconcile).
     secretName: ""
@@ -821,10 +823,11 @@ broadcastAnnouncement:
   # entirely (no audit-row noise, no log line).
   pruneEnabled: true
 
+# A PostgreSQL you bring yourself. Used only with `corePostgres.enabled:
+# false`; the built-in PostgreSQL (the default) needs nothing here.
 postgres:
-  # -- PostgreSQL host. v0.1 expects an operator-managed PG cluster (Goal #11
-  # explicitly excludes a bundled PG subchart); typically reached over the
-  # network at the cluster boundary. Empty in defaults — consumers override.
+  # -- PostgreSQL host. Typically an operator-managed PG cluster reached over
+  # the network at the cluster boundary. Empty in defaults — consumers override.
   host: ""
   # -- PostgreSQL port. 5432 is the upstream default; override only when the
   # operator's PG cluster listens on a non-standard port.
@@ -834,7 +837,9 @@ postgres:
   # logical databases.
   database: meho
   # -- Name of the Kubernetes Secret holding the DATABASE_URL value at key
-  # `url` — MUST be set. Synced from Vault by External Secrets Operator (ESO)
+  # `url` — MUST be set when `corePostgres.enabled` is false. With the
+  # built-in PostgreSQL leave it empty: the backplane then reads
+  # `<release>-core-postgres-meho`, which the install makes. Synced from Vault by External Secrets Operator (ESO)
   # in production; the consumer pre-provisions it before `helm install`.
   #
   # HARD PREREQUISITE (pgvector): the pre-install migration Job runs Alembic
@@ -879,9 +884,13 @@ postgres:
     # -- Kubernetes Secret with the runtime login's DSN at key `url`.
     credentialsSecret: ""
 
+# A Vault you bring yourself. Used only with `coreVault.enabled: false`;
+# with the built-in OpenBao (the default) the chart sets the backplane's
+# address, login role and mount itself, and `vault.address` and
+# `config.vaultAddr` must stay empty.
 vault:
-  # -- Vault address (e.g. `https://vault.example.org`) — MUST be set; empty
-  # fails the schema. Goal #11 cross-repo dependency: the consumer's Vault
+  # -- Vault address (e.g. `https://vault.example.org`) — MUST be set with
+  # `coreVault.enabled: false`; empty fails the schema. Goal #11 cross-repo dependency: the consumer's Vault
   # must have the `meho-mcp` JWT/OIDC role bound to the Keycloak issuer
   # configured below.
   address: ""
@@ -1188,16 +1197,30 @@ uiConsole:
 # must wait for approval. While this block is off, the pod gets no
 # APPROVAL_HANDOFF_ENCRYPTION_KEY and MEHO denies every such operation
 # instead of letting it wait for approval. `GET /ready` shows the state under
-# `features.approval_custody`. Create a Fernet key with
+# `features.approval_custody`.
+#
+# With a built-in core part on, it is on by default (#4047): the install
+# makes the key in `<release>-core-approval-handoff`. Without one, create a
+# Fernet key with
 # `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`,
 # store it in a Kubernetes Secret, then set `enabled: true` and `secretName`.
 # Steps and key rotation: docs/codebase/approvals.md.
 approvalHandoff:
-  enabled: false
+  # -- Unset (the default) = on with a built-in core part, off without one.
+  # `false` turns it off in both cases.
+  enabled: null
+  # -- Your own Secret with the key. Empty = `<release>-core-approval-handoff`.
   secretName: ""
   secretKey: approval_handoff_encryption_key
 
-# Built-in core: the Secrets the install makes (#4041).
+# Built-in core (#3974): PostgreSQL, Keycloak and OpenBao, each on by
+# default, and wired to the backplane by the chart (#4591, #4047). An install
+# that brings its own PostgreSQL, Keycloak or Vault sets the matching
+# `enabled: false` and fills `postgres:`, `keycloak:` / `config.keycloak*`
+# or `vault:` / `config.vaultAddr` as before; with all three off the chart
+# renders what it rendered before the built-in core.
+#
+# The Secrets the install makes (#4041):
 #
 # When a built-in part is on, a hook Job runs before every install and
 # upgrade (templates/core-secrets-job.yaml). It makes each password and key
@@ -1217,8 +1240,12 @@ approvalHandoff:
 corePostgres:
   # -- Built-in PostgreSQL. When on, the install makes
   # `<release>-core-postgres-superuser`, `-core-postgres-meho`,
-  # `-core-postgres-meho-app` and `-core-postgres-keycloak`.
-  enabled: false
+  # `-core-postgres-meho-app` and `-core-postgres-keycloak`. The migrations
+  # read DATABASE_URL from `<release>-core-postgres-meho` (key `url`), the
+  # running backplane from `<release>-core-postgres-meho-app`.
+  # `postgres.credentialsSecret` must then stay empty or name
+  # `<release>-core-postgres-meho`, and `eso.enabled` off.
+  enabled: true
   existingSecrets:
     # -- Your own Secret with the PostgreSQL superuser password (key
     # `password`). Empty = the install makes
@@ -1237,8 +1264,6 @@ corePostgres:
   # `postgres.credentialsSecret` is not needed. A sidecar in the
   # PostgreSQL pod sets the role passwords again whenever the Secrets
   # change. The superuser Secret is mounted by the PostgreSQL pod alone.
-  # Off by default for now; it turns on by default once the existing
-  # bring-your-own installs set `corePostgres.enabled: false`.
   image:
     repository: pgvector/pgvector
     tag: "0.8.7-pg17-bookworm"
@@ -1320,7 +1345,7 @@ coreKeycloak:
   # `config.uiKeycloakClientId` and `keycloakAdmin.url` / `clientId` are
   # not used. Pods call Keycloak over plain HTTP inside the namespace (see
   # docs/codebase/devops.md, "How the backplane uses it").
-  enabled: false
+  enabled: true
   # -- MEHO's public DNS name. Set the same value as `ingress.host`.
   hostname: ""
   # -- The first tenant's id (a UUID). Pick one per install and keep it.
@@ -1431,7 +1456,15 @@ coreVault:
   # its own disk at `http://<release>-vault:8200` inside the namespace. The
   # `vault:` block above stays for a Vault you bring yourself. Every other
   # key is described in `charts/openbao/values.yaml`; set it here.
-  enabled: false
+  #
+  # When on, the chart points the backplane at it (#4047): VAULT_ADDR
+  # `http://<release>-vault:8200`, the login role `meho-mcp` on `jwt` (one
+  # role for every tenant: the token's tenant_id goes into the login, so
+  # each tenant reads only `secret/tenants/<its id>/`), and the scheduler's
+  # token from `<release>-core-vault-scheduler`. Leave `vault.address` and
+  # `config.vaultAddr` empty (the render stops otherwise). Needs
+  # `coreKeycloak.enabled: true`.
+  enabled: true
   # -- Bind OpenBao's service account to `system:auth-delegator` (a
   # ClusterRoleBinding, the chart's only cluster-wide object). Default false:
   # MEHO does not need it.

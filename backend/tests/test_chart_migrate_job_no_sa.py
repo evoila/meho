@@ -42,6 +42,13 @@ _CHART_DIR = _REPO_ROOT / "deploy" / "charts" / "meho"
 
 # Minimal chassis-required overrides that satisfy values.schema.json.
 _BASE_OVERRIDES = [
+    # Bring-your-own unless a test turns a built-in part on (#4047).
+    "--set",
+    "corePostgres.enabled=false",
+    "--set",
+    "coreKeycloak.enabled=false",
+    "--set",
+    "coreVault.enabled=false",
     "--set",
     "image.tag=test",
     "--set",

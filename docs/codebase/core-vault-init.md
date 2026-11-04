@@ -72,7 +72,7 @@ The Secrets:
 | --- | --- | --- |
 | `<release>-core-vault-unseal` | `key` | stays; delete it for "keyholder at boot" (#4046) |
 | `<release>-core-vault-init` | `token` (the root token) | only while the first run runs; deleted at the end |
-| `<release>-core-vault-scheduler` | `token` | stays; the backplane reads it as a file (`VAULT_SCHEDULER_TOKEN_FILE`, #4047). Nothing renews it: a later run of this Job makes a new one when it has expired |
+| `<release>-core-vault-scheduler` | `token` | stays; the backplane reads it as a file (`VAULT_SCHEDULER_TOKEN_FILE`, #4047). The scheduler renews it every hour and after each successful read or write; if it has expired anyway, a later run of this Job makes a new one |
 | `<release>-core-vault-snapshot` | `token` | stays; the backup job renews it (#3960) |
 
 ## Control flow

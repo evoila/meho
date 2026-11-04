@@ -525,9 +525,13 @@ copy, with only the chart version evened out.
 **Not wired yet.** Valkey and the backplane keep reading the broadcast
 subchart's own `<release>-broadcast-auth`, not `<release>-core-broadcast-auth`:
 the subchart cannot read the parent's `core*` switches, so it needs a
-`global` value or a subchart value first. Nothing renews the scheduler
-token; a later run of the setup Job makes a new one when it has expired,
-and the backplane reads the new file without a restart.
+`global` value or a subchart value first.
+
+**The scheduler's OpenBao token.** The scheduler renews it itself, every
+hour and after each successful read or write
+(`backend/src/meho_backplane/scheduler/vault_credentials.py`). If it has
+expired anyway, a later run of the setup Job makes a new one, and the
+backplane reads the new file without a restart.
 
 ### Broadcast subchart (`charts/broadcast/`)
 

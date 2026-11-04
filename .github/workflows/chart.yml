@@ -1504,6 +1504,8 @@ jobs:
             --set config.vaultAddr=https://vault.test \
             --set config.backplaneUrl=https://meho-test.test \
             --set corePostgres.enabled=true \
+            --set coreKeycloak.enabled=false \
+            --set coreVault.enabled=false \
             --set corePostgres.image.digest= \
             --show-only charts/corePostgres/templates/configmap.yaml \
             --show-only charts/corePostgres/templates/service.yaml \

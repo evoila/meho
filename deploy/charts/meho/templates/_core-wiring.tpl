@@ -84,14 +84,16 @@ schedulerSecret: ""
 
 {{/*
 The approval hand-off key as YAML. `approvalHandoff.enabled` left unset
-means on with a built-in part (the secrets Job makes
+or null means on with a built-in part (the secrets Job makes
 `<release>-core-approval-handoff`) and off without one. An empty
-`secretName` means that made Secret.
+`secretName` means that made Secret. The check is on the value's type,
+not `hasKey`: Helm 3 keeps a null default as a key, Helm 4 drops it.
 Usage: {{- $handoff := include "meho.approvalHandoff" . | fromYaml }}
 */}}
 {{- define "meho.approvalHandoff" -}}
 {{- $core := include "meho.core.enabled" . -}}
-{{- $enabled := ternary .Values.approvalHandoff.enabled (eq $core "true") (hasKey .Values.approvalHandoff "enabled") -}}
+{{- $set := .Values.approvalHandoff.enabled -}}
+{{- $enabled := ternary $set (eq $core "true") (kindIs "bool" $set) -}}
 {{- $name := .Values.approvalHandoff.secretName -}}
 {{- if and $enabled (not $name) -}}
 {{- if not $core -}}

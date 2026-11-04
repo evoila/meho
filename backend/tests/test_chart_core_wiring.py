@@ -269,14 +269,10 @@ def test_a_tenant_guard_of_its_own_is_accepted() -> None:
 
 
 @pytest.mark.parametrize(
-    ("key", "message"),
-    [
-        ("postgres.credentialsSecret", "/postgres/credentialsSecret"),
-        ("vault.address", "/vault/address"),
-        ("ingress.tls.secretName", "/ingress/tls/secretName"),
-    ],
+    "key",
+    ["postgres.credentialsSecret", "vault.address", "ingress.tls.secretName"],
 )
-def test_bring_your_own_still_needs_its_values(key: str, message: str) -> None:
+def test_bring_your_own_still_needs_its_values(key: str) -> None:
     byo = [
         "--set",
         "corePostgres.enabled=false",
@@ -302,7 +298,10 @@ def test_bring_your_own_still_needs_its_values(key: str, message: str) -> None:
         "networkPolicy.enabled=false",
     ]
     assert _run(*byo).returncode == 0, _run(*byo).stderr
-    assert message in _fails(*byo, "--set", f"{key}=")
+    # Helm 3 names the key dotted (`postgres.credentialsSecret`), Helm 4 as
+    # a path (`/postgres/credentialsSecret`). CI pins Helm 3.
+    stderr = _fails(*byo, "--set", f"{key}=")
+    assert key in stderr or "/" + key.replace(".", "/") in stderr, stderr
 
 
 def test_bring_your_own_network_policy_still_needs_the_cidrs() -> None:

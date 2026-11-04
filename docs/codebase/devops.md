@@ -1467,8 +1467,38 @@ claude-rdc-hetzner-dc#610 / #715) and shares the
 hardening conventions of `image.yml` (Task #33): job-level fork-PR guard,
 SHA-pinned actions with `# vX.Y.Z` comments, minimum `permissions:` block
 (`contents: read`, `packages: write`, `id-token: write`), per-job
-`timeout-minutes`, and a `concurrency:` group that cancels stale runs per
-ref.
+`timeout-minutes`, and a `concurrency:` group (see "Every main commit gets
+its image and chart" below).
+
+### Every main commit gets its image and chart
+
+`image.yml` and `chart.yml` put each run in a `concurrency:` group:
+
+- **Push to `main`:** one group per commit (the group name ends with the
+  commit sha). A newer push never cancels an older push's run. So every
+  `main` commit gets its own image (`:sha-<commit>`) and its own chart
+  (`0.1.<date>-<short-sha>`).
+- **Pull request:** one group per pull request. A new push to the pull
+  request cancels the old run, as before.
+- **Tag push (`v*`):** one group per tag, as before.
+
+Why: a merge lands on `main` about every 15 minutes, and the image build
+takes about 25 minutes. With one group per branch, each new merge
+cancelled the build of the merge before it, and for hours no `main`
+commit got its image. Only turning off `cancel-in-progress` would not
+fix this. GitHub keeps one waiting run per group, and a newer run
+replaces the waiting one.
+
+What it costs:
+
+- Two or three `main` image builds can run at the same time. They use
+  the `meho-runners-ci` pool (the same pool as the integration test
+  shards), so they take two or three of its runners for about 25
+  minutes. The chart jobs on this pool take a few minutes.
+- Runs can finish out of order. The moving `:main` image alias then
+  points at an older commit for a short time, until the newer run
+  finishes. `:main` is never a deploy target: deploys pin
+  `sha-<commit>` or a release tag.
 
 ### Triggers and locked publish behaviour
 
@@ -1648,7 +1678,9 @@ these workflows:
   `cancel-in-progress: ${{ github.event_name != 'merge_group' }}`. A
   cancelled queue check fails the merge attempt and drops the PR out of
   the queue, so `merge_group` runs are never cancelled; `pull_request` /
-  `push` runs still cancel their own predecessors as before.
+  `push` runs still cancel their own predecessors as before. In
+  `chart.yml` a push to `main` has its own group per commit, so nothing
+  cancels it (see "Every main commit gets its image and chart").
 - **The runs of a dropped group are cancelled.** GitHub does not stop the
   runs of a group that leaves the queue. Two helpers do it, so the runs
   stop using our runners:

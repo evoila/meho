@@ -90,8 +90,11 @@ permissions:
   # and CodeRabbit's same finding. See the `publish` job below.
 
 concurrency:
-  # On main/tag pushes: keep one in-flight publish per ref so a fast follow-up
-  # commit cancels its predecessor. On PRs: scoped by PR ref the same way.
+  # Pushes to main: one group per commit (the sha suffix), so a newer push
+  # never cancels or replaces an older push's run. Every main commit gets
+  # its own chart (0.1.<date>-<short-sha>), like the image in image.yml.
+  # Pull requests: one group per PR, so a new push cancels the old run.
+  # Tag pushes: one group per tag, as before (the sha suffix is empty).
   # The `${{ github.event_name }}` suffix keeps pull_request / push /
   # merge_group runs in distinct cancellation domains (mirrors ci.yml,
   # security-scan.yml, secret-scan.yml, dependency-license-check.yml).
@@ -99,8 +102,10 @@ concurrency:
   # IMPORTANT: already-running merge_group jobs must NEVER be cancelled — a
   # cancelled queue check fails the merge attempt and drops the PR out of the
   # queue, defeating the queue's purpose (#769). cancel-in-progress is
-  # therefore scoped OFF for merge_group and stays ON for pull_request / push.
-  group: chart-${{ github.ref }}-${{ github.event_name }}
+  # therefore scoped OFF for merge_group and stays ON for pull_request / push
+  # (a main push has its own group, so in practice only PRs and a re-pushed
+  # tag cancel an older run).
+  group: chart-${{ github.ref }}-${{ github.event_name }}-${{ github.ref == 'refs/heads/main' && github.sha || '' }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:

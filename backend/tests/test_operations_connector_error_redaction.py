@@ -23,6 +23,8 @@ stay legible.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -176,6 +178,61 @@ def test_http_403_upstream_message_redacted_in_extras_and_summary() -> None:
     assert "[REDACTED:api_key]" in upstream
     assert "ghp_secret" not in upstream
     assert "ghp_secret" not in (result.error or "")
+
+
+def test_http_403_upstream_body_of_name_value_pairs_hides_the_secret_pair_value() -> None:
+    """A body that lists fields as name/value pairs hides the value of the secret-named pair.
+
+    The body is not a ``message`` object, so the raw text goes through the
+    sanitizer. The ``USER`` pair stays; the ``PASSWORD`` pair value is replaced
+    in ``extras`` and in the summary tail.
+    """
+    request = httpx.Request("GET", "https://upstream.test/api/credentials")
+    response = httpx.Response(
+        403,
+        json=[{"name": "USER", "value": "root"}, {"name": "PASSWORD", "value": _PASSWORD_SECRET}],
+        request=request,
+    )
+    exc = httpx.HTTPStatusError("403", request=request, response=response)
+    result = result_connector_http_403("op.read", exc, 1.0)
+    upstream = result.extras["upstream_message"]
+    assert json.loads(upstream) == [
+        {"name": "USER", "value": "root"},
+        {"name": "PASSWORD", "value": "[REDACTED:param_name]"},
+    ]
+    assert upstream in (result.error or "")
+    assert _PASSWORD_SECRET not in repr(result.model_dump())
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '[{"name": "USER", "value": "root"}, {"name": "\\u0050ASSWORD", "value": "SECRET"}]',
+        '[{"name": "USER", "value": "root"}, {"value": "SECRET", "name": "\\u0050ASSWORD"}]',
+    ],
+)
+def test_http_403_upstream_body_with_an_escaped_pair_name_hides_the_secret_pair_value(
+    body: str,
+) -> None:
+    """A pair whose name is written with a JSON escape hides its value like a plain name.
+
+    The body text keeps the escape; the name is read by what it says. Both
+    member orders are covered.
+    """
+    request = httpx.Request("GET", "https://upstream.test/api/credentials")
+    response = httpx.Response(
+        403,
+        content=body.replace("SECRET", _PASSWORD_SECRET).encode(),
+        headers={"content-type": "application/json"},
+        request=request,
+    )
+    exc = httpx.HTTPStatusError("403", request=request, response=response)
+    result = result_connector_http_403("op.read", exc, 1.0)
+    upstream = result.extras["upstream_message"]
+    assert "\\u0050ASSWORD" in upstream
+    assert json.loads(upstream) == json.loads(body.replace("SECRET", "[REDACTED:param_name]"))
+    assert upstream in (result.error or "")
+    assert _PASSWORD_SECRET not in repr(result.model_dump())
 
 
 @pytest.mark.parametrize("credential_text", [_PASSWORD_TEXT, _BEARER_TEXT])

@@ -16,6 +16,9 @@ and refuses to run when it differs:
   count; only the fields that decide where and how MEHO connects do.
 * :func:`preview_changed_since_request` builds the preview again and
   compares its hash with the one the request stored.
+* :func:`~meho_backplane.operations.approval_object_check.object_changed_since_request`
+  builds the approval card again and compares the object it names with
+  the card the person approved (its own module).
 
 The refusal results are
 :func:`~meho_backplane.operations._errors.result_target_changed_since_approval`

@@ -286,6 +286,16 @@ written to the audit log. Concretely:
   re-checked at approve time, so the approval is tied to the preview a
   human actually saw. If the parameters changed between preview and
   approval, the approve is refused.
+- **The run checks the object again.** Right before an approved delete
+  runs, MEHO reads the object once more and compares it with the approval
+  card: the same id or key, or, for an object that has none, the same
+  fields. If someone deleted the object and created a new one under the
+  same name while the request waited, the run is refused and nothing is
+  deleted. The same happens when the card said there was nothing to delete
+  and an object with that name is there now, and when MEHO cannot read the
+  object right before the run. The requester sends a new request, and the
+  approver sees the new object. If the object is simply gone, the run
+  reports it as already absent.
 - **A blast-radius statement is mandatory.** A destructive operation
   cannot park without a block naming the object, its enumerated child
   objects, and how irreversible the change is. The console renders it as
@@ -368,9 +378,10 @@ curl -s https://<your-backplane>/ready | jq .features.approval_queue.effective_p
 # "single_operator_break_glass"   → APPROVAL_ALLOW_SELF_APPROVAL=true is set
 ```
 
-If the deploy sets `METRICS_AUTH_TOKEN`, `/ready` only returns the
-`features` block when you send that token. Add
-`-H "Authorization: Bearer <metrics-token>"` to the `curl` call.
+`/ready` returns the `features` block only when you send the metrics
+token. Add `-H "Authorization: Bearer <metrics-token>"` to the `curl`
+call. A chart install makes the token on the first install; read it with
+`kubectl get secret <release>-metrics-auth -o jsonpath='{.data.token}' | base64 -d`.
 
 **Did a specific write self-approve?** Two signals:
 

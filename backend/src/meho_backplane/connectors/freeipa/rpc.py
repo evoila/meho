@@ -33,21 +33,38 @@ from typing import Any, Final
 
 __all__ = [
     "API_VERSION",
+    "AUTOMEMBER_ADD_COMMAND",
+    "AUTOMEMBER_ADD_CONDITION_COMMAND",
     "GROUP_FIND_COMMAND",
     "GROUP_SHOW_COMMAND",
+    "HBACRULE_ADD_COMMAND",
+    "HBACRULE_ADD_HOST_COMMAND",
+    "HBACRULE_ADD_SERVICE_COMMAND",
+    "HBACRULE_ADD_USER_COMMAND",
+    "HBACRULE_DISABLE_COMMAND",
     "HBACRULE_FIND_COMMAND",
     "HBACRULE_SHOW_COMMAND",
     "HBACTEST_COMMAND",
+    "HOSTGROUP_ADD_COMMAND",
+    "HOSTGROUP_ADD_MEMBER_COMMAND",
+    "HOSTGROUP_DEL_COMMAND",
     "HOSTGROUP_FIND_COMMAND",
     "HOSTGROUP_SHOW_COMMAND",
+    "HOST_DEL_COMMAND",
     "HOST_FIND_COMMAND",
     "HOST_SHOW_COMMAND",
     "JSON_PATH",
     "LOGIN_PATH",
     "PING_COMMAND",
+    "PWPOLICY_MOD_COMMAND",
     "PWPOLICY_SHOW_COMMAND",
     "ROLE_FIND_COMMAND",
     "ROLE_SHOW_COMMAND",
+    "SUDOCMD_ADD_COMMAND",
+    "SUDORULE_ADD_ALLOW_COMMAND_COMMAND",
+    "SUDORULE_ADD_COMMAND",
+    "SUDORULE_ADD_HOST_COMMAND",
+    "SUDORULE_ADD_USER_COMMAND",
     "SUDORULE_FIND_COMMAND",
     "SUDORULE_SHOW_COMMAND",
     "USER_FIND_COMMAND",
@@ -87,6 +104,23 @@ HBACRULE_FIND_COMMAND: Final[str] = "hbacrule_find"
 HBACRULE_SHOW_COMMAND: Final[str] = "hbacrule_show"
 HBACTEST_COMMAND: Final[str] = "hbactest"
 PWPOLICY_SHOW_COMMAND: Final[str] = "pwpolicy_show"
+HOSTGROUP_ADD_COMMAND: Final[str] = "hostgroup_add"
+HOSTGROUP_ADD_MEMBER_COMMAND: Final[str] = "hostgroup_add_member"
+HOSTGROUP_DEL_COMMAND: Final[str] = "hostgroup_del"
+HOST_DEL_COMMAND: Final[str] = "host_del"
+AUTOMEMBER_ADD_COMMAND: Final[str] = "automember_add"
+AUTOMEMBER_ADD_CONDITION_COMMAND: Final[str] = "automember_add_condition"
+SUDOCMD_ADD_COMMAND: Final[str] = "sudocmd_add"
+SUDORULE_ADD_COMMAND: Final[str] = "sudorule_add"
+SUDORULE_ADD_USER_COMMAND: Final[str] = "sudorule_add_user"
+SUDORULE_ADD_HOST_COMMAND: Final[str] = "sudorule_add_host"
+SUDORULE_ADD_ALLOW_COMMAND_COMMAND: Final[str] = "sudorule_add_allow_command"
+HBACRULE_ADD_COMMAND: Final[str] = "hbacrule_add"
+HBACRULE_ADD_USER_COMMAND: Final[str] = "hbacrule_add_user"
+HBACRULE_ADD_HOST_COMMAND: Final[str] = "hbacrule_add_host"
+HBACRULE_ADD_SERVICE_COMMAND: Final[str] = "hbacrule_add_service"
+HBACRULE_DISABLE_COMMAND: Final[str] = "hbacrule_disable"
+PWPOLICY_MOD_COMMAND: Final[str] = "pwpolicy_mod"
 
 #: Longest error text from the server kept in an error message.
 _ERROR_TEXT_LIMIT: Final[int] = 500

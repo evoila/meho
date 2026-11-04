@@ -77,6 +77,7 @@ from meho_backplane.operations._catalog_guard import (
     choose_catalog_for_target,
 )
 from meho_backplane.operations._errors import (
+    result_license_read_off,
     result_target_required,
     result_unqualified_target_version,
 )
@@ -94,9 +95,10 @@ from meho_backplane.operations._validate import (
     policy_gate,
     validate_params,
 )
+from meho_backplane.operations.license_reads import is_license_read
 from meho_backplane.redaction import apply_connector_boundary_redaction
 
-__all__ = ["compute_preview_hash", "preview_dispatch"]
+__all__ = ["PARAMS_DIGEST_KEY", "compute_preview_hash", "preview_dispatch"]
 
 _log = structlog.get_logger(__name__)
 
@@ -113,6 +115,13 @@ _PREVIEW_HASH_KEYS: Final[tuple[str, ...]] = (
     "redacted_body",
 )
 
+#: Envelope key of the keyed digest of the full params a synthetic preview
+#: carries (:mod:`._composite_preview`). Its ``redacted_body`` is a safe view
+#: that hides values, so the digest is what keeps the hash bound to every
+#: value. Hashed only when present: an ingested preview has no digest, and
+#: its hash stays what it was.
+PARAMS_DIGEST_KEY: Final[str] = "params_digest"
+
 
 def compute_preview_hash(envelope: Mapping[str, Any]) -> str:
     """Return a stable SHA-256 hex over a preview's canonicalised resolved envelope.
@@ -124,7 +133,9 @@ def compute_preview_hash(envelope: Mapping[str, Any]) -> str:
     ``redacted_body``) plus its ``connector_id`` / ``op_id`` identity — so two
     previews of the identical ``(connector_id, op_id, target, params)`` yield
     the identical hash, and the dispatcher can recompute it to detect a
-    param-swap between preview and the governed call.
+    param-swap between preview and the governed call. A synthetic preview
+    also carries :data:`PARAMS_DIGEST_KEY`; it joins the projection when
+    present, so a value the safe view hides still changes the hash.
 
     Canonicalisation matches the params hashes in
     :mod:`meho_backplane.operations._validate`
@@ -132,6 +143,8 @@ def compute_preview_hash(envelope: Mapping[str, Any]) -> str:
     so the hashing discipline is uniform across the two binding hashes.
     """
     source = {key: envelope.get(key) for key in _PREVIEW_HASH_KEYS}
+    if PARAMS_DIGEST_KEY in envelope:
+        source[PARAMS_DIGEST_KEY] = envelope[PARAMS_DIGEST_KEY]
     canonical = json.dumps(source, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -219,19 +232,34 @@ def _is_previewable(descriptor: EndpointDescriptor) -> bool:
       sees. A credential-class op (``classify_op`` ∈ the aggregate-only
       :data:`~meho_backplane.operations._preview._SENSITIVE_CLASSES`) is
       **excluded**: its secret rides in the request params, and the synthetic
-      preview's ``redacted_body`` slot uses only connector-boundary value-shape
-      redaction — which does not scrub a structured secret like
-      ``{"data": {"password": …}}``. The park path suppresses credential-class
-      request detail for exactly this reason (``build_proposed_effect`` step 3);
-      mirror it here so a ``vault.kv.put`` / ``k8s.secret.create`` preview never
-      surfaces the written secret. Single-sourced on ``classify_op``; the class
-      set is imported, never re-declared.
+      preview's ``redacted_body`` slot is a safe view of the params
+      (:func:`~meho_backplane.operations._composite_preview.safe_params_view`),
+      not a place to carry a written secret at all. The park path suppresses
+      credential-class request detail for exactly this reason
+      (``build_proposed_effect`` step 3); mirror it here so a ``vault.kv.put`` /
+      ``k8s.secret.create`` preview never surfaces the written secret.
+      Single-sourced on ``classify_op``; the class set is imported, never
+      re-declared.
     """
     if descriptor.source_kind == "ingested":
         return True
     if descriptor.safety_level == "destructive":
         return True
     return descriptor.requires_approval and classify_op(descriptor.op_id) not in _SENSITIVE_CLASSES
+
+
+def _refused_envelope(
+    result: Any, *, op_id: str, connector_id: str, source_kind: str
+) -> dict[str, Any]:
+    """The preview envelope of a dispatch error result that stops before the policy gate."""
+    return {
+        "status": "error",
+        "op_id": op_id,
+        "connector_id": connector_id,
+        "source_kind": source_kind,
+        "error": result.error,
+        "extras": dict(result.extras),
+    }
 
 
 async def _resolve_descriptor(
@@ -291,19 +319,22 @@ async def _resolve_descriptor(
     # Imported lazily: the dispatcher imports this module at load time.
     from meho_backplane.operations.dispatcher import descriptor_requires_target
 
+    if descriptor.source_kind == "ingested" and is_license_read(descriptor.method, descriptor.path):
+        # Same answer and order as ``dispatch``: an ingested read of
+        # licence keys never runs, so its preview says so first.
+        held = result_license_read_off(op_id, 0.0)
+        return _refused_envelope(
+            held, op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
+        )
+
     if target is None and descriptor_requires_target(descriptor):
         # #4139: same answer and same order as ``dispatch`` -- before the
         # catalog choice, so a guarded catalog never answers
         # ``unqualified_target_version`` for a missing target.
         missing = result_target_required(op_id, 0.0)
-        return {
-            "status": "error",
-            "op_id": op_id,
-            "connector_id": connector_id,
-            "source_kind": descriptor.source_kind,
-            "error": missing.error,
-            "extras": dict(missing.extras),
-        }
+        return _refused_envelope(
+            missing, op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
+        )
 
     # --- Catalog choice (mirrors dispatch Step 3, no audit row) ------------
     choice = await choose_catalog_for_target(
@@ -320,14 +351,9 @@ async def _resolve_descriptor(
             target_version=choice.target_version,
             duration_ms=0.0,
         )
-        return {
-            "status": "error",
-            "op_id": op_id,
-            "connector_id": connector_id,
-            "source_kind": descriptor.source_kind,
-            "error": refused.error,
-            "extras": dict(refused.extras),
-        }
+        return _refused_envelope(
+            refused, op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
+        )
     return choice.descriptor, choice.connector_id
 
 
@@ -694,7 +720,7 @@ async def _preview_resolved_op(
         # previewability gate (#3198/#3312) — bind the logical request tuple
         # + reuse the park-time proposed_effect, no handler runs. Imported
         # lazily: the synthetic-preview module imports back from here (shared
-        # ``compute_preview_hash`` / ``_redact_request_body``), so a top-level
+        # ``compute_preview_hash`` / ``PARAMS_DIGEST_KEY``), so a top-level
         # import would cycle.
         from meho_backplane.operations._composite_preview import build_composite_preview
 

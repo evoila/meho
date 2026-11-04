@@ -38,6 +38,10 @@ park without the approver seeing *exactly which record(s) die*:
   (live resolution breaks immediately for every consumer) against the recovery
   path.
 * ``match_count`` — the number of record values the approved call will remove.
+  For ``delete`` with a pinned ``rdata`` that is the values equal to it (one,
+  or zero when it is not there), not the sibling count: the approved run's
+  object check reads a zero as "the record is absent" and refuses the run
+  when the record appears later.
 
 Both decline (return ``None`` → identifier-only default → the park is refused
 ``blast_radius_required``, fail-closed) when the connector/target is
@@ -55,6 +59,7 @@ from meho_backplane.connectors.bind9.ops_record import (
     RemoteCommandError,
     ZoneResolutionError,
     _find_record_matches,
+    _rdata_matches,
     _read_zonefile_text,
     _resolve_zone_and_path,
 )
@@ -159,15 +164,17 @@ async def _bind9_record_delete_preview(ctx: PreviewContext) -> dict[str, Any] | 
         "type": record_type,
         "view": view,
     }
+    removed = matches
     if isinstance(rdata_param, str) and rdata_param:
         obj["rdata"] = rdata_param
+        removed = [value for value in matches if _rdata_matches(rdata_param, value, record_type)]
     children = [{"kind": "record_value", "type": record_type, "rdata": value} for value in matches]
     return {
         "blast_radius": {
             "object": obj,
             "children": children,
             "irreversibility": "recreatable",
-            "match_count": len(matches),
+            "match_count": len(removed),
         },
     }
 

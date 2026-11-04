@@ -93,7 +93,7 @@ In the realm that hosts `meho-backplane`, create a client with:
 | Client ID | `meho-cli` (suggested — any identifier works) | Must match `config.keycloakCliClientId` in your chart values. |
 | Client authentication | **Off** (public client) | The CLI has nowhere to store a secret; the device grant against a confidential client fails with `unauthorized_client`. |
 | Standard flow | **On** | Older `meho` CLI versions open the approval sign-in on this client. The current CLI uses `meho-cli-approve` (below). `meho login` uses the device flow. |
-| PKCE method (Advanced → Proof Key for Code Exchange) | (none) | `meho login` sends no PKCE, and Keycloak checks PKCE at the device login too. A required method refuses every `meho login`. The browser sign-in of older CLI versions still sends a challenge, and Keycloak accepts it. |
+| PKCE method (Advanced → Proof Key for Code Exchange) | (none), or `S256` once every person runs CLI 0.44.0 or later | From CLI 0.44.0, `meho login` sends PKCE (`S256`) at the device login. Older CLI versions send none, and Keycloak checks PKCE at the device login too, so a required method refuses their `meho login`. The browser sign-in of older CLI versions sends a challenge, and Keycloak accepts it. |
 | Direct access grants | Off | Password grant is out of scope by design. |
 | Implicit flow | Off | Deprecated by OAuth 2.1. |
 | Service accounts roles | Off | Public clients cannot hold credentials. |
@@ -193,7 +193,18 @@ the login flow only when its account `meho-admin` has the
 Otherwise add the flow through MEHO (see
 [Add the approval flow to a running realm through MEHO](#add-the-approval-flow-to-a-running-realm-through-meho))
 or by hand as above.
-Until the client exists, approve in the web interface.
+
+**Bind the flow before people approve on the command line.** A
+command-line approval must always sign in through `meho approval
+sign-in`, also on a realm that was made before this flow existed. So on
+an upgraded install, add the flow and bind it to `meho-cli-approve`
+first, with the operation above or by hand. Until the client exists and
+uses this flow, approve in the web interface. This matters most on a
+realm whose login goes straight to a company login: the approval flow
+does not use that login, so the person always types the password (and
+the code) at Keycloak. Check the binding with
+`keycloak.client.get` (`authenticationFlowBindingOverrides.browser` must
+name the flow) and the realm's login with `keycloak.identity_provider.list`.
 
 Two backplane settings control the check:
 
@@ -908,7 +919,7 @@ usually appear:
 | Symptom | Cause | Fix |
 |---|---|---|
 | `unauthorized_client` at login start | The client is confidential, or the device grant is off | Step 2 — public client, device grant **On**. |
-| `meho login` fails at once with `invalid_request` and "Missing parameter: code_challenge_method" | The login client (`meho-cli`) requires a PKCE method. `meho login` sends no PKCE, and Keycloak checks PKCE at the device login too. A realm made with MEHO 0.40.0, 0.41.0 or 0.42.0 (the built-in Keycloak, or `meho admin keycloak bootstrap-clients`) set `S256` on it. | Clear the PKCE method on the login client: in the admin console (Advanced → Proof Key for Code Exchange, set it to empty), or with the operation `keycloak.client.update` and the representation `{"attributes": {"pkce.code.challenge.method": ""}}` (an empty value removes the attribute). Step 2. |
+| `meho login` fails at once with `invalid_request` and "Missing parameter: code_challenge_method" | The login client (`meho-cli`) requires a PKCE method, and the CLI is older than 0.44.0. Those versions send no PKCE at the device login, and Keycloak checks PKCE there too. A realm made with MEHO 0.40.0, 0.41.0 or 0.42.0 (the built-in Keycloak, or `meho admin keycloak bootstrap-clients`) set `S256` on it. | Update the CLI to 0.44.0 or later. Or clear the PKCE method on the login client: in the admin console (Advanced → Proof Key for Code Exchange, set it to empty), or with the operation `keycloak.client.update` and the representation `{"attributes": {"pkce.code.challenge.method": ""}}` (an empty value removes the attribute). Step 2. |
 | Token issued, every call 401s with `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` | Missing protocol mappers, or the person is in none of the five groups | Step 3 — add all the mappers; Step 5 — put the person in one group. Then log out and back in. |
 | Everyone gets the same role, whatever their group | A fixed-value (Hardcoded claim) `tenant_role` mapper is still on the client | Delete it, and add the User Attribute mapper of Step 3 in the admin console. On an existing realm, do not run `meho admin keycloak bootstrap-clients` for this: it rewrites all the mappers and clients. |
 | Token issued, every call 401s with `invalid_token` or `missing_sub`; the decoded token has no `sub` | The `basic` scope is not a default scope on the client | Step 4 — assign it, re-login (existing tokens stay broken). |

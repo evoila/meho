@@ -41,6 +41,7 @@ from meho_backplane.operations.ingest.connector_registration import (
     resolved_profiled_connector_class,
 )
 from meho_backplane.operations.ingest.exceptions import ConnectorNotFoundError
+from meho_backplane.operations.license_reads import LICENSE_PATH_MARK
 
 _log = structlog.get_logger(__name__)
 
@@ -832,7 +833,9 @@ async def bulk_enable_read_ops(
     HTTP method ∈ :data:`READ_HTTP_METHODS` (``GET`` / ``HEAD``) on an
     ``source_kind='ingested'`` row; every write-shaped verb
     (POST / PUT / PATCH / DELETE) and every typed / composite op
-    (``method`` NULL) is left untouched so writes stay default-deny.
+    (``method`` NULL) is left untouched so writes stay default-deny. A
+    read whose path names licences stays off as well: its answer carries
+    licence keys (:mod:`meho_backplane.operations.license_reads`).
 
     Returns the number of rows actually changed. The
     ``is_enabled != True`` guard is what makes the action idempotent:
@@ -861,6 +864,9 @@ async def bulk_enable_read_ops(
             EndpointDescriptor.source_kind == "ingested",
             EndpointDescriptor.method.in_(sorted(READ_HTTP_METHODS)),
             EndpointDescriptor.is_enabled.is_(False),
+            # A read of licence keys stays off; the dispatcher refuses it
+            # too (``operations.license_reads``).
+            ~func.lower(EndpointDescriptor.path).contains(LICENSE_PATH_MARK),
         )
         .values(is_enabled=True)
     )

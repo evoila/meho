@@ -69,7 +69,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
-from meho_backplane.redaction.engine import RedactionManifestEntry
+from meho_backplane.redaction.engine import RedactionManifestEntry, hash_replacement
 from meho_backplane.redaction.path_glob import path_matches
 from meho_backplane.redaction.policy import (
     PRESIDIO_SUPPORTED_ENTITIES,
@@ -469,9 +469,11 @@ def _build_operators(rule: Tier2Rule) -> dict[str, Any]:
       ``masking_char="*"``, ``chars_to_mask=<len>``,
       ``from_end=False``. Length-preserving like Tier-1's mask, but
       Presidio's built-in operator handles the per-entity span.
-    * ``hash`` -> :class:`OperatorConfig("hash", ...)` with
-      ``hash_type="sha256"``. Maps to a stable hex digest the audit
-      replay can compare across calls.
+    * ``hash`` -> :class:`OperatorConfig("custom", ...)` that calls
+      :func:`~meho_backplane.redaction.engine.hash_replacement`, the
+      same keyed fingerprint the first stage writes. Presidio's own
+      ``hash`` operator is not used: it has no key, so a stored value
+      could be computed again from a guess.
     """
     from presidio_anonymizer.entities import OperatorConfig
 
@@ -510,8 +512,8 @@ def _build_operators(rule: Tier2Rule) -> dict[str, Any]:
     if rule.action == "hash":
         return {
             "DEFAULT": OperatorConfig(
-                "hash",
-                {"hash_type": "sha256"},
+                "custom",
+                {"lambda": hash_replacement},
             ),
         }
     # The Literal union on RedactionAction excludes any other value

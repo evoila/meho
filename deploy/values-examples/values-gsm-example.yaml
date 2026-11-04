@@ -71,6 +71,10 @@ config:
   # Optional: impersonate a dedicated reader SA instead of reading directly
   # under the pod's Workload Identity ADC. Leave "" for direct ADC.
   gsmImpersonateSa: "" # e.g. meho-secret-reader@my-gcp-project.iam.gserviceaccount.com
+  # MEHO reads a gsm: secret (a target's login, or a ref in an operation
+  # parameter) only from a Google Cloud project listed in
+  # GSM_PARAM_ALLOWED_PROJECTS. The list is empty by default, which refuses
+  # every gsm: target. Set it through extraEnv at the end of this file.
   # --- Operator console (/ui/*) OAuth (#2594, Goal #336) ---
   # Public client_id of the confidential `meho-web` Keycloak client the
   # browser BFF login runs its authorization-code grant against. Leave
@@ -127,3 +131,11 @@ networkPolicy:
   # unused subnet (no Vault egress rule is exercised without a Vault backend).
   vaultCIDR: 10.0.2.0/24 # CHANGE ME (unused on GSM; kept to satisfy the schema)
   keycloakCIDR: 10.0.3.0/24 # CHANGE ME
+
+# Google Cloud projects MEHO may read gsm: secrets from: a target's login
+# and a gsm: ref in an operation parameter. Comma-separated project ids.
+# Empty (the default) refuses every gsm: target, so list at least the
+# project of your targets' secrets.
+extraEnv:
+  - name: GSM_PARAM_ALLOWED_PROJECTS
+    value: my-gcp-project # CHANGE ME (comma-separated project ids)

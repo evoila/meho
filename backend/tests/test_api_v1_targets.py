@@ -2737,6 +2737,7 @@ def test_create_target_accepts_gsm_secret_ref_on_gsm_backend(
     ``extraEnv`` workaround required (``deploy/values-examples/values-gsm-example.yaml``).
     """
     monkeypatch.setenv("CREDENTIAL_BACKEND", "gsm")
+    monkeypatch.setenv("GSM_PARAM_ALLOWED_PROJECTS", "my-gcp-project")
     get_settings.cache_clear()
     gsm_ref = "gsm:my-gcp-project/vcf-logs#password"
     key = make_rsa_keypair("kid-A")
@@ -2767,6 +2768,7 @@ async def test_update_target_accepts_gsm_secret_ref_on_gsm_backend(
     it must likewise pass through a GSM-backed ref untouched.
     """
     monkeypatch.setenv("CREDENTIAL_BACKEND", "gsm")
+    monkeypatch.setenv("GSM_PARAM_ALLOWED_PROJECTS", "my-gcp-project")
     get_settings.cache_clear()
     gsm_ref = "gsm:my-gcp-project/patched#password"
     key = make_rsa_keypair("kid-A")
@@ -2782,8 +2784,9 @@ async def test_update_target_accepts_gsm_secret_ref_on_gsm_backend(
     assert response.json()["secret_ref"] == gsm_ref
 
 
-def test_create_target_gsm_scheme_ref_bypasses_gate_on_vault_backend(
+def test_create_target_gsm_scheme_ref_resolves_to_gsm_on_vault_backend(
     client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A ``gsm:`` scheme ref resolves to GSM even on a Vault-default deploy.
 
@@ -2794,6 +2797,8 @@ def test_create_target_gsm_scheme_ref_bypasses_gate_on_vault_backend(
     not apply and the ref is stored verbatim — the guard stays fully
     intact for schemeless / ``vault:`` refs (covered above).
     """
+    monkeypatch.setenv("GSM_PARAM_ALLOWED_PROJECTS", "my-gcp-project")
+    get_settings.cache_clear()
     gsm_ref = "gsm:my-gcp-project/override#password"
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
@@ -2810,6 +2815,112 @@ def test_create_target_gsm_scheme_ref_bypasses_gate_on_vault_backend(
         )
     assert response.status_code == 201
     assert response.json()["secret_ref"] == gsm_ref
+
+
+def _assert_project_not_allowed(response: Any, *, secret_ref: str, project: str) -> None:
+    """The 422 names the project, the setting and the remediation, in a stable shape."""
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["kind"] == "secret_ref_project_not_allowed"
+    assert detail["secret_ref"] == secret_ref
+    assert detail["project"] == project
+    assert detail["setting"] == "GSM_PARAM_ALLOWED_PROJECTS"
+    assert "GSM_PARAM_ALLOWED_PROJECTS" in detail["message"]
+    assert project in detail["message"]
+
+
+@pytest.mark.parametrize(
+    ("allowed", "secret_ref", "project"),
+    [
+        ("", "gsm:my-gcp-project/vcf-logs#password", "my-gcp-project"),
+        ("other-project", "gsm:my-gcp-project/vcf-logs#password", "my-gcp-project"),
+        ("my-gcp-project", "gsm:my-gcp-project-2/vcf-logs", "my-gcp-project-2"),
+        ("my-gcp-project", "gsm:/vcf-logs", ""),
+    ],
+)
+def test_create_target_refuses_gsm_secret_ref_in_a_project_not_allowed(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    allowed: str,
+    secret_ref: str,
+    project: str,
+) -> None:
+    """POST with a ``gsm:`` ref is refused unless its project is on the list.
+
+    The empty list (the default) allows no project. A project that is
+    only a prefix of a listed one, or a ref with no project segment, is
+    refused too.
+    """
+    monkeypatch.setenv("GSM_PARAM_ALLOWED_PROJECTS", allowed)
+    get_settings.cache_clear()
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "gsm-not-allowed",
+                "product": "ssh",
+                "host": "10.0.0.5",
+                "secret_ref": secret_ref,
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    _assert_project_not_allowed(response, secret_ref=secret_ref, project=project)
+
+
+def test_create_target_refuses_schemeless_ref_on_gsm_backend_when_project_not_allowed(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a ``CREDENTIAL_BACKEND=gsm`` install a schemeless ref follows the same rule."""
+    monkeypatch.setenv("CREDENTIAL_BACKEND", "gsm")
+    monkeypatch.setenv("GSM_PARAM_ALLOWED_PROJECTS", "my-gcp-project")
+    get_settings.cache_clear()
+    secret_ref = "other-project/vcf-logs#password"
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "gsm-schemeless-not-allowed",
+                "product": "ssh",
+                "host": "10.0.0.5",
+                "secret_ref": secret_ref,
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    _assert_project_not_allowed(response, secret_ref=secret_ref, project="other-project")
+
+
+@pytest.mark.asyncio
+async def test_update_target_refuses_gsm_secret_ref_in_a_project_not_allowed(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PATCH runs the same project check as POST, and the stored ref stays unchanged."""
+    monkeypatch.setenv("GSM_PARAM_ALLOWED_PROJECTS", "my-gcp-project")
+    get_settings.cache_clear()
+    secret_ref = "gsm:other-project/patched#password"
+    key = make_rsa_keypair("kid-A")
+    await _insert_target(
+        name="patched-gsm-refused", product="ssh", host="10.0.0.9", secret_ref=None
+    )
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.patch(
+            "/api/v1/targets/patched-gsm-refused",
+            json={"secret_ref": secret_ref},
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+        _assert_project_not_allowed(response, secret_ref=secret_ref, project="other-project")
+        shown = client.get(
+            "/api/v1/targets/patched-gsm-refused",
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert shown.status_code == 200
+    assert shown.json()["secret_ref"] is None
 
 
 # ---------------------------------------------------------------------------

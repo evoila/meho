@@ -144,6 +144,24 @@
         }
       }
     },
+    "metricsAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The metrics token. With `enabled: true` (default) the backplane gets `METRICS_AUTH_TOKEN` from a Secret: `existingSecret` when set, else the chart-made `<release>-metrics-auth`. `/metrics` answers only a caller that sends the token as a bearer; `/ready` shows its `features` block only to such a caller and gives every caller the verdict and the checks. The ServiceMonitor (when on) sends the token from the same Secret.",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "existingSecret": {
+          "type": "string",
+          "description": "Name of your own Secret holding the token under `secretKey`. Empty: the chart makes `<release>-metrics-auth`."
+        },
+        "secretKey": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Key in the Secret that holds the token."
+        }
+      }
+    },
     "prometheusRule": {
       "type": "object",
       "additionalProperties": false,
@@ -447,6 +465,21 @@
           "enum": ["true", "false"],
           "description": "Lab-class switch for delegated approval decisions (#3693), rendered unconditionally into the `APPROVAL_ALLOW_DELEGATED_DECISION` env var. A delegated decision is an approve or reject whose reason ends with an `Instructed-by:` block. Default `\"false\"` (fail-closed, production) refuses every delegated decision with 403 `delegated_decision_forbidden`. Set `\"true\"` only on a lab-class deployment. Deliberately absent from `config.required`."
         },
+        "dispatchRateLimitPerMinute": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "How many operations one person or agent may start per minute, counted per tenant and principal in the Valkey store. Rendered into `DISPATCH_RATE_LIMIT_PER_MINUTE`. Default `\"600\"`. `\"0\"` turns the limit off. See `docs/codebase/rate-limiting.md`."
+        },
+        "dispatchMaxConcurrentOps": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "How many operations one person or agent may have running at the same time. Rendered into `DISPATCH_MAX_CONCURRENT_OPS`. Default `\"16\"`. `\"0\"` turns the cap off."
+        },
+        "mcpSessionStartLimitPerMinute": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "How many new MCP sessions one tenant may start per minute. Rendered into `MCP_SESSION_START_LIMIT_PER_MINUTE`. Default `\"60\"`. `\"0\"` turns the cap off."
+        },
         "freshSignInMaxAgeSeconds": {
           "type": "string",
           "pattern": "^([3-9][0-9]|[1-9][0-9]{2}|[12][0-9]{3}|3[0-5][0-9]{2}|3600)$",
@@ -475,6 +508,22 @@
           "type": "string",
           "minLength": 1,
           "description": "Kubernetes Secret name holding the DATABASE_URL value at key `url` — required."
+        },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The login of the running backplane, apart from the owner login in `credentialsSecret` that runs the migrations. Both keys empty = one login for everything.",
+          "properties": {
+            "role": {
+              "type": "string",
+              "pattern": "^([a-z_][a-z0-9_]{0,62})?$",
+              "description": "Name of the runtime role: a lower-case PostgreSQL role name. The migration grants it its rights (`DATABASE_RUNTIME_ROLE`)."
+            },
+            "credentialsSecret": {
+              "type": "string",
+              "description": "Kubernetes Secret holding the runtime login's DSN at key `url`. With your own PostgreSQL, `role` and this key go together. With the built-in PostgreSQL, leave it empty: the install makes `<release>-core-postgres-meho-app`, and the PostgreSQL pod reads only that Secret."
+            }
+          }
         }
       }
     },
@@ -1677,6 +1726,102 @@
     }
   },
   "allOf": [
+    {
+      "description": "A runtime login needs both keys: `postgres.runtime.credentialsSecret` names the Secret, `postgres.runtime.role` the role the migration grants. A Secret without a role would give the running backplane a login with no rights. The next rule checks the other direction.",
+      "if": {
+        "properties": {
+          "postgres": {
+            "properties": {
+              "runtime": {
+                "properties": { "credentialsSecret": { "minLength": 1 } },
+                "required": ["credentialsSecret"]
+              }
+            },
+            "required": ["runtime"]
+          }
+        },
+        "required": ["postgres"]
+      },
+      "then": {
+        "properties": {
+          "postgres": {
+            "properties": {
+              "runtime": {
+                "properties": { "role": { "minLength": 1 } },
+                "required": ["role"]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "With your own PostgreSQL a runtime role needs its Secret too: `postgres.runtime.role` without `postgres.runtime.credentialsSecret` would make the migration grant rights to a login the running backplane never uses, and the backplane would keep the owner login. With the built-in PostgreSQL the install makes the Secret, so `role: meho_app` alone is fine there.",
+      "if": {
+        "allOf": [
+          {
+            "not": {
+              "properties": {
+                "corePostgres": {
+                  "properties": { "enabled": { "const": true } },
+                  "required": ["enabled"]
+                }
+              },
+              "required": ["corePostgres"]
+            }
+          },
+          {
+            "properties": {
+              "postgres": {
+                "properties": {
+                  "runtime": {
+                    "properties": { "role": { "minLength": 1 } },
+                    "required": ["role"]
+                  }
+                },
+                "required": ["runtime"]
+              }
+            },
+            "required": ["postgres"]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "postgres": {
+            "properties": {
+              "runtime": {
+                "properties": { "credentialsSecret": { "minLength": 1 } },
+                "required": ["credentialsSecret"]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "With the built-in PostgreSQL the runtime role is `meho_app`, made by the install together with the Secret `<release>-core-postgres-meho-app`. `postgres.runtime.role` stays empty or `meho_app` there; another name would make the migration wait for a role the install never creates. `postgres.runtime.credentialsSecret` stays empty or names that Secret; the render checks it (`meho.postgres.runtimeSecretName`), because a schema cannot know the release name.",
+      "if": {
+        "properties": {
+          "corePostgres": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["corePostgres"]
+      },
+      "then": {
+        "properties": {
+          "postgres": {
+            "properties": {
+              "runtime": {
+                "properties": { "role": { "enum": ["", "meho_app"] } }
+              }
+            }
+          }
+        }
+      }
+    },
     {
       "description": "When `config.credentialBackend` is `vault` (the default), the deployment reads credentials + the health federation proof from Vault, so `vault.address` must be a non-empty `uri`. A `gsm` install skips this and may leave `vault.address` blank.",
       "if": {

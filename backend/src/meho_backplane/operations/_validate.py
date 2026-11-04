@@ -38,13 +38,14 @@ from jsonschema import Draft202012Validator
 from referencing.exceptions import Unresolvable
 
 from meho_backplane.auth.delegation import resolve_actor_sub
-from meho_backplane.auth.operator import Operator, PrincipalKind
+from meho_backplane.auth.operator import Operator, PrincipalKind, is_human_principal
 from meho_backplane.auth.permissions import _more_restrictive, resolve_verdict
 from meho_backplane.broadcast.events import scrub_secret_named_values
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._errors import _sanitize_free_text
 from meho_backplane.operations._param_errors import describe_violation
+from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.sandbox_mode import sandbox_mode_active
 from meho_backplane.settings import get_settings
 
@@ -62,6 +63,7 @@ __all__ = [
     "compute_audit_digest_hash",
     "compute_audit_params_hash",
     "compute_params_hash",
+    "compute_value_fingerprint",
     "ingested_schema_for_validation",
     "params_check_errors",
     "params_hash_candidates",
@@ -86,6 +88,10 @@ _PARAMS_HASH_KEY_LABEL: Final[bytes] = b"meho-params-hash-key-v1"
 #: Prefix for :func:`compute_audit_digest_hash`, so its output never equals a
 #: params hash of the same text.
 _DIGEST_HASH_PREFIX: Final[bytes] = b"meho-audit-digest-v1\x00"
+
+#: Prefix for :func:`compute_value_fingerprint`, so a value's fingerprint never
+#: equals a params hash or a digest hash of the same bytes.
+_VALUE_FINGERPRINT_PREFIX: Final[bytes] = b"meho-secret-value-v1\x00"
 
 
 class InvalidOpSchemaError(Exception):
@@ -191,6 +197,22 @@ def compute_audit_digest_hash(value: str) -> str:
     install.
     """
     message = _DIGEST_HASH_PREFIX + value.encode("utf-8")
+    return hmac.new(_params_hash_key(), message, hashlib.sha256).hexdigest()
+
+
+def compute_value_fingerprint(value: bytes) -> str:
+    """Return the keyed fingerprint an answer carries in place of a secret value.
+
+    For an operation that moves or stages a secret value and must say which
+    value it was without showing it: the secret broker and the Kubernetes
+    kubeconfig read. HMAC-SHA256 under the server key, with its own prefix,
+    over the exact bytes. Equal values give equal fingerprints inside one
+    install, so an auditor can match two rows that carried the same value.
+    Without the server key the fingerprint cannot be computed again from a
+    value, so a stored fingerprint tells nothing about a short or common
+    value.
+    """
+    message = _VALUE_FINGERPRINT_PREFIX + value
     return hmac.new(_params_hash_key(), message, hashlib.sha256).hexdigest()
 
 
@@ -602,6 +624,33 @@ async def _service_read_scope_denial(*, operator: Operator, target: Any) -> str 
     return await read_scope_denial(operator=operator, target=target)
 
 
+def _person_role_floor_denial(
+    operator: Operator, descriptor: EndpointDescriptor, target_id_str: str | None
+) -> str | None:
+    """Why a person may not run this op, or ``None`` (also for a machine login).
+
+    The op's role floor (:mod:`meho_backplane.operations.role_floors`) is
+    the same role its dedicated REST route and MCP tool ask for at the
+    door; here it holds for ``call_operation``, the REST dispatch route
+    and the CLI too. Agents and service logins are not checked: they park
+    or run under a grant, and the person who approves is checked by the
+    approval queue at the decision.
+    """
+    if not is_human_principal(operator):
+        return None
+    denial = role_floor_denial(descriptor.op_id, operator.tenant_role)
+    if denial is not None:
+        _log.info(
+            "policy_gate_role_floor_denied",
+            operator_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+            op_id=descriptor.op_id,
+            actual_role=operator.tenant_role.value,
+            target_id=target_id_str,
+        )
+    return denial
+
+
 async def _non_agent_verdict(
     *,
     operator: Operator,
@@ -630,11 +679,18 @@ async def _non_agent_verdict(
     or a read-only ``caution`` op) is first checked against the
     principal's **read scope** (#4992): when a person has set one and it
     does not cover the call's target, the verdict is ``DENY`` with a
-    ``read_scope_denied`` reason. This is the one ``DENY`` this branch
-    returns. Calls that park keep today's rules (grants or approval).
+    ``read_scope_denied`` reason. Calls that park keep today's rules
+    (grants or approval).
+
+    A person below the op's role floor (:func:`_person_role_floor_denial`)
+    is ``DENY`` before any other rule. These two are the only ``DENY``
+    verdicts this branch returns.
     """
     target_id_str = str(getattr(target, "id", None)) if target is not None else None
     is_service = operator.principal_kind is PrincipalKind.SERVICE
+    role_denial = _person_role_floor_denial(operator, descriptor, target_id_str)
+    if role_denial is not None:
+        return PermissionVerdict.DENY, role_denial
     gate_reason = _non_agent_park_reason(descriptor, is_service=is_service, decide_only=decide_only)
 
     if gate_reason is None and is_service:

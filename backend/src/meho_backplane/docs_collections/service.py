@@ -44,7 +44,7 @@ import structlog
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.corpus import corpus_endpoint_host
+from meho_backplane.auth.corpus import assert_corpus_host_allowed, corpus_endpoint_host
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.models import DocCollection as DocCollectionORM
 from meho_backplane.docs_collections.lifecycle import (
@@ -62,6 +62,7 @@ from meho_backplane.docs_collections.schemas import (
 from meho_backplane.docs_search.backends import BackendReadiness, resolve_backend
 from meho_backplane.docs_search.backends.corpus_http import CORPUS_HTTP_BACKEND_TYPE
 from meho_backplane.docs_search.backends.registry import all_backends
+from meho_backplane.settings import get_settings
 from meho_backplane.targets.ssrf_guard import (
     TargetDestinationBlockedError,
     assert_public_destination_async,
@@ -228,13 +229,17 @@ def _validate_backend_type(backend_type: str) -> None:
 
 
 async def _screen_backend_endpoint(backend: DocCollectionBackend) -> None:
-    """Reject a ``corpus-http`` backend whose endpoint is non-public / non-https.
+    """Reject a ``corpus-http`` backend whose endpoint MEHO would not dial.
 
     Extracts the corpus endpoint from ``backend.ref`` (the ``endpoint`` key,
     alias ``url``) and screens it with the shared target SSRF guard —
     ``https`` scheme + a public, allowlist-aware host — the same
     :func:`~meho_backplane.targets.ssrf_guard.assert_public_destination_async`
-    the connector target dial uses. An explicit ``answer_endpoint`` (#3911,
+    the connector target dial uses. The host must also be one the deployment
+    named as a docs service
+    (:func:`~meho_backplane.auth.corpus.assert_corpus_host_allowed`: the host
+    of ``CORPUS_URL`` or an entry of ``CORPUS_ALLOWED_HOSTS``), so a tenant
+    cannot point a collection at any other server. An explicit ``answer_endpoint`` (#3911,
     the opted-in answer endpoint) or ``read_endpoint`` (#3948, the opted-in
     read endpoint) is a dialed URL too and is screened the same way. Absent
     endpoint (the legacy global
@@ -258,6 +263,7 @@ async def _screen_backend_endpoint(backend: DocCollectionBackend) -> None:
             continue
         try:
             host = corpus_endpoint_host(endpoint)
+            assert_corpus_host_allowed(host, get_settings())
             await assert_public_destination_async(host)
         except TargetDestinationBlockedError as exc:
             raise DocCollectionEndpointError(endpoint, str(exc)) from exc

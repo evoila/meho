@@ -15,7 +15,7 @@
   the move submits ONLY ``<kind>:<ref>`` references (``from`` / ``to``) and an
   optional reason. There is DELIBERATELY no value input -- the value never
   enters the op params, the response, a log event, or the audit row. The
-  result render surfaces only {status, value_sha256, length}. Do NOT add a
+  result render surfaces only {status, value_fingerprint, length}. Do NOT add a
   value/secret field here.
 
   The confirm POST carries the OWASP signed double-submit CSRF token on the

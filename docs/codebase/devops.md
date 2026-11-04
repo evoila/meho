@@ -640,11 +640,15 @@ Design: the internal core design note, §2 (one database server) and §1
   wins). The image is built FROM the official `postgres:17-bookworm` image,
   so the official entrypoint runs. PostgreSQL 18 is not used: it moves the
   data directory layout.
-- **Two databases, two roles.** One SQL file (`core.sql` in the ConfigMap)
+- **Two databases, three roles.** One SQL file (`core.sql` in the ConfigMap)
   makes the roles `meho` and `keycloak` (`LOGIN NOSUPERUSER NOCREATEDB
   NOCREATEROLE`, connection limits 60 and 25), the databases `meho` and
   `keycloak`, each owned by its role, takes CONNECT and TEMPORARY away from
-  PUBLIC, and creates `vector` in `meho` as the image superuser. Every
+  PUBLIC, and creates `vector` in `meho` as the image superuser. It also
+  makes `meho_app`, the login of the running backplane (same role
+  settings, connection limit 60, `CONNECT` on `meho`, owns nothing); the
+  migration, which runs as the owner `meho`, grants it its rights on the
+  tables (`docs/codebase/migrations.md`, "The runtime role"). Every
   statement is safe to run twice (`CREATE` is guarded with `\gexec`).
   Passwords reach SQL only as psql variables (`\getenv`).
 - **Two paths, one file.** On an empty disk the entrypoint runs `apply.sh`
@@ -658,11 +662,11 @@ Design: the internal core design note, §2 (one database server) and §1
   (`/var/run/postgresql`, an emptyDir) through initdb's `local all all
   trust` line. It never needs the superuser password.
 - **Secrets.** The chart makes no password. It reads
-  `<release>-core-postgres-superuser`, `-meho` and `-keycloak` (key
-  `password`), which the install's secrets Job makes (#4041). The
+  `<release>-core-postgres-superuser`, `-meho`, `-meho-app` and `-keycloak`
+  (key `password`), which the install's secrets Job makes (#4041). The
   superuser Secret is mounted by the `postgres` container alone, as
   `POSTGRES_PASSWORD_FILE`; initdb reads it once. The sidecar mounts only
-  the two role Secrets. `corePostgres.existingSecrets.{superuser,keycloak}`
+  the three role Secrets. `corePostgres.existingSecrets.{superuser,keycloak}`
   names operator-made Secrets instead.
 - **Logins.** `POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256`: TCP logins
   from inside the pod (127.0.0.1, also `kubectl port-forward`) need a
@@ -695,7 +699,10 @@ Design: the internal core design note, §2 (one database server) and §1
   change, but not on its own clock).
 - **What wires it to the backplane.** Not this subchart. The migration
   runs as the backplane's `migrate` init container in this mode (#5233,
-  see [Migration Job](#migration-job-templatesmigration-jobyaml)). The
+  see [Migration Job](#migration-job-templatesmigration-jobyaml)), with
+  the owner login and `DATABASE_RUNTIME_ROLE=meho_app`; the backplane
+  container reads `DATABASE_URL` from `<release>-core-postgres-meho-app`
+  (parent helpers `meho.postgres.*` in `templates/_helpers.tpl`). The
   `DATABASE_URL` default and the schema conditionals come with #4047.
 
 **Helm test.** `templates/tests/test-pgvector.yaml` runs on the same
@@ -1460,8 +1467,38 @@ claude-rdc-hetzner-dc#610 / #715) and shares the
 hardening conventions of `image.yml` (Task #33): job-level fork-PR guard,
 SHA-pinned actions with `# vX.Y.Z` comments, minimum `permissions:` block
 (`contents: read`, `packages: write`, `id-token: write`), per-job
-`timeout-minutes`, and a `concurrency:` group that cancels stale runs per
-ref.
+`timeout-minutes`, and a `concurrency:` group (see "Every main commit gets
+its image and chart" below).
+
+### Every main commit gets its image and chart
+
+`image.yml` and `chart.yml` put each run in a `concurrency:` group:
+
+- **Push to `main`:** one group per commit (the group name ends with the
+  commit sha). A newer push never cancels an older push's run. So every
+  `main` commit gets its own image (`:sha-<commit>`) and its own chart
+  (`0.1.<date>-<short-sha>`).
+- **Pull request:** one group per pull request. A new push to the pull
+  request cancels the old run, as before.
+- **Tag push (`v*`):** one group per tag, as before.
+
+Why: a merge lands on `main` about every 15 minutes, and the image build
+takes about 25 minutes. With one group per branch, each new merge
+cancelled the build of the merge before it, and for hours no `main`
+commit got its image. Only turning off `cancel-in-progress` would not
+fix this. GitHub keeps one waiting run per group, and a newer run
+replaces the waiting one.
+
+What it costs:
+
+- Two or three `main` image builds can run at the same time. They use
+  the `meho-runners-ci` pool (the same pool as the integration test
+  shards), so they take two or three of its runners for about 25
+  minutes. The chart jobs on this pool take a few minutes.
+- Runs can finish out of order. The moving `:main` image alias then
+  points at an older commit for a short time, until the newer run
+  finishes. `:main` is never a deploy target: deploys pin
+  `sha-<commit>` or a release tag.
 
 ### Triggers and locked publish behaviour
 
@@ -1641,7 +1678,9 @@ these workflows:
   `cancel-in-progress: ${{ github.event_name != 'merge_group' }}`. A
   cancelled queue check fails the merge attempt and drops the PR out of
   the queue, so `merge_group` runs are never cancelled; `pull_request` /
-  `push` runs still cancel their own predecessors as before.
+  `push` runs still cancel their own predecessors as before. In
+  `chart.yml` a push to `main` has its own group per commit, so nothing
+  cancels it (see "Every main commit gets its image and chart").
 - **The runs of a dropped group are cancelled.** GitHub does not stop the
   runs of a group that leaves the queue. Two helpers do it, so the runs
   stop using our runners:
@@ -2847,27 +2886,70 @@ scope the cosign-signed `image.yml` release build restores from; the
 release image's trust chain never depends on cache produced by unmerged
 code, while the per-PR build keeps its warm-cache read.
 
-## Dependabot waits 7 days before it takes a new version
+## Dependencies wait 7 days before we take a new version
 
-Every entry in `.github/dependabot.yml` has a `cooldown` block with
-`default-days: 7`. Dependabot opens a version-update pull request for a
-new release (a GitHub Action, a Python package in `backend/uv.lock`, or
-a base image in a Dockerfile) only when that release is at least 7 days
-old.
+We take a new version of a dependency only when it is at least 7 days
+old. A new release can carry harmful code, for example when someone
+takes over a maintainer's account. Such releases are usually found and
+removed within a few days. The wait skips them. Two settings do this:
 
-- **Why.** A new release can carry harmful code, for example when an
-  attacker takes over a maintainer's account. Such releases are usually
-  found and removed within a few days. The wait skips them.
-- **Security updates are not delayed.** Dependabot's `cooldown` applies
-  to version updates only. A security update still comes at once.
-- **Without the block, Dependabot already waits 3 days** on github.com.
-  The block makes the wait visible in the file and sets it to 7 days.
-- **A manual upgrade does not wait.** `uv lock --upgrade` or a hand
-  edit of a Dockerfile digest can still take a release that is younger
-  than 7 days. The matching uv setting (`exclude-newer` in
-  `backend/pyproject.toml`) is not set yet; it needs a lock file in
-  which every locked version is already 7 days old, otherwise
-  `uv lock` moves packages back.
+- **Dependabot.** Every entry in `.github/dependabot.yml` has a
+  `cooldown` block with `default-days: 7`. Dependabot opens a
+  version-update pull request for a new release (a GitHub Action, a
+  Python package in `backend/uv.lock`, or a base image in a Dockerfile)
+  only when that release is at least 7 days old. Without the block,
+  Dependabot already waits 3 days on github.com. The block makes the
+  wait visible in the file and sets it to 7 days.
+- **uv.** `[tool.uv]` in `backend/pyproject.toml` has
+  `exclude-newer = "7 days"`. uv ignores every package version uploaded
+  in the last 7 days, in every lock: Dependabot's, a person's and an
+  agent's (`uv add`, `uv lock --upgrade`). `backend/uv.lock` records the
+  wait as `exclude-newer-span = "P7D"` under `[options]`. The span is
+  relative, so `uv sync --locked` keeps passing as days go by. The
+  `exclude-newer = "0001-01-01T00:00:00Z"` line next to it has no
+  effect; uv writes it for older uv versions. Relative values need uv
+  0.9.17 or newer. CI uses uv 0.13.0, the image build uses uv 0.11.12.
+
+**Security updates.** Dependabot's `cooldown` applies to version updates
+only. A security update still comes at once. But uv cannot tell a
+security update from a normal release. Dependabot runs uv with our
+settings, so a security update to a version that is younger than 7 days
+fails to lock until that version is 7 days old.
+
+**How to take an urgent fix at once.** Lift the wait for that one
+package, and only for that package:
+
+1. Add this line to `[tool.uv]` in `backend/pyproject.toml`, with the
+   name of the package:
+
+   ```toml
+   exclude-newer-package = { <package> = false }
+   ```
+
+   When the fixed version needs a version of another package that is
+   also younger than 7 days, name that package in the same line. For
+   example, a boto3 release needs the botocore release of the same day:
+   `{ boto3 = false, botocore = false }`.
+2. Run `cd backend && uv lock --upgrade-package <package>`. A plain
+   `uv lock` is not enough: it keeps the version that is in the lock
+   file. The flag tells uv to take the newest version of that package.
+   uv writes the exception into `uv.lock` under
+   `[options.exclude-newer-package]`.
+3. Check the version in the lock file. It must be the version with the
+   fix:
+
+   ```bash
+   grep -A1 '^name = "<package>"$' backend/uv.lock
+   ```
+
+   An older version means a package it needs is still inside the wait.
+   Add that package to the line and run step 2 again.
+4. Run `uv sync --locked --all-groups`, then the tests of the code that
+   uses the package.
+5. Remove the line only once the fixed version is 7 days old, and run
+   `uv lock` again. uv then keeps the version and drops the exception
+   from `uv.lock`. Removed earlier, `uv lock` goes back to the newest
+   version that is old enough, and the fix is gone.
 
 ## Dependencies
 

@@ -676,6 +676,26 @@ async def test_fingerprint_unreachable_maps_to_not_reachable() -> None:
     assert "error" in fp.extras
 
 
+@pytest.mark.asyncio
+async def test_fingerprint_over_cap_buildinfo_maps_to_not_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A buildinfo body above the response cap is refused like a transport fault."""
+    monkeypatch.setattr("meho_backplane.connectors.adapters.http._MAX_RESPONSE_BYTES", 64)
+    connector = TempoConnector()
+    try:
+        async with respx.mock(base_url=_TEMPO_BASE_URL, assert_all_called=False) as mock:
+            mock.get("/api/status/buildinfo").respond(
+                200, json={"version": "2.6.1", "padding": "x" * 1024}
+            )
+            fp = await connector.fingerprint(_TempoTarget())
+    finally:
+        await connector.aclose()
+
+    assert fp.reachable is False
+    assert "error" in fp.extras
+
+
 # ---------------------------------------------------------------------------
 # Optional auth — Bearer / Basic / none
 # ---------------------------------------------------------------------------

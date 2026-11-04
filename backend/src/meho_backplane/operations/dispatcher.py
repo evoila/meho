@@ -20,7 +20,10 @@ phases the parent Initiative names:
    implementation that does must have the same op enabled; the dispatch
    then runs on that sibling
    (:mod:`meho_backplane.operations._catalog_guard`, #3600). Otherwise ->
-   structured ``unqualified_target_version`` error. Then validate
+   structured ``unqualified_target_version`` error. A composite op gets
+   the same error when its connector states a target version range for
+   composites and the target is outside it
+   (:mod:`meho_backplane.operations._composite_version_guard`). Then validate
    ``params`` against the chosen ``descriptor.parameter_schema`` via
    :class:`Draft202012Validator` (JSON Schema 2020-12, OpenAPI 3.1
    compatible) -- :func:`~meho_backplane.operations._validate.validate_params`.
@@ -329,6 +332,7 @@ from meho_backplane.operations._errors import (
     result_idempotency_key_conflict,
     result_invalid_op_schema,
     result_invalid_params,
+    result_license_read_off,
     result_no_connector,
     result_preview_binding_required,
     result_preview_hash_mismatch,
@@ -399,6 +403,7 @@ from meho_backplane.operations.dispatch_limits import (
     resolve_dispatch_concurrency_cap,
     resolve_dispatch_rate_limit,
 )
+from meho_backplane.operations.license_reads import is_license_read
 from meho_backplane.operations.reducer import (
     PassThroughReducer,
     Reducer,
@@ -406,6 +411,8 @@ from meho_backplane.operations.reducer import (
     handle_owner_sub_var,
 )
 from meho_backplane.operations.result_document import json_text_bytes
+from meho_backplane.operations.role_floors import role_floor_denial
+from meho_backplane.operations.secondary_target_policy import approved_requester_sub
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
     apply_connector_boundary_redaction,
@@ -1037,6 +1044,17 @@ def _secret_view(*, makes_new_secret: bool, reveal_secret: bool) -> SecretView |
 def _agent_acts(operator: Operator) -> bool:
     """True when an agent makes this call: an agent principal, or a hosted agent run."""
     return operator.principal_kind is PrincipalKind.AGENT or resolve_actor_sub() is not None
+
+
+def _requester_runs_approved_call(operator: Operator) -> bool:
+    """True when the requester of an approved call runs it, not a reviewer.
+
+    The agent's own resume and a hosted agent run (:func:`_agent_acts`), and
+    the requester's re-run of a failed approved call, which binds the
+    requester of the row (:func:`approved_requester_sub`). A reviewer who
+    runs the call from an approvals surface is not the requester.
+    """
+    return _agent_acts(operator) or approved_requester_sub() == operator.sub
 
 
 async def _refuse_agent_reveal(
@@ -3514,6 +3532,12 @@ async def dispatch(
             started=started,
             target=target,
         )
+    # An ingested read of licence keys never runs: the ingest would give it
+    # the safe level of its HTTP method, and its answer carries the keys in
+    # full. Refused before the target check, the catalog guard, the policy
+    # gate and any vendor call, whatever the row's enable flag says.
+    if descriptor.source_kind == "ingested" and is_license_read(descriptor.method, descriptor.path):
+        return result_license_read_off(op_id, _elapsed_ms(started))
     # #4139: an op that needs a target (every ingested op, or a typed op
     # bound to a connector) and got none fails here with one clear line,
     # before the catalog guard, the policy gate or a wait for approval.
@@ -3533,7 +3557,9 @@ async def dispatch(
     # switches: the approver saw and the gate checked the stored catalog,
     # and this path skips both. If the target's detected version moved
     # while the request waited, the resume is refused and the caller
-    # must make a new request.
+    # must make a new request. A composite op is checked here against the
+    # target version range its connector states for composites (one check
+    # for the whole composite; its steps are not checked again).
     selection = await select_catalog_for_target(
         operator=operator,
         descriptor=descriptor,
@@ -3766,6 +3792,31 @@ async def dispatch(
             # executed row honestly records it was four-eyes-gated, not
             # auto-executed.
             policy_decision_var.set(PermissionVerdict.NEEDS_APPROVAL.value)
+            # The approval queue refuses an approver below the op's role
+            # floor at the decision, so an approved call was approved by a
+            # person with the role. From an approvals surface the call runs
+            # under that reviewer; check the role again here as a backstop.
+            # The requester's own run (an agent's resume, a hosted agent
+            # run, or a re-run of a failed call by the requester, also a
+            # service login) keeps the approval as the authorization.
+            role_denial = (
+                None
+                if _requester_runs_approved_call(operator)
+                else role_floor_denial(op_id, operator.tenant_role)
+            )
+            if role_denial is not None:
+                duration_ms = _elapsed_ms(started)
+                receipt = await audit_safe(
+                    audit_id=uuid.uuid4(),
+                    event_class=AuditEventClass.POLICY_DECISION,
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    params_hash=params_hash,
+                    result_status="denied",
+                    duration_ms=duration_ms,
+                )
+                return with_audit_receipt(result_denied(op_id, role_denial, duration_ms), receipt)
 
         # --- Step 5: connector resolution ---------------------------------
         connector_instance: Connector | None

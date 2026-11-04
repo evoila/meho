@@ -609,7 +609,8 @@ async def test_list_and_show_tell_approved_from_executed(embedding: list[float])
     assert pending["preview_hash"] == bound_hash
     assert pending["result_state"] is None
 
-    approver = _operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+    approver = _operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         await approve_request(s, uuid.UUID(request_id), operator=approver, params=None)
         await s.commit()

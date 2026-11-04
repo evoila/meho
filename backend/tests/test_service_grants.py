@@ -339,6 +339,97 @@ async def test_existing_grant_row_never_lets_a_vendor_delete_run(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("op_id", "descriptor_kwargs"),
+    [
+        pytest.param(
+            "POST:/vswitch/{vswitch-id}",
+            {"source_kind": "ingested", "method": "POST", "tags": ["write"]},
+            id="ingested-post-on-the-default-list",
+        ),
+        pytest.param(
+            "msad.group.delete",
+            {"source_kind": "typed", "tags": ["write", "group", "delete"]},
+            id="typed-op-named-delete",
+        ),
+        pytest.param(
+            "DELETE:/vcenter/vm/{vm}",
+            {"source_kind": "composite"},
+            id="inner-step-with-delete-verb-in-the-id",
+        ),
+    ],
+)
+async def test_existing_grant_row_never_lets_a_pattern_match_run(
+    op_id: str, descriptor_kwargs: dict[str, object]
+) -> None:
+    """A stored grant on an op id that matches the pattern list is inert at dispatch.
+
+    These records carry no delete sign of their own: the method is ``POST``
+    or missing, the level is below ``destructive`` and no tag says
+    ``destructive``. The op id matches a default pattern, and that is enough
+    at call time too, so a row written before the pattern was on the list
+    never clears the call.
+    """
+    await _seed_grant_row(op_id)
+    descriptor = EndpointDescriptor(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id=op_id,
+        safety_level="dangerous",
+        requires_approval=True,
+        parameter_schema={},
+        **descriptor_kwargs,
+    )
+
+    grant_id = await consult_and_record_grant(
+        operator=_service_operator(),
+        descriptor=descriptor,
+        target=None,
+        connector_id=_CONNECTOR,
+    )
+
+    assert grant_id is None
+    assert await _grant_use_audit_rows() == 0
+
+
+@pytest.mark.asyncio
+async def test_existing_grant_row_never_lets_a_later_pattern_match_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pattern added to the setting after the grant was made applies at call time."""
+    op_id = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+    await _seed_grant_row(op_id)
+    descriptor = EndpointDescriptor(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id=op_id,
+        source_kind="ingested",
+        method="POST",
+        safety_level="caution",
+        requires_approval=False,
+        parameter_schema={},
+    )
+    operator = _service_operator()
+
+    before = await consult_and_record_grant(
+        operator=operator, descriptor=descriptor, target=None, connector_id=_CONNECTOR
+    )
+    assert before is not None
+    assert await _grant_use_audit_rows() == 1
+
+    monkeypatch.setenv("SERVICE_GRANT_DELETE_SHAPED_PATTERNS", "POST:/PropertyCollector/*")
+    get_settings.cache_clear()
+
+    after = await consult_and_record_grant(
+        operator=operator, descriptor=descriptor, target=None, connector_id=_CONNECTOR
+    )
+    assert after is None
+    assert await _grant_use_audit_rows() == 1
+
+
+@pytest.mark.asyncio
 async def test_existing_grant_row_still_clears_an_ordinary_write() -> None:
     """Control: the same seeded-row path auto-approves a non-delete inner step."""
     op_id = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"

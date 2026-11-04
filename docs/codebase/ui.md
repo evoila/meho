@@ -1,5 +1,9 @@
 # `ui/` — Operator-console chassis
 
+> Looking for the rules rather than the mechanism? [`ui-conventions.md`](./ui-conventions.md) is the short list of
+> things not to get wrong when working on the console. This document is the
+> reference for how the chassis works.
+
 Initiative [#337](https://github.com/evoila/meho/issues/337) (G10.0
 Frontend chassis) introduces a server-rendered web UI inside the
 backplane FastAPI process at `/ui/*`. This doc covers the **chassis**
@@ -1048,8 +1052,19 @@ body (`_require_ui_role`):
   runs or queues an operation, or starts, advances or aborts a runbook
   run, declares it: `POST /ui/operations/call` and `/preview`,
   `POST /ui/vault/put`, `/delete` and `/move`, `POST /ui/runbooks/runs`,
-  `POST /ui/runbooks/runs/{run_id}/next` and `/abort`. The confirm
-  modals and every read page stay on the session floor.
+  `POST /ui/runbooks/runs/{run_id}/next` and `/abort`. So does every
+  console page that reads through an operation or the audit log, because
+  the REST route it mirrors has the same floor: the whole Vault console
+  (`/ui/vault`, `/list`, `/read`, `/versions`, `/status`, `/auth` and the
+  three write confirm modals), the Keycloak read pages (`/ui/keycloak`,
+  `/clients/{client_uuid}`, `/users`), and the audit console (`/ui/audit`,
+  `/results`, `/my-recent`, `/show/{audit_id}`; the replay tree keeps its
+  own tenant_admin check). A `read_only` person gets `403
+  operator_required` on these pages before any operation runs or any
+  audit row is read. Read pages that do not run an operation (dashboard,
+  connectors, knowledge, memory, topology, runbook catalog) stay on the
+  session floor, and so does the approvals list, which a `read_only`
+  approver needs.
 
 Upload routes chain `require_ui_admin` on top:
 
@@ -3387,7 +3402,7 @@ routers are included ahead of the stubs aggregate in
   `secret-broker-1.x` connector with the schema's `from` / `to` references
   (+ optional `reason`). **Value-free**: no value input exists, no value
   reaches the dispatched params, and the render surfaces only the
-  `{status, value_sha256, length}` confirmation — the no-`--value` invariant
+  `{status, value_fingerprint, length}` confirmation — the no-`--value` invariant
   the CLI keeps.
 
 ### Two connector ids (load-bearing)
@@ -3424,7 +3439,7 @@ shared result fragment (`vault/_write_result.html`) surfaces it as a banner
 + a deep-link into `/ui/approvals/{approval_request_id}` (the surface #1778
 shipped, `hx-get` into `#meho-approvals-modal-container`), so the operator
 never thinks the write silently no-op'd. The fragment's other branches:
-the value-free `secret.move` `ok` render (status / value_sha256 / length
+the value-free `secret.move` `ok` render (status / value_fingerprint / length
 only); the put / delete `ok` render (a plain success, no secret value); the
 `error` / `denied` render via the shared `vault/_envelope_error.html` macro
 (which carries the `VaultTenantScopeError` "outside your tenant scope"
@@ -3435,7 +3450,9 @@ out-of-scope path — and the generic `extras.error_code`); and the inline
 ### RBAC (operator tier; the gate is policy, not role)
 
 The write verbs are OPERATOR-tier (like the operations Run surface) — there
-is **no** `tenant_admin` hard-403 on the write POST. Safety is enforced by
+is **no** `tenant_admin` hard-403 on the write POST. The confirm modals sit
+on the same `require_ui_operator` floor as the POSTs and every other Vault
+console page, so a `read_only` person never reaches a Vault form. Safety is enforced by
 the confirm modal + the dispatcher's `policy_gate` → approval queue, not by
 `TenantRole`; a role gate here would contradict the backend gate and the
 operations console. Tenant scoping derives from `operator.tenant_id` only
@@ -3478,7 +3495,7 @@ discipline is pinned.
   the token, 200 with it); route ordering (`put/confirm` → confirm handler);
   the CAS rule (carried only when set, blank ≠ `cas=0`); the `secret.move`
   value-free contract (dispatches `secret-broker-1.x` with refs only, a
-  smuggled `value` field dropped, render carries only status/value_sha256/
+  smuggled `value` field dropped, render carries only status/value_fingerprint/
   length); RBAC (a plain operator runs all three writes, no `tenant_admin`
   403); the `VaultTenantScopeError` friendly-message render branch; inline
   400 form errors for malformed `data` / empty `versions` / missing

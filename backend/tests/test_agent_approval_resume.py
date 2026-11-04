@@ -747,6 +747,7 @@ async def test_resume_no_ops_when_operator_surface_already_claimed(
     assert resumed["status"] == "already_resumed", resumed
     assert resumed["extras"]["decision"] == "approved"
     assert resumed["extras"]["error_code"] == "already_resumed"
+    assert "not known" in resumed["error"], "no stored result: the outcome is unknown"
     assert redispatched == 0
     assert request.execution_handle is not None
     async with sessionmaker() as fresh:
@@ -1128,7 +1129,13 @@ async def test_durable_approval_winner_claims_and_discards_handoff(
 
 
 async def test_competing_resumers_dispatch_at_most_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Two waiters on one approved row: one dispatches, the other is already_resumed."""
+    """Two waiters on one approved row: one dispatches, the other runs nothing.
+
+    The loser reads the stored result of the winner's run. Whether that
+    result is stored yet when the loser reads the row depends on timing, so
+    the loser answers ``already_resumed`` (nothing stored yet) or the
+    winner's ``ok`` result.
+    """
     requester = _make_operator(sub="agent-durable-race")
     request = await _park_request(requester=requester, status=ApprovalRequestStatus.APPROVED)
     dispatched = _forbid_dispatch(monkeypatch)
@@ -1143,7 +1150,8 @@ async def test_competing_resumers_dispatch_at_most_once(monkeypatch: pytest.Monk
 
     outcomes = await asyncio.gather(_resume(), _resume())
 
-    assert sorted(o["status"] for o in outcomes) == ["already_resumed", "ok"]
+    assert "ok" in [o["status"] for o in outcomes]
+    assert all(o["status"] in ("already_resumed", "ok") for o in outcomes)
     assert len(dispatched) == 1
 
 
@@ -1548,12 +1556,13 @@ async def test_composite_resume_uses_saved_target_when_name_was_reassigned(
 async def test_composite_resume_fails_closed_when_saved_target_deleted_and_name_reused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A deleted target whose name was reused: refuse, dispatch nothing, keep the claim.
+    """A deleted target whose name was reused: refuse, dispatch nothing, record it.
 
     The saved target was soft-deleted while the request waited and a new
     target now carries its old name. The re-entry must not run against the
-    new target. It returns a ``denied`` envelope and leaves the one-resumer
-    claim free, the same as the operator surface.
+    new target. It returns a ``denied`` envelope, takes the one-resumer
+    claim and stores the refusal as the run result, the same as the
+    operator surface.
     """
     import meho_backplane.operations.meta_tools as meta_tools_module
     from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
@@ -1588,10 +1597,12 @@ async def test_composite_resume_fails_closed_when_saved_target_deleted_and_name_
     )
 
     assert resumed["status"] == "denied"
-    assert resumed["extras"]["error_code"] == "denied"
+    assert resumed["extras"]["error_code"] == "target_gone_since_approval"
     assert str(original_id) in resumed["error"]
     assert calls == []
     async with get_sessionmaker()() as fresh:
         row = await fresh.get(ApprovalRequest, request.id)
     assert row is not None
-    assert row.resumed_at is None, "a refused resume must not burn the claim"
+    assert row.resumed_at is not None, "a refused resume takes the claim"
+    assert row.resume_result is not None
+    assert row.resume_result["extras"]["error_code"] == "target_gone_since_approval"

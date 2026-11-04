@@ -74,6 +74,7 @@ from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_t
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.routes.topology import build_router as build_topology_router
+from meho_backplane.ui.routes.topology.batch_parse import BULK_MAX_UPLOAD_BYTES
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests._oidc_jwt_helpers import (
     AUDIENCE as _DEFAULT_AUDIENCE,
@@ -545,6 +546,36 @@ def test_topology_ui_bulk_apply_via_multipart_file_upload() -> None:
     assert response.status_code == 200, response.text
     assert 'data-test="bulk-applied"' in response.text
     assert _count_edges(_TENANT_A, source="curated") == 1
+
+
+def test_topology_ui_bulk_upload_over_the_size_cap_renders_the_parse_banner() -> None:
+    """An upload above the cap gets the 422 panel with the size message, not a 500."""
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+
+    client, mock, csrf = _authenticated_client_with_role_jwks(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.post(
+            "/ui/topology/edges/bulk",
+            data={"dry_run": "true"},
+            files={
+                "upload": (
+                    "edges.yaml",
+                    b"x" * (BULK_MAX_UPLOAD_BYTES + 1),
+                    "application/yaml",
+                )
+            },
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+
+    assert response.status_code == 422, response.text
+    assert "larger than 256 KiB" in response.text
+    assert _count_edges(_TENANT_A, source="curated") == 0
 
 
 def test_topology_ui_bulk_invalid_rows_surface_every_error_together() -> None:

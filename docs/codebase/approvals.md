@@ -150,6 +150,13 @@ the vendor gets no call:
    stored as the request's run result. So every read surface shows
    `result_state = "failed"` with that error code.
 
+The same three steps (`approval_queue._refuse_resume`) record a run
+refused because its target changed or no longer resolves
+(`refuse_resume_if_target_changed`, see
+[An approval covers one target and one preview](#an-approval-covers-one-target-and-one-preview)).
+The audit row then carries `result_status = "target_changed_since_approval"`
+or `"target_gone_since_approval"` and the `target_id`.
+
 This covers a request that was approved just before an update and had
 not run yet. A remote-write mint for a satellite runner checks the same
 rule: an approval from an older release mints nothing
@@ -173,9 +180,12 @@ not stored: only the start-up expiry ends a request before its deadline,
 so an `expired` row with `decided_at < expires_at` expired because the
 release changed. The console modal shows such a request with the time
 the update ended it (`decided_at`), not the deadline it never reached.
-For a run MEHO refused (error code `release_changed_while_waiting`), the
-console says MEHO was updated, the operation did not run, and the
-requester must ask again; it does not say the operation ran and failed.
+For a run MEHO refused before it ran, the console says why (MEHO was
+updated, the target changed, the target is gone, or the preview changed),
+that the operation did not run, and that the requester must ask again; it
+does not say the operation ran and failed. The sentences are in
+`ui/routes/approvals/render.py` (`RESUME_REFUSAL_MESSAGES`), keyed by the
+error code of the stored result.
 
 **During a rolling update.** For a short time old and new pods run side
 by side. A new pod ends the waiting requests it finds when it starts. A
@@ -209,9 +219,22 @@ per-call `fqdn` does not count (the agent waiter applies it again after
 the check, see below). `rehydrate_resume_target` loads the target
 by id as before and compares the hash. When it differs, the run is refused
 with `error_code = "target_changed_since_approval"` and nothing is sent.
+A target that no longer resolves (deleted or revoked after the request
+was made) refuses the run with `error_code = "target_gone_since_approval"`.
 The requester asks again. A rename, new aliases, notes, a new detected
 version or a new fingerprint do not change the hash. A request with no
 target, and a row saved before the column, has no hash and is not checked.
+
+Both resume paths call the check through
+`refuse_resume_if_target_changed`, which records a refusal the same way as
+the release refusal (see "Before an approved run" above): the one-resumer
+claim is taken, so the request never runs later; the stored run input is
+deleted and the secret-named params are hidden; one `approval.resume`
+audit row carries the error code as `result_status`; and the refusal is
+stored as the request's run result, so REST, MCP and the console show
+`result_state = "failed"` with that error code. The re-run after a failed
+run calls `rehydrate_resume_target` directly and records its own refusal
+(`approval.rerun`).
 
 **Preview.** A request with a `preview_hash` (every `destructive` request)
 builds the preview again with the target and params of the run
@@ -219,8 +242,47 @@ builds the preview again with the target and params of the run
 longer builds, the run is refused with
 `error_code = "preview_changed_since_approval"`. The one-resumer claim is
 already taken at that point, so the refusal is stored as the request's run
-result and the request never runs later. The re-run path reports the same
-two checks as `target_changed` and `preview_changed`.
+result and the request never runs later.
+
+**Object.** The preview hash of a typed or multi-step op covers the call's
+parameters, not the object they name. So, for the same requests (a
+`preview_hash` is stored), MEHO also builds the approval card again right
+before the run, against the live system, and compares the object the card
+names (`proposed_effect.blast_radius.object`) with the live one
+(`operations/approval_object_check.py`, `object_changed_since_request`):
+
+- The card has an `id` or `key`: the live object must have the same value.
+  Keycloak user, group and client deletes by name, Harbor robot deletes.
+- The card has no id or key: the live object must have the same fields,
+  without counts and yes/no flags. pfSense alias, gateway and static-route
+  deletes, DNS record deletes, a Vault secret path, a Kubernetes Secret.
+- The card says the object is absent (`present: false`, an empty id, or a
+  `match_count` of zero; the approver saw "nothing to delete"): the live
+  card must say so too. An object that appeared under that name since the
+  request refuses the run (`REASON_APPEARED`). The DNS cards (BIND9 and
+  Windows DNS) name the record set, so their object stays the same with or
+  without records; `match_count` says how many values the call removes,
+  and `card_object` keeps a zero as `present: false` on the object. For a
+  BIND9 delete with a pinned `rdata`, the count is the values equal to it,
+  not the sibling values the children list.
+- The live card says the object is gone: the run goes ahead and the
+  handler answers "already absent" or "not found" itself.
+- The card does not build now (the op does not resolve, the builder
+  declines, or it fails while reading, for example a user is found but
+  the read of their groups fails): the run is refused
+  (`REASON_UNREADABLE`). MEHO cannot tell which object the handler would
+  find, so an unreadable object is never treated as the approved one, and
+  not as a gone one either. A builder that declines for an absent object
+  (pfSense) refuses the run too; a new request is then refused at park
+  time with `blast_radius_required`, which tells the requester the object
+  is not there.
+
+A changed, appeared or unreadable object refuses the run with
+`error_code = "object_changed_since_approval"`; `extras.reason` says
+which. The refusal is stored as the run result like the preview refusal.
+A request without a card object (no blast radius) is not checked. The
+re-run path reports the three checks as `target_changed`,
+`preview_changed` and `object_changed`.
 
 ## The params hash on requests and audit rows
 
@@ -632,22 +694,32 @@ model, or resume endpoint):
    the params-hash check, so a self-approver gets the precise refusal
    reason.
 
-   **How to audit a break-glass self-approval (#2087).** There is
-   **no** `self_approved` field on the audit row — do not filter for
-   one. When break-glass is enabled and a self-approval goes through,
-   `_check_self_approval` (`approval_queue.py`) emits the structured
-   **log event** `approval_self_approval_break_glass` (WARNING, with
-   `approval_request_id`, `op_id`, `operator_sub`, `tenant_id`) and
-   returns; the decision audit row written by `approve_request` via
-   `_write_audit_row` carries the ordinary payload
-   (`approval_request_id`, `op_id`, `connector_id`, `principal_sub`,
-   `result_status`, `decision`, `reviewed_by`, optional `reason`).
-   A self-approval is therefore identified **on the ledger** as the
-   `approval.decision` row where the requester equals the approver —
-   `payload.principal_sub == payload.reviewed_by` (the approver's
-   `operator.sub`). A first-class `self_approved` audit marker would
-   be net-new, separately scoped work. Whether the deploy currently
-   allows self-approval at all is visible without grepping the values
+   **Who may approve, by group (#3328).** `_check_approver_group`
+   (`approval_queue.py`) decides, after the role check. The rules come
+   from [the decision record](../decisions/approval-groups-and-self-approval.md):
+   - A MEHO-SA-Operator (`Operator.may_self_approve`) may approve their
+     own change at every risk level. Everyone else gets
+     `SelfApprovalForbiddenError` for their own change, unless break-glass
+     covers it (`safe` and `caution` only).
+   - Another person's `dangerous` or `destructive` change may be approved
+     only by a MEHO-SA-Operator or a tenant admin. Everyone else gets
+     `ApprovalGroupForbiddenError` (a subclass of
+     `UnauthorizedApprovalError`; REST answers 403
+     `approval_group_required: <text>`).
+   - Another person's lower-risk change keeps the reviewer rule
+     (operator-or-higher, or the `approver` flag). A request without a
+     stamped `safety_level` counts as lower-risk.
+
+   **How to audit a self-approval.** The `approval.decision` audit row
+   carries `reviewed_by` (the approver's `sub`), `self_approved` (true
+   when requester and approver are the same `sub`) and `approval_rule`:
+   `sa_operator_self_approval`, `break_glass_self_approval`,
+   `sa_operator_or_admin` or `reviewer`. The `approval.approved` add-on
+   step event carries the same three fields.
+   A break-glass self-approval also logs the WARNING event
+   `approval_self_approval_break_glass` (with `approval_request_id`,
+   `op_id`, `operator_sub`, `tenant_id`). Whether the deploy currently
+   allows break-glass at all is visible without grepping the values
    file: `GET /ready` → `features.approval_queue.effective_posture`
    is `"single_operator_break_glass"` when
    `APPROVAL_ALLOW_SELF_APPROVAL=true`, `"four_eyes_enforced"`
@@ -832,9 +904,14 @@ person, and was a decision an agent must never make.
   `0119`), and drops a stored credential handoff (#3537).
   `reviewed_by` and `decided_at` stay NULL.
 - **Audit:** one row, `path = 'approval.withdraw'`,
-  `event_class = 'operation_execution'` (not `approval_decision`),
-  `operator_sub` = the sender. The payload has `withdrawn_by` and the
-  optional `reason`, and no `decision` or `reviewed_by` key. A paired
+  `event_class = 'approval_decision'`, `operator_sub` = the sender. The
+  payload has `withdrawn_by` and the optional `reason`, and no `decision`
+  or `reviewed_by` key. The audit query shows its result as `withdrawn`,
+  never `ok`, and a filter for operation runs
+  (`event_class = operation_execution`) does not return it: the
+  operation never ran (#5717). The class is the one of the other rows
+  that close a request (approve, reject, expiry). Rows written before
+  #5717 keep the class `operation_execution`; audit rows never change. A paired
   add-on gets the `approval.withdrawn` step event (#3027).
 - **Nothing runs:** approve, reject and decide on a withdrawn request
   see a closed row and answer 409 `approval_request_already_withdrawn`.
@@ -1014,9 +1091,12 @@ request. The one-resumer claim (`claim_resume`, inside
 `resume_dispatch_after_approval`) decides who runs it. Only the caller
 that wins the claim runs the op:
 
-- `/decide` wins: it runs the op. A waiting agent then gets an "already
-  run" answer (`_resume_approved_or_already_resumed` in
-  `agent/approval_wait.py`) and runs nothing.
+- `/decide` wins: it runs the op, or refuses it before it runs. A
+  waiting agent then runs nothing. It reads the request again and
+  returns the stored result of that run: the refusal, or the result of
+  the run (`_lost_claim_envelope` in `agent/approval_wait.py`). When no
+  result is stored yet, it returns an `already_resumed` answer that says
+  the outcome is not known yet; it never says the operation ran.
 - The waiting agent wins: `/decide` runs nothing and returns
   `dispatch_status="already_resumed"`.
 - No agent is waiting any more: `/decide` wins and runs the op.
@@ -1066,6 +1146,7 @@ There is no MCP tool for it; the agent working surface is unchanged.
 | The saved target still resolves. | same (`target_gone`) |
 | The saved target has the connection settings it had when the request was made (`target_hash`, same check as every approved run). | same (`target_changed`) |
 | A `destructive` request: a new server-side preview has the approved `preview_hash`. | same (`preview_changed`) |
+| A `destructive` request: the live card builds, and the object it names is still the one on the approval card, or is gone (`approval_object_check.py`, same check as every approved run). | same (`object_changed`) |
 
 The operation, connector and target always come from the request, so the
 caller cannot change them. A refused re-run runs nothing.
@@ -1462,8 +1543,13 @@ Where it shows:
   row (`/ui/audit?audit_id=<id>`). The card after an approve says "Approved,
   but the run failed" when the run returned an error. Both show a "Next
   step" line with the `guidance`, when set. When another resumer
-  (usually the waiting requester) already ran the operation
-  (`already_resumed`), it shows the normal "Request approved" card.
+  (usually the waiting requester) won the run claim (`already_resumed`),
+  the card reads the request again and shows its stored result: the same
+  refused or failed card, or the normal "Request approved" card when the
+  run landed. No stored result yet gives an "Approved, the run is still
+  going" card that names the approvals history as the place where the
+  result will show. The card never says the operation was re-dispatched
+  when another caller may have refused it.
 
 **Decision: reads of an approval request stay as they are here.** A client
 that polls `GET /api/v1/approvals/{id}` until the run ends makes one
@@ -1696,7 +1782,7 @@ got one in #4850; `k8s.secret.update` came later with its own builder
 | `sddc.host.validate` | an agent's call | host count; per host: `fqdn`, `username`, `storageType`, `networkPoolId` | the ESXi password and any other spec field |
 | `sddc.host.commission` | every call | the same as `sddc.host.validate` | the same |
 | `holodeck.router.patch` | every call | HoloRouter version, whether the call only checks (`verify_only`, a 9.1 router), the patch ids and the module file each one edits | nothing secret exists; the op takes no params |
-| `secret.handoff.import` | every call | the store target name (the other instance's Vault), the sink `{kind, ref}`, `expect_sha256`, the reason | the one-time handoff token (`connectors/secret/handoff_preview.py`) |
+| `secret.handoff.import` | every call | the store target name (the other instance's Vault), the sink `{kind, ref}`, `expect_fingerprint`, the reason | the one-time handoff token (`connectors/secret/handoff_preview.py`) |
 | `vmware.composite.vm.guest.file.read` | an agent's call | VM, guest path, whether MEHO downloads the bytes (`fetch_content`, `max_inline_bytes`), the guest login's store path (`guest_secret_ref`) | the guest login |
 
 `k8s.secret.delete` is not a credential write (its params are only the
@@ -2440,8 +2526,12 @@ mappers of `meho-cli` without the MCP
 audience, and its own login flow `meho approval sign-in`
 (`authenticationFlowBindingOverrides.browser`) — is set by `meho admin keycloak bootstrap-clients`, the
 bundled realm `deploy/charts/meho/charts/keycloak/files/meho-realm.json`
-(new installs; the realm finishing job creates it on a running realm),
-installs), and `docs-site/install/keycloak-realm.md` Step 2. `list`
+(new installs; the realm stage adds the flow to a running realm when it
+may change login flows, else `keycloak.authflow.ensure_approval_flow`
+does), and `docs-site/install/keycloak-realm.md` Step 2. The flow holds
+also when the realm's login goes straight to a company login: a
+command-line approval always signs in through its own flow
+(`tests/integration/test_core_company_login_keycloak.py`). `list`
 has a `RUN` column and `show` / `approve` print how the run of an approved
 request ended (#3543, see "Approved, but the run failed" above).
 `list` shows only pending requests unless `--status` is set; `--status all`
@@ -3141,10 +3231,17 @@ What the agent waiter does:
   deleted and a new one created with the same name. Loading by id means the
   approved write can only run against the original target. If the saved
   target no longer resolves (soft-deleted or revoked), or its connection
-  settings changed since the request was made (`target_changed_since_approval`,
+  settings changed since the request was made (`target_changed_since_approval`
+  or `target_gone_since_approval`,
   see [An approval covers one target and one preview](#an-approval-covers-one-target-and-one-preview)),
-  the waiter returns a `denied` envelope and runs nothing. This check runs
-  before the one-resumer claim, so a refused resume leaves the claim free.
+  the waiter returns a `denied` envelope and runs nothing. The refusal
+  takes the one-resumer claim, deletes the stored run input, writes one
+  audit row and is stored as the run result, like the release refusal.
+  When another caller (usually the console) took the claim first, the
+  waiter reads the request again and returns the stored result of that
+  caller's run: its refusal, or the result of the run. No stored result
+  yet gives an `already_resumed` envelope that says the outcome is not
+  known; the waiter never answers that the operation ran.
   Covered by `test_composite_resume_uses_saved_target_when_name_was_reassigned`
   and `test_composite_resume_fails_closed_when_saved_target_deleted_and_name_reused`
   (unit) and the two `test_agent_waiter_composite_resume_*` tests (end to

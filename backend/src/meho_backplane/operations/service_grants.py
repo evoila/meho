@@ -1265,18 +1265,16 @@ async def consult_and_record_grant(
     transaction before returning. The audit row is the record; no
     Broadcast event is published (#3758).
 
-    A ``destructive``-tier op (#3183) is refused here **before** any grant
-    lookup: the tier is non-grantable, so even a stale grant row that
-    predates the op's promotion into the tier can never auto-approve it.
-    This is the dispatch-time twin of the create-time refusal in
-    :func:`_delete_shaped_reason_by_descriptor`; together they make
-    "a standing grant can never satisfy a destructive op" hold whether the
-    grant is being created or consulted.
-
-    An op id whose vendor action name means delete (#4632) is refused the
-    same way. A composite's inner step arrives as an in-memory record with
-    its declared level only — no method, no tags — so for it the op id is
-    the only sign.
+    An op with any delete sign is refused here **before** any grant
+    lookup, with the same rule grant create uses (:func:`delete_grant_reason`):
+    a configured name pattern, a vendor delete action name, the
+    ``destructive`` tier, the HTTP verb ``DELETE`` or the
+    ``destructive`` tag. So a grant row that is older than the sign (a
+    pattern added to the setting later, an op promoted into the tier, a
+    row written for a VI-JSON delete) can never auto-approve the op. A
+    composite's inner step arrives as an in-memory record with its
+    declared level only — no method, no tags — so for it the op id is the
+    only sign, and both id signs are checked.
 
     **Sandbox mode (#4622).** When the instance runs in sandbox mode and
     the op has any delete sign, a live **delete grant** from
@@ -1314,9 +1312,11 @@ async def consult_and_record_grant(
         if grant_id is not None:
             return grant_id
 
-    destructive_reason = _delete_shaped_reason_by_action_name(
-        descriptor.op_id
-    ) or _delete_shaped_reason_by_descriptor(descriptor)
+    from meho_backplane.settings import get_settings
+
+    destructive_reason = delete_grant_reason(
+        descriptor.op_id, get_settings().service_grant_delete_shaped_patterns, descriptor
+    )
     if destructive_reason is not None:
         _log.info(
             "service_grant_refused_delete_shaped",

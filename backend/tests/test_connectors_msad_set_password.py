@@ -32,6 +32,7 @@ from meho_backplane.connectors.msad.ops_password import (
 )
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
 from meho_backplane.settings import get_settings
+from tests._ssh_fakes import FakeSshConnection
 
 _PASSWORD = "Pässwört'; Remove-ADUser x #\u2019"
 
@@ -291,10 +292,9 @@ class _Ssh(SshConnector):
 
 async def test_run_command_passes_stdin_as_input() -> None:
     connector = _Ssh()
-    conn = MagicMock()
-    conn.run = AsyncMock(return_value=_proc(stdout="ok"))
+    conn = FakeSshConnection(stdout="ok")
     with patch.object(connector, "_connect", AsyncMock(return_value=conn)):
         await connector._run_command(_TARGET, "cmd", stdin="line\n")  # type: ignore[arg-type]
-        conn.run.assert_awaited_with("cmd", input="line\n", check=False)
+        assert conn.calls[-1] == ("cmd", "line\n")
         await connector._run_command(_TARGET, "cmd")  # type: ignore[arg-type]
-        conn.run.assert_awaited_with("cmd", check=False)
+        assert conn.calls[-1] == ("cmd", None)

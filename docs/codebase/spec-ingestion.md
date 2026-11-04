@@ -193,6 +193,18 @@ catalog YAML. The field validator pins each value to a single path
 segment (no `/`, `\`, or `..`) so a resource name can't escape its
 package root.
 
+A connector package (a wheel that adds a folder under
+`meho_backplane/connectors/`) can bring catalog rows of its own: its
+folder's `__init__` calls the kit's `register_connector_catalog`, and
+`load_catalog()` reads the package's YAML file with the built-in one.
+The `spec_resource` and `profile_resource` of such a row name files in
+the package's folder, not in the two resource packages above. So code
+that reads a row's files uses `load_entry_spec(entry)` and
+`load_entry_profile(entry)`, which look in the right place for either
+kind of row (`entry.source_package` says which package brought it;
+`None` is a built-in row). See
+[connector-packages.md](connector-packages.md), "Bring catalog rows".
+
 **Why:** `vmware/9.0` and `sddc/9.0` have an `upstream` the backend
 can't dereference (HTML developer portal / fqdn-templated appliance
 URL) — the `catalog_entry_upstream_not_spec` /
@@ -529,8 +541,8 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `tags` | `tags` | Spec tags + optional `spec:<source>` marker |
 | `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc`; `additionalProperties: false` (#293) |
 | `response_schema` | `response_schema` | Success-response schema or `None` |
-| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay` |
-| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE` (#3827), destructive-action hints, a connector-owned minimum safety floor, or a catalog `safety_overlay` rule |
+| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay`, then the op class floor (a `credential_read` is at least `caution`) |
+| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE`, destructive-action hints, a connector-owned minimum safety floor, a catalog `safety_overlay` rule, or a `credential_read` op class |
 | `llm_instructions` | `llm_instructions` | `None` from the parser; set only by a connector-owned spec correction |
 
 Every `DELETE` lands `dangerous` with `requires_approval=True` (#3827). A
@@ -641,6 +653,50 @@ Installer bring-up spec read `GET:/v1/sddcs/{id}/spec`; it has no catalog
 row, so a manual ingest of it gets the redaction guard only. Stored rows
 change at the next ingest (see "Applying corrected floors to existing
 rows" below).
+
+#### Op class floor for credential reads
+
+The op class is the third and last floor. An ingested operation that a
+connector declares as `credential_read` (`declare_op_classes` in its
+`op_classes.py`, read through `classify_op`) is at least `caution` and
+waits for a person's approval. `apply_safety_floor` applies it after the
+connector floor and the catalog overlay, and it only raises. So the same
+marker that makes the dispatcher hide the values of the answer also sets
+the lowest risk level of the read. A catalog row and its `safety_overlay`
+can raise such a read further, but a product without a row, or a row
+without a list, no longer leaves a credential read at `safe`. A declared
+credential read counts as governed in `has_safety_floor`, so a re-ingest
+never lowers a stricter stored row. Tests:
+`tests/test_credential_read_safety_floor.py`.
+
+#### Ingested licence reads stay off
+
+A vendor file can describe a read whose answer carries the product's
+licence keys unmasked (SDDC Manager `GET /v1/license-keys`, the vCenter
+licence manager's `licenses` property, an NSX `/licenses` list). The
+ingest would give it the `safe` level of its HTTP method. A licence key
+is a paid secret, so MEHO never runs such a read. The rule is one word:
+a `GET` or `HEAD` whose path names licences (`license-keys`, `licenses`,
+`licensing`, `licence`) is a licence read
+(`operations/license_reads.py`). It is broad by design, like the flight
+recorder's family rule, and needs no list of vendor paths. Three places
+apply it:
+
+- `enable-reads` (`bulk_enable_read_ops`) leaves such a row off and turns
+  the other reads on.
+- `call_operation` and `preview_operation` answer `license_read_off`
+  before the target check, the catalog guard, the policy gate and any
+  vendor call. The row that is off gets this answer too
+  (`op_miss_result`, when the caller can see the row), and so does a row
+  an operator turned on by hand. Nothing runs, so no audit row is
+  written. The message names the way to read licences: the connector's
+  hand-written licence read, which shows each key masked. A row another
+  tenant owns is not visible, so it stays `unknown_op`.
+- The flight recorder never records the body of an op whose id names
+  licences in any case (`licen` in `SECRET_FAMILY_WORDS`, matched
+  case-insensitively, because a vendor path keeps the vendor's spelling).
+
+Tests: `tests/test_operations_license_reads_stay_off.py`.
 
 #### Applying corrected floors to existing rows
 
@@ -2488,7 +2544,21 @@ activity:
 
 5. **Response size cap.** The response body is streamed and rejected if it
    exceeds 20 MiB (`_MAX_SPEC_BYTES`), preventing a redirect to a large
-   internal endpoint from exhausting pod memory.
+   internal endpoint from exhausting pod memory. A YAML spec is also
+   refused when it expands to more than two nodes per byte of input
+   (`_MAX_SPEC_NODES_PER_BYTE`, checked by `_assert_expanded_size`): YAML
+   anchors and aliases let a small file stand for a document with many
+   times more nodes, and the later full walks of the pipeline do not
+   share them. The check runs on the composed node graph, before the
+   nodes are turned into Python objects (`_load_yaml_spec`), because a
+   `<<` merge key copies every merged entry during that step, and the
+   duplicate keys then collapse in the result. The walk counts a node
+   when it enters it and keeps only the current path, so the check
+   itself never holds more than the cap. An alias that points back at
+   a node it sits inside (a recursive alias) is refused at once, since
+   such a document never finishes expanding. A document without
+   aliases has at most one node per byte, so a real spec never hits
+   this cap.
 
 6. **Oracle-free error messages that name the inline remedy.** Error
    messages never echo the operator-supplied URI, the resolved IP /

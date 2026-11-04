@@ -1512,13 +1512,14 @@ class Settings(BaseModel):
     gsm_wif_subject_token_type: str = Field(
         default="urn:ietf:params:oauth:token-type:jwt", min_length=1
     )
-    # Google Cloud projects whose Secret Manager secrets an operation may
-    # name in a parameter (for example ``password_secret_ref:
-    # gsm:<project>/<secret>``). Comma-separated project ids, whitespace
-    # ignored. Empty (the default) refuses every ``gsm:`` secret named in a
-    # parameter, and on a ``credentialBackend=gsm`` install every schemeless
-    # one too. A target's own ``secret_ref`` is not affected. Read through
-    # :attr:`gsm_param_allowed_project_set`. Set via
+    # Google Cloud projects whose Secret Manager secrets MEHO may read: a
+    # target's own ``gsm:<project>/<secret>`` login, and a ``gsm:`` ref an
+    # operation names in a parameter (for example ``password_secret_ref``).
+    # Comma-separated project ids, whitespace ignored. Empty (the default)
+    # refuses every ``gsm:`` secret, and on a ``credentialBackend=gsm``
+    # install every schemeless one too. A target whose login names another
+    # project is refused when it is saved and when its login is read. Read
+    # through :attr:`gsm_param_allowed_project_set`. Set via
     # ``GSM_PARAM_ALLOWED_PROJECTS``.
     gsm_param_allowed_projects: str = Field(default="")
     database_url: str = Field(min_length=1)
@@ -1606,6 +1607,13 @@ class Settings(BaseModel):
     #: ``mcp_session_start_limit_per_minute`` (same ``<tenant-uuid>=<int>``
     #: CSV shape). Set via ``MCP_SESSION_START_LIMIT_PER_MINUTE_OVERRIDES``.
     mcp_session_start_limit_per_minute_overrides: str = ""
+    #: Byte cap on every HTTP request body, enforced by
+    #: :class:`meho_backplane.request_body_limit.RequestBodyLimitMiddleware`
+    #: with a ``413`` answer. Sits above the largest body MEHO accepts on
+    #: purpose (the 20 MiB inline spec of the connector ingest route);
+    #: routes with a tighter cap of their own keep it. Set via
+    #: ``HTTP_MAX_REQUEST_BODY_BYTES``.
+    http_max_request_body_bytes: int = Field(default=32 * 1024 * 1024, ge=1024)
     #: Look-back window (minutes) for the dispatch-time target-activity
     #: advisory (#2550). A write-class dispatch on a target with peer
     #: activity inside this window carries a compact
@@ -2214,6 +2222,16 @@ class Settings(BaseModel):
     #: 503) rather than receiving the operator bearer. ``repr=False`` keeps
     #: the secret out of ``Settings`` reprs / structured logs.
     corpus_service_token: str = Field(default="", repr=False)
+    #: Hosts of the docs services this deployment uses, as a comma-separated
+    #: list of host names or IP addresses (no scheme, port or path). MEHO
+    #: dials a docs-service endpoint, and sends ``corpus_service_token``,
+    #: only when the endpoint's host is on this list or is the host of
+    #: ``corpus_url``. A tenant's doc collection can therefore only point at
+    #: a docs service the deployment named. Matching is exact and ignores
+    #: case and a trailing dot; a host that only resolves to a listed
+    #: address does not count. Empty ("") allows the host of ``corpus_url``
+    #: alone. Read via :func:`~meho_backplane.auth.corpus.corpus_allowed_hosts`.
+    corpus_allowed_hosts: str = ""
     #: Bound on the corpus HTTP request (connect / read / write), in
     #: seconds. A slow corpus raises ``CorpusUnavailable`` rather than
     #: blocking the event loop.
@@ -2792,6 +2810,9 @@ def get_settings() -> Settings:
             "MCP_SESSION_START_LIMIT_PER_MINUTE_OVERRIDES",
             "",
         ).strip(),
+        http_max_request_body_bytes=int(
+            os.environ.get("HTTP_MAX_REQUEST_BODY_BYTES", str(32 * 1024 * 1024)),
+        ),
         dispatch_activity_advisory_window_minutes=int(
             os.environ.get("DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES", "30"),
         ),
@@ -3140,6 +3161,7 @@ def get_settings() -> Settings:
         corpus_url=os.environ.get("CORPUS_URL", "").strip(),
         corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),
         corpus_service_token=os.environ.get("CORPUS_SERVICE_TOKEN", "").strip(),
+        corpus_allowed_hosts=os.environ.get("CORPUS_ALLOWED_HOSTS", "").strip(),
         corpus_timeout_seconds=float(
             os.environ.get("CORPUS_TIMEOUT_SECONDS", "10.0"),
         ),

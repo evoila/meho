@@ -23,6 +23,7 @@ import json
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -32,6 +33,7 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequestStatus
+from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
     claim_resume,
@@ -135,20 +137,42 @@ def fake_dispatch(monkeypatch: pytest.MonkeyPatch) -> _FakeDispatch:
     return fake
 
 
+async def _persist_target(name: str) -> uuid.UUID:
+    target_id = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        s.add(
+            TargetORM(
+                id=target_id,
+                tenant_id=_TENANT_ID,
+                name=name,
+                product="vcf-installer",
+                host="first.invalid",
+                port=443,
+                secret_ref="kv/installer/first",
+                aliases=[],
+                extras={},
+            )
+        )
+        await s.commit()
+    return target_id
+
+
 async def _park(
     params: dict[str, Any],
     *,
     approved: bool = False,
     release_id: str | None = None,
     expires_at: datetime | None = None,
+    target_id: uuid.UUID | None = None,
 ) -> uuid.UUID:
+    target = SimpleNamespace(id=target_id, fqdn=None) if target_id is not None else None
     async with get_sessionmaker()() as s:
         request = await create_pending_request(
             s,
             operator=_requester(),
             connector_id=_CONNECTOR_ID,
             op_id=_OP_ID,
-            target=None,
+            target=target,
             params=params,
             params_hash=compute_params_hash(params),
         )
@@ -356,5 +380,26 @@ async def test_run_refused_after_a_meho_update_keeps_no_secret_values(
     )
 
     assert result.extras["error_code"] == "release_changed_while_waiting"
+    assert fake_dispatch.calls == []
+    _assert_hidden(await _stored_params(request_id))
+
+
+@pytest.mark.asyncio
+async def test_run_refused_after_a_target_change_keeps_no_secret_values(
+    fake_dispatch: _FakeDispatch,
+) -> None:
+    target_id = await _persist_target("installer-1")
+    request_id = await _park(_SPEC_PARAMS, approved=True, target_id=target_id)
+    async with get_sessionmaker()() as s:
+        target = await s.get(TargetORM, target_id)
+        assert target is not None
+        target.host = "second.invalid"
+        await s.commit()
+
+    result = await resume_dispatch_after_approval(
+        operator=_requester(), request=await _load(request_id)
+    )
+
+    assert result.extras["error_code"] == "target_changed_since_approval"
     assert fake_dispatch.calls == []
     _assert_hidden(await _stored_params(request_id))

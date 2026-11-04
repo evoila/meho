@@ -16,8 +16,11 @@ real asyncpg wire path:
   PostgreSQL with ``ReadOnlySqlTransactionError`` -- the
   ``default_transaction_read_only=on`` backstop (Task #2236 AC), independent of
   the first-keyword allowlist.
-* ``postgres.query`` reads through the allowlist and refuses a write before the
-  wire.
+* ``postgres.query`` reads through the allowlist as a role that is not a
+  superuser, refuses a write, a server admin function and a function that
+  runs a SQL string before the wire,
+  refuses the container's superuser login unless the target allows it, and
+  every session carries the server-side ``statement_timeout``.
 
 The credential loader is exercised through the in-process Vault fake (there is
 no real Vault in this lane), which returns the container's own credentials so
@@ -41,8 +44,16 @@ import asyncpg
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.postgres import PostgresConnector, PostgresReadOnlyError
-from meho_backplane.connectors.postgres.session import connect_read_only
+from meho_backplane.connectors.postgres import (
+    PostgresConnector,
+    PostgresReadOnlyError,
+    PostgresSuperuserError,
+)
+from meho_backplane.connectors.postgres.query_guard import ALLOW_SUPERUSER_QUERY_EXTRA
+from meho_backplane.connectors.postgres.session import (
+    DEFAULT_STATEMENT_TIMEOUT_MS,
+    connect_read_only,
+)
 from meho_backplane.settings import get_settings
 
 from .._vault_fakes import install_fake_client
@@ -90,6 +101,11 @@ def _operator() -> Operator:
         tenant_id=UUID("00000000-0000-0000-0000-0000000000d4"),
         tenant_role=TenantRole.OPERATOR,
     )
+
+
+#: The low-rights role ``_seed`` creates for the ``postgres.query`` tests.
+_READER_USER = "meho_reader"
+_READER_PASSWORD = "reader-test-password"
 
 
 @dataclass
@@ -144,6 +160,8 @@ async def _seed(c: _Container) -> None:
             [(i, f"note-{i}") for i in range(50)],
         )
         await conn.execute("ANALYZE orders")
+        await conn.execute(f"CREATE ROLE {_READER_USER} LOGIN PASSWORD '{_READER_PASSWORD}'")
+        await conn.execute(f"GRANT SELECT ON orders TO {_READER_USER}")
     finally:
         await conn.close()
 
@@ -155,6 +173,16 @@ def _vault(monkeypatch: pytest.MonkeyPatch, pg_container: _Container) -> None:
     install_fake_client(
         monkeypatch,
         secret={"username": pg_container.user, "password": pg_container.password},
+    )
+
+
+@pytest.fixture
+def _vault_reader(monkeypatch: pytest.MonkeyPatch, pg_container: _Container) -> None:
+    """Route the credential loader at the low-rights reader role."""
+    get_settings.cache_clear()
+    install_fake_client(
+        monkeypatch,
+        secret={"username": _READER_USER, "password": _READER_PASSWORD},
     )
 
 
@@ -218,8 +246,22 @@ async def test_session_write_fails_server_side(pg_container: _Container, _vault:
 
 
 @pytest.mark.asyncio
-async def test_run_query_reads_and_blocks_write(pg_container: _Container, _vault: None) -> None:
-    """postgres.query reads via the allowlist; a write is refused before the wire."""
+async def test_session_carries_statement_timeout(pg_container: _Container, _vault: None) -> None:
+    """Every session has the server-side statement_timeout set at startup."""
+    target = _PgLiveTarget(host=pg_container.host, port=pg_container.port)
+    conn = await connect_read_only(target, _operator(), database=pg_container.dbname)
+    try:
+        shown = await conn.fetchval("SHOW statement_timeout")
+        assert shown == f"{DEFAULT_STATEMENT_TIMEOUT_MS // 1000}s"
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_run_query_reads_and_blocks_write(
+    pg_container: _Container, _vault_reader: None
+) -> None:
+    """postgres.query reads as a low-rights role; a write is refused before the wire."""
     target = _PgLiveTarget(host=pg_container.host, port=pg_container.port)
     connector = PostgresConnector()
 
@@ -237,3 +279,80 @@ async def test_run_query_reads_and_blocks_write(pg_container: _Container, _vault
             target,
             {"sql": "DELETE FROM orders", "database": pg_container.dbname},
         )
+
+
+@pytest.mark.asyncio
+async def test_run_query_refuses_admin_function(
+    pg_container: _Container, _vault_reader: None
+) -> None:
+    """A statement that names a server admin function is refused before the wire."""
+    target = _PgLiveTarget(host=pg_container.host, port=pg_container.port)
+    with pytest.raises(PostgresReadOnlyError, match="pg_terminate_backend"):
+        await PostgresConnector().run_query(
+            _operator(),
+            target,
+            {
+                "sql": "SELECT pg_terminate_backend(pg_backend_pid())",
+                "database": pg_container.dbname,
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_query_refuses_sql_running_function(
+    pg_container: _Container, _vault_reader: None
+) -> None:
+    """A built-in that runs a SQL string is refused before the wire.
+
+    Without the refusal the server would join the pieces into
+    ``pg_terminate_backend`` and end the reader's own session: a non-superuser
+    may terminate its own sessions, so the role check does not stop it.
+    """
+    target = _PgLiveTarget(host=pg_container.host, port=pg_container.port)
+    with pytest.raises(PostgresReadOnlyError, match="query_to_xml"):
+        await PostgresConnector().run_query(
+            _operator(),
+            target,
+            {
+                "sql": (
+                    "SELECT query_to_xml('SELECT pg_' || "
+                    "'terminate_backend(pg_backend_pid())', true, false, '')"
+                ),
+                "database": pg_container.dbname,
+            },
+        )
+    # The reader's session is still there: nothing reached the server.
+    ok = await PostgresConnector().run_query(
+        _operator(), target, {"sql": "SELECT 1 AS n", "database": pg_container.dbname}
+    )
+    assert ok["rows"] == [{"n": 1}]
+
+
+@pytest.mark.asyncio
+async def test_run_query_refuses_superuser_login(pg_container: _Container, _vault: None) -> None:
+    """The container's own login is a superuser, so postgres.query refuses it."""
+    target = _PgLiveTarget(host=pg_container.host, port=pg_container.port)
+    with pytest.raises(PostgresSuperuserError, match="superuser"):
+        await PostgresConnector().run_query(
+            _operator(),
+            target,
+            {"sql": "SELECT 1 AS n", "database": pg_container.dbname},
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_query_runs_as_superuser_when_target_allows(
+    pg_container: _Container, _vault: None
+) -> None:
+    """With extras.allow_superuser_query=true the superuser login runs the read."""
+    target = _PgLiveTarget(
+        host=pg_container.host,
+        port=pg_container.port,
+        extras={ALLOW_SUPERUSER_QUERY_EXTRA: True},
+    )
+    ok = await PostgresConnector().run_query(
+        _operator(),
+        target,
+        {"sql": "SELECT 1 AS n", "database": pg_container.dbname},
+    )
+    assert ok["rows"] == [{"n": 1}]

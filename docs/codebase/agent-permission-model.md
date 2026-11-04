@@ -296,6 +296,35 @@ instead and stores nothing:
 See [approvals.md](approvals.md) for the queue, the approve and reject
 verbs, and the resume path.
 
+### Per-op role floor (`operations/role_floors.py`)
+
+A few operations need a role above `operator` from the person who runs
+them: `targets.register` and the five `topology.*` writes need
+`tenant_admin`, like their REST routes and MCP tools. Their connector
+module registers the floor at import (`register_role_floor`). The
+non-agent branch of `policy_gate` checks it first for a person
+(`is_human_principal`): a role below the floor is `deny`, so the call is
+refused on every path (`call_operation`, the REST dispatch route, the
+CLI, `preview_operation`) and the audit row says `denied`. Agents and
+service logins are not checked here; they park or run under a grant, and
+a person decides. The approval queue (`approve_request`,
+`_check_approver_role_floor`) checks that person against the same floor
+at the decision, on every approve surface (REST `/approve` and `/decide`,
+the console; approval decisions have no MCP path): an approver below the
+floor gets 403, the request stays pending and no decision is recorded.
+So the approved call runs a decision a person with the role made,
+whichever resume path wins. When that person runs the approved call from
+an approvals surface, the dispatcher's approve-and-run path
+(`_approved=True`) checks their role once more and refuses with a
+`denied` audit row. The requester's own run of an approved call is not
+checked again, the person's approval is the authorization: an agent's
+own resume (`agent/approval_wait.py`, an agent principal or a hosted
+agent run), and the requester's re-run of a failed approved call
+(`POST /api/v1/approvals/{id}/rerun`, `operations/approval_rerun.py`),
+which runs under the requester, also a service login with the `operator`
+role. The dispatcher tells the two apart by the requester the resume
+helper binds (`secondary_target_policy.approved_requester_sub`).
+
 `policy_gate` (`_validate.py`) opens its own DB session (same
 `get_sessionmaker()` pattern as `audit_and_broadcast_safe`) and calls
 `resolve_verdict` for agent principals.

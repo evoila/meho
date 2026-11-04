@@ -90,8 +90,11 @@ permissions:
   # and CodeRabbit's same finding. See the `publish` job below.
 
 concurrency:
-  # On main/tag pushes: keep one in-flight publish per ref so a fast follow-up
-  # commit cancels its predecessor. On PRs: scoped by PR ref the same way.
+  # Pushes to main: one group per commit (the sha suffix), so a newer push
+  # never cancels or replaces an older push's run. Every main commit gets
+  # its own chart (0.1.<date>-<short-sha>), like the image in image.yml.
+  # Pull requests: one group per PR, so a new push cancels the old run.
+  # Tag pushes: one group per tag, as before (the sha suffix is empty).
   # The `${{ github.event_name }}` suffix keeps pull_request / push /
   # merge_group runs in distinct cancellation domains (mirrors ci.yml,
   # security-scan.yml, secret-scan.yml, dependency-license-check.yml).
@@ -99,8 +102,10 @@ concurrency:
   # IMPORTANT: already-running merge_group jobs must NEVER be cancelled — a
   # cancelled queue check fails the merge attempt and drops the PR out of the
   # queue, defeating the queue's purpose (#769). cancel-in-progress is
-  # therefore scoped OFF for merge_group and stays ON for pull_request / push.
-  group: chart-${{ github.ref }}-${{ github.event_name }}
+  # therefore scoped OFF for merge_group and stays ON for pull_request / push
+  # (a main push has its own group, so in practice only PRs and a re-pushed
+  # tag cancel an older run).
+  group: chart-${{ github.ref }}-${{ github.event_name }}-${{ github.ref == 'refs/heads/main' && github.sha || '' }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
@@ -1025,7 +1030,11 @@ jobs:
         # The roles are not superusers, each database is fenced to its
         # owner, `vector` is in `meho`, and after a changed Secret plus a
         # pod restart the reconcile sidecar sets the new password (the
-        # failure shape of a regenerated database password).
+        # failure shape of a regenerated database password). The running
+        # backplane is logged in as `meho_app`, the role the migration
+        # granted: it can add and read audit rows and empty `raw_payload`,
+        # but not change or delete a row, truncate the table or add a
+        # trigger, and it owns nothing.
         run: |
           set -euo pipefail
           pg() {
@@ -1034,10 +1043,22 @@ jobs:
           }
           test "$(pg -c "SELECT rolsuper FROM pg_roles WHERE rolname = 'meho'")" = f
           test "$(pg -c "SELECT rolsuper FROM pg_roles WHERE rolname = 'keycloak'")" = f
+          test "$(pg -c "SELECT rolsuper FROM pg_roles WHERE rolname = 'meho_app'")" = f
           test "$(pg -c "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = 'keycloak'")" = keycloak
+          test "$(pg -c "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = 'meho'")" = meho
           test "$(pg -d meho -c "SELECT extname FROM pg_extension WHERE extname = 'vector'")" = vector
           test "$(pg -c "SELECT has_database_privilege('keycloak', 'meho', 'CONNECT')")" = f
           test "$(pg -c "SELECT has_database_privilege('meho', 'keycloak', 'CONNECT')")" = f
+          test "$(pg -c "SELECT has_database_privilege('meho_app', 'meho', 'CONNECT')")" = t
+          test "$(pg -d meho -c "SELECT count(*) > 0 FROM pg_stat_activity WHERE usename = 'meho_app' AND datname = 'meho'")" = t
+          test "$(pg -d meho -c "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r' AND pg_get_userbyid(c.relowner) = 'meho_app'")" = 0
+          test "$(pg -d meho -c "SELECT has_table_privilege('meho_app', 'audit_log', 'SELECT') AND has_table_privilege('meho_app', 'audit_log', 'INSERT')")" = t
+          test "$(pg -d meho -c "SELECT has_column_privilege('meho_app', 'audit_log', 'raw_payload', 'UPDATE')")" = t
+          test "$(pg -d meho -c "SELECT has_column_privilege('meho_app', 'audit_log', 'status_code', 'UPDATE')")" = f
+          for right in UPDATE DELETE TRUNCATE TRIGGER; do
+            test "$(pg -d meho -c "SELECT has_table_privilege('meho_app', 'audit_log', '$right')")" = f
+          done
+          test "$(pg -d meho -c "SELECT bool_and(has_table_privilege('meho_app', c.oid, 'SELECT, INSERT, UPDATE, DELETE')) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname <> 'audit_log'")" = t
 
           new_pw=$(openssl rand -hex 16)
           kubectl -n meho-test create secret generic meho-test-core-postgres-keycloak \
@@ -1056,7 +1077,7 @@ jobs:
           done
           kubectl -n meho-test exec meho-test-postgres-0 -c postgres -- \
             env PGPASSWORD="$new_pw" psql -X -tA -h 127.0.0.1 -U keycloak -d keycloak -c 'SELECT 1'
-          echo ">> built-in PostgreSQL verified: no superuser roles, fenced databases, vector, reconcile"
+          echo ">> built-in PostgreSQL verified: no superuser roles, fenced databases, vector, reconcile, meho_app rights"
 
       - name: Broadcast load + chaos verification (G6.1-T9)
         # G6.1-T9 (#433) acceptance:
@@ -1413,9 +1434,11 @@ jobs:
       - name: Start a bring-your-own PostgreSQL outside the release (#5412)
         # This is the customer's database. It is the chart's own PostgreSQL
         # objects (`--show-only`), applied with kubectl and not with Helm, so
-        # they are not part of the release below. The three Secrets they read
+        # they are not part of the release below. The four Secrets they read
         # are made here with throwaway passwords. Their names, keys and URL
-        # shape are those the install's secrets Job uses.
+        # shape are those the install's secrets Job uses. The release below
+        # runs with one login (`postgres.runtime` empty), so `meho_app` is
+        # created by the database but not used here.
         #
         # The database start-up script creates the `vector` extension as the
         # superuser. That is the one step a customer's database admin does by
@@ -1432,6 +1455,10 @@ jobs:
           kubectl -n meho-test create secret generic meho-test-core-postgres-meho \
             --from-literal=password="$meho_pw" \
             --from-literal=url="postgresql+asyncpg://meho:${meho_pw}@meho-test-postgres:5432/meho"
+          app_pw=$(openssl rand -hex 16)
+          kubectl -n meho-test create secret generic meho-test-core-postgres-meho-app \
+            --from-literal=password="$app_pw" \
+            --from-literal=url="postgresql+asyncpg://meho_app:${app_pw}@meho-test-postgres:5432/meho"
           kubectl -n meho-test create secret generic meho-test-core-postgres-keycloak \
             --from-literal=password="$(openssl rand -hex 16)"
           helm template meho-test ./deploy/charts/meho \

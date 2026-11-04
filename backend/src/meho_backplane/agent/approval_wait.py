@@ -342,30 +342,79 @@ def _build_already_resumed_envelope(
     original_envelope: dict[str, Any],
     approval_request_id: uuid.UUID,
 ) -> dict[str, Any]:
-    """Annotate the envelope when an operator surface already executed the op.
+    """Annotate the envelope when another caller claimed the run and stored no result yet.
 
-    Exactly-one-resumer claim (#2293): the request was approved, but the
-    operator approval surface that granted it won the claim and
-    re-dispatched the op, so this in-process waiter lost the race and must
-    not dispatch again. Rewrites ``status`` to ``"already_resumed"`` (a
-    benign terminal, not an error), stamps
-    ``extras["error_code"] = "already_resumed"`` + ``extras["decision"] =
-    "approved"`` so the agent's model has a stable string to switch on, and
-    names the request in ``error``. The durable execution audit row written
-    by the winning resumer is the evidence the op ran; this envelope is the
-    model-side view telling the agent it need not (and must not) retry.
+    Exactly-one-resumer claim: the request was approved, but
+    another resumer (usually the operator approval surface that granted
+    it) won the claim, so this in-process waiter lost the race and must not
+    dispatch again. The claim alone does not say how that run ended: the
+    winner may still be running the op, or may have refused it before it
+    ran. So this envelope says the outcome is not known here, nothing more.
+    When the winner has stored its result, :func:`_lost_claim_envelope`
+    returns that result instead of this envelope.
+
+    Rewrites ``status`` to ``"already_resumed"`` (a benign terminal, not an
+    error), stamps ``extras["error_code"] = "already_resumed"`` +
+    ``extras["decision"] = "approved"`` so the agent's model has a stable
+    string to switch on, and names the request in ``error``.
     """
     annotated = dict(original_envelope)
     annotated["status"] = "already_resumed"
     annotated["error"] = (
-        f"approval request {approval_request_id} was approved and executed by "
-        "an operator approval surface; not re-dispatched here."
+        f"approval request {approval_request_id} was approved, and another caller "
+        "claimed its run before this one. That run has stored no result yet, so its "
+        "outcome is not known here; it was not re-dispatched here. Read the request's "
+        "stored result to learn whether the operation ran."
     )
     extras = dict(original_envelope.get("extras") or {})
     extras["error_code"] = "already_resumed"
     extras["decision"] = "approved"
     annotated["extras"] = extras
     return annotated
+
+
+async def _lost_claim_envelope(
+    *,
+    operator: Operator,
+    original_envelope: dict[str, Any],
+    approval_request_id: uuid.UUID,
+) -> dict[str, Any]:
+    """Return the outcome of a run that another resumer claimed first.
+
+    A lost one-resumer claim only says that another caller took the run.
+    That caller may have run the op (and it may have failed), or refused
+    it before it ran because the target changed or is gone, or MEHO was
+    updated. The agent must see that outcome, not an "executed" answer.
+    So the row is read again: a stored run result
+    (:func:`~meho_backplane.operations.approval_queue.persist_resume_result`,
+    written by the claim winner) is returned as the outcome, in the same
+    reduced envelope shape this waiter returns when it runs the op itself.
+    No stored result yet gives the :func:`_build_already_resumed_envelope`
+    answer, which says the outcome is not known here.
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations.approval_queue import get_request
+
+    async with get_sessionmaker()() as session:
+        request = await get_request(
+            session,
+            tenant_id=operator.tenant_id,
+            request_id=approval_request_id,
+        )
+    stored = request.resume_result
+    _log.info(
+        "approval_wait_resume_already_claimed",
+        approval_request_id=str(approval_request_id),
+        tenant_id=str(operator.tenant_id),
+        op_id=original_envelope.get("op_id"),
+        stored_result=stored is not None,
+    )
+    if stored is not None:
+        return dict(stored)
+    return _build_already_resumed_envelope(
+        original_envelope=original_envelope,
+        approval_request_id=approval_request_id,
+    )
 
 
 # code-quality-allow: about 65 of the lines are the docstring that records the
@@ -385,9 +434,10 @@ async def _resume_approved_or_already_resumed(
     via ``resume_dispatch_after_approval``. Both this in-process waiter and
     that surface must win the same atomic :func:`claim_resume` before
     dispatching, so the approved (possibly write) op executes exactly once.
-    Win it here before the in-memory re-dispatch; a lost claim means an
-    operator surface already executed it, so surface a clean
-    already-executed envelope to the agent rather than double-dispatching.
+    Win it here before the in-memory re-dispatch; a lost claim means
+    another resumer took the run, so return that run's stored outcome (or
+    say the outcome is not known yet, :func:`_lost_claim_envelope`) rather
+    than double-dispatching.
 
     Audit lineage (#2323, completing #2086): the executed dispatch row must
     parent-link to the ``approval.request`` row so an approved chain replays
@@ -420,13 +470,15 @@ async def _resume_approved_or_already_resumed(
     :func:`_redispatch_approved`).
 
     Both kinds dispatch against the target the row saved by id
-    (:func:`~meho_backplane.operations.approval_queue.rehydrate_resume_target`,
+    (:func:`~meho_backplane.operations.approval_queue.refuse_resume_if_target_changed`,
     the operator surface's check), never the name in *call_arguments*: a
     target renamed, or deleted and re-created under the same name, while the
     request waited must not receive the approved write. A saved target that
     no longer resolves, or whose connection settings changed since the
-    request was made, fails closed with a ``denied`` envelope before the
-    claim. A per-call ``fqdn`` in the agent's original ``target`` dict is
+    request was made, fails closed with a ``denied`` envelope: the refusal
+    takes the one-resumer claim, drops the stored run input, writes one
+    audit row and is stored as the run result, like the release refusal.
+    A per-call ``fqdn`` in the agent's original ``target`` dict is
     applied to that loaded target again
     (:func:`~meho_backplane.operations.meta_tools.apply_target_fqdn_override`),
     as it was for the call that parked, so the approved call reaches the
@@ -450,7 +502,7 @@ async def _resume_approved_or_already_resumed(
         persist_resume_result,
         refuse_resume_if_preview_changed,
         refuse_resume_if_release_changed,
-        rehydrate_resume_target,
+        refuse_resume_if_target_changed,
     )
     from meho_backplane.operations.meta_tools import apply_target_fqdn_override
 
@@ -472,7 +524,8 @@ async def _resume_approved_or_already_resumed(
     release_refusal = await refuse_resume_if_release_changed(operator, request)
     if release_refusal is not None:
         if release_refusal.status == "already_resumed":
-            return _build_already_resumed_envelope(
+            return await _lost_claim_envelope(
+                operator=operator,
                 original_envelope=awaiting_envelope,
                 approval_request_id=approval_request_id,
             )
@@ -482,11 +535,19 @@ async def _resume_approved_or_already_resumed(
     # check the operator surface runs, not the name the agent used when it
     # parked: that name may point at another target by now. A saved target
     # that no longer resolves, or whose connection settings changed, fails
-    # closed here, before the claim, so the refused resume does not burn the
-    # one-resumer claim.
-    resolved_target, denied = await rehydrate_resume_target(operator, request)
-    if denied is not None:
-        return cast("dict[str, Any]", denied.model_dump(mode="json"))
+    # closed here. The refusal takes the one-resumer claim and is recorded
+    # like the release refusal above, so the request never runs later. A
+    # lost claim returns what the claim winner stored: its own refusal, or
+    # the result of its run.
+    resolved_target, target_refusal = await refuse_resume_if_target_changed(operator, request)
+    if target_refusal is not None:
+        if target_refusal.status == "already_resumed":
+            return await _lost_claim_envelope(
+                operator=operator,
+                original_envelope=awaiting_envelope,
+                approval_request_id=approval_request_id,
+            )
+        return target_refusal.model_dump(mode="json")
     # The agent's call may name a per-call ``fqdn`` (the virtual host the
     # connector sends in the HTTP Host header and the TLS server name). The
     # park ran with it, so the approved run must too. Applied after the
@@ -495,13 +556,8 @@ async def _resume_approved_or_already_resumed(
     apply_target_fqdn_override(resolved_target, call_arguments.get("target"))
 
     if not await claim_resume(approval_request_id):
-        _log.info(
-            "approval_wait_resume_already_claimed",
-            approval_request_id=str(approval_request_id),
-            tenant_id=str(operator.tenant_id),
-            op_id=awaiting_envelope.get("op_id"),
-        )
-        return _build_already_resumed_envelope(
+        return await _lost_claim_envelope(
+            operator=operator,
             original_envelope=awaiting_envelope,
             approval_request_id=approval_request_id,
         )

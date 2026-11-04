@@ -117,9 +117,11 @@ from meho_backplane.operations._audit import (
 from meho_backplane.operations._errors import (
     result_already_resumed,
     result_denied,
+    result_object_changed_since_approval,
     result_preview_changed_since_approval,
     result_release_changed_while_waiting,
     result_target_changed_since_approval,
+    result_target_gone_since_approval,
 )
 from meho_backplane.operations._secret_values import split_reveal_secret, with_reveal_secret
 from meho_backplane.operations._validate import (
@@ -138,6 +140,7 @@ from meho_backplane.operations.approval_handoff import (
 from meho_backplane.operations.approval_handoff import (
     store as store_handoff,
 )
+from meho_backplane.operations.approval_object_check import object_changed_since_request
 from meho_backplane.operations.approval_outcome import with_approval_guidance
 from meho_backplane.operations.approval_resume_checks import (
     park_time_target_hash,
@@ -145,6 +148,7 @@ from meho_backplane.operations.approval_resume_checks import (
     target_changed_since_request,
 )
 from meho_backplane.operations.reducer import handle_owner_sub_var
+from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.version import running_release_id
 
 __all__ = [
@@ -153,11 +157,14 @@ __all__ = [
     "MAX_REASON_LENGTH",
     "ApprovalError",
     "ApprovalExpiredReason",
+    "ApprovalGroupForbiddenError",
     "ApprovalListOrder",
     "ApprovalNotFoundError",
     "ApprovalRequestAlreadyDecidedError",
     "ApprovalRequestExpiredError",
     "ApprovalResultState",
+    "ApprovalRoleFloorError",
+    "ApprovalRule",
     "ApprovalSignInReusedError",
     "ApprovalSignInTooOldError",
     "ChainPosition",
@@ -193,6 +200,7 @@ __all__ = [
     "record_approval_step_event",
     "refuse_resume_if_preview_changed",
     "refuse_resume_if_release_changed",
+    "refuse_resume_if_target_changed",
     "rehydrate_resume_target",
     "reject_request",
     "resume_dispatch_after_approval",
@@ -216,9 +224,39 @@ _APPROVAL_STATUS_CODE: int = 202
 _DECISION_STATUS_CODE_APPROVED: int = 200
 _DECISION_STATUS_CODE_REJECTED: int = 403
 _DECISION_STATUS_CODE_EXPIRED: int = 410
-#: Audit ``status_code`` for an approved run refused because MEHO was
-#: updated while the request waited (#5030).
-_RELEASE_CHANGED_STATUS_CODE: int = 409
+#: Audit ``status_code`` for an approved run MEHO refused before it ran:
+#: MEHO was updated while the request waited (#5030), or the target changed
+#: or no longer resolves (:func:`refuse_resume_if_target_changed`).
+_RESUME_REFUSED_STATUS_CODE: int = 409
+
+#: Who may approve another person's ``dangerous`` or ``destructive`` change,
+#: in words for the refusal texts. The rule itself is in
+#: :func:`_check_approver_group`; the groups come from the decision record
+#: ``docs/decisions/approval-groups-and-self-approval.md`` (#3325).
+_HIGH_RISK_APPROVERS_TEXT: Final[str] = "a MEHO-SA-Operator or a MEHO-Admin"
+
+
+class ApprovalRule(StrEnum):
+    """The rule that allowed an approval (#3328).
+
+    Recorded as ``approval_rule`` on the ``approval.decision`` audit row
+    and on the ``approval.approved`` step event, next to ``self_approved``.
+
+    * ``sa_operator_self_approval`` — a MEHO-SA-Operator approved their own
+      change.
+    * ``break_glass_self_approval`` — the requester approved their own
+      ``safe`` or ``caution`` change under ``APPROVAL_ALLOW_SELF_APPROVAL``.
+    * ``sa_operator_or_admin`` — another person's ``dangerous`` or
+      ``destructive`` change, approved by a person in a group that may
+      approve it.
+    * ``reviewer`` — another person's lower-risk change, approved under the
+      reviewer rule of :func:`_check_reviewer_role`.
+    """
+
+    SA_OPERATOR_SELF_APPROVAL = "sa_operator_self_approval"
+    BREAK_GLASS_SELF_APPROVAL = "break_glass_self_approval"
+    SA_OPERATOR_OR_ADMIN = "sa_operator_or_admin"
+    REVIEWER = "reviewer"
 
 
 class ApprovalError(Exception):
@@ -385,25 +423,44 @@ class SelfApprovalForbiddenError(ApprovalError):
     """The approver is the same principal that requested the approval.
 
     Raised by :func:`approve_request` when
-    ``operator.sub == request.principal_sub`` and the deployment has not
-    enabled the audited single-operator break-glass mode
-    (``Settings.approval_allow_self_approval``). Enforces the
-    requester != approver invariant (G11.7-T1 #1401): a single account
-    must not be able to both request and grant a privileged connector
-    write. The route layer maps this to 403.
+    ``operator.sub == request.principal_sub``, the person is not in the
+    MEHO-SA-Operators group (:attr:`~meho_backplane.auth.operator.Operator.may_self_approve`,
+    #3328), and the audited single-operator break-glass mode
+    (``Settings.approval_allow_self_approval``) does not cover the change.
+    Break-glass never covers a ``dangerous`` or ``destructive`` change
+    (*high_risk*). The route layer maps this to 403.
+
+    The message says who can approve instead. For a lower-risk change it
+    also names the break-glass switch.
 
     Reject is deliberately *not* guarded — an operator withdrawing their
     own pending request is not a privilege escalation.
     """
 
-    def __init__(self, request_id: uuid.UUID, *, principal_sub: str) -> None:
+    def __init__(
+        self, request_id: uuid.UUID, *, principal_sub: str, high_risk: bool = False
+    ) -> None:
         self.request_id = request_id
         self.principal_sub = principal_sub
+        self.high_risk = high_risk
+        who_can = (
+            f"Ask {_HIGH_RISK_APPROVERS_TEXT} to approve this dangerous or destructive change."
+            if high_risk
+            else "Ask another operator, an admin or an approver to approve it."
+        )
+        #: The plain refusal text, without ids, for the web interface.
+        self.reason_text = (
+            "You cannot approve your own change. Only members of the "
+            f"MEHO-SA-Operators group may approve their own changes. {who_can}"
+        )
+        break_glass = (
+            ""
+            if high_risk
+            else " (set APPROVAL_ALLOW_SELF_APPROVAL=true for audited single-operator break-glass)"
+        )
         super().__init__(
             f"operator {principal_sub!r} may not approve approval_request "
-            f"{request_id}: requester and approver must differ "
-            "(set APPROVAL_ALLOW_SELF_APPROVAL=true for audited "
-            "single-operator break-glass)"
+            f"{request_id}: {self.reason_text}{break_glass}"
         )
 
 
@@ -416,12 +473,53 @@ class UnauthorizedApprovalError(ApprovalError):
     ``approver=true``, passes. The route layer maps this to 403.
     """
 
-    def __init__(self, *, operator_sub: str, role: str) -> None:
+    def __init__(self, *, operator_sub: str, role: str, message: str | None = None) -> None:
         self.operator_sub = operator_sub
         self.role = role
         super().__init__(
-            f"operator {operator_sub!r} with role {role!r} may not approve/reject "
-            "an approval request (requires at least 'operator')"
+            message
+            if message is not None
+            else (
+                f"operator {operator_sub!r} with role {role!r} may not "
+                "approve/reject an approval request (requires at least 'operator')"
+            )
+        )
+
+
+class ApprovalGroupForbiddenError(UnauthorizedApprovalError):
+    """The person may not approve another person's high-risk change (#3328).
+
+    Raised by :func:`approve_request` when the request is another person's
+    ``dangerous`` or ``destructive`` change and the approver is not in a
+    group that may approve it. The groups are those of the decision record
+    ``docs/decisions/approval-groups-and-self-approval.md``. Subclasses
+    :class:`UnauthorizedApprovalError`, so every handler of that error still
+    answers 403; the approve routes catch this one first to show its text.
+    """
+
+    def __init__(
+        self,
+        request_id: uuid.UUID,
+        *,
+        operator_sub: str,
+        role: str,
+        safety_level: str,
+    ) -> None:
+        self.request_id = request_id
+        self.safety_level = safety_level
+        #: The plain refusal text, without ids, for the web interface.
+        self.reason_text = (
+            f"You cannot approve this {safety_level} change of another person. "
+            f"Only {_HIGH_RISK_APPROVERS_TEXT} may approve dangerous and "
+            "destructive changes."
+        )
+        super().__init__(
+            operator_sub=operator_sub,
+            role=role,
+            message=(
+                f"operator {operator_sub!r} may not approve approval_request "
+                f"{request_id}: {self.reason_text}"
+            ),
         )
 
 
@@ -458,6 +556,33 @@ class NonHumanApprovalError(UnauthorizedApprovalError):
             f"principal {operator_sub!r} of kind {principal_kind!r} may not "
             "decide an approval request — approval is a human decision "
             "(v0.1-spec §7)",
+        )
+
+
+class ApprovalRoleFloorError(UnauthorizedApprovalError):
+    """The approver's role is below the role floor of the parked operation.
+
+    Raised by :func:`approve_request` when the operation needs a role from
+    the person who runs it (:mod:`meho_backplane.operations.role_floors`)
+    and the approver's ``tenant_role`` is below it. The approved call runs
+    with the approval as its authorization, on whichever resume path wins,
+    so the person who approves must hold the role the operation needs.
+    Checked before any state change: the request stays ``pending`` and no
+    decision audit row is written. Subclasses
+    :class:`UnauthorizedApprovalError`, so every handler of that error still
+    answers 403; the approve routes catch this one first to show its text.
+    """
+
+    def __init__(self, request_id: uuid.UUID, *, operator_sub: str, role: str, denial: str) -> None:
+        self.request_id = request_id
+        #: The plain refusal text, without ids, for the web interface.
+        self.reason_text = f"You cannot approve this change: {denial}."
+        super().__init__(
+            operator_sub=operator_sub,
+            role=role,
+            message=(
+                f"operator {operator_sub!r} may not approve approval_request {request_id}: {denial}"
+            ),
         )
 
 
@@ -1094,7 +1219,8 @@ async def _write_audit_row(
     *event_class* (#3733) is declared by each caller:
     ``policy_decision`` for the ``approval.request`` row (the gate decided
     the call needs approval), ``approval_decision`` for an approve, reject
-    or expiry ``approval.decision`` row, and ``legacy_request`` for the
+    or expiry ``approval.decision`` row and for the ``approval.withdraw``
+    row, and ``legacy_request`` for the
     ``approval.result`` read row.
 
     Uses ``method='APPROVAL'`` and the provided *path* (``'approval.request'``
@@ -1593,13 +1719,20 @@ async def approve_request(
        ``read_only`` principal carrying the ``approver`` capability
        (#3243); else 403.
     3. The row is still ``pending`` (else 409).
-    4. The approver is not the requester — ``operator.sub !=
-       request.principal_sub`` — unless the deployment enabled the
-       audited single-operator break-glass mode
-       (``Settings.approval_allow_self_approval``). Else 403,
-       :class:`SelfApprovalForbiddenError` (G11.7-T1 #1401). Checked
-       before the hash check so a self-approver learns *why* they are
-       refused rather than being told their params mismatch.
+    4. Who may approve (#1401, #3328, :func:`_check_approver_group`):
+       the approver's own change only for a MEHO-SA-Operator, or for a
+       ``safe`` / ``caution`` change under the audited break-glass mode
+       (``Settings.approval_allow_self_approval``); else 403,
+       :class:`SelfApprovalForbiddenError`. Another person's
+       ``dangerous`` or ``destructive`` change only for the groups of the
+       decision record; else 403, :class:`ApprovalGroupForbiddenError`.
+       Checked before the hash check so the approver learns *why* they
+       are refused rather than being told their params mismatch.
+       When the operation carries a role floor
+       (:mod:`meho_backplane.operations.role_floors`), the approver's role
+       must meet it; else 403, :class:`ApprovalRoleFloorError`. The
+       approved call runs with the approval as its authorization, so the
+       person who approves must hold the role the operation needs.
     5. If *params* is supplied, it matches the stored ``params_hash``
        (:func:`params_hash_matches`; else 422, :class:`ParamsMismatchError`).
        The hash check is **skipped** when *params* is ``None`` — the
@@ -1616,6 +1749,10 @@ async def approve_request(
 
     * Flips the row to ``approved``, stamps ``reviewed_by`` + ``decided_at``.
     * Writes a synchronous "decision" audit row in the same transaction.
+      Its payload carries ``reviewed_by``, ``self_approved`` and
+      ``approval_rule`` (the :class:`ApprovalRule` that allowed the
+      approval). The ``approval.approved`` step event carries the same
+      three fields.
 
     The **re-dispatch** (executing the approved op) happens *after* the
     caller commits this transaction. The ``POST /api/v1/approvals/{id}/
@@ -1650,8 +1787,14 @@ async def approve_request(
         UnauthorizedApprovalError: Operator lacks approvals access
             (``read_only`` without the ``approver`` capability, #3243).
         ApprovalRequestAlreadyDecidedError: Row is not ``pending``.
-        SelfApprovalForbiddenError: Approver is the requester and
-            break-glass is disabled (G11.7-T1 #1401).
+        SelfApprovalForbiddenError: Approver is the requester, is not a
+            MEHO-SA-Operator, and break-glass does not cover the change
+            (G11.7-T1 #1401, #3328).
+        ApprovalGroupForbiddenError: Another person's ``dangerous`` or
+            ``destructive`` change, and the approver is not in a group that
+            may approve it (#3328).
+        ApprovalRoleFloorError: The operation needs a role from the person
+            who runs it, and the approver's role is below it.
         ParamsMismatchError: Hash of *params* != stored ``params_hash``
             (only raised when *params* is supplied).
         PreviewBindingMissingError: The row is ``destructive``-tier but
@@ -1667,7 +1810,7 @@ async def approve_request(
             the request's risk level: the approval window, or for a
             ``destructive`` request ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``.
     """
-    request = await _load_pending_for_approval(
+    request, rule = await _load_pending_for_approval(
         session, request_id, operator=operator, params=params
     )
     # Validate before any state change so a bad or forbidden delegated
@@ -1688,7 +1831,13 @@ async def approve_request(
     request.decided_at = now
     await session.flush()
 
-    extra: dict[str, Any] = {"decision": "approved", "reviewed_by": operator.sub}
+    self_approved = operator.sub == request.principal_sub
+    extra: dict[str, Any] = {
+        "decision": "approved",
+        "reviewed_by": operator.sub,
+        "self_approved": self_approved,
+        "approval_rule": rule.value,
+    }
     if reason:
         extra["reason"] = reason
     if approval_auth is not None:
@@ -1713,9 +1862,13 @@ async def approve_request(
         approval_request_id=str(request_id),
         op_id=request.op_id,
         reviewed_by=operator.sub,
+        self_approved=self_approved,
+        approval_rule=rule.value,
         tenant_id=str(operator.tenant_id),
     )
     request._audit_id = approve_audit_id  # type: ignore[attr-defined]
+    # Read by record_approval_step_event for the ``approval.approved`` event.
+    request._approval_rule = rule  # type: ignore[attr-defined]
     return request
 
 
@@ -1819,7 +1972,8 @@ async def withdraw_request(
     (``operator.sub == request.principal_sub``). The row moves to
     ``withdrawn`` with ``withdrawn_at`` and ``withdraw_reason`` set;
     ``reviewed_by`` and ``decided_at`` stay NULL. One ``approval.withdraw``
-    audit row records it. The original call never runs: approve, reject
+    audit row of class ``approval_decision`` records it; the audit query
+    shows its result as ``withdrawn``. The original call never runs: approve, reject
     and decide then see a closed row and refuse (409).
 
     Args:
@@ -1859,8 +2013,9 @@ async def withdraw_request(
     await _write_audit_row(
         session,
         audit_id=withdraw_audit_id,
-        # Not APPROVAL_DECISION: nobody decided. The sender ran an action.
-        event_class=AuditEventClass.OPERATION_EXECUTION,
+        # Not OPERATION_EXECUTION: the operation never ran. The row closes
+        # the approval request, like a reject or an expiry row (#5717).
+        event_class=AuditEventClass.APPROVAL_DECISION,
         operator=operator,
         request=request,
         path="approval.withdraw",
@@ -2159,9 +2314,10 @@ async def resume_dispatch_after_approval(
     cancel) while the claim blocks the ``/approve`` / UI double-dispatch
     when the waiter is alive.
 
-    Before the run, the target must still have the connection settings it
-    had when the request was made (:func:`rehydrate_resume_target`), and a
-    request with a preview hash must still build the same preview
+    Before the run, the target must still resolve and still have the
+    connection settings it had when the request was made
+    (:func:`refuse_resume_if_target_changed`), and a request with a preview
+    hash must still build the same preview
     (:func:`refuse_resume_if_preview_changed`). Either change refuses the
     run, and the requester asks again.
     """
@@ -2176,14 +2332,15 @@ async def resume_dispatch_after_approval(
     if release_refusal is not None:
         return release_refusal
 
-    resolved_target, denied = await rehydrate_resume_target(operator, request)
-    if denied is not None:
-        return denied
+    resolved_target, target_refusal = await refuse_resume_if_target_changed(operator, request)
+    if target_refusal is not None:
+        return target_refusal
 
     # Exactly-one-resumer claim (#2293): win the atomic conditional UPDATE
-    # right before executing -- after the fail-closed checks above, so a
-    # refused resume (pre-0036 params gap, unresolvable target) never burns
-    # the claim and leaves the op un-executable. A lost claim means another
+    # right before executing -- after the pre-0036 params check above, so
+    # that gap never burns the claim and leaves the op un-executable. A
+    # refusal above (release or target) takes the claim itself: such a
+    # request never runs later. A lost claim means another
     # resumer already executed the approved op (the in-process agent waiter
     # that read the same approved row, or a racing operator
     # surface), so no-op with a benign already_resumed result rather than
@@ -2289,18 +2446,6 @@ async def refuse_resume_if_release_changed(
     if not approval_release_changed(request):
         return None
     running = cast(str, running_release_id())
-    if not await claim_resume(request.id):
-        return result_already_resumed(request.op_id, request.id, 0.0)
-    await _discard_refused_handoff(request)
-    refusal = result_release_changed_while_waiting(
-        request.op_id,
-        approval_request_id=request.id,
-        request_release=request.release_id,
-        running_release=running,
-    )
-    audit_id = await _audit_release_refusal(operator, request, running)
-    if audit_id is not None:
-        refusal = refusal.model_copy(update={"audit_id": audit_id})
     _log().warning(
         "approval_resume_release_changed",
         approval_request_id=str(request.id),
@@ -2309,6 +2454,89 @@ async def refuse_resume_if_release_changed(
         running_release=running,
         operator_sub=operator.sub,
     )
+    refusal = result_release_changed_while_waiting(
+        request.op_id,
+        approval_request_id=request.id,
+        request_release=request.release_id,
+        running_release=running,
+    )
+    return await _refuse_resume(
+        operator,
+        request,
+        refusal,
+        audit_payload={"request_release": request.release_id, "running_release": running},
+    )
+
+
+async def refuse_resume_if_target_changed(
+    operator: Operator,
+    request: ApprovalRequest,
+) -> tuple[Any, OperationResult | None]:
+    """Load the saved target for an approved run, or refuse the run.
+
+    Returns ``(resolved_target, None)`` when the target the request pinned
+    still resolves and still has the connection settings it had when the
+    request was made (``None`` for a tenant-wide request). Else the
+    operation never runs and the vendor gets no call: the refusal of
+    :func:`rehydrate_resume_target` (``target_changed_since_approval`` or
+    ``target_gone_since_approval``) is recorded the same way as the release
+    refusal (:func:`_refuse_resume`): the one-resumer claim is taken, the
+    stored run input is deleted, one audit row records the refusal, and the
+    refusal is stored as the request's run result. A lost claim returns the
+    usual ``already_resumed`` result.
+
+    Shared by both resume paths: the operator surfaces
+    (:func:`resume_dispatch_after_approval`) and the in-process agent
+    waiter (:mod:`meho_backplane.agent.approval_wait`). The re-run after a
+    failed run (:mod:`meho_backplane.operations.approval_rerun`) calls
+    :func:`rehydrate_resume_target` directly and records its own refusal.
+    """
+    resolved_target, denied = await rehydrate_resume_target(operator, request)
+    if denied is None:
+        return resolved_target, None
+    refusal = await _refuse_resume(
+        operator,
+        request,
+        denied,
+        audit_payload={"target_id": str(request.target_id)},
+    )
+    return None, refusal
+
+
+async def _refuse_resume(
+    operator: Operator,
+    request: ApprovalRequest,
+    refusal: OperationResult,
+    *,
+    audit_payload: dict[str, Any],
+) -> OperationResult:
+    """Record that an approved run was refused before it ran, and return the refusal.
+
+    The same four steps for every refusal that happens before the
+    one-resumer claim:
+
+    * The claim (:func:`claim_resume`) is taken, so the request can never
+      run later. A lost claim means another resumer already took the
+      request; the usual ``already_resumed`` result is returned and nothing
+      is recorded here. The claim itself hides the secret-named values of
+      the stored params.
+    * The stored run input (the credential-write custody row) is deleted,
+      the same as on every other way a request ends.
+    * One audit row records the refusal (``path`` ``approval.resume``,
+      ``result_status`` = the refusal's error code, plus *audit_payload*).
+      A failed audit write is logged; the run is refused either way.
+    * The refusal is stored as the request's run result, so every read
+      surface shows the run as refused with that error code.
+    """
+    if not await claim_resume(request.id):
+        return result_already_resumed(request.op_id, request.id, 0.0)
+    await _discard_refused_handoff(request)
+    error_code = str((refusal.extras or {}).get("error_code"))
+    audit_id = await _audit_resume_refusal(
+        operator, request, extra_payload={"result_status": error_code, **audit_payload}
+    )
+    if audit_id is not None:
+        refusal = refusal.model_copy(update={"audit_id": audit_id})
     await persist_resume_result(request.id, refusal, parked_op_id=request.op_id)
     return refusal
 
@@ -2319,29 +2547,43 @@ async def refuse_resume_if_preview_changed(
     target: Any,
     params: dict[str, Any],
 ) -> OperationResult | None:
-    """Refuse an approved run whose preview is not the approved one.
+    """Refuse an approved run whose preview, or whose object, is not the approved one.
 
-    Returns ``None`` when the request stored no preview hash, or when a
-    preview built now for *target* and *params* has the stored hash. Else
-    the operation does not run: the refusal is stored as the request's run
-    result, so every read surface shows the run as failed with the
-    ``preview_changed_since_approval`` error code. The caller has already
+    Two checks, for a request that stored a preview hash. The preview built
+    now for *target* and *params* must have the stored hash. Then the
+    object the approval card named must still be the object the live
+    system has under the call's name
+    (:func:`~meho_backplane.operations.approval_object_check.object_changed_since_request`).
+    Returns ``None`` when both hold, or when the request stored no preview
+    hash. Else the operation does not run: the refusal is stored as the
+    request's run result, so every read surface shows the run as failed
+    with the ``preview_changed_since_approval`` or
+    ``object_changed_since_approval`` error code. The caller has already
     won the one-resumer claim, so the request cannot run later.
 
     Shared by both resume paths: the operator surfaces
     (:func:`resume_dispatch_after_approval`) and the in-process agent
     waiter (:mod:`meho_backplane.agent.approval_wait`).
     """
-    if not await preview_changed_since_request(operator, request, target, params):
-        return None
-    refusal = result_preview_changed_since_approval(request.op_id, approval_request_id=request.id)
-    _log().warning(
-        "approval_resume_preview_changed",
-        approval_request_id=str(request.id),
-        op_id=request.op_id,
-        connector_id=request.connector_id,
-        operator_sub=operator.sub,
-    )
+    refusal: OperationResult
+    if await preview_changed_since_request(operator, request, target, params):
+        refusal = result_preview_changed_since_approval(
+            request.op_id, approval_request_id=request.id
+        )
+        _log().warning(
+            "approval_resume_preview_changed",
+            approval_request_id=str(request.id),
+            op_id=request.op_id,
+            connector_id=request.connector_id,
+            operator_sub=operator.sub,
+        )
+    else:
+        reason = await object_changed_since_request(operator, request, target, params)
+        if reason is None:
+            return None
+        refusal = result_object_changed_since_approval(
+            request.op_id, approval_request_id=request.id, reason=reason
+        )
     await persist_resume_result(request.id, refusal, parked_op_id=request.op_id)
     return refusal
 
@@ -2355,12 +2597,13 @@ async def _discard_refused_handoff(request: ApprovalRequest) -> None:
         await session.commit()
 
 
-async def _audit_release_refusal(
+async def _audit_resume_refusal(
     operator: Operator,
     request: ApprovalRequest,
-    running: str,
+    *,
+    extra_payload: dict[str, Any],
 ) -> uuid.UUID | None:
-    """Write the audit row for a refused run (#5030); ``None`` if the write failed."""
+    """Write the audit row for a refused run; ``None`` if the write failed."""
     from meho_backplane.db.engine import get_sessionmaker
 
     audit_id = uuid.uuid4()
@@ -2373,19 +2616,16 @@ async def _audit_release_refusal(
                 operator=operator,
                 request=request,
                 path="approval.resume",
-                status_code=_RELEASE_CHANGED_STATUS_CODE,
+                status_code=_RESUME_REFUSED_STATUS_CODE,
                 duration_ms=0.0,
-                extra_payload={
-                    "result_status": "release_changed_while_waiting",
-                    "request_release": request.release_id,
-                    "running_release": running,
-                },
+                extra_payload=extra_payload,
             )
             await session.commit()
     except Exception:
         _log().exception(
-            "approval_resume_release_changed_audit_failed",
+            "approval_resume_refusal_audit_failed",
             approval_request_id=str(request.id),
+            result_status=extra_payload.get("result_status"),
         )
         return None
     return audit_id
@@ -2760,9 +3000,11 @@ async def rehydrate_resume_target(
     derives its connection from ``connector_id`` / ``params`` execute the
     approved privileged write outside the original target scope.
 
-    Shared by the operator surface (:func:`resume_dispatch_after_approval`)
-    and the in-process agent waiter's composite re-entry
-    (:mod:`meho_backplane.agent.approval_wait`, #3421). Loading by the saved
+    Shared, through :func:`refuse_resume_if_target_changed`, by the operator
+    surface (:func:`resume_dispatch_after_approval`) and the in-process
+    agent waiter (:mod:`meho_backplane.agent.approval_wait`, #3421), and
+    called directly by the re-run after a failed run
+    (:mod:`meho_backplane.operations.approval_rerun`). Loading by the saved
     ``target_id`` instead of the name the caller used at park time means a
     target renamed, or deleted and re-created under the same name, while the
     request waited can never receive the approved write.
@@ -2772,7 +3014,9 @@ async def rehydrate_resume_target(
     :mod:`meho_backplane.operations.approval_resume_checks`) is refused the
     same way, with the ``target_changed_since_approval`` error code: the
     approval covers the target as the person saw it, not a new host or new
-    credentials.
+    credentials. A target that no longer resolves gives the
+    ``target_gone_since_approval`` error code. This function only checks;
+    it records nothing.
     """
     if request.target_id is None:
         return None, None
@@ -2806,17 +3050,9 @@ async def rehydrate_resume_target(
         target_id=str(request.target_id),
         operator_sub=operator.sub,
     )
-    denied = result_denied(
-        request.op_id,
-        (
-            f"approved target {request.target_id} no longer resolves "
-            "(soft-deleted or revoked between request and approval); "
-            "re-dispatch refused to avoid executing outside the "
-            "original target scope"
-        ),
-        0.0,
+    return None, result_target_gone_since_approval(
+        request.op_id, approval_request_id=request.id, target_id=request.target_id
     )
-    return None, denied
 
 
 def _deadline_passed_clause(cutoff: datetime, default_ttl: timedelta | None) -> Any:
@@ -3114,54 +3350,52 @@ def _check_reviewer_role(operator: Operator) -> None:
         )
 
 
-#: Safety tiers whose self-approval refusal is *unconditional* — the
-#: ``APPROVAL_ALLOW_SELF_APPROVAL`` break-glass switch never re-enables
-#: self-approval for them. ``destructive`` (#3198) plus ``dangerous``
-#: (#3290): a delete-class op can register on the reversible ``dangerous``
-#: tier while still being the four-eyes-critical action #3198 protects.
-#: Break-glass still applies to ``caution`` / ``safe``.
-_NO_SELF_APPROVAL_TIERS = frozenset({"dangerous", "destructive"})
+#: The risk levels with the group rule (#3328). Break-glass
+#: (``APPROVAL_ALLOW_SELF_APPROVAL``) never allows a self-approval of these
+#: (#3198, #3290), and another person's change at these levels may be
+#: approved only by the groups :func:`_check_approver_group` names.
+#: ``dangerous`` is here because a delete-class op can register on it.
+_HIGH_RISK_TIERS = frozenset({"dangerous", "destructive"})
 
 
-def _check_self_approval(operator: Operator, request: ApprovalRequest) -> None:
-    """Raise :class:`SelfApprovalForbiddenError` on a self-approval.
+def _request_safety_level(request: ApprovalRequest) -> str | None:
+    """Return the risk level the dispatcher stamped on *request*, or ``None``."""
+    level = (request.proposed_effect or {}).get("safety_level")
+    return level if isinstance(level, str) else None
 
-    Enforces requester != approver (G11.7-T1 #1401): the principal that
-    parked the request (``request.principal_sub``) may not also approve
-    it unless the deployment enabled the audited single-operator
-    break-glass mode (``Settings.approval_allow_self_approval``). The
+
+def _check_self_approval(operator: Operator, request: ApprovalRequest) -> ApprovalRule | None:
+    """Check a self-approval; return its rule, or ``None`` when it is not one.
+
+    A self-approval is ``operator.sub == request.principal_sub``. The
     comparison is on the stable ``sub`` claim, so a renamed display name
-    cannot launder a self-approval.
+    can never turn into a self-approval. Then, in order:
 
-    **The dangerous and destructive tiers do not honour break-glass
-    (#3198, #3290).** For a ``safety_level`` of ``"dangerous"`` or
-    ``"destructive"`` self-approval is refused *unconditionally* — even
-    under ``APPROVAL_ALLOW_SELF_APPROVAL`` — so a governed delete is
-    genuine four-eyes on every deployment (decision
-    ``governed-delete-operations.md`` requirement 1: "no self-approval, even
-    under break-glass"; a single-operator tenant uses the agent-requester
-    pattern, never self-approval). #3198 scoped this to ``destructive``
-    only, but a delete-class op can legitimately register on the
-    ``dangerous`` tier (a reversible soft-delete — e.g. a KV
-    secret-version delete) while still being exactly the four-eyes-critical
-    action #3198 protects; #3290 widened the refusal to cover it. Break-glass
-    still applies to the ``caution`` / ``safe`` tiers. The tier is read off
-    the durable ``proposed_effect`` envelope the dispatcher stamped at park
-    time.
+    1. A MEHO-SA-Operator (:attr:`Operator.may_self_approve`, #3327) may
+       approve their own change at every risk level (#3328). On the
+       command line and REST the approve routes have already required a
+       fresh sign-in (#3979).
+    2. Anyone else may approve their own ``safe`` or ``caution`` change
+       only when the deployment enabled the audited single-operator
+       break-glass mode (``Settings.approval_allow_self_approval``). The
+       switch never covers ``dangerous`` or ``destructive`` changes
+       (#3198, #3290).
+    3. Otherwise :class:`SelfApprovalForbiddenError` (403).
 
-    Imported lazily to keep the queue module decoupled from settings at
-    import time (mirrors the local ``TenantRole`` import in
-    :func:`_check_reviewer_role`).
+    The level is read off the ``proposed_effect`` envelope the dispatcher
+    stamped at park time. Settings are imported lazily to keep the queue
+    module decoupled from settings at import time.
     """
     if operator.sub != request.principal_sub:
-        return
+        return None
+    if operator.may_self_approve:
+        return ApprovalRule.SA_OPERATOR_SELF_APPROVAL
 
-    effect = request.proposed_effect or {}
-    no_break_glass_tier = effect.get("safety_level") in _NO_SELF_APPROVAL_TIERS
+    high_risk = _request_safety_level(request) in _HIGH_RISK_TIERS
 
     from meho_backplane.settings import get_settings
 
-    if not no_break_glass_tier and get_settings().approval_allow_self_approval:
+    if not high_risk and get_settings().approval_allow_self_approval:
         _log().warning(
             "approval_self_approval_break_glass",
             approval_request_id=str(request.id),
@@ -3169,9 +3403,66 @@ def _check_self_approval(operator: Operator, request: ApprovalRequest) -> None:
             operator_sub=operator.sub,
             tenant_id=str(operator.tenant_id),
         )
-        return
+        return ApprovalRule.BREAK_GLASS_SELF_APPROVAL
 
-    raise SelfApprovalForbiddenError(request.id, principal_sub=operator.sub)
+    raise SelfApprovalForbiddenError(request.id, principal_sub=operator.sub, high_risk=high_risk)
+
+
+def _check_approver_group(operator: Operator, request: ApprovalRequest) -> ApprovalRule:
+    """Return the rule that lets *operator* approve *request*, or raise (#3328).
+
+    Runs after :func:`_check_reviewer_role`, so a machine principal is
+    already refused. The decision depends only on the person's group and
+    the risk level of the change; there are no per-system, per-connector
+    or time-limited exceptions.
+
+    * Own change: :func:`_check_self_approval`.
+    * Another person's ``dangerous`` or ``destructive`` change: only a
+      MEHO-SA-Operator or a tenant admin may approve it, as the decision
+      record ``docs/decisions/approval-groups-and-self-approval.md`` says.
+      Everyone else gets :class:`ApprovalGroupForbiddenError` (403).
+    * Another person's lower-risk change (also one that waits only because
+      it is marked ``requires_approval``): the reviewer rule of
+      :func:`_check_reviewer_role` is enough.
+
+    A request without a stamped level is treated as lower-risk, the same
+    as the break-glass check and :func:`_check_destructive_preview_binding`.
+    """
+    self_rule = _check_self_approval(operator, request)
+    if self_rule is not None:
+        return self_rule
+    level = _request_safety_level(request)
+    if level not in _HIGH_RISK_TIERS:
+        return ApprovalRule.REVIEWER
+    if operator.may_self_approve or operator.tenant_role == TenantRole.TENANT_ADMIN:
+        return ApprovalRule.SA_OPERATOR_OR_ADMIN
+    raise ApprovalGroupForbiddenError(
+        request.id,
+        operator_sub=operator.sub,
+        role=operator.tenant_role.value,
+        safety_level=str(level),
+    )
+
+
+def _check_approver_role_floor(operator: Operator, request: ApprovalRequest) -> None:
+    """Raise :class:`ApprovalRoleFloorError` when the approver is below the op's floor.
+
+    A parked ``targets.register`` or ``topology.*`` write needs the
+    ``tenant_admin`` role from the person who runs it
+    (:mod:`meho_backplane.operations.role_floors`). Once approved, the call
+    runs with the approval as its authorization: the agent's own resume
+    and the hosted-run resume do not look at who approved. So the role is
+    checked here, at the decision, before any state change. An operation
+    without a floor is not affected.
+    """
+    denial = role_floor_denial(request.op_id, operator.tenant_role)
+    if denial is not None:
+        raise ApprovalRoleFloorError(
+            request.id,
+            operator_sub=operator.sub,
+            role=operator.tenant_role.value,
+            denial=denial,
+        )
 
 
 async def _load_pending_for_approval(
@@ -3180,16 +3471,18 @@ async def _load_pending_for_approval(
     *,
     operator: Operator,
     params: dict[str, Any] | None,
-) -> ApprovalRequest:
+) -> tuple[ApprovalRequest, ApprovalRule]:
     """Load + validate a row for approval, raising on any precondition failure.
 
     Runs the full approve precondition ladder in order so callers learn
     the most specific reason first: role gate → tenant-scoped load (under a
     row lock) → pending guard → deadline guard (security F12 / #274) →
-    self-approval guard (G11.7-T1 #1401) → params-hash check (only when
+    self-approval and group rule (#1401, #3328) → the op's role floor
+    (:func:`_check_approver_role_floor`) → params-hash check (only when
     *params* is supplied) → destructive preview-binding re-verification
-    (#3197). Returns the validated pending row; the caller flips status +
-    writes the decision audit row.
+    (#3197). Returns the validated pending row and the
+    rule that allowed the approval; the caller flips status + writes the
+    decision audit row.
 
     The row is loaded ``FOR UPDATE`` so a competing approve / reject /
     expiry serialises on the lock and the loser re-reads the committed
@@ -3205,11 +3498,12 @@ async def _load_pending_for_approval(
         raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
     if _deadline_has_passed(request, _now(), _resolve_default_ttl()):
         raise ApprovalRequestExpiredError(request_id)
-    _check_self_approval(operator, request)
+    rule = _check_approver_group(operator, request)
+    _check_approver_role_floor(operator, request)
     if params is not None and not params_hash_matches(params, request.params_hash):
         raise ParamsMismatchError(request_id)
     _check_destructive_preview_binding(request)
-    return request
+    return request, rule
 
 
 def _check_destructive_preview_binding(request: ApprovalRequest) -> None:
@@ -3494,6 +3788,11 @@ async def record_approval_step_event(
     No Broadcast event is published (#3758). The stored approval row is
     what waiters, the approvals bell and the console read.
 
+    An ``approved`` event also carries ``reviewed_by`` (who approved),
+    ``self_approved`` and, when :func:`approve_request` set it,
+    ``approval_rule`` (#3328) -- the same fields as the
+    ``approval.decision`` audit row.
+
     A ``pending`` event of a request that shares its ``work_ref`` with
     other pending requests also carries ``chain_step`` / ``chain_total``
     (#3596): "this is step k of N waiting under this change ticket".
@@ -3507,6 +3806,12 @@ async def record_approval_step_event(
         "approval_op_id": request.op_id,
         "work_ref": request.work_ref,
     }
+    if decision == "approved":
+        payload["reviewed_by"] = request.reviewed_by
+        payload["self_approved"] = request.reviewed_by == request.principal_sub
+        rule = getattr(request, "_approval_rule", None)
+        if rule is not None:
+            payload["approval_rule"] = str(rule)
     if decision == "pending" and request.work_ref is not None:
         position = await _chain_position_fail_open(tenant_id, request)
         if position is not None:

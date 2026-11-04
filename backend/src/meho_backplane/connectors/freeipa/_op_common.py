@@ -3,11 +3,12 @@
 
 """Shared pieces of the FreeIPA op metadata: the op dataclass, groups, schemas, builders.
 
-Every operation of this connector reads. A list read runs a ``*_find``
-command and returns ``{rows, total, truncated}``; a read of one object runs a
-``*_show`` command and returns ``{entry}``. :func:`list_op` and
-:func:`show_op` build the metadata of both kinds, so each operation module
-only states what differs.
+A list read runs a ``*_find`` command and returns ``{rows, total,
+truncated}``; a read of one object runs a ``*_show`` command and returns
+``{entry}``. :func:`list_op` and :func:`show_op` build the metadata of both
+kinds, so each read module only states what differs. :func:`write_op` builds
+the metadata of a write: it carries :data:`WRITE_TAGS` instead of
+:data:`TAGS`, and always waits until a second person approves.
 """
 
 from __future__ import annotations
@@ -18,16 +19,23 @@ from typing import Any, Final, Literal
 from meho_backplane.connectors.freeipa.reads import DEFAULT_LIMIT, MAX_LIMIT
 
 __all__ = [
+    "APPROVAL_NOTE",
+    "COMPLETED_SCHEMA",
+    "DESCRIPTION_SCHEMA",
     "GROUP_ACCESS",
     "GROUP_HOSTS",
     "GROUP_IDENTITY",
     "GROUP_SERVER",
     "TAGS",
     "UNTRUSTED_TEXT_NOTE",
+    "WRITE_TAGS",
     "FreeipaTypedOp",
+    "entry_schema",
     "list_op",
     "name_schema",
+    "names_schema",
     "show_op",
+    "write_op",
 ]
 
 GROUP_SERVER: Final[str] = "server"
@@ -35,8 +43,13 @@ GROUP_HOSTS: Final[str] = "hosts"
 GROUP_IDENTITY: Final[str] = "identity"
 GROUP_ACCESS: Final[str] = "access"
 
+_PRODUCT_TAGS: Final[tuple[str, ...]] = ("freeipa", "idm", "identity-management")
+
 #: Tags every FreeIPA read carries.
-TAGS: Final[tuple[str, ...]] = ("read-only", "freeipa", "idm", "identity-management")
+TAGS: Final[tuple[str, ...]] = ("read-only", *_PRODUCT_TAGS)
+
+#: Tags every FreeIPA write carries.
+WRITE_TAGS: Final[tuple[str, ...]] = ("write", *_PRODUCT_TAGS)
 
 #: Added to the guidance of every read: names and descriptions come from the
 #: IPA server and may hold any text.
@@ -214,4 +227,83 @@ def show_op(
                 f"{next_step} A NotFound error means no such object exists. {UNTRUSTED_TEXT_NOTE}"
             ),
         },
+    )
+
+
+#: Added to the preconditions of every write.
+APPROVAL_NOTE: Final[str] = "A second person must approve the call."
+
+DESCRIPTION_SCHEMA: Final[dict[str, Any]] = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 1024,
+    "description": "Optional. A short text that says what it is for.",
+}
+
+COMPLETED_SCHEMA: Final[dict[str, Any]] = {
+    "type": "integer",
+    "description": "How many values FreeIPA added: all that were sent, or the call fails.",
+}
+
+
+def names_schema(description: str, item: str) -> dict[str, Any]:
+    """A list of one or more different names; *item* describes one name."""
+    return {
+        "type": "array",
+        "minItems": 1,
+        "uniqueItems": True,
+        "description": description,
+        "items": name_schema(item),
+    }
+
+
+def entry_schema(description: str) -> dict[str, Any]:
+    return {"type": "object", "description": description}
+
+
+def write_op(
+    *,
+    op_id: str,
+    handler_attr: str,
+    summary: str,
+    description: str,
+    group_key: str,
+    properties: dict[str, Any],
+    required: list[str],
+    example: dict[str, Any],
+    response: dict[str, Any],
+    tags: tuple[str, ...],
+    safety_level: Literal["caution", "dangerous"],
+    llm_instructions: dict[str, Any],
+    any_of: list[dict[str, Any]] | None = None,
+    dependent_required: dict[str, list[str]] | None = None,
+) -> FreeipaTypedOp:
+    """A write. It always waits until a second person approves.
+
+    *any_of* and *dependent_required* become the parameter schema's
+    ``anyOf`` and ``dependentRequired``.
+    """
+    parameter_schema: dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+        "examples": [example],
+    }
+    if any_of:
+        parameter_schema["anyOf"] = any_of
+    if dependent_required:
+        parameter_schema["dependentRequired"] = dependent_required
+    return FreeipaTypedOp(
+        op_id=op_id,
+        handler_attr=handler_attr,
+        summary=summary,
+        description=description,
+        parameter_schema=parameter_schema,
+        response_schema={"type": "object", "properties": response},
+        group_key=group_key,
+        tags=(*WRITE_TAGS, *tags),
+        safety_level=safety_level,
+        requires_approval=True,
+        llm_instructions=llm_instructions,
     )

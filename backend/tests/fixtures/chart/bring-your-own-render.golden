@@ -138,6 +138,21 @@ type: Opaque
 data:
   requirepass: "<random>"
 ---
+# Source: meho-chart/templates/metrics-auth-secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: test-metrics-auth
+  labels:
+    helm.sh/chart: meho-chart-0.1.0
+    app.kubernetes.io/name: meho
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+type: Opaque
+data:
+  token: "<random>"
+---
 # Source: meho-chart/charts/broadcast/templates/configmap.yaml
 apiVersion: v1
 kind: ConfigMap
@@ -385,7 +400,11 @@ spec:
         # means any change to what the pod consumes — config.*, memory.*,
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
-        checksum/config: 37787f2275cee3e589f966955041e30ece64f5281545a417956144a08d2668ff
+        checksum/config: cd847854582c3b10a8812fd9f2f61a32ded1ac6eda84c644539492c65c1d22d8
+        # Roll the pod when the chart-made metrics token changes, so the
+        # token the pod checks is the one the Secret holds. On a cluster
+        # `lookup` keeps the value and the checksum stays stable.
+        checksum/metrics-auth: "<random>"
       labels:
         app.kubernetes.io/name: meho
         app.kubernetes.io/instance: test
@@ -433,6 +452,14 @@ spec:
                 secretKeyRef:
                   name: meho-postgres-url
                   key: url
+            # The metrics token (`metricsAuth`): `/metrics` and the
+            # `features` block of `/ready` answer only a caller that sends
+            # it. `secretKeyRef` only, never plaintext.
+            - name: METRICS_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: "test-metrics-auth"
+                  key: "token"
             # BROADCAST_REDIS_URL points the backplane at the in-cluster
             # broadcast store. The name must match the env var the
             # backplane actually reads (`Settings.broadcast_redis_url`
@@ -864,6 +891,12 @@ data:
   # code step for an approve. The web interface is not affected.
   FRESH_SIGN_IN_MAX_AGE_SECONDS: "900"
   PER_ACTION_SIGN_IN_MAX_AGE_SECONDS: "300"
+  # Per-person request limits on the operation path, and the per-tenant
+  # cap on new MCP sessions. On by default; "0" turns a limit off. See
+  # `docs/codebase/rate-limiting.md`.
+  DISPATCH_RATE_LIMIT_PER_MINUTE: "600"
+  DISPATCH_MAX_CONCURRENT_OPS: "16"
+  MCP_SESSION_START_LIMIT_PER_MINUTE: "60"
   APPROVAL_ONE_TIME_CODE_ACR_VALUES: ""
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The

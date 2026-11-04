@@ -28,7 +28,6 @@ or the persisted audit row.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import uuid
@@ -61,6 +60,7 @@ from meho_backplane.db.models import AuditLog
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
+from meho_backplane.operations._validate import compute_value_fingerprint
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
@@ -346,7 +346,7 @@ async def test_keycloak_source_to_vault_move_reads_secret_server_side(
     # (c) ...and NOWHERE else: response, params, logs.
     assert result.result == {
         "status": "moved",
-        "value_sha256": hashlib.sha256(_SENTINEL.encode()).hexdigest(),
+        "value_fingerprint": compute_value_fingerprint(_SENTINEL.encode()),
         "length": len(_SENTINEL.encode()),
     }
     assert _SENTINEL not in result.model_dump_json()

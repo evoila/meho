@@ -200,12 +200,14 @@ service:
 # install ships neither, so a cluster without the operator is unaffected.
 serviceMonitor:
   # -- Render a ServiceMonitor that scrapes the backplane `/metrics`
-  # endpoint (unauthenticated legacy-0.0.4 exposition — see
+  # endpoint (legacy-0.0.4 exposition — see
   # `backend/src/meho_backplane/metrics.py`). Default `false`: `/metrics`
   # stays dark until an operator running the Prometheus Operator flips
   # this on. The ServiceMonitor selects THIS release's Service via the
   # `app.kubernetes.io/name` + `app.kubernetes.io/instance` selector
-  # labels and scrapes the named `service.portName` port.
+  # labels and scrapes the named `service.portName` port. With
+  # `metricsAuth.enabled` (the default) it sends the metrics token from
+  # the Secret as a bearer token, so no scrape setting is needed.
   enabled: false
   # -- Extra labels applied to the ServiceMonitor metadata. REQUIRED in
   # most clusters: a Prometheus CR only discovers ServiceMonitors whose
@@ -222,6 +224,29 @@ serviceMonitor:
   # -- HTTP path scraped on the backplane Service port. `/metrics` matches
   # the backplane exposition route (main.py).
   path: /metrics
+
+# The metrics token. `/metrics` answers only a caller that sends it as a
+# bearer token (`Authorization: Bearer <token>`), and `/ready` shows its
+# `features` block only to such a caller. `/ready` still gives every caller
+# the verdict (200 or 503) and the checks, so the readiness probe needs no
+# header, and `/healthz` is always open. The backplane reads the token as
+# `METRICS_AUTH_TOKEN`.
+metricsAuth:
+  # -- Give the backplane a metrics token. `false` sets no token: `/metrics`
+  # and the whole `/ready` body then answer every caller.
+  enabled: true
+  # -- Name of a Secret you own that holds the token under `secretKey`.
+  # Empty: the chart makes `<release>-metrics-auth` with a random
+  # 32-character token on the first install, and keeps that value on every
+  # upgrade. Read it with
+  # `kubectl get secret <release>-metrics-auth -o jsonpath='{.data.token}' | base64 -d`
+  # when your own scrape config (not the chart's ServiceMonitor) needs it.
+  # A render with `helm template` has no cluster to look in, so every render
+  # makes a new token; the pod rolls with it, and the ServiceMonitor reads
+  # the Secret live.
+  existingSecret: ""
+  # -- Key in the Secret that holds the token.
+  secretKey: token
 
 # Optional starter alerting rules (Initiative #2884, #2885). Renders a
 # PrometheusRule with two conservative alerts so a fresh install has a
@@ -321,6 +346,12 @@ ingress:
   # -- Annotations applied to the Ingress. Defaults are empty; consumers add
   # cert-manager / ingress-controller-specific annotations as needed (e.g.
   # `cert-manager.io/cluster-issuer: letsencrypt-prod`).
+  #
+  # The backplane refuses a request body above 32 MiB with a 413
+  # (`HTTP_MAX_REQUEST_BODY_BYTES`). Set the matching cap on the ingress
+  # controller too, so an oversized body is dropped at the edge. The
+  # annotation name depends on the controller; for ingress-nginx it is
+  # `nginx.ingress.kubernetes.io/proxy-body-size: "32m"`.
   annotations: {}
   tls:
     enabled: true
@@ -617,6 +648,19 @@ config:
   # nothing else. From 30 to 3600. Rendered into
   # `PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`.
   perActionSignInMaxAgeSeconds: "300"
+  # -- Per-person request limits on the operation path. Every chart
+  # install has the Valkey store the limits count in (`broadcast.enabled`
+  # is on by default), so they are on here. `dispatchRateLimitPerMinute`
+  # caps how many operations one person or agent may start per minute;
+  # `dispatchMaxConcurrentOps` caps how many may run at the same time. A
+  # request over the cap gets a `rate_limited` answer with a retry hint.
+  # `mcpSessionStartLimitPerMinute` caps new MCP sessions per tenant and
+  # minute. `"0"` turns a limit off. Per-tenant overrides go through
+  # `extraEnv` (`DISPATCH_RATE_LIMIT_PER_MINUTE_OVERRIDES` and friends).
+  # See `docs/codebase/rate-limiting.md`.
+  dispatchRateLimitPerMinute: "600"
+  dispatchMaxConcurrentOps: "16"
+  mcpSessionStartLimitPerMinute: "60"
   # -- Comma-separated `acr` values that mean the person entered a one-time
   # code from their authenticator app (#3979). Rendered into
   # `APPROVAL_ONE_TIME_CODE_ACR_VALUES`. Empty (the default) turns the
@@ -811,6 +855,29 @@ postgres:
   # posture. See `deploy/values-examples/README.md` (§ pgvector extension
   # prerequisite) and `docs/decisions/pgvector-superuser-prerequisite.md`.
   credentialsSecret: ""
+  # The login of the running backplane, apart from the owner login above.
+  # The owner login (`credentialsSecret`) owns the tables and runs the
+  # migrations. The running backplane can use a second, narrower login
+  # instead: it may read and write every table, but on `audit_log` it may
+  # only add rows, read them, and empty the `raw_payload` column (the
+  # weekly age-off). It cannot change or delete audit rows, and it does
+  # not own the table. The migration gives the role these rights on every
+  # run (`DATABASE_RUNTIME_ROLE`, backend `db/runtime_role.py`).
+  #
+  # With the built-in PostgreSQL (`corePostgres.enabled`) the install makes
+  # the role `meho_app` and the Secret `<release>-core-postgres-meho-app`;
+  # leave both keys empty there. The PostgreSQL pod reads only that Secret,
+  # so another Secret name stops the install. With your own PostgreSQL,
+  # create the role yourself (LOGIN, no superuser, CONNECT on the
+  # database) and a Secret with its DSN at key `url`, then name both here:
+  # one key without the other stops the install. The migration waits for
+  # the role to exist, so create it before the upgrade. Both empty = one
+  # login for everything, as before.
+  runtime:
+    # -- Name of the runtime role (a lower-case PostgreSQL role name).
+    role: ""
+    # -- Kubernetes Secret with the runtime login's DSN at key `url`.
+    credentialsSecret: ""
 
 vault:
   # -- Vault address (e.g. `https://vault.example.org`) — MUST be set; empty
@@ -1149,8 +1216,8 @@ approvalHandoff:
 # to the two blocks below.
 corePostgres:
   # -- Built-in PostgreSQL. When on, the install makes
-  # `<release>-core-postgres-superuser`, `-core-postgres-meho` and
-  # `-core-postgres-keycloak`.
+  # `<release>-core-postgres-superuser`, `-core-postgres-meho`,
+  # `-core-postgres-meho-app` and `-core-postgres-keycloak`.
   enabled: false
   existingSecrets:
     # -- Your own Secret with the PostgreSQL superuser password (key
@@ -1163,7 +1230,9 @@ corePostgres:
     keycloak: ""
   # The subchart settings below (#4039): one PostgreSQL 17 server with
   # pgvector and two databases, `meho` and `keycloak`, each owned by a role
-  # of the same name that is not a superuser. The chart creates the
+  # of the same name that is not a superuser. A third role, `meho_app`, is
+  # the login of the running backplane (see `postgres.runtime`); the owner
+  # role `meho` runs the migrations. The chart creates the
   # `vector` extension itself, so the pgvector step described at
   # `postgres.credentialsSecret` is not needed. A sidecar in the
   # PostgreSQL pod sets the role passwords again whenever the Secrets

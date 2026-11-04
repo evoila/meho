@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""FreeipaConnector: typed reads of Red Hat Identity Management (FreeIPA).
+"""FreeipaConnector: typed reads and writes of Red Hat Identity Management (FreeIPA).
 
 One target is one IPA server. FreeIPA has no OpenAPI description; its API is
 JSON-RPC (:mod:`meho_backplane.connectors.freeipa.rpc`).
@@ -28,7 +28,11 @@ Login
    :meth:`FreeipaConnector.invalidate_session` with the rejected request and
    runs the call once more; the next call logs in again.
 
-The read bodies live in :mod:`meho_backplane.connectors.freeipa.reads`.
+The read bodies live in :mod:`meho_backplane.connectors.freeipa.reads`, the
+host write bodies in :mod:`meho_backplane.connectors.freeipa.writes`. The
+sudo, access rule and password policy writes are methods of
+:class:`~meho_backplane.connectors.freeipa.access_writes.FreeipaAccessWriteOps`,
+which the connector inherits.
 ``docs/codebase/connectors-freeipa.md`` describes the whole flow.
 """
 
@@ -56,6 +60,7 @@ from meho_backplane.connectors._shared.vcf_auth import (
     session_establish_auth_error,
 )
 from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.freeipa.access_writes import FreeipaAccessWriteOps
 from meho_backplane.connectors.freeipa.rpc import (
     JSON_PATH,
     LOGIN_PATH,
@@ -128,8 +133,11 @@ def referer_for(target: FreeipaTargetLike) -> str:
     return f"https://{server_name}/ipa"
 
 
-class FreeipaConnector(HttpConnector):
+class FreeipaConnector(FreeipaAccessWriteOps, HttpConnector):
     """FreeIPA JSON-RPC connector: password login, session cookie, ``Referer``.
+
+    The handler methods of the sudo, access rule and password policy writes
+    come from :class:`FreeipaAccessWriteOps`.
 
     Registered as ``("freeipa", "4.x", "freeipa-jsonrpc")``, so the connector
     ID is ``freeipa-jsonrpc-4.x``, plus the ``("freeipa", "", "")`` row that
@@ -528,6 +536,57 @@ class FreeipaConnector(HttpConnector):
         from meho_backplane.connectors.freeipa.reads import pwpolicy_show_impl
 
         return await pwpolicy_show_impl(self, operator, target, params)
+
+    # Writes (bodies in writes.py). The dispatcher runs them only after a
+    # second person approved.
+
+    async def hostgroup_create(
+        self, operator: Operator, target: FreeipaTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``freeipa.hostgroup.create``: a new, empty host group."""
+        from meho_backplane.connectors.freeipa.writes import hostgroup_create_impl
+
+        return await hostgroup_create_impl(self, operator, target, params)
+
+    async def hostgroup_member_add(
+        self, operator: Operator, target: FreeipaTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``freeipa.hostgroup.member.add``: add hosts and host groups to a host group."""
+        from meho_backplane.connectors.freeipa.writes import hostgroup_member_add_impl
+
+        return await hostgroup_member_add_impl(self, operator, target, params)
+
+    async def automember_rule_create(
+        self, operator: Operator, target: FreeipaTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``freeipa.automember.rule.create``: a rule that fills a host group."""
+        from meho_backplane.connectors.freeipa.writes import automember_rule_create_impl
+
+        return await automember_rule_create_impl(self, operator, target, params)
+
+    async def automember_condition_add(
+        self, operator: Operator, target: FreeipaTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``freeipa.automember.condition.add``: conditions of a host group's rule."""
+        from meho_backplane.connectors.freeipa.writes import automember_condition_add_impl
+
+        return await automember_condition_add_impl(self, operator, target, params)
+
+    async def host_delete(
+        self, operator: Operator, target: FreeipaTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``freeipa.host.delete``: delete one host."""
+        from meho_backplane.connectors.freeipa.writes import host_delete_impl
+
+        return await host_delete_impl(self, operator, target, params)
+
+    async def hostgroup_delete(
+        self, operator: Operator, target: FreeipaTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``freeipa.hostgroup.delete``: delete one host group."""
+        from meho_backplane.connectors.freeipa.writes import hostgroup_delete_impl
+
+        return await hostgroup_delete_impl(self, operator, target, params)
 
     async def aclose(self) -> None:
         """Forget every cached session, then close the HTTP clients."""

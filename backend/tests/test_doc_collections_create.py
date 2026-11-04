@@ -300,6 +300,8 @@ def test_http_endpoint_listed_as_exact_allowlist_entry_is_created(
 ) -> None:
     """Plain http is accepted when the host is an exact allowlist entry (#3573)."""
     monkeypatch.setenv("MEHO_TARGET_SSRF_ALLOWLIST", "10.20.30.40")
+    monkeypatch.setenv("CORPUS_ALLOWED_HOSTS", "10.20.30.40")
+    get_settings.cache_clear()
     key = make_rsa_keypair("kid-A")
     endpoint = "http://10.20.30.40:8080/v1/search"
     body = _valid_body(backend={"type": "corpus-http", "ref": {"endpoint": endpoint}})
@@ -332,6 +334,68 @@ def test_url_alias_endpoint_is_also_screened(
     resp = _post(client, key, _admin_token(key), body)
     assert resp.status_code == 422, resp.text
     assert resp.json()["detail"]["kind"] == "endpoint_not_allowed"
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        {"endpoint": "https://other.test/v1/search"},
+        {"endpoint": _CORPUS_URL, "answer_endpoint": "https://other.test/v1/ask"},
+        {"endpoint": _CORPUS_URL, "read_endpoint": "https://other.test/v1/read"},
+    ],
+    ids=["endpoint", "answer_endpoint", "read_endpoint"],
+)
+@pytest.mark.asyncio
+async def test_endpoint_on_a_host_the_deployment_did_not_name_is_rejected(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, ref: dict[str, str]
+) -> None:
+    """A public https host is refused at create unless it is a docs-service host of the deployment.
+
+    MEHO dials a collection's endpoints with the deployment's docs-service
+    token, so each of the three endpoint fields must name the host of
+    ``CORPUS_URL`` or an entry of ``CORPUS_ALLOWED_HOSTS``. The answer is a
+    structured 422 and no row is written.
+    """
+    monkeypatch.delenv("CORPUS_ALLOWED_HOSTS", raising=False)
+    get_settings.cache_clear()
+    key = make_rsa_keypair("kid-A")
+    body = _valid_body(collection_key="other-host", backend={"type": "corpus-http", "ref": ref})
+    resp = _post(client, key, _admin_token(key), body)
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert detail["kind"] == "endpoint_not_allowed"
+    assert "CORPUS_ALLOWED_HOSTS" in detail["message"]
+
+    sm = get_sessionmaker()
+    async with sm() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(DocCollectionORM).where(DocCollectionORM.collection_key == "other-host")
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert rows == []
+
+
+def test_endpoint_on_a_listed_docs_service_host_is_created(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A host listed in CORPUS_ALLOWED_HOSTS is accepted for all three endpoint fields."""
+    monkeypatch.setenv("CORPUS_ALLOWED_HOSTS", "other.test, reader.test")
+    get_settings.cache_clear()
+    key = make_rsa_keypair("kid-A")
+    ref = {
+        "endpoint": "https://other.test/v1/search",
+        "answer_endpoint": "https://OTHER.test/v1/ask",
+        "read_endpoint": "https://reader.test./v1/read",
+    }
+    body = _valid_body(backend={"type": "corpus-http", "ref": ref})
+    resp = _post(client, key, _admin_token(key), body)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["backend"]["ref"] == ref
 
 
 # ---------------------------------------------------------------------------

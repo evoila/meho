@@ -204,6 +204,15 @@ returns a `{status: awaiting_approval, approval_request_id, ...}`
 envelope; the write executes with the stored params when a human
 approves from any approvals surface), while a human tenant_admin rides
 the default-allow branch and executes immediately — same UX as before.
+A person with a lower role is refused: all five writes carry the
+`tenant_admin` **per-op role floor** (`operations/role_floors.py`,
+registered at import by `connectors/topology/ops.py`), which the policy
+gate checks on every dispatch path (`call_operation`, the REST dispatch
+route, the CLI) and the approval queue checks at the decision: a person
+below the floor cannot approve a parked write, so the approved write was
+approved by a `tenant_admin` whichever resume path runs it. The REST
+routes and MCP tools keep their own
+`tenant_admin` check at the door.
 The typed-op handlers unwrap params and call `annotate_edge_with_plan` /
 `create_or_get_node` / `unannotate_edge` / `bulk_import_edges` unchanged;
 domain errors come
@@ -387,6 +396,14 @@ python -m meho_backplane.topology.scope_repair stage
 python -m meho_backplane.topology.scope_repair show <manifest-id>
 python -m meho_backplane.topology.scope_repair cutover <manifest-id>
 ```
+
+`cutover` changes an index and a column, which only the owner of the
+tables may do. When the install gives the running backplane its own
+database login (`postgres.runtime.*`, or the built-in PostgreSQL), run
+`cutover` with the owner login: set `DATABASE_URL` to the `url` of
+`postgres.credentialsSecret` for that command. With the runtime login it
+refuses before it changes anything (`must be owner of table graph_node`).
+See `docs/codebase/migrations.md`, "The runtime role".
 
 **Stage** (`stage.py`). Calls `discover_topology` on every live target
 of every tenant (same call as a refresh, as `system:topology-scope-repair`)

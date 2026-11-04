@@ -83,13 +83,16 @@ __all__ = [
     "result_idempotency_key_conflict",
     "result_invalid_op_schema",
     "result_invalid_params",
+    "result_license_read_off",
     "result_no_connector",
     "result_no_target",
+    "result_object_changed_since_approval",
     "result_preview_changed_since_approval",
     "result_rate_limited",
     "result_receipt_too_large",
     "result_release_changed_while_waiting",
     "result_target_changed_since_approval",
+    "result_target_gone_since_approval",
     "result_target_invalid_type",
     "result_target_required",
     "result_unknown_connector",
@@ -408,6 +411,32 @@ def result_target_required(op_id: str, duration_ms: float) -> OperationResult:
         ),
         duration_ms=duration_ms,
         extras={"error_code": "target_required", "op_id": op_id},
+    )
+
+
+def result_license_read_off(op_id: str, duration_ms: float) -> OperationResult:
+    """An ingested read of licence keys; MEHO keeps it off.
+
+    The answer of such a read carries the product's licence keys unmasked,
+    and the ingest would give it the ``safe`` level of its HTTP method. So
+    ``call_operation`` and ``preview_operation`` refuse it before the
+    catalog guard, the policy gate and any vendor call, also when an
+    operator turned the row on by hand (see
+    :mod:`meho_backplane.operations.license_reads`). The message names the
+    way to read licences: the connector's hand-written licence read, which
+    shows each key masked. Same envelope as ``target_required``: no audit
+    row, because nothing ran.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            "license_read_off: MEHO keeps this ingested read off because its "
+            "answer carries licence keys; use the connector's hand-written "
+            "licence read, which shows each key masked"
+        ),
+        duration_ms=duration_ms,
+        extras={"error_code": "license_read_off", "op_id": op_id},
     )
 
 
@@ -1219,6 +1248,37 @@ def result_target_changed_since_approval(
     )
 
 
+def result_target_gone_since_approval(
+    op_id: str,
+    *,
+    approval_request_id: uuid.UUID,
+    target_id: uuid.UUID,
+) -> OperationResult:
+    """An approved request did not run: its target no longer resolves.
+
+    The request pinned a target by id. That target was deleted or revoked
+    after the request was made, so the approval covers nothing that still
+    exists. Nothing was sent. The requester asks again.
+    """
+    reason = (
+        f"approved target {target_id} no longer resolves (deleted or revoked "
+        "after the request was made), so the approval does not cover the run. "
+        "The operation did not run. Ask again."
+    )
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=f"target_gone_since_approval: {reason}",
+        duration_ms=0.0,
+        extras={
+            "error_code": "target_gone_since_approval",
+            "reason": reason,
+            "approval_request_id": str(approval_request_id),
+            "target_id": str(target_id),
+        },
+    )
+
+
 def result_preview_changed_since_approval(
     op_id: str,
     *,
@@ -1241,6 +1301,34 @@ def result_preview_changed_since_approval(
         duration_ms=0.0,
         extras={
             "error_code": "preview_changed_since_approval",
+            "reason": reason,
+            "approval_request_id": str(approval_request_id),
+        },
+    )
+
+
+def result_object_changed_since_approval(
+    op_id: str,
+    *,
+    approval_request_id: uuid.UUID,
+    reason: str,
+) -> OperationResult:
+    """An approved request did not run: its object is not the one on the approval card.
+
+    Right before the run, MEHO built the approval card again against the
+    live system. The object it found has another identity than the one the
+    person approved, an object appeared where the card said there was none,
+    or the card did not build (see
+    :mod:`~meho_backplane.operations.approval_object_check`). Nothing was
+    sent. The requester sends a new request.
+    """
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=f"object_changed_since_approval: {reason}",
+        duration_ms=0.0,
+        extras={
+            "error_code": "object_changed_since_approval",
             "reason": reason,
             "approval_request_id": str(approval_request_id),
         },

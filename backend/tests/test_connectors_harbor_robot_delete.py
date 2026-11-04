@@ -359,7 +359,8 @@ async def test_full_governed_flow_preview_park_approve_resume(_stub_embedding: A
     assert blast["irreversibility"] == "recreatable_new_secret"
 
     # 4) A DIFFERENT operator approves (four-eyes) — the binding re-verifies.
-    approver = _make_operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         approved = await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()
@@ -426,7 +427,8 @@ async def test_service_principal_proposes_destroy_and_adopts_result(
     assert pending.resume_result is None
 
     # 4) A distinct human approves; the DELETE runs under the approver.
-    approver = _make_operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()

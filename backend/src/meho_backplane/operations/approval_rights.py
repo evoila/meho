@@ -49,11 +49,18 @@ from meho_backplane.operations.approval_queue import (
 )
 
 __all__ = [
+    "WEB_APPROVAL_HINT",
     "ApproveRight",
     "ApproveRightReason",
     "approve_right",
     "self_approval_confirmation",
 ]
+
+#: Ends every approve refusal, on the command line and in the web interface.
+WEB_APPROVAL_HINT = (
+    "The web interface is the normal place to approve: "
+    "it shows for each request whether you may approve it."
+)
 
 
 class ApproveRightReason(StrEnum):

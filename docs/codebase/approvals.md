@@ -797,10 +797,20 @@ interface only show it.
   This is not a new gate: the approve POST runs `approve_request`,
   which checks again (see the module docstring of
   `ui/routes/approvals/routes.py`). After a self-approval the outcome
-  card says so. A refused own-change approve shows the server's refusal
-  text in its banner; the routes find it by the
-  `SelfApprovalForbiddenError` cause, because since #3328 the detail is
-  the plain refusal text, not the `self_approval_forbidden` token.
+  card says so. A refused approve (403) shows the server's refusal text
+  as it is in its banner, then the same hint as the command line
+  (`WEB_APPROVAL_HINT`: the web interface is the normal place to
+  approve). A refused reject carries no hint. The routes find a refused
+  own-change approve by the `SelfApprovalForbiddenError` cause, because
+  since #3328 the detail is the plain refusal text, not the
+  `self_approval_forbidden` token.
+- **"Approve group in order" window** (`ui/routes/approvals/in_order.py`).
+  Each pending step shows the same answer. When a step the run has not
+  reached says no, the window says the run will stop there; the steps
+  before it can still go. A step the run approved as a self-approval
+  says so on its row, and the done banner counts them. A refused step
+  shows the refusal text and the hint. Each step's approval checks
+  again.
 
 ## Delegated decisions: the reason-line convention (#3692)
 

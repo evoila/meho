@@ -102,8 +102,10 @@ enabled (an operator withdrawing their own request is not an escalation).
 This adds no new gate. The button state is UX only: the approve POST
 runs ``approve_request``, which checks again and answers 403
 (:class:`SelfApprovalForbiddenError`, :class:`ApprovalGroupForbiddenError`)
-with the plain refusal text in the re-rendered modal. After a
-self-approval the outcome card says so, with the rule that allowed it.
+with the plain refusal text in the re-rendered modal, followed by the
+hint that the web interface is the normal place to approve (the same
+sentence the command line prints). After a self-approval the outcome
+card says so, with the rule that allowed it.
 
 Tenant isolation
 ----------------
@@ -176,6 +178,7 @@ from meho_backplane.operations.approval_queue import (
     resume_dispatch_after_approval,
 )
 from meho_backplane.operations.approval_rights import (
+    WEB_APPROVAL_HINT,
     ApproveRightReason,
     approve_right,
     self_approval_confirmation,
@@ -730,6 +733,7 @@ async def _render_detail_modal(
     error_message: str | None = None,
     self_approval_error: bool = False,
     fresh_sign_in_error: bool = False,
+    error_hint: str | None = None,
 ) -> HTMLResponse:
     """Render the request-detail modal with Approve / Deny.
 
@@ -743,7 +747,9 @@ async def _render_detail_modal(
     second round-trip; ``self_approval_error`` promotes that banner from a
     bare error to the actionable single-operator guidance (#2669), and
     ``fresh_sign_in_error`` to the "sign in again" guidance with the link
-    to a new sign-in.
+    to a new sign-in. ``error_hint`` is a sentence the banner shows after
+    the refusal text (#3329: an approve refusal says the web interface is
+    the normal place to approve).
 
     An approve needs a recent sign-in that asked for the credentials
     (:func:`~meho_backplane.auth.approval_sign_in.check_fresh_web_approval_sign_in`).
@@ -784,6 +790,7 @@ async def _render_detail_modal(
         "csrf_token": csrf_token,
         "error_status": error_status,
         "error_message": error_message,
+        "error_hint": error_hint,
     }
     response = get_templates().TemplateResponse(request, "approvals/_modal.html", context)
     set_csrf_cookie(response, csrf_token)
@@ -839,6 +846,10 @@ async def _decide(
         fresh_sign_in_error = detail.startswith(
             ("fresh_sign_in_required", "fresh_sign_in_already_used")
         )
+        # A refused approve (403) keeps the refusal text as it is and adds
+        # the hint that the web interface is the normal place to approve
+        # (#3329), as the command line does. Not on a reject.
+        approve_refused = decision == "approved" and exc.status_code == status.HTTP_403_FORBIDDEN
         return await _render_detail_modal(
             request,
             session,
@@ -847,6 +858,7 @@ async def _decide(
             error_message=detail,
             self_approval_error=self_approval_error,
             fresh_sign_in_error=fresh_sign_in_error,
+            error_hint=WEB_APPROVAL_HINT if approve_refused else None,
         )
 
     # Approve re-dispatches the parked op (the committed approval is the

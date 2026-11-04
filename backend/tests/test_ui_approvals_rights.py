@@ -18,6 +18,7 @@ import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.models import ApprovalRequestStatus
+from meho_backplane.operations.approval_rights import WEB_APPROVAL_HINT
 from tests.test_ui_approvals import (
     _RESOLVE_OPERATOR,
     _REVIEWER_SUB,
@@ -190,5 +191,40 @@ def test_a_forced_own_destructive_approve_shows_the_refusal_text() -> None:
     assert "You cannot approve your own request" in body
     assert "Ask a MEHO-SA-Operator or a MEHO-Admin to approve this" in body
     assert "agent-requester" in body
+    # The refusal says where to approve (#3329), after the refusal text.
+    assert 'data-testid="approval-refusal-hint"' in body
+    assert body.index("Ask a MEHO-SA-Operator") < body.index(WEB_APPROVAL_HINT)
     assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
     resume_mock.assert_not_awaited()
+
+
+def test_a_forced_wrong_group_approve_shows_the_refusal_text_and_the_hint() -> None:
+    """A 403 for another person's destructive change keeps its text and adds the hint."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_destructive_request()
+    resume_mock = AsyncMock(return_value=_dispatch_result())
+
+    response = _post_decision(_operator(tenant_id=_TENANT_A), rid, resume_mock=resume_mock)
+
+    body = response.text  # type: ignore[attr-defined]
+    assert "Could not complete (403)" in body
+    assert "Only a MEHO-SA-Operator or a MEHO-Admin may approve" in body
+    assert 'data-testid="approval-refusal-hint"' in body
+    assert WEB_APPROVAL_HINT in body
+    assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
+    resume_mock.assert_not_awaited()
+
+
+def test_a_refused_reject_carries_no_web_hint() -> None:
+    """The hint is for approve refusals only, as on the command line."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A)
+    read_only = _operator(tenant_id=_TENANT_A, role=TenantRole.READ_ONLY)
+
+    response = _post_decision(read_only, rid, action="reject")
+
+    body = response.text  # type: ignore[attr-defined]
+    assert "Could not complete (403)" in body
+    assert "approval-refusal-hint" not in body
+    assert WEB_APPROVAL_HINT not in body
+    assert _request_status(rid) == ApprovalRequestStatus.PENDING.value

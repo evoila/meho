@@ -98,6 +98,9 @@
     csrf_token            -- str: minted double-submit token
     error_status          -- int | None: a failed-decision HTTP status
     error_message         -- str | None: a failed-decision human detail
+    error_hint            -- str | None: a sentence shown after the refusal text
+                             (#3329: an approve refusal says the web interface is
+                             the normal place to approve)
 -#}
 {% from "_icons.html" import icon %}
 {% from "_references.html" import subject %}
@@ -178,6 +181,9 @@
             <p class="mt-1 opacity-90">
               {{ error_message }} You may still deny it.
             </p>
+            {% if error_hint %}
+              <p class="mt-1 opacity-90" data-testid="approval-refusal-hint">{{ error_hint }}</p>
+            {% endif %}
             {{ single_operator_choices(self_approval_docs_url, self_approval_setting) }}
           </div>
         </div>
@@ -201,6 +207,9 @@
           <div>
             <h4 class="font-semibold">Could not complete ({{ error_status }})</h4>
             <p class="text-sm opacity-90">{{ error_message | default("The decision could not be completed.") }}</p>
+            {% if error_hint %}
+              <p class="text-sm opacity-90" data-testid="approval-refusal-hint">{{ error_hint }}</p>
+            {% endif %}
           </div>
         </div>
       {% endif %}

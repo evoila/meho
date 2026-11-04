@@ -829,19 +829,20 @@ def _take_the_approval_flow_out(kc: _Keycloak) -> None:
     """Make the realm look like one from before the approval sign-in flow.
 
     The client loses its flow binding first: Keycloak does not delete a flow
-    that a client uses. Then the flow goes, with its sub-flow.
+    that a client uses. An empty value removes a binding; an empty map
+    changes nothing. Then the flow goes, with its sub-flow.
     """
     admin = f"{kc.base_url}/admin/realms/meho"
     headers = _master_headers(kc)
     client = _approval_client(kc)
-    client["authenticationFlowBindingOverrides"] = {}
+    client["authenticationFlowBindingOverrides"] = {"browser": ""}
     httpx.put(f"{admin}/clients/{client['id']}", headers=headers, json=client).raise_for_status()
+    assert _approval_client(kc).get("authenticationFlowBindingOverrides", {}) == {}
     for alias in (_APPROVAL_FLOW, f"{_APPROVAL_FLOW} - one-time code"):
         flow_id = _flow_ids(kc).get(alias)
         if flow_id is not None:
             gone = httpx.delete(f"{admin}/authentication/flows/{flow_id}", headers=headers)
             gone.raise_for_status()
-    assert _approval_client(kc).get("authenticationFlowBindingOverrides", {}) == {}
     assert not {alias for alias in _flow_ids(kc) if alias.startswith(_APPROVAL_FLOW)}
 
 

@@ -8,7 +8,8 @@ checks it ("nft -c", check only) and loads it, in a new user and network
 namespace (unshare --map-root-user --net). The namespace has its own empty
 firewall, so the machine that runs the tests keeps its own rules. One test
 then changes the SSH rule with meho-host admin-network, which checks and
-loads the new file with the real nft too. Another reads the loaded table
+loads the new file with the real nft too; another adds and removes the rule
+for the log server with meho-host log-server. Another reads the loaded table
 with firewall_state, so its check of the chain prerouting matches the real
 output of nft.
 
@@ -255,6 +256,41 @@ class NftCheckTests(InstallTestCase):
                     self.assertNotIn("elements", result.stdout)
                 else:
                     self.assertIn(elements, result.stdout)
+
+    def test_nft_accepts_the_file_after_meho_host_log_server(self) -> None:
+        # meho-host runs the real nft -c -f and nft -f in the namespace, on
+        # the fake appliance. Stubs answer rsyslog's check and its restart; an
+        # address needs no look-up.
+        rules = self.rules_file("--admin-network", "10.0.0.0/24")
+        installed = rules.read_text()
+        for folder in ("/opt/meho/appliance", "/etc/rsyslog.d"):
+            self.machine.host_path(folder).mkdir(parents=True, exist_ok=True)
+        stubs = self.machine.home / "log-server-stubs"
+        stubs.mkdir()
+        for tool in ("rsyslogd", "systemctl"):
+            (stubs / tool).write_text("#!/bin/sh\nexit 0\n")
+            (stubs / tool).chmod(0o755)
+        rule = r"ip daddr (\{ )?192\.0\.2\.20( \})? tcp dport 6514 accept"
+        for value, listed in (("192.0.2.20:6514", True), ("none", False)):
+            with self.subTest(log_server=value):
+                result = in_namespace(
+                    "sh",
+                    "-c",
+                    'PATH="$1:$PATH" MEHO_TEST_ROOT="$2" "$3" log-server "$4"'
+                    " && nft list chain inet meho output",
+                    "sh",
+                    str(stubs),
+                    str(self.machine.root),
+                    str(LINUX_SERVER / "meho-host"),
+                    value,
+                )
+
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                if listed:
+                    self.assertRegex(result.stdout, rule)
+                else:
+                    self.assertNotRegex(result.stdout, rule)
+        self.assertEqual(installed, rules.read_text())
 
     def test_firewall_state_reads_the_real_nft_output(self) -> None:
         # firewall_state runs with the real nft in the namespace. A stub

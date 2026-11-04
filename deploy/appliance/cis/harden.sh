@@ -9,7 +9,7 @@
 # the data stream to the build VM and runs it as root, after the form-2
 # install and the appliance pieces, before the clean. In this order:
 #
-#   1. the packages the hardening needs, and ufw goes
+#   1. the packages the hardening and meho-host log-server need, and ufw goes
 #   2. the scanner files under /opt/meho/appliance/cis, where meho-host check
 #      and the update find them, and oscap-run-sce-script in /usr/local/bin,
 #      so the script checks run from the noexec /tmp
@@ -54,7 +54,9 @@ readonly SCE_RUNNER=/usr/local/bin/oscap-run-sce-script
 readonly SCAN_PROFILE=xccdf_com.evoila.meho_profile_appliance
 readonly REMEDIATE_PROFILE=xccdf_com.evoila.meho_profile_appliance_remediate
 readonly RULE_PREFIX=xccdf_org.ssgproject.content_rule_
-readonly PACKAGES=(aide aide-common openscap-scanner libpam-pwquality cracklib-runtime apparmor-utils)
+# rsyslog-gnutls: the TLS module of rsyslog for meho-host log-server --tls
+# (#5752). The appliance has no way to the Ubuntu archive later.
+readonly PACKAGES=(aide aide-common openscap-scanner libpam-pwquality cracklib-runtime apparmor-utils rsyslog-gnutls)
 readonly FSTAB=/etc/fstab
 readonly UBUNTU_TMP_MOUNT=/usr/share/systemd/tmp.mount
 readonly TMP_MOUNT=/etc/systemd/system/tmp.mount

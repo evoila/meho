@@ -682,8 +682,10 @@ managed realm:
    (`POST .../flows/browser/copy`). Keycloak names the copied sub-flows and
    configs `browser with passkeys <old name>`. A flow with that name from a
    run that stopped half-way is used instead, when its steps, without the
-   condition, match `browser` (same order, level, name and requirement).
-   Otherwise stop with `other_steps`, naming the first difference.
+   condition, match `browser` (same order, level, name, requirement and
+   settings; each step's config is read with `GET .../config/{id}`; only
+   the ids and the copied aliases may differ). Otherwise stop with
+   `other_steps`, naming the first difference.
 5. In the copy's code sub-flow: add the step
    (`POST .../flows/{alias}/executions/execution`; it starts `DISABLED`
    at the end), set it `REQUIRED` (`PUT .../flows/{alias}/executions`),
@@ -693,9 +695,13 @@ managed realm:
    `conditional-user-configured`. A step that is already there is kept
    when its config matches, and stops the op otherwise. The steps are read
    again; a wrong read-back is `check_failed` and the realm is not bound.
-6. Bind: read the realm, put `browserFlow` on top, write the full realm back
-   (`ops_write_merge.merge_representation`), and read it again. A
-   `browserFlow` that does not read back is `check_failed`.
+6. Bind: read the realm again right before the write (steps 4-5 take
+   several requests; a setting another operator changed meanwhile must not
+   go back to its old value), stop with `realm_changed` when its
+   `browserFlow` is no longer the flow from step 1, put `browserFlow` on
+   top, write the full realm back (`ops_write_merge.merge_representation`),
+   and read it again. A `browserFlow` that does not read back is
+   `check_failed`.
 
 The result is `{realm, previous_browser_flow, browser_flow, changed,
 flow_copied, step_added, binding_changed, unrequested_changes, flow_steps}`.

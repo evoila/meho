@@ -23,8 +23,10 @@ What is proven:
 * a custom browser flow, or a flow with no conditional one-time code
   sub-flow, stops the run and nothing is written;
 * a copy left by a run that stopped half-way is finished; a copy with other
-  steps stops the run;
-* the bind keeps the realm's other settings and is read back;
+  steps, or with other settings on a step, stops the run;
+* the bind keeps the realm's other settings, also a setting changed while
+  the flow was set up, and is read back; a browser flow changed meanwhile
+  stops the run before the bind;
 * the op is ``caution`` with approval, a plain ``write`` on the feed, and
   waits for approval; its approval card names the realm and both flows.
 """
@@ -34,7 +36,7 @@ from __future__ import annotations
 import copy
 import json
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
 from urllib.parse import unquote
 
@@ -202,6 +204,8 @@ class FakeKeycloak:
             "attributes": {"frontendUrl": ""},
         }
         self.writes: list[tuple[str, str, Any]] = []
+        #: Runs once, on the first flow write: another operator at work meanwhile.
+        self.on_first_flow_write: Callable[[], None] | None = None
         self._counter = 0
         for name, item in flows.items():
             item.setdefault("id", f"flow-{name}")
@@ -270,6 +274,7 @@ class FakeKeycloak:
             return httpx.Response(200, json=self._listed(alias, 0))
         body = json.loads(request.content)
         self.writes.append((request.method, raw, body))
+        self._first_flow_write()
         if tail == "copy":
             return self._copy(alias, body["newName"])
         if tail == "executions" and request.method == "PUT":
@@ -328,6 +333,7 @@ class FakeKeycloak:
         execution_id, _, tail = rest.partition("/")
         body = json.loads(request.content) if request.content else None
         self.writes.append((request.method, raw, body))
+        self._first_flow_write()
         alias, index = self._find(execution_id)
         steps = self.flows[alias]["steps"]
         if tail == "config":
@@ -345,6 +351,11 @@ class FakeKeycloak:
                 steps[index - 1], steps[index] = step, before
             return httpx.Response(204)
         return httpx.Response(405)
+
+    def _first_flow_write(self) -> None:
+        hook, self.on_first_flow_write = self.on_first_flow_write, None
+        if hook is not None:
+            hook()
 
     def _config(self, request: httpx.Request) -> httpx.Response:
         config_id = request.url.path.rsplit("/", 1)[-1]
@@ -578,6 +589,49 @@ async def test_bind_keeps_the_other_realm_settings(kc: KeycloakConnector) -> Non
     assert len(realm_puts) == 1
 
 
+async def test_setting_changed_during_flow_setup_is_kept(kc: KeycloakConnector) -> None:
+    fake = _fake()
+
+    def other_operator() -> None:
+        fake.realm["displayName"] = "Changed while the flow was set up"
+        fake.realm["attributes"]["frontendUrl"] = "https://login.example.invalid"
+
+    fake.on_first_flow_write = other_operator
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run()
+    assert result["status"] == "ok", result
+    assert result["result"]["unrequested_changes"] == []
+    assert fake.on_first_flow_write is None  # the hook ran
+    assert fake.realm["browserFlow"] == _COPY
+    assert fake.realm["displayName"] == "Changed while the flow was set up"
+    assert fake.realm["attributes"]["frontendUrl"] == "https://login.example.invalid"
+
+
+async def test_browser_flow_changed_during_flow_setup_stops_before_the_bind(
+    kc: KeycloakConnector,
+) -> None:
+    fake = _fake()
+
+    def other_operator() -> None:
+        fake.realm["browserFlow"] = "direct grant"
+
+    fake.on_first_flow_write = other_operator
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run()
+    assert result["status"] != "ok"
+    text = json.dumps(result)
+    assert "realm_changed" in text
+    assert "direct grant" in text
+    assert fake.on_first_flow_write is None
+    assert not any(path == _ADMIN for _, path, _ in fake.writes)
+    assert fake.realm["browserFlow"] == "direct grant"
+    # The copy has the step, so a new run (after a person checks the realm)
+    # finds it finished.
+    assert fake.code_steps(_COPY_CODE_SUB) == _WANTED_CODE_STEPS
+
+
 async def test_realm_with_the_step_is_not_changed(kc: KeycloakConnector) -> None:
     fake = _fake(with_condition=True)
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
@@ -693,6 +747,44 @@ async def test_copy_with_other_steps_stops(kc: KeycloakConnector) -> None:
     assert "auth-cookie" in text
     assert fake.writes == []
     assert fake.realm["browserFlow"] == "browser"
+
+
+async def test_copy_whose_other_step_has_other_settings_stops(kc: KeycloakConnector) -> None:
+    fake = _fake()
+    fake._copy("browser", _COPY)
+    # Someone gave the copy's identity-provider redirect a default provider.
+    config_id = fake.add_config("browser with passkeys idp", {"defaultProvider": "partner-idp"})
+    fake.flows[_COPY]["steps"][2]["config"] = config_id
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run()
+    assert result["status"] != "ok"
+    text = json.dumps(result)
+    assert "other_steps" in text
+    assert "identity-provider-redirector" in text
+    assert "partner-idp" not in text
+    assert fake.writes == []
+    assert fake.realm["browserFlow"] == "browser"
+
+
+async def test_copy_with_the_same_settings_under_copied_aliases_is_finished(
+    kc: KeycloakConnector,
+) -> None:
+    fake = _fake()
+    config_id = fake.add_config("idp-redirector", {"defaultProvider": "partner-idp"})
+    fake.flows["browser"]["steps"][2]["config"] = config_id
+    fake._copy("browser", _COPY)
+    copied = fake.flows[_COPY]["steps"][2]["config"]
+    assert copied != config_id
+    assert fake.configs[copied]["alias"] == f"{_COPY} idp-redirector"
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run()
+    assert result["status"] == "ok", result
+    assert result["result"]["flow_copied"] is False
+    assert result["result"]["step_added"] is True
+    assert fake.code_steps(_COPY_CODE_SUB) == _WANTED_CODE_STEPS
+    assert fake.realm["browserFlow"] == _COPY
 
 
 async def test_copy_whose_condition_has_other_settings_stops(kc: KeycloakConnector) -> None:

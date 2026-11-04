@@ -24,14 +24,19 @@ the realm's browser flow. What the op does, on the target's managed realm:
 3. The bound flow is not the built-in ``browser`` flow, or it has no such
    sub-flow: stop and change nothing.
 4. Copy ``browser`` as ``browser with passkeys`` (Keycloak names the copied
-   sub-flows ``browser with passkeys <old name>``). A copy with that name
-   from a run that stopped half-way is used when its other steps match
-   ``browser``; otherwise the op stops and names the difference.
+   sub-flows and configs ``browser with passkeys <old name>``). A copy with
+   that name from a run that stopped half-way is used when its other steps
+   match ``browser``: same level, name, requirement and settings (only the
+   ids and the copied aliases may differ); otherwise the op stops and names
+   the difference.
 5. In the copy's sub-flow, add the step, set it to required, give it its
    config, and move it right after ``conditional-user-configured``. Read
    the steps again and check them.
-6. Bind the copy: read the realm, put ``browserFlow`` on top, write the full
-   realm back, and read it again.
+6. Bind the copy: read the realm again right before the write, so a
+   setting another operator changed meanwhile is not written back to its
+   old value. Stop when the realm's browser flow is no longer the one from
+   step 1. Put ``browserFlow`` on top, write the full realm back, and read
+   it again.
 
 The way back is ``keycloak.realm.update`` with ``{"browserFlow": "browser"}``.
 """
@@ -89,6 +94,8 @@ _CONDITION_CONFIG = {"credentials": _PASSKEY_CREDENTIAL, "included": "false"}
 _CONDITION_CONFIG_ALIAS = f"{PASSKEY_FLOW_ALIAS} - skip code after passkey"
 #: Keycloak joins several credential types in one config value with ``##``.
 _CONFIG_DELIMITER = "##"
+#: A flow step row and its settings (``None`` when it has none).
+_Step = tuple[dict[str, Any], dict[str, Any] | None]
 
 
 class KeycloakPasskeyFlowError(RuntimeError):
@@ -98,6 +105,7 @@ class KeycloakPasskeyFlowError(RuntimeError):
     ``no_code_step``: the flow has no conditional sub-flow with the one-time
     code. ``other_steps``: the flow or the copy has another shape.
     ``check_failed``: the copy or the binding did not read back as written.
+    ``realm_changed``: the realm's browser flow changed while the op ran.
     """
 
     def __init__(self, code: str, message: str) -> None:
@@ -180,6 +188,34 @@ async def _read_steps(
     return _rows(await get_admin_list_strict(connector, target, path, operator=operator))
 
 
+async def _read_config(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    realm: str,
+    row: dict[str, Any],
+) -> dict[str, Any] | None:
+    """The step's settings (the ``config`` map), or ``None`` for a step without any."""
+    config_id = row.get("authenticationConfig")
+    if not isinstance(config_id, str) or not config_id:
+        return None
+    path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": quote_segment(config_id)})
+    body = await connector._get_admin_json(target, path, operator=operator)
+    config = body.get("config")
+    return config if isinstance(config, dict) else {}
+
+
+async def _with_configs(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    realm: str,
+    rows: list[dict[str, Any]],
+) -> list[_Step]:
+    """Pair every step with its settings, read one by one."""
+    return [(row, await _read_config(connector, operator, target, realm, row)) for row in rows]
+
+
 async def _config_matches(
     connector: KeycloakConnector,
     operator: Operator,
@@ -188,13 +224,8 @@ async def _config_matches(
     row: dict[str, Any],
 ) -> bool:
     """``True`` when the step's config is ``webauthn-passwordless`` with ``included`` off."""
-    config_id = row.get("authenticationConfig")
-    if not isinstance(config_id, str) or not config_id:
-        return False
-    path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": quote_segment(config_id)})
-    body = await connector._get_admin_json(target, path, operator=operator)
-    config = body.get("config")
-    if not isinstance(config, dict):
+    config = await _read_config(connector, operator, target, realm, row)
+    if not config:
         return False
     credentials = str(config.get("credentials") or "").split(_CONFIG_DELIMITER)
     included = str(config.get("included") or "false").strip().lower()
@@ -219,32 +250,48 @@ async def _step_is_there(
     return False
 
 
-def _copy_difference(
-    source: list[dict[str, Any]], copy: list[dict[str, Any]], copy_sub: int | None
-) -> str | None:
-    """Name how the copy differs from ``browser`` besides the step, or ``None``."""
+def _step_difference(index: int, want: _Step, have: _Step) -> str | None:
+    """Name how step *index* of the copy differs from the same step of ``browser``."""
+    (want_row, want_config), (have_row, have_config) = want, have
+    want_name = _name(want_row)
+    if _is_subflow(want_row):
+        want_name = f"{PASSKEY_FLOW_ALIAS} {want_name}"
+    if (have_row["level"], _name(have_row), have_row.get("requirement")) != (
+        want_row["level"],
+        want_name,
+        want_row.get("requirement"),
+    ):
+        return (
+            f"step {index + 1} is {_name(have_row)!r} ({have_row.get('requirement')}); "
+            f"wanted {want_name!r} ({want_row.get('requirement')})"
+        )
+    if have_config != want_config:
+        return (
+            f"step {index + 1} ({_name(have_row)!r}) has other settings than in "
+            f"{BUILT_IN_BROWSER_FLOW!r}"
+        )
+    return None
+
+
+def _copy_difference(source: list[_Step], copy: list[_Step], copy_sub: int | None) -> str | None:
+    """Name how the copy differs from ``browser`` besides the step, or ``None``.
+
+    Each step must match in level, name, requirement and settings. The ids
+    differ in every copy, and a copied sub-flow or config carries the copy's
+    name in front of its alias, so those are not compared.
+    """
     if copy_sub is None:
         return "it has no conditional sub-flow with the one-time code"
-    conditions = _conditions(copy, copy_sub)
+    conditions = _conditions([row for row, _ in copy], copy_sub)
     if len(conditions) > 1:
         return f"its one-time code sub-flow has {len(conditions)} credential conditions"
-    rest = [row for index, row in enumerate(copy) if index not in conditions]
+    rest = [step for index, step in enumerate(copy) if index not in conditions]
     for index, want in enumerate(source):
         if index >= len(rest):
-            return f"step {index + 1} ({_name(want)!r}) is missing"
-        have = rest[index]
-        want_name = _name(want)
-        if _is_subflow(want):
-            want_name = f"{PASSKEY_FLOW_ALIAS} {want_name}"
-        if (have["level"], _name(have), have.get("requirement")) != (
-            want["level"],
-            want_name,
-            want.get("requirement"),
-        ):
-            return (
-                f"step {index + 1} is {_name(have)!r} ({have.get('requirement')}); "
-                f"wanted {want_name!r} ({want.get('requirement')})"
-            )
+            return f"step {index + 1} ({_name(want[0])!r}) is missing"
+        difference = _step_difference(index, want, rest[index])
+        if difference is not None:
+            return difference
     if len(rest) > len(source):
         return f"it has {len(rest)} steps besides the condition; wanted {len(source)}"
     return None
@@ -260,7 +307,11 @@ async def _finish_copy(
     """Give the copy the step, in the right place. Returns ``(steps, step_added)``."""
     rows = await _read_steps(connector, operator, target, realm, PASSKEY_FLOW_ALIAS)
     sub = _code_subflow(rows)
-    difference = _copy_difference(source, rows, sub)
+    difference = _copy_difference(
+        await _with_configs(connector, operator, target, realm, source),
+        await _with_configs(connector, operator, target, realm, rows),
+        sub,
+    )
     if difference is not None or sub is None:
         raise KeycloakPasskeyFlowError(
             "other_steps",
@@ -394,9 +445,23 @@ async def _bind(
     operator: Operator,
     target: KeycloakTargetLike,
     realm_path: str,
-    before: dict[str, Any],
+    expected_flow: str,
 ) -> list[str]:
-    """Bind the copy as the realm's browser flow. Returns the unrequested changes."""
+    """Bind the copy as the realm's browser flow. Returns the unrequested changes.
+
+    The realm is read again right before the write: the flow setup takes
+    several requests, and a realm setting another operator changed meanwhile
+    must not be written back to its old value. The op stops when the realm's
+    browser flow is no longer *expected_flow*.
+    """
+    before = await connector._get_admin_json(target, realm_path, operator=operator)
+    if before.get("browserFlow") != expected_flow:
+        raise KeycloakPasskeyFlowError(
+            "realm_changed",
+            f"the realm's browser flow changed to {before.get('browserFlow')!r} while the "
+            f"op ran; it was {expected_flow!r}. The realm was not bound to "
+            f"{PASSKEY_FLOW_ALIAS!r}, which has the step. Check the realm and run again.",
+        )
     requested = {"browserFlow": PASSKEY_FLOW_ALIAS}
     await connector._write_admin(
         target,
@@ -480,7 +545,7 @@ async def keycloak_authflow_ensure_passkey_code_skip(
             idempotent_conflict=False,
         )
     copy_rows, step_added = await _finish_copy(self, operator, target, segment, rows)
-    unrequested = await _bind(self, operator, target, realm_path, before)
+    unrequested = await _bind(self, operator, target, realm_path, bound)
     return {
         **answer,
         "browser_flow": PASSKEY_FLOW_ALIAS,

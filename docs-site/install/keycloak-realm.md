@@ -838,8 +838,9 @@ meho operation call keycloak-admin-26.x keycloak.authflow.ensure_passkey_code_sk
   copy the realm's browser flow. Then it reads the flow and the realm back.
   `browser_flow` in the result is the flow the realm now uses.
 - **A copy `browser with passkeys` is there from a run that stopped
-  half-way:** MEHO finishes it, when its other steps match `browser`.
-  Otherwise it stops, changes nothing more, and names the difference.
+  half-way:** MEHO finishes it, when its other steps match `browser`,
+  settings included. Otherwise it stops, changes nothing more, and names
+  the difference.
   Delete or rename that copy, then run again.
 - **The realm uses its own flow**, or the flow has no conditional one-time
   code sub-flow: MEHO stops and changes nothing. Do the steps below by

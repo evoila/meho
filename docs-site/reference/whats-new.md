@@ -9,6 +9,31 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.44.0](https://github.com/evoila/meho/releases/tag/v0.44.0) — 2026-11-04
+
+- **The first release without the VMware connectors in the public
+  image.** They now come as a separate, signed connector package that
+  runs on top of the public image. The
+  [decision record](https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-own-connectors-leave-the-public-tree.md)
+  says which connectors moved and why.
+- **Connector kit 1.1.** A connector package can bring its own catalog
+  rows: the vendor API file, the login profile and the risk levels.
+- **Credential reads wait for a person.** An ingested credential read
+  waits for a person's approval. Ingested licence reads stay off.
+- **Who may approve.** Only an SA-Operator or a tenant admin may approve
+  another person's dangerous change. A withdrawn request is recorded as
+  withdrawn.
+- **More secrets stay hidden, and more limits.** More secret values are
+  hidden in answers, previews and records. Request limits and a metrics
+  token are on by default in the chart.
+- **New FreeIPA connector.** Reads, and writes that wait for approval.
+- **Smaller fixes.** A mail policy change holds for the next send. The
+  appliance can send its own logs to your log server. A console bookmark
+  of a page part opens the whole page.
+- **Read first.** Three database migrations, new chart defaults, and a
+  few scripts must change. See "Breaking changes" and "Steps after the
+  upgrade" in the release notes.
+
 ## [v0.43.0](https://github.com/evoila/meho/releases/tag/v0.43.0) — 2026-11-02
 
 - **The last release with the VMware connectors in the public image.**

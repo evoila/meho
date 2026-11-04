@@ -117,7 +117,10 @@ unit and `firewall_state`. In order:
      not. `harden.sh` takes it out of `/etc/environment` and writes
      `/etc/sudoers.d/meho-appliance` with its own `secure_path` (sudo uses
      the last one it reads), checked with `visudo -c` before it goes in
-     place. `/etc/sudoers` itself stays as the package ships it.
+     place. `/etc/sudoers` itself stays as the package ships it. The scan
+     of step 6 runs in the same process, which got its `PATH` from sudo
+     before the change, so `harden.sh` takes `/snap/bin` out of its own
+     `PATH` too.
    - `/etc/cron.allow` in the group `crontab` (CIS 2.4.1.8): after the
      fixes it is in the group `root`.
    - AIDE skips `/var/lib/rancher`, `/var/lib/kubelet`,

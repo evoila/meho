@@ -84,6 +84,7 @@ STUBS = {
         case "$*" in
           *--remediate*) exit "$(cat "$MEHO_FAKE/remediate_rc")" ;;
         esac
+        printf '%s\\n' "$PATH" >"$MEHO_FAKE/scan_path"
         cat "$MEHO_FAKE/scan"
         exit "$(cat "$MEHO_FAKE/scan_rc")"
         """),
@@ -202,7 +203,8 @@ class FakeBuildVM:
 
     def run(self) -> subprocess.CompletedProcess[str]:
         env = {
-            "PATH": f"{self.stubs}:{self.tools}",
+            # sudo's secure_path on Ubuntu ends in /snap/bin too.
+            "PATH": f"{self.stubs}:{self.tools}:/snap/bin",
             "MEHO_TEST_ROOT": str(self.root),
             "MEHO_FAKE": str(self.fake),
             "LC_ALL": "C",
@@ -375,6 +377,8 @@ class HardenTests(unittest.TestCase):
         self.assertEqual(0o440, self.vm.host_path(SUDOERS_DROPIN).stat().st_mode & 0o777)
         [visudo] = self.vm.calls("visudo")
         self.assertTrue(visudo.startswith(f"visudo -cqf {self.vm.host_path(SUDOERS_DROPIN)}."))
+        # The scan runs in the process sudo started, so its PATH changes too.
+        self.assertEqual(f"{self.vm.stubs}:{self.vm.tools}\n", (self.vm.fake / "scan_path").read_text())
 
     def test_a_sudo_file_visudo_refuses_never_goes_in(self) -> None:
         self.vm.answer("visudo_rc", "1")

@@ -313,7 +313,11 @@ drop_snap_from_root_path() {
             "read visudo's message above, then adapt drop_snap_from_root_path in harden.sh."
     fi
     mv -f "$temporary" "$dropin"
-    ok "root's PATH has no /snap/bin in $ENVIRONMENT and in sudo's secure_path (CIS 5.4.2.5)"
+    # The scan of step 6 runs in this process, which has the PATH sudo gave
+    # it before the change.
+    # shellcheck disable=SC2001 # a ${PATH//...} would also cut /snap/binx
+    PATH=$(sed 's#:/snap/bin\(:\|$\)#\1#g' <<<"$PATH")
+    ok "root's PATH has no /snap/bin in $ENVIRONMENT, in sudo's secure_path and for the scan (CIS 5.4.2.5)"
 }
 
 # After the fixes of step 3 the file is in the group root; CIS 2.4.1.8

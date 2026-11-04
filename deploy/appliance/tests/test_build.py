@@ -164,6 +164,32 @@ class BuildWithoutVmInfoTest(unittest.TestCase):
             self.ssh_log.read_text(),
         )
 
+    def test_a_stopped_hardening_still_brings_back_the_result_list(self) -> None:
+        stubs = {
+            # The CIS content: the stub curl writes the archive, the stub
+            # sha512sum and tar accept it.
+            "curl": 'while [ $# -gt 1 ]; do [ "$1" = -o ] && : >"$2"; shift; done\n',
+            "sha512sum": "cat >/dev/null\n",
+            "tar": "",
+            # harden.sh stops, as on a rule in neither list.
+            "ssh": 'printf "%s\\n" "$*" >>"$SSH_LOG"\ncase "$*" in *harden.sh*) exit 1 ;; esac\n',
+            "scp": 'printf "scp %s\\n" "$*" >>"$SSH_LOG"\n',
+        }
+        for name, body in stubs.items():
+            stub = self.root / "bin" / name
+            stub.write_text("#!/bin/sh\n" + body)
+            stub.chmod(0o755)
+
+        result = self.run_build("--from-step", "3")
+
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertIn("cis/harden.sh stopped on the build VM (exit code 1).", result.stderr)
+        log = self.ssh_log.read_text().splitlines()
+        [harden] = [index for index, line in enumerate(log) if "harden.sh" in line]
+        self.assertIn("sudo rm -f /run/meho-cis-results.txt", "\n".join(log[:harden]))
+        copy = f"/run/meho-cis-results.txt {self.root}/out/meho-appliance-{VERSION}-cis.txt"
+        self.assertTrue(any(copy in line for line in log[harden + 1 :]), log)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -408,13 +408,22 @@ download_cis_content() {
 # harden_os: cis/harden.sh on the build VM. Its result list holds rule names
 # and results only, nothing of the lab, so it can be a public artifact.
 harden_os() {
-    local results=meho-appliance-$VERSION-cis.txt build_host=$BUILD_USER@${MEHO_BUILD_ADDRESS%/*}
+    local results=meho-appliance-$VERSION-cis.txt build_host=$BUILD_USER@${MEHO_BUILD_ADDRESS%/*} rc=0
     download_cis_content
-    ssh_build "rm -rf meho-cis"
+    # No list of an earlier run, so a list that comes back is of this run.
+    ssh_build "rm -rf meho-cis && sudo rm -f /run/meho-cis-results.txt"
     scp_build -r "$APPLIANCE_DIR/cis" "$build_host:meho-cis"
     scp_build "$WORK/$CIS_DATA_STREAM" "$build_host:meho-cis/$CIS_DATA_STREAM"
     # /run is a RAM disk, so neither the list nor the logs are in the OVA.
-    ssh_build "sudo bash meho-cis/harden.sh --content meho-cis/$CIS_DATA_STREAM --results /run/meho-cis-results.txt"
+    ssh_build "sudo bash meho-cis/harden.sh --content meho-cis/$CIS_DATA_STREAM --results /run/meho-cis-results.txt" || rc=$?
+    if ((rc != 0)); then
+        # When harden.sh got to its scan, the list names the rules to fix.
+        if scp_build "$build_host:/run/meho-cis-results.txt" "$OUT_DIR/$results" 2>/dev/null; then
+            note "the scan's result list is $OUT_DIR/$results"
+        fi
+        fail "cis/harden.sh stopped on the build VM (exit code $rc)." \
+            "read its [FAIL] line and any [WARN] lines above, fix the cause, then go on with --from-step 3."
+    fi
     scp_build "$build_host:/run/meho-cis-results.txt" "$OUT_DIR/$results"
     ssh_build "rm -rf meho-cis"
     ok "the OS is hardened to CIS Ubuntu 24.04 Level 1 - Server; the scan's result list is $OUT_DIR/$results"

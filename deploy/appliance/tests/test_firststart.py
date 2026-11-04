@@ -13,6 +13,7 @@ import unittest
 
 from firststart_harness import (
     APPLIANCE,
+    DOWNLOAD,
     JOIN_TOKEN,
     PASSWORD,
     SSH_KEY,
@@ -707,6 +708,27 @@ class BannerTests(FirstStartTestCase):
                     self.assertIn("appliance-firststart.md", banner)
                 if line == locked:
                     self.assertNotIn("chage", banner)
+
+    def test_the_boot_menu_link_points_to_the_release_of_this_appliance(self) -> None:
+        self.assert_succeeds(self.vm.run())
+        self.vm.answer("shadow", "admin:!$y$hash:0:0:365:7:45::\n")
+        doc = "docs/codebase/appliance-firststart.md"
+        # The MEHO version of the download, and the git ref the link uses.
+        cases = {
+            "0.43.0": "v0.43.0",
+            "0.44.0-rc.1": "v0.44.0-rc.1",
+            "0.1.20261103-caf1eae": "main",
+            "": "main",
+        }
+        for version, ref in cases.items():
+            with self.subTest(version=version):
+                self.vm.host_file(f"{DOWNLOAD}/VERSION", f"MEHO_VERSION={version}\n")
+
+                banner = self.vm.banner()
+
+                self.assertIn(
+                    f"The steps: https://github.com/evoila/meho/blob/{ref}/{doc},\n", banner
+                )
 
 
 if __name__ == "__main__":

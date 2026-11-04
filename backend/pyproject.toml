@@ -186,6 +186,14 @@ build = [
 ]
 
 [tool.uv]
+# Take a new package version only when it is at least 7 days old. A
+# release that carries harmful code is usually found and removed within a
+# few days, so the wait skips it. The urgent-fix path is in
+# docs/codebase/devops.md ("Dependencies wait 7 days"). Keep this line
+# first in the section: the Semgrep rule reads the section only up to
+# the first square bracket, and the comment below has one.
+exclude-newer = "7 days"
+
 # Transitive-version floors the resolver MUST honour without promoting the
 # packages to first-class runtime dependencies. ``constraint-dependencies``
 # bounds a version wherever it appears in the graph but — unlike a

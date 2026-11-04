@@ -2854,27 +2854,52 @@ scope the cosign-signed `image.yml` release build restores from; the
 release image's trust chain never depends on cache produced by unmerged
 code, while the per-PR build keeps its warm-cache read.
 
-## Dependabot waits 7 days before it takes a new version
+## Dependencies wait 7 days before we take a new version
 
-Every entry in `.github/dependabot.yml` has a `cooldown` block with
-`default-days: 7`. Dependabot opens a version-update pull request for a
-new release (a GitHub Action, a Python package in `backend/uv.lock`, or
-a base image in a Dockerfile) only when that release is at least 7 days
-old.
+We take a new version of a dependency only when it is at least 7 days
+old. A new release can carry harmful code, for example when someone
+takes over a maintainer's account. Such releases are usually found and
+removed within a few days. The wait skips them. Two settings do this:
 
-- **Why.** A new release can carry harmful code, for example when an
-  attacker takes over a maintainer's account. Such releases are usually
-  found and removed within a few days. The wait skips them.
-- **Security updates are not delayed.** Dependabot's `cooldown` applies
-  to version updates only. A security update still comes at once.
-- **Without the block, Dependabot already waits 3 days** on github.com.
-  The block makes the wait visible in the file and sets it to 7 days.
-- **A manual upgrade does not wait.** `uv lock --upgrade` or a hand
-  edit of a Dockerfile digest can still take a release that is younger
-  than 7 days. The matching uv setting (`exclude-newer` in
-  `backend/pyproject.toml`) is not set yet; it needs a lock file in
-  which every locked version is already 7 days old, otherwise
-  `uv lock` moves packages back.
+- **Dependabot.** Every entry in `.github/dependabot.yml` has a
+  `cooldown` block with `default-days: 7`. Dependabot opens a
+  version-update pull request for a new release (a GitHub Action, a
+  Python package in `backend/uv.lock`, or a base image in a Dockerfile)
+  only when that release is at least 7 days old. Without the block,
+  Dependabot already waits 3 days on github.com. The block makes the
+  wait visible in the file and sets it to 7 days.
+- **uv.** `[tool.uv]` in `backend/pyproject.toml` has
+  `exclude-newer = "7 days"`. uv ignores every package version uploaded
+  in the last 7 days, in every lock: Dependabot's, a person's and an
+  agent's (`uv add`, `uv lock --upgrade`). `backend/uv.lock` records the
+  wait as `exclude-newer-span = "P7D"` under `[options]`. The span is
+  relative, so `uv sync --locked` keeps passing as days go by. The
+  `exclude-newer = "0001-01-01T00:00:00Z"` line next to it has no
+  effect; uv writes it for older uv versions. Relative values need uv
+  0.9.17 or newer. CI uses uv 0.13.0, the image build uses uv 0.11.12.
+
+**Security updates.** Dependabot's `cooldown` applies to version updates
+only. A security update still comes at once. But uv cannot tell a
+security update from a normal release. Dependabot runs uv with our
+settings, so a security update to a version that is younger than 7 days
+fails to lock until that version is 7 days old.
+
+**How to take an urgent fix at once.** Lift the wait for that one
+package, and only for that package:
+
+1. Add this line to `[tool.uv]` in `backend/pyproject.toml`, with the
+   name of the package:
+
+   ```toml
+   exclude-newer-package = { <package> = false }
+   ```
+
+2. Run `cd backend && uv lock`. uv then takes the new version of that
+   package, and `uv sync --locked` passes again. The lock file records
+   only the new version, not the exception: with the line and no newer
+   version to take, `uv lock` changes nothing.
+3. Remove the line once the version is older than 7 days, and run
+   `uv lock` again.
 
 ## Dependencies
 

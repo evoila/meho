@@ -35,7 +35,7 @@ Each `AuditEntry` carries the forensic fields you filter and pivot on:
 | `principal_sub` / `principal_name` | the subject that acted (the JWT `sub`) |
 | `target_name` | the target it acted on |
 | `op_id` / `op_class` | the operation and its sensitivity class |
-| `result_status` | `ok` / `error` / `denied` |
+| `result_status` | `ok` / `error` / `denied`, or `withdrawn` when the sender took its approval request back (the operation never ran) |
 | `policy_decision` | the gate verdict: `auto-execute`, `needs-approval`, or `deny` |
 | `agent_session_id` | the originating agent's MCP session id — the key for session tracing |
 | `parent_audit_id` | the id of the row that caused this one. An approval's decision row and run row point at the approval request row. |

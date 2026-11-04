@@ -146,12 +146,19 @@ log = structlog.get_logger(__name__)
 #: ``audit_log``; the substrate caps ``limit`` at 1000 regardless.
 _PAGE_SIZE: Final[int] = 50
 
-#: The ``result_status`` filter dropdown options. These are the four closed
+#: The ``result_status`` filter dropdown options. These are the five closed
 #: values the substrate's ``_result_status_predicate`` understands (an
 #: unknown value matches nothing rather than erroring); the empty default is
 #: the "Any" sentinel that omits the filter. Surfaced in the
-#: ok / pending / error / denied order an operator reads severity in.
-_RESULT_STATUS_OPTIONS: Final[tuple[str, ...]] = ("ok", "pending", "error", "denied")
+#: ok / pending / error / denied order an operator reads severity in, then
+#: ``withdrawn`` (the sender took its approval request back, #5717).
+_RESULT_STATUS_OPTIONS: Final[tuple[str, ...]] = (
+    "ok",
+    "pending",
+    "error",
+    "denied",
+    "withdrawn",
+)
 
 #: Plain labels for the event class (#3733) filter, counters and badges, in
 #: the closed enum order. The empty form value is the "Any" sentinel.

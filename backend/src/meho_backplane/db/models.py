@@ -436,7 +436,8 @@ class AuditEventClass(StrEnum):
     * :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:
       a policy deny, a rate-limit refusal, or a park for approval.
     * :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,
-      rejected, or let an approval request expire.
+      rejected, or let an approval request expire, or its sender withdrew
+      it (#5717). The operation did not run on any of these rows.
     * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
       refresh-token replay or a broken satellite effect chain.
     * :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every

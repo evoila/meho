@@ -1190,7 +1190,8 @@ async def _write_audit_row(
     *event_class* (#3733) is declared by each caller:
     ``policy_decision`` for the ``approval.request`` row (the gate decided
     the call needs approval), ``approval_decision`` for an approve, reject
-    or expiry ``approval.decision`` row, and ``legacy_request`` for the
+    or expiry ``approval.decision`` row and for the ``approval.withdraw``
+    row, and ``legacy_request`` for the
     ``approval.result`` read row.
 
     Uses ``method='APPROVAL'`` and the provided *path* (``'approval.request'``
@@ -1935,7 +1936,8 @@ async def withdraw_request(
     (``operator.sub == request.principal_sub``). The row moves to
     ``withdrawn`` with ``withdrawn_at`` and ``withdraw_reason`` set;
     ``reviewed_by`` and ``decided_at`` stay NULL. One ``approval.withdraw``
-    audit row records it. The original call never runs: approve, reject
+    audit row of class ``approval_decision`` records it; the audit query
+    shows its result as ``withdrawn``. The original call never runs: approve, reject
     and decide then see a closed row and refuse (409).
 
     Args:
@@ -1975,8 +1977,9 @@ async def withdraw_request(
     await _write_audit_row(
         session,
         audit_id=withdraw_audit_id,
-        # Not APPROVAL_DECISION: nobody decided. The sender ran an action.
-        event_class=AuditEventClass.OPERATION_EXECUTION,
+        # Not OPERATION_EXECUTION: the operation never ran. The row closes
+        # the approval request, like a reject or an expiry row (#5717).
+        event_class=AuditEventClass.APPROVAL_DECISION,
         operator=operator,
         request=request,
         path="approval.withdraw",

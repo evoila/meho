@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -73,14 +75,29 @@ def initial_state() -> dict[str, Any]:
     }
 
 
+def fake_kubectl_stub() -> str:
+    """The body of the kubectl stub: run fake_cluster.py with this Python.
+
+    meho-host runs its commands with the small environment of
+    FakeHost.environment(). The CPython of actions/setup-python finds its
+    libpython through LD_LIBRARY_PATH when its RUNPATH does not exist, as on
+    a self-hosted runner (see firststart_harness.py of the appliance tests).
+    So the stub keeps the value of the test process, for this Python only.
+    """
+    lines = []
+    library_path = os.environ.get("LD_LIBRARY_PATH")
+    if library_path:
+        lines.append(f"export LD_LIBRARY_PATH={shlex.quote(library_path)}")
+    lines.append(f'exec {shlex.quote(sys.executable)} {shlex.quote(str(FAKE_CLUSTER))} "$@"')
+    return "\n".join(lines) + "\n"
+
+
 class ClusterHost(FakeHost):
     """A fake installed machine with a fake cluster that keeps state."""
 
     def __init__(self) -> None:
         super().__init__()
-        _write_script(
-            self.host_path(RKE2_KUBECTL), f'exec "{sys.executable}" "{FAKE_CLUSTER}" "$@"\n'
-        )
+        _write_script(self.host_path(RKE2_KUBECTL), fake_kubectl_stub())
         _write_script(self.stubs / "sleep", "exit 0\n")
         found = shutil.which("base64")
         if found is None:

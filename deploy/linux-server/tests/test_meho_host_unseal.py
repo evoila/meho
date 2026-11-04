@@ -15,10 +15,12 @@ import subprocess
 import termios
 import time
 import unittest
+from unittest import mock
 
 from cluster_harness import (
     CORE_LABELS,
     OTHER_KEY,
+    RKE2_KUBECTL,
     SUPPORT_HINT,
     UNSEAL_KEY,
     UNSEAL_KEY_FILE,
@@ -372,6 +374,33 @@ class UnsealTests(ClusterTestCase):
                 self.assertNotIn(UNSEAL_KEY, self.output(result))
                 self.assertIn("never", result.stderr)
         self.assertTrue(self.host.state()["openbao"]["sealed"])
+
+
+class FakeKubectlTests(unittest.TestCase):
+    """The fake kubectl runs with the Python of the tests, also in CI."""
+
+    def test_the_stub_keeps_the_library_path_of_the_test_python(self) -> None:
+        with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": "/made-up/python lib"}):
+            host = ClusterHost()
+        self.addCleanup(host.close)
+
+        result = host.run("unseal")
+
+        self.assertIn(
+            "export LD_LIBRARY_PATH='/made-up/python lib'\n",
+            host.host_path(RKE2_KUBECTL).read_text(),
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertNotIn("LD_LIBRARY_PATH", host.environment())
+
+    def test_without_a_library_path_the_stub_sets_none(self) -> None:
+        with mock.patch.dict(os.environ):
+            os.environ.pop("LD_LIBRARY_PATH", None)
+            host = ClusterHost()
+        self.addCleanup(host.close)
+
+        self.assertNotIn("LD_LIBRARY_PATH", host.host_path(RKE2_KUBECTL).read_text())
+        self.assertEqual(0, host.run("unseal").returncode)
 
 
 class TheKeyIsNeverShownTests(ClusterTestCase):

@@ -94,6 +94,329 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-11-04
+
+**This is the first release whose public image has no VMware
+connectors.** The VMware connectors now come as a separate, signed
+connector package. It runs on top of the public image, in an overlay
+image. The public image lists no VMware connector. The decision record
+[evoila's own connectors leave the public repository](https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-own-connectors-leave-the-public-tree.md)
+says which connectors moved and why.
+
+MEHO 0.44.0 also lets a connector package bring its own catalog rows
+(connector kit 1.1). An ingested credential read now waits for a
+person's approval. Only an SA-Operator or a tenant admin may approve
+another person's dangerous change. More secret values stay hidden.
+Request limits and a metrics token are on by default in the chart. A
+new FreeIPA connector reads and changes a FreeIPA server.
+
+The upgrade runs three database migrations (`0133`, `0134`, `0135`).
+They only add columns and an index. The new head is `0135`. Read
+"Breaking changes" and "Steps after the upgrade" first.
+
+### Breaking changes
+- The public image has no VMware connectors any more: vCenter, NSX,
+  SDDC Manager, the VCF parts (installer, Cloud Builder, fleet
+  management, Automation, Operations, Logs), Aria Automation 8, Aria
+  Operations 8, Aria Operations for Logs 8, Cloud Director, HCX, Site
+  Recovery Manager, vSphere Replication, Orchestrator, Identity Broker,
+  Holodeck and Salt. A target of these products finds no connector.
+  Rows that you ingested earlier stay in the database, but no code runs
+  them. The VMware command line verbs stay (#5665). What to do: if you
+  use these connectors, run an overlay image that adds the VMware
+  connector package to this image.
+- The stored operation `installer.sddc.status` is deleted at the first
+  start (#5689). What to do: use `installer.sddc.bringup.status`. It
+  comes with the VMware connector package.
+- `gh.composite.sub_issue_add` takes the child issue as
+  `sub_issue_number`. `sub_issue_id` gets a parameter error. The five
+  GitHub ticket writes run only inside the target's repository and
+  board (#5638). What to do: send `sub_issue_number`. Set `host` of a
+  GitHub target to one repository. A target that runs the board writes
+  also needs `extras.project_id`.
+- Only a MEHO-SA-Operator or a tenant admin may approve another
+  person's `dangerous` or `destructive` change. Everyone else gets 403
+  `approval_group_required` (#5688). What to do: put the people who
+  approve such changes in the SA-Operators group of the tenant, or give
+  them the tenant admin role.
+- `/metrics` and the `features` block of `/ready` answer only a caller
+  that sends the metrics token. The API docs pages (`/openapi.json`,
+  `/docs`, `/redoc`) are off (#5706). What to do: a ServiceMonitor of
+  the chart sends the token by itself. Give any other scraper the token
+  from the Secret `<release>-metrics-auth`. Set `API_DOCS_ENABLED` if
+  you need the API docs pages.
+- The chart turns the per-person request limits on: 600 operations per
+  minute, 16 at the same time, and 60 new MCP sessions per tenant and
+  minute. A request body is capped at 32 MiB, a console upload at
+  256 KiB, and the output of an SSH command at 16 MiB (#5708). What to
+  do: keep the Valkey store of the chart on (`broadcast.enabled`, on by
+  default). Raise `config.dispatchRateLimitPerMinute`,
+  `config.dispatchMaxConcurrentOps` or
+  `config.mcpSessionStartLimitPerMinute` if busy automation gets
+  `rate_limited`. `"0"` turns a limit off.
+- `secret.move`, `secret.handoff.export`, `secret.handoff.import` and
+  the Kubernetes kubeconfig read answer `value_fingerprint` in place of
+  `value_sha256`. The import takes `expect_fingerprint` in place of
+  `expect_sha256` (#5720). What to do: read and send the new names. For
+  the check between two MEHO instances, both must run 0.44.0; with an
+  older instance on the export side, leave `expect_fingerprint` out.
+- MEHO reads a target login from Google Secret Manager (`gsm:`) only
+  when its project is listed in `GSM_PARAM_ALLOWED_PROJECTS`. The list
+  is empty by default (#5702). What to do: list the projects of your
+  `gsm:` target logins, comma-separated.
+- MEHO sends the docs-service token only to the host of `CORPUS_URL`
+  or a host in the new setting `CORPUS_ALLOWED_HOSTS`. A doc collection
+  on another host gets 503 (#5696). What to do: add such hosts to
+  `CORPUS_ALLOWED_HOSTS`.
+- An event source no longer uses a delivery id header. MEHO finds the
+  same event again from the signed data (#5694). What to do: remove the
+  delivery id header setting from your event sources. Prefer the
+  timestamped HMAC mode.
+- `postgres.query` refuses a superuser login and statements that name
+  server admin, file, backup, replication, wait or remote-connection
+  functions. Every Postgres session has a statement timeout of 30
+  seconds (#5695). What to do: use a login that is not a superuser, or
+  set `extras.allow_superuser_query=true` on the target.
+- `targets.register` and the five `topology.*` writes need the
+  `tenant_admin` role from a person on every path (#5736). What to do:
+  give `tenant_admin` to the people who do this work. Agents and
+  service logins still wait for approval.
+- In the console, the Vault pages, the Keycloak read pages and the
+  audit pages need the `operator` role. A `read_only` person gets 403
+  `operator_required` (#5709). What to do: give the `operator` role to
+  the people who use these pages.
+- An ingested read whose path names licences stays off and answers
+  `license_read_off`, also when it was turned on by hand (#5718). What
+  to do: use the connector's hand-written licence read. It shows each
+  key masked.
+- An ingested credential read gets at least the risk level `caution`
+  and waits for a person's approval, from the next ingest of its
+  connector (#5700). What to do: expect approvals for these reads, and
+  ingest your connectors again (see "Steps after the upgrade").
+- On MCP, an operator changes only the knowledge entries it created and
+  cannot set `source_kind` (#5693). What to do: let a tenant admin edit
+  other entries.
+- A standing grant never runs a call whose operation id matches the
+  delete pattern list, also an older grant (#5714). What to do: send
+  such calls for approval.
+
+### Steps after the upgrade
+- Back up the database first. The three migrations only add: `0133`
+  adds two columns to `web_session` for the tenant choice, `0134` adds
+  `replaced_at` to both grant tables and builds their unique indexes
+  again, and `0135` adds an index to `agent_announcement`. While `0135`
+  builds the index, writes to that table wait for a short time. The new
+  head is `0135` (#5439, #5636, #5350).
+- The upgrade ends every approval request that still waits, as every
+  upgrade since 0.39.0 does (`release_changed`). Decide waiting requests
+  first, or ask the requesters to send them again.
+- VMware users: switch to an overlay image that adds the VMware
+  connector package, built on this release (#5665).
+- Request limits: they count in the Valkey store of the chart. Keep
+  `broadcast.enabled` on, or set the three limits to `"0"` (#5708).
+- Metrics: a scraper that is not the chart's ServiceMonitor needs the
+  token from `<release>-metrics-auth` (#5706).
+- The separate database login stays off with your own PostgreSQL (the
+  default). To turn it on, create the role (login, no superuser, connect
+  on the database) and a Secret with its address at key `url`, then set
+  `postgres.runtime.role` and `postgres.runtime.credentialsSecret`.
+  Create the role before the upgrade. With the built-in PostgreSQL, the
+  install makes the role `meho_app` and uses it (#5699).
+- Ingest each connector that loads a vendor API file again, so its
+  credential reads wait for approval and its licence reads stay off
+  (#5700, #5718).
+- Put approvers of `dangerous` and `destructive` changes in the
+  SA-Operators group or give them `tenant_admin` (#5688).
+- Set `GSM_PARAM_ALLOWED_PROJECTS` and `CORPUS_ALLOWED_HOSTS` where you
+  need them (#5702, #5696).
+- A realm made before the approval sign-in flow existed: add the flow
+  with the new operation `keycloak.authflow.ensure_approval_flow`, then
+  approve on the command line. Until then, approve in the web interface
+  (#5643, #5742).
+- Built-in Keycloak installed before this release: the setup Job cannot
+  make the new console admin. Follow "Console admin on an older
+  install" in `docs-site/install/keycloak-realm.md` (#5634).
+- Install the 0.44.0 CLI. It sends PKCE at `meho login`. When every
+  person runs it, a realm may require the PKCE method `S256` on
+  `meho-cli` (#5692).
+- Claude Desktop users install `meho-claude-desktop-0.44.0.mcpb` from
+  the release. Claude Code users run `claude plugin update meho@meho`
+  and restart Claude Code (plugin 0.32.1, #5693).
+
+### Connectors moved out
+- The 22 VMware connector folders and the VMware shared code left the
+  public tree in one plain commit, with their tests, profiles, catalog
+  rows and docs. They ship as a separate, signed connector package for
+  the overlay image. The README, the docs site, the catalog and the
+  generated reference pages describe the public tree (#5665).
+- The old operation `installer.sddc.status` is retired. The start
+  deletes its stored row once (#5689).
+
+### Connector kit
+- Connector kit 1.1. New name `register_connector_catalog(package,
+  resource="catalog.yaml")`: a connector package can bring its own
+  catalog rows. A row names, for a product and version, the vendor API
+  file, the ingest profile and the safety overlay. MEHO checks the rows
+  at start like its own and stops with an error that names the package
+  when a row is wrong or already exists. Then `ingest --catalog` loads
+  the package's API file and applies its overlay (#5697). No name was
+  removed or changed, so a package for kit 1.0 keeps working.
+
+### Security
+- Approvals and roles:
+  - An ingested credential read gets at least the risk level `caution`
+    and waits for a person's approval. Ingested licence reads stay off
+    (#5700, #5718).
+  - Right before an approved run, MEHO checks the object again against
+    the live system. A run whose object changed, or whose card does not
+    build, is refused with `object_changed_since_approval`, and nothing
+    is sent (#5719).
+  - A run refused because its target changed or is gone is recorded
+    like a run refused after an update: one audit row, the stored run
+    input deleted, and `target_gone_since_approval` for a target that no
+    longer resolves (#5710).
+  - `targets.register` and the `topology.*` writes check the caller's
+    role on every path. The approve-and-run path checks the approver
+    against the same role (#5736).
+  - The console Vault, Keycloak and audit pages need the `operator`
+    role (#5709).
+  - A standing grant checks the delete pattern list when it is used,
+    not only when it is made (#5714).
+  - Another person's `dangerous` or `destructive` change needs an
+    SA-Operator or a tenant admin to approve (#5688; details under
+    "Governance").
+- Secret values stay hidden:
+  - A name/value pair whose name is a secret name has its value hidden
+    (#5741).
+  - Pre-shared keys and authentication secret keys are hidden by name
+    (`psk`, `passphrases`, `secret_key`, `shared_key`, `preshared_key`,
+    `passwords`) (#5740).
+  - The preview of an operation that waits for approval hides the
+    values of free-form maps. The flight recorder masks OVF property
+    values (#5734).
+  - The Keycloak connector masks secret fields in the Admin REST answers
+    that the flight recorder stores (#5722).
+  - The redaction `hash` action writes a keyed fingerprint (#5737).
+  - `secret.move`, the handoff and the kubeconfig read answer a keyed
+    fingerprint of the moved value (#5720).
+- Reach and limits:
+  - The webhook endpoint rate-limits a source before it reads the
+    source's secret, and finds repeats from the signed data (#5694).
+  - `postgres.query` refuses admin functions and superuser logins, and
+    every Postgres session has a statement timeout (#5695).
+  - The docs-service token goes only to hosts the deployment named
+    (#5696).
+  - A target's Google Secret Manager login is read only from a listed
+    project (#5702).
+  - Size caps on request bodies, reads and uploads; request limits on by
+    default in the chart (#5708).
+  - A metrics token by default; the API docs pages are off (#5706).
+  - The running backplane can use its own database login, which can add
+    audit rows but cannot change or delete them (#5699).
+  - More agent-facing text is marked as data, not instructions (#5693).
+  - MEHO reads a tenant's mail recipient allowlist on every `mail.send`.
+    A policy change holds for the next send in every backplane process
+    (#5756).
+- Install hardening:
+  - The Linux server install checks the ports of Canal and the ports
+    that RKE2 uses on 127.0.0.1 (#5650).
+  - The MEHO firewall accepts traffic to the machine's own addresses
+    and drops loopback source addresses that come from a network card
+    (#5646).
+  - The appliance build hardens the OS to the CIS Ubuntu 24.04 Level 1
+    server benchmark and scans it (#5671).
+- Login: the device login of `meho login` sends PKCE (#5624 / #5692).
+
+### Governance
+- Approve by group: only a MEHO-SA-Operator or a tenant admin may
+  approve another person's `dangerous` or `destructive` change. An
+  SA-Operator may approve their own change at every risk level. AI tools
+  and other machine logins are refused first. The audit row records
+  which rule allowed the approval (#5688).
+- A withdrawn request is recorded as withdrawn (class
+  `approval_decision`), not as an operation run. The new `withdrawn`
+  result filter finds these rows (#5735).
+- Fresh sign-in to approve: the new operation
+  `keycloak.authflow.ensure_approval_flow` adds the approval sign-in
+  flow to a running realm, with approval (#5643). Tests against a real
+  Keycloak prove that the approval sign-in keeps its own flow next to a
+  company login (#5742).
+- The approver of `k8s.job.create` and `k8s.cronjob.run` sees the Job
+  spec as it will run, with secret values hidden (#5409).
+
+### Added
+- FreeIPA connector: 17 read operations (#5366); host group, member,
+  automember and delete writes (#5698); sudo rule, access rule and
+  password policy writes (#5701). Every write waits until a second
+  person approves.
+- `targets.probe`: an agent detects a target's product and version with
+  one operation (#5659).
+- `keycloak.identity_provider.list` lists the identity providers of a
+  realm, with no config or secret (#5643).
+- The web console asks a person with several tenants to pick one after
+  login, and the sidebar switches the tenant (#5439).
+- The built-in Keycloak gets a console admin in realm `master`, and new
+  guides connect a company login: local users, Active Directory / LDAP,
+  Entra ID and your own Keycloak (#5634).
+- Appliance: it sets itself up at its first boot from the wizard fields
+  (#5137), asks for the fields on the VM console when there are none
+  (#5661), and is hardened to CIS Level 1 (#5671). `meho-host
+  log-server <host>[:<port>]` sends the appliance's own logs to your log
+  server, over TCP or TLS, and opens the firewall only for that server
+  (#5757). The appliance is not published yet.
+
+### Fixed
+- A large API-file ingest keeps the health checks answering: the
+  embedding model uses one thread per CPU the container may use
+  (#5738), and the spec version check runs in a worker thread (#5678).
+- An ended grant can be made again without a revoke (#5636).
+- The preview says when a live grant runs the call at once (#5637).
+- In sandbox mode, a service login with a delete grant can remove a
+  target (#5635).
+- A connector can name the target versions its multi-step operations
+  work on; MEHO checks the version once before such an operation runs
+  (#5715).
+- The login client of a new realm requires no PKCE, so `meho login`
+  works there (#5633).
+- The realm file uses the current passkey field, and the steps for an
+  older realm work (#5666).
+- `meho admin keycloak bootstrap-clients --dry-run` shows each change
+  it would make (#5686).
+- Appliance first start gets past step 3: the `admin` group and the
+  password dictionary (#5750).
+- A browser that opens a console fragment URL directly, for example from
+  a bookmark or a reload, goes to the page that holds it (#5751).
+
+### Changed
+- The claim lookup of the broadcast feed uses its own index (migration
+  `0135`), and `broadcast/history.py` is split (#5350).
+- The Kubernetes operation rows come from their own modules (#5595).
+
+### CI
+- Every push to `main` builds its own image and chart; a newer push no
+  longer cancels the build of an older one (#5748).
+- A pull request runs only the unit tests its change can break; the
+  merge queue and `main` still run them all (#5648).
+- Merge-queue unit shards run on their own reserved runners (#5641).
+- uv waits 7 days before it takes a new package version (#5747).
+- The placeholder root `uv.lock` is removed after the dependency graph
+  reset (#4808 / #5743).
+- Dependabot updates come in groups, on Sunday evening (#5645).
+- No more false "Event loop is closed" notes on unit shards (#5681).
+- The required spec-shelf files are listed in one small file per
+  product (#5669).
+- New checks: old shared lists may only get shorter (#5667); example
+  values must not look real, and named operations must exist (#5670);
+  new migrations list their module names in `__all__` (#5684).
+- Test fixes: the vCenter canary puts the connector registry back
+  (#5664); the Keycloak login test gives every call 60 seconds (#5657).
+
+### Documentation
+- Operator-console conventions for developers and coding agents (#5601).
+- How code is organised (#5592).
+- One person in several tenants (#5687).
+- The Keycloak console session limit is 10 hours (#5640).
+
 ## [0.43.0] - 2026-11-02
 
 **This is the last release with the VMware connectors built into the

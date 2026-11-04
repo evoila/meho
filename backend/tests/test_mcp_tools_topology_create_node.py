@@ -55,6 +55,9 @@ from tests.mcp_test_fixtures import (
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
 )
 
+# MCP calls come with a token; these tests check executed writes (#3980).
+pytestmark = pytest.mark.usefixtures("person_token_writes_run_at_once")
+
 # ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------

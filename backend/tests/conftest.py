@@ -1311,3 +1311,18 @@ def result_reducer_cls() -> type[Any]:
     from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 
     return JsonFluxReducer
+
+
+@pytest.fixture
+def person_token_writes_run_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let a person's token call run a non-safe op at once, as before #3980.
+
+    Every MCP and REST call comes with a token, so since #3980 a person's
+    ``caution`` or ``dangerous`` op waits for approval. A suite that checks
+    the shape of an executed write uses this fixture to skip that wait.
+    ``destructive`` and ``requires_approval`` ops still wait. The token rule
+    itself is pinned in ``test_operations_dispatcher.py``.
+    """
+    from meho_backplane.operations import _validate
+
+    monkeypatch.setattr(_validate, "_person_park_reason", lambda _operator, _descriptor: None)

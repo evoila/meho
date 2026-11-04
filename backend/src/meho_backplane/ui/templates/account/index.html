@@ -23,6 +23,7 @@
 -#}
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
+{% from "_tenant_label.html" import tenant_label %}
 {# The expiry-relative renderer lives with the session fragment so the
    page + fragment share one implementation. #}
 {% from "account/_sessions.html" import expires_in with context %}
@@ -66,8 +67,12 @@
         </div>
         <div>
           <dt class="meho-overline mb-1">Tenant</dt>
-          <dd class="truncate font-mono text-sm" data-field="tenant">
-            {% if session_tenant is not none %}{{ session_tenant.name or session_tenant.slug or session_tenant.id }}{% else %}&mdash;{% endif %}
+          <dd
+            class="truncate font-mono text-sm"
+            data-field="tenant"
+            {% if session_tenant is not none %}title="{{ session_tenant.id }}"{% endif %}
+          >
+            {% if session_tenant is not none %}{{ tenant_label(session_tenant) }}{% else %}&mdash;{% endif %}
           </dd>
         </div>
         <div>

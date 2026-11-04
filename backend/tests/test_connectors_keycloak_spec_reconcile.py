@@ -67,8 +67,8 @@ they stay **unserved** — the day a newer pinned spec starts serving
 one, that test fails and the constant must be promoted into
 :data:`_METHODS_BY_CONSTANT`. All reconciled op_ids (19 at #2988, extended
 to 29 by the #3280 group-lifecycle ops, to 33 by the #3944 deletes, to
-34 by the #3851 user logout, to 37 by the #3886 realm delete, and to 45 by the login flow
-ops) were
+34 by the #3851 user logout, to 37 by the #3886 realm delete, to 45 by the login flow
+ops, and to 48 by the passkey step op) were
 served on the armed run; no path repoints were needed. Protocol:
 docs/decisions/spec-reconcile-guards-standard.md.
 """
@@ -131,6 +131,10 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_AUTH_FLOW_ADD_SUBFLOW_PATH": ("POST",),
     "_AUTH_CONFIG_PATH": ("GET",),
     "_IDENTITY_PROVIDERS_PATH": ("GET",),
+    # The passkey step op: copy the browser flow, configure and move the step.
+    "_AUTH_FLOW_COPY_PATH": ("POST",),
+    "_AUTH_EXECUTION_CONFIG_PATH": ("POST",),
+    "_AUTH_EXECUTION_RAISE_PRIORITY_PATH": ("POST",),
 }
 
 #: Dispatched constants deliberately outside the pinned Admin REST
@@ -214,7 +218,10 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/users/{user-id}/groups",
         "GET:/admin/realms/{realm}/users/{user-id}/role-mappings",
         "POST:/admin/realms",
+        "POST:/admin/realms/{realm}/authentication/executions/{executionId}/config",
+        "POST:/admin/realms/{realm}/authentication/executions/{executionId}/raise-priority",
         "POST:/admin/realms/{realm}/authentication/flows",
+        "POST:/admin/realms/{realm}/authentication/flows/{flowAlias}/copy",
         "POST:/admin/realms/{realm}/authentication/flows/{flowAlias}/executions/execution",
         "POST:/admin/realms/{realm}/authentication/flows/{flowAlias}/executions/flow",
         "POST:/admin/realms/{realm}/client-scopes",

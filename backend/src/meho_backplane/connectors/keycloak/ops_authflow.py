@@ -371,8 +371,18 @@ _WHEN_TO_USE_AUTHFLOW = (
     "difference. It needs approval."
 )
 
-#: Group text for the op's group, merged into the connector's map.
-WHEN_TO_USE_AUTHFLOW_BY_GROUP: dict[str, str] = {"authflow_write": _WHEN_TO_USE_AUTHFLOW}
+_WHEN_TO_USE_AUTHFLOW_GROUP = (
+    "Use to change a realm's login flows with approval. "
+    "``keycloak.authflow.ensure_approval_flow`` gives a realm the approval "
+    "sign-in flow of 'meho-cli-approve'. "
+    "``keycloak.authflow.ensure_passkey_code_skip`` gives a realm made before "
+    "Keycloak 26.4 the step that skips the one-time code after a passkey "
+    "login. Both are safe to run twice and stop without a change on a flow "
+    "with another shape."
+)
+
+#: Group text for the login flow ops' group, merged into the connector's map.
+WHEN_TO_USE_AUTHFLOW_BY_GROUP: dict[str, str] = {"authflow_write": _WHEN_TO_USE_AUTHFLOW_GROUP}
 
 _PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",

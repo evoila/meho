@@ -640,9 +640,14 @@ class BannerTests(FirstStartTestCase):
     def test_the_admin_password_expiry_warning(self) -> None:
         self.assert_succeeds(self.vm.run())
         today = int(time.time()) // 86400
-        boot_menu = (
-            "[WARN] Nobody can log in as admin: its password is locked, or the account is disabled."
-        )
+        locked = "Nobody can log in as admin: its password is locked, or the account is disabled."
+        expired = "Nobody can log in as admin: the account has expired."
+        # What the boot menu's root shell must run for each of the two.
+        advice = {
+            locked: "and set a new password (passwd admin). The steps:",
+            expired: "and remove its expiry date (chage -E -1 admin) and set a new password"
+            " (passwd admin). The steps:",
+        }
         # The shadow fields password, last change, maximum and inactive days and
         # the account's expiry date (the CIS settings: 365 and 45 days), and the
         # banner line, or None for no warning.
@@ -666,10 +671,19 @@ class BannerTests(FirstStartTestCase):
                 "",
                 "[WARN] The password of admin has expired. Log in",
             ),
-            "disabled 45 days after it expired": ("$y$hash", today - 411, 365, 45, "", boot_menu),
-            "locked": ("!$y$hash", today, 365, 45, "", boot_menu),
-            "locked, no password": ("*", today, 365, 45, "", boot_menu),
-            "the account expired": ("$y$hash", today, 365, 45, today, boot_menu),
+            "disabled 45 days after it expired": ("$y$hash", today - 411, 365, 45, "", locked),
+            "locked": ("!$y$hash", today, 365, 45, "", locked),
+            "locked, no password": ("*", today, 365, 45, "", locked),
+            "the account expires tomorrow": ("$y$hash", today, 365, 45, today + 1, None),
+            "the account expired": ("$y$hash", today, 365, 45, today, expired),
+            "the account expired, and its password is locked": (
+                "!$y$hash",
+                today,
+                365,
+                45,
+                today - 1,
+                expired,
+            ),
         }
         for name, (password, last_change, max_days, inactive, expire, line) in cases.items():
             with self.subTest(case=name):
@@ -684,9 +698,12 @@ class BannerTests(FirstStartTestCase):
                     self.assertNotIn("[WARN]", banner)
                 else:
                     self.assertIn(line, banner)
-                if line == boot_menu:
+                if line in advice:
                     self.assertNotIn("Log in", banner)
+                    self.assertIn(advice[line], banner)
                     self.assertIn("appliance-firststart.md", banner)
+                if line == locked:
+                    self.assertNotIn("chage", banner)
 
 
 if __name__ == "__main__":

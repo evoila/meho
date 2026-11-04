@@ -38,17 +38,23 @@ readonly BOOT_MENU_DOC="https://github.com/evoila/meho/blob/main/docs/codebase/a
 # (! or *), the account has not expired, and the password did not expire
 # longer ago than its inactive days.
 admin_can_log_in() {
-    local password="" last_change max_days inactive expire today
-    IFS=: read -r _ password last_change _ max_days _ inactive expire _ < <(getent shadow "$ADMIN_USER") || true
+    local password="" last_change max_days inactive today
+    IFS=: read -r _ password last_change _ max_days _ inactive _ < <(getent shadow "$ADMIN_USER") || true
     [[ -n $password && $password != [*!]* ]] || return 1
+    ! admin_account_expired || return 1
     today=$(($(date +%s) / 86400))
-    if [[ $expire =~ ^[0-9]+$ ]] && ((today >= expire)); then
-        return 1
-    fi
     if [[ $last_change =~ ^[1-9][0-9]*$ && $max_days =~ ^[0-9]+$ && $inactive =~ ^[0-9]+$ ]]; then
         ((today - last_change <= max_days + inactive)) || return 1
     fi
     return 0
+}
+
+# admin_account_expired: whether the admin account has passed its expiry
+# date (chage -E). A new password does not change that date.
+admin_account_expired() {
+    local expire=""
+    IFS=: read -r _ _ _ _ _ _ _ expire _ < <(getent shadow "$ADMIN_USER") || true
+    [[ $expire =~ ^[0-9]+$ ]] && (($(date +%s) / 86400 >= expire))
 }
 
 # days_until_password_expiry: the days until the admin password expires, or
@@ -62,7 +68,7 @@ days_until_password_expiry() {
 }
 
 banner() {
-    local version hostname file days
+    local version hostname file days reason fix
     version=$(sed -n 's/^MEHO_VERSION=//p' "${HOST_ROOT}${VERSION_FILE}" 2>/dev/null || true)
     printf 'MEHO appliance %s\n\n' "$version"
     if [[ -f ${HOST_ROOT}${FAILED_FILE} ]]; then
@@ -91,9 +97,15 @@ banner() {
     done
     days=$(days_until_password_expiry)
     if ! admin_can_log_in; then
-        printf '\n  [WARN] Nobody can log in as %s: its password is locked, or the account is disabled.\n' "$ADMIN_USER"
+        reason="its password is locked, or the account is disabled"
+        fix="set a new password (passwd $ADMIN_USER)"
+        if admin_account_expired; then
+            reason="the account has expired"
+            fix="remove its expiry date (chage -E -1 $ADMIN_USER) and set a new password (passwd $ADMIN_USER)"
+        fi
+        printf '\n  [WARN] Nobody can log in as %s: %s.\n' "$ADMIN_USER" "$reason"
         printf '  To get back in, restart the VM, open the boot menu with the bootloader password from your key store,\n'
-        printf '  and set a new password. The steps: %s,\n' "$BOOT_MENU_DOC"
+        printf '  and %s. The steps: %s,\n' "$fix" "$BOOT_MENU_DOC"
         printf '  section "The boot menu, after a lost password or a locked admin".\n'
     elif [[ -n $days ]] && ((days < WARN_DAYS)); then
         if ((days < 0)); then

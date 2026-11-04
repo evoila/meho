@@ -225,8 +225,11 @@ Writes `/etc/issue` (0644) in one step:
   has not passed its expiry date, and the password did not expire longer
   ago than its inactive days (45 with the CIS settings). Otherwise a
   finished appliance shows a `[WARN]` with the way back in through the boot
-  menu and a link to the section below, in place of the expiry warning. A
-  disabled account also refuses SSH keys ("Your account has expired").
+  menu and a link to the section below, in place of the expiry warning. It
+  names the commands to run there: `passwd admin`, and also
+  `chage -E -1 admin` when the account has passed its expiry date, because
+  a new password does not change that date. A disabled account also refuses
+  SSH keys ("Your account has expired").
 
 ## Ways in without the wizard
 
@@ -300,6 +303,11 @@ the customer's key store (the third one-time file of step 6):
    `passwd -l` and an expired password, so the 45-day disable after the
    expiry no longer applies. `exec /sbin/init` goes on with the normal
    boot.
+
+   If the banner says the account has expired, also run
+   `chage -E -1 admin` before `sync`. It removes the account's expiry date
+   (`chage -E`), which `passwd` does not change. Without it, the account
+   still refuses every login after the new password.
 
 A lock after failed logins (`pam_faillock`) needs no step: the count is
 kept under `/var/run/faillock`, which is empty after every boot. If the
@@ -390,6 +398,9 @@ On macOS run them in Docker, as `deploy/appliance/README.md` says.
   -1, `maxrepeat = 3`, `maxsequence = 3`, `dictcheck`, `enforcing`,
   `enforce_for_root`).
 - Linux-PAM 1.5.3 `modules/pam_unix/passverify.c` (`check_shadow_expiry`).
+- shadow-utils 4.13 (Ubuntu 24.04 `passwd` package): `chage(1)` (`-E -1`
+  removes the account's expiry date; checked in a container that a new
+  password leaves the date in place).
 - OVF environment: DMTF DSP0243 2.1.1 (the `Environment` and
   `PropertySection` elements; password values in clear text); open-vm-tools
   13.0.10 `services/vmtoolsd/cmdLine.c` (`--cmd` exits 1 when no value is set).

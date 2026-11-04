@@ -193,7 +193,18 @@ the login flow only when its account `meho-admin` has the
 Otherwise add the flow through MEHO (see
 [Add the approval flow to a running realm through MEHO](#add-the-approval-flow-to-a-running-realm-through-meho))
 or by hand as above.
-Until the client exists, approve in the web interface.
+
+**Bind the flow before people approve on the command line.** A
+command-line approval must always sign in through `meho approval
+sign-in`, also on a realm that was made before this flow existed. So on
+an upgraded install, add the flow and bind it to `meho-cli-approve`
+first, with the operation above or by hand. Until the client exists and
+uses this flow, approve in the web interface. This matters most on a
+realm whose login goes straight to a company login: the approval flow
+does not use that login, so the person always types the password (and
+the code) at Keycloak. Check the binding with
+`keycloak.client.get` (`authenticationFlowBindingOverrides.browser` must
+name the flow) and the realm's login with `keycloak.identity_provider.list`.
 
 Two backplane settings control the check:
 

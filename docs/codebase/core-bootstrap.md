@@ -464,7 +464,11 @@ when nothing is missing. The Secrets it makes carry only the label
   login is tested there too, in
   `backend/tests/integration/test_core_company_login_keycloak.py`: a second
   realm in the same Keycloak plays the company login, and a browser login
-  through it gives the right token fields.
+  through it gives the right token fields. The same file proves that a
+  realm from before the approval sign-in flow gets the flow from the
+  stage, and that with the company login as the default the approval
+  sign-in of `meho-cli-approve` still asks for the password and the
+  one-time code at Keycloak, and its token passes MEHO's approval check.
 
 ## References
 

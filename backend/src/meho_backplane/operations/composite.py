@@ -115,6 +115,7 @@ __all__ = [
     "CompositeRecursionLimitExceeded",
     "CompositeResumeState",
     "DispatchChild",
+    "approved_run_var",
     "composite_depth_var",
     "composite_dispatch_var",
     "composite_resume_scope_var",
@@ -225,15 +226,13 @@ composite_dispatch_var: ContextVar[tuple[str, dict[str, Any]] | None] = ContextV
 #: later identical sub-op in the same composite does not clear a second time.
 #: ``None`` for every ordinary dispatch.
 #:
-#: Correctness contract (#3351 review B1): the resume re-enters the parent
-#: composite under the **approving reviewer's** identity, and every governed
-#: sub-op shipped today is ``dangerous`` + ``requires_approval=False`` — a
-#: verdict a USER auto-executes (``policy_gate`` default-allow). So the reviewer
-#: runs the approved sub-op **and** every remaining governed sub-op in a single
-#: pass; the composite completes in one resume. This var clears exactly one
-#: sub-op; the correctness of the rest relies on that auto-execute invariant.
-#: A multi-gate re-park — a later governed sub-op that a USER would *not*
-#: auto-execute (``destructive`` or ``requires_approval=True``) — is **not
+#: Correctness contract (#3351 review B1, #3980): this var clears exactly one
+#: sub-op. Every other governed sub-op that is not ``destructive`` and not
+#: marked ``requires_approval`` goes ahead because a person approved the run
+#: (:func:`_covered_by_approved_run`), whoever runs the resume and however
+#: the approval was given (web click or command line). So the composite
+#: completes in one resume. A multi-gate re-park — a later governed sub-op
+#: that is ``destructive`` or ``requires_approval=True`` — is **not
 #: supported** by this re-entry mechanism (there is no completed-leg guard, so
 #: a second park + second resume would re-run earlier legs). It is detected via
 #: :data:`composite_resume_scope_var` and fails closed in
@@ -263,6 +262,17 @@ composite_resume_scope_var: ContextVar[tuple[str, str] | None] = ContextVar(
     "composite_resume_scope",
     default=None,
 )
+
+
+#: ContextVar set to ``True`` while the dispatcher runs an approved call
+#: (``dispatch(..., _approved=True)``) (#3980). A person approved this run,
+#: so :func:`enforce_subop_policy` lets its internal steps go ahead without a
+#: second approval, unless a step is ``destructive`` or marked
+#: ``requires_approval`` (:func:`_covered_by_approved_run`). One approval
+#: still completes one run, now that a call made with a token (and a
+#: ``dangerous`` step in the web interface) waits for approval. ``False`` for
+#: every ordinary dispatch.
+approved_run_var: ContextVar[bool] = ContextVar("approved_run", default=False)
 
 
 class CompositeResumeState(NamedTuple):
@@ -514,10 +524,10 @@ def _subop_resume_cleared(*, op_id: str, params: dict[str, Any]) -> bool:
     direct seam — and the var is consumed (set to ``None``) so the same
     sub-op cannot clear twice in one re-entry. Matching on
     the params-hash (not op_id alone) pins the clear to the exact entity
-    approved. This clears **exactly one** sub-op: the resume then relies on the
-    reviewer auto-executing every other governed sub-op in the same pass (all
-    ``dangerous`` + ``requires_approval=False``). If any other governed sub-op
-    would instead need its own approval, the fail-closed multi-gate guard in
+    approved. This clears **exactly one** sub-op. Every other governed sub-op
+    that is not ``destructive`` and not ``requires_approval`` goes ahead under
+    the approval of the run (:func:`_covered_by_approved_run`, #3980). If any
+    other governed sub-op would instead need its own approval, the fail-closed multi-gate guard in
     :func:`enforce_subop_policy` (keyed off the unconsumed
     :data:`composite_resume_scope_var`) aborts the resume rather than re-park it
     (#3351 review B1) — it does **not** re-park the rest. The exception is a
@@ -532,6 +542,21 @@ def _subop_resume_cleared(*, op_id: str, params: dict[str, Any]) -> bool:
         _log.info("composite_subop_resume_cleared", op_id=op_id)
         return True
     return False
+
+
+def _covered_by_approved_run(*, safety_level: str, requires_approval: bool) -> bool:
+    """True when a person's approval of this run covers this waiting step (#3980).
+
+    The run is approved when the dispatcher runs it with ``_approved=True``
+    (:data:`approved_run_var`) or when it is the re-entry of an approved step
+    (:data:`composite_resume_scope_var`). Such an approval covers every other
+    internal step, except a ``destructive`` step and a step marked
+    ``requires_approval``: those keep their own approval, or end with
+    ``composite_resume_multi_gate_unsupported`` during a resume.
+    """
+    if safety_level == "destructive" or requires_approval:
+        return False
+    return approved_run_var.get() or composite_resume_scope_var.get() is not None
 
 
 def _resume_parent_for_current_composite(
@@ -753,6 +778,13 @@ async def enforce_subop_policy(
     )
     if verdict is PermissionVerdict.AUTO_EXECUTE:
         return None
+    # #3980: a person approved this run, so a step that would only wait goes
+    # ahead. A ``deny`` stays a deny.
+    if verdict is PermissionVerdict.NEEDS_APPROVAL and _covered_by_approved_run(
+        safety_level=safety_level, requires_approval=requires_approval
+    ):
+        _log.info("composite_subop_covered_by_approved_run", op_id=op_id)
+        return None
 
     # #4646: the rows this gate writes read the verdict off
     # ``policy_decision_var`` (the ``approval.request`` row of a parked step,
@@ -771,9 +803,9 @@ async def enforce_subop_policy(
             # would create a second approval whose own resume re-enters the composite
             # from the top and re-runs every earlier governed leg (this mechanism
             # clears one sub-op and has no completed-leg guard), double-executing
-            # writes. No shipped composite reaches here — every governed sub-op is
-            # ``dangerous`` + ``requires_approval=False``, which the USER reviewer
-            # auto-executes in the single resume pass. Refuse instead of parking.
+            # writes. Only a ``destructive`` or ``requires_approval`` step reaches
+            # here: every other step went ahead above under the approval of the
+            # run (#3980). Refuse instead of parking.
             #
             # #4217 relaxes this guard for an ``after_main_effect`` step: it saved
             # the state its resume continues from (checked above), so its own

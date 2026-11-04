@@ -58,6 +58,7 @@ _READ_METHODS: Final[frozenset[str]] = frozenset({"GET", "HEAD"})
 _log = structlog.get_logger(__name__)
 
 __all__ = [
+    "TOKEN_CALL_WAIT",
     "InvalidOpSchemaError",
     "ParamsCheck",
     "compute_audit_digest_hash",
@@ -72,6 +73,7 @@ __all__ = [
     "policy_gate",
     "register_params_check",
     "validate_params",
+    "waits_only_for_token_call",
 ]
 
 #: A check of one op's params that its JSON schema cannot express. It gets
@@ -92,6 +94,12 @@ _DIGEST_HASH_PREFIX: Final[bytes] = b"meho-audit-digest-v1\x00"
 #: Prefix for :func:`compute_value_fingerprint`, so a value's fingerprint never
 #: equals a params hash or a digest hash of the same bytes.
 _VALUE_FINGERPRINT_PREFIX: Final[bytes] = b"meho-secret-value-v1\x00"
+
+#: The value of ``proposed_effect["waits_because"]`` on a request that waits
+#: only because a person sent a ``caution`` call with a token (#3980). The
+#: same person may approve such a request with a click in the web interface
+#: (:func:`~meho_backplane.operations.approval_queue._check_self_approval`).
+TOKEN_CALL_WAIT: Final[str] = "token_call"
 
 
 class InvalidOpSchemaError(Exception):
@@ -577,8 +585,57 @@ async def _service_grant_verdict(
     return None, gate_reason
 
 
+def waits_only_for_token_call(operator: Operator, descriptor: EndpointDescriptor) -> bool:
+    """True when a person's call waits only because it came with a token (#3980).
+
+    That is a ``caution`` operation not marked ``requires_approval``, sent by
+    a person (not an agent, not a service) outside the web interface, and not
+    as part of a hosted agent run. In the web interface the same call would
+    run at once. The park stamps :data:`TOKEN_CALL_WAIT` on such a request.
+    """
+    return (
+        is_human_principal(operator)
+        and not operator.web_session
+        and resolve_actor_sub() is None
+        and descriptor.safety_level == "caution"
+        and not descriptor.requires_approval
+    )
+
+
+def _person_park_reason(operator: Operator, descriptor: EndpointDescriptor) -> str | None:
+    """Why a person's call waits for approval, by how it arrived (#3980).
+
+    * In the web interface (:attr:`Operator.web_session`): ``safe`` and
+      ``caution`` run at once; every other level waits for an approval click.
+    * With a token (MCP, the command line, REST, also a person's own token,
+      and every in-process caller without a web session): only ``safe`` runs
+      at once. MEHO does not try to tell who is behind a token, because an AI
+      tool can use a person's login.
+
+    An unknown level waits on both paths (fail closed).
+    """
+    level = descriptor.safety_level
+    if level == "safe":
+        return None
+    if operator.web_session and is_human_principal(operator):
+        if level == "caution":
+            return None
+        return (
+            f"safety_level={level}; in the web interface only safe and caution "
+            "operations run at once, so this waits for an approval click (#3980)"
+        )
+    return (
+        f"safety_level={level}; a call made with a token runs only safe operations "
+        "at once, so this waits for an approval click (#3980)"
+    )
+
+
 def _non_agent_park_reason(
-    descriptor: EndpointDescriptor, *, is_service: bool, decide_only: bool = False
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    *,
+    is_service: bool,
+    decide_only: bool = False,
 ) -> str | None:
     """Why a non-agent call parks, or ``None`` when it runs at once.
 
@@ -592,7 +649,9 @@ def _non_agent_park_reason(
       the destructive tier (decision ``governed-delete-operations.md``
       requirement 1).
     * ``requires_approval`` (G11.7-T1): the approval queue.
-    * Service principals only: :func:`_service_safety_gate_reason` (#3152).
+    * Service principals: :func:`_service_safety_gate_reason` (#3152). They
+      keep their standing-grant rule and are not under the token rule.
+    * Everyone else: :func:`_person_park_reason` (#3980).
     """
     if descriptor.safety_level == "destructive":
         reason = (
@@ -607,7 +666,7 @@ def _non_agent_park_reason(
         return "requires_approval is True; routed to the approval queue (G11.7-T1)"
     if is_service:
         return _service_safety_gate_reason(descriptor)
-    return None
+    return _person_park_reason(operator, descriptor)
 
 
 async def _service_read_scope_denial(*, operator: Operator, target: Any) -> str | None:
@@ -663,9 +722,7 @@ async def _non_agent_verdict(
 ) -> tuple[PermissionVerdict, str | None]:
     """Resolve the verdict for a human / service (non-agent) principal.
 
-    Preserves the v0.2 default-allow contract for a human ``USER`` operator
-    — an ordinary op auto-executes and a ``requires_approval`` op routes to
-    the approval queue (G11.7-T1 #1401); they are their own approver.
+    For a person it depends on how the call arrived (:func:`_person_park_reason`).
 
     For a **service** principal (client-credentials, ``principal_kind =
     service``) the gate additionally consults ``safety_level`` (#3152) so a
@@ -691,7 +748,9 @@ async def _non_agent_verdict(
     role_denial = _person_role_floor_denial(operator, descriptor, target_id_str)
     if role_denial is not None:
         return PermissionVerdict.DENY, role_denial
-    gate_reason = _non_agent_park_reason(descriptor, is_service=is_service, decide_only=decide_only)
+    gate_reason = _non_agent_park_reason(
+        operator, descriptor, is_service=is_service, decide_only=decide_only
+    )
 
     if gate_reason is None and is_service:
         denial = await _service_read_scope_denial(operator=operator, target=target)
@@ -776,9 +835,10 @@ async def policy_gate(
       :class:`~meho_backplane.db.models.ApprovalRequest` row and return an
       ``awaiting_approval`` result, via
       :func:`~meho_backplane.operations.approval_queue.create_pending_request`
-      (G11.2-T4, #817). Reached by both agent principals (verdict floor)
-      and, since G11.7-T1 (#1401), human/service principals on a
-      ``requires_approval`` op.
+      (G11.2-T4, #817). Reached by agent principals, by people and service
+      principals on a ``requires_approval`` or ``destructive`` op, and by a
+      person on any op that is not ``safe`` (only ``caution`` runs at once,
+      and only in the web interface, #3980).
     * ``deny`` — write an audit row in ``denied`` status, return
       :func:`~meho_backplane.operations._errors.result_denied` with the
       *reason* string so the agent can reason about the refusal.
@@ -793,10 +853,11 @@ async def policy_gate(
 
     The per-(principal, op, target) agent-permission model gates **agent
     principals** (``principal_kind == agent``) through
-    :func:`~meho_backplane.auth.permissions.resolve_verdict`. Human
-    operators keep the v0.2 default-allow contract for ordinary ops, but a
-    ``requires_approval`` op now routes them to the **approval queue**
-    (``needs-approval``) rather than hard-denying.
+    :func:`~meho_backplane.auth.permissions.resolve_verdict`: only ``safe``
+    runs at once, every other level waits for a person's approval.
+
+    **People** (#3980): only the web interface (``Operator.web_session``)
+    runs ``caution`` at once; a token call runs only ``safe`` at once.
 
     **Direct hosted-agent runs** (#4237): when an actor is bound, the call
     gets the stricter of the caller's and the hosted agent's verdict
@@ -814,8 +875,7 @@ async def policy_gate(
 
     G11.7-T1 (#1401) routes ``USER`` operators to ``needs-approval`` on a
     ``requires_approval`` op (reusing the queue/approve/resume substrate)
-    rather than hard-denying — so no existing human-runnable op regresses.
-    The agent path additionally folds ``requires_approval`` into the
+    rather than hard-denying. The agent path additionally folds ``requires_approval`` into the
     verdict as a ``needs-approval`` floor, so an op the connector author
     marked as requiring approval is never auto-executed by an agent
     regardless of its ``safety_level``.

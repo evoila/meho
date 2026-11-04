@@ -33,9 +33,10 @@ phases the parent Initiative names:
    :func:`~meho_backplane.operations._validate.policy_gate`). **Agent**
    principals resolve a three-state
    :class:`~meho_backplane.db.models.PermissionVerdict` via the
-   per-(principal, op, target) permission model; **human / service**
-   principals keep the v0.2 contract (default-allow except
-   ``requires_approval=True`` -> ``deny``). Branches:
+   per-(principal, op, target) permission model. A **person** follows the
+   rule for how the call arrived (#3980): in the web interface ``safe``
+   and ``caution`` run at once; with a token only ``safe`` does. A
+   **service** principal keeps its standing-grant rule. Branches:
    ``auto-execute`` proceeds; ``needs-approval`` ->
    :func:`~meho_backplane.operations.approval_queue.create_pending_request`
    writes a durable :class:`~meho_backplane.db.models.ApprovalRequest`
@@ -376,6 +377,7 @@ from meho_backplane.operations._secret_values import (
     split_reveal_secret,
 )
 from meho_backplane.operations._validate import (
+    TOKEN_CALL_WAIT,
     InvalidOpSchemaError,
     compute_audit_params_hash,
     compute_params_hash,
@@ -383,6 +385,7 @@ from meho_backplane.operations._validate import (
     params_check_errors,
     policy_gate,
     validate_params,
+    waits_only_for_token_call,
 )
 from meho_backplane.operations._vendor_text import (
     redact_error_payload,
@@ -393,6 +396,7 @@ from meho_backplane.operations.composite import (
     COMPOSITE_DEPTH_TOP_LEVEL,
     CompositeRecursionLimitExceeded,
     DispatchChild,
+    approved_run_var,
     composite_depth_var,
     get_dispatch_child,
 )
@@ -2992,6 +2996,11 @@ async def _build_proposed_effect(
         # ``op_class`` / ``preview`` / fail-soft-marker envelope built by
         # :func:`build_proposed_effect` itself unchanged.
         base["safety_level"] = descriptor.safety_level
+        # #3980: a person's ``caution`` call that waits only because it came
+        # with a token says so on the request. The same person may then
+        # approve it with a click in the web interface.
+        if waits_only_for_token_call(operator, descriptor):
+            base["waits_because"] = TOKEN_CALL_WAIT
         # #3197: promote a destructive op's blast-radius block (object
         # identity, enumerated child objects, irreversibility class) from the
         # builder's ``preview`` sub-dict to the top level of the envelope, so
@@ -3669,6 +3678,10 @@ async def dispatch(
     # as ``policy_decision_var`` so a composite parent's value is restored
     # after a child dispatch rebinds it.
     _reveal_token = reveal_secret_var.set(reveal_secret if (secret_read or reveal_secret) else None)
+    # #3980: a person approved this run, so the internal steps of a
+    # multi-step operation go ahead under that approval
+    # (``composite.enforce_subop_policy``). A child dispatch inherits it.
+    _approved_run_token = approved_run_var.set(True) if _approved else None
     try:
         if reveal_secret and _agent_acts(operator):
             return await _refuse_agent_reveal(
@@ -3911,6 +3924,8 @@ async def dispatch(
     finally:
         policy_decision_var.reset(_verdict_token)
         reveal_secret_var.reset(_reveal_token)
+        if _approved_run_token is not None:
+            approved_run_var.reset(_approved_run_token)
         # #3500: release the concurrency slot (no-op when none was taken --
         # the disabled / non-top-level / approved paths). Best-effort: a
         # release hiccup must not turn a decided result into an exception,

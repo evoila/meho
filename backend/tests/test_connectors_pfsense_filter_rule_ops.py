@@ -1206,10 +1206,17 @@ async def test_delete_full_governed_flow() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("op_id", "params"),
-    [(_ADD_OP, _FENCE_PARAMS), (_DELETE_OP, {"ridentifier": _RID})],
+    ("op_id", "params", "expected_status", "expected_pending"),
+    [
+        (_ADD_OP, _FENCE_PARAMS, "awaiting_approval", 1),
+        # A destructive request needs the preview hash before it can wait.
+        (_DELETE_OP, {"ridentifier": _RID}, "denied", 0),
+    ],
 )
-async def test_agent_principal_cannot_run_either_op(op_id: str, params: dict[str, Any]) -> None:
+async def test_agent_principal_cannot_run_either_op(
+    op_id: str, params: dict[str, Any], expected_status: str, expected_pending: int
+) -> None:
+    """An agent never runs either op; its request waits for a person (#3980)."""
     recorder = _RecordingPfSense(config_before=_AFTER_ADD)
     await _bootstrap(recorder)
     result = await dispatch(
@@ -1229,6 +1236,6 @@ async def test_agent_principal_cannot_run_either_op(op_id: str, params: dict[str
         ),
         params=dict(params),
     )
-    assert result.status == "denied", result
+    assert result.status == expected_status, result
     assert not recorder.playback_ran
-    assert await _pending_count() == 0
+    assert await _pending_count() == expected_pending

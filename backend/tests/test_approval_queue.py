@@ -1564,6 +1564,122 @@ async def test_self_approval_still_honours_break_glass_for_low_tiers(
     assert row.reviewed_by == requester.sub
 
 
+async def _park_own_caution(
+    session: AsyncSession, requester: Operator, *, effect: dict[str, Any]
+) -> tuple[uuid.UUID, dict[str, Any]]:
+    params = {"name": "test"}
+    pending = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.put",
+        target=None,
+        params=params,
+        params_hash=compute_params_hash(params),
+        proposed_effect={"op_id": "vault.kv.put", "safety_level": "caution", **effect},
+    )
+    await session.commit()
+    return pending.id, params
+
+
+@pytest.mark.asyncio
+async def test_self_approval_of_token_caution_with_web_click_is_allowed(
+    session: AsyncSession,
+) -> None:
+    """#3980: a person approves their own token-waiting ``caution`` change in the web interface.
+
+    The change waited only because it came with a token
+    (``waits_because="token_call"``). The same person, in the web interface
+    (``web_session=True``), may approve it. The decision records the rule.
+    """
+    requester = _make_operator(sub="solo-operator", role=TenantRole.OPERATOR)
+    request_id, params = await _park_own_caution(
+        session, requester, effect={"waits_because": "token_call"}
+    )
+    web_click = requester.model_copy(update={"web_session": True})
+    async with get_sessionmaker()() as s2:
+        row = await approve_request(s2, request_id, operator=web_click, params=params)
+        await s2.commit()
+    assert row.status == ApprovalRequestStatus.APPROVED.value
+    assert row.reviewed_by == requester.sub
+    async with get_sessionmaker()() as s3:
+        decision = (
+            (await s3.execute(select(AuditLog).where(AuditLog.path == "approval.decision")))
+            .scalars()
+            .one()
+        )
+    assert decision.payload["approval_rule"] == "token_call_self_approval"
+
+
+@pytest.mark.asyncio
+async def test_self_approval_of_token_caution_on_cli_or_rest_is_refused(
+    session: AsyncSession,
+) -> None:
+    """#3980: the same own approval through the command line or REST is refused.
+
+    The reviewer carries a fresh approval sign-in but no web session. The
+    message points to the web interface.
+    """
+    requester = _make_operator(sub="solo-operator", role=TenantRole.OPERATOR)
+    request_id, params = await _park_own_caution(
+        session, requester, effect={"waits_because": "token_call"}
+    )
+    async with get_sessionmaker()() as s2:
+        with pytest.raises(SelfApprovalForbiddenError) as excinfo:
+            await approve_request(s2, request_id, operator=requester, params=params)
+    assert "web interface" in excinfo.value.reason_text
+    async with get_sessionmaker()() as s3:
+        row = await s3.get(ApprovalRequest, request_id)
+        assert row is not None
+        assert row.status == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+async def test_self_approval_of_requires_approval_caution_keeps_group_rules(
+    session: AsyncSession,
+) -> None:
+    """#3980: a ``caution`` change without the token reason keeps the #3328 rules.
+
+    A change marked ``requires_approval`` waits on every path, so it carries
+    no token reason. A web click by the same person (not a MEHO-SA-Operator)
+    is refused.
+    """
+    requester = _make_operator(sub="solo-operator", role=TenantRole.OPERATOR)
+    request_id, params = await _park_own_caution(session, requester, effect={})
+    web_click = requester.model_copy(update={"web_session": True})
+    async with get_sessionmaker()() as s2:
+        with pytest.raises(SelfApprovalForbiddenError):
+            await approve_request(s2, request_id, operator=web_click, params=params)
+
+
+@pytest.mark.asyncio
+async def test_token_reason_on_a_dangerous_request_does_not_allow_self_approval(
+    session: AsyncSession,
+) -> None:
+    """The token rule covers only ``caution``; a ``dangerous`` request keeps the group rules."""
+    requester = _make_operator(sub="solo-operator", role=TenantRole.OPERATOR)
+    params = {"name": "test"}
+    pending = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.delete",
+        target=None,
+        params=params,
+        params_hash=compute_params_hash(params),
+        proposed_effect={
+            "op_id": "vault.kv.delete",
+            "safety_level": "dangerous",
+            "waits_because": "token_call",
+        },
+    )
+    await session.commit()
+    web_click = requester.model_copy(update={"web_session": True})
+    async with get_sessionmaker()() as s2:
+        with pytest.raises(SelfApprovalForbiddenError):
+            await approve_request(s2, pending.id, operator=web_click, params=params)
+
+
 @pytest.mark.asyncio
 async def test_different_sub_approval_on_dangerous_tier_passes(
     session: AsyncSession,

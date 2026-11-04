@@ -462,6 +462,9 @@ async def test_completed_dispatch_is_uncertain_when_audit_row_cannot_commit(
             op_id=op_id,
             target=_FakeTarget(),
             params={"name": "widget"},
+            # A ``caution`` call sent with a token runs only as an approved
+            # run (#3980).
+            _approved=safety_level == "caution",
         )
 
     _assert_audit_commit_failed(result)

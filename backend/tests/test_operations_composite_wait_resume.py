@@ -20,6 +20,7 @@ the real dispatcher against the migrated SQLite engine. Covered:
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -39,7 +40,10 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations._audit import agent_session_id_var
-from meho_backplane.operations.approval_queue import resume_dispatch_after_approval
+from meho_backplane.operations.approval_queue import (
+    approve_request,
+    resume_dispatch_after_approval,
+)
 from meho_backplane.settings import get_settings
 
 from . import _composite_wait_audit_helpers as h
@@ -236,6 +240,8 @@ async def test_unsaved_operation_row_turns_the_result_into_audit_commit_failed(
     await h.register_child(stub_embedding_service)
     await h.register_composite(session, op_id, handler_name)
     h.fail_operation_row(monkeypatch, op_id, RuntimeError("audit DB unavailable"))
+    if op_id == h.DENY_OP_ID:
+        await h.deny_step_for(who)
 
     result = await h.run(op_id, who)
 
@@ -295,3 +301,71 @@ async def test_cancelled_before_the_operation_row_leaves_loose_rows_and_a_valid_
     assert len(runs) == 1
     assert runs[0].id == second.audit_id
     assert runs[0].parent_audit_id == request.request_audit_id
+
+
+# ---------------------------------------------------------------------------
+# #3980 — one approval completes one run of a multi-step operation
+# ---------------------------------------------------------------------------
+
+
+def _approver(how: str) -> Operator:
+    """A MEHO-SA-Operator who approves with a web click or on the command line."""
+    approver = h.operator(sub="op-approver").model_copy(update={"self_approver": True})
+    if how == "web":
+        return approver.model_copy(update={"web_session": True})
+    # The command line: a token from a fresh approval sign-in (#3979, #5515).
+    return approver.model_copy(
+        update={"auth_time": int(time.time()), "sid": "kc-sid", "azp": "meho-cli-approve"}
+    )
+
+
+@pytest.mark.parametrize("how", ["web", "cli"])
+@pytest.mark.parametrize(
+    ("composite_level", "requester_web"),
+    [("dangerous", False), ("safe", False), ("safe", True)],
+    ids=["whole-run-waits", "first-step-waits-token", "first-step-waits-web"],
+)
+async def test_one_approval_runs_both_dangerous_steps_once(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    how: str,
+    composite_level: str,
+    requester_web: bool,
+) -> None:
+    """Two internal ``dangerous`` steps run in one resume, each exactly once.
+
+    Either the whole run waits (a ``dangerous`` multi-step operation sent with
+    a token) or its first step waits. After one approval, given with a web
+    click or on the command line, the resume runs both steps: the approval of
+    the run covers the second step, so nothing waits again and nothing is
+    refused with ``composite_resume_multi_gate_unsupported``.
+    """
+    await h.register_child(stub_embedding_service)
+    await h.register_composite(
+        session,
+        h.TWO_DANGEROUS_OP_ID,
+        "two_dangerous_steps_composite",
+        safety_level=composite_level,
+    )
+    h.executed_steps.clear()
+    requester = h.operator().model_copy(update={"web_session": requester_web})
+
+    first = await h.run(h.TWO_DANGEROUS_OP_ID, requester)
+    assert first.status == "awaiting_approval", first.error
+    assert h.executed_steps == []
+
+    approver = _approver(how)
+    async with get_sessionmaker()() as s:
+        await approve_request(
+            s, UUID(first.extras["approval_request_id"]), operator=approver, params=None
+        )
+        await s.commit()
+    request = await h.request(UUID(first.extras["approval_request_id"]))
+
+    second = await resume_dispatch_after_approval(operator=approver, request=request, params=None)
+
+    assert second.status == "ok", second.error
+    assert h.executed_steps == [h.STEP_A, h.STEP_B]
+    async with get_sessionmaker()() as s:
+        requests = (await s.execute(select(ApprovalRequest))).scalars().all()
+    assert len(requests) == 1

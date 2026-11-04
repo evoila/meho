@@ -185,8 +185,10 @@ async def _groups(connector_id: str = _CONNECTOR_ID) -> list[str]:
 
 
 async def _call(op_id: str, connector_id: str = _CONNECTOR_ID) -> Any:
+    # A person in the web interface: the ``caution`` op runs at once (#3980).
+    operator = _operator().model_copy(update={"web_session": True})
     return await dispatch(
-        operator=_operator(), connector_id=connector_id, op_id=op_id, target=None, params={}
+        operator=operator, connector_id=connector_id, op_id=op_id, target=None, params={}
     )
 
 

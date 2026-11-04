@@ -2901,6 +2901,16 @@ and off, for minutes. So the model is built with one thread per CPU the
 container may use (`retrieval/cpu_limit.py`, `embedding_thread_count`).
 See `retrieval.md`.
 
+`backend/scripts/ingest_health_benchmark.py` checks this. It runs the
+real ingest pipeline (a dry run, then the store step with the real
+embedding model) in a server process, and probes `/healthz`, `/ready`
+and the job status from a second process with the chart's probe
+timeouts. `--cpu-limit 1` runs the server in a `systemd-run` scope with
+one CPU, like a pod with that limit; `--threads 32` forces the old thread
+count to show the failure. `tests/test_ingest_health_benchmark.py` pins
+the harness; its two slow tests (`MEHO_RUN_SLOW_TESTS=1`) run the whole
+benchmark with the real model, without a limit and under one CPU.
+
 `OpIdCollision` fires from two distinct sites: the up-front within-
 batch set scan (two ops in one call share `op_id`) and the per-row
 cross-call check (this call's `spec_source` differs from the

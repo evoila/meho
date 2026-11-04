@@ -373,13 +373,20 @@ never holds a query or a body, and it never averages across groups.
   default `jsonb_ops` opclass) backs the lookup.
 - **fastembed** — the `EmbeddingService` wraps a `BAAI/bge-small-en-v1.5`
   ONNX model (384-dim). The model gets one thread per CPU the container
-  may use: `retrieval/cpu_limit.py` reads the CPU limit (cgroup v2
-  `cpu.max`, or cgroup v1 `cpu.cfs_quota_us` / `cpu.cfs_period_us`),
-  rounds it down to whole CPUs (at least 1) and passes it as
-  `TextEmbedding(threads=...)`. Without a limit the ONNX runtime keeps
-  its default (one thread per host core). Why: more threads than the
-  limit make the kernel pause the whole process, the event loop too, so
-  health checks time out during a large spec ingest.
+  may use: `retrieval/cpu_limit.py` reads the CPU limit of the process's
+  own cgroup and of every cgroup above it (the path comes from
+  `/proc/self/cgroup`; cgroup v2 `cpu.max`, or cgroup v1
+  `cpu.cfs_quota_us` / `cpu.cfs_period_us`), takes the smallest, rounds
+  it down to whole CPUs (at least 1) and passes it as
+  `TextEmbedding(threads=...)`. In a pod the own cgroup is the root; on
+  a host it is a few levels down, for example a `systemd-run` scope.
+  Without a limit the ONNX runtime keeps its default (one thread per
+  host core). `EmbeddingService(threads=...)` forces a count; only the
+  ingest health benchmark uses it. Why: more threads than the limit make
+  the kernel pause the whole process, the event loop too, so health
+  checks time out during a large spec ingest. The benchmark
+  `backend/scripts/ingest_health_benchmark.py` shows it (see
+  `spec-ingestion.md`).
 - **SQLAlchemy 2.0 async** — `AsyncSession` for both candidate queries
   + the hydration `IN` fetch. Raw `text()` for the two candidate SQL
   statements because `@@` / `<=>` / `@>` have no first-class ORM

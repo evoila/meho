@@ -260,7 +260,8 @@ async def test_requester_cannot_approve_even_with_break_glass(
             await approve_request(session, request_id, operator=requester, params=None)
 
 
-async def test_agent_without_permission_is_refused() -> None:
+async def test_agent_without_permission_waits_for_a_person() -> None:
+    """An agent's request waits for a person's approval (#3980); it does not run."""
     target = await _setup(ADD_OP)
     result = await dispatch(
         operator=make_operator("robot-agent", principal_kind=PrincipalKind.AGENT),
@@ -269,8 +270,8 @@ async def test_agent_without_permission_is_refused() -> None:
         target=target,
         params=membership_params(321),
     )
-    assert result.status == "denied", result
-    assert await _approval_count() == 0
+    assert result.status == "awaiting_approval", result
+    assert await _approval_count() == 1
 
 
 async def test_service_login_waits_for_approval() -> None:

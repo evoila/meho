@@ -978,10 +978,10 @@ def _is_service_account_token(claims: Any, settings: Settings) -> bool:
     test (security review S11), and only then to the ``user`` default. That
     backstop matters: a prefix-marker false negative is safe **only**
     because the shape test catches the client-credentials token it missed —
-    on its own it is *not* safe, because for a mutating ``caution`` /
-    ``dangerous`` op the #3152 gate auto-executes a ``user``-classified
-    principal instead of parking it (only ``requires_approval`` and the
-    ``destructive`` tier park for a ``user``). A false positive, conversely,
+    on its own it is *not* safe, because a ``user``-classified principal
+    in the web interface runs a ``caution`` op at once, where a service
+    principal waits unless a standing grant covers the op (#3152, #3980).
+    A false positive, conversely,
     would silently upgrade an ordinary user into the unattended-dispatch
     surface, so this marker must stay a positive prefix signal only. An
     empty configured prefix disables *this* marker; the shape test still
@@ -1034,7 +1034,7 @@ def _is_client_credentials_token(claims: Any) -> bool:
 
     Fail-closed by construction: it returns ``True`` only on that positive
     shape. An interactive human token always carries a session claim, so it
-    is never upgraded — the human-``user`` default-allow is preserved. A
+    is never upgraded — it stays a ``user``. A
     degenerate token with no client-identity claim stays ``user`` too (the
     absence of session claims alone never upgrades).
     """

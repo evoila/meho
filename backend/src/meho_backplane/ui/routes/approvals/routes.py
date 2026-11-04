@@ -172,6 +172,7 @@ from meho_backplane.operations.approval_queue import (
     pending_chain_positions,
     record_approval_step_event,
     reject_request,
+    request_waits_only_for_token_call,
     resume_dispatch_after_approval,
 )
 from meho_backplane.settings import get_settings
@@ -470,8 +471,14 @@ def _is_self_approval_blocked(operator: Operator, request: ApprovalRequest) -> b
     (``Settings.approval_allow_self_approval``). The button state is UX
     only; the service re-checks on the POST (never trust the disabled
     button), so a forged self-approve still 403s.
+
+    A person's own ``caution`` change that waited only because it came with
+    a token is not blocked here (#3980): the web interface is where they
+    may approve it.
     """
     if operator.sub != request.principal_sub:
+        return False
+    if operator.web_session and request_waits_only_for_token_call(request):
         return False
     return not get_settings().approval_allow_self_approval
 

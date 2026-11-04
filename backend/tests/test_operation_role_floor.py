@@ -286,12 +286,22 @@ async def test_the_preview_says_denied_for_a_person_below_the_floor(
 
 
 async def test_a_tenant_admin_runs_at_once(_registered_ops: None) -> None:
-    result = await _register(_person(TenantRole.TENANT_ADMIN))
+    # In the web interface; with a token the call waits for approval (#3980).
+    admin = _person(TenantRole.TENANT_ADMIN).model_copy(update={"web_session": True})
+    result = await _register(admin)
 
     assert result.status == "ok", result
     (row,) = await _target_rows()
     assert row.name == "new-system"
     assert await _approval_rows() == []
+
+
+async def test_a_tenant_admin_with_a_token_waits_for_approval(_registered_ops: None) -> None:
+    result = await _register(_person(TenantRole.TENANT_ADMIN))
+
+    assert result.status == "awaiting_approval", result
+    assert len(await _approval_rows()) == 1
+    assert await _target_rows() == []
 
 
 async def test_an_agent_still_waits_for_approval(_registered_ops: None) -> None:
@@ -444,7 +454,8 @@ async def test_a_person_below_the_floor_is_denied_on_every_topology_write(
 
 async def test_a_tenant_admin_creates_a_node_at_once(_registered_ops: None) -> None:
     result = await dispatch(
-        operator=_person(TenantRole.TENANT_ADMIN),
+        # In the web interface; with a token the call waits (#3980).
+        operator=_person(TenantRole.TENANT_ADMIN).model_copy(update={"web_session": True}),
         connector_id=TOPOLOGY_GRAPH_CONNECTOR_ID,
         op_id=TOPOLOGY_CREATE_NODE_OP_ID,
         target=None,

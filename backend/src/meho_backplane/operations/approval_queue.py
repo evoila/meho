@@ -125,6 +125,7 @@ from meho_backplane.operations._errors import (
 )
 from meho_backplane.operations._secret_values import split_reveal_secret, with_reveal_secret
 from meho_backplane.operations._validate import (
+    TOKEN_CALL_WAIT,
     params_hash_candidates,
     params_hash_matches,
 )
@@ -203,6 +204,7 @@ __all__ = [
     "refuse_resume_if_target_changed",
     "rehydrate_resume_target",
     "reject_request",
+    "request_waits_only_for_token_call",
     "resume_dispatch_after_approval",
     "withdraw_request",
 ]
@@ -251,12 +253,16 @@ class ApprovalRule(StrEnum):
       approve it.
     * ``reviewer`` — another person's lower-risk change, approved under the
       reviewer rule of :func:`_check_reviewer_role`.
+    * ``token_call_self_approval`` — a person approved, with a click in the
+      web interface, their own ``caution`` change that waited only because
+      it came with a token (#3980).
     """
 
     SA_OPERATOR_SELF_APPROVAL = "sa_operator_self_approval"
     BREAK_GLASS_SELF_APPROVAL = "break_glass_self_approval"
     SA_OPERATOR_OR_ADMIN = "sa_operator_or_admin"
     REVIEWER = "reviewer"
+    TOKEN_CALL_SELF_APPROVAL = "token_call_self_approval"
 
 
 class ApprovalError(Exception):
@@ -438,16 +444,28 @@ class SelfApprovalForbiddenError(ApprovalError):
     """
 
     def __init__(
-        self, request_id: uuid.UUID, *, principal_sub: str, high_risk: bool = False
+        self,
+        request_id: uuid.UUID,
+        *,
+        principal_sub: str,
+        high_risk: bool = False,
+        web_click_allowed: bool = False,
     ) -> None:
         self.request_id = request_id
         self.principal_sub = principal_sub
         self.high_risk = high_risk
-        who_can = (
-            f"Ask {_HIGH_RISK_APPROVERS_TEXT} to approve this dangerous or destructive change."
-            if high_risk
-            else "Ask another operator, an admin or an approver to approve it."
-        )
+        if high_risk:
+            who_can = (
+                f"Ask {_HIGH_RISK_APPROVERS_TEXT} to approve this dangerous or destructive change."
+            )
+        elif web_click_allowed:
+            # #3980: the change waits only because it came with a token.
+            who_can = (
+                "This change waits only because it came with a token, so you may "
+                "approve it yourself with a click in the web interface."
+            )
+        else:
+            who_can = "Ask another operator, an admin or an approver to approve it."
         #: The plain refusal text, without ids, for the web interface.
         self.reason_text = (
             "You cannot approve your own change. Only members of the "
@@ -3364,6 +3382,19 @@ def _request_safety_level(request: ApprovalRequest) -> str | None:
     return level if isinstance(level, str) else None
 
 
+def request_waits_only_for_token_call(request: ApprovalRequest) -> bool:
+    """True when *request* is a ``caution`` change that waits only because it came with a token.
+
+    The park stamps the reason on ``proposed_effect`` (#3980). A request
+    marked ``requires_approval`` never carries it.
+    """
+    effect = request.proposed_effect or {}
+    return (
+        effect.get("waits_because") == TOKEN_CALL_WAIT
+        and _request_safety_level(request) == "caution"
+    )
+
+
 def _check_self_approval(operator: Operator, request: ApprovalRequest) -> ApprovalRule | None:
     """Check a self-approval; return its rule, or ``None`` when it is not one.
 
@@ -3375,12 +3406,17 @@ def _check_self_approval(operator: Operator, request: ApprovalRequest) -> Approv
        approve their own change at every risk level (#3328). On the
        command line and REST the approve routes have already required a
        fresh sign-in (#3979).
-    2. Anyone else may approve their own ``safe`` or ``caution`` change
+    2. A person may approve their own ``caution`` change that waited only
+       because it came with a token (``proposed_effect["waits_because"]``,
+       #3980), but only with a click in the web interface
+       (:attr:`Operator.web_session`). The command line and REST are
+       refused below, unless break-glass covers the change.
+    3. Anyone else may approve their own ``safe`` or ``caution`` change
        only when the deployment enabled the audited single-operator
        break-glass mode (``Settings.approval_allow_self_approval``). The
        switch never covers ``dangerous`` or ``destructive`` changes
        (#3198, #3290).
-    3. Otherwise :class:`SelfApprovalForbiddenError` (403).
+    4. Otherwise :class:`SelfApprovalForbiddenError` (403).
 
     The level is read off the ``proposed_effect`` envelope the dispatcher
     stamped at park time. Settings are imported lazily to keep the queue
@@ -3390,6 +3426,9 @@ def _check_self_approval(operator: Operator, request: ApprovalRequest) -> Approv
         return None
     if operator.may_self_approve:
         return ApprovalRule.SA_OPERATOR_SELF_APPROVAL
+    token_wait = request_waits_only_for_token_call(request)
+    if token_wait and operator.web_session:
+        return ApprovalRule.TOKEN_CALL_SELF_APPROVAL
 
     high_risk = _request_safety_level(request) in _HIGH_RISK_TIERS
 
@@ -3405,7 +3444,9 @@ def _check_self_approval(operator: Operator, request: ApprovalRequest) -> Approv
         )
         return ApprovalRule.BREAK_GLASS_SELF_APPROVAL
 
-    raise SelfApprovalForbiddenError(request.id, principal_sub=operator.sub, high_risk=high_risk)
+    raise SelfApprovalForbiddenError(
+        request.id, principal_sub=operator.sub, high_risk=high_risk, web_click_allowed=token_wait
+    )
 
 
 def _check_approver_group(operator: Operator, request: ApprovalRequest) -> ApprovalRule:

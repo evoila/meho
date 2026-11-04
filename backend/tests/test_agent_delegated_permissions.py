@@ -101,10 +101,12 @@ async def _seed_grant(op_pattern: str, verdict: str, principal_sub: str = _AGENT
 
 
 async def test_without_an_actor_the_person_verdict_is_unchanged() -> None:
-    """No run bound: a person's caution op still runs (default allow)."""
+    """No run bound: a person's caution op still runs in the web interface (#3980)."""
     await _seed_grant("*", "deny")
     verdict, reason = await policy_gate(
-        operator=_person(), descriptor=_descriptor(safety_level="caution"), target=None
+        operator=_person().model_copy(update={"web_session": True}),
+        descriptor=_descriptor(safety_level="caution"),
+        target=None,
     )
     assert verdict is PermissionVerdict.AUTO_EXECUTE
     assert reason is None

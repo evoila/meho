@@ -915,7 +915,8 @@ async def test_preview_names_the_refusal_for_the_admin_account() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_principal_without_grant_is_denied() -> None:
+async def test_agent_principal_without_grant_waits_for_a_person() -> None:
+    """An agent's request waits for a person's approval (#3980); it does not run."""
     recorder = _RecordingPfSense(config_before=_CONFIG_VPN_ON)
     await _bootstrap(recorder)
     await _seed_target()
@@ -929,6 +930,6 @@ async def test_agent_principal_without_grant_is_denied() -> None:
             "params": {"name": "vpn.guest-1"},
         },
     )
-    assert call["status"] == "denied", call
+    assert call["status"] == "awaiting_approval", call
     assert not recorder.playback_ran
-    assert await _pending_count() == 0
+    assert await _pending_count() == 1

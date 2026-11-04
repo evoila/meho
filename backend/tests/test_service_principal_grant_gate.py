@@ -339,8 +339,27 @@ async def test_grant_target_scope_is_exact() -> None:
 
 
 @pytest.mark.asyncio
-async def test_user_principal_caution_mutation_auto_executes() -> None:
-    """A human USER operator is NOT subject to the safety_level tightening."""
+async def test_user_principal_caution_mutation_auto_executes_in_web_interface() -> None:
+    """A person in the web interface runs a ``caution`` op at once (#3980)."""
+    operator = _operator(principal_kind=PrincipalKind.USER, sub="human-op").model_copy(
+        update={"web_session": True}
+    )
+    result = await enforce_subop_policy(
+        operator=operator,
+        connector_id=_CONNECTOR,
+        op_id=_OP,
+        safety_level="caution",
+        requires_approval=False,
+        target=None,
+        params=_PARAMS,
+    )
+    # No standing grant is consulted for a person.
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_user_principal_caution_mutation_with_token_waits() -> None:
+    """A person's ``caution`` call made with a token waits for approval (#3980)."""
     result = await enforce_subop_policy(
         operator=_operator(principal_kind=PrincipalKind.USER, sub="human-op"),
         connector_id=_CONNECTOR,
@@ -350,9 +369,8 @@ async def test_user_principal_caution_mutation_auto_executes() -> None:
         target=None,
         params=_PARAMS,
     )
-    # USER keeps the v0.2 default-allow: a caution op with requires_approval=False
-    # auto-executes (the seam returns None). No standing grant is consulted.
-    assert result is None
+    assert result is not None
+    assert result.status == "awaiting_approval"
 
 
 @pytest.mark.asyncio

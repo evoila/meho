@@ -326,6 +326,8 @@ class _Target:
 
 
 def _operator() -> Operator:
+    # A person in the web interface, so the ``caution`` validate runs at
+    # once without an approval (#3980).
     return Operator(
         sub="op-spec-trace",
         name="Spec Trace Operator",
@@ -333,6 +335,7 @@ def _operator() -> Operator:
         raw_jwt="op.spec.trace.jwt",
         tenant_id=_TENANT_ID,
         tenant_role=TenantRole.OPERATOR,
+        web_session=True,
     )
 
 

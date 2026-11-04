@@ -279,7 +279,7 @@ secret is in neither the stored trace nor the agent copy.
 
 ## Write ops (G3.13-T4, extended by #3280)
 
-Seventeen approval-gated write ops (`requires_approval=True`), all
+Approval-gated write ops (`requires_approval=True`), all
 dispatching via the admin-auth path, all keyed on the object's **UUID**:
 
 | op_id | safety | Admin REST API |
@@ -302,6 +302,7 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.client.delete` | destructive | `DELETE .../clients/{client-uuid}` |
 | `keycloak.user.logout` | caution | `POST .../users/{user-id}/logout` |
 | `keycloak.realm.delete` | destructive | `DELETE /admin/realms/{realm}` |
+| `keycloak.authflow.ensure_passkey_code_skip` | caution | `POST .../authentication/flows/browser/copy`, then `PUT .../realms/{realm}` |
 
 The group-lifecycle writes (#3280) are all `dangerous`: group attributes
 + membership drive the backplane's tenant claims (`tenant_id` /
@@ -649,6 +650,70 @@ Both ops read lists with `get_admin_list_strict`: a body that is not a JSON
 array raises `KeycloakUnexpectedResponseError`, so a failed read never looks
 like an empty list.
 
+### Skip the one-time code after a passkey (#5663)
+
+Keycloak 26.4 and newer puts the step `conditional-credential`
+("Condition - credential") into the browser flow of a **new** realm. Its
+config `credentials = webauthn-passwordless`, `included = false` makes it
+true only when no passkey was used, so a passkey login skips the one-time
+code. An upgrade does not add it to an older realm (Keycloak 26.8.1:
+`DefaultAuthenticationFlows.browserFlow`; `MigrateTo26_4_0` does not touch
+flows). Keycloak refuses a new step in a built-in flow.
+
+`keycloak.authflow.ensure_passkey_code_skip` (`ops_authflow_passkey.py`,
+metadata in `ops_authflow_passkey_schemas.py`) — risk level `caution`,
+approval required, group `authflow_write`, no params. On the target's
+managed realm:
+
+1. Read the realm's `browserFlow` and its steps. Keycloak lists them as one
+   flat list, depth first, with a `level` per row; a sub-flow row carries
+   its alias in `displayName`. The **code sub-flow** is the `CONDITIONAL`
+   sub-flow whose own steps include `conditional-user-configured` and
+   `auth-otp-form`. More than one: stop with `other_steps`.
+2. The code sub-flow has a `conditional-credential` step, `REQUIRED`, whose
+   config (`GET .../authentication/config/{id}`) is exactly
+   `webauthn-passwordless` with `included` not `true`: nothing is written,
+   `changed: false`. This holds for any bound flow.
+3. Stop, with nothing written, when the bound flow is not the built-in
+   `browser` flow (`custom_flow`), when it has no code sub-flow
+   (`no_code_step`), or when its code sub-flow has a credential condition
+   with other settings (`other_steps`).
+4. Copy `browser` as `browser with passkeys`
+   (`POST .../flows/browser/copy`). Keycloak names the copied sub-flows and
+   configs `browser with passkeys <old name>`. A flow with that name from a
+   run that stopped half-way is used instead, when its steps, without the
+   condition, match `browser` (same order, level, name, requirement and
+   settings; each step's config is read with `GET .../config/{id}`; only
+   the ids and the copied aliases may differ). Otherwise stop with
+   `other_steps`, naming the first difference.
+5. In the copy's code sub-flow: add the step
+   (`POST .../flows/{alias}/executions/execution`; it starts `DISABLED`
+   at the end), set it `REQUIRED` (`PUT .../flows/{alias}/executions`),
+   give it its config (`POST .../executions/{id}/config`, alias
+   `browser with passkeys - skip code after passkey`), and raise it
+   (`POST .../executions/{id}/raise-priority`) until it is right after
+   `conditional-user-configured`. A step that is already there is kept
+   when its config matches, and stops the op otherwise. The steps are read
+   again; a wrong read-back is `check_failed` and the realm is not bound.
+6. Bind: read the realm again right before the write (steps 4-5 take
+   several requests; a setting another operator changed meanwhile must not
+   go back to its old value), stop with `realm_changed` when its
+   `browserFlow` is no longer the flow from step 1, put `browserFlow` on
+   top, write the full realm back (`ops_write_merge.merge_representation`),
+   and read it again. A `browserFlow` that does not read back is
+   `check_failed`.
+
+The result is `{realm, previous_browser_flow, browser_flow, changed,
+flow_copied, step_added, binding_changed, unrequested_changes, flow_steps}`.
+`unrequested_changes` names realm fields that changed besides
+`browserFlow` (names only). Errors raise `KeycloakPasskeyFlowError` with a
+stable `code`. A failed write in steps 4-5 leaves the realm on its old
+flow; a new run finishes the copy. The approval card (registered in the
+same module) names the realm, the flow it copies, the new flow, that every
+browser login of the realm will use it, and the way back:
+`keycloak.realm.update` with `{"browserFlow": "browser"}`. The op is pinned
+as a plain `write` in `connectors/keycloak/op_classes.py`.
+
 ### Park-time approval preview (#1857)
 
 Eleven of the write ops register bespoke `proposed_effect` preview builders
@@ -670,6 +735,7 @@ use:
 | `keycloak.group.delete` | `{blast_radius}` — name, path, member count (up to 1000), sub-group count; direct sub-groups as children |
 | `keycloak.client.delete` | `{blast_radius}` — client id, enabled or not, public or confidential; its service-account user as a child; never the secret |
 | `keycloak.realm.delete` | `{blast_radius}` — realm, enabled or not, user / client / group counts; never the realm body |
+| `keycloak.authflow.ensure_passkey_code_skip` | `{resource, realm, copies_flow, new_flow, affects, way_back}` (registered in `ops_authflow_passkey.py`) |
 
 The group builders surface `attribute_keys` (which attributes change,
 e.g. `tenant_id` / `tenant_role`) and echo the attribute map scrubbed —

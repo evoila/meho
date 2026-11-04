@@ -2894,12 +2894,30 @@ package, and only for that package:
    exclude-newer-package = { <package> = false }
    ```
 
-2. Run `cd backend && uv lock`. uv then takes the new version of that
-   package, and `uv sync --locked` passes again. The lock file records
-   only the new version, not the exception: with the line and no newer
-   version to take, `uv lock` changes nothing.
-3. Remove the line once the version is older than 7 days, and run
-   `uv lock` again.
+   When the fixed version needs a version of another package that is
+   also younger than 7 days, name that package in the same line. For
+   example, a boto3 release needs the botocore release of the same day:
+   `{ boto3 = false, botocore = false }`.
+2. Run `cd backend && uv lock --upgrade-package <package>`. A plain
+   `uv lock` is not enough: it keeps the version that is in the lock
+   file. The flag tells uv to take the newest version of that package.
+   uv writes the exception into `uv.lock` under
+   `[options.exclude-newer-package]`.
+3. Check the version in the lock file. It must be the version with the
+   fix:
+
+   ```bash
+   grep -A1 '^name = "<package>"$' backend/uv.lock
+   ```
+
+   An older version means a package it needs is still inside the wait.
+   Add that package to the line and run step 2 again.
+4. Run `uv sync --locked --all-groups`, then the tests of the code that
+   uses the package.
+5. Remove the line only once the fixed version is 7 days old, and run
+   `uv lock` again. uv then keeps the version and drops the exception
+   from `uv.lock`. Removed earlier, `uv lock` goes back to the newest
+   version that is old enough, and the fix is gone.
 
 ## Dependencies
 

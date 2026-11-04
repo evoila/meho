@@ -1583,7 +1583,7 @@
           "tenants"
         ],
         "summary": "Update Mail Recipient Policy",
-        "description": "Set or clear the caller's per-tenant mail-recipient allowlist (#3499).\n\nTenant-scoped to ``operator.tenant_id`` (no cross-tenant write is\nexpressible -- no tenant id is accepted in the path or body).\n``tenant_admin`` only. Applies the field only when present in the body; an\napplied change is folded into this request's ``audit_log`` row (field / old\n/ new, ``None`` -> ``inherit`` sentinel) and evicts the resolver's\nper-tenant cache so the new value governs the next dispatched ``mail.send``\nwithout a restart.",
+        "description": "Set or clear the caller's per-tenant mail-recipient allowlist (#3499).\n\nTenant-scoped to ``operator.tenant_id`` (no cross-tenant write is\nexpressible -- no tenant id is accepted in the path or body).\n``tenant_admin`` only. Applies the field only when present in the body; an\napplied change is folded into this request's ``audit_log`` row (field / old\n/ new, ``None`` -> ``inherit`` sentinel). The resolver reads the committed\ncolumn on every send, so the new value governs the next dispatched\n``mail.send`` in every process as soon as this request commits.",
         "operationId": "update_mail_recipient_policy_api_v1_tenants_mail_recipient_policy_patch",
         "parameters": [
           {

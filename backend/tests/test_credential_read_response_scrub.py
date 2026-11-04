@@ -32,6 +32,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import httpx
 import pytest
 from sqlalchemy import select
 
@@ -332,14 +333,31 @@ async def _module_pair_fields_handler(
     }
 
 
-async def _register_pair_fields_read(stub_embedding_service: AsyncMock) -> None:
+async def _module_pair_fields_http_error_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """A read whose vendor answers with an error body that lists fields as pairs."""
+    request = httpx.Request("GET", "https://vendor.test/api/credentials")
+    response = httpx.Response(
+        500,
+        json=[{"name": "USER", "value": "root"}, {"name": "PASSWORD", "value": _PASSWORD_SECRET}],
+        request=request,
+    )
+    raise httpx.HTTPStatusError("500 Server Error", request=request, response=response)
+
+
+async def _register_pair_fields_read(
+    stub_embedding_service: AsyncMock, handler: Any = _module_pair_fields_handler
+) -> None:
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
     await register_typed_operation(
         product="vault",
         version="1.x",
         impl_id="vault",
         op_id="vault.kv.versions",
-        handler=_module_pair_fields_handler,
+        handler=handler,
         summary="List credential fields.",
         description="Name/value pairs.",
         parameter_schema={"type": "object"},
@@ -528,3 +546,38 @@ async def test_read_op_hides_the_value_of_a_secret_named_pair_and_fingerprints_i
     [stored] = row.raw_payload["credentialInstances"]
     assert stored["fields"][0] == {"name": "USER", "value": "root"}
     assert stored["fields"][1]["value"].startswith(_FINGERPRINT)
+
+
+async def test_read_op_http_error_body_hides_the_value_of_a_secret_named_pair(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The vendor's error text keeps the USER pair and hides the PASSWORD pair value.
+
+    The text reaches the caller in the error envelope and the audit row in
+    the stored error; neither holds the value.
+    """
+    await _register_pair_fields_read(stub_embedding_service, _module_pair_fields_http_error_handler)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.versions",
+        target=None,
+        params={},
+    )
+    assert result.status == "error"
+    assert result.extras["http_status"] == 500
+    assert json.loads(result.extras["upstream_message"]) == [
+        {"name": "USER", "value": "root"},
+        {"name": "PASSWORD", "value": _REDACTED},
+    ]
+    assert _PASSWORD_SECRET not in result.model_dump_json()
+
+    row = await _audit_row("vault.kv.versions")
+    stored = json.dumps(
+        {column.name: getattr(row, column.name) for column in AuditLog.__table__.columns},
+        default=str,
+    )
+    assert _PASSWORD_SECRET not in stored
+    assert row.payload["result_status"] == "error"
+    assert _REDACTED in json.dumps(row.payload["error"])

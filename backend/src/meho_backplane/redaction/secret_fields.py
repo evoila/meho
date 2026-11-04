@@ -27,6 +27,15 @@ broadcast scrub and the approval echo already use.
   replaced, as the walk does for data. :func:`iter_quoted_secret_fields`
   lists those pairs; the capture check (``tests/test_capture_secret_scan.py``)
   uses it too.
+* Both know the name/value pair shape too, ``{"name": "PASSWORD", "value":
+  "..."}``, in which a vendor lists the fields of an object. The ``value``
+  of a pair whose ``name`` is a secret name is hidden like the value of a
+  secret-named key. For data the rule is
+  :func:`~meho_backplane.broadcast.events.is_secret_name_value_pair`. In
+  text the scanner finds the ``name`` member, reads its string, and when
+  that is a secret name looks for the ``value`` member of the same object:
+  the two may come in either order, with other members between them
+  (:func:`_pair_value_field`).
 
 The value is read by a small scanner, not by a pattern: it walks the text
 from the opening quote to the closing quote and steps over each escape, so
@@ -80,6 +89,23 @@ _PAIR_START: Final[re.Pattern[str]] = re.compile(
 )
 
 _BRACKETS: Final = "{["
+
+#: What can start a member key or a string: a quote, or the ``\\`` of
+#: escaped JSON's ``\\"``.
+_KEY_STARTS: Final = "\"'\\"
+
+
+def _member_pattern(key: str, *, escaped: bool) -> re.Pattern[str]:
+    """The start of the member *key* of a pair object, up to what opens its value."""
+    if escaped:
+        return re.compile(r"\\\"" + key + r"\\\"\s*:\s*(?P<open>\\\"|[{\[])")
+    return re.compile(r"(?P<key_quote>[\"'])" + key + r"(?P=key_quote)\s*:\s*(?P<open>[\"'{\[])")
+
+
+_NAME_KEY: Final = _member_pattern("name", escaped=False)
+_VALUE_KEY: Final = _member_pattern("value", escaped=False)
+_ESCAPED_NAME_KEY: Final = _member_pattern("name", escaped=True)
+_ESCAPED_VALUE_KEY: Final = _member_pattern("value", escaped=True)
 
 #: A value some earlier step already masked: ``[REDACTED:...]``, the trace
 #: markers ``[MEHO-REDACTED:...]`` / ``[MEHO-OMITTED:...]`` and ``[redacted]``.
@@ -167,33 +193,42 @@ def _escaped_value_end(text: str, start: int) -> int:
     return -1
 
 
-def _bracket_value_end(text: str, start: int, *, escaped: bool) -> int:
-    """The index after the bracket that closes the object or list at *start*; -1 when none.
+def _after_string_or_escape(text: str, index: int, *, escaped: bool) -> int:
+    """The index after the quoted string or ``\\x`` escape at *index*; *index* when neither.
 
-    A quoted string inside is stepped over whole, so a bracket in a string
-    does not count. In escaped JSON the strings are delimited by ``\\"``.
+    A string is stepped over whole, so a bracket or a key inside it does not
+    count. In escaped JSON the strings are delimited by ``\\"``; a string
+    with no closing quote runs to the end of *text*.
     """
+    char = text[index]
+    if char == "\\":
+        if escaped and text[index + 1 : index + 2] == '"':
+            end = _escaped_value_end(text, index + 2)
+            return len(text) if end == -1 else end + 2
+        return index + 2
+    if not escaped and char in ('"', "'"):
+        end = _plain_value_end(text, index + 1, char)
+        return len(text) if end == -1 else end + 1
+    return index
+
+
+def _bracket_value_end(text: str, start: int, *, escaped: bool) -> int:
+    """The index after the bracket that closes the object or list at *start*; -1 when none."""
     depth = 0
     index = start
     while index < len(text):
+        after = _after_string_or_escape(text, index, escaped=escaped)
+        if after != index:
+            index = after
+            continue
         char = text[index]
-        if char == "\\":
-            if escaped and text[index + 1 : index + 2] == '"':
-                end = _escaped_value_end(text, index + 2)
-                index = len(text) if end == -1 else end + 2
-            else:
-                index += 2
-        elif not escaped and char in ('"', "'"):
-            end = _plain_value_end(text, index + 1, char)
-            index = len(text) if end == -1 else end + 1
-        else:
-            if char in _BRACKETS:
-                depth += 1
-            elif char in "}]":
-                depth -= 1
-                if depth == 0:
-                    return index + 1
-            index += 1
+        if char in _BRACKETS:
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
     return -1
 
 
@@ -206,11 +241,112 @@ def _value_end(text: str, match: re.Match[str], *, bracketed: bool, escaped: boo
     return _plain_value_end(text, start, match.group("open"))
 
 
-def iter_quoted_secret_fields(text: str) -> Iterator[QuotedSecretField]:
-    """Yield each pair in *text* whose name is a secret name, in order.
+def _field_of(
+    text: str, match: re.Match[str], name: str, opener: str, *, escaped: bool
+) -> QuotedSecretField:
+    """The field whose value opens at the end of *match*, under *name*."""
+    bracketed = opener in _BRACKETS
+    start = match.end() - 1 if bracketed else match.end()
+    end = _value_end(text, match, bracketed=bracketed, escaped=escaped)
+    if end == -1:
+        end = len(text)
+    return QuotedSecretField(name, text[start:end], start, end, bracketed, escaped)
 
-    A pair inside the value of an earlier secret-named pair is not yielded
-    again. A value with no closing quote or bracket runs to the end of *text*.
+
+def _after_field(text: str, field: QuotedSecretField) -> int:
+    """The index after the closing quote or bracket of *field*."""
+    if field.bracketed or field.end == len(text):
+        return field.end
+    return field.end + (2 if field.escaped else 1)
+
+
+def _sibling_member(
+    text: str,
+    index: int,
+    *,
+    want: re.Pattern[str],
+    stop: re.Pattern[str],
+    escaped: bool,
+) -> re.Match[str] | None:
+    """The first *want* member from *index* on, in the same object; ``None`` when none.
+
+    Nested objects, lists and strings are stepped over. The search ends at
+    the bracket that closes the object, and at a *stop* member: a second
+    member with the key of the one the search started from, so that member
+    starts its own search and each stretch of the text is walked once.
+    """
+    depth = 0
+    while index < len(text):
+        char = text[index]
+        if depth == 0 and char in _KEY_STARTS:
+            if (member := want.match(text, index)) is not None:
+                return member
+            if stop.match(text, index) is not None:
+                return None
+        after = _after_string_or_escape(text, index, escaped=escaped)
+        if after != index:
+            index = after
+            continue
+        if char in _BRACKETS:
+            depth += 1
+        elif char in "}]":
+            if depth == 0:
+                return None
+            depth -= 1
+        index += 1
+    return None
+
+
+def _pair_name(text: str, match: re.Match[str], opener: str, *, escaped: bool) -> str | None:
+    """The string under the ``name`` member *match* when it is a secret name; else ``None``."""
+    if opener in _BRACKETS:
+        return None
+    end = _value_end(text, match, bracketed=False, escaped=escaped)
+    if end == -1:
+        return None
+    name = text[match.end() : end]
+    return name if _is_secret_name(name) else None
+
+
+def _pair_value_field(
+    text: str, match: re.Match[str], key: str, opener: str, *, escaped: bool
+) -> QuotedSecretField | None:
+    """The ``value`` of a name/value pair object whose ``name`` is a secret name.
+
+    *match* is the ``name`` or the ``value`` member of the object (*key* says
+    which); the other member is looked up in the same object, after it. So
+    ``{"name": "PASSWORD", "value": "..."}`` is found from its ``name`` and
+    ``{"value": "...", "name": "PASSWORD"}`` from its ``value``, with other
+    members between the two. ``None`` when the object is not such a pair.
+    """
+    name_key, value_key = (
+        (_ESCAPED_NAME_KEY, _ESCAPED_VALUE_KEY) if escaped else (_NAME_KEY, _VALUE_KEY)
+    )
+    if key == "name":
+        name = _pair_name(text, match, opener, escaped=escaped)
+        if name is None:
+            return None
+        after = _value_end(text, match, bracketed=False, escaped=escaped) + (2 if escaped else 1)
+        value = _sibling_member(text, after, want=value_key, stop=name_key, escaped=escaped)
+        if value is None:
+            return None
+        return _field_of(text, value, name, value.group("open"), escaped=escaped)
+    field = _field_of(text, match, key, opener, escaped=escaped)
+    after = _after_field(text, field)
+    name_member = _sibling_member(text, after, want=name_key, stop=value_key, escaped=escaped)
+    if name_member is None:
+        return None
+    name = _pair_name(text, name_member, name_member.group("open"), escaped=escaped)
+    return None if name is None else field._replace(name=name)
+
+
+def _find_secret_fields(text: str) -> Iterator[QuotedSecretField]:
+    """Every secret-named field of *text*, in the order of the keys that find them.
+
+    The ``value`` of a pair object may come before its ``name``, and a
+    secret-named key may sit between the two, so the fields are not yet in
+    order of position and may repeat; :func:`iter_quoted_secret_fields`
+    sorts them.
     """
     cursor = 0
     for match in _PAIR_START.finditer(text):
@@ -218,16 +354,35 @@ def iter_quoted_secret_fields(text: str) -> Iterator[QuotedSecretField]:
             continue
         escaped = match.group("escaped_name") is not None
         name = match.group("escaped_name" if escaped else "name")
+        opener = match.group("escaped_open" if escaped else "open")
+        if name in ("name", "value"):
+            pair_value = _pair_value_field(text, match, name, opener, escaped=escaped)
+            if pair_value is not None:
+                yield pair_value
+            continue
         if not _is_secret_name(name):
             continue
-        opener = match.group("escaped_open" if escaped else "open")
-        bracketed = opener in _BRACKETS
-        start = match.end() - 1 if bracketed else match.end()
-        end = _value_end(text, match, bracketed=bracketed, escaped=escaped)
-        if end == -1:
-            end = len(text)
-        yield QuotedSecretField(name, text[start:end], start, end, bracketed, escaped)
-        cursor = end
+        field = _field_of(text, match, name, opener, escaped=escaped)
+        yield field
+        cursor = field.end
+
+
+def iter_quoted_secret_fields(text: str) -> Iterator[QuotedSecretField]:
+    """Yield each pair in *text* whose name is a secret name, in order.
+
+    A pair inside the value of an earlier secret-named pair is not yielded
+    again. A value with no closing quote or bracket runs to the end of *text*.
+    The ``value`` of a name/value pair object whose ``name`` is a secret name
+    is yielded under that name (:func:`_pair_value_field`).
+    """
+    cursor = 0
+    spans: set[tuple[int, int]] = set()
+    for field in sorted(_find_secret_fields(text), key=lambda field: field.start):
+        if field.start < cursor or (field.start, field.end) in spans:
+            continue
+        spans.add((field.start, field.end))
+        yield field
+        cursor = field.end
 
 
 def scrub_secret_fields_in_text(text: str) -> str:

@@ -212,8 +212,9 @@ an error body, where a quote sits between the name and the `:`.
   {"name": "PASSWORD", "value": "..."}]`, so the secret sits under the key
   `value`. The `value` of such a pair is replaced like the value of a
   secret-named key; a pair without a `value` key stays. Every walk of the
-  name rule does this: this one, the default view of an answer
-  (`scrub_secret_named_values`) and the params echo of a waiting approval.
+  name rule does this: this one, its text step (below), the default view of
+  an answer (`scrub_secret_named_values`) and the params echo of a waiting
+  approval.
 - `scrub_secret_fields_in_text(text)` replaces the value of each quoted
   name-value pair whose name is a secret name. The name and the value may
   each use `"` or `'` (JSON `"name": "value"`, Python `'name': 'value'`,
@@ -227,8 +228,13 @@ an error body, where a quote sits between the name and the `:`.
   does not count) and replaces the whole object or list with the quoted
   marker, as the walk does for data. A value with no closing quote or
   bracket (a diagnostic cut by a length cap) is replaced up to the end of
-  the text. `iter_quoted_secret_fields(text)` lists the same pairs; the
-  capture check uses it.
+  the text. The text step knows the name/value pair object too: when the
+  `name` member of an object is a secret name, the `value` member of the
+  same object is replaced (`{"name": "PASSWORD", "value": "..."}`, also as
+  Python text or escaped JSON). The two members may come in either order,
+  with other members between them; a nested object's members do not count.
+  `iter_quoted_secret_fields(text)` lists the same pairs; the capture check
+  uses it.
 
 The name rule is the shared `broadcast.events.is_secret_param_name`
 (`password`, `encryptedPassword`, `sessionToken`, `client_secret`,

@@ -41,6 +41,7 @@ directly, keeping the resolver tie-break ladder unambiguous.
 # ``keycloak.user.check_login`` (which user, where the password comes from).
 from meho_backplane.connectors.keycloak import (
     op_classes,  # noqa: F401 -- declares the op classes
+    ops_authflow_passkey,  # noqa: F401 -- the approval card of the passkey step op
     ops_login_check,  # noqa: F401
     ops_write_preview,  # noqa: F401
 )

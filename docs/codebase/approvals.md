@@ -671,10 +671,35 @@ model, or resume endpoint):
    (`backend/src/meho_backplane/operations/_validate.py`) returns
    `NEEDS_APPROVAL` — not `DENY` — when a non-agent principal hits a
    `requires_approval=True` op. The op is parked + resumable, not
-   denied to the operator meant to run it. Non-`requires_approval` ops a
-   human has always been able to run still auto-execute (the v0.2
-   default-allow is preserved), so no existing human-runnable op
-   regresses.
+   denied to the operator meant to run it.
+
+   **Only the web interface counts as a person (#3980).** For a person,
+   what waits depends on how the call arrives, not on whose token it is:
+   - **Web interface** (`Operator.web_session` is `True`): `safe` and
+     `caution` run at once; `dangerous`, `destructive` and
+     `requires_approval` wait for an approval click.
+   - **Any call made with a token** — MCP (for example an AI tool), the
+     `meho` command line, REST, also a person's own token, and every
+     in-process caller without a web session (runbook verify steps, the
+     legacy connector route): only `safe` runs at once. Everything else
+     waits. MEHO does not try to tell who is behind a token, because an
+     AI tool can use a person's login.
+
+   Only `verify_access_token_with_refresh`
+   (`backend/src/meho_backplane/ui/auth/refresh.py`) sets
+   `web_session=True`. No token claim, header or request field can set
+   it. The rule lives in `_person_park_reason` (`_validate.py`). Service
+   principals keep their standing-grant rule (`_service_safety_gate_reason`).
+
+   **Own approval of a token `caution` change.** When a person's `caution`
+   change waits only because it came with a token, the park stamps
+   `proposed_effect["waits_because"] = "token_call"`
+   (`waits_only_for_token_call`, stamped in `_build_proposed_effect`).
+   The same person may then approve it with a click in the web interface
+   (`approval_rule` `token_call_self_approval`). The same approval on the
+   command line or REST is refused with `SelfApprovalForbiddenError`,
+   which points to the web interface. A change marked `requires_approval`
+   never carries the reason and keeps the group rules below.
 2. **Self-approval guard (requester != approver).** `approve_request`
    raises `SelfApprovalForbiddenError` (→ HTTP 403 `self_approval_forbidden`
    on REST, invalid-params on MCP) when `operator.sub ==
@@ -714,7 +739,8 @@ model, or resume endpoint):
    carries `reviewed_by` (the approver's `sub`), `self_approved` (true
    when requester and approver are the same `sub`) and `approval_rule`:
    `sa_operator_self_approval`, `break_glass_self_approval`,
-   `sa_operator_or_admin` or `reviewer`. The `approval.approved` add-on
+   `sa_operator_or_admin`, `reviewer` or `token_call_self_approval`
+   (#3980). The `approval.approved` add-on
    step event carries the same three fields.
    A break-glass self-approval also logs the WARNING event
    `approval_self_approval_break_glass` (with `approval_request_id`,
@@ -3122,24 +3148,31 @@ The fix re-enters the **parent composite** on resume:
   dispatch path. The match is on `(op_id, params_hash)`, so the clear pins
   to the exact entity approved and consumes the var.
 
-#### The actual contract: one resume completes the composite (#3351 review B1)
+#### The actual contract: one resume completes the composite (#3351 review B1, #3980)
 
-The resume does **not** re-park "one gate at a time". It re-enters the
-composite under the **approving reviewer's** identity, and every governed
-sub-op currently shipped is `dangerous` + `requires_approval=False` — a
-verdict a `USER` auto-executes (`policy_gate` default-allow;
-`_non_agent_verdict` re-gates a `USER` only on `safety_level=="destructive"`
-or `requires_approval==True`). So the reviewer runs the approved sub-op
-**and every remaining governed sub-op in the same pass**: a multi-governed-leg
-composite (e.g. `vm.create` with `power_on_after_create=True`, which parks at
-create then powers on) completes in a **single** resume, each leg firing
-exactly once. The invariant the correctness relies on is therefore explicit:
-**every governed sub-op of a composite must be `dangerous` +
-`requires_approval=False`** so the reviewer auto-executes all remaining legs.
+The resume does **not** re-park "one gate at a time". A person approved
+the run, so its remaining internal steps go ahead under that approval
+(`_covered_by_approved_run` in `composite.py`). A run counts as approved
+while the dispatcher runs it with `_approved=True` (it binds
+`approved_run_var`) or while `composite_resume_scope_var` is set (the
+re-entry of an approved step). Then a step whose gate says
+`NEEDS_APPROVAL` goes ahead, unless the step is `destructive` or marked
+`requires_approval`. A `DENY` stays a deny. The same holds for a child
+operation the composite runs through `dispatch_child`: the child's own
+`dispatch()` reads `approved_run_var` right after its policy gate and goes
+ahead on `NEEDS_APPROVAL` under the same two exceptions. This holds whoever runs the
+resume and however the approval was given: a web click, or the command
+line with a fresh sign-in (#3979). It matters since #3980: a reviewer's
+token, and a `dangerous` step in the web interface, would otherwise wait
+again. So a multi-step composite (e.g. `vm.create` with
+`power_on_after_create=True`, which parks at create then powers on)
+completes in a **single** resume, each step running exactly once. The
+invariant is explicit: **every governed sub-op of a composite that must
+finish in one resume is not `destructive` and not `requires_approval`**.
 
-A **multi-gate re-park** — a governed sub-op a reviewer would *not*
-auto-execute (`destructive` or `requires_approval=True`) — is **not
-supported** by this re-entry mechanism. The mechanism clears exactly one
+A **multi-gate re-park** — a governed sub-op that is `destructive` or
+`requires_approval=True` — is **not supported** by this re-entry
+mechanism. The mechanism clears exactly one
 sub-op and keeps no record of already-executed legs, so a second park +
 second resume would re-enter the composite from the top and re-run every
 earlier governed leg — a duplicate write (the reviewer reproduced a duplicate
@@ -3151,7 +3184,8 @@ composite, the approved sub-op, and the sub-op that would have parked — and
 does **not** park a second request or continue. It is audited via the
 composite's own dispatch audit row. This is enforced in
 `enforce_subop_policy` (the `NEEDS_APPROVAL` branch, keyed off the unconsumed
-`composite_resume_scope_var`) and is unreachable for shipped composites.
+`composite_resume_scope_var`). Only a `destructive` or `requires_approval`
+step can reach it.
 
 #### Continuing where it stopped (#4217)
 

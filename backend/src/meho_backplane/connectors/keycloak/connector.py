@@ -1153,6 +1153,16 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_authflow_ensure_approval_flow(self, operator, target, params)
 
+    async def authflow_ensure_passkey_code_skip(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.authflow.ensure_passkey_code_skip``."""
+        from meho_backplane.connectors.keycloak.ops_authflow_passkey import (
+            keycloak_authflow_ensure_passkey_code_skip,
+        )
+
+        return await keycloak_authflow_ensure_passkey_code_skip(self, operator, target, params)
+
     async def identity_provider_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1193,7 +1203,8 @@ class KeycloakConnector(HttpConnector):
         the destructive ``user.delete`` / ``group.delete`` /
         ``client.delete``. #3851 adds ``user.logout``; #3886 adds ``realm.delete``.
         ``user.check_login`` (one login test) rides the same walk, and so do
-        ``authflow.ensure_approval_flow`` and ``identity_provider.list``.
+        ``authflow.ensure_approval_flow``, ``authflow.ensure_passkey_code_skip``
+        and ``identity_provider.list``.
         """
         # Lazy imports: the operations package pulls in the embedding
         # pipeline (ONNX runtime + a 100 MB+ model on first touch) that a
@@ -1203,6 +1214,9 @@ class KeycloakConnector(HttpConnector):
         from meho_backplane.connectors.keycloak.ops_authflow import (
             APPROVAL_FLOW_OPS,
             WHEN_TO_USE_AUTHFLOW_BY_GROUP,
+        )
+        from meho_backplane.connectors.keycloak.ops_authflow_passkey_schemas import (
+            PASSKEY_CODE_SKIP_OPS,
         )
         from meho_backplane.connectors.keycloak.ops_identity_provider import (
             IDENTITY_PROVIDER_OPS,
@@ -1239,6 +1253,7 @@ class KeycloakConnector(HttpConnector):
             *WRITE_OPS,
             *LOGIN_CHECK_OPS,
             *APPROVAL_FLOW_OPS,
+            *PASSKEY_CODE_SKIP_OPS,
             *IDENTITY_PROVIDER_OPS,
         ):
             handler = getattr(cls, op.handler_attr, None)

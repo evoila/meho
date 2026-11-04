@@ -533,6 +533,7 @@ class _RecordingHttpConnector(HttpConnector):
         *,
         operator: Operator,
         verb: str = "POST",
+        params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
@@ -1117,6 +1118,51 @@ def test_operations_ui_run_call_second_step_of_change_ticket_links_to_ordered_vi
 
 
 _DESTRUCTIVE_OP_ID = "DELETE:/repos/{owner}/{repo}"
+
+
+@pytest.mark.parametrize(
+    ("safety_level", "expected_status", "executes"),
+    [("caution", "ok", True), ("dangerous", "awaiting_approval", False)],
+)
+def test_operations_ui_run_call_web_session_rule(
+    safety_level: str, expected_status: str, executes: bool
+) -> None:
+    """#3980: in the web interface ``caution`` runs at once and ``dangerous`` waits.
+
+    Real dispatch, no stub. The web interface is the only path that counts as
+    a person, so a ``caution`` op runs; a ``dangerous`` op waits for an
+    approval click. (The same ``caution`` op sent with a token would wait.)
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    op_id = f"POST:/repos/{{owner}}/{{repo}}/{safety_level}"
+    _seed_ingested_op(
+        tenant_id=None,
+        op_id=op_id,
+        path=f"/repos/{{owner}}/{{repo}}/{safety_level}",
+        safety_level=safety_level,
+    )
+    _seed_gh_target(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/operations/call",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": op_id,
+                "target": "gh-prod",
+                "params": '{"owner": "evoila", "repo": "meho", "body": {}}',
+            },
+        )
+    assert response.status_code == 200, response.text
+    assert f'data-run-status="{expected_status}"' in response.text
+    connector = get_or_create_connector_instance(_RecordingHttpConnector)
+    assert isinstance(connector, _RecordingHttpConnector)
+    assert bool(connector.calls) is executes
+    assert len(_approval_requests()) == (0 if executes else 1)
 
 
 async def _destructive_blast_radius_builder(ctx: PreviewContext) -> dict[str, Any]:

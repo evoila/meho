@@ -1177,6 +1177,87 @@ def test_forced_self_approve_is_rejected_server_side() -> None:
     resume_mock.assert_not_awaited()
 
 
+_TOKEN_CAUTION_EFFECT: dict[str, object] = {
+    "op_id": "vsphere.vm.create",
+    "connector_id": "vsphere-1.x",
+    "safety_level": "caution",
+    "waits_because": "token_call",
+}
+
+
+def test_self_approve_of_token_caution_with_web_click_is_allowed() -> None:
+    """#3980: a person's own ``caution`` change that waited only for the token.
+
+    The change came with a token, so it waited. The same person may approve
+    it with a click in the web interface: the Approve button is enabled and
+    the approval goes through.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A, principal_sub=_REVIEWER_SUB, proposed_effect=_TOKEN_CAUTION_EFFECT
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB).model_copy(
+        update={"web_session": True}
+    )
+    resume_mock = AsyncMock(return_value=_dispatch_result())
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, resume_mock),
+        ):
+            modal = client.get(f"/ui/approvals/{rid}")
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert modal.status_code == 200, modal.text
+    approve_button = modal.text.split('data-action="approve"')[1].split("</button>")[0]
+    assert "disabled" not in approve_button
+    assert response.status_code == 200, response.text
+    assert "Request approved" in response.text
+    assert _request_status(rid) == ApprovalRequestStatus.APPROVED.value
+    resume_mock.assert_awaited_once()
+
+
+def test_self_approve_of_requires_approval_caution_keeps_group_rules() -> None:
+    """#3980: without the token reason, the same web click is refused (#3328 rules)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        principal_sub=_REVIEWER_SUB,
+        proposed_effect={"op_id": "vsphere.vm.create", "safety_level": "caution"},
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB).model_copy(
+        update={"web_session": True}
+    )
+    resume_mock = AsyncMock(return_value=_dispatch_result())
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, resume_mock),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    assert "cannot approve your own request" in response.text.lower()
+    assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
+    resume_mock.assert_not_awaited()
+
+
 def test_self_deny_is_allowed_server_side() -> None:
     """An operator may deny their own request -- withdrawal is not an escalation."""
     _seed_tenant(_TENANT_A, "tenant-a")

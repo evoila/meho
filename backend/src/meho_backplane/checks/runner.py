@@ -82,11 +82,11 @@ Each dispatch runs as a synthetic per-tenant :class:`~meho_backplane.auth.operat
 with ``sub=sensor.identity_sub`` (#2503's per-row column, default
 ``"__sensor__"``), ``tenant_id=sensor.tenant_id``,
 ``TenantRole.OPERATOR`` -- the topology-refresh ``_system_operator`` mould with
-the sub sourced from the row. ``principal_kind`` defaults to ``USER``, so
-:func:`~meho_backplane.operations._validate.policy_gate` would auto-execute the
-op: the non-agent verdict parks only the ``destructive`` and
-``requires_approval`` tiers, never re-consulting ``safety_level`` for a ``USER``
-(that consultation lives behind the SERVICE-only branch). #2503's registration
+the sub sourced from the row. ``principal_kind`` defaults to ``USER`` and
+the operator has no web session, so
+:func:`~meho_backplane.operations._validate.policy_gate` follows the token
+rule (#3980): only a ``safe`` op runs at once, and anything else would wait
+for approval instead of running. #2503's registration
 guard enforces ``safe`` **at Sensor create time**, but a versioned re-ingest
 could later re-classify a sensored op to ``caution`` / ``dangerous`` while
 keeping ``requires_approval=False``. So :func:`_run_evaluation` **re-asserts the

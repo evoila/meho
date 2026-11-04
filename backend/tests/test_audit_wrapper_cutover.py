@@ -1160,6 +1160,7 @@ async def test_mcp_rolled_back_record_keeps_the_failed_attempt(
     assert rows[0].operator_sub == holder["op"].sub
 
 
+@pytest.mark.usefixtures("person_token_writes_run_at_once")
 async def test_mcp_bulk_import_dry_run_is_routine_and_apply_keeps_its_own_records(
     mcp: tuple[TestClient, dict[str, Operator]],
 ) -> None:

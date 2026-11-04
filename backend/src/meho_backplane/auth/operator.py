@@ -390,6 +390,12 @@ class Operator(BaseModel):
     tenant_chosen: bool = True
     #: The role comes from the platform admin group, not a role group (#5239).
     role_from_platform_admin: bool = False
+    #: This call came from a person's web interface session (#3980). Only
+    #: :func:`~meho_backplane.ui.auth.refresh.verify_access_token_with_refresh`
+    #: sets it. No token claim, header or request field can set it, and REST
+    #: and MCP never do. Off means the call came with a token: it follows the
+    #: agent rule, so only ``safe`` operations run at once.
+    web_session: bool = False
 
     @property
     def may_self_approve(self) -> bool:

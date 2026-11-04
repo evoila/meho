@@ -485,7 +485,7 @@ async def _verify_session_token(
     _assert_same_tenant(decrypted, request_tenant)
     requested, allow_unchosen = session_tenant_request(decrypted)
     try:
-        return await verify_jwt_for_audience(
+        operator = await verify_jwt_for_audience(
             f"Bearer {access_token}",
             expected_audience=expected_audience,
             requested_tenant=requested,
@@ -499,6 +499,10 @@ async def _verify_session_token(
                 expected_audience=expected_audience,
             )
         raise
+    # #3980: this is the one place where a call counts as a person in the
+    # web interface. Every other way in (REST, MCP, in-process callers)
+    # leaves the field off, so the call follows the token rule.
+    return Operator(**operator.model_dump(exclude={"web_session"}), web_session=True)
 
 
 async def verify_access_token_with_refresh(
@@ -516,6 +520,11 @@ async def verify_access_token_with_refresh(
     Returns the (possibly rotated) session alongside the verified
     :class:`~meho_backplane.auth.operator.Operator` so the caller's
     role gate runs against claims that match the stored token.
+
+    The returned Operator has ``web_session=True`` (#3980): the call comes
+    from a person in the web interface, so the people rule applies to it
+    (``caution`` runs at once, ``dangerous`` waits for an approval click).
+    This function is the only place that sets the field.
 
     The check runs in the session's current tenant (#5240): the
     returned Operator carries that tenant's role. A session whose

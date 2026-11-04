@@ -15,8 +15,8 @@ after the form-2 install and the appliance pieces, before the clean
   to a machine that runs Kubernetes. `not-applicable.md` gives each reason.
 - **The result:** a list with one line per rule, next to the OVA as
   `meho-appliance-<version>-cis.txt` and kept by the build workflow. A
-  failing rule must be in `exceptions.md`. In this first version the build
-  only warns about a rule that is in neither list; it does not stop.
+  failing rule must be in `exceptions.md`; a rule that fails and is in
+  neither list stops the build.
 
 The design is the internal design note `form-1-appliance.md`, section 1,
 step 3, "What the build sets beyond the image's defaults" and "The CIS
@@ -30,7 +30,7 @@ decisions of Damir Topic".
 | `cis/tailoring.xml` | Two profiles: `appliance` (the scan) and `appliance_remediate` (the fixes). |
 | `cis/not-applicable.md` | Each rule the scan leaves out, with its reason; also the manual rules that do not apply. |
 | `cis/oscap-run-sce-script` | OpenSCAP's runner for script checks it cannot execute, as from the `noexec` `/tmp`. |
-| `cis/exceptions.md` | Each rule that applies but fails on the build, with one sentence on why. Damir Topic approves the list once per release. |
+| `cis/exceptions.md` | Each rule that applies but fails on the build or on an appliance after first start, with where it fails and one sentence on why. Damir Topic approves the list once per release (`docs/RELEASING.md`, pre-flight). |
 | `tests/test_harden.py` | `harden.sh` against a fake build VM. |
 | `tests/test_cis_lists.py` | The tailoring and the two lists agree. |
 
@@ -97,16 +97,29 @@ unit and `firewall_state`. In order:
      `/etc/sysctl.d/60-meho-ipv6-off.conf`. The IPv6 stack stays, so a
      program that opens an IPv6 socket still works; the kernel parameter
      `ipv6.disable=1` would not.
-   - SSH with keys only and no root (ADR 0009 decision 4):
+   - SSH with keys only, no root, and only for `admin` (ADR 0009
+     decision 4; CIS 5.1.4):
      `/etc/ssh/sshd_config.d/05-meho-appliance.conf` with
-     `PasswordAuthentication no`, `KbdInteractiveAuthentication no` and
-     `PermitRootLogin no`, checked with `sshd -t`. CIS Level 1 alone does
-     not turn password login off. sshd keeps the first value it reads, and
-     Ubuntu reads `sshd_config.d/*.conf` first, in name order: after the
-     fixes' `00-complianceascode-hardening.conf` and
+     `PasswordAuthentication no`, `KbdInteractiveAuthentication no`,
+     `PermitRootLogin no` and `AllowUsers admin`, checked with `sshd -t`.
+     CIS Level 1 alone does not turn password login off, and
+     ComplianceAsCode has no fix for 5.1.4. sshd keeps the first value it
+     reads, and Ubuntu reads `sshd_config.d/*.conf` first, in name order:
+     after the fixes' `00-complianceascode-hardening.conf` and
      `01-complianceascode-reinforce-os-defaults.conf` (neither sets these
-     three), before cloud-init's `50-cloud-init.conf`. The running sshd is not reloaded, so the build's
-     own login stays; the appliance starts with these settings.
+     four), before cloud-init's `50-cloud-init.conf`. The running sshd is
+     not reloaded, so the build's own login stays; the appliance starts
+     with these settings. After a restart of sshd on the build VM, the
+     build user could no longer log in.
+   - root's `PATH` without `/snap/bin` (CIS 5.4.2.5): the check reads the
+     scanner's own `PATH`, which is sudo's `secure_path` or the one in
+     `/etc/environment`. Both name `/snap/bin`, which the appliance has
+     not. `harden.sh` takes it out of `/etc/environment` and writes
+     `/etc/sudoers.d/meho-appliance` with its own `secure_path` (sudo uses
+     the last one it reads), checked with `visudo -c` before it goes in
+     place. `/etc/sudoers` itself stays as the package ships it.
+   - `/etc/cron.allow` in the group `crontab` (CIS 2.4.1.8): after the
+     fixes it is in the group `root`.
    - AIDE skips `/var/lib/rancher`, `/var/lib/kubelet`,
      `/var/lib/meho/volumes`, `/var/log` and `/run`
      (`/etc/aide/aide.conf.d/90_meho_appliance`). First start builds the
@@ -132,8 +145,10 @@ unit and `firewall_state`. In order:
    prints `Rule<CR><TAB><id>` and `Result<CR><TAB><result>` for each rule;
    the list keeps `<result> <rule>` without the `xccdf_org...content_rule_`
    prefix. A rule that is not `pass`, `notapplicable` or `informational`
-   and not in `exceptions.md` gets a `[WARN]` line in the build log. An
-   exception that passes gets a note, so it can leave the list.
+   and not in `exceptions.md` gets a `[WARN]` line in the build log, and
+   `harden.sh` stops with exit 1 after the list is written. An exception
+   that passes on the build gets a note: when it passes on an appliance
+   too, it can leave the list.
 
 Every step is safe to run twice, so `build.sh --from-step 3` runs it again.
 
@@ -165,10 +180,9 @@ Ubuntu's OpenSCAP runs:
   matter.
 - 4.3.6 `set_nftables_loopback_traffic`: in the input chain, before the
   first line with a `}`, the text `iif "lo" accept` and an `ip saddr`
-  rule. The form-2 file has `iifname "lo" accept`, and its first `}` comes
-  in `tcp dport { 80, 443 }`, so the rule fails. It is in `exceptions.md`
-  until the form-2 file adds `iif "lo" accept` and
-  `ip saddr 127.0.0.0/8 drop` at the top of the input chain.
+  rule. The form-2 file has both at the top of its input chain
+  (`iif "lo" accept`, `ip saddr 127.0.0.0/8 drop`), so the rule passes on
+  the build and on the appliance.
 - 4.3.10 `nftables_rules_permanent`: `/etc/nftables.conf` has an
   `include "<file>"` line, and that file exists and is not empty.
 - 4.1.1 `firewall_single_service_active`: exactly one of `ufw.service`,
@@ -194,26 +208,29 @@ Ubuntu's OpenSCAP runs:
 
 ## Known issues
 
-- **Not run on a real build yet.** The tests use stubs. The week-4 build
-  (#4815) runs it in the lab and records the ten rules that only a real
-  build shows (#4640 item 5).
-- **The build only warns.** A failing rule in neither list does not stop the
-  build yet. The second part of #4640 fills `exceptions.md` from the real
-  scan and makes the build stop.
+- **The first real build** (week 4, #4815) ended with pass 343, not
+  applicable 41, fail 6 on the build, and fail 7 on an appliance after
+  first start. The ten rules that only a real build shows are recorded on
+  #4640. Five of the failing rules have a fix now: three in `harden.sh`
+  (root's `PATH`, `/etc/cron.allow`, `AllowUsers`) and two in first start
+  (the `admin` start-up files, and the log files under `/var/log/aide` and
+  `/var/log/apt`). The others are in `exceptions.md`. A new lab build has
+  not checked the fixes yet.
 - **Rules first start sets fail on the build:** the bootloader password
-  (1.4.1) and the AIDE database (6.3.1). They are in `exceptions.md` with
-  that reason. A scan on an appliance after first start passes them.
-- **4.3.6** fails with the current form-2 firewall file (above).
+  (1.4.1, `grub2_password` and `grub2_uefi_password`). They are in
+  `exceptions.md` with that reason, and pass on an appliance.
+- **`aide_build_database` (6.3.1) never passes:** the check looks for a
+  `database=` line in `aide.conf`, and AIDE 0.18 calls it `database_in=`.
+- **The scan runs on the build VM only.** Rules that fail only on an
+  appliance after first start (the world-writable kubelet files, 7.1.11)
+  do not stop the build. `meho-host check` (#4737) and the release test
+  (#4816) scan an appliance.
 - **AIDE and the one-time files.** First start builds the database after
   it wrote the three one-time files under `/var/lib/meho/`. When the admin
   deletes them, as the guide says, AIDE's daily check reports them as
   removed until the database is built again (the update does that). The
   guide (#4817) should say to run `aideinit --yes --force` after the
   delete, or AIDE should skip those three files.
-- **The scan runs on the build VM**, before the clean and before first
-  start. Rules about the `admin` account, the time servers and
-  `grub.cfg` after first start's `update-grub` show their real result
-  only on an imported appliance.
 
 ## Testing
 
@@ -223,9 +240,11 @@ of the fake VM is the one `render_firewall_rules` of the form-2 install
 writes, so the policy change is tested on the real format. It checks the
 packages, the scanner files, the order (fixes, settings, firewall, scan),
 the fstab and `tmp.mount` lines, the AppArmor links, IPv6 and AIDE,
-`nftables.conf` and its drop-in, the three `drop` policies with nothing
-else changed, a changed or refused firewall file, no archive, the oscap
-exit codes, the result list and its warnings, and that a second run
+`nftables.conf` and its drop-in, root's `PATH` and the sudo file (and a
+sudo file `visudo` refuses), the group of `/etc/cron.allow`, the three
+`drop` policies with nothing else changed, a changed or refused firewall
+file, no archive, the oscap exit codes, the result list and its warnings,
+that a failing rule in neither list stops the build, and that a second run
 changes nothing more. `tests/test_cis_lists.py` checks that the tailoring
 and `not-applicable.md` name the same rules and that no exception is also
 "not applicable".

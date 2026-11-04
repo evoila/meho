@@ -65,6 +65,31 @@ class FirstStartTests(FirstStartTestCase):
         self.assertEqual(ALL_MARKERS, self.vm.markers())
         self.assertTrue(self.vm.host_path("/var/lib/meho/firststart.done").is_file())
 
+    def test_the_admin_start_up_files_and_the_logs_get_at_most_0640(self) -> None:
+        # CIS 7.2.10 and 6.1.4.1, as the first lab import found them.
+        files = {
+            "/home/admin/.bashrc": 0o644,
+            "/home/admin/.profile": 0o644,
+            "/home/admin/.bash_logout": 0o644,
+            "/var/log/aide/aideinit.log": 0o644,
+            "/var/log/apt/history.log": 0o644,
+            "/var/log/apt/eipp.log.xz": 0o644,
+            "/var/log/apt/term.log": 0o600,
+        }
+        for path, mode in files.items():
+            self.vm.host_file(path, "")
+            self.vm.host_path(path).chmod(mode)
+        self.vm.host_file("/etc/outside", "")
+        self.vm.host_path("/etc/outside").chmod(0o644)
+        self.vm.host_path("/var/log/apt/link").symlink_to(self.vm.host_path("/etc/outside"))
+
+        self.assert_succeeds(self.vm.run())
+
+        for path, mode in files.items():
+            with self.subTest(path=path):
+                self.assertEqual(0o600 if mode == 0o600 else 0o640, self.vm.mode(path))
+        self.assertEqual(0o644, self.vm.mode("/etc/outside"))
+
     def test_without_an_admin_group_useradd_makes_its_own(self) -> None:
         self.vm.answer("group", "root:x:0:\nsudo:x:27:\n")
 

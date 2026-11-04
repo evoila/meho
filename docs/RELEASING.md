@@ -183,6 +183,22 @@ How users get the new version is in the
   maintainer repo `evoila-bosnia/meho-internal`). Every other pull
   request keeps the normal path.
 
+- [ ] **The appliance's CIS exception list is approved (every release
+  that ships the appliance OVA).** `deploy/appliance/cis/exceptions.md`
+  lists each CIS rule that still fails on the appliance, with one
+  sentence on why. Damir Topic approves the whole list once per release,
+  with the release's security sheet, as a comment on the release-cutting
+  PR. What changed since the last release:
+
+  ```bash
+  git diff <last-tag> -- deploy/appliance/cis/exceptions.md deploy/appliance/cis/not-applicable.md
+  ```
+
+  The release does not ship without the approval. The OVA build of the
+  tag stops when any other rule fails, so the approved list is all that
+  fails at the end of the build
+  ([`docs/codebase/appliance-cis.md`](codebase/appliance-cis.md)).
+
 - [ ] Pick `vX.Y.Z`.
 
 ### 2. Roll the CHANGELOG — the load-bearing step

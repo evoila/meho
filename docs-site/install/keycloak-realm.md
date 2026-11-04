@@ -821,9 +821,42 @@ realm. The built-in Keycloak of the chart started with a newer version, so
 its realm has the step. Without the step, a passkey replaces the password,
 but a person with a one-time code still types the code.
 
-Until MEHO has an operation for this
-([#5663](https://github.com/evoila/meho/issues/5663)), these steps run in the
-Keycloak admin console:
+MEHO adds the step with one operation. A second person must approve it,
+because it changes how every person of the realm logs in:
+
+```bash
+meho operation call keycloak-admin-26.x keycloak.authflow.ensure_passkey_code_skip \
+  --target <keycloak-target>
+```
+
+- **The step is there** (a realm made on 26.4 or newer): MEHO changes
+  nothing. The result says `changed: false`. So the call is safe to run
+  twice.
+- **The realm uses the built-in `browser` flow without the step:** MEHO
+  copies `browser` as `browser with passkeys`, adds **Condition -
+  credential** to the copy (the settings in step 3 below), and makes the
+  copy the realm's browser flow. Then it reads the flow and the realm back.
+  `browser_flow` in the result is the flow the realm now uses.
+- **A copy `browser with passkeys` is there from a run that stopped
+  half-way:** MEHO finishes it, when its other steps match `browser`.
+  Otherwise it stops, changes nothing more, and names the difference.
+  Delete or rename that copy, then run again.
+- **The realm uses its own flow**, or the flow has no conditional one-time
+  code sub-flow: MEHO stops and changes nothing. Do the steps below by
+  hand.
+
+The Keycloak server must run 26.4 or newer.
+
+**The way back:** make `browser` the realm's browser flow again:
+
+```bash
+meho operation call keycloak-admin-26.x keycloak.realm.update \
+  --target <keycloak-target> --params '{"representation": {"browserFlow": "browser"}}'
+```
+
+The copy then has no effect, and you can delete it.
+
+To do it by hand in the Keycloak admin console:
 
 1. **Check.** Open **Authentication → Flows** and the flow that is bound
    as the browser flow (usually `browser`). In the sub-flow whose name
@@ -849,8 +882,8 @@ Keycloak admin console:
 5. **Test.** Log in with a passkey: Keycloak asks no one-time code. Log in
    with the password: Keycloak still asks for the code.
 
-**The way back:** bind `browser` as the **Browser Flow** again. The copy
-then has no effect, and you can delete it.
+By hand, the way back is the same: bind `browser` as the **Browser Flow**
+again.
 
 ## Wire it into Helm
 

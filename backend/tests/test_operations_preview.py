@@ -633,6 +633,35 @@ async def test_no_builder_echo_keeps_scalar_settings_under_secret_names() -> Non
 
 
 @pytest.mark.asyncio
+async def test_no_builder_echo_scrubs_the_value_of_a_secret_named_pair() -> None:
+    """A ``{"name": "PASSWORD", "value": ...}`` pair in the params echoes no value."""
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="keycloak.user.update"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        connector_id="keycloak-1.x",
+        params={
+            "name": "my-credential",
+            "fields": [
+                {"name": "USER", "value": "root"},
+                {"name": "PASSWORD", "value": "hunter2"},
+                {"name": "PASSWORD"},
+            ],
+        },
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    echo = effect["params_echo"]
+    assert echo["name"] == "my-credential"
+    assert echo["fields"] == [
+        {"name": "USER", "value": "root"},
+        {"name": "PASSWORD", "value": "***REDACTED***"},
+        {"name": "PASSWORD"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_no_builder_echo_scrubs_secrets_nested_in_tuples() -> None:
     """A secret inside a tuple is masked, like the broadcast scrub does (#3808).
 

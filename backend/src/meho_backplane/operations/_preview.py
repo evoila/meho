@@ -82,7 +82,11 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import structlog
 
-from meho_backplane.broadcast.events import classify_op, is_secret_param_name
+from meho_backplane.broadcast.events import (
+    classify_op,
+    is_secret_name_value_pair,
+    is_secret_param_name,
+)
 from meho_backplane.redaction import apply_connector_boundary_redaction, get_default_policy, redact
 
 if TYPE_CHECKING:
@@ -225,8 +229,10 @@ def _scrub_secret_param_keys(value: Any) -> Any:
     does. For every mapping, a key that
     :func:`~meho_backplane.broadcast.events.is_secret_param_name` marks as
     secret has its whole value replaced when that value is a string, a
-    mapping or a sequence -- so a nested ``{"credentials": [...]}`` leaks
-    no element. This is the same name check and the same value rule the
+    mapping or a sequence -- so a nested ``{"credentials": [...]}`` shows
+    no element. The ``value`` of a name/value pair whose ``name`` is secret
+    (:func:`~meho_backplane.broadcast.events.is_secret_name_value_pair`)
+    is replaced the same way. This is the same name check and the same value rule the
     broadcast params scrub uses, so a param the broadcast path flags as
     secret is always masked here too (``password``, ``admin_password``,
     ``rootPassword``, ``client_secret``, ``api_key``, ...). Bare scalars
@@ -241,11 +247,12 @@ def _scrub_secret_param_keys(value: Any) -> Any:
     value-shape half is :func:`apply_connector_boundary_redaction`.
     """
     if isinstance(value, Mapping):
+        hide_pair_value = is_secret_name_value_pair(value)
         return {
             key: (
                 _PARAM_REDACTED
                 if isinstance(key, str)
-                and is_secret_param_name(key)
+                and (is_secret_param_name(key) or (hide_pair_value and key == "value"))
                 and isinstance(item, (str, Mapping, Sequence))
                 else _scrub_secret_param_keys(item)
             )

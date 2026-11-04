@@ -65,7 +65,7 @@ func newCountCmd() *cobra.Command {
 	f.StringVar(&opts.OpClass, "op-class", "",
 		"count only one op-class (read|write|credential_read|audit_query|other)")
 	f.StringVar(&opts.ResultStatus, "result-status", "",
-		"count only one result-status (ok|error|denied|pending)")
+		"count only one result-status (ok|error|denied|pending|withdrawn)")
 	f.StringVar(&opts.Since, "since", "",
 		"start of the window; 24h / 7d / 30m / 2w shorthand or ISO-8601 (default: the last 24 hours)")
 	f.StringVar(&opts.Until, "until", "",

@@ -224,7 +224,9 @@ an error body, where a quote sits between the name and the `:`.
 
 The name rule is the shared `broadcast.events.is_secret_param_name`
 (`password`, `encryptedPassword`, `sessionToken`, `client_secret`,
-`licenseKey`, ...), the one the broadcast scrub and the approval echo use.
+`licenseKey`, `psk`, `sharedKey`, `secret_key`, ...), the one the
+broadcast scrub and the approval echo use. The full word list is in
+[connectors-shared-api-file-secrets.md](connectors-shared-api-file-secrets.md#what-counts-as-a-secret-name).
 Numbers, booleans and `null` stay. A value an earlier step already masked
 (`[REDACTED:...]`, a trace marker, `***`) stays, so its label is kept.
 
@@ -296,12 +298,27 @@ capture.
 | --- | --- |
 | `redact` | `[REDACTED:<pattern>]` (fixed marker; default) |
 | `mask` | `*…*<last-4-chars>` (length-preserving; shape-correlatable) |
-| `hash` | `sha256:<first-12-hex-of-SHA-256(match)>` (stable; replay-correlatable) |
+| `hash` | `hmac-sha256:<first-12-hex-of-keyed-fingerprint(match)>` (stable inside one install; replay-correlatable) |
 
 Choose `redact` for raw secrets, `mask` when downstream consumers
 need to spot duplicates without seeing the value, and `hash` when an
 audit replay needs to confirm the same identifier appears across
 calls.
+
+The `hash` action writes a keyed fingerprint, not a plain digest:
+`engine.hash_replacement` calls `compute_value_fingerprint` in
+`operations/_validate.py` (HMAC-SHA256 under the server key, the key
+the audit params hash uses; see
+[approvals.md](approvals.md#the-params-hash-on-requests-and-audit-rows)).
+Equal values give equal strings inside one install. Without the server
+key the string cannot be computed again from a guess, so a `hash` rule
+on a credential pattern does not give away a short or common value.
+The second-stage (Presidio) `hash` action calls the same function
+through a Presidio `custom` operator, so both stages write the same
+shape. The packaged policies use only `redact`; `hash` runs only for a
+rule an operator writes. `test_redaction_hash_action.py` pins that the
+string depends on the server key and never equals a plain SHA-256
+prefix of the match.
 
 ## Connector-boundary middleware (#1071)
 
@@ -768,8 +785,12 @@ provisioned.
 - **PyYAML** (`yaml.safe_load`) — already a transitive dep; matches
   the precedent set by `operations/ingest/catalog.py`.
 - **Pydantic v2** — already pinned in `backend/pyproject.toml`.
-- **Python stdlib** — `re`, `hashlib`, `importlib.resources`,
-  `collections.abc`, `threading` (resolver lock).
+- **Python stdlib** — `re`, `hashlib` (flight recorder XML digest),
+  `importlib.resources`, `collections.abc`, `threading` (resolver lock).
+  The `hash` action's keyed fingerprint comes from
+  `operations/_validate.py` (`hmac`), imported inside the function
+  because the operations package reaches the engine through the
+  broadcast events.
 - **presidio-analyzer 2.2.362** + **presidio-anonymizer 2.2.362**
   (#1072) — the Tier-2 NER adapter. Imports are lazy so Tier-1-only
   deployments incur zero NER cost at runtime. The transitive

@@ -112,12 +112,16 @@ cloud image's kernel line ends with `console=ttyS0`.
      Then `netplan apply`.
    - `/etc/systemd/timesyncd.conf.d/50-meho.conf` with the time servers.
      The cloud image has systemd-timesyncd, not chrony.
-   - The `admin` account (groups `sudo`), the wizard password through
+   - The `admin` account (groups `sudo`; it joins the empty group `admin`
+     that the cloud image already has, because `useradd` refuses to make a
+     second one, exit code 9, #5739), the wizard password through
      `chpasswd` on stdin, `passwd --expire` so the first login must change
      it, and the SSH key in `~admin/.ssh/authorized_keys` (0600). Without a
      key the file is removed, in case an earlier try wrote one. The script
-     checks the 14 characters itself, because `chpasswd` run by root skips
-     the quality checks.
+     checks the 14 characters itself, before anything changes. `chpasswd`
+     then runs the CIS password checks too, also for root
+     (`enforce_for_root`), and refuses a dictionary word
+     ([appliance-cis.md](appliance-cis.md), #5744).
    - `meho-host admin-network <range>`: SSH answers only from the admin
      network.
 4. **The clock.** Waits up to 10 minutes until `timedatectl` says the clock

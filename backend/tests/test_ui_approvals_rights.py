@@ -84,6 +84,36 @@ def test_an_sa_operator_sees_they_may_approve_their_own_change() -> None:
     assert "you cannot approve it" not in body
 
 
+def test_a_token_call_caution_change_shows_yes_and_confirms_the_self_approval() -> None:
+    """#3980: an own ``caution`` change that waited only for its token, with a web click."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        principal_sub=_REVIEWER_SUB,
+        proposed_effect={
+            "op_id": "vsphere.vm.create",
+            "safety_level": "caution",
+            "waits_because": "token_call",
+        },
+    )
+    operator = _operator(tenant_id=_TENANT_A).model_copy(update={"web_session": True})
+
+    body = _modal(operator, rid)
+
+    assert 'data-approve-right="yes"' in body
+    assert 'data-approve-reason="own_change"' in body
+    assert "It waits only because it came with a token, so you may approve it here." in body
+    assert "disabled" not in _approve_button(body)
+    assert 'data-approval-confirm="self-approval"' in body
+
+    response = _post_decision(operator, rid)
+
+    assert response.status_code == 200, response.text  # type: ignore[attr-defined]
+    assert 'data-testid="approval-self-approved"' in response.text  # type: ignore[attr-defined]
+    assert "It waited only because it came with a token." in response.text  # type: ignore[attr-defined]
+    assert _request_status(rid) == ApprovalRequestStatus.APPROVED.value
+
+
 def test_another_persons_change_shows_yes_without_a_self_approval_line() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
     rid = _seed_request(tenant_id=_TENANT_A, proposed_effect={"safety_level": "caution"})

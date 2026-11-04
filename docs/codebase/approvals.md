@@ -802,7 +802,9 @@ interface only show it.
   `wrong_group`), and the role floor of the operation (`role_too_low`).
   Otherwise the answer is `ok`. For an own change that a
   MEHO-SA-Operator (or break-glass) may approve, the answer is yes with
-  `own_change`. It does not check what can change before the click: the
+  `own_change`. So is a web click on an own `caution` change that
+  waited only because it came with a token (#3980): the web interface
+  says yes, the command line and REST say no. It does not check what can change before the click: the
   sign-in age, the deadline, the params and the preview binding. The
   approve still checks those. The read writes nothing and logs no
   break-glass warning (`_check_self_approval(..., log_break_glass=False)`).

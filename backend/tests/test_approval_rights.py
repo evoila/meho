@@ -238,6 +238,33 @@ def test_an_own_lower_risk_change_names_the_break_glass_switch() -> None:
     assert "MEHO-SA-Operator or a MEHO-Admin" in high.message
 
 
+def _token_call_row() -> ApprovalRequest:
+    """An own ``caution`` change that waits only because it came with a token (#3980)."""
+    row = _row("caution", requester=_REQUESTER)
+    row.proposed_effect = {**row.proposed_effect, "waits_because": "token_call"}
+    return row
+
+
+def test_a_web_click_may_approve_an_own_token_call_caution_change() -> None:
+    """#3980: yes with a web session, no on the command line and REST."""
+    web = _person(_REQUESTER).model_copy(update={"web_session": True})
+    cli = _person(_REQUESTER)
+
+    allowed = approve_right(web, _token_call_row())
+    refused = approve_right(cli, _token_call_row())
+
+    assert allowed.may_approve is True
+    assert allowed.reason == ApproveRightReason.OWN_CHANGE
+    assert allowed.rule == ApprovalRule.TOKEN_CALL_SELF_APPROVAL
+    assert allowed.self_approval is True
+    assert "came with a token" in allowed.message
+    assert refused.may_approve is False
+    assert refused.reason == ApproveRightReason.OWN_CHANGE
+    assert "click in the web interface" in refused.message
+    # The token reason does not help with a change marked requires_approval.
+    assert approve_right(web, _row("caution", requester=_REQUESTER)).may_approve is False
+
+
 def test_break_glass_allows_an_own_lower_risk_change_and_logs_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -282,9 +309,11 @@ def test_a_role_too_low_for_the_operation_cannot_approve() -> None:
 
 def test_the_confirmation_line_names_the_self_approval_rule() -> None:
     sa = self_approval_confirmation(ApprovalRule.SA_OPERATOR_SELF_APPROVAL)
+    token_call = self_approval_confirmation(ApprovalRule.TOKEN_CALL_SELF_APPROVAL)
     break_glass = self_approval_confirmation(ApprovalRule.BREAK_GLASS_SELF_APPROVAL)
 
     assert sa is not None and "MEHO-SA-Operator" in sa and "audit log" in sa
+    assert token_call is not None and "came with a token" in token_call
     assert break_glass is not None and "APPROVAL_ALLOW_SELF_APPROVAL" in break_glass
     assert self_approval_confirmation(ApprovalRule.REVIEWER) is None
     assert self_approval_confirmation(ApprovalRule.SA_OPERATOR_OR_ADMIN) is None

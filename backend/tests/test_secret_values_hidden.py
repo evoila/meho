@@ -97,11 +97,9 @@ _PLAIN_NAMES = (
     "pin",
     "cert",
     "token_value",
-    "secret_key",
     "privkey",
     "pem",
     "tls_key",
-    "psk",
     "pat",
     "otp",
     "seed",
@@ -308,6 +306,25 @@ def test_name_scrub_hides_numbers_only_when_asked() -> None:
 def test_other_ops_hide_secret_named_values_including_numbers() -> None:
     shown = hide_secret_values("demo.thing.list", {"password": 1234, "name": "a"})
     assert shown == {"password": "[REDACTED:param_name]", "name": "a"}
+
+
+def test_other_ops_hide_a_pre_shared_key_and_an_authentication_secret_key() -> None:
+    """A VPN session or a routing peer answer, as a vendor file shapes it."""
+    answer = {
+        "display_name": "site-a",
+        "psk": "planted-psk-1",
+        "passphrases": ["planted-psk-2", "planted-psk-3"],
+        "authentication": {"type": "md5", "secret_key": "planted-key-4", "key_id": 7},
+        "env": [{"value_from": {"secret_key_ref": {"name": "db", "key": "url"}}}],
+    }
+    shown = hide_secret_values("demo.vpn.session.get", answer)
+    assert shown == {
+        "display_name": "site-a",
+        "psk": "[REDACTED:param_name]",
+        "passphrases": "[REDACTED:param_name]",
+        "authentication": {"type": "md5", "secret_key": "[REDACTED:param_name]", "key_id": 7},
+        "env": [{"value_from": {"secret_key_ref": {"name": "db", "key": "url"}}}],
+    }
 
 
 # ---------------------------------------------------------------------------

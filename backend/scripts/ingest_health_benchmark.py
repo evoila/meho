@@ -30,7 +30,9 @@ Usage (from ``backend/``)::
     uv run python -m scripts.ingest_health_benchmark --cpu-limit 1 --threads 32
     uv run python -m scripts.ingest_health_benchmark --spec path/to/openapi.json
 
-``--threads`` forces the thread count of the embedding model. A count
+``--spec`` ingests the file under its own ``info.version`` (the pipeline
+rejects a label with another major version); a file without one is
+ingested under ``1.0``. ``--threads`` forces the thread count of the embedding model. A count
 above the CPU limit shows the problem this benchmark guards against.
 The exit code is 1 when a probe missed its deadline or an ingest failed.
 """
@@ -79,7 +81,8 @@ ENDPOINT_DEADLINES_S = {
 }
 
 _PRODUCT = "benchmark"
-_VERSION = "1.0"
+#: The version label of a spec without ``info.version``.
+_DEFAULT_VERSION = "1.0"
 _IMPL_ID = "benchmark-rest"
 
 RunIngest = Callable[[bool], Awaitable[dict[str, Any]]]
@@ -170,8 +173,19 @@ def build_app(run_ingest: RunIngest, *, threads: int | None) -> FastAPI:
     return app
 
 
-def ingest_runner(embedding_service: Any, spec_content: str) -> RunIngest:
-    """The real ingest pipeline on *spec_content*, with the LLM grouping stubbed."""
+def spec_version(spec_content: str) -> str:
+    """The version label to ingest *spec_content* under: its ``info.version``.
+
+    The pipeline rejects a label whose major version differs from the
+    spec's, so a vendor file must be ingested under its own version.
+    """
+    from meho_backplane.operations.ingest import read_spec_info_version
+
+    return read_spec_info_version("spec:benchmark", content=spec_content) or _DEFAULT_VERSION
+
+
+def ingest_runner(embedding_service: Any, spec_content: str, *, version: str) -> RunIngest:
+    """The real ingest pipeline on *spec_content* under *version*, with the LLM grouping stubbed."""
     from meho_backplane.auth.operator import Operator, TenantRole
     from meho_backplane.db.engine import get_sessionmaker
     from meho_backplane.operations.ingest import GroupingResult, SpecSource
@@ -189,7 +203,7 @@ def ingest_runner(embedding_service: Any, spec_content: str) -> RunIngest:
 
     async def _no_grouping(**_kwargs: Any) -> GroupingResult:
         return GroupingResult(
-            connector_id=f"{_IMPL_ID}-{_VERSION}",
+            connector_id=f"{_IMPL_ID}-{version}",
             groups_created=0,
             operations_assigned=0,
             operations_unassigned=0,
@@ -207,7 +221,7 @@ def ingest_runner(embedding_service: Any, spec_content: str) -> RunIngest:
         started = time.monotonic()
         result = await service.ingest(
             product=_PRODUCT,
-            version=_VERSION,
+            version=version,
             impl_id=_IMPL_ID,
             specs=[SpecSource(uri="spec:benchmark", content=spec_content)],
             tenant_id=None,
@@ -268,7 +282,8 @@ def serve(args: argparse.Namespace) -> int:
         )
         threads = args.threads if args.threads is not None else embedding_thread_count()
         spec_content = Path(args.spec).read_text() if args.spec else synth_openapi_spec(args.ops)
-        app = build_app(ingest_runner(service, spec_content), threads=threads)
+        runner = ingest_runner(service, spec_content, version=spec_version(spec_content))
+        app = build_app(runner, threads=threads)
         uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning", lifespan="off")
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

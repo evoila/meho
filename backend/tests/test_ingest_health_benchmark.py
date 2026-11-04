@@ -12,7 +12,8 @@ from outside, with the chart's probe deadlines. These tests pin:
 * the prober sees every answer when the event loop is free, and counts
   the missed answers when the loop is frozen;
 * the deadlines are the chart's probe timeouts;
-* the server runs in a CPU quota scope when asked.
+* the server runs in a CPU quota scope when asked;
+* a file given with ``--spec`` is ingested under its own ``info.version``.
 
 The two slow tests run the whole benchmark with the real embedding model
 on the full-size spec, once without a limit and once under a one-CPU
@@ -33,6 +34,7 @@ from argparse import Namespace
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -46,8 +48,10 @@ from scripts.ingest_health_benchmark import (
     READINESS_TIMEOUT_S,
     ProbeSample,
     build_app,
+    ingest_runner,
     run_phase,
     server_command,
+    spec_version,
     summarize,
     synth_openapi_spec,
 )
@@ -133,6 +137,60 @@ def test_server_runs_without_a_scope_and_passes_spec_and_threads() -> None:
     assert command[0] == "python3"
     assert "systemd-run" not in command
     assert command[-6:] == ["--ops", "50", "--spec", "vendor.json", "--threads", "4"]
+
+
+def _vendor_spec(tmp_path: Path, info: dict[str, Any]) -> Path:
+    """A vendor-like file on disk, read back the way ``--spec`` reads it."""
+    spec = json.loads(synth_openapi_spec(3))
+    spec["info"] = info
+    path = tmp_path / "vendor.json"
+    path.write_text(json.dumps(spec))
+    return path
+
+
+def test_spec_version_is_the_version_of_the_file(tmp_path: Path) -> None:
+    path = _vendor_spec(tmp_path, {"title": "Vendor API", "version": "9.0.0"})
+    assert spec_version(path.read_text()) == "9.0.0"
+
+
+def test_spec_version_falls_back_for_a_file_without_one(tmp_path: Path) -> None:
+    path = _vendor_spec(tmp_path, {"title": "Vendor API"})
+    assert spec_version(path.read_text()) == "1.0"
+    assert spec_version(synth_openapi_spec(3)) == "1.0.0"
+
+
+@pytest.mark.asyncio
+async def test_runner_ingests_a_file_under_its_own_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file whose major version is not 1 reaches the pipeline under that version."""
+    import meho_backplane.db.engine as engine_module
+    import meho_backplane.operations.ingest.pipeline as pipeline_module
+
+    calls: list[dict[str, Any]] = []
+
+    class _FakePipeline:
+        def __init__(self, operator: Any, *, sessionmaker: Any, embedding_service: Any) -> None:
+            self.embedding_service = embedding_service
+
+        async def ingest(self, **kwargs: Any) -> Any:
+            calls.append(kwargs)
+            ingestion = SimpleNamespace(inserted_count=3, connector_registered=True)
+            return SimpleNamespace(ingestion=ingestion)
+
+    monkeypatch.setattr(engine_module, "get_sessionmaker", lambda: None)
+    monkeypatch.setattr(pipeline_module, "IngestionPipelineService", _FakePipeline)
+    content = _vendor_spec(tmp_path, {"title": "Vendor API", "version": "9.0.0"}).read_text()
+
+    run = ingest_runner(object(), content, version=spec_version(content))
+    result = await run(False)
+
+    assert result["operations"] == 3
+    assert result["connector_registered"] is True
+    assert len(calls) == 1
+    assert calls[0]["version"] == "9.0.0"
+    assert calls[0]["dry_run"] is False
+    assert [spec.content for spec in calls[0]["specs"]] == [content]
 
 
 async def _wait_for_end(client: httpx.AsyncClient) -> dict[str, Any]:

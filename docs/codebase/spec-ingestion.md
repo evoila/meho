@@ -2907,7 +2907,8 @@ embedding model) in a server process, and probes `/healthz`, `/ready`
 and the job status from a second process with the chart's probe
 timeouts. `--cpu-limit 1` runs the server in a `systemd-run` scope with
 one CPU, like a pod with that limit; `--threads 32` forces the old thread
-count to show the failure. `tests/test_ingest_health_benchmark.py` pins
+count to show the failure; `--spec` ingests a vendor file under its own
+`info.version`. `tests/test_ingest_health_benchmark.py` pins
 the harness; its two slow tests (`MEHO_RUN_SLOW_TESTS=1`) run the whole
 benchmark with the real model, without a limit and under one CPU.
 

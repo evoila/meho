@@ -109,8 +109,8 @@ CIS_FIX = (
     f"restart RKE2: systemctl restart rke2-server. If the cause is not clear, {SUPPORT_HINT}"
 )
 CERTIFICATE_FIX = (
-    "Fix: the console needs a certificate for the host name of this install, valid for more "
-    f"than 30 days. {SUPPORT_HINT}"
+    "Fix: install a certificate for the host name of this install that is valid for more than "
+    "30 days: sudo meho-host certificate --cert <chain.pem> --key <key.pem>"
 )
 BUNDLE_PATH = "/var/lib/meho/support/meho-support-meho.example.com-20261023T120000Z.tar.gz"
 BUNDLE_FILES = {
@@ -149,6 +149,11 @@ class UsageTests(HostTestCase):
             "support-bundle",
             "admin-network",
             "uninstall",
+            "certificate --cert <chain.pem> --key <key.pem>",
+            "keyholder on",
+            "keyholder off",
+            "unseal",
+            "Never give the key on the command line",
             "Exit codes:",
         ):
             self.assertIn(text, result.stdout)

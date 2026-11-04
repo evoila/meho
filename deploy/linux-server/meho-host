@@ -17,8 +17,16 @@
 #   uninstall         remove MEHO and RKE2, and the host changes of RKE2's
 #                     CIS profile that the install made; the MEHO firewall
 #                     stays on
+#   certificate       put the customer's certificate and key into the TLS
+#                     Secret of the console, after it checks them (#4738)
+#   keyholder on|off  switch OpenBao between "a keyholder unseals it" and
+#                     "it unseals itself" (#4738)
+#   unseal            unseal OpenBao by hand in keyholder mode (#4738)
 #
-# A later Task adds the commands certificate, keyholder and unseal (#4738).
+# keyholder and unseal read the unseal key from a hidden prompt, or from
+# standard input when it is not a terminal. The key is never an argument of
+# a command, so it is not in the process list or the shell history, and
+# meho-host never prints it.
 #
 # meho-host sources two files of lib/, the files install.sh uses too:
 # lib/firewall.sh and lib/cis.sh, for their read-only functions
@@ -151,6 +159,33 @@ readonly TLS_CERTS_TEMPLATE='{{with index .data "tls.crt"}}{{base64decode .}}{{e
 # and X509_V_ERR_CERT_HAS_EXPIRED). certificate_state reports the time of the
 # server certificate itself, in its own words.
 readonly VERIFY_TIME_ERRORS_RE='^error (9|10) at 0 depth lookup:'
+readonly CERTIFICATE_COMMAND="sudo meho-host certificate --cert <chain.pem> --key <key.pem>"
+readonly CHAIN_HINT="put the server certificate first into one file, then every intermediate CA certificate, and your CA certificate last. Then run: $CERTIFICATE_COMMAND"
+readonly PEM_CERT_BEGIN='-----BEGIN CERTIFICATE-----'
+readonly PEM_CERT_END='-----END CERTIFICATE-----'
+# OpenBao of the core (#4044, #4046): the StatefulSet <release>-vault with
+# one pod, whose server container is named after its program, bao. While
+# the Secret <release>-core-vault-unseal exists, the pod's unseal helper
+# unseals OpenBao after every restart with the key in it ("key"). Without
+# the Secret, a keyholder unseals it by hand (keyholder mode; core.md
+# section 4, sub-decision 9).
+readonly UNSEAL_SECRET=meho-core-vault-unseal
+readonly OPENBAO_STATEFULSET=meho-vault
+readonly OPENBAO_POD=meho-vault-0
+readonly OPENBAO_CONTAINER=bao
+# The label of the Secrets the core's Jobs make
+# (backend/src/meho_backplane/core/secrets.py, MANAGED_BY_LABELS).
+readonly CORE_SECRET_LABEL='"meho.evoila.com/managed-by":"core-bootstrap"'
+# An unseal key as OpenBao gives it (base64), or as hex.
+readonly UNSEAL_KEY_RE='^[A-Za-z0-9+/]+={0,2}$'
+# With --ignore-not-found, kubectl prints nothing when the Secret does not
+# exist. When it exists, this prints the line "present", then the key.
+readonly UNSEAL_SECRET_TEMPLATE='{{"present\n"}}{{with index .data "key"}}{{base64decode .}}{{end}}'
+# After a restart, meho-host asks OpenBao every 5 seconds, 60 times: 5 minutes.
+readonly OPENBAO_WAIT_TRIES=60
+readonly OPENBAO_WAIT_SECONDS=5
+readonly OPENBAO_WAIT_TEXT="5 minutes"
+readonly UNSEAL_COMMAND="sudo meho-host unseal"
 
 COMMAND=""
 BUNDLE_WORK=""
@@ -160,6 +195,13 @@ CHECK_NAMES=()
 CHECK_STATUSES=()
 CHECK_DETAILS=()
 CHECK_HINTS=()
+# The unseal key the admin gave, the key in the unseal Secret, and the seal
+# state of OpenBao. They are variables, not command output, so no key passes
+# through a command line. The commands clear the keys when they are done.
+UNSEAL_KEY=""
+UNSEAL_SECRET_FOUND=0
+UNSEAL_SECRET_KEY=""
+SEAL_STATE=unknown
 
 usage() {
     cat <<'HELP'
@@ -170,6 +212,9 @@ Run it as root:
   sudo meho-host support-bundle
   sudo meho-host admin-network 10.0.50.0/24
   sudo meho-host uninstall
+  sudo meho-host certificate --cert chain.pem --key key.pem
+  sudo meho-host keyholder on
+  sudo meho-host unseal
 
 Commands:
   check [--json]    Check the built-in Kubernetes (RKE2) and the hardening
@@ -202,7 +247,33 @@ Commands:
                     firewall stays on, and a line names the command that
                     removes it. A restart of the machine brings back the
                     operating system's own kernel values.
+  certificate --cert <chain.pem> --key <key.pem>
+                    Install your own certificate for the console, the API
+                    and the login. chain.pem holds the server certificate
+                    first, then the intermediate CA certificates, and your
+                    CA certificate last. key.pem holds the private key of
+                    the server certificate, without a pass phrase. It
+                    checks that the key belongs to the certificate, that
+                    the certificate names the host name of this install
+                    and is valid now, and that the chain ends at your CA.
+                    When a check fails, nothing changes. At the end it
+                    prints the certificate line of check.
+  keyholder on      OpenBao, the password safe of MEHO, stays sealed after
+                    every restart, and MEHO waits, until a keyholder runs
+                    unseal. It asks for the unseal key, to show that the
+                    key is in your key store, then deletes the key from
+                    the built-in Kubernetes and restarts OpenBao.
+  keyholder off     OpenBao unseals itself after every restart again. It
+                    asks for the unseal key, keeps it in the built-in
+                    Kubernetes and restarts OpenBao.
+  unseal            Unseal OpenBao by hand in keyholder mode, with the key
+                    from your key store. It prints unsealed or sealed.
   -h, --help        Show this help and stop.
+
+The unseal key: keyholder and unseal ask for it with a hidden prompt. When
+standard input is not a terminal, they read one line of it instead, for
+example from a script. Never give the key on the command line: it would
+stay in the shell history.
 
 Exit codes:
   0  check: every line is ok or a warning; the other commands: done
@@ -549,7 +620,7 @@ certificate_state() {
 # the login show to the browser and to the meho CLI.
 check_console_certificate() {
     local host certs chain ca state hint
-    hint="the console needs a certificate for the host name of this install, valid for more than $CONSOLE_CERT_MIN_DAYS days. $SUPPORT_HINT"
+    hint="install a certificate for the host name of this install that is valid for more than $CONSOLE_CERT_MIN_DAYS days: $CERTIFICATE_COMMAND"
     if ! command -v openssl >/dev/null 2>&1; then
         result console-certificate fail "openssl not found, so the certificate cannot be checked." \
             "install the package openssl from your distribution's mirror, then run the check again."
@@ -1090,6 +1161,402 @@ command_uninstall() {
         "$CIS_SYSCTL_FILE"
 }
 
+# pem_certificates <file>: the certificates of a PEM file in their order,
+# and nothing else: no private key, and none of the text that some tools
+# write around them ("subject=" lines, "Bag Attributes"). Windows line ends
+# are removed.
+pem_certificates() {
+    awk -v begin="$PEM_CERT_BEGIN" -v end="$PEM_CERT_END" '
+        { sub(/\r$/, "") }
+        $0 == begin { on = 1 }
+        on { print }
+        $0 == end { on = 0 }
+    ' "$1"
+}
+
+# pem_count <certificates>: the number of certificates in the output of
+# pem_certificates.
+pem_count() {
+    awk -v begin="$PEM_CERT_BEGIN" '$0 == begin { n++ } END { print n + 0 }' <<<"$1"
+}
+
+# pem_block <certificates> <first|last>: the first or the last certificate
+# of the output of pem_certificates.
+pem_block() {
+    awk -v which="$2" -v begin="$PEM_CERT_BEGIN" -v end="$PEM_CERT_END" '
+        $0 == begin { block = "" }
+        { block = block $0 "\n" }
+        $0 == end {
+            if (which == "first") { printf "%s", block; exit }
+            last = block
+        }
+        END { if (which == "last") printf "%s", last }
+    ' <<<"$1"
+}
+
+# write_console_tls <certificates> <CA certificate> <key file>: the chain
+# goes into tls.crt, the CA into ca.crt and the key into tls.key of the
+# console's TLS Secret, in one merge patch. So the Secret keeps its labels,
+# and the chart's secrets Job keeps it at every update: it keeps a Secret
+# that has all three keys (backend/src/meho_backplane/core/secrets.py). The
+# key is written as openssl pkey prints it: PKCS#8, without a pass phrase.
+# It goes from openssl through base64 into a variable, and the patch goes
+# to kubectl on standard input, so the key is never on a command line.
+# kubectl's messages are not shown: an error text could quote the patch.
+write_console_tls() {
+    local chain=$1 ca=$2 key_file=$3 tls_crt tls_key ca_crt
+    tls_crt=$(printf '%s\n' "$chain" | base64 -w 0)
+    ca_crt=$(printf '%s\n' "$ca" | base64 -w 0)
+    tls_key=$(openssl pkey -in "$key_file" -passin pass: </dev/null 2>/dev/null | base64 -w 0) || return 1
+    [[ -n $tls_key ]] || return 1
+    printf '{"data":{"tls.crt":"%s","tls.key":"%s","ca.crt":"%s"}}\n' "$tls_crt" "$tls_key" "$ca_crt" |
+        rke2_kubectl -n "$MEHO_NAMESPACE" patch secret "$CONSOLE_TLS_SECRET" \
+            --type=merge --patch-file=/dev/stdin >/dev/null 2>&1
+}
+
+# check_new_certificate <host> <file> <certificates>: stop with one [FAIL]
+# line unless the chain is complete and the server certificate passes the
+# rule of the console certificate (certificate_state), with the last
+# certificate of the file as the CA. A chain of one certificate, or one
+# that ends with the server certificate again, would pass the rule with
+# the server certificate as its own CA, so it is refused first.
+check_new_certificate() {
+    local host=$1 cert_file=$2 chain=$3 count ca state problems
+    count=$(pem_count "$chain")
+    if ((count == 0)); then
+        fail "$cert_file holds no certificate. Nothing was changed." "$CHAIN_HINT"
+    elif ((count == 1)); then
+        fail "$cert_file holds only one certificate, so the chain to your CA is missing. Nothing was changed." "$CHAIN_HINT"
+    fi
+    ca=$(pem_block "$chain" last)
+    [[ $ca != "$(pem_block "$chain" first)" ]] ||
+        fail "the last certificate of $cert_file is the server certificate again, so the chain to your CA is missing. Nothing was changed." "$CHAIN_HINT"
+    openssl x509 -noout <<<"$chain" 2>/dev/null ||
+        fail "openssl cannot read the first certificate of $cert_file. Nothing was changed." "$CHAIN_HINT"
+    state=$(certificate_state "$host" "$chain" "$ca" "$(date -u +%s)")
+    if [[ $state == fail:* ]]; then
+        problems=${state#fail: }
+        problems=${problems//"its chain to ca.crt"/"its chain to your CA, the last certificate of $cert_file,"}
+        fail "the certificate in $cert_file cannot be used: $problems. Nothing was changed." \
+            "give a certificate for $host that is valid now, and $CHAIN_HINT"
+    fi
+}
+
+# check_new_key <certificate file> <key file> <certificates>: stop with one
+# [FAIL] line unless the key file holds a private key without a pass phrase
+# whose public key is the one of the server certificate. "-passin pass:"
+# gives an empty pass phrase, so openssl refuses an encrypted key at once
+# and never asks for one.
+check_new_key() {
+    local cert_file=$1 key_file=$2 chain=$3 key_public cert_public
+    key_public=$(openssl pkey -in "$key_file" -passin pass: -pubout </dev/null 2>/dev/null) ||
+        fail "$key_file holds no private key that openssl can read without a pass phrase. Nothing was changed." \
+            "give the private key without a pass phrase: Traefik, which shows the certificate, cannot ask for one. This writes a copy without it: openssl pkey -in <key.pem> -out <new-key.pem>"
+    cert_public=$(openssl x509 -noout -pubkey <<<"$chain" 2>/dev/null) || cert_public=""
+    [[ $key_public == "$cert_public" ]] ||
+        fail "the key in $key_file does not belong to the server certificate, the first one in $cert_file. Nothing was changed." \
+            "give the private key that was made together with the request for this certificate."
+}
+
+command_certificate() {
+    local cert_file="" key_file="" host chain
+    while (($# > 0)); do
+        case $1 in
+            --cert | --key)
+                (($# >= 2)) || usage_error "certificate: $1 needs a file."
+                if [[ $1 == --cert ]]; then cert_file=$2; else key_file=$2; fi
+                shift
+                ;;
+            *) usage_error "unknown option of certificate: $1" ;;
+        esac
+        shift
+    done
+    [[ -n $cert_file && -n $key_file ]] ||
+        usage_error "certificate needs both files: --cert <chain.pem> --key <key.pem>."
+    check_root
+    command -v openssl >/dev/null 2>&1 ||
+        fail "openssl not found, so the certificate cannot be checked. Nothing was changed." \
+            "install the package openssl from your distribution's mirror, then run the command again."
+    host=$(install_hostname) || host=""
+    [[ -n $host ]] ||
+        fail "the host name is not in $MEHO_INSTALL_RECORD, so the certificate cannot be checked. Nothing was changed." "$SUPPORT_HINT"
+    [[ -f $cert_file && -r $cert_file ]] ||
+        fail "$cert_file cannot be read. Nothing was changed." "give the path of the file with the certificate chain."
+    [[ -f $key_file && -r $key_file ]] ||
+        fail "$key_file cannot be read. Nothing was changed." "give the path of the file with the private key."
+    chain=$(pem_certificates "$cert_file")
+    check_new_certificate "$host" "$cert_file" "$chain"
+    check_new_key "$cert_file" "$key_file" "$chain"
+    write_console_tls "$chain" "$(pem_block "$chain" last)" "$key_file" ||
+        fail "the Secret $CONSOLE_TLS_SECRET could not be changed, so the console keeps its certificate." \
+            "check the node and pods lines: sudo meho-host check. Then $SUPPORT_HINT"
+    ok "installed the certificate for $host in the Secret $CONSOLE_TLS_SECRET: the console, the API and the login show it within a minute"
+    note "browsers and the meho CLI trust it when the computer trusts your CA."
+    # shortcut: the first-start list (#4042) is not built yet. Until it is,
+    # this prints the certificate line of check, which reads the Secret
+    # again with the same rule. Print the first-start list when #4042 lands.
+    check_console_certificate
+    print_checks
+    if in_list fail "${CHECK_STATUSES[@]}"; then
+        exit 1
+    fi
+}
+
+# read_unseal_key: one unseal key into UNSEAL_KEY. On a terminal, read
+# prints the prompt and hides what is typed (-s). Otherwise read leaves out
+# the prompt and reads one line of standard input. White space is removed,
+# as the chart's unseal helper removes it. meho-host never prints the key.
+read_unseal_key() {
+    UNSEAL_KEY=""
+    IFS= read -r -s -p "Unseal key (it is not shown): " UNSEAL_KEY || true
+    if [[ -t 0 ]]; then
+        printf '\n' >&2
+    fi
+    UNSEAL_KEY=${UNSEAL_KEY//[[:space:]]/}
+    [[ -n $UNSEAL_KEY ]] ||
+        fail "no unseal key was given. Nothing was changed." \
+            "run the command again and give the key from your key store, on the prompt or on standard input."
+    if [[ ! $UNSEAL_KEY =~ $UNSEAL_KEY_RE ]]; then
+        UNSEAL_KEY=""
+        fail "this is not an unseal key: an unseal key holds only letters, digits, + and /, with = at the end. Nothing was changed." \
+            "copy the key again from your key store, with nothing before or after it."
+    fi
+}
+
+# read_unseal_secret: UNSEAL_SECRET_FOUND is 1 when the unseal Secret
+# exists, and UNSEAL_SECRET_KEY holds its key. False when RKE2 does not
+# answer. The key goes from kubectl straight into the variable.
+read_unseal_secret() {
+    local answer
+    UNSEAL_SECRET_FOUND=0
+    UNSEAL_SECRET_KEY=""
+    answer=$(rke2_kubectl -n "$MEHO_NAMESPACE" get secret "$UNSEAL_SECRET" --ignore-not-found \
+        -o go-template="$UNSEAL_SECRET_TEMPLATE" 2>/dev/null) || return 1
+    [[ -n $answer ]] || return 0
+    UNSEAL_SECRET_FOUND=1
+    answer=${answer#present}
+    UNSEAL_SECRET_KEY=${answer//[[:space:]]/}
+}
+
+# create_unseal_secret: the unseal Secret with UNSEAL_KEY, as the vault-init
+# Job makes it (backend/src/meho_backplane/core/vault_init.py): type Opaque,
+# the key under "key", and the label of the core's Secrets. The manifest
+# goes to kubectl on standard input, and kubectl create keeps no copy of it
+# in an annotation (kubectl apply would). UNSEAL_KEY passed the check of
+# read_unseal_key, so it needs no JSON escaping. kubectl's messages are not
+# shown: an error text could quote the manifest.
+create_unseal_secret() {
+    printf '{"apiVersion":"v1","kind":"Secret","type":"Opaque","metadata":{"name":"%s","labels":{%s}},"stringData":{"key":"%s"}}\n' \
+        "$UNSEAL_SECRET" "$CORE_SECRET_LABEL" "$UNSEAL_KEY" |
+        rke2_kubectl -n "$MEHO_NAMESPACE" create -f - >/dev/null 2>&1
+}
+
+delete_unseal_secret() {
+    rke2_kubectl -n "$MEHO_NAMESPACE" delete secret "$UNSEAL_SECRET" --ignore-not-found >/dev/null
+}
+
+# openbao_seal_state: SEAL_STATE is unsealed, sealed or unknown, from the
+# exit code of "bao status" in the OpenBao pod: 0 unsealed, 2 sealed, 1 an
+# error. kubectl exec exits with the exit code of the command in the pod.
+# Any other failure, such as a pod that does not run yet, is unknown.
+openbao_seal_state() {
+    local rc=0
+    rke2_kubectl -n "$MEHO_NAMESPACE" exec "$OPENBAO_POD" -c "$OPENBAO_CONTAINER" -- \
+        bao status >/dev/null 2>&1 || rc=$?
+    case $rc in
+        0) SEAL_STATE=unsealed ;;
+        2) SEAL_STATE=sealed ;;
+        *) SEAL_STATE=unknown ;;
+    esac
+}
+
+# send_unseal_key: UNSEAL_KEY goes to OpenBao's unseal API (/v1/sys/unseal,
+# the key in the request body) inside the pod. "bao write sys/unseal key=-"
+# reads the value from standard input, as the chart's unseal helper does.
+# Its output is thrown away, because an error text could quote the request.
+# A wrong key leaves OpenBao sealed. SEAL_STATE then says the result.
+send_unseal_key() {
+    printf '%s' "$UNSEAL_KEY" |
+        rke2_kubectl -n "$MEHO_NAMESPACE" exec -i "$OPENBAO_POD" -c "$OPENBAO_CONTAINER" -- \
+            bao write sys/unseal key=- >/dev/null 2>&1 || true
+    openbao_seal_state
+}
+
+openbao_pod_uid() {
+    rke2_kubectl -n "$MEHO_NAMESPACE" get pod "$OPENBAO_POD" -o jsonpath='{.metadata.uid}' 2>/dev/null || true
+}
+
+# restart_openbao <unsealed|any>: restart OpenBao's StatefulSet, then wait
+# until its new pod answers. The new pod is told from the old one by its
+# uid. "unsealed" waits until it is unsealed: with the Secret, the unseal
+# helper unseals it a few seconds after the start. "any" stops at the first
+# answer. SEAL_STATE then holds the last state of the new pod: unknown when
+# it did not answer within 5 minutes. False when kubectl cannot restart it.
+# The StatefulSet replaces a sealed pod too: its podManagementPolicy is
+# Parallel, so it does not wait for the old pod to be ready.
+restart_openbao() {
+    local wanted=$1 old_uid uid try
+    old_uid=$(openbao_pod_uid)
+    rke2_kubectl -n "$MEHO_NAMESPACE" rollout restart "statefulset/$OPENBAO_STATEFULSET" >/dev/null || return 1
+    SEAL_STATE=unknown
+    for ((try = 0; try < OPENBAO_WAIT_TRIES; try++)); do
+        sleep "$OPENBAO_WAIT_SECONDS"
+        uid=$(openbao_pod_uid)
+        [[ -n $uid && $uid != "$old_uid" ]] || continue
+        openbao_seal_state
+        if [[ $SEAL_STATE == unsealed || ($wanted == any && $SEAL_STATE == sealed) ]]; then
+            return 0
+        fi
+    done
+}
+
+forget_unseal_keys() {
+    UNSEAL_KEY=""
+    UNSEAL_SECRET_KEY=""
+}
+
+# keyholder_on: the admin gives the unseal key, and it must be the key in
+# the Secret: a "yes" proves nothing, and without the key nobody can open
+# OpenBao after the next restart. Then the Secret goes, and OpenBao
+# restarts sealed.
+keyholder_on() {
+    read_unseal_secret ||
+        fail "RKE2 does not answer, so meho-host cannot read the Secret $UNSEAL_SECRET. Nothing was changed." \
+            "check the node and pods lines: sudo meho-host check. Then $SUPPORT_HINT"
+    if ((UNSEAL_SECRET_FOUND == 0)); then
+        ok "OpenBao is in keyholder mode already: a keyholder unseals it after every restart. Nothing was changed."
+        return 0
+    fi
+    if [[ -z $UNSEAL_SECRET_KEY ]]; then
+        fail "the Secret $UNSEAL_SECRET holds no unseal key, so meho-host cannot check yours. Nothing was changed." "$SUPPORT_HINT"
+    fi
+    printf 'In keyholder mode, OpenBao stays sealed after every restart of its pod or of this machine, and MEHO waits, until a keyholder runs: %s. Without the unseal key, nobody can open the secrets of MEHO again. Give the key from your key store, to show that it is there.\n' \
+        "$UNSEAL_COMMAND"
+    read_unseal_key
+    if [[ $UNSEAL_KEY != "$UNSEAL_SECRET_KEY" ]]; then
+        forget_unseal_keys
+        fail "this is not the unseal key of this OpenBao. Nothing was changed." \
+            "copy the key again from your key store. If it is not there, copy it there first from $MEHO_UNSEAL_KEY_FILE, while that file exists."
+    fi
+    forget_unseal_keys
+    delete_unseal_secret ||
+        fail "the Secret $UNSEAL_SECRET could not be deleted. Nothing was changed." \
+            "check the node and pods lines: sudo meho-host check. Then $SUPPORT_HINT"
+    ok "deleted the Secret $UNSEAL_SECRET: OpenBao no longer unseals itself"
+    if [[ -e ${HOST_ROOT}${MEHO_UNSEAL_KEY_FILE} ]]; then
+        warn "$MEHO_UNSEAL_KEY_FILE still holds the unseal key on this machine. Delete it now that the key is in your key store: rm $MEHO_UNSEAL_KEY_FILE"
+    fi
+    note "restarting OpenBao. This can take up to $OPENBAO_WAIT_TEXT."
+    restart_openbao any ||
+        fail "OpenBao could not be restarted, so it stays unsealed until its next restart. From then on, a keyholder unseals it." \
+            "check the node and pods lines: sudo meho-host check. Then $SUPPORT_HINT"
+    case $SEAL_STATE in
+        sealed) ok "OpenBao restarted and is sealed, so MEHO waits now. Unseal it with: $UNSEAL_COMMAND" ;;
+        unsealed) warn "OpenBao restarted and is unsealed already: someone unsealed it. From its next restart on, a keyholder unseals it." ;;
+        *)
+            fail "OpenBao did not answer within $OPENBAO_WAIT_TEXT after the restart. It is in keyholder mode." \
+                "check the pods line: sudo meho-host check. When OpenBao runs, unseal it with: $UNSEAL_COMMAND. If it does not start, $SUPPORT_HINT"
+            ;;
+    esac
+}
+
+# keyholder_off: the key goes into the Secret again, and OpenBao restarts,
+# which proves that the unseal helper unseals it with the key. When OpenBao
+# is sealed now, the key is checked first by unsealing it. When it is
+# unsealed, only the restart can check the key: when OpenBao stays sealed,
+# the Secret goes again, so the mode stays what OpenBao really does.
+keyholder_off() {
+    read_unseal_secret ||
+        fail "RKE2 does not answer, so meho-host cannot read the Secret $UNSEAL_SECRET. Nothing was changed." \
+            "check the node and pods lines: sudo meho-host check. Then $SUPPORT_HINT"
+    UNSEAL_SECRET_KEY=""
+    if ((UNSEAL_SECRET_FOUND)); then
+        ok "OpenBao unseals itself already: the Secret $UNSEAL_SECRET holds its key. Nothing was changed."
+        return 0
+    fi
+    printf 'OpenBao will unseal itself after every restart again: the unseal key is kept in the Secret %s on this machine, next to the data. Give the key from your key store.\n' \
+        "$UNSEAL_SECRET"
+    read_unseal_key
+    openbao_seal_state
+    if [[ $SEAL_STATE == sealed ]]; then
+        send_unseal_key
+        if [[ $SEAL_STATE != unsealed ]]; then
+            forget_unseal_keys
+            fail "OpenBao is still sealed after the key was sent, so this is not the unseal key of this OpenBao. Nothing was changed." \
+                "copy the key again from your key store, and run the command again."
+        fi
+        ok "unsealed OpenBao with the key"
+    fi
+    if ! create_unseal_secret; then
+        forget_unseal_keys
+        fail "the Secret $UNSEAL_SECRET could not be created. Nothing was changed." \
+            "check the node and pods lines: sudo meho-host check. Then $SUPPORT_HINT"
+    fi
+    forget_unseal_keys
+    ok "created the Secret $UNSEAL_SECRET with the unseal key"
+    note "restarting OpenBao. This can take up to $OPENBAO_WAIT_TEXT."
+    restart_openbao unsealed ||
+        fail "OpenBao could not be restarted. The Secret is there, so OpenBao unseals itself from its next restart on." \
+            "check the node and pods lines: sudo meho-host check. Then $SUPPORT_HINT"
+    case $SEAL_STATE in
+        unsealed) ok "OpenBao restarted and unsealed itself: it does so after every restart now" ;;
+        sealed)
+            delete_unseal_secret 2>/dev/null ||
+                fail "OpenBao is still sealed $OPENBAO_WAIT_TEXT after the restart, so the key in the Secret $UNSEAL_SECRET does not unseal it, and the Secret could not be deleted again." \
+                    "unseal OpenBao with the right key: $UNSEAL_COMMAND. Then $SUPPORT_HINT"
+            fail "OpenBao is still sealed $OPENBAO_WAIT_TEXT after the restart, so the key does not unseal it. meho-host deleted the Secret $UNSEAL_SECRET again: OpenBao stays in keyholder mode." \
+                "unseal it with the right key from your key store: $UNSEAL_COMMAND. Then run sudo meho-host keyholder off again with the same key."
+            ;;
+        *)
+            fail "OpenBao did not answer within $OPENBAO_WAIT_TEXT after the restart. The Secret is there, so OpenBao unseals itself when it runs." \
+                "check the pods line: sudo meho-host check. If OpenBao does not start, $SUPPORT_HINT"
+            ;;
+    esac
+}
+
+command_keyholder() {
+    # The value is not printed: a key given by mistake would show.
+    (($# == 1)) && [[ $1 == on || $1 == off ]] ||
+        usage_error "keyholder takes one value: on or off. The unseal key is never given on the command line."
+    check_root
+    if [[ $1 == on ]]; then
+        keyholder_on
+    else
+        keyholder_off
+    fi
+}
+
+command_unseal() {
+    (($# == 0)) ||
+        usage_error "unseal takes no argument: it reads the unseal key from a hidden prompt or from standard input, never from the command line."
+    check_root
+    openbao_seal_state
+    case $SEAL_STATE in
+        unsealed)
+            ok "unsealed: OpenBao is unsealed already. Nothing was changed."
+            return 0
+            ;;
+        unknown)
+            fail "OpenBao does not answer, so it cannot be unsealed now." \
+                "check the pods line: sudo meho-host check. If OpenBao does not start, $SUPPORT_HINT"
+            ;;
+    esac
+    read_unseal_key
+    send_unseal_key
+    forget_unseal_keys
+    case $SEAL_STATE in
+        unsealed) ok "unsealed: OpenBao is open again, and MEHO is ready within a minute. Check it with: sudo meho-host check" ;;
+        sealed)
+            fail "sealed: OpenBao is still sealed, so this is not the unseal key of this OpenBao." \
+                "copy the key again from your key store, and run $UNSEAL_COMMAND again."
+            ;;
+        *)
+            fail "OpenBao stopped answering, so meho-host cannot tell whether it is unsealed." \
+                "run $UNSEAL_COMMAND again. If OpenBao does not start, $SUPPORT_HINT"
+            ;;
+    esac
+}
+
 main() {
     (($# > 0)) || usage_error "no command given."
     COMMAND=$1
@@ -1101,6 +1568,9 @@ main() {
         support-bundle) command_support_bundle "$@" ;;
         admin-network) command_admin_network "$@" ;;
         uninstall) command_uninstall "$@" ;;
+        certificate) command_certificate "$@" ;;
+        keyholder) command_keyholder "$@" ;;
+        unseal) command_unseal "$@" ;;
         *) usage_error "unknown command: $COMMAND" ;;
     esac
 }

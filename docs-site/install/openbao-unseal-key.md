@@ -12,7 +12,19 @@ what to do in an emergency.
 The commands below are for an install on your own Kubernetes. Replace
 `<namespace>` and `<release>` with your Helm namespace and release name.
 Where MEHO's installer runs the cluster for you, the installer has its own
-commands for the same steps.
+commands for the same steps. On a Linux server installed with MEHO's
+`install.sh`, they are:
+
+| Step | Command on the Linux server |
+| --- | --- |
+| From self-unseal to keyholder at boot | `sudo meho-host keyholder on` |
+| From keyholder at boot to self-unseal | `sudo meho-host keyholder off` |
+| Unseal by hand (keyholder at boot) | `sudo meho-host unseal` |
+
+Each of them asks for the unseal key with a hidden prompt. The two
+`keyholder` commands then restart OpenBao. `keyholder on` deletes the
+Secret only after you gave the key that is in it, so the key is in your
+key store before it leaves the machine.
 
 ## Two modes
 

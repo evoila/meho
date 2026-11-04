@@ -71,7 +71,9 @@ the tests set it, as `install.sh` does.
    appliance; and the first-start service and the console banner
    (`firststart/`, [appliance-firststart.md](appliance-firststart.md)):
    the scripts under `/opt/meho/appliance/firststart/`, the two units
-   under `/etc/systemd/system/`, both enabled. They run at the customer's
+   under `/etc/systemd/system/`, both enabled. `banner.sh` gets the git
+   commit of this checkout as `DOCS_REF`, for its link to the boot-menu
+   steps (`main` when the checkout has no git). They run at the customer's
    first boot; the build VM does not boot again. Then the OS hardening
    (`harden_os`, [appliance-cis.md](appliance-cis.md)): `build.sh`
    downloads the CIS content of ComplianceAsCode (pinned with its sha512,

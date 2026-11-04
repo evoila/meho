@@ -227,10 +227,12 @@ Writes `/etc/issue` (0644) in one step:
   ago than its inactive days (45 with the CIS settings). Otherwise a
   finished appliance shows a `[WARN]` with the way back in through the boot
   menu and a link to the section below, in place of the expiry warning. The
-  link points to this file at the release tag of the appliance's MEHO
-  version (`v<version>`), so a later change on `main` cannot break it; a
-  build of a `main` commit (`0.1.<date>-<commit>`) has no tag and links to
-  `main`. It names the commands to run there: `passwd admin`, and also
+  link points to this file at the git commit the appliance's scripts come
+  from: `build.sh` writes `git rev-parse HEAD` of its checkout into
+  `DOCS_REF` in `banner.sh` when it installs it. So the steps always match
+  the scripts, also when the build takes an older release download, whose
+  tag may not have this file, and a later change on `main` cannot break the
+  link. Without git, `DOCS_REF` stays `main`. It names the commands to run there: `passwd admin`, and also
   `chage -E -1 admin` when the account has passed its expiry date, because
   a new password does not change that date. A disabled account also
   refuses SSH keys ("Your account has expired").

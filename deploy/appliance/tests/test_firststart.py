@@ -13,6 +13,7 @@ import unittest
 
 from firststart_harness import (
     APPLIANCE,
+    BANNER_SH,
     DOWNLOAD,
     JOIN_TOKEN,
     PASSWORD,
@@ -709,26 +710,27 @@ class BannerTests(FirstStartTestCase):
                 if line == locked:
                     self.assertNotIn("chage", banner)
 
-    def test_the_boot_menu_link_points_to_the_release_of_this_appliance(self) -> None:
+    def test_the_boot_menu_link_follows_the_commit_of_the_scripts_not_the_download(
+        self,
+    ) -> None:
         self.assert_succeeds(self.vm.run())
         self.vm.answer("shadow", "admin:!$y$hash:0:0:365:7:45::\n")
-        doc = "docs/codebase/appliance-firststart.md"
-        # The MEHO version of the download, and the git ref the link uses.
-        cases = {
-            "0.43.0": "v0.43.0",
-            "0.44.0-rc.1": "v0.44.0-rc.1",
-            "0.1.20261103-caf1eae": "main",
-            "": "main",
-        }
-        for version, ref in cases.items():
-            with self.subTest(version=version):
-                self.vm.host_file(f"{DOWNLOAD}/VERSION", f"MEHO_VERSION={version}\n")
+        # Newer scripts on an older release download, whose tag has no such doc.
+        self.vm.host_file(f"{DOWNLOAD}/VERSION", "MEHO_VERSION=0.43.0\n")
+        link = "The steps: https://github.com/evoila/meho/blob/{}/docs/codebase/appliance-firststart.md,\n"
 
-                banner = self.vm.banner()
+        self.assertIn(link.format("main"), self.vm.banner())
 
-                self.assertIn(
-                    f"The steps: https://github.com/evoila/meho/blob/{ref}/{doc},\n", banner
-                )
+        # build.sh writes the commit of the scripts into this one line.
+        script = BANNER_SH.read_text()
+        self.assertEqual(1, script.count("\nreadonly DOCS_REF=main\n"))
+        stamped = self.vm.fake / "banner.sh"
+        stamped.write_text(
+            script.replace("\nreadonly DOCS_REF=main\n", "\nreadonly DOCS_REF=0123abc\n")
+        )
+        stamped.chmod(0o755)
+
+        self.assertIn(link.format("0123abc"), self.vm.banner(stamped))
 
 
 if __name__ == "__main__":

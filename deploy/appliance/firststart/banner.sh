@@ -31,17 +31,11 @@ readonly VERSION_FILE=/opt/meho/appliance/download/VERSION
 readonly ONE_TIME_FILES=(/var/lib/meho/first-login-passwords /var/lib/meho/unseal-key /var/lib/meho/bootloader-password)
 readonly ADMIN_USER=admin
 readonly WARN_DAYS=30
-
-# boot_menu_doc <MEHO version>: the link to the boot-menu steps, at the
-# release tag of this appliance, so a later change on main cannot break it.
-# A build of a main commit (0.1.<date>-<commit>) has no tag: main then.
-boot_menu_doc() {
-    local ref=main
-    if [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ && ! $1 =~ ^0\.1\.[0-9]{8}- ]]; then
-        ref=v$1
-    fi
-    printf 'https://github.com/evoila/meho/blob/%s/docs/codebase/appliance-firststart.md' "$ref"
-}
+# The git commit of these scripts, for the link to the boot-menu steps.
+# build.sh writes it here when it installs them, so the steps always match
+# this appliance, whatever download it was built with. Without git: main.
+readonly DOCS_REF=main
+readonly BOOT_MENU_DOC="https://github.com/evoila/meho/blob/$DOCS_REF/docs/codebase/appliance-firststart.md"
 
 # admin_can_log_in: whether the admin account takes a login, as pam_unix
 # decides it (check_shadow_expiry): it has a password that is not locked
@@ -117,7 +111,7 @@ banner() {
         fi
         printf '\n  [WARN] %s.\n' "$problem"
         printf '  To get back in, restart the VM, open the boot menu with the bootloader password from your key store,\n'
-        printf '  and %s. The steps: %s,\n' "$fix" "$(boot_menu_doc "$version")"
+        printf '  and %s. The steps: %s,\n' "$fix" "$BOOT_MENU_DOC"
         printf '  section "The boot menu, after a lost password or a locked admin".\n'
     elif [[ -n $days ]] && ((days < WARN_DAYS)); then
         if ((days < 0)); then

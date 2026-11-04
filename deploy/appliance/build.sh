@@ -363,8 +363,11 @@ run_form2_install() {
 }
 
 add_appliance_pieces() {
-    local name
+    local name docs_ref
     name=$(basename "$MEHO_DOWNLOAD" .tar)
+    # The banner links to the docs of the commit these scripts come from,
+    # not of the download's version, which may be an older release.
+    docs_ref=$(git -C "$APPLIANCE_DIR" rev-parse HEAD 2>/dev/null) || docs_ref=main
     # The unpacked download without the RKE2 files and the image archive,
     # which are already where RKE2 reads them: install.sh --from-disk needs
     # the rest at first start.
@@ -378,6 +381,7 @@ add_appliance_pieces() {
     scp_build -r "$APPLIANCE_DIR/firststart" "$BUILD_USER@${MEHO_BUILD_ADDRESS%/*}:meho-firststart"
     ssh_build "sudo install -d -m 0755 /opt/meho/appliance/firststart &&
         sudo install -m 0755 meho-firststart/firststart.sh meho-firststart/banner.sh /opt/meho/appliance/firststart/ &&
+        sudo sed -i 's/^readonly DOCS_REF=main\$/readonly DOCS_REF=$docs_ref/' /opt/meho/appliance/firststart/banner.sh &&
         sudo install -m 0644 meho-firststart/meho-firststart.service meho-firststart/meho-banner.service /etc/systemd/system/ &&
         rm -rf meho-firststart &&
         sudo systemctl daemon-reload &&

@@ -322,8 +322,8 @@ class FakeAppliance:
         """Run first start; the answers are what an admin types on the VM console."""
         return self._run(FIRSTSTART_SH, answers)
 
-    def banner(self) -> str:
-        result = self._run(BANNER_SH)
+    def banner(self, script: Path = BANNER_SH) -> str:
+        result = self._run(script)
         if result.returncode != 0:
             raise AssertionError(result.stdout + result.stderr)
         return self.read("/etc/issue")

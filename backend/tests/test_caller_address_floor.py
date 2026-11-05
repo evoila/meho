@@ -13,7 +13,9 @@ hold without any connector package:
 * an ingested operation that a spec correction marks is raised and counts as
   governed, so a new ingest never lowers it;
 * at dispatch, an override that turns approval off does not remove it, and a
-  row stored with lower values is raised.
+  row stored with lower values is raised;
+* an edit that turns approval off is refused, and the override report shows
+  approval on for an override stored with approval off.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import select, update
 
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
@@ -42,6 +45,11 @@ from meho_backplane.operations.ingest import (
 )
 from meho_backplane.operations.ingest.safety_floors import apply_safety_floor, has_safety_floor
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
+from meho_backplane.operations.op_policy import (
+    OpPolicyEditError,
+    apply_policy_edit,
+    list_overrides,
+)
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.settings import get_settings
 
@@ -343,3 +351,80 @@ async def test_row_stored_with_lower_values_is_raised_at_dispatch(embedding: Asy
 
     assert await _effective(uuid.uuid4()) == ("caution", True)
     assert await _stored(_TYPED["product"], _TYPED_OP) == ("safe", False)
+
+
+# -- operator edits and the override report -----------------------------------
+
+
+def _platform_admin() -> Operator:
+    return Operator(
+        sub="fixture-admin",
+        raw_jwt="header.payload.signature",
+        tenant_id=uuid.uuid4(),
+        tenant_role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+        principal_kind=PrincipalKind.USER,
+    )
+
+
+async def _typed_row(session: Any) -> EndpointDescriptor:
+    return (
+        await session.execute(
+            select(EndpointDescriptor).where(
+                EndpointDescriptor.tenant_id.is_(None), EndpointDescriptor.op_id == _TYPED_OP
+            )
+        )
+    ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_edit_that_turns_approval_off_is_refused(embedding: AsyncMock) -> None:
+    await _register_typed(embedding)
+    async with get_sessionmaker()() as session:
+        with pytest.raises(OpPolicyEditError) as caught:
+            await apply_policy_edit(
+                session,
+                row=await _typed_row(session),
+                scope_tenant_id=None,
+                operator=_platform_admin(),
+                safety_level=None,
+                requires_approval=False,
+                reason="fixture: try to turn approval off",
+                person_present=True,
+                tighten_only=False,
+                max_age_seconds=300,
+            )
+        overrides = (await session.execute(select(OperationPolicyOverride))).scalars().all()
+
+    assert caught.value.code == "approval_off_caller_address"
+    assert overrides == []
+
+
+@pytest.mark.asyncio
+async def test_report_shows_approval_on_for_an_override_that_turned_it_off(
+    embedding: AsyncMock,
+) -> None:
+    await _register_typed(embedding)
+    async with get_sessionmaker()() as session:
+        session.add(
+            OperationPolicyOverride(
+                tenant_id=None,
+                **_TYPED,
+                op_id=_TYPED_OP,
+                requires_approval=False,
+                reason="fixture: stored before the floor",
+                set_by_sub="fixture-admin",
+            )
+        )
+        await session.commit()
+
+    async with get_sessionmaker()() as session:
+        report = await list_overrides(
+            session, operator=_platform_admin(), reduced_approval_only=False
+        )
+        reduced = await list_overrides(
+            session, operator=_platform_admin(), reduced_approval_only=True
+        )
+
+    assert [(row.op_id, policy.requires_approval) for row, policy in report] == [(_TYPED_OP, True)]
+    assert reduced == []

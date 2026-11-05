@@ -698,6 +698,11 @@ target for MEHO.
     does not remove it, and a row stored before the floor is raised when
     it is looked up. Dispatch, preview, search and the satellite runner
     all read this value.
+  - Operator edits: `apply_policy_edit` refuses an edit that turns
+    approval off for a marked operation (`approval_off_caller_address`).
+    The override report (`list_overrides`) applies the floor too, so it
+    never lists approval as off for a marked operation, also not for an
+    override stored before the floor.
 - **Sensors.** A sensor runs only `safe` operations. So a sensor cannot
   use a marked operation: a new one is refused, and the runner reports
   an existing one as `unknown` with the reason `op_not_safe_at_dispatch`.
@@ -1252,6 +1257,7 @@ review payload also carries `classified_safety_level` /
 | a level below the classification | anyone | - | refused, `risk_level_below_classification`: open a pull request |
 | `requires_approval=false` where the classification requires it | platform admin, with a non-empty `reason` and a person present | whole install (built-in) or the row's tenant | override `false`; listed in the reduced-approval report |
 | `requires_approval=false` on a destructive operation | anyone | - | always refused, `approval_off_destructive` |
+| `requires_approval=false` on an operation with a caller-address parameter | anyone | - | always refused, `approval_off_caller_address` |
 
 **Every edit that ends approval passes the same checks.** The rule looks
 at the result, not at the field in the request. When the effective

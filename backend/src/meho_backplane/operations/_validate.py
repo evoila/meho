@@ -45,6 +45,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._errors import _sanitize_free_text
 from meho_backplane.operations._param_errors import describe_violation
+from meho_backplane.operations.caller_address import has_caller_address
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.sandbox_mode import sandbox_mode_active
 from meho_backplane.settings import get_settings
@@ -536,8 +537,11 @@ async def _service_grant_verdict(
     """Consult a standing grant for a parking service-principal op (#3151 / #3349).
 
     Returns ``(AUTO_EXECUTE, reason)`` when a live grant (concrete-target or
-    selector, #3349) clears the gate, else ``(None, gate_reason)`` — with the
-    #3349 null-target hint appended to *gate_reason* when the dispatch is
+    selector, #3349) clears the gate, else ``(None, gate_reason)``. For an
+    op with a parameter marked ``x-meho-caller-address: true`` the grant
+    lookup refuses every row, and *gate_reason* says that a person approves
+    each call. Otherwise *gate_reason* gets the
+    #3349 null-target hint appended when the dispatch is
     target-scoped and the only live candidate for this
     ``(principal, op, connector)`` is a null-target grant (the operator
     likely created it believing null = "any target").
@@ -573,6 +577,13 @@ async def _service_grant_verdict(
         )
     if grant_id is not None:
         return PermissionVerdict.AUTO_EXECUTE, f"auto-granted by standing grant {grant_id}"
+
+    if has_caller_address(descriptor.parameter_schema):
+        note = (
+            "the operation connects to an address the caller gives, so no "
+            "standing grant covers it; a person approves each call"
+        )
+        return None, f"{gate_reason}; {note}" if gate_reason else note
 
     hint = await _null_target_park_hint(
         operator=operator,

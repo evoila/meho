@@ -103,6 +103,7 @@ from meho_backplane.db.models import (
     Target,
 )
 from meho_backplane.delete_names import destructive_action_name_in_op_id
+from meho_backplane.operations.caller_address import has_caller_address
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate, ServiceGrantRead
 from meho_backplane.sandbox_mode import SANDBOX_DELETE_GRANT_MAX_DAYS, sandbox_mode_active
 
@@ -112,6 +113,7 @@ __all__ = [
     "GrantModel",
     "GrantValidationError",
     "ServicePrincipalGrantService",
+    "caller_address_grant_reason",
     "classify_orphaned_grants",
     "consult_and_record_grant",
     "count_live_grants_for_principal",
@@ -295,6 +297,23 @@ def delete_grant_reason(
     if reason is None and descriptor is not None:
         reason = _delete_shaped_reason_by_descriptor(descriptor)
     return reason
+
+
+def caller_address_grant_reason(descriptor: EndpointDescriptor | None) -> str | None:
+    """Return why a grant cannot cover *descriptor*, or ``None`` when it can.
+
+    An operation with a parameter marked ``x-meho-caller-address: true``
+    connects to an address the caller gives. A grant covers an operation,
+    a connector and a target, never the address in the call. So a person
+    approves each call of such an operation: grant create refuses it, and
+    :func:`consult_and_record_grant` never lets a grant row clear it.
+    """
+    if descriptor is None or not has_caller_address(descriptor.parameter_schema):
+        return None
+    return (
+        f"op {descriptor.op_id!r} connects to an address the caller gives; "
+        "a standing grant never covers it, a person approves each call"
+    )
 
 
 def delete_shaped_refusal_reason(op_id: str, patterns: tuple[str, ...]) -> str | None:
@@ -552,7 +571,8 @@ class ServicePrincipalGrantService:
     ) -> ServiceGrantRead:
         """Create one standing grant row after the full create-time review.
 
-        Refuses wildcards, delete-shaped ops, and past/naive expiries;
+        Refuses wildcards, delete-shaped ops, ops that connect to an address
+        the caller gives, and past/naive expiries;
         raises :exc:`GrantValidationError` (→ 422) on any of those or on a
         duplicate active grant for the same fully-scoped key (a duplicate
         target selector included, #3349).
@@ -617,6 +637,9 @@ class ServicePrincipalGrantService:
         descriptor = await _resolve_descriptor_for_classification(
             tenant_id, payload.connector_id, payload.op_id
         )
+        address_reason = caller_address_grant_reason(descriptor)
+        if address_reason is not None:
+            raise GrantValidationError(address_reason)
         delete_reason = delete_grant_reason(
             payload.op_id, get_settings().service_grant_delete_shaped_patterns, descriptor
         )
@@ -1276,6 +1299,11 @@ async def consult_and_record_grant(
     declared level only — no method, no tags — so for it the op id is the
     only sign, and both id signs are checked.
 
+    An op with a parameter marked ``x-meho-caller-address: true`` is refused
+    before any lookup too (:func:`caller_address_grant_reason`), also before
+    a delete grant. A grant row stored before the marker never auto-approves
+    the op: a person approves each call.
+
     **Sandbox mode (#4622).** When the instance runs in sandbox mode and
     the op has any delete sign, a live **delete grant** from
     :class:`~meho_backplane.db.models.SandboxDeleteGrant` is consulted
@@ -1299,6 +1327,19 @@ async def consult_and_record_grant(
     real call sends, and the real call checks the hash and the blast
     radius before it uses the grant.
     """
+    address_reason = caller_address_grant_reason(descriptor)
+    if address_reason is not None:
+        _log.info(
+            "service_grant_refused_caller_address",
+            op_id=descriptor.op_id,
+            connector_id=connector_id,
+            safety_level=descriptor.safety_level,
+            principal_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+            reason=address_reason,
+        )
+        return None
+
     if sandbox_mode_active():
         grant_id = await _consult_delete_grant(
             operator=operator,

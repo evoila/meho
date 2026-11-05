@@ -17,15 +17,14 @@ The layer is deliberately minimal: a Sensor stores a **bounded** assertion
 model carries no transition logic; the admin service owns create/list/get/
 delete, the runner (#2505) owns claim/advance/park and the result write.
 
-Op-specific probe recipes live with their ops. One worth naming here:
-health-checking a **strict-vhost appliance** (a service that vhost-routes
-and 404s unless the request's `Host:` matches — e.g. VCFA behind a
-NAT-alias IP before DNS exists). Pin a `net.http_probe` Sensor with the
-`host_header` param so the probe dials the IP (what the allowlist gates)
-yet sends the virtual host as the `Host:` header and TLS SNI; otherwise a
-by-IP probe reads a misleading 404 / `tls_error` whether the service is
-healthy or wedged. See `docs/codebase/connectors-net-diagnostics.md`
-§ *Vhost-routed probes by IP*.
+Op-specific probe recipes live with their ops. A Sensor runs only `safe`
+operations. An operation with a parameter that holds an address MEHO
+connects to (marked `x-meho-caller-address: true`) is at least `caution`
+and waits for approval, so no Sensor can use it. This covers every `net.*`
+probe and `pfsense.diag.ping`: a new Sensor on one is refused, and the
+runner reports an existing one as `unknown` with the reason
+`op_not_safe_at_dispatch`. See `docs/codebase/spec-ingestion.md`,
+"Caller-address floor".
 
 A second one watches MEHO itself: **loose audit rows** (#4670). The
 `safe`, targetless op `audit.loose_rows` on `audit-integrity-1.x` lists

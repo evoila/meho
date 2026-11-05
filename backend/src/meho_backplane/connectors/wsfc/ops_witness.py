@@ -16,7 +16,9 @@ transport.
 * ``wsfc.witness.set`` reconfigures the witness (``caution``): a **disk**
   witness (``Set-ClusterQuorum -DiskWitness <resource>``), a **file-share**
   witness (``-FileShareWitness <UNC path>``), or **node majority / no witness**
-  (``-NoWitness``).
+  (``-NoWitness``). The cluster connects to the file share the caller gives,
+  so ``path`` carries the caller-address marker and every call waits for a
+  person's approval (:mod:`meho_backplane.operations.caller_address`).
 
 No cloud witness (deliberate)
 -----------------------------
@@ -51,6 +53,7 @@ from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors._shared.pwsh import ps_single_quote, pwsh_run
 from meho_backplane.connectors.wsfc.ops import SSH_TRANSPORT_NOTE, WsfcOp
+from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -230,6 +233,7 @@ WITNESS_OPS: tuple[WsfcOp, ...] = (
                 },
                 "path": {
                     "type": "string",
+                    CALLER_ADDRESS_MARKER: True,
                     "description": "UNC share path (required for ``witness_type='file_share'``).",
                 },
             },
@@ -251,11 +255,12 @@ WITNESS_OPS: tuple[WsfcOp, ...] = (
         group_key="witness",
         tags=("write", "witness", "quorum"),
         safety_level="caution",
-        requires_approval=False,
+        requires_approval=True,
         llm_instructions={
             "when_to_use": (
                 "Reconfigure the quorum witness (disk / file-share / node "
-                "majority). Recoverable; safety_level=caution. No cloud "
+                "majority). Recoverable; safety_level=caution. Each call waits "
+                "until a person approves it. No cloud "
                 "witness in this cut. " + SSH_TRANSPORT_NOTE
             ),
             "parameter_hints": {

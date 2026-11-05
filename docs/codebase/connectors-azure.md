@@ -76,6 +76,8 @@ methods that `AzureConnector` takes over.
   line per list for each family.
 - `_paths.py` keeps the paths, in one marked section per family. It has no
   `__all__`, because every family would add its names at the same place.
+- `trace_mask.py` holds what the flight recorder leaves out of every Azure
+  answer (see [Trace mask](#trace-mask)).
 
 Every place that collects the families has one fixed comment line per family,
 `# <family> (Task #<n>)`, in alphabetical order. A family adds its lines
@@ -308,6 +310,31 @@ itself fails, the text is withheld. The cleaned text goes only into
 `upstream_message`, which the dispatcher filters and cuts once more. The same
 function cleans the error message of a failed long-running operation. MEHO's
 own text names Azure's error code only when it looks like a code.
+
+## Trace mask
+
+When the flight recorder is on, it keeps Azure's answer to each call in the
+trace (the record of one call, for debugging). `AzureConnector.trace_response_body`
+hands it Azure's JSON with the value of each field below replaced by
+`<left out by MEHO: can hold a secret>`, at any depth, in any case and for
+every family; `send` asks this hook for every call, the Blob service calls
+too. The shared filter of the flight recorder then still runs on the result.
+An empty answer, or one that is not JSON, is left to the shared filter as it
+is. An answer the mask cannot walk is left out.
+
+| Field | Where Azure sends it |
+|---|---|
+| `serviceKey`, `authorizationKey` | an ExpressRoute circuit and its authorizations |
+| `activationKey` | an ExpressRoute Direct port, a VPN site |
+| `keys`, `primaryKey`, `secondaryKey` | a `listKeys` answer (storage accounts, Automation accounts) |
+| `parameters` | Automation runbooks and job schedules, deployments, policy assignments |
+| `publishContentLink`, `draft` | Automation runbooks (signed links to the code) |
+
+The shared secret-name rule (`is_secret_param_name`) already hides
+`sharedKey` (VPN connections, ExpressRoute peerings), `adminPassword` (VMs),
+`serverAppSecret` and `secret` (AKS) and `connectionString` (any
+`*ConnectionString`), so `trace_mask.SECRET_FIELDS` does not list them. A test
+checks that the two lists never repeat each other.
 
 ## URL check
 

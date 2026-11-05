@@ -320,7 +320,7 @@ hands it Azure's JSON with the value of each field below replaced by
 every family; `send` asks this hook for every call, the Blob service calls
 too. The shared filter of the flight recorder then still runs on the result.
 An empty answer, or one that is not JSON, is left to the shared filter as it
-is. An answer the mask cannot walk is left out.
+is. An answer the mask cannot parse or walk is left out.
 
 | Field | Where Azure sends it |
 |---|---|

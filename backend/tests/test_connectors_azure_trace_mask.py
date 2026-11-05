@@ -138,6 +138,15 @@ def test_hook_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     assert traced == TRACE_BODY_WITHHELD
 
 
+def test_hook_never_raises_on_json_nested_too_deep_to_parse() -> None:
+    """``json.loads`` raises ``RecursionError`` here, which is not a ``ValueError``."""
+    deep = "[" * 200_000 + "]" * 200_000
+
+    traced = AzureConnector().trace_response_body(httpx.Response(200, text=deep))
+
+    assert traced == TRACE_BODY_WITHHELD
+
+
 def test_storage_caller_trace_uses_the_azure_mask() -> None:
     caller = _StorageCaller(AzureConnector(), {})
 

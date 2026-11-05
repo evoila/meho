@@ -420,8 +420,8 @@ class AzureConnector(
         replaced (:func:`~meho_backplane.connectors.azure.trace_mask.mask_answer`);
         the shared redaction still runs on the result. An empty answer or one
         that is not JSON gives ``None``, so the shared redaction records the
-        raw answer as before. An answer the mask cannot walk is left out
-        (:data:`TRACE_BODY_WITHHELD`). Never raises.
+        raw answer as before. An answer the mask cannot parse or walk is left
+        out (:data:`TRACE_BODY_WITHHELD`). Never raises.
         """
         if not response.content:
             return None
@@ -429,6 +429,8 @@ class AzureConnector(
             body = response.json()
         except ValueError:
             return None
+        except RecursionError:  # JSON nested too deep to parse cannot be masked either
+            return TRACE_BODY_WITHHELD
         try:
             return trace_mask.mask_answer(body)
         except Exception:  # a trace must never break the call, and never hold a secret

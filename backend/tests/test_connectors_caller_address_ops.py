@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy import select
 
 from meho_backplane.connectors.winsrv import WinsrvConnector
+from meho_backplane.connectors.wsfc import WsfcConnector
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations import typed_register as tr_module
@@ -27,6 +28,7 @@ _SAFETY_RANK = {"safe": 0, "caution": 1, "dangerous": 2, "destructive": 3}
 #: (connector class, operation id, marked field)
 _CASES = [
     (WinsrvConnector, "winsrv.storage.iscsi.connect", "target_portal_address"),
+    (WsfcConnector, "wsfc.witness.set", "path"),
 ]
 
 
@@ -43,7 +45,7 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("connector", "op_id", "field"), _CASES)
 async def test_registered_op_waits_for_approval(
-    connector: type[WinsrvConnector], op_id: str, field: str
+    connector: type[WinsrvConnector | WsfcConnector], op_id: str, field: str
 ) -> None:
     with patch.object(tr_module, "encode_endpoint_text", AsyncMock(return_value=[0.1] * 384)):
         await connector.register_operations()

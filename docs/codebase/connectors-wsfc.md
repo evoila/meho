@@ -65,7 +65,7 @@ central-dial / on-site only).
 | `wsfc.resources.list` | safe | no | `Get-ClusterResource` |
 | `wsfc.resources.dependency-report` | safe | no | `Get-ClusterResourceDependency` |
 | `wsfc.witness.get` | safe | no | `Get-ClusterQuorum` + `Get-ClusterResource` |
-| `wsfc.witness.set` | caution | no | `Set-ClusterQuorum` |
+| `wsfc.witness.set` | caution | **yes** | `Set-ClusterQuorum` (the cluster connects to the file share in `path`, a caller address: the field carries the caller-address marker) |
 
 The three `dangerous` ops (`nodes.evict`, `groups.offline`, `groups.online`) are
 `requires_approval=True` — a dispatch parks at `needs-approval` for a human

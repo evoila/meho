@@ -183,7 +183,9 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "action ran (deny, rate limit, or wait for approval). "
                 "`approval_decision`: a person approved or rejected a "
                 "request, or it expired. `security_event`: a security "
-                "signal. `legacy_request`: a row from before record "
+                "signal. `config_change`: an operator changed the "
+                "settings of one operation; it did not run. "
+                "`legacy_request`: a row from before record "
                 "kinds existed. Without it you get every kind. Same "
                 "filter as the REST route `POST /api/v1/audit/query`."
             ),

@@ -688,8 +688,11 @@ apply it:
   before the target check, the catalog guard, the policy gate and any
   vendor call. The row that is off gets this answer too
   (`op_miss_result`, when the caller can see the row), and so does a row
-  an operator turned on by hand. Nothing runs, so no audit row is
-  written. The message names the way to read licences: the connector's
+  an operator turned on by hand. Nothing runs. A refused call writes one
+  `policy_decision` audit row: it names the op id, has `result_status`
+  `denied` and the code `license_read_off` under `payload["error"]`, and
+  has no result (#5791, `operations/_license_refusal.py`). A refused
+  preview writes no row. The message names the way to read licences: the connector's
   hand-written licence read, which shows each key masked. A row another
   tenant owns is not visible, so it stays `unknown_op`.
 - The flight recorder never records the body of an op whose id names

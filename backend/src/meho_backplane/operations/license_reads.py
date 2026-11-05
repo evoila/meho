@@ -15,6 +15,8 @@ MEHO never runs it:
 * a call or a preview of it answers ``license_read_off`` before anything
   runs, also when an operator turned the row on by hand
   (:func:`~meho_backplane.operations._errors.result_license_read_off`).
+  A refused call leaves one ``policy_decision`` audit row with the op id
+  and the code (:mod:`meho_backplane.operations._license_refusal`).
 
 The hand-written licence reads of a connector are the way to read
 licences: they show each key masked.

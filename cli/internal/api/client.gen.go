@@ -71,6 +71,7 @@ const (
 // Defines values for AuditEventClass.
 const (
 	AuditEventClassApprovalDecision   AuditEventClass = "approval_decision"
+	AuditEventClassConfigChange       AuditEventClass = "config_change"
 	AuditEventClassLegacyRequest      AuditEventClass = "legacy_request"
 	AuditEventClassOperationExecution AuditEventClass = "operation_execution"
 	AuditEventClassPolicyDecision     AuditEventClass = "policy_decision"
@@ -1839,7 +1840,7 @@ type AssignmentDocumentResponse struct {
 //
 // “counts“ has one key per event class (“operation_execution“,
 // “policy_decision“, “approval_decision“, “security_event“,
-// “legacy_request“), “0“ when a class has no rows. Old rows count
+// “config_change“, “legacy_request“), “0“ when a class has no rows. Old rows count
 // as “legacy_request“; they are never reclassified. “total“ is the
 // sum. “since“ is the start of the counted window: the request's
 // “since“, or 24 hours ago when the request set none.
@@ -1947,6 +1948,11 @@ type AuditEntry struct {
 //     it (#5717). The operation did not run on any of these rows.
 //   - :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
 //     refresh-token replay or a broken satellite effect chain.
+//   - :attr:`CONFIG_CHANGE` -- an operator changed the settings of one
+//     operation with “meho_connector_edit_op“: turned it on or off, or
+//     changed its risk level, approval rule, description or guidance
+//     (#5791). The operation did not run. The row's “payload["op_id"]“
+//     names the edited operation.
 //   - :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
 //     row written before migration “0106“ reads as this class; it is never
 //     guessed from “method“ / “path“. The REST and MCP request wrapper
@@ -1984,6 +1990,11 @@ type AuditQueryRequest struct {
 	//   it (#5717). The operation did not run on any of these rows.
 	// * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
 	//   refresh-token replay or a broken satellite effect chain.
+	// * :attr:`CONFIG_CHANGE` -- an operator changed the settings of one
+	//   operation with ``meho_connector_edit_op``: turned it on or off, or
+	//   changed its risk level, approval rule, description or guidance
+	//   (#5791). The operation did not run. The row's ``payload["op_id"]``
+	//   names the edited operation.
 	// * :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
 	//   row written before migration ``0106`` reads as this class; it is never
 	//   guessed from ``method`` / ``path``. The REST and MCP request wrapper

@@ -351,6 +351,11 @@ from meho_backplane.operations._handler_resolve import (
     reset_connector_instance_cache,
     reset_handler_cache,
 )
+from meho_backplane.operations._license_refusal import (
+    LICENSE_READ_OFF,
+    audit_license_read_off,
+    license_read_stand_in,
+)
 from meho_backplane.operations._lookup import (
     lookup_descriptor,
     parse_connector_id,
@@ -3540,7 +3545,7 @@ async def dispatch(
         op_id=op_id,
     )
     if descriptor is None:
-        return await op_miss_result(
+        miss = await op_miss_result(
             tenant_id=operator.tenant_id,
             connector_id=connector_id,
             op_id=op_id,
@@ -3548,12 +3553,31 @@ async def dispatch(
             started=started,
             target=target,
         )
+        if miss.extras.get("error_code") != LICENSE_READ_OFF:
+            return miss
+        # #5791: the refused licence read gets its own audit row.
+        return await audit_license_read_off(
+            miss,
+            operator=operator,
+            descriptor=license_read_stand_in(
+                product=product, version=version, impl_id=impl_id, op_id=op_id
+            ),
+            target=target,
+            params_hash=params_hash,
+        )
     # An ingested read of licence keys never runs: the ingest would give it
     # the safe level of its HTTP method, and its answer carries the keys in
     # full. Refused before the target check, the catalog guard, the policy
-    # gate and any vendor call, whatever the row's enable flag says.
+    # gate and any vendor call, whatever the row's enable flag says. The
+    # refusal gets its own audit row (#5791).
     if descriptor.source_kind == "ingested" and is_license_read(descriptor.method, descriptor.path):
-        return result_license_read_off(op_id, _elapsed_ms(started))
+        return await audit_license_read_off(
+            result_license_read_off(op_id, _elapsed_ms(started)),
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params_hash=params_hash,
+        )
     # #4139: an op that needs a target (every ingested op, or a typed op
     # bound to a connector) and got none fails here with one clear line,
     # before the catalog guard, the policy gate or a wait for approval.

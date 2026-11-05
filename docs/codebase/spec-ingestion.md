@@ -703,6 +703,13 @@ target for MEHO.
     The override report (`list_overrides`) applies the floor too, so it
     never lists approval as off for a marked operation, also not for an
     override stored before the floor.
+  - Standing grants: a service principal's grant does not run a marked
+    operation. `consult_and_record_grant` in `service_grants.py` refuses
+    the operation before it looks a grant row up, so a grant stored
+    before the marker never auto-approves it, and grant create refuses a
+    new grant for it (`caller_address_grant_reason`). The call waits for
+    a person, and the park reason says so. A grant covers an operation,
+    a connector and a target, never the address in the call.
 - **Sensors.** A sensor runs only `safe` operations. So a sensor cannot
   use a marked operation: a new one is refused, and the runner reports
   an existing one as `unknown` with the reason `op_not_safe_at_dispatch`.

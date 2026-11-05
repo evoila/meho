@@ -14,6 +14,8 @@ hold without any connector package:
   governed, so a new ingest never lowers it;
 * at dispatch, an override that turns approval off does not remove it, and a
   row stored with lower values is raised;
+* a standing grant of a service principal does not run it: the call waits
+  for a person, the handler does not run, and a new grant for it is refused;
 * an edit that turns approval off is refused, and the override report shows
   approval on for an override stored with approval off.
 """
@@ -29,9 +31,16 @@ import pytest
 from sqlalchemy import select, update
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.connectors.registry import clear_registry
+from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
+from meho_backplane.db.models import (
+    EndpointDescriptor,
+    OperationPolicyOverride,
+    ServicePrincipalGrant,
+)
+from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._lookup import lookup_descriptor
 from meho_backplane.operations.caller_address import (
     CALLER_ADDRESS_MARKER,
@@ -50,11 +59,19 @@ from meho_backplane.operations.op_policy import (
     apply_policy_edit,
     list_overrides,
 )
+from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate
+from meho_backplane.operations.service_grants import (
+    GrantValidationError,
+    ServicePrincipalGrantService,
+)
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.settings import get_settings
 
 _TYPED = {"product": "addrfixture", "version": "1.x", "impl_id": "addrfixture"}
+_TYPED_CONNECTOR = "addrfixture-1.x"
 _TYPED_OP = "addrfixture.probe.check"
+_TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000005787")
+_SERVICE_SUB = "svc:address-check"
 
 _INGEST = {"product": "addringest", "version": "1.0", "impl_id": "addringest-rest"}
 _SPEC = """
@@ -94,8 +111,11 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 @pytest.fixture(autouse=True)
 def _clean_registry() -> Iterator[None]:
     clear_registry()
+    reset_dispatcher_caches()
+    _HANDLER_CALLS.clear()
     yield
     clear_registry()
+    reset_dispatcher_caches()
 
 
 @pytest.fixture
@@ -183,7 +203,11 @@ def test_floor_only_raises(level: str, approval: bool, expected: tuple[str, bool
 # -- typed registration -------------------------------------------------------
 
 
+_HANDLER_CALLS: list[dict[str, Any]] = []
+
+
 async def _fixture_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    _HANDLER_CALLS.append(params)
     return {}
 
 
@@ -351,6 +375,90 @@ async def test_row_stored_with_lower_values_is_raised_at_dispatch(embedding: Asy
 
     assert await _effective(uuid.uuid4()) == ("caution", True)
     assert await _stored(_TYPED["product"], _TYPED_OP) == ("safe", False)
+
+
+# -- standing grants ----------------------------------------------------------
+
+
+class _FixtureConnector(Connector):
+    """The smallest connector, so the dispatcher finds a class for the fixture op."""
+
+    product = _TYPED["product"]
+    version = _TYPED["version"]
+    impl_id = _TYPED["impl_id"]
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(  # type: ignore[override]
+        self, target: Any, op_id: str, params: dict[str, Any]
+    ) -> OperationResult:
+        raise NotImplementedError
+
+
+def _service_operator() -> Operator:
+    return Operator(
+        sub=_SERVICE_SUB,
+        raw_jwt="header.payload.signature",
+        tenant_id=_TENANT_ID,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.SERVICE,
+    )
+
+
+async def _seed_grant() -> None:
+    async with get_sessionmaker()() as session:
+        session.add(
+            ServicePrincipalGrant(
+                id=uuid.uuid4(),
+                tenant_id=_TENANT_ID,
+                principal_sub=_SERVICE_SUB,
+                op_id=_TYPED_OP,
+                connector_id=_TYPED_CONNECTOR,
+                target_id=None,
+                reason="fixture: stored before the marker",
+                created_by_sub="fixture-admin",
+            )
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_standing_grant_does_not_run_a_marked_operation(embedding: AsyncMock) -> None:
+    """A matching grant row does not clear the gate: the call waits for a person."""
+    register_connector_v2(product=_TYPED["product"], version="", impl_id="", cls=_FixtureConnector)
+    await _register_typed(embedding)
+    await _seed_grant()
+
+    result = await dispatch(
+        operator=_service_operator(),
+        connector_id=_TYPED_CONNECTOR,
+        op_id=_TYPED_OP,
+        target=None,
+        params={"host": "example.test"},
+    )
+
+    assert result.status == "awaiting_approval", result
+    assert _HANDLER_CALLS == []
+
+
+@pytest.mark.asyncio
+async def test_grant_for_a_marked_operation_is_refused(embedding: AsyncMock) -> None:
+    await _register_typed(embedding)
+    payload = ServiceGrantCreate(
+        principal_sub=_SERVICE_SUB,
+        op_id=_TYPED_OP,
+        connector_id=_TYPED_CONNECTOR,
+        target_id=None,
+        reason="fixture: try to grant an address check",
+        expires_at=None,
+    )
+
+    with pytest.raises(GrantValidationError, match="address the caller gives"):
+        await ServicePrincipalGrantService().create(_TENANT_ID, "fixture-admin", payload)
 
 
 # -- operator edits and the override report -----------------------------------

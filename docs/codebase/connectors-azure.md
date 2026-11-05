@@ -1980,14 +1980,11 @@ such as `(` is written as a `%` code (`%28`), so it stays part of the name.
 **Secrets.** Every row is built from a fixed list of fields; nothing else
 from Azure's answer is passed on. An ExpressRoute circuit's answer holds its
 service key, its authorization keys and the BGP keys of its peerings; none
-of them reaches a result. Because the flight recorder would otherwise keep
-Azure's raw answer in the trace, `azure.network.expressroute.list` carries
-the tag `keys-withheld`: its `keys` word is a secret word for the flight
-recorder, so the trace of this call keeps no body. The same tag makes the
-dispatcher keep Azure's error text out of this operation's error result
-(`operations/_vendor_text.py`); the error code, the HTTP status and the hint
-stay. A gateway's answer no longer holds the RADIUS secret (Microsoft removed
-it from the list answer), so `azure.network.gateway.list` needs no such tag. The description of a
+of them reaches a result. The flight recorder keeps Azure's answer in the
+trace with these keys masked by the connector's [trace mask](#trace-mask),
+so the error text of `azure.network.expressroute.list` stays visible like
+that of every other read. A gateway's answer no longer holds the RADIUS
+secret (Microsoft removed it from the list answer). The description of a
 security rule is text from Azure; it is filtered with `clean_azure_text`
 like Azure's error text.
 

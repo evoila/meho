@@ -3010,6 +3010,26 @@ lifecycle timestamps, and -- on completion -- one of:
 `status="running"` leaves both clusters `None`. Clients branch on
 `status` rather than checking presence.
 
+**Which step runs now (#5786).** Every answer also carries `phase`
+and `phase_started_at` (epoch seconds), so an operator can tell a slow
+import from a stuck one. The steps, in order:
+
+| `phase` | What runs |
+|---|---|
+| `parse` | Read each API file and check its version. A new job starts here, at `started_at`. |
+| `register` | Parse each file and write its operations. |
+| `grouping` | The language model sorts the operations into groups. On a large file this is the longest step. |
+
+The pipeline reports each step when it starts
+(`report_ingest_phase` in `operations/ingest/job_phase.py`).
+`run_ingest_job` puts a reporter for its job in a context variable, so
+the pipeline needs no job id, and the sync path (no job) reports to
+nobody. A finished job keeps the step it ended in: a `failed` job
+shows the step that failed. The other fields of a finished answer do
+not change. `phase_started_at` is declared `format: double` in the
+OpenAPI document, so the generated Go client keeps it as a 64-bit
+float (a 32-bit float rounds an epoch time to about two minutes).
+
 **Why async by default.** The OpenAPI ingest path is the escape
 hatch per [api-shape-conventions.md §1](api-shape-conventions.md) --
 operators reach for it when the curated daily-driver doesn't cover
@@ -3085,10 +3105,12 @@ detached, or lost the waiting session, this verb re-reads the same
 `GET /api/v1/connectors/ingest/jobs/{job_id}` route. Without `--wait`
 it reads one snapshot -- a `running` job prints its identity +
 lifecycle echo (job_id, status, the originating request descriptors,
-`started_at`) and exits 0 (`--json` emits the raw
+`started_at`, and `phase: <step> (since <time>)`) and exits 0 (`--json` emits the raw
 `IngestJobStatusResponse`); a terminal job renders exactly what the
 waiting-ingest path renders. With `--wait` it re-attaches the same
-2s poll loop until terminal. Terminal rendering and the poll loop are
+2s poll loop until terminal. While the job runs, the shared poll loop
+prints one `ingest job phase: <step> (since <time>)` line to stderr
+each time the step changes (both verbs). Terminal rendering and the poll loop are
 **shared** with `ingest` (the extracted `renderIngestTerminal` switch
 + `pollIngestJob`), not duplicated, so succeeded / failed / degraded /
 undocumented-status / 401 / 403 / 404 all behave identically across

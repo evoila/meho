@@ -33,6 +33,7 @@ _GOOGLE_CREDENTIAL: Final = "made-up-account%40project.iam"
 _PASSWORD: Final = "made-up-password-7"
 _TOKEN: Final = "made-up-token-value-12345"
 _SECURITY_TOKEN: Final = "made-up-security-token-6789"
+_CLUSTER_LINK: Final = f"https://admin:{_PASSWORD}@cluster.example.com"  # trufflehog:ignore
 
 #: (link, secret values in it, readable parts that must stay)
 _LINKS: Final[list[tuple[str, tuple[str, ...], tuple[str, ...]]]] = [
@@ -61,7 +62,7 @@ _LINKS: Final[list[tuple[str, tuple[str, ...], tuple[str, ...]]]] = [
         ("storage.files.example.com/bucket/package.zip", "X-Goog-Expires=600"),
     ),
     (
-        f"https://deploy:{_PASSWORD}@files.example.com/packages/ipam.zip",
+        f"https://deploy:{_PASSWORD}@files.example.com/packages/ipam.zip",  # trufflehog:ignore
         (_PASSWORD,),
         ("@files.example.com/packages/ipam.zip",),
     ),
@@ -229,10 +230,10 @@ def test_is_secret_query_name(name: str, secret: bool) -> None:
     ("url", "expected"),
     [
         (
-            f"https://admin:{_PASSWORD}@cluster.example.com:6443/api/v1/pods?token={_TOKEN}#x",
+            f"{_CLUSTER_LINK}:6443/api/v1/pods?token={_TOKEN}#x",
             "https://cluster.example.com:6443/api/v1/pods",
         ),
-        (f"https://admin:{_PASSWORD}@cluster.example.com", "https://cluster.example.com"),
+        (_CLUSTER_LINK, "https://cluster.example.com"),
         ("https://cluster.example.com?owner=a@b.example.com", "https://cluster.example.com"),
         ("https://cluster.example.com/a@b", "https://cluster.example.com/a@b"),
         ("/api/v1/pods?token=abc", "/api/v1/pods"),

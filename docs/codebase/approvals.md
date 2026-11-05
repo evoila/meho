@@ -787,6 +787,59 @@ routed to `NEEDS_APPROVAL`, re-running the gate on resume would re-queue
 the call instead of executing it, so the bypass is what lets the
 approved op run.
 
+## The "may I approve this?" answer (#3329)
+
+People see, for each request, whether they may approve it and why not.
+MEHO works the answer out on the server; the command line and the web
+interface only show it.
+
+- **Where it is worked out.** `approve_right(operator, request)` in
+  `operations/approval_rights.py`. It runs the checks of
+  `approve_request` in the same order: a machine login never approves
+  (`not_a_person`), a `read_only` person without the `approver` flag
+  cannot decide (`no_approval_access`), only a `pending` request can be
+  approved (`not_pending`), the group rule of #3328 (`own_change`,
+  `wrong_group`), and the role floor of the operation (`role_too_low`).
+  Otherwise the answer is `ok`. For an own change that a
+  MEHO-SA-Operator (or break-glass) may approve, the answer is yes with
+  `own_change`. So is a web click on an own `caution` change that
+  waited only because it came with a token (#3980): the web interface
+  says yes, the command line and REST say no. It does not check what can change before the click: the
+  sign-in age, the deadline, the params and the preview binding. The
+  approve still checks those. The read writes nothing and logs no
+  break-glass warning (`_check_self_approval(..., log_break_glass=False)`).
+- **REST.** `GET /api/v1/approvals` and `GET /api/v1/approvals/{id}`
+  carry `may_approve` and `may_approve_reason` for the caller. The
+  withdraw answer leaves both `null`. `POST …/decide` answers with
+  `self_approved` and `approval_rule` after an approve: the same values
+  as the `approval.decision` audit row.
+- **Command line.** `meho approvals list` has an `APPROVE` column
+  (`yes`, `yes:own_change`, `no:<reason>`, `-` when not pending).
+  `meho approvals show` has a `May approve` line. `meho approvals
+  approve` prints a self-approval line after a self-approval (also with
+  several ids and with `--in-order`). On a 403 it prints the server's
+  text as it is, then says the web interface is the normal place to
+  approve.
+- **Web interface.** The request window shows the answer for a pending
+  request, and the Approve button is disabled when the answer is no.
+  This is not a new gate: the approve POST runs `approve_request`,
+  which checks again (see the module docstring of
+  `ui/routes/approvals/routes.py`). After a self-approval the outcome
+  card says so. A refused approve (403) shows the server's refusal text
+  as it is in its banner, then the same hint as the command line
+  (`WEB_APPROVAL_HINT`: the web interface is the normal place to
+  approve). A refused reject carries no hint. The routes find a refused
+  own-change approve by the `SelfApprovalForbiddenError` cause, because
+  since #3328 the detail is the plain refusal text, not the
+  `self_approval_forbidden` token.
+- **"Approve group in order" window** (`ui/routes/approvals/in_order.py`).
+  Each pending step shows the same answer. When a step the run has not
+  reached says no, the window says the run will stop there; the steps
+  before it can still go. A step the run approved as a self-approval
+  says so on its row, and the done banner counts them. A refused step
+  shows the refusal text and the hint. Each step's approval checks
+  again.
+
 ## Delegated decisions: the reason-line convention (#3692)
 
 Sometimes an approver decides because **another person told them to, in
@@ -1055,7 +1108,7 @@ finds them without reading source:
   distillation of this section.
 - **Console guidance** — the approvals modal
   (`ui/templates/approvals/_modal.html`) renders both patterns + a
-  deep link to that guide when the Approve button is disabled *and* on a
+  deep link to that guide when the Approve button is disabled for an own change *and* on a
   rejected self-approval 403 (routes' `_SINGLE_OPERATOR_DOCS_URL`,
   mirroring `ui/maturity.py`'s `MATURITY_INDEX_URL` convention). The wire
   `403` / MCP-error text still names the flag and stays authoritative.

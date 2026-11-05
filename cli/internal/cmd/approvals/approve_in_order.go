@@ -84,6 +84,9 @@ type inOrderStep struct {
 	SafetyLevel string `json:"safety_level,omitempty"`
 	Outcome     string `json:"outcome"`
 	Detail      string `json:"detail,omitempty"`
+	// SelfApproval is the self-approval line when this run approved the
+	// person's own change (#3329), else empty.
+	SelfApproval string `json:"self_approval,omitempty"`
 }
 
 // inOrderResult is the --json output of an in-order run.
@@ -192,7 +195,7 @@ func runInOrder(cmd *cobra.Command, opts inOrderOpts) error {
 		return nil
 	}
 	if stop.err != nil {
-		return routeRequestError(cmd, backplaneURL, stop.err, opts.JSONOut)
+		return routeApproveError(cmd, backplaneURL, stop.err, opts.JSONOut)
 	}
 	return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(stopMessage(res)), opts.JSONOut)
 }
@@ -247,6 +250,7 @@ func (r *inOrderRunner) runStep(ctx context.Context, item *api.ApprovalRequestVi
 	if err != nil {
 		return &stepStop{detail: "the approval was refused: " + err.Error(), err: err}
 	}
+	step.SelfApproval = selfApprovalLine(resp.JSON200)
 	stop, claimedElsewhere := checkDispatch(resp, step)
 	if claimedElsewhere {
 		return r.waitForStoredResult(ctx, item.Id, step)
@@ -399,6 +403,9 @@ func printInOrderStep(w io.Writer, step inOrderStep, total int) {
 		fmt.Fprintf(w, "  (%s)", step.Detail)
 	}
 	fmt.Fprintln(w)
+	if step.SelfApproval != "" {
+		fmt.Fprintf(w, "  %s\n", step.SelfApproval)
+	}
 }
 
 func printInOrderSummary(w io.Writer, res inOrderResult) {

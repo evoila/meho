@@ -51,7 +51,17 @@ func newListCmd() *cobra.Command {
 			"in the order they were sent. --limit caps how many requests " +
 			"come back (1..500; no limit when omitted). --offset " +
 			"skips that many requests first. --json emits the raw " +
-			"JSON array for jq pipelines.",
+			"JSON array for jq pipelines.\n\n" +
+			"The APPROVE column says whether you may approve each " +
+			"pending request. MEHO works this out with the same checks " +
+			"as the approve: yes; yes:own_change (your own change, " +
+			"which a MEHO-SA-Operator may approve: a self-approval); " +
+			"no:own_change; no:wrong_group (another person's dangerous " +
+			"or destructive change needs a MEHO-SA-Operator or a " +
+			"MEHO-Admin); no:role_too_low; no:no_approval_access; " +
+			"no:not_a_person. A request that is not pending shows -. " +
+			"In --json the same answer is may_approve and " +
+			"may_approve_reason.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -231,9 +241,11 @@ func listOrder(opts listOpts) string {
 }
 
 // printListTable renders the list as a compact table.
-// Columns: ID, STATUS, RUN, CONNECTOR, OP, PRINCIPAL, CREATED. RUN (#3543)
-// says whether an approved request ran and how it ended, so a run that
-// failed after the approval does not look like a plain "approved".
+// Columns: ID, STATUS, RUN, APPROVE, CONNECTOR, OP, PRINCIPAL, CREATED.
+// RUN (#3543) says whether an approved request ran and how it ended, so a
+// run that failed after the approval does not look like a plain
+// "approved". APPROVE (#3329) says whether the caller may approve the
+// request, as the server worked it out.
 // statusFilter, workRef and offset are the --status, --filter-work-ref and
 // --offset values; an empty list names them, so an empty default
 // (pending-only) list, an empty match for one change ticket, or an empty
@@ -243,13 +255,14 @@ func printListTable(w io.Writer, items []api.ApprovalRequestView, statusFilter, 
 		fmt.Fprintln(w, emptyListMessage(statusFilter, workRef, offset))
 		return
 	}
-	fmt.Fprintf(w, "%-36s %-9s %-11s %-24s %-32s %-20s %s\n",
-		"ID", "STATUS", "RUN", "CONNECTOR", "OP", "PRINCIPAL", "CREATED")
+	fmt.Fprintf(w, "%-36s %-9s %-11s %-23s %-24s %-32s %-20s %s\n",
+		"ID", "STATUS", "RUN", "APPROVE", "CONNECTOR", "OP", "PRINCIPAL", "CREATED")
 	for _, e := range items {
-		fmt.Fprintf(w, "%-36s %-9s %-11s %-24s %-32s %-20s %s\n",
+		fmt.Fprintf(w, "%-36s %-9s %-11s %-23s %-24s %-32s %-20s %s\n",
 			e.Id.String(),
 			string(e.Status),
 			runStateLabel(e.ResultState),
+			approveRightLabel(e.MayApprove, e.MayApproveReason),
 			truncate(e.ConnectorId, 24),
 			truncate(e.OpId, 32),
 			truncate(principalScanLabel(e.PrincipalSub, e.PrincipalName), 20),

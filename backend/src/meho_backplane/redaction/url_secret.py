@@ -4,7 +4,7 @@
 """Find the secret parts of a URL in text.
 
 A signed download link works as a key until it ends. Its secret parts
-are the user part before ``@`` (``https://user:password@host/``) and the
+are the user part before ``@`` (``user:password``) and the
 values of some query parameters:
 
 * S3: ``X-Amz-Signature``, ``X-Amz-Credential``, ``X-Amz-Security-Token``

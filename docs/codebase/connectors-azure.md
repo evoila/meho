@@ -896,9 +896,8 @@ maintenance, their jobs and their schedules. Every operation is a read
 Files: `automation.py` (group text, guidance for the AI, operation table, and
 `AutomationOps`, a class whose methods `AzureConnector` takes over as one of
 its base classes), `automation_reads.py` (name checks, row shapes and the
-operation bodies), `automation_schemas.py` (name rules, parameter and
-response schemas), `automation_trace.py` (what the trace keeps of an
-answer). The paths are in the `automation` section of `_paths.py`.
+operation bodies) and `automation_schemas.py` (name rules, parameter and
+response schemas). The paths are in the `automation` section of `_paths.py`.
 
 ### Operations
 
@@ -941,11 +940,10 @@ secrets. No operation reads them:
   `azure.automation.job.list` has none either.
 - The trace (the flight recorder's record of each call) leaves these fields
   out too. Its shared filter finds secrets by their shape only, and a
-  parameter value or a signed link can have any shape. So every Automation
-  list is read through `TraceMaskingCaller` (`automation_trace.py`): the
-  trace gets Azure's answer with `parameters`, `publishContentLink` and
-  `draft` in each row replaced by a fixed text. A test switches the recorder
-  on and checks the spans.
+  parameter value or a signed link can have any shape. So the connector's
+  [trace mask](#trace-mask) replaces `parameters`, `publishContentLink` and
+  `draft` with a fixed text, like the key fields of every other family. A
+  test switches the recorder on and checks the spans.
 
 Names, descriptions, `last_modified_by` and `started_by` are text from Azure.
 MEHO copies them as data and never puts them into a path or a filter. The

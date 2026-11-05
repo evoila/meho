@@ -123,8 +123,6 @@ async def _dispatch_lookup(params: dict[str, Any]) -> OperationResult:
         op_id=_OP_ID,
         target=None,
         params=params,
-        # Each net.* call waits for approval; this runs the approved call.
-        _approved=True,
     )
 
 

@@ -20,9 +20,11 @@ A field looks like an address when:
 A marker on the field itself or on a field around it counts (a list of URLs
 may carry the marker on the list). A field that only looks like an address
 goes in :data:`NOT_CALLER_ADDRESSES` with its reason: MEHO and the target
-never connect to it, or MEHO connects to it only on the target's own host
-(the Azure poll URL). Used by ``test_operation_contracts.py``; tested with fake operations
-in ``test_operation_contract_rules.py``.
+never connect to it, MEHO connects to it only on the target's own host
+(the Azure poll URL), or it is the address of a built-in network check
+(``net.*``), which the probe allowlist guards instead of approval. Used by
+``test_operation_contracts.py``; tested with fake operations in
+``test_operation_contract_rules.py``.
 """
 
 from __future__ import annotations
@@ -42,6 +44,10 @@ ADDRESS_FORMATS: Final[frozenset[str]] = frozenset({"uri", "url", "hostname", "i
 #: ``(operation id, field path) -> reason``. The live check fails when an
 #: entry no longer names a registered field that looks like an address.
 _EVIDENCE_LINK: Final[str] = "a link stored as evidence on the topology; MEHO never opens it"
+BUILT_IN_CHECK_REASON: Final[str] = (
+    "a built-in network check; the probe allowlist (MEHO_NETDIAG_PROBE_ALLOWLIST) "
+    "bounds where it connects, so it needs no approval and a sensor can run it"
+)
 NOT_CALLER_ADDRESSES: Final[Mapping[tuple[str, str], str]] = {
     ("azure.operation.status", "operation.poll_url"): (
         "the poll URL an earlier Azure write returned; MEHO polls it only when it is "
@@ -62,6 +68,15 @@ NOT_CALLER_ADDRESSES: Final[Mapping[tuple[str, str], str]] = {
         "the iSCSI name (IQN) of the target, not a network address; the host connects "
         "to the portal in target_portal_address, which carries the marker"
     ),
+    ("net.dns_lookup", "resolver"): BUILT_IN_CHECK_REASON,
+    ("net.http_probe", "url"): BUILT_IN_CHECK_REASON,
+    ("net.ntp_check", "host"): BUILT_IN_CHECK_REASON,
+    ("net.path_mtu", "host"): BUILT_IN_CHECK_REASON,
+    ("net.ping", "host"): BUILT_IN_CHECK_REASON,
+    ("net.ssh_keyscan", "host"): BUILT_IN_CHECK_REASON,
+    ("net.tcp_check", "host"): BUILT_IN_CHECK_REASON,
+    ("net.tls_inspect", "host"): BUILT_IN_CHECK_REASON,
+    ("net.trace", "host"): BUILT_IN_CHECK_REASON,
     ("topology.bulk_import", "rows[].evidence_url"): _EVIDENCE_LINK,
     ("topology.create_node", "evidence_url"): _EVIDENCE_LINK,
 }

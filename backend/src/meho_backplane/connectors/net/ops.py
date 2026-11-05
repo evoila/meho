@@ -41,11 +41,10 @@ Three foundations every later ``net.*`` op reuses land here:
   refusal (no socket opened, no product) is the deliberate exception and
   fails the dispatch instead (#2784).
 
-``host`` (and the optional ``resolver`` of ``net.dns_lookup``) carries the
-caller-address marker, so the probe runs at risk level ``caution`` and
-waits for a person's approval
-(:mod:`meho_backplane.operations.caller_address`). The probe allowlist
-bounds where it may connect.
+``safety_level="safe"`` + ``requires_approval=False`` make the probe
+agent-auto-runnable and ungated, so the probe allowlist is the sole
+floor. The reviewed alternative (``"caution"`` — operators auto-run,
+agents do not) is a one-line change if the security review prefers it.
 """
 
 from __future__ import annotations
@@ -65,7 +64,6 @@ import dns.resolver
 import dns.reversename
 
 from meho_backplane.connectors.net.allowlist import assert_probe_allowed
-from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
 from meho_backplane.operations.typed_register import register_typed_operation
 
 if TYPE_CHECKING:
@@ -94,7 +92,6 @@ NET_TCP_CHECK_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "host": {
             "type": "string",
-            CALLER_ADDRESS_MARKER: True,
             "minLength": 1,
             "description": (
                 "Hostname or IP literal to probe. Must be covered by "
@@ -309,7 +306,6 @@ NET_DNS_LOOKUP_PARAMETER_SCHEMA: dict[str, Any] = {
         },
         "resolver": {
             "type": "string",
-            CALLER_ADDRESS_MARKER: True,
             "minLength": 1,
             "description": (
                 "Optional resolver IP to query instead of the system "
@@ -623,9 +619,9 @@ async def register_net_typed_operations(
     :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
     after the connector eager-import pass. Idempotent: a re-run against
     unchanged text is a no-op for the embedding pipeline. Every ``net.*``
-    op is ``caution`` + ``requires_approval=True``: its address field
-    carries the caller-address marker. Registers ``net.tcp_check`` and
-    ``net.dns_lookup``.
+    op is ``safe`` + ``requires_approval=False`` — the probe allowlist is
+    the only floor. Registers ``net.tcp_check`` (#2406) and
+    ``net.dns_lookup`` (#2409).
     """
     await register_typed_operation(
         product="net",
@@ -652,8 +648,8 @@ async def register_net_typed_operations(
         parameter_schema=NET_TCP_CHECK_PARAMETER_SCHEMA,
         response_schema=_NET_TCP_CHECK_RESPONSE_SCHEMA,
         tags=["net", "probe", "read", "diagnostics"],
-        safety_level="caution",
-        requires_approval=True,
+        safety_level="safe",
+        requires_approval=False,
         llm_instructions=_NET_TCP_CHECK_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )
@@ -684,8 +680,8 @@ async def register_net_typed_operations(
         parameter_schema=NET_DNS_LOOKUP_PARAMETER_SCHEMA,
         response_schema=_NET_DNS_LOOKUP_RESPONSE_SCHEMA,
         tags=["net", "probe", "read", "diagnostics", "dns"],
-        safety_level="caution",
-        requires_approval=True,
+        safety_level="safe",
+        requires_approval=False,
         llm_instructions=_NET_DNS_LOOKUP_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )

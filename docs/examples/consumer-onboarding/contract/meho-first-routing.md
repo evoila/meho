@@ -415,10 +415,9 @@ meho operation call net-probe-1.x net.ntp_check  --params '{"host": "<ntp-host>"
   dark" failure** — the sentinel is absent, the log shows why, and the
   declared units are inactive. Steps 4–7 harden the check from "did it
   start" into "is the configuration correct and does the service answer."
-- Every step is a read-only, audited op — the whole recipe is a
-  governed alternative to a hand SSH session. Steps 1–6 are `safe`. Step 7
-  is served by the existing `net` connector, not a Linux verb; it connects
-  to an address you give, so each call waits for a person's approval.
+- Every step is a `safe`, read-only, audited op — the whole recipe is a
+  governed alternative to a hand SSH session. Step 7 is served by the
+  existing `net` connector, not a Linux verb.
 <!-- fragment:END linux-day0 -->
 
 <!-- fragment:START ops-audit -->

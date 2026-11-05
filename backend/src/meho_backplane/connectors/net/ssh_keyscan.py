@@ -52,10 +52,9 @@ This op inherits the three keystone foundations verbatim:
   that ran. An allowlist refusal is the deliberate exception: nothing was
   dialed, so it fails the dispatch instead.
 
-A read-only handshake that offers no credential and sends no application
-data. ``host`` carries the caller-address marker, so the op runs at risk
-level ``caution`` and waits for a person's approval (same as
-``net.tls_inspect``).
+``safety_level="safe"`` + ``requires_approval=False``: a read-only
+handshake that offers no credential and sends no application data, so the
+probe allowlist is the sole floor (same posture as ``net.tls_inspect``).
 The presented host key is **public** material — never a private key —
 safe to log, audit, and hand to an agent.
 """
@@ -78,7 +77,6 @@ from meho_backplane.connectors.net.ops import (
     _MAX_TIMEOUT_SECONDS,
     _clamp_timeout,
 )
-from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
 from meho_backplane.operations.typed_register import register_typed_operation
 
 if TYPE_CHECKING:
@@ -140,7 +138,6 @@ NET_SSH_KEYSCAN_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "host": {
             "type": "string",
-            CALLER_ADDRESS_MARKER: True,
             "minLength": 1,
             "description": (
                 "Hostname or IP literal to scan for SSH host keys. Must be "
@@ -472,8 +469,8 @@ async def register_net_ssh_keyscan_operation(
     the connector eager-import pass. Registered under the same synthetic
     natural key as the keystone
     (``product="net", version="1.x", impl_id="net-probe"``), so it shares
-    the ``net-probe-1.x`` wire ``connector_id``. Idempotent. ``caution`` +
-    ``requires_approval=True``: ``host`` carries the caller-address marker.
+    the ``net-probe-1.x`` wire ``connector_id``. Idempotent. ``safe`` +
+    ``requires_approval=False`` — the probe allowlist is the only floor.
     """
     await register_typed_operation(
         product="net",
@@ -506,8 +503,8 @@ async def register_net_ssh_keyscan_operation(
         parameter_schema=NET_SSH_KEYSCAN_PARAMETER_SCHEMA,
         response_schema=_NET_SSH_KEYSCAN_RESPONSE_SCHEMA,
         tags=["net", "probe", "read", "diagnostics", "ssh"],
-        safety_level="caution",
-        requires_approval=True,
+        safety_level="safe",
+        requires_approval=False,
         llm_instructions=_NET_SSH_KEYSCAN_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )

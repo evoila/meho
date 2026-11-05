@@ -397,6 +397,13 @@ const (
 	IngestJobHandleStatusSucceeded IngestJobHandleStatus = "succeeded"
 )
 
+// Defines values for IngestJobStatusResponsePhase.
+const (
+	IngestJobStatusResponsePhaseGrouping IngestJobStatusResponsePhase = "grouping"
+	IngestJobStatusResponsePhaseParse    IngestJobStatusResponsePhase = "parse"
+	IngestJobStatusResponsePhaseRegister IngestJobStatusResponsePhase = "register"
+)
+
 // Defines values for IngestJobStatusResponseStatus.
 const (
 	IngestJobStatusResponseStatusDegraded  IngestJobStatusResponseStatus = "degraded"
@@ -1888,9 +1895,16 @@ type AuditClassCountsRequest struct {
 //     None pending a separate fix to bind “name“ to contextvars in
 //     “verify_jwt_and_bind“.
 //   - “sandbox_mode“ ← “audit_log.sandbox_mode“ (the sandbox mark; #4622)
+//   - “actor_sub“ ← “audit_log.actor_sub“ (#5773): the agent that acted
+//     for the person in “principal_sub“, in a run the person started.
+//     “None“ when nobody acted for another login.
+//   - “actor_name“ — the agent's name, read from “actor_sub“
+//     (“agent:<name>“). “None“ when “actor_sub“ is not of that form.
 //   - “broadcast_event_id“ — v0.2 placeholder, always None (FK direction
 //     is reversed: “BroadcastEvent.audit_id“ points at the audit row).
 type AuditEntry struct {
+	ActorName        *string                `json:"actor_name"`
+	ActorSub         *string                `json:"actor_sub"`
 	AgentSessionId   *openapi_types.UUID    `json:"agent_session_id"`
 	BroadcastEventId *openapi_types.UUID    `json:"broadcast_event_id"`
 	DurationMs       *string                `json:"duration_ms"`
@@ -6172,6 +6186,11 @@ type HealthResponse struct {
 	// login with several tenants that chose none gets ``tenant_id`` and
 	// ``tenant_role`` as ``None``: the status answer then only lists the
 	// tenants.
+	//
+	// Inside an agent run that a person started (an agent is bound as the
+	// actor), no role in ``tenants`` is higher than ``tenant_role``, the
+	// role of the run that every check uses (#5773). The person's own
+	// login groups may give a higher role, but the agent never gets it.
 	Operator OperatorIdentity `json:"operator"`
 	Pairings *[]PairingHealth `json:"pairings,omitempty"`
 
@@ -6306,7 +6325,11 @@ type IngestJobHandleStatus string
 //     correlate against their own state.
 //   - **Lifecycle** -- “status“ + “started_at“ + optional
 //     “ended_at“. Status moves “running“ → one of “succeeded“ /
-//     “degraded“ / “failed“ exactly once.
+//     “degraded“ / “failed“ exactly once. “phase“ is the step the
+//     job is on (“parse“ → “register“ → “grouping“) and
+//     “phase_started_at“ is when that step started (#5786), so a slow
+//     import can be told from a stuck one. A finished job keeps the step
+//     it ended in.
 //   - **Result vs error** -- keyed on status. “succeeded“ populates
 //     “ingestion“ (with optional “grouping“) and leaves “error“
 //     “None“; “failed“ populates “error“ / “error_class“ and
@@ -6354,14 +6377,23 @@ type IngestJobStatusResponse struct {
 	// reclassify nothing. ``dropped_count`` / ``dropped_ops`` (T3-F01) are
 	// likewise additive with empty defaults — ``0`` / ``[]`` for every
 	// product that declares no ingest op allowlist.
-	Ingestion *IngestionResultModel         `json:"ingestion,omitempty"`
-	JobId     openapi_types.UUID            `json:"job_id"`
-	Product   *string                       `json:"product"`
-	SpecUris  *[]string                     `json:"spec_uris,omitempty"`
-	StartedAt float32                       `json:"started_at"`
-	Status    IngestJobStatusResponseStatus `json:"status"`
-	Version   *string                       `json:"version"`
+	Ingestion *IngestionResultModel `json:"ingestion,omitempty"`
+	JobId     openapi_types.UUID    `json:"job_id"`
+
+	// Phase The step the job is on: parse (read and check the API files), register (write the operations), grouping (the language model groups the operations). A finished job keeps the step it ended in.
+	Phase IngestJobStatusResponsePhase `json:"phase"`
+
+	// PhaseStartedAt When the current step started (epoch seconds).
+	PhaseStartedAt float64                       `json:"phase_started_at"`
+	Product        *string                       `json:"product"`
+	SpecUris       *[]string                     `json:"spec_uris,omitempty"`
+	StartedAt      float32                       `json:"started_at"`
+	Status         IngestJobStatusResponseStatus `json:"status"`
+	Version        *string                       `json:"version"`
 }
+
+// IngestJobStatusResponsePhase The step the job is on: parse (read and check the API files), register (write the operations), grouping (the language model groups the operations). A finished job keeps the step it ended in.
+type IngestJobStatusResponsePhase string
 
 // IngestJobStatusResponseStatus defines model for IngestJobStatusResponse.Status.
 type IngestJobStatusResponseStatus string
@@ -6774,6 +6806,11 @@ type LivenessResponse struct {
 	// login with several tenants that chose none gets ``tenant_id`` and
 	// ``tenant_role`` as ``None``: the status answer then only lists the
 	// tenants.
+	//
+	// Inside an agent run that a person started (an agent is bound as the
+	// actor), no role in ``tenants`` is higher than ``tenant_role``, the
+	// role of the run that every check uses (#5773). The person's own
+	// login groups may give a higher role, but the agent never gets it.
 	Operator OperatorIdentity `json:"operator"`
 
 	// SensorRunner Liveness of this process's sensor evaluation loop (#2763).
@@ -7391,6 +7428,11 @@ type OperationRunSummaryResponse struct {
 // login with several tenants that chose none gets “tenant_id“ and
 // “tenant_role“ as “None“: the status answer then only lists the
 // tenants.
+//
+// Inside an agent run that a person started (an agent is bound as the
+// actor), no role in “tenants“ is higher than “tenant_role“, the
+// role of the run that every check uses (#5773). The person's own
+// login groups may give a higher role, but the agent never gets it.
 type OperatorIdentity struct {
 	Email    *string             `json:"email"`
 	Name     *string             `json:"name"`
@@ -7990,6 +8032,8 @@ type RemoteWriteCapabilityGrant struct {
 // Frozen like its parent: a node handed to a caller cannot mutate after the
 // tree is built.
 type ReplayNode struct {
+	ActorName        *string                `json:"actor_name"`
+	ActorSub         *string                `json:"actor_sub"`
 	AgentSessionId   *openapi_types.UUID    `json:"agent_session_id"`
 	BroadcastEventId *openapi_types.UUID    `json:"broadcast_event_id"`
 	Children         *[]ReplayNode          `json:"children,omitempty"`

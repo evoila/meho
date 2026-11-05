@@ -144,6 +144,7 @@ from meho_backplane.agent.toolset_discovery import (
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import role_at_least
 from meho_backplane.mcp.tools.connector_admin import reduce_connector_list
+from meho_backplane.operations.deny_reasons import CONNECTOR_NOT_ALLOWED, ROLE_INSUFFICIENT
 from meho_backplane.operations.meta_tools import (
     call_operation,
     list_operation_groups,
@@ -404,7 +405,9 @@ def _refuse_disallowed_connector(
     raise ToolRefusedRetry(
         f"connector_id {connector_id!r} is not in this agent's "
         f"allowed connectors {sorted(allowed_connectors)!r}. Pick "
-        f"an allowed connector or stop."
+        f"an allowed connector or stop.",
+        reason_code=CONNECTOR_NOT_ALLOWED,
+        reason=f"{tool_name}: the connector is not in this agent's allowed connectors",
     )
 
 
@@ -485,7 +488,12 @@ def _make_meta_tool(
                 tenant_id=str(ctx.deps.tenant_id),
             )
             raise ToolRefusedRetry(
-                f"forbidden: {meta.name!r} requires a higher role. Do not retry it."
+                f"forbidden: {meta.name!r} requires a higher role. Do not retry it.",
+                reason_code=ROLE_INSUFFICIENT,
+                reason=(
+                    f"{meta.name} needs the {meta.required_role.value} role; "
+                    f"the role in this run is {ctx.deps.tenant_role.value}"
+                ),
             )
         if is_connector_scoped and allowed_connectors is not None:
             _refuse_disallowed_connector(

@@ -2094,6 +2094,83 @@ func TestRunIngestAsyncPollsToSuccess(t *testing.T) {
 	if strings.Contains(out, "202") {
 		t.Errorf("stdout must stay reserved for the result (progress goes to stderr):\n%s", out)
 	}
+	// The mock is an older server that sends no phase: no phase line.
+	if strings.Contains(errOut, "ingest job phase") {
+		t.Errorf("a job without a phase must print no phase line:\n%s", errOut)
+	}
+}
+
+// TestRunIngestAsyncPrintsPhaseChanges pins the phase progress lines
+// (#5786): while the job runs, each new phase prints one line to
+// stderr, in order, and a repeated phase prints nothing new.
+func TestRunIngestAsyncPrintsPhaseChanges(t *testing.T) {
+	phases := []api.IngestJobStatusResponsePhase{
+		api.IngestJobStatusResponsePhaseParse,
+		api.IngestJobStatusResponsePhaseParse,
+		api.IngestJobStatusResponsePhaseRegister,
+		api.IngestJobStatusResponsePhaseGrouping,
+		api.IngestJobStatusResponsePhaseGrouping,
+	}
+	var pollCalls atomic.Int32
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 202, asyncIngestHandle())
+		},
+		"GET /api/v1/connectors/ingest/jobs/" + asyncIngestJobID.String(): func(w http.ResponseWriter, _ *http.Request) {
+			n := int(pollCalls.Add(1)) - 1
+			if n < len(phases) {
+				writeJSON(t, w, 200, api.IngestJobStatusResponse{
+					JobId:          asyncIngestJobID,
+					Status:         api.IngestJobStatusResponseStatusRunning,
+					Phase:          phases[n],
+					PhaseStartedAt: 1_700_000_000 + float64(n),
+				})
+				return
+			}
+			writeJSON(t, w, 200, api.IngestJobStatusResponse{
+				JobId:  asyncIngestJobID,
+				Status: api.IngestJobStatusResponseStatusSucceeded,
+				Phase:  api.IngestJobStatusResponsePhaseGrouping,
+				Ingestion: &api.IngestionResultModel{
+					ConnectorId:   "vmware-rest-9.0",
+					InsertedCount: 3,
+				},
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	if err := runIngest(cmd, ingestOptions{
+		Catalog:           "vmware/9.0",
+		BackplaneOverride: srv.URL,
+		pollInterval:      time.Millisecond,
+	}); err != nil {
+		t.Fatalf("runIngest async: %v", err)
+	}
+	var got []string
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if strings.HasPrefix(line, "ingest job phase: ") {
+			got = append(got, strings.TrimPrefix(line, "ingest job phase: "))
+		}
+	}
+	want := []string{
+		"parse (since 2023-11-14T22:13:20Z)",
+		"register (since 2023-11-14T22:13:22Z)",
+		"grouping (since 2023-11-14T22:13:23Z)",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("phase lines = %q, want %q", got, want)
+	}
+	if strings.Contains(stdout.String(), "ingest job phase") {
+		t.Errorf("phase lines must go to stderr, not stdout:\n%s", stdout.String())
+	}
 }
 
 // TestRunIngestAsyncNoWaitPrintsHandle pins the detached mode: a
@@ -2448,6 +2525,9 @@ func TestRunIngestStatusRunningSnapshot(t *testing.T) {
 				Version:   &version,
 				ImplId:    &impl,
 				StartedAt: 1_700_000_000,
+				Phase:     api.IngestJobStatusResponsePhaseRegister,
+				// Past 2^24: a 32-bit float would round this time.
+				PhaseStartedAt: 1_700_000_061,
 			})
 		},
 	})
@@ -2469,6 +2549,7 @@ func TestRunIngestStatusRunningSnapshot(t *testing.T) {
 		"ingest job " + asyncIngestJobID.String() + " — status=running",
 		"request: vmware/9.0/vmware-rest",
 		"started_at: 2023-11-14T",
+		"phase: register (since 2023-11-14T22:14:21Z)",
 		"re-running ingest would start a second job",
 	} {
 		if !strings.Contains(out, want) {

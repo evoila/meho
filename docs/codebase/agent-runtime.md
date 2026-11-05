@@ -470,8 +470,11 @@ carry the child's run id (see [Lineage](#lineage--the-cascade-tree-is-reconstruc
   as the record of the parent's `invoke_agent` call.
 - **Row shape.** `method="AGENT"`, `path="/agent/tools/call/<tool>"`. The
   payload holds `op_id` (the tool name), `params_hash`, `op_class`,
-  `error_type` on a failure, and the agent model and provider. Arguments and
-  error text are never stored.
+  `error_type` on a failure, and the agent model and provider. A call the
+  toolset refused also holds `error` with `error_code` `denied`, a
+  `reason_code` (`role_insufficient` or `connector_not_allowed`) and a short
+  `reason` that names the rule (#5773). Arguments and error text are never
+  stored.
 - **Status.** 200 success, 403 a call the toolset refused (role floor or
   connector allow-list; `_make_meta_tool` raises `ToolRefusedRetry`), 400 bad
   arguments, a retry the tool asked for, or a call to a tool name the run

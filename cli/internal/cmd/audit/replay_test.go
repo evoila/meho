@@ -464,6 +464,29 @@ func TestFormatReplayNodeShowsTenant(t *testing.T) {
 	}
 }
 
+// TestFormatReplayNodeShowsActor — a node of an agent run that a person
+// started names the agent at the end of the line (#5773); a node without
+// an actor has no actor field.
+func TestFormatReplayNodeShowsActor(t *testing.T) {
+	actor := "agent:reader"
+	node := &api.ReplayNode{
+		Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
+		Ts:           mustTS(t, "2026-05-13T10:00:00Z"),
+		PrincipalSub: "damir",
+		OpId:         "x.y",
+		ResultStatus: "denied",
+		ActorSub:     &actor,
+	}
+	want := "2026-05-13T10:00:00Z x.y [denied] (-ms) tenant=- actor=agent:reader"
+	if got := formatReplayNode(node); got != want {
+		t.Errorf("got %q; want %q", got, want)
+	}
+	node.ActorSub = nil
+	if got := formatReplayNode(node); strings.Contains(got, "actor=") {
+		t.Errorf("node without an actor shows one: %q", got)
+	}
+}
+
 // TestRunReplayTreeShowsTenantOnEveryNode — the text tree names the
 // tenant on each line, children included (#5238).
 func TestRunReplayTreeShowsTenantOnEveryNode(t *testing.T) {

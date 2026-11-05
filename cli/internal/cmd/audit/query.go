@@ -321,7 +321,8 @@ func postQuery(
 // printQueryTable renders the audit page as a compact, scannable
 // table. Columns: AUDIT_ID, TIME, TENANT, PRINCIPAL, TARGET, OP_ID,
 // CLASS, STATUS. TENANT is the tenant name, or the tenant id when the
-// backend has no name for it (#5238). The audit id comes first and
+// backend has no name for it (#5238). PRINCIPAL ends with "via <actor>"
+// when an agent acted for the person (#5773). The audit id comes first and
 // is printed whole (#4858), so an operator can paste it into
 // `meho audit show` without re-running the query with --json. When `next_cursor` is set, a final NEXT
 // line tells the operator how to paste-paginate.
@@ -336,6 +337,9 @@ func printQueryTable(w io.Writer, r *api.AuditQueryResult) {
 		principal := row.PrincipalSub
 		if name := strDeref(row.PrincipalName); name != "" {
 			principal = fmt.Sprintf("%s (%s)", name, row.PrincipalSub)
+		}
+		if actor := strDeref(row.ActorSub); actor != "" {
+			principal = fmt.Sprintf("%s via %s", principal, actor)
 		}
 		target := strDeref(row.TargetName)
 		if target == "" {

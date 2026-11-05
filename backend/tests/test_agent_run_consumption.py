@@ -75,8 +75,9 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
-    # Pin the default model so we hit a known pricing-table entry.
-    monkeypatch.setenv("AGENT_DEFAULT_MODEL", "anthropic:claude-sonnet-4-6")
+    # Pin the default model so we hit a known pricing-table entry: the
+    # current default (#5771).
+    monkeypatch.setenv("AGENT_DEFAULT_MODEL", "anthropic:claude-sonnet-5-5")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -206,12 +207,13 @@ async def test_finished_run_stamps_cost_and_applies_consumption(
         row = (
             await session.execute(select(AgentRunRow).where(AgentRunRow.id == outcome.run_id))
         ).scalar_one()
-    pricing = MODEL_PRICING["anthropic:claude-sonnet-4-6"]
+    pricing = MODEL_PRICING["anthropic:claude-sonnet-5-5"]
     expected_cost = (
         pricing.input * Decimal(input_tokens) + pricing.output * Decimal(output_tokens)
     ) / Decimal(1_000_000)
     assert row.cost is not None
     assert row.cost == expected_cost
+    assert expected_cost > 0
 
     # --- 2. Three IdentityBudget rows materialise ----------------------
     async with sessionmaker() as session:
@@ -269,7 +271,7 @@ async def test_get_remaining_after_run_reports_correct_gap(
     outcome = await invoker.run(op, "consumption-reader", "go")
     assert outcome.status is AgentRunStatus.SUCCEEDED
 
-    pricing = MODEL_PRICING["anthropic:claude-sonnet-4-6"]
+    pricing = MODEL_PRICING["anthropic:claude-sonnet-5-5"]
     expected_cost = (
         pricing.input * Decimal(input_tokens) + pricing.output * Decimal(output_tokens)
     ) / Decimal(1_000_000)

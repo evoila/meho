@@ -1107,7 +1107,7 @@ class Settings(BaseModel):
     agent_default_model:
         Pinned Anthropic model id the agent loop uses when an
         ``AgentDefinition`` does not override it. A full id
-        (``anthropic:claude-sonnet-4-6``), never a moving ``-latest`` tag,
+        (``anthropic:claude-sonnet-5-5``), never a moving ``-latest`` tag,
         so a model swap is a deliberate config push. Set via
         ``AGENT_DEFAULT_MODEL``.
     agent_max_output_tokens:
@@ -1922,10 +1922,10 @@ class Settings(BaseModel):
     # is the pinned model id the loop uses when an ``AgentDefinition`` does
     # not override it (full id in config, not a moving ``-latest`` tag).
     anthropic_api_key: str = ""
-    agent_default_model: str = Field(default="anthropic:claude-sonnet-4-6", min_length=1)
+    agent_default_model: str = Field(default="anthropic:claude-sonnet-5-5", min_length=1)
     # #3997 -- output-token limit for each Anthropic agent request. Since
     # pydantic-ai 2.52 an unset ``max_tokens`` means the model's maximum
-    # (128,000 for claude-sonnet-4-6), sent as a stream, so the builders
+    # (128,000 for claude-sonnet-5-5), sent as a stream, so the builders
     # always send this value. 4096 keeps requests as they were before.
     agent_max_output_tokens: int = Field(default=4096, ge=1, le=128_000)
     # G11.5-T2 #1076 — AWS Bedrock backend configuration. The Bedrock
@@ -3061,7 +3061,7 @@ def get_settings() -> Settings:
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip(),
         agent_default_model=os.environ.get(
             "AGENT_DEFAULT_MODEL",
-            "anthropic:claude-sonnet-4-6",
+            "anthropic:claude-sonnet-5-5",
         ),
         agent_max_output_tokens=int(
             os.environ.get("AGENT_MAX_OUTPUT_TOKENS", "4096"),

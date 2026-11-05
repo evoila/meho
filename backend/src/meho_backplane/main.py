@@ -211,6 +211,7 @@ from meho_backplane.operations.result_read_admission import (
     configure_result_read_admission,
     shutdown_result_read_admission,
 )
+from meho_backplane.operations.unpriced_model import warn_if_model_unpriced
 from meho_backplane.request_body_limit import RequestBodyLimitMiddleware
 from meho_backplane.request_usage.retention import (
     start_request_usage_retention_sweeper,
@@ -515,6 +516,9 @@ async def _run_lifespan_startup() -> None:
     # (#1673).
     _assert_mcp_resource_uri_configured()
     _advise_vault_tenant_scope_unenforced()
+    # #5771: a default model with no price row costs 0, so the spend
+    # limits would not count it. Warn, but start.
+    warn_if_model_unpriced(get_settings().agent_default_model)
     # G10.0-T5 (#866) — ensure ``ui/static/dist/`` exists so the
     # StaticFiles mount does not crash on a fresh clone where
     # ``tailwindcss --watch`` has not yet materialised the compiled

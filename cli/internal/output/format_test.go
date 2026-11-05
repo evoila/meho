@@ -478,3 +478,38 @@ func TestRenderHumanHealth_Tenants(t *testing.T) {
 		t.Errorf("chosen output wrong:\n%s", chosen)
 	}
 }
+
+// TestRenderHumanHealth_AgentModelSpend: one warning line when MEHO has
+// no price for the default agent model (#5771); nothing new when it has
+// one, and nothing new when an older backplane sends no field.
+func TestRenderHumanHealth_AgentModelSpend(t *testing.T) {
+	render := func(spend *api.AgentModelSpend) string {
+		var buf bytes.Buffer
+		resp := &api.HealthResponse{
+			Operator:        api.OperatorIdentity{Sub: "alice-sub-id"},
+			Vault:           api.VaultStatus{Reachable: true, ReadOk: true},
+			Db:              api.DbStatus{Migrated: ptrBool(true)},
+			AgentModelSpend: spend,
+		}
+		if err := PrintHealth(&buf, resp); err != nil {
+			t.Fatalf("PrintHealth: %v", err)
+		}
+		return buf.String()
+	}
+	unpriced := render(&api.AgentModelSpend{Model: "anthropic:claude-new-model", SpendCounted: false})
+	want := "Agent model: anthropic:claude-new-model has no price in MEHO, so spend limits do not count its runs"
+	if !strings.Contains(unpriced, want) {
+		t.Errorf("expected the warning line, got:\n%s", unpriced)
+	}
+	priced := render(&api.AgentModelSpend{Model: "anthropic:claude-sonnet-5-5", SpendCounted: true})
+	missing := render(nil)
+	if priced != missing {
+		t.Errorf("a priced model and no field must print the same:\n%s\n---\n%s", priced, missing)
+	}
+	if strings.Contains(priced, "Agent model") {
+		t.Errorf("no line when the spend is counted, got:\n%s", priced)
+	}
+	if strings.Count(unpriced, "\n") != strings.Count(priced, "\n")+1 {
+		t.Errorf("an unpriced model adds exactly one line:\n%s\n---\n%s", unpriced, priced)
+	}
+}

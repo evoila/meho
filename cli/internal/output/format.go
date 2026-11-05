@@ -382,7 +382,27 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 	if line := formatOperationCatalog(resp.OperationCatalog); line != "" {
 		fmt.Fprintln(stdoutW, line)
 	}
+
+	// Agent model spend (#5771): one line when MEHO has no price for the
+	// default agent model, nothing otherwise. Older backplanes send no
+	// field.
+	if line := formatAgentModelSpend(resp.AgentModelSpend); line != "" {
+		fmt.Fprintln(stdoutW, line)
+	}
 	return nil
+}
+
+// formatAgentModelSpend renders the one warning line for a default agent
+// model that has no price: runs on it cost 0, so the spend limits do not
+// count them. Empty when the spend is counted or the field is missing.
+func formatAgentModelSpend(s *api.AgentModelSpend) string {
+	if s == nil || s.SpendCounted {
+		return ""
+	}
+	return fmt.Sprintf(
+		"  Agent model: %s has no price in MEHO, so spend limits do not count its runs",
+		s.Model,
+	)
 }
 
 // tenantNotChosen reports a status answer for a login with several

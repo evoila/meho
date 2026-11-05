@@ -396,7 +396,7 @@ async def test_default_model_factory_strips_provider_prefix(
     """The shipped default spec-form id reaches AnthropicModel as the bare id.
 
     ``agent_default_model`` defaults to the pydantic-ai spec form
-    ``anthropic:claude-sonnet-4-6``; passed raw, the ``anthropic:`` prefix
+    ``anthropic:claude-sonnet-5-5``; passed raw, the ``anthropic:`` prefix
     reaches the Messages API verbatim and 404s. The factory must strip it
     (RDC #789 N11).
     """
@@ -411,7 +411,7 @@ async def test_default_model_factory_strips_provider_prefix(
     try:
         model = default_model_factory()
         assert isinstance(model, AnthropicModel)
-        assert model.model_name == "claude-sonnet-4-6"
+        assert model.model_name == "claude-sonnet-5-5"
     finally:
         get_settings.cache_clear()
 
@@ -442,7 +442,7 @@ async def test_default_model_factory_pins_old_max_tokens(
     """Each agent request asks for at most 4096 output tokens, not streamed.
 
     Since pydantic-ai 2.52, an unset ``max_tokens`` becomes the model's
-    maximum (128,000 for claude-sonnet-4-6) and the request is streamed.
+    maximum (128,000 for claude-sonnet-5-5) and the request is streamed.
     The ``AGENT_MAX_OUTPUT_TOKENS`` default of 4096 keeps the request as before.
     """
     from meho_backplane.agent.run import default_model_factory
@@ -461,7 +461,7 @@ async def test_default_model_factory_pins_old_max_tokens(
     finally:
         get_settings.cache_clear()
 
-    assert body["model"] == "claude-sonnet-4-6"
+    assert body["model"] == "claude-sonnet-5-5"
     assert body["max_tokens"] == 4096
     assert body.get("stream") is not True
 

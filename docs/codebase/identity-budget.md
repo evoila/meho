@@ -90,10 +90,10 @@ best-effort partial usage on failure, but the v0.2 contract is
 `MODEL_PRICING` is a `Final[dict[str, PerMillionPricing]]` pinned at
 import time. The keys are the **resolved** provider-prefixed ids the
 runtime emits via `AgentRunAuditMeta.model` (e.g.
-`anthropic:claude-sonnet-4-6`). The runtime calls `compute_cost(usage,
-model_id)` with the *resolved* id, not the operator-facing logical
-tier, so the table keys directly on what the provider was actually
-billed for.
+`anthropic:claude-sonnet-5-5`, the default of `AGENT_DEFAULT_MODEL`).
+The runtime calls `compute_cost(usage, model_id)` with the *resolved*
+id, not the operator-facing logical tier, so the table keys directly
+on what the provider was actually billed for.
 
 Why in code and not the DB:
 
@@ -108,6 +108,25 @@ An unknown model id (lookup miss) yields `Decimal(0)` and logs a
 single `warning` per process — the "known unknown" contract. The gate
 that prevents a run from *starting* against an un-priced model lives
 in the multi-provider resolver (G11.5-C4).
+
+The table has a row for each current Claude model: `claude-opus-5-5`,
+`claude-sonnet-5-5` and `claude-haiku-5-5`. `cache_write` is the price
+of a 5-minute cache write. Haiku 5.5 costs more when one request's
+prompt is over 100,000 tokens. A run's usage is one total over all its
+requests, so the table uses the price for shorter prompts.
+
+A default model with no row is made visible in two places (#5771,
+`operations/unpriced_model.py`):
+
+- **At start.** `warn_if_model_unpriced(settings.agent_default_model)`
+  logs one `agent_default_model_unpriced` warning. MEHO still starts:
+  an install may pick a new model before MEHO knows its price.
+- **In the status read.** `GET /api/v1/health` (and the `meho_status`
+  tool) carries `agent_model_spend: {model, spend_counted}`.
+  `meho status` prints one line when `spend_counted` is false.
+
+`is_model_priced` reads a bare model id (no `provider:` part) as an
+Anthropic id, the same way the runtime stores it.
 
 ## Window truncation
 

@@ -106,11 +106,12 @@ class PerMillionPricing:
     cache_write: Decimal = Decimal(0)
 
 
-#: Per-model published pricing as of 2026-05-27 (Anthropic).
+#: Per-model published pricing (Anthropic; 5.5 rows as of 2026-11-05).
+#: ``cache_write`` is the 5-minute cache write price.
 #:
 #: The keys are the resolved provider-prefixed model ids the runtime
 #: emits via :attr:`AgentRunAuditMeta.model` (e.g. the
-#: ``anthropic:claude-sonnet-4-6`` shape ``settings.agent_default_model``
+#: ``anthropic:claude-sonnet-5-5`` shape ``settings.agent_default_model``
 #: defaults to). The runtime calls
 #: :func:`compute_cost` with the *resolved* id, not the operator-
 #: facing logical tier, so this map keys directly on what the
@@ -120,8 +121,29 @@ class PerMillionPricing:
 #: =0 / :attr:`output` =0, i.e. cost reported as 0 (a *known-unknown*
 #: rather than an error). The runtime logs a single ``warning`` on the
 #: first lookup miss per process so an operator notices the gap
-#: without breaking the run.
+#: without breaking the run (``unpriced_model`` also warns at start).
 MODEL_PRICING: Final[dict[str, PerMillionPricing]] = {
+    # Anthropic Claude 5.5 family, the current models.
+    "anthropic:claude-opus-5-5": PerMillionPricing(
+        input=Decimal("4.00"),
+        output=Decimal("20.00"),
+        cache_read=Decimal("0.20"),
+        cache_write=Decimal("5.00"),
+    ),
+    "anthropic:claude-sonnet-5-5": PerMillionPricing(
+        input=Decimal("2.00"),
+        output=Decimal("10.00"),
+        cache_read=Decimal("0.10"),
+        cache_write=Decimal("2.50"),
+    ),
+    # Price for prompts up to 100,000 tokens; one run's usage cannot show
+    # the length of each request's prompt.
+    "anthropic:claude-haiku-5-5": PerMillionPricing(
+        input=Decimal("0.10"),
+        output=Decimal("0.50"),
+        cache_read=Decimal("0.01"),
+        cache_write=Decimal("0.125"),
+    ),
     # Anthropic Claude Sonnet 4.x family.
     "anthropic:claude-sonnet-4-6": PerMillionPricing(
         input=Decimal("3.00"),

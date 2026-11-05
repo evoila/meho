@@ -746,7 +746,7 @@ model may write back in one answer. The setting
 
 Why the builders always send a value: since pydantic-ai 2.52, an unset
 `max_tokens` means the model's maximum (128,000 for
-`claude-sonnet-4-6`), and pydantic-ai then sends the request as a
+`claude-sonnet-5-5`), and pydantic-ai then sends the request as a
 stream.
 
 What a higher value costs:

@@ -90,8 +90,8 @@ def test_factory_strips_provider_prefix(monkeypatch: pytest.MonkeyPatch) -> None
 
     client = build_anthropic_ingest_llm_client()
     assert isinstance(client, AnthropicMessagesLlmClient)
-    # Default agent_default_model is "anthropic:claude-sonnet-4-6".
-    assert client._model == "claude-sonnet-4-6"
+    # Default agent_default_model is "anthropic:claude-sonnet-5-5".
+    assert client._model == "claude-sonnet-5-5"
 
 
 def test_factory_accepts_bare_model_id(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -326,7 +326,7 @@ async def test_real_sdk_request_carries_max_tokens_and_timeout(
     assert str(request.url) == "http://anthropic.invalid/v1/messages"
     body = json.loads(request.content)
     assert body["max_tokens"] == 2048
-    assert body["model"] == "claude-sonnet-4-6"
+    assert body["model"] == "claude-sonnet-5-5"
     assert "stream" not in body
     # httpx2 carries the timeout each request uses in its extensions.
     assert request.extensions["timeout"] == {

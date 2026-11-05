@@ -393,7 +393,7 @@ _ROLE_PARAM: Final[dict[str, Any]] = {
     "description": "The data role. Only these two roles are accepted.",
 }
 
-_EXAMPLE_PRINCIPAL: Final[str] = "00000000-0000-0000-0000-0000000000a1"
+_EXAMPLE_PRINCIPAL: Final[str] = "<principal-object-id>"
 
 BLOB_LINK_CREATE_PARAMS: Final[dict[str, Any]] = {
     "type": "object",

@@ -700,6 +700,9 @@ def test_an_allow_listed_field_passes_and_every_entry_has_a_reason() -> None:
     for (op_id, path), reason in NOT_CALLER_ADDRESSES.items():
         assert reason.strip(), f"{op_id} {path} has no reason"
         schema = {"type": "object", "properties": {path: {"type": "string"}}}
+        if not unmarked_address_fields("fake.other.op", schema):
+            # A field found by its format, not its name (allowed_ip, format ipv4).
+            schema = {"type": "object", "properties": {path: {"type": "string", "format": "ipv4"}}}
         if "." not in path and "[" not in path:
             assert unmarked_address_fields(op_id, schema) == []
             assert unmarked_address_fields("fake.other.op", schema) == [path]

@@ -47,6 +47,7 @@ from meho_backplane.connectors import OperationResult, ResultHandle
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
+from meho_backplane.operations.deny_reasons import READ_SCOPE_DENIED, deny_reason_code
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 from meho_backplane.redaction.secret_fields import scrub_secret_fields_in_text
@@ -686,10 +687,12 @@ def result_handler_unreachable(
 #: Stable error code for a service-principal read refused by its read
 #: scope (#4992). The policy gate starts the deny reason with this code
 #: and a colon; :func:`result_denied` then reports it as ``error_code``.
-READ_SCOPE_DENIED_CODE: Final[str] = "read_scope_denied"
+READ_SCOPE_DENIED_CODE: Final[str] = READ_SCOPE_DENIED
 
 
-def result_denied(op_id: str, reason: str, duration_ms: float) -> OperationResult:
+def result_denied(
+    op_id: str, reason: str, duration_ms: float, *, reason_code: str | None = None
+) -> OperationResult:
     """Policy gate denied the call.
 
     Returned when the effective verdict is
@@ -705,6 +708,12 @@ def result_denied(op_id: str, reason: str, duration_ms: float) -> OperationResul
     the refusal without human intervention. ``error_code`` is ``denied``,
     or :data:`READ_SCOPE_DENIED_CODE` when the reason starts with that
     code (the gate's stable marker for a read-scope refusal).
+
+    ``reason_code`` says which rule refused the call
+    (:mod:`~meho_backplane.operations.deny_reasons`). When the caller does
+    not give one, it is worked out from *reason*. The dispatcher stores the
+    extras on the audit row of the refusal, so the row keeps the code and
+    the text too.
     """
     error_code = "denied"
     if reason.startswith(f"{READ_SCOPE_DENIED_CODE}:"):
@@ -714,7 +723,11 @@ def result_denied(op_id: str, reason: str, duration_ms: float) -> OperationResul
         op_id=op_id,
         error=f"denied: {reason}",
         duration_ms=duration_ms,
-        extras={"error_code": error_code, "reason": reason},
+        extras={
+            "error_code": error_code,
+            "reason_code": reason_code or deny_reason_code(reason),
+            "reason": reason,
+        },
     )
 
 

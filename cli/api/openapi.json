@@ -25028,6 +25028,16 @@
             "type": "boolean",
             "title": "Sandbox Mode"
           },
+          "actor_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Actor Sub"
+          },
+          "actor_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Actor Name"
+          },
           "broadcast_event_id": {
             "type": "string",
             "format": "uuid",
@@ -25062,7 +25072,7 @@
           "broadcast_event_id"
         ],
         "title": "AuditEntry",
-        "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``tenant_name`` \u2190 LEFT JOIN ``tenant.name`` ON ``audit_log.tenant_id``\n  (#5238). ``None`` when the tenant row is gone; show ``tenant_id`` then.\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``work_ref`` \u2190 ``audit_log.work_ref`` (external change-ticket reference;\n  work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat\n  ``work_ref`` filter on :class:`AuditQueryFilters` is exact-match.\n* ``principal_name`` \u2190 ``payload['principal_name']`` when set. The MCP\n  audit-write helper (``write_mcp_audit_row``) populates it from\n  ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain\n  None pending a separate fix to bind ``name`` to contextvars in\n  ``verify_jwt_and_bind``.\n* ``sandbox_mode`` \u2190 ``audit_log.sandbox_mode`` (the sandbox mark; #4622)\n* ``broadcast_event_id`` \u2014 v0.2 placeholder, always None (FK direction\n  is reversed: ``BroadcastEvent.audit_id`` points at the audit row)."
+        "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``tenant_name`` \u2190 LEFT JOIN ``tenant.name`` ON ``audit_log.tenant_id``\n  (#5238). ``None`` when the tenant row is gone; show ``tenant_id`` then.\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``work_ref`` \u2190 ``audit_log.work_ref`` (external change-ticket reference;\n  work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat\n  ``work_ref`` filter on :class:`AuditQueryFilters` is exact-match.\n* ``principal_name`` \u2190 ``payload['principal_name']`` when set. The MCP\n  audit-write helper (``write_mcp_audit_row``) populates it from\n  ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain\n  None pending a separate fix to bind ``name`` to contextvars in\n  ``verify_jwt_and_bind``.\n* ``sandbox_mode`` \u2190 ``audit_log.sandbox_mode`` (the sandbox mark; #4622)\n* ``actor_sub`` \u2190 ``audit_log.actor_sub`` (#5773): the agent that acted\n  for the person in ``principal_sub``, in a run the person started.\n  ``None`` when nobody acted for another login.\n* ``actor_name`` \u2014 the agent's name, read from ``actor_sub``\n  (``agent:<name>``). ``None`` when ``actor_sub`` is not of that form.\n* ``broadcast_event_id`` \u2014 v0.2 placeholder, always None (FK direction\n  is reversed: ``BroadcastEvent.audit_id`` points at the audit row)."
       },
       "AuditEventClass": {
         "type": "string",
@@ -33195,7 +33205,7 @@
           "tenant_role"
         ],
         "title": "OperatorIdentity",
-        "description": "Operator identity surface exposed to the CLI and MCP ``meho_status``.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only.\n\n``tenant_id`` + ``tenant_role`` (#2746) let a connected MCP session\nconfirm *which tenant and role it runs as* from inside the session \u2014\nthe check the clean-room program's \"logged in as operator, not\ntenant_admin\" discipline needs, and the identity the ``meho_status``\ntool's own doc (``docs/cross-repo/mcp-client-setup.md`` Step 4)\nalready promises. Both are always present on the validated\n:class:`Operator` (JWT claims), so the surface can never omit them;\nthey serialise as a UUID string / role value under\n``model_dump(mode=\"json\")`` \u2014 the same wire shape the\n``meho://tenant/<id>/info`` resource returns.\n\n``tenants`` (#5239) lists every tenant of the person, with the role\nin each, when the token carries a tenant list (empty otherwise). A\nlogin with several tenants that chose none gets ``tenant_id`` and\n``tenant_role`` as ``None``: the status answer then only lists the\ntenants."
+        "description": "Operator identity surface exposed to the CLI and MCP ``meho_status``.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only.\n\n``tenant_id`` + ``tenant_role`` (#2746) let a connected MCP session\nconfirm *which tenant and role it runs as* from inside the session \u2014\nthe check the clean-room program's \"logged in as operator, not\ntenant_admin\" discipline needs, and the identity the ``meho_status``\ntool's own doc (``docs/cross-repo/mcp-client-setup.md`` Step 4)\nalready promises. Both are always present on the validated\n:class:`Operator` (JWT claims), so the surface can never omit them;\nthey serialise as a UUID string / role value under\n``model_dump(mode=\"json\")`` \u2014 the same wire shape the\n``meho://tenant/<id>/info`` resource returns.\n\n``tenants`` (#5239) lists every tenant of the person, with the role\nin each, when the token carries a tenant list (empty otherwise). A\nlogin with several tenants that chose none gets ``tenant_id`` and\n``tenant_role`` as ``None``: the status answer then only lists the\ntenants.\n\nInside an agent run that a person started (an agent is bound as the\nactor), no role in ``tenants`` is higher than ``tenant_role``, the\nrole of the run that every check uses (#5773). The person's own\nlogin groups may give a higher role, but the agent never gets it."
       },
       "OrderBy": {
         "properties": {
@@ -34276,6 +34286,16 @@
           "sandbox_mode": {
             "type": "boolean",
             "title": "Sandbox Mode"
+          },
+          "actor_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Actor Sub"
+          },
+          "actor_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Actor Name"
           },
           "broadcast_event_id": {
             "type": "string",

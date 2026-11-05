@@ -41,6 +41,18 @@ down_revision: str | None = "0136"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+# Alembic reads these names itself. List them in __all__, so the code-quality
+# check does not report them as unused globals. Keep a plain list of strings
+# with no type annotation: the check reads only that form.
+__all__ = [
+    "branch_labels",
+    "depends_on",
+    "down_revision",
+    "downgrade",
+    "revision",
+    "upgrade",
+]
+
 _TABLE = "audit_log"
 _CONSTRAINT = "ck_audit_log_event_class"
 

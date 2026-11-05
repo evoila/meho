@@ -101,6 +101,11 @@ TAG_FEATURE: Final[dict[str, str]] = {
     # The read scope (#4992) narrows what a service principal reads without
     # a grant; a person sets it on the same operator plane as the grants.
     "service-principal-read-scopes": "approvals",
+    # The settings file (core.md §5): export / import / history over the
+    # tenant policies, conventions and targets. New and not yet proven in the
+    # field, and its import is a bulk write, so it rides the beta
+    # ``write_surfaces`` tier rather than the GA tiers of what it carries.
+    "settings": "write_surfaces",
     "targets": "targets",
     # The per-tenant flight-recorder capture policy (#3272) is the write-side
     # companion of the operator flight-recorder read surface, which rides the

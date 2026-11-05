@@ -9513,6 +9513,38 @@ type ServiceReadScopeSet struct {
 	Entries []ReadScopeEntry `json:"entries"`
 }
 
+// SettingsImportResponse The preview and the apply answer: plain JSON, the mistakes and the diff.
+//
+// “diff“ has one entry per section (“tenants“, “policies“,
+// “conventions“, “targets“), each with “added“, “changed“ (“before“
+// and “after“) and “not_in_file“ lists. It is “null“ when the file has
+// mistakes. On an apply, “diff“ is what actually changed, “failed“ lists
+// the items that could not be written (the rest were), and “revision_id“ is
+// the new revision (“null“ when nothing changed).
+type SettingsImportResponse struct {
+	Applied    *bool                   `json:"applied,omitempty"`
+	Diff       *map[string]interface{} `json:"diff"`
+	Failed     *[]string               `json:"failed,omitempty"`
+	Mistakes   []string                `json:"mistakes"`
+	Ok         bool                    `json:"ok"`
+	Preview    bool                    `json:"preview"`
+	RevisionId *openapi_types.UUID     `json:"revision_id"`
+	Warnings   []string                `json:"warnings"`
+}
+
+// SettingsRevision One “instance_settings_revision“ row, with its diff worked out on read.
+type SettingsRevision struct {
+	ActorSub     string                  `json:"actor_sub"`
+	ApiVersion   string                  `json:"api_version"`
+	AuditId      openapi_types.UUID      `json:"audit_id"`
+	Diff         map[string]interface{}  `json:"diff"`
+	ExportedFrom *map[string]interface{} `json:"exported_from"`
+	FileSha256   string                  `json:"file_sha256"`
+	Id           openapi_types.UUID      `json:"id"`
+	Summary      map[string]interface{}  `json:"summary"`
+	Ts           time.Time               `json:"ts"`
+}
+
 // ShowTemplateResponse Full template surface returned by “meho_runbook_show_template“.
 //
 // The complete template including the ordered :attr:`steps` and the
@@ -12070,6 +12102,24 @@ type ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetParams struct {
 
 // SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams defines parameters for SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPut.
 type SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ExportApiV1SettingsExportGetParams defines parameters for ExportApiV1SettingsExportGet.
+type ExportApiV1SettingsExportGetParams struct {
+	TenantId      *openapi_types.UUID `form:"tenant_id,omitempty" json:"tenant_id,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
+// HistoryApiV1SettingsHistoryGetParams defines parameters for HistoryApiV1SettingsHistoryGet.
+type HistoryApiV1SettingsHistoryGetParams struct {
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ImportSettingsApiV1SettingsImportPostParams defines parameters for ImportSettingsApiV1SettingsImportPost.
+type ImportSettingsApiV1SettingsImportPostParams struct {
+	Preview       *bool   `form:"preview,omitempty" json:"preview,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -15453,6 +15503,15 @@ type ClientInterface interface {
 	SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutWithBody(ctx context.Context, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPut(ctx context.Context, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, body SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ExportApiV1SettingsExportGet request
+	ExportApiV1SettingsExportGet(ctx context.Context, params *ExportApiV1SettingsExportGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// HistoryApiV1SettingsHistoryGet request
+	HistoryApiV1SettingsHistoryGet(ctx context.Context, params *HistoryApiV1SettingsHistoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ImportSettingsApiV1SettingsImportPostWithBody request with any body
+	ImportSettingsApiV1SettingsImportPostWithBody(ctx context.Context, params *ImportSettingsApiV1SettingsImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListTargetsApiV1TargetsGet request
 	ListTargetsApiV1TargetsGet(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -19122,6 +19181,42 @@ func (c *Client) SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutWith
 
 func (c *Client) SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPut(ctx context.Context, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, body SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutRequest(c.Server, principalSub, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ExportApiV1SettingsExportGet(ctx context.Context, params *ExportApiV1SettingsExportGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExportApiV1SettingsExportGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) HistoryApiV1SettingsHistoryGet(ctx context.Context, params *HistoryApiV1SettingsHistoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewHistoryApiV1SettingsHistoryGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ImportSettingsApiV1SettingsImportPostWithBody(ctx context.Context, params *ImportSettingsApiV1SettingsImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewImportSettingsApiV1SettingsImportPostRequestWithBody(c.Server, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -34426,6 +34521,200 @@ func NewSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutRequestWithBo
 	return req, nil
 }
 
+// NewExportApiV1SettingsExportGetRequest generates requests for ExportApiV1SettingsExportGet
+func NewExportApiV1SettingsExportGetRequest(server string, params *ExportApiV1SettingsExportGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/settings/export")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_id", runtime.ParamLocationQuery, *params.TenantId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewHistoryApiV1SettingsHistoryGetRequest generates requests for HistoryApiV1SettingsHistoryGet
+func NewHistoryApiV1SettingsHistoryGetRequest(server string, params *HistoryApiV1SettingsHistoryGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/settings/history")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewImportSettingsApiV1SettingsImportPostRequestWithBody generates requests for ImportSettingsApiV1SettingsImportPost with any type of body
+func NewImportSettingsApiV1SettingsImportPostRequestWithBody(server string, params *ImportSettingsApiV1SettingsImportPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/settings/import")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Preview != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "preview", runtime.ParamLocationQuery, *params.Preview); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewListTargetsApiV1TargetsGetRequest generates requests for ListTargetsApiV1TargetsGet
 func NewListTargetsApiV1TargetsGetRequest(server string, params *ListTargetsApiV1TargetsGetParams) (*http.Request, error) {
 	var err error
@@ -48047,6 +48336,15 @@ type ClientWithResponsesInterface interface {
 
 	SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutWithResponse(ctx context.Context, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, body SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutJSONRequestBody, reqEditors ...RequestEditorFn) (*SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse, error)
 
+	// ExportApiV1SettingsExportGetWithResponse request
+	ExportApiV1SettingsExportGetWithResponse(ctx context.Context, params *ExportApiV1SettingsExportGetParams, reqEditors ...RequestEditorFn) (*ExportApiV1SettingsExportGetResponse, error)
+
+	// HistoryApiV1SettingsHistoryGetWithResponse request
+	HistoryApiV1SettingsHistoryGetWithResponse(ctx context.Context, params *HistoryApiV1SettingsHistoryGetParams, reqEditors ...RequestEditorFn) (*HistoryApiV1SettingsHistoryGetResponse, error)
+
+	// ImportSettingsApiV1SettingsImportPostWithBodyWithResponse request with any body
+	ImportSettingsApiV1SettingsImportPostWithBodyWithResponse(ctx context.Context, params *ImportSettingsApiV1SettingsImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportSettingsApiV1SettingsImportPostResponse, error)
+
 	// ListTargetsApiV1TargetsGetWithResponse request
 	ListTargetsApiV1TargetsGetWithResponse(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*ListTargetsApiV1TargetsGetResponse, error)
 
@@ -52729,6 +53027,74 @@ func (r SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse) Sta
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ExportApiV1SettingsExportGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ExportApiV1SettingsExportGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ExportApiV1SettingsExportGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type HistoryApiV1SettingsHistoryGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *[]SettingsRevision
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r HistoryApiV1SettingsHistoryGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r HistoryApiV1SettingsHistoryGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ImportSettingsApiV1SettingsImportPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *SettingsImportResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ImportSettingsApiV1SettingsImportPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ImportSettingsApiV1SettingsImportPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -60190,6 +60556,33 @@ func (c *ClientWithResponses) SetReadScopeApiV1ServicePrincipalsReadScopesPrinci
 		return nil, err
 	}
 	return ParseSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse(rsp)
+}
+
+// ExportApiV1SettingsExportGetWithResponse request returning *ExportApiV1SettingsExportGetResponse
+func (c *ClientWithResponses) ExportApiV1SettingsExportGetWithResponse(ctx context.Context, params *ExportApiV1SettingsExportGetParams, reqEditors ...RequestEditorFn) (*ExportApiV1SettingsExportGetResponse, error) {
+	rsp, err := c.ExportApiV1SettingsExportGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExportApiV1SettingsExportGetResponse(rsp)
+}
+
+// HistoryApiV1SettingsHistoryGetWithResponse request returning *HistoryApiV1SettingsHistoryGetResponse
+func (c *ClientWithResponses) HistoryApiV1SettingsHistoryGetWithResponse(ctx context.Context, params *HistoryApiV1SettingsHistoryGetParams, reqEditors ...RequestEditorFn) (*HistoryApiV1SettingsHistoryGetResponse, error) {
+	rsp, err := c.HistoryApiV1SettingsHistoryGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseHistoryApiV1SettingsHistoryGetResponse(rsp)
+}
+
+// ImportSettingsApiV1SettingsImportPostWithBodyWithResponse request with arbitrary body returning *ImportSettingsApiV1SettingsImportPostResponse
+func (c *ClientWithResponses) ImportSettingsApiV1SettingsImportPostWithBodyWithResponse(ctx context.Context, params *ImportSettingsApiV1SettingsImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportSettingsApiV1SettingsImportPostResponse, error) {
+	rsp, err := c.ImportSettingsApiV1SettingsImportPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseImportSettingsApiV1SettingsImportPostResponse(rsp)
 }
 
 // ListTargetsApiV1TargetsGetWithResponse request returning *ListTargetsApiV1TargetsGetResponse
@@ -68609,6 +69002,98 @@ func ParseSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse(rs
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest ServiceReadScopeRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseExportApiV1SettingsExportGetResponse parses an HTTP response from a ExportApiV1SettingsExportGetWithResponse call
+func ParseExportApiV1SettingsExportGetResponse(rsp *http.Response) (*ExportApiV1SettingsExportGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ExportApiV1SettingsExportGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseHistoryApiV1SettingsHistoryGetResponse parses an HTTP response from a HistoryApiV1SettingsHistoryGetWithResponse call
+func ParseHistoryApiV1SettingsHistoryGetResponse(rsp *http.Response) (*HistoryApiV1SettingsHistoryGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &HistoryApiV1SettingsHistoryGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest []SettingsRevision
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseImportSettingsApiV1SettingsImportPostResponse parses an HTTP response from a ImportSettingsApiV1SettingsImportPostWithResponse call
+func ParseImportSettingsApiV1SettingsImportPostResponse(rsp *http.Response) (*ImportSettingsApiV1SettingsImportPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ImportSettingsApiV1SettingsImportPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SettingsImportResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

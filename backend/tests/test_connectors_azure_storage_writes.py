@@ -11,15 +11,21 @@ Microsoft's documented examples. Every id and name here is made up.
 
 from __future__ import annotations
 
+import base64
+import dataclasses
 import json
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 import respx
+from defusedxml.ElementTree import fromstring
 from sqlalchemy import select
 
+import meho_backplane.connectors.vault.ops as vault_ops
+from meho_backplane.broadcast.events import classify_op, redact_payload
 from meho_backplane.connectors.azure import (
     AZURE_CONNECTOR_ID,
     AZURE_IMPL_ID,
@@ -28,13 +34,15 @@ from meho_backplane.connectors.azure import (
     AzureConnector,
     register_azure_typed_operations,
     storage,
+    storage_writes,
 )
 from meho_backplane.connectors.azure.storage_schemas import STORAGE_DATA_ROLES
 from meho_backplane.connectors.azure.storage_writes import assignment_name
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import AuditLog, EndpointDescriptor
+from meho_backplane.flight_recorder import capture
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
@@ -44,6 +52,7 @@ from meho_backplane.settings import get_settings
 from tests._azure_fixtures import (
     ARM_BASE,
     ARM_HOST,
+    MEHO_TENANT,
     SUBSCRIPTION_A,
     AzureTargetStub,
     CountingLoader,
@@ -186,9 +195,13 @@ def _assignment(name: str, principal: str, scope: str = ACCOUNT_SCOPE) -> dict[s
 # ----------------------------------------------------------------------
 
 
-def test_the_role_writes_are_dangerous_and_wait_for_approval() -> None:
+def test_the_writes_are_dangerous_and_wait_for_approval() -> None:
     writes = {op.op_id: op for op in storage.OPS if "write" in op.tags}
-    assert set(writes) == {"azure.role.assignment.create", "azure.role.assignment.delete"}
+    assert set(writes) == {
+        "azure.storage.blob.link.create",
+        "azure.role.assignment.create",
+        "azure.role.assignment.delete",
+    }
     for op in writes.values():
         assert op.group_key == "storage"
         assert op.safety_level == "dangerous" and op.requires_approval is True
@@ -378,3 +391,257 @@ async def test_both_ops_wait_for_approval(
     assert result.status == "awaiting_approval", result
     assert not login.called
     assert not anything.called
+
+
+# ----------------------------------------------------------------------
+# The download link (azure.storage.blob.link.create)
+# ----------------------------------------------------------------------
+
+BLOB_HOST = f"{ACCOUNT}.blob.core.windows.net"
+FILE_NAME = "esxi/VMware-ESXi 8.0.iso"
+FILE_URL = f"https://{BLOB_HOST}/{CONTAINER}/esxi/VMware-ESXi%208.0.iso"
+KEY_URL = f"https://{BLOB_HOST}/?restype=service&comp=userdelegationkey"
+ALLOWED_IP = "198.51.100.7"
+STORE_AS = "esxi-iso"
+LINK_REF = f"tenants/{MEHO_TENANT}/azure-blob-links/{STORE_AS}"
+NOW = datetime(2026, 11, 5, 10, 0, tzinfo=UTC)
+
+#: A made-up user delegation key value. It may reach no result, trace or audit row.
+KEY_VALUE = base64.b64encode(b"made-up-delegation-key-value-for-tests-0001").decode()
+
+LINK = {
+    "account": ACCOUNT,
+    "container": CONTAINER,
+    "name": FILE_NAME,
+    "allowed_ip": ALLOWED_IP,
+    "store_as": STORE_AS,
+}
+
+
+def _key_xml(start: str = "2026-11-05T09:55:00Z", expiry: str = "2026-11-05T14:00:00Z") -> str:
+    return (
+        '<?xml version="1.0" encoding="utf-8"?><UserDelegationKey>'
+        "<SignedOid>11111111-2222-3333-4444-555555555555</SignedOid>"
+        "<SignedTid>66666666-7777-8888-9999-000000000000</SignedTid>"
+        f"<SignedStart>{start}</SignedStart><SignedExpiry>{expiry}</SignedExpiry>"
+        "<SignedService>b</SignedService><SignedVersion>2026-10-06</SignedVersion>"
+        f"<Value>{KEY_VALUE}</Value></UserDelegationKey>"
+    )
+
+
+@pytest.fixture
+def vault_put(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    put = AsyncMock(return_value={"version": 1})
+    monkeypatch.setattr(vault_ops, "vault_kv_put", put)
+    return put
+
+
+@pytest.fixture
+def fixed_now(monkeypatch: pytest.MonkeyPatch) -> datetime:
+    monkeypatch.setattr(storage_writes, "_utcnow", lambda: NOW)
+    return NOW
+
+
+def _blob_head(mock: respx.MockRouter, status: int = 200) -> respx.Route:
+    return mock.head(url__startswith=FILE_URL).respond(
+        status,
+        headers={"Content-Length": "1048576", "Content-Type": "application/octet-stream"},
+    )
+
+
+def _key(mock: respx.MockRouter, status: int = 200, body: str | None = None) -> respx.Route:
+    return mock.post(url__startswith=KEY_URL).respond(
+        status,
+        text=_key_xml() if body is None else body,
+        headers={"Content-Type": "application/xml"},
+    )
+
+
+def _stored_link(put: AsyncMock) -> str:
+    (args, _kwargs) = put.call_args
+    data: dict[str, str] = args[2]["data"]
+    return data["url"]
+
+
+@pytest.mark.asyncio
+async def test_link_create_stores_the_link_in_vault_and_returns_only_the_ref(
+    azure: AzureConnector, vault_put: AsyncMock, fixed_now: datetime
+) -> None:
+    with respx.mock() as mock:
+        _login(mock)
+        _accounts(mock)
+        head = _blob_head(mock)
+        key = _key(mock)
+        result = await _call("azure.storage.blob.link.create", LINK)
+
+    assert result.status == "ok", result.error
+    assert head.called and key.call_count == 1
+    assert key.calls.last.request.headers["x-ms-version"] == "2026-10-06"
+    vault_put.assert_awaited_once()
+    (args, _kwargs) = vault_put.call_args
+    assert args[2]["mount"] == "secret"
+    assert args[2]["path"] == LINK_REF
+    assert set(args[2]["data"]) == {"url"}
+    link = _stored_link(vault_put)
+    assert link.startswith(f"{FILE_URL}?")
+    assert "sig=" in link and f"sip={ALLOWED_IP}" in link
+    answer = result.result
+    assert answer["secret_ref"] == LINK_REF
+    assert answer["field"] == "url"
+    assert answer["allowed_ip"] == ALLOWED_IP
+    assert answer["account"] == {"name": ACCOUNT, "resource_group": GROUP}
+    assert answer["length"] == len(link.encode())
+    assert answer["value_fingerprint"]
+    dumped = json.dumps(answer)
+    assert "sig=" not in dumped and link not in dumped and KEY_VALUE not in dumped
+
+
+@pytest.mark.asyncio
+async def test_link_times_follow_now_and_hours(
+    azure: AzureConnector, vault_put: AsyncMock, fixed_now: datetime
+) -> None:
+    with respx.mock() as mock:
+        _login(mock)
+        _accounts(mock)
+        _blob_head(mock)
+        key = _key(mock, body=_key_xml(expiry="2026-11-05T16:00:00Z"))
+        result = await _call("azure.storage.blob.link.create", {**LINK, "hours": 6})
+
+    assert result.status == "ok", result.error
+    sent = fromstring(key.calls.last.request.content)
+    assert sent.findtext("Start") == "2026-11-05T09:55:00Z"
+    assert sent.findtext("Expiry") == "2026-11-05T16:00:00Z"
+    link = _stored_link(vault_put)
+    assert "st=2026-11-05T09%3A55%3A00Z" in link
+    assert "se=2026-11-05T16%3A00%3A00Z" in link
+    assert result.result["expires_at"] == "2026-11-05T16:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_link_create_trace_keeps_no_key_and_no_link(
+    azure: AzureConnector,
+    vault_put: AsyncMock,
+    fixed_now: datetime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spans: list[Any] = []
+
+    async def _record_trace(**kwargs: Any) -> None:
+        spans.extend(kwargs["spans"])
+
+    monkeypatch.setattr(capture, "should_capture", AsyncMock(return_value=True))
+    monkeypatch.setattr(capture, "record_trace", _record_trace)
+    with respx.mock() as mock:
+        _login(mock)
+        _accounts(mock)
+        _blob_head(mock)
+        _key(mock)
+        result = await _call("azure.storage.blob.link.create", LINK)
+
+    assert result.status == "ok", result.error
+    assert spans, "the flight recorder recorded nothing"
+    traced = json.dumps([dataclasses.asdict(span) for span in spans], default=str)
+    link = _stored_link(vault_put)
+    assert KEY_VALUE not in traced
+    assert link not in traced
+    assert "sig=" not in traced
+
+
+@pytest.mark.asyncio
+async def test_link_create_audit_and_broadcast_hold_no_link(
+    azure: AzureConnector, vault_put: AsyncMock, fixed_now: datetime
+) -> None:
+    with respx.mock() as mock:
+        _login(mock)
+        _accounts(mock)
+        _blob_head(mock)
+        _key(mock)
+        result = await _call("azure.storage.blob.link.create", LINK)
+
+    assert result.status == "ok", result.error
+    link = _stored_link(vault_put)
+    async with get_sessionmaker()() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(AuditLog).where(AuditLog.path == "azure.storage.blob.link.create")
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert rows
+    audited = json.dumps([row.payload for row in rows], default=str)
+    assert link not in audited and KEY_VALUE not in audited and "sig=" not in audited
+    broadcast = redact_payload(
+        classify_op("azure.storage.blob.link.create"),
+        {"params": LINK, "result": result.result},
+        "ok",
+    )
+    assert broadcast == {"op_class": "credential_mint", "result_status": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_vault_write_failure_names_the_path_not_the_link(
+    azure: AzureConnector, fixed_now: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+
+    async def _refuse(operator: Any, target: Any, params: dict[str, Any]) -> dict[str, Any]:
+        seen.append(params["data"]["url"])
+        raise RuntimeError(f"permission denied writing {params['data']['url']}")
+
+    monkeypatch.setattr(vault_ops, "vault_kv_put", _refuse)
+    with respx.mock() as mock:
+        _login(mock)
+        _accounts(mock)
+        _blob_head(mock)
+        _key(mock)
+        result = await _call("azure.storage.blob.link.create", LINK)
+
+    assert result.status == "error"
+    (link,) = seen
+    shown = json.dumps(result.model_dump(mode="json"), default=str)
+    assert LINK_REF in shown
+    assert link not in shown and "sig=" not in shown and KEY_VALUE not in shown
+
+
+@pytest.mark.asyncio
+async def test_missing_blob_stops_before_the_key_request(
+    azure: AzureConnector, vault_put: AsyncMock, fixed_now: datetime
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        _login(mock)
+        _accounts(mock)
+        _blob_head(mock, status=404)
+        key = _key(mock)
+        result = await _call("azure.storage.blob.link.create", LINK)
+
+    assert result.status == "not_found", result
+    assert not key.called
+    vault_put.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_key_request_403_names_the_role(
+    azure: AzureConnector, vault_put: AsyncMock, fixed_now: datetime
+) -> None:
+    refused = (
+        '<?xml version="1.0" encoding="utf-8"?><Error><Code>AuthorizationPermissionMismatch'
+        "</Code><Message>This request is not authorized.</Message></Error>"
+    )
+    with respx.mock() as mock:
+        _login(mock)
+        _accounts(mock)
+        _blob_head(mock)
+        _key(mock, status=403, body=refused)
+        result = await _call("azure.storage.blob.link.create", LINK)
+
+    assert result.status == "error"
+    message = str(result.extras["exception_message"])
+    assert "Storage Blob Data Reader" in message and "Storage Blob Delegator" in message
+    vault_put.assert_not_awaited()
+
+
+def test_link_op_is_credential_mint() -> None:
+    assert classify_op("azure.storage.blob.link.create") == "credential_mint"

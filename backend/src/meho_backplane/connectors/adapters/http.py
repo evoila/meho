@@ -409,6 +409,7 @@ async def _read_capped_json_response(
     headers: dict[str, str] | None = None,
     extensions: dict[str, Any] | None = None,
     timeout: Any = httpx.USE_CLIENT_DEFAULT,
+    content: bytes | None = None,
 ) -> httpx.Response:
     """Issue the request with a streamed, byte-capped read of the response.
 
@@ -450,6 +451,7 @@ async def _read_capped_json_response(
         params=params,
         json=json,
         data=data,
+        content=content,
         headers=headers,
         extensions=extensions,
         timeout=timeout,

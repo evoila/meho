@@ -311,6 +311,7 @@ async def send(
     repeatable: bool | None = None,
     resource_graph: bool = False,
     extra_hosts: Iterable[str] = (),
+    content: bytes | None = None,
 ) -> httpx.Response:
     """Send one Azure call inside one retry budget and return the answer.
 
@@ -322,7 +323,9 @@ async def send(
     may be sent again after a 5xx or a lost connection; it defaults to
     ``True`` for GET, HEAD and OPTIONS only. A read-only POST (a Resource
     Graph query) passes ``True``. *resource_graph* paces the call to
-    Resource Graph's limit.
+    Resource Graph's limit. *content* is a raw body (for example the XML of a
+    Blob service call); the caller sets its ``Content-Type``. The trace
+    records no raw body.
 
     Returns the answer for any status below 300. Raises
     :class:`AzureUrlRefusedError` for a redirect (MEHO follows none), an
@@ -340,7 +343,7 @@ async def send(
         budget.attempts += 1
         try:
             response = await _send_once(
-                connector, target, method, url, operator, params, json, resource_graph
+                connector, target, method, url, operator, params, json, resource_graph, content
             )
         except httpx.TransportError as exc:
             delay = _transport_delay(exc, may_repeat, budget)
@@ -433,6 +436,7 @@ async def _send_once(
     params: dict[str, Any] | None,
     json: dict[str, Any] | None,
     resource_graph: bool,
+    content: bytes | None = None,
 ) -> httpx.Response:
     """Send the request once, inside the login's limit, and record it in the trace."""
     headers, login = await connector.authorize(target, operator)
@@ -449,6 +453,7 @@ async def _send_once(
                 url,
                 params=params,
                 json=json,
+                content=content,
                 headers=headers,
                 extensions=connector._request_extensions(target),
             )

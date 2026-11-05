@@ -31697,6 +31697,22 @@
             "nullable": true,
             "title": "Ended At"
           },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "parse",
+              "register",
+              "grouping"
+            ],
+            "title": "Phase",
+            "description": "The step the job is on: parse (read and check the API files), register (write the operations), grouping (the language model groups the operations). A finished job keeps the step it ended in."
+          },
+          "phase_started_at": {
+            "type": "number",
+            "format": "double",
+            "title": "Phase Started At",
+            "description": "When the current step started (epoch seconds)."
+          },
           "ingestion": {
             "$ref": "#/components/schemas/IngestionResultModel",
             "nullable": true
@@ -31720,10 +31736,12 @@
         "required": [
           "job_id",
           "status",
-          "started_at"
+          "started_at",
+          "phase",
+          "phase_started_at"
         ],
         "title": "IngestJobStatusResponse",
-        "description": "Response body for ``GET /api/v1/connectors/ingest/jobs/{job_id}``.\n\nMirrors the in-memory\n:class:`~meho_backplane.operations.ingest.jobs.IngestJob` row,\nprojecting it into a Pydantic-typed shape the route returns.\nThree field clusters:\n\n* **Identity** -- ``job_id`` + the originator's request descriptors\n  (``catalog_entry`` / ``product`` / ``version`` / ``impl_id`` /\n  ``spec_uris``). Echo so the polling caller doesn't need to\n  correlate against their own state.\n* **Lifecycle** -- ``status`` + ``started_at`` + optional\n  ``ended_at``. Status moves ``running`` \u2192 one of ``succeeded`` /\n  ``degraded`` / ``failed`` exactly once.\n* **Result vs error** -- keyed on status. ``succeeded`` populates\n  ``ingestion`` (with optional ``grouping``) and leaves ``error``\n  ``None``; ``failed`` populates ``error`` / ``error_class`` and\n  leaves ``ingestion`` ``None`` (the pipeline raised, no result).\n  ``degraded`` populates **both** \u2014 the pipeline returned a result\n  (so ``ingestion`` carries the counts that landed) but a\n  postcondition found it non-dispatchable (so ``error`` /\n  ``error_class`` carry the reason). ``running`` leaves them ``None``\n  so polling clients branch on ``status`` rather than presence.\n\n``error`` is the capped message; ``error_class`` is the structured\ndiscriminator -- the Python exception class name for ``failed``\n(``VersionMismatchError`` vs ``LlmClientUnavailable``), or the fixed\n``ingested_not_dispatchable`` token for ``degraded`` -- so agents\nbranch without parsing prose. The structured 422 envelopes the\nsynchronous ingest path used to return (the error-shape convention's\nclassifier + ``detail`` body) are NOT available off the request\nthread; the polling response is the new error surface for the async\npath."
+        "description": "Response body for ``GET /api/v1/connectors/ingest/jobs/{job_id}``.\n\nMirrors the in-memory\n:class:`~meho_backplane.operations.ingest.jobs.IngestJob` row,\nprojecting it into a Pydantic-typed shape the route returns.\nThree field clusters:\n\n* **Identity** -- ``job_id`` + the originator's request descriptors\n  (``catalog_entry`` / ``product`` / ``version`` / ``impl_id`` /\n  ``spec_uris``). Echo so the polling caller doesn't need to\n  correlate against their own state.\n* **Lifecycle** -- ``status`` + ``started_at`` + optional\n  ``ended_at``. Status moves ``running`` \u2192 one of ``succeeded`` /\n  ``degraded`` / ``failed`` exactly once. ``phase`` is the step the\n  job is on (``parse`` \u2192 ``register`` \u2192 ``grouping``) and\n  ``phase_started_at`` is when that step started (#5786), so a slow\n  import can be told from a stuck one. A finished job keeps the step\n  it ended in.\n* **Result vs error** -- keyed on status. ``succeeded`` populates\n  ``ingestion`` (with optional ``grouping``) and leaves ``error``\n  ``None``; ``failed`` populates ``error`` / ``error_class`` and\n  leaves ``ingestion`` ``None`` (the pipeline raised, no result).\n  ``degraded`` populates **both** \u2014 the pipeline returned a result\n  (so ``ingestion`` carries the counts that landed) but a\n  postcondition found it non-dispatchable (so ``error`` /\n  ``error_class`` carry the reason). ``running`` leaves them ``None``\n  so polling clients branch on ``status`` rather than presence.\n\n``error`` is the capped message; ``error_class`` is the structured\ndiscriminator -- the Python exception class name for ``failed``\n(``VersionMismatchError`` vs ``LlmClientUnavailable``), or the fixed\n``ingested_not_dispatchable`` token for ``degraded`` -- so agents\nbranch without parsing prose. The structured 422 envelopes the\nsynchronous ingest path used to return (the error-shape convention's\nclassifier + ``detail`` body) are NOT available off the request\nthread; the polling response is the new error surface for the async\npath."
       },
       "IngestKbRequest": {
         "properties": {

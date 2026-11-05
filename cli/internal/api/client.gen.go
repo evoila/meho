@@ -397,6 +397,13 @@ const (
 	IngestJobHandleStatusSucceeded IngestJobHandleStatus = "succeeded"
 )
 
+// Defines values for IngestJobStatusResponsePhase.
+const (
+	IngestJobStatusResponsePhaseGrouping IngestJobStatusResponsePhase = "grouping"
+	IngestJobStatusResponsePhaseParse    IngestJobStatusResponsePhase = "parse"
+	IngestJobStatusResponsePhaseRegister IngestJobStatusResponsePhase = "register"
+)
+
 // Defines values for IngestJobStatusResponseStatus.
 const (
 	IngestJobStatusResponseStatusDegraded  IngestJobStatusResponseStatus = "degraded"
@@ -6318,7 +6325,11 @@ type IngestJobHandleStatus string
 //     correlate against their own state.
 //   - **Lifecycle** -- “status“ + “started_at“ + optional
 //     “ended_at“. Status moves “running“ → one of “succeeded“ /
-//     “degraded“ / “failed“ exactly once.
+//     “degraded“ / “failed“ exactly once. “phase“ is the step the
+//     job is on (“parse“ → “register“ → “grouping“) and
+//     “phase_started_at“ is when that step started (#5786), so a slow
+//     import can be told from a stuck one. A finished job keeps the step
+//     it ended in.
 //   - **Result vs error** -- keyed on status. “succeeded“ populates
 //     “ingestion“ (with optional “grouping“) and leaves “error“
 //     “None“; “failed“ populates “error“ / “error_class“ and
@@ -6366,14 +6377,23 @@ type IngestJobStatusResponse struct {
 	// reclassify nothing. ``dropped_count`` / ``dropped_ops`` (T3-F01) are
 	// likewise additive with empty defaults — ``0`` / ``[]`` for every
 	// product that declares no ingest op allowlist.
-	Ingestion *IngestionResultModel         `json:"ingestion,omitempty"`
-	JobId     openapi_types.UUID            `json:"job_id"`
-	Product   *string                       `json:"product"`
-	SpecUris  *[]string                     `json:"spec_uris,omitempty"`
-	StartedAt float32                       `json:"started_at"`
-	Status    IngestJobStatusResponseStatus `json:"status"`
-	Version   *string                       `json:"version"`
+	Ingestion *IngestionResultModel `json:"ingestion,omitempty"`
+	JobId     openapi_types.UUID    `json:"job_id"`
+
+	// Phase The step the job is on: parse (read and check the API files), register (write the operations), grouping (the language model groups the operations). A finished job keeps the step it ended in.
+	Phase IngestJobStatusResponsePhase `json:"phase"`
+
+	// PhaseStartedAt When the current step started (epoch seconds).
+	PhaseStartedAt float64                       `json:"phase_started_at"`
+	Product        *string                       `json:"product"`
+	SpecUris       *[]string                     `json:"spec_uris,omitempty"`
+	StartedAt      float32                       `json:"started_at"`
+	Status         IngestJobStatusResponseStatus `json:"status"`
+	Version        *string                       `json:"version"`
 }
+
+// IngestJobStatusResponsePhase The step the job is on: parse (read and check the API files), register (write the operations), grouping (the language model groups the operations). A finished job keeps the step it ended in.
+type IngestJobStatusResponsePhase string
 
 // IngestJobStatusResponseStatus defines model for IngestJobStatusResponse.Status.
 type IngestJobStatusResponseStatus string

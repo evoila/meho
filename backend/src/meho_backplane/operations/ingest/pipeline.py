@@ -127,6 +127,7 @@ from meho_backplane.operations.ingest.exceptions import (
 )
 from meho_backplane.operations.ingest.ingest_auth_store import save_ingest_auth_profile
 from meho_backplane.operations.ingest.ingest_profile import build_ingest_execution_profile
+from meho_backplane.operations.ingest.job_phase import report_ingest_phase
 from meho_backplane.operations.ingest.llm_groups import (
     GroupingResult,
     run_llm_grouping,
@@ -967,6 +968,7 @@ class IngestionPipelineService:
         """
         log.info("ingestion_pipeline_start")
         sessionmaker = self._sessionmaker()
+        await report_ingest_phase("register")
         aggregated = await self._run_register_phase(
             product=product,
             version=version,
@@ -1008,6 +1010,7 @@ class IngestionPipelineService:
         # catch ``asyncio.CancelledError`` (a BaseException): the job
         # watchdog's timeout must still propagate to ``failed`` to keep the
         # job-terminality guarantee.
+        await report_ingest_phase("grouping")
         try:
             grouping_result = await self._run_grouping_phase(
                 product=product,

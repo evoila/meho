@@ -510,7 +510,7 @@
       "properties": {
         "openshift": {
           "type": "boolean",
-          "description": "Set to true on OpenShift. The built-in core parts then leave out `runAsUser`, `runAsGroup` and `fsGroup`, so OpenShift can pick the user id from the project's range. Default false: the pods run with fixed, non-root user ids."
+          "description": "Set to true on OpenShift. Every pod of the chart then leaves out `runAsUser`, `runAsGroup` and `fsGroup`, so OpenShift can pick the user id from the project's range. Default false: the pods run with fixed, non-root user ids."
         },
         "imageRegistry": {
           "type": "string",

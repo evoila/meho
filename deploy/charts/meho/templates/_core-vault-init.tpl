@@ -62,7 +62,7 @@ spec:
     {{- . | nindent 4 }}
   {{- end }}
   securityContext:
-    {{- toYaml .Values.podSecurityContext | nindent 4 }}
+    {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.podSecurityContext "global" .Values.global) | nindent 4 }}
   containers:
     - name: vault-init
       # The backplane image, with the same digest pin as the Deployment.

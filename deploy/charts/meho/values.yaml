@@ -18,10 +18,12 @@
 
 # Values Helm hands to the parent chart and every subchart.
 global:
-  # -- Set to true on OpenShift. The built-in core parts then leave out
+  # -- Set to true on OpenShift. Every pod of the chart then leaves out
   # `runAsUser`, `runAsGroup` and `fsGroup`, so OpenShift can pick the user
   # id from the project's range (it refuses a fixed one outside it). On
   # other clusters keep false: the pods run with fixed, non-root user ids.
+  # `deploy/values-examples/values-openshift.yaml` has the other OpenShift
+  # settings.
   openshift: false
   # -- Your own image registry, for an install with no internet (#4100).
   # Every pod of the chart then pulls from it. It replaces the registry host
@@ -92,6 +94,8 @@ podLabels: {}
 # `runAsNonRoot: true` + a numeric `runAsUser` matches the backplane Dockerfile's
 # `USER 1001:0` directive — running with the wrong UID will fail-closed at
 # admission time on a cluster with the restricted PodSecurity profile.
+# The setup and migration Jobs use it too. `global.openshift: true` leaves
+# `runAsUser` out, so OpenShift picks the user id.
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1001
@@ -384,13 +388,16 @@ ingress:
 #
 # `startup` (Issue #2393) gates liveness/readiness until first boot
 # succeeds. First boot registers the full typed-op catalog and preloads the
-# fastembed embedding model before the app binds :8000 (~2-3 min, longer on
-# a cold install that downloads model weights into an empty cache PVC), so
-# the short-delay liveness probe would otherwise CrashLoopBackOff a
-# slow-but-healthy pod. The default budget is `failureThreshold` ×
-# `periodSeconds` = 30 × 10s = 300s (5 min); once it passes the kubelet
-# hands off to the liveness probe for fast hang detection. Clear
-# `probes.startup` to opt out on a fast cluster.
+# fastembed embedding model before the app binds :8000, so the short-delay
+# liveness probe would otherwise CrashLoopBackOff a slow-but-healthy pod. On
+# an empty database every operation also gets its embedding: about 5 min
+# for the 1,302 operations of v0.43.0 at the 1-CPU limit (measured on
+# OpenShift, #4102). Since #5019 a stopped start keeps none of that work, so
+# the whole first boot must fit in one budget; later boots take about 20s.
+# The default budget is `failureThreshold` × `periodSeconds` = 90 × 10s =
+# 900s (15 min); once it passes the kubelet hands off to the liveness probe
+# for fast hang detection. Clear `probes.startup` to opt out on a fast
+# cluster.
 probes:
   liveness:
     httpGet:
@@ -412,11 +419,10 @@ probes:
     httpGet:
       path: /healthz
       port: http
-    # 30 × 10s = 300s (5 min) first-boot budget; covers op-catalog
-    # registration + fastembed model preload/download on a cold install.
+    # 90 × 10s = 900s (15 min) first-boot budget; see `startup` above.
     periodSeconds: 10
     timeoutSeconds: 1
-    failureThreshold: 30
+    failureThreshold: 90
 
 # -- Container resources. Conservative production baselines for the v0.1
 # chassis backplane — sized for steady-state authn/authz traffic plus the

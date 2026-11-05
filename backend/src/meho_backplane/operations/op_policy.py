@@ -41,6 +41,10 @@ The rules:
   override (:func:`_lock_operation`). So the checks always see what the
   edit before them wrote, also when two requests arrive at once.
 
+* **Caller address.** An operation with a parameter that holds an address
+  MEHO connects to (:mod:`meho_backplane.operations.caller_address`) is at
+  least ``caution`` and waits for approval. No override removes this.
+
 Dispatch, preview, search and the operation contract all read the
 effective values through :func:`apply_effective_policy` /
 :func:`effective_policy_map`, so they always agree.
@@ -60,6 +64,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
+from meho_backplane.operations.caller_address import raise_for_caller_address
 
 __all__ = [
     "SAFETY_RANK",
@@ -221,14 +226,33 @@ async def effective_policy_map(
     tenant_id: UUID | None,
     rows: Sequence[EndpointDescriptor],
 ) -> dict[OpKey, EffectivePolicy]:
-    """Return the effective policy of every row in *rows* for *tenant_id*."""
+    """Return the effective policy of every row in *rows* for *tenant_id*.
+
+    The caller-address floor runs last, after the overrides: an operation
+    with a parameter that holds an address MEHO connects to stays at least
+    ``caution`` with approval, also when an override turned approval off,
+    and also for a row stored before the marker floor existed.
+    """
     overrides = await load_overrides(session, tenant_id=tenant_id, keys=map(OpKey.of, rows))
     return {
-        OpKey.of(row): effective_policy(
-            row.safety_level, row.requires_approval, overrides.get(OpKey.of(row), [])
+        OpKey.of(row): _with_caller_address_floor(
+            row,
+            effective_policy(
+                row.safety_level, row.requires_approval, overrides.get(OpKey.of(row), [])
+            ),
         )
         for row in rows
     }
+
+
+def _with_caller_address_floor(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectivePolicy:
+    """Raise *policy* for a row with a caller-address parameter."""
+    safety_level, requires_approval = raise_for_caller_address(
+        row.parameter_schema,
+        safety_level=policy.safety_level,
+        requires_approval=policy.requires_approval,
+    )
+    return EffectivePolicy(safety_level=safety_level, requires_approval=requires_approval)
 
 
 async def apply_effective_policy(

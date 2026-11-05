@@ -148,6 +148,7 @@ from meho_backplane.connector_packages import connector_package_of
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations._handler_resolve import import_handler
+from meho_backplane.operations.caller_address import raise_for_caller_address
 from meho_backplane.operations.catalog_release import record_catalog_release
 from meho_backplane.operations.composite_invariant import (
     assert_registered_composites_have_no_ingested_dispatch,
@@ -1244,7 +1245,10 @@ async def register_typed_operation(
     safety_level
         ``"safe"`` (default), ``"caution"``, or ``"dangerous"``. The
         policy gate consumes this; safe ops execute under the
-        default-allow policy.
+        default-allow policy. A parameter marked with
+        ``x-meho-caller-address: true`` raises the op to at least
+        ``caution`` with ``requires_approval=True``
+        (:mod:`meho_backplane.operations.caller_address`).
     requires_approval
         When ``True``, the dispatcher writes an audit row in
         ``status='pending'`` and waits for operator decision before
@@ -1644,6 +1648,11 @@ async def _register_in_session(
             "requires_approval=False; the destructive tier is "
             "human-approval-always — register it with requires_approval=True"
         )
+    # A parameter that holds an address MEHO connects to raises the op to at
+    # least ``caution`` with approval, whatever the registrar declared.
+    safety_level, requires_approval = raise_for_caller_address(
+        parameter_schema, safety_level=safety_level, requires_approval=requires_approval
+    )
 
     log = structlog.get_logger()
     now = datetime.now(UTC)

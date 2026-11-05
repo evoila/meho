@@ -116,6 +116,8 @@ async def _dispatch_inspect(params: dict[str, Any]) -> OperationResult:
         op_id=_OP_ID,
         target=None,
         params=params,
+        # Each net.* call waits for approval; this runs the approved call.
+        _approved=True,
     )
 
 
@@ -579,7 +581,7 @@ async def test_handler_maps_connect_exceptions_to_reason_codes(
 # ---------------------------------------------------------------------------
 
 
-async def test_tls_inspect_registered_as_safe_ungated_typed_op(
+async def test_tls_inspect_registered_as_caution_with_approval_typed_op(
     _registered_tls_inspect_op: None,
 ) -> None:
     sessionmaker = get_sessionmaker()
@@ -595,8 +597,8 @@ async def test_tls_inspect_registered_as_safe_ungated_typed_op(
             )
         ).scalar_one()
     assert row.source_kind == "typed"
-    assert row.safety_level == "safe"
-    assert row.requires_approval is False
+    assert row.safety_level == "caution"
+    assert row.requires_approval is True
     assert row.llm_instructions["result_scalars"]["keys"] == [
         "handshake",
         "reason",

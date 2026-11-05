@@ -6,7 +6,7 @@
 An AI picks an operation from its summary, description, group text and
 safety level, and fills in the parameters from the field descriptions. This
 test checks every hand-written (typed and multi-step) operation that MEHO
-registers at start-up, of every connector, against twelve rules:
+registers at start-up, of every connector, against thirteen rules:
 
 1. ``summary`` -- a one-line summary (at most 120 characters) and a short
    description (at most 300 characters).
@@ -45,6 +45,13 @@ registers at start-up, of every connector, against twelve rules:
     its first part, so a wrong first part (``kubernetes.node.list``) is
     caught. File names, field paths and API groups that only look like an
     operation id are in :data:`NOT_OPERATION_IDS`, each with a reason.
+13. ``caller_address`` -- a parameter field that looks like an address
+    (its name is ``url``, ``host``, ``resolver``, ... or its ``format`` is
+    ``uri``, ``hostname``, ...) carries ``x-meho-caller-address: true``, so
+    MEHO runs the operation at ``caution`` or higher with approval. A field
+    that only looks like an address, and MEHO never connects to it, is in
+    :data:`tests._operation_contract_addresses.NOT_CALLER_ADDRESSES` with
+    its reason. The field checks are in :mod:`tests._operation_contract_addresses`.
 
 Today's gaps live in ``tests/data/operation_contract_gaps.yaml``. The test
 fails on a gap that is not in that list (a new gap) and on a listed gap that
@@ -78,6 +85,11 @@ from meho_backplane.operations._param_errors import describe_violation
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS
 from meho_backplane.operations.typed_register import run_typed_op_registrars
 from meho_backplane.settings import get_settings
+from tests._operation_contract_addresses import (
+    NOT_CALLER_ADDRESSES,
+    address_fields,
+    unmarked_address_fields,
+)
 from tests._operation_contract_placeholders import PLACEHOLDER, example_value_problems
 
 GAPS_FILE: Final[Path] = Path(__file__).parent / "data" / "operation_contract_gaps.yaml"
@@ -95,6 +107,7 @@ RULES: Final[tuple[str, ...]] = (
     "write_name",
     "example_placeholders",
     "named_operations_exist",
+    "caller_address",
 )
 
 #: Real reads whose id holds a write word, with the reason. The live test
@@ -173,7 +186,7 @@ class OperationContract:
 
 
 # ---------------------------------------------------------------------------
-# The twelve rules. Each returns a list of problems; an empty list means pass.
+# The thirteen rules. Each returns a list of problems; an empty list means pass.
 # ---------------------------------------------------------------------------
 
 
@@ -389,6 +402,15 @@ def check_named_operations_exist(op: OperationContract, registered: Collection[s
     ]
 
 
+def check_caller_address(op: OperationContract) -> list[str]:
+    return [
+        f"parameter field {path!r} looks like an address but has no "
+        "'x-meho-caller-address: true'; mark it, or add a field MEHO never "
+        "connects to to NOT_CALLER_ADDRESSES with a reason"
+        for path in unmarked_address_fields(op.op_id, op.parameter_schema)
+    ]
+
+
 CHECKS: Final[Mapping[str, Any]] = {
     "summary": check_summary,
     "field_descriptions": check_field_descriptions,
@@ -401,6 +423,7 @@ CHECKS: Final[Mapping[str, Any]] = {
     "preview_builder": check_preview_builder,
     "write_name": check_write_name,
     "example_placeholders": check_example_placeholders,
+    "caller_address": check_caller_address,
 }
 
 
@@ -532,7 +555,7 @@ async def _registered_operations() -> list[OperationContract]:
 
 @pytest.mark.asyncio
 async def test_operation_contracts_match_the_gap_list() -> None:
-    """Every hand-written operation meets the twelve rules, or its gap is in the list."""
+    """Every hand-written operation meets the thirteen rules, or its gap is in the list."""
     ops = await _registered_operations()
     assert ops, "no typed or multi-step operation was registered"
 
@@ -583,6 +606,18 @@ async def test_safe_writes_on_purpose_are_registered_safe_and_marked() -> None:
     assert not undeclared, (
         f"mark these with declare_safe_writes in the connector's op_classes: {undeclared}"
     )
+
+
+@pytest.mark.asyncio
+async def test_not_caller_addresses_name_registered_address_fields() -> None:
+    """Each entry names a registered field that looks like an address, so the list stays short."""
+    fields = {
+        (op.op_id, path)
+        for op in await _registered_operations()
+        for path in address_fields(op.parameter_schema)
+    }
+    stale = sorted(set(NOT_CALLER_ADDRESSES) - fields)
+    assert not stale, f"no registered address field; remove from NOT_CALLER_ADDRESSES: {stale}"
 
 
 def test_gap_list_names_only_known_rules() -> None:

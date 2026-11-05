@@ -541,8 +541,8 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `tags` | `tags` | Spec tags + optional `spec:<source>` marker |
 | `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc`; `additionalProperties: false` (#293) |
 | `response_schema` | `response_schema` | Success-response schema or `None` |
-| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay`, then the op class floor (a `credential_read` is at least `caution`) |
-| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE`, destructive-action hints, a connector-owned minimum safety floor, a catalog `safety_overlay` rule, or a `credential_read` op class |
+| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay`, then the op class floor (a `credential_read` is at least `caution`), then the caller-address floor (an op with a parameter marked `x-meho-caller-address: true` is at least `caution`) |
+| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE`, destructive-action hints, a connector-owned minimum safety floor, a catalog `safety_overlay` rule, a `credential_read` op class, or a parameter marked `x-meho-caller-address: true` |
 | `llm_instructions` | `llm_instructions` | `None` from the parser; set only by a connector-owned spec correction |
 
 Every `DELETE` lands `dangerous` with `requires_approval=True` (#3827). A
@@ -656,7 +656,7 @@ rows" below).
 
 #### Op class floor for credential reads
 
-The op class is the third and last floor. An ingested operation that a
+The op class is the third floor. An ingested operation that a
 connector declares as `credential_read` (`declare_op_classes` in its
 `op_classes.py`, read through `classify_op`) is at least `caution` and
 waits for a person's approval. `apply_safety_floor` applies it after the
@@ -668,6 +668,48 @@ without a list, no longer leaves a credential read at `safe`. A declared
 credential read counts as governed in `has_safety_floor`, so a re-ingest
 never lowers a stricter stored row. Tests:
 `tests/test_credential_read_safety_floor.py`.
+
+#### Caller-address floor
+
+The caller-address floor is the fourth and last floor. It covers an
+operation that connects to an address the caller gives: a URL, a host
+name, or a host and port. The connection can come from MEHO or from the
+target for MEHO.
+
+- **The marker.** Such a parameter carries the schema keyword
+  `x-meho-caller-address: true`, next to `x-meho-param-loc`. The keyword
+  counts at any depth of the parameter schema, also inside nested
+  objects and lists. The name and the floor live in
+  `meho_backplane/operations/caller_address.py`; the connector kit
+  exports the name as `CALLER_ADDRESS_MARKER`.
+- **What it does.** A marked operation is at least `caution` and waits
+  for a person's approval. The floor only raises: a connector may set a
+  higher level, never a lower one.
+- **Where it runs.**
+  - Ingest: `apply_safety_floor` applies it after the op class floor. An
+    ingested operation gets the marker from the connector's spec
+    correction (`register_ingest_spec_correction`). A marked operation
+    counts as governed in `has_safety_floor`, so a new ingest never
+    lowers a stricter stored row.
+  - Typed and multi-step registration: `register_typed_operation` and
+    `register_composite_operation` apply it before they store the row.
+  - Dispatch: `effective_policy_map` in `op_policy.py` applies it last,
+    after the operator overrides. So an override that turns approval off
+    does not remove it, and a row stored before the floor is raised when
+    it is looked up. Dispatch, preview, search and the satellite runner
+    all read this value.
+- **Sensors.** A sensor runs only `safe` operations. So a sensor cannot
+  use a marked operation: a new one is refused, and the runner reports
+  an existing one as `unknown` with the reason `op_not_safe_at_dispatch`.
+  This holds for the `net.*` probes and `pfsense.diag.ping`.
+- **The contract check.** Rule 13 (`caller_address`) of
+  `tests/test_operation_contracts.py` fails for a parameter that looks
+  like an address but has no marker. A field that only looks like an
+  address, and MEHO never connects to it, is listed with its reason in
+  `NOT_CALLER_ADDRESSES` (`tests/_operation_contract_addresses.py`).
+
+Tests: `tests/test_caller_address_floor.py` (a fixture operation, no
+connector package) and `tests/test_operation_contract_rules.py`.
 
 #### Ingested licence reads stay off
 

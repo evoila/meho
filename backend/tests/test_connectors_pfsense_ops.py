@@ -1101,6 +1101,10 @@ _USER_WRITE_OP_IDS = {"pfsense.user.disable", "pfsense.user.enable"}
 #: The approval-gated firewall rule add (#3850) -- ``dangerous``.
 _DANGEROUS_OP_IDS = {"pfsense.filter.rule.add"}
 
+# Reads whose parameter holds an address the firewall connects to: caution
+# with approval (the caller-address floor).
+_CALLER_ADDRESS_OP_IDS = {"pfsense.diag.ping"}
+
 
 def test_pfsense_read_ops_safe_write_ops_caution_delete_ops_destructive() -> None:
     for op in PFSENSE_OPS:
@@ -1110,10 +1114,8 @@ def test_pfsense_read_ops_safe_write_ops_caution_delete_ops_destructive() -> Non
             assert op.safety_level == "destructive", (
                 f"{op.op_id!r} delete op should be safety_level='destructive'"
             )
-        elif op.op_id in _WRITE_OP_IDS:
-            assert op.safety_level == "caution", (
-                f"{op.op_id!r} write op should be safety_level='caution'"
-            )
+        elif op.op_id in _WRITE_OP_IDS | _CALLER_ADDRESS_OP_IDS:
+            assert op.safety_level == "caution", f"{op.op_id!r} should be safety_level='caution'"
         elif op.op_id in _USER_WRITE_OP_IDS:
             assert op.safety_level == "dangerous", (
                 f"{op.op_id!r} user write should be safety_level='dangerous'"
@@ -1191,10 +1193,10 @@ def test_pfsense_ops_handler_attrs_exist_on_connector() -> None:
 
 
 def test_pfsense_ops_requires_approval_only_for_governed_ops() -> None:
-    """Only the governed deletes, the filter rule add (#3850) and the user
-    writes (#3937) require approval."""
+    """Only the governed deletes, the filter rule add, the user writes and
+    the reads of a caller address require approval."""
     for op in PFSENSE_OPS:
-        if op.op_id in _DANGEROUS_OP_IDS | _USER_WRITE_OP_IDS:
+        if op.op_id in _DANGEROUS_OP_IDS | _USER_WRITE_OP_IDS | _CALLER_ADDRESS_OP_IDS:
             assert op.requires_approval, f"{op.op_id!r} must require approval"
         elif op.op_id in _DELETE_OP_IDS:
             assert op.requires_approval, f"{op.op_id!r} destructive delete must require approval"

@@ -37,6 +37,7 @@ from meho_backplane.connectors.azure import (
 )
 from meho_backplane.connectors.azure.network import OPS
 from meho_backplane.connectors.azure.network_reads import network_vnet_show_impl
+from meho_backplane.connectors.azure.trace_mask import LEFT_OUT
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
@@ -81,6 +82,19 @@ AUTHORIZATION_KEY = "fake-authorization-key-for-tests"
 PEERING_SHARED_KEY = "fake-bgp-shared-key-for-tests"
 ACTIVATION_KEY = "fake-activation-key-for-tests"
 CIRCUIT_SECRETS = (SERVICE_KEY, AUTHORIZATION_KEY, PEERING_SHARED_KEY, ACTIVATION_KEY)
+#: Made-up values for the other key and password fields Azure answers can hold (#5212).
+ADMIN_PASSWORD = "fake-admin-password-for-tests"
+SERVER_APP_SECRET = "fake-server-app-secret-for-tests"
+PLAIN_SECRET = "fake-secret-for-tests"
+ACCESS_KEY = "fake-access-key-for-tests"
+CONNECTION_PASSWORD = "fake-connection-password-for-tests"
+OTHER_AZURE_SECRETS = (
+    ADMIN_PASSWORD,
+    SERVER_APP_SECRET,
+    PLAIN_SECRET,
+    ACCESS_KEY,
+    CONNECTION_PASSWORD,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1223,8 +1237,8 @@ async def test_expressroute_list_shows_provider_bandwidth_and_state_without_keys
 
 
 @pytest.mark.asyncio
-async def test_an_expressroute_list_error_keeps_azure_text_out(registered: AzureConnector) -> None:
-    """The keys-withheld tag also hides Azure's error text; the code and the hint stay."""
+async def test_an_expressroute_list_error_shows_azure_text(registered: AzureConnector) -> None:
+    """Azure's error text is visible again (#5212); the code and the hint stay."""
     refusal = {"error": {"code": "AuthorizationFailed", "message": "made-up refusal text"}}
     with respx.mock() as mock:
         _login(mock)
@@ -1236,7 +1250,7 @@ async def test_an_expressroute_list_error_keeps_azure_text_out(registered: Azure
     assert result.status == "error"
     assert result.extras is not None and result.extras["http_status"] == 403
     assert "role" in result.extras["remediation"]
-    assert "made-up refusal text" not in json.dumps(result.model_dump(mode="json"))
+    assert "made-up refusal text" in json.dumps(result.model_dump(mode="json"))
 
 
 async def _trace_spans(audit_id: Any) -> list[DispatchTraceSpan]:
@@ -1253,10 +1267,10 @@ async def _trace_spans(audit_id: Any) -> list[DispatchTraceSpan]:
 
 
 @pytest.mark.asyncio
-async def test_the_trace_of_expressroute_list_keeps_no_body(
+async def test_the_trace_of_expressroute_list_masks_every_key_field(
     registered: AzureConnector, session: AsyncSession
 ) -> None:
-    """The flight recorder is on: the stored trace holds no key of the circuit."""
+    """The flight recorder is on: the stored trace keeps the circuit but none of its keys."""
     session.add(
         Tenant(id=MEHO_TENANT, slug="azure-net", name="azure-net", flight_recorder_enabled=True)
     )
@@ -1264,8 +1278,16 @@ async def test_the_trace_of_expressroute_list_keeps_no_body(
     reset_flight_recorder_config_cache_for_testing()
     with respx.mock() as mock:
         _login(mock)
+        circuit = _circuit("er-primary")
+        circuit["properties"].update(
+            adminPassword=ADMIN_PASSWORD,
+            serverAppSecret=SERVER_APP_SECRET,
+            secret=PLAIN_SECRET,
+            keys=[{"keyName": "key1", "value": ACCESS_KEY}],
+            connectionString=f"Server=example;Password={CONNECTION_PASSWORD}",
+        )
         mock.get(_url("/providers/Microsoft.Network/expressRouteCircuits")).respond(
-            200, json={"value": [_circuit("er-primary")]}
+            200, json={"value": [circuit]}
         )
         result = await _call("azure.network.expressroute.list")
 
@@ -1275,9 +1297,11 @@ async def test_the_trace_of_expressroute_list_keeps_no_body(
     vendor_calls = [span for span in spans if span.span_kind == "vendor_call"]
     assert vendor_calls
     arm_call = next(span for span in vendor_calls if "expressRouteCircuits" in span.name)
-    assert arm_call.attributes["response_body"] == SECRET_FAMILY_OMITTED_MARKER
+    assert arm_call.attributes["response_body"] != SECRET_FAMILY_OMITTED_MARKER
     rendered = json.dumps([f"{span.name}|{span.attributes}" for span in spans], default=str)
-    for secret in CIRCUIT_SECRETS:
+    assert "er-primary" in rendered
+    assert LEFT_OUT in rendered
+    for secret in (*CIRCUIT_SECRETS, *OTHER_AZURE_SECRETS):
         assert secret not in rendered
 
 

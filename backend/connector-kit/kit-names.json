@@ -4,6 +4,10 @@
     "AuthModel": {
       "kind": "class"
     },
+    "CALLER_ADDRESS_MARKER": {
+      "kind": "value",
+      "type": "str"
+    },
     "Connector": {
       "kind": "class"
     },

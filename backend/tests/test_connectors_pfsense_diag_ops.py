@@ -31,6 +31,7 @@ from meho_backplane.connectors.pfsense.ops_diag import (
     firewall_addresses,
     parse_ping_summary,
 )
+from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
 from meho_backplane.settings import get_settings
 
 
@@ -284,10 +285,11 @@ def test_ping_response_schema_accepts_both_outcomes() -> None:
     )
 
 
-def test_ping_is_a_safe_read_in_the_diagnostics_group() -> None:
+def test_ping_is_a_read_that_waits_for_approval_in_the_diagnostics_group() -> None:
     op = next(o for o in PFSENSE_OPS if o.op_id == "pfsense.diag.ping")
-    assert op.safety_level == "safe"
-    assert op.requires_approval is False
+    assert op.safety_level == "caution"
+    assert op.requires_approval is True
+    assert op.parameter_schema["properties"]["host"][CALLER_ADDRESS_MARKER] is True
     assert op.group_key == "diagnostics"
     assert "read-only" in op.tags
     assert op.parameter_schema["additionalProperties"] is False

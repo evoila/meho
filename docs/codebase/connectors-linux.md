@@ -548,8 +548,10 @@ SSH session.
 It ships **no new ops** — every step is an already-shipped `safe` T1 read
 verb (§ *The read surface (T1)*), or, for the functional probe, an op on
 the existing `net` diagnostics connector
-([`connectors-net-diagnostics.md`](connectors-net-diagnostics.md)). The
-recipe is a documented contract over those verbs, not code.
+([`connectors-net-diagnostics.md`](connectors-net-diagnostics.md)). A
+`net` probe connects to an address the caller gives, so each call waits
+for a person's approval. The recipe is a documented contract over those
+verbs, not code.
 
 Each step runs through the ordinary dispatch path (`call_operation` on the
 agent surface, `meho operation call linux-ssh-1.x <op_id> --target <host>

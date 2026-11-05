@@ -155,8 +155,9 @@ def test_op_surface_ids_and_safety_tiers() -> None:
         "wsfc.groups.offline",
         "wsfc.groups.online",
     }
-    # Every dangerous op requires approval; nothing else does.
-    assert {k for k, v in by_id.items() if v.requires_approval} == dangerous
+    # Every dangerous op requires approval, and so does the witness change (the
+    # cluster connects to a file share the caller gives).
+    assert {k for k, v in by_id.items() if v.requires_approval} == dangerous | {"wsfc.witness.set"}
     assert caution == {
         "wsfc.cluster.test",
         "wsfc.nodes.pause",

@@ -89,9 +89,12 @@ When a `SERVICE` op would park, the gate consults a live standing grant
 matched — the dispatcher and the composite sub-op gate both pass it; the
 gateway path is safe-only and never needs it). A match auto-approves the
 op and records the use; absent a match, the op parks for a human decision.
-The one exception is the `destructive` tier: `consult_and_record_grant`
-refuses it **before** any grant lookup, so even a stale grant row cannot
-auto-approve a destructive op — the tier always parks for a human.
+Two ops are refused **before** any grant lookup, so even a stale grant
+row cannot auto-approve them: the `destructive` tier (the tier always
+parks for a human) and an op with a parameter marked
+`x-meho-caller-address: true` (it connects to an address the caller
+gives; a grant never covers the address, so a person approves each call,
+and grant create refuses such a grant — `caller_address_grant_reason`).
 Parking is not refusal: a service principal can still propose a
 destructive op and read its result after a human approves. The steps are in
 [`approvals.md`](approvals.md#an-add-on-proposes-a-governed-destroy-3478).

@@ -918,30 +918,17 @@ async def test_non_ok_dispatch_persists_unknown(
 
 
 @pytest.mark.asyncio
-async def test_netdiag_allowlist_refusal_persists_unknown_not_critical(
+async def test_netdiag_sensor_reads_unknown_because_the_op_waits_for_approval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A probe the allowlist refuses reads ``unknown``, never a false ``critical``.
+    """A ``net.tcp_check`` sensor reads ``unknown``, never a false ``critical``.
 
-    The #2784 regression, end to end through the **real** dispatcher (no
-    monkeypatched ``dispatch``): a ``net.tcp_check`` sensor asserting on
-    ``$.connected`` against a host outside ``MEHO_NETDIAG_PROBE_ALLOWLIST``.
-
-    Before the fix the refusal came back ``status="ok"`` carrying
-    ``{"connected": false, "reason": "not_in_probe_allowlist"}``, the
-    ``BoolCompare`` mapped ``false`` to ``critical``, and the ``reason``
-    was dropped at the assertion select — so a reverted allowlist was
-    indistinguishable from a genuine outage. The refusal is now a
-    ``connector_probe_refused`` dispatch error, so the runner's existing
-    non-``ok`` mapping persists ``unknown`` with the allowlist named in
-    the stored evidence.
-
-    Uses TEST-NET-1 (RFC 5737 ``192.0.2.1``, the address from the incident
-    report). Nothing is dialed: the guard refuses before any socket opens.
+    ``net.tcp_check`` connects to an address from its parameters, so it runs
+    at risk level ``caution`` and waits for a person's approval. A sensor
+    runs only ``safe`` operations, so the runner stops at the descriptor
+    check: the sensor reads ``unknown`` with the reason
+    ``op_not_safe_at_dispatch`` and nothing is dialed.
     """
-    # Unset ⇒ deny-all (the allowlist's inverted semantics). Pinned
-    # explicitly so an ambient value in the developer's shell cannot turn
-    # this into a real dial against TEST-NET-1.
     monkeypatch.delenv(PROBE_ALLOWLIST_ENV, raising=False)
     embedding = AsyncMock()
     embedding.encode_one.return_value = [0.1] * 384
@@ -969,15 +956,9 @@ async def test_netdiag_allowlist_refusal_persists_unknown_not_critical(
 
     row = await _get_sensor(sensor_id)
     assert row.last_state == "unknown"
-    assert row.last_state != "critical"
     assert row.last_evidence is not None
-    assert row.last_evidence["reason"] == "dispatch_not_ok"
-    assert row.last_evidence["dispatch_status"] == "error"
-    # The stored evidence names the allowlist, so the dashboard answers
-    # "why" in one glance instead of showing a phantom down host.
-    dispatch_error = row.last_evidence["dispatch_error"]
-    assert "connector_probe_refused" in dispatch_error
-    assert PROBE_ALLOWLIST_ENV in dispatch_error
+    assert row.last_evidence["reason"] == "op_not_safe_at_dispatch"
+    assert row.last_evidence["safety_level"] == "caution"
 
 
 @pytest.mark.asyncio

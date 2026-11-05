@@ -46,7 +46,7 @@ registers at start-up, of every connector, against thirteen rules:
     caught. File names, field paths and API groups that only look like an
     operation id are in :data:`NOT_OPERATION_IDS`, each with a reason.
 13. ``caller_address`` -- a parameter field that looks like an address
-    (its name is ``url``, ``host``, ``resolver``, ... or its ``format`` is
+    (its name is ``url``, ``host``, ``resolver``, ends in ``_address``, ... or its ``format`` is
     ``uri``, ``hostname``, ...) carries ``x-meho-caller-address: true``, so
     MEHO runs the operation at ``caution`` or higher with approval. A field
     that only looks like an address, and MEHO never connects to it, is in

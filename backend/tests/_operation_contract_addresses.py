@@ -12,7 +12,8 @@ This module finds the fields that look like an address but have no marker.
 A field looks like an address when:
 
 - its name is ``url``, ``uri``, ``host``, ``hostname``, ``address``,
-  ``server`` or ``resolver``, or ends in ``_url`` or ``_host``; or
+  ``server`` or ``resolver``, or ends in ``_url``, ``_host`` or
+  ``_address``; or
 - its schema ``format`` is ``uri``, ``url``, ``hostname``, ``ipv4`` or
   ``ipv6``.
 
@@ -33,7 +34,7 @@ from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
 ADDRESS_NAMES: Final[frozenset[str]] = frozenset(
     {"url", "uri", "host", "hostname", "address", "server", "resolver"}
 )
-ADDRESS_NAME_ENDINGS: Final[tuple[str, ...]] = ("_url", "_host")
+ADDRESS_NAME_ENDINGS: Final[tuple[str, ...]] = ("_url", "_host", "_address")
 ADDRESS_FORMATS: Final[frozenset[str]] = frozenset({"uri", "url", "hostname", "ipv4", "ipv6"})
 
 #: Fields that look like an address, but MEHO never connects to them:
@@ -56,6 +57,10 @@ NOT_CALLER_ADDRESSES: Final[Mapping[tuple[str, str], str]] = {
         "and later calls run that target's own operations"
     ),
     ("topology.annotate", "evidence_url"): _EVIDENCE_LINK,
+    ("winsrv.storage.iscsi.connect", "node_address"): (
+        "the iSCSI name (IQN) of the target, not a network address; the host connects "
+        "to the portal in target_portal_address, which carries the marker"
+    ),
     ("topology.bulk_import", "rows[].evidence_url"): _EVIDENCE_LINK,
     ("topology.create_node", "evidence_url"): _EVIDENCE_LINK,
 }

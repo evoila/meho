@@ -633,6 +633,7 @@ def _with_field(name: str, schema: dict[str, Any]) -> OperationContract:
         ("Host", {"type": "string"}),
         ("callback_url", {"type": "string"}),
         ("jump_host", {"type": "string"}),
+        ("portal_address", {"type": "string"}),
         ("to", {"type": "string", "format": "uri"}),
         ("to", {"type": "string", "format": "url"}),
         ("to", {"type": "string", "format": "hostname"}),

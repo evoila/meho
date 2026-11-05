@@ -31,11 +31,16 @@ __all__ = ["URL_SECRET", "UrlSecretFinder", "is_secret_query_name"]
 
 #: A URL: a short scheme, ``://``, and every byte up to white space, a
 #: double quote or an angle bracket. An apostrophe is a valid URL byte
-#: (RFC 3986 sub-delims), so it stays in the URL; a link written in
-#: single quotes is cut at its closing quote by :func:`_quoted_url`.
+#: (RFC 3986 sub-delims), so it stays in the URL; :func:`_links` splits
+#: the match where the next link in single quotes starts, and cuts a
+#: link written in single quotes at its closing quote.
 #: The scheme length is capped, so a long run of letters and dots
 #: without ``://`` is not scanned again and again.
 _URL: Final = re.compile(r"(?<![A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]{0,31}://[^\s\"<>]+")
+
+#: The opening quote of a link in single quotes, inside a URL match
+#: (``'https://a','https://b'`` is one match of :data:`_URL`).
+_QUOTED_LINK_START: Final = re.compile(r"'[A-Za-z][A-Za-z0-9+.\-]{0,31}://")
 
 #: A value that already is a complete ``[REDACTED:<name>]`` placeholder.
 _PLACEHOLDER: Final = re.compile(r"\[REDACTED:[^\]\s'\"]+\]")
@@ -85,21 +90,41 @@ class UrlSecretFinder:
         """Return ``(start, end)`` of every secret part, left to right."""
         spans: list[tuple[int, int]] = []
         for match in _URL.finditer(text):
-            spans.extend(_url_spans(_quoted_url(text, match), match.start()))
+            for url, offset in _links(text, match):
+                spans.extend(_url_spans(url, offset))
         return spans
 
 
-def _quoted_url(text: str, match: re.Match[str]) -> str:
-    """Return the URL of *match*, cut at its closing quote when it is in single quotes.
+def _links(text: str, match: re.Match[str]) -> list[tuple[str, int]]:
+    """Return each link of *match* with its offset in *text*.
 
-    The last apostrophe of the match is the closing quote, so an
-    apostrophe inside the link (``/it's/file``) stays part of it. A link
-    that is not in quotes keeps every apostrophe.
+    A match holds more than one link when links in single quotes follow
+    each other without white space (``['https://a','https://b']``). The
+    match is split at each apostrophe that opens the next link, and each
+    link in single quotes is cut at its closing quote: the last
+    apostrophe of its part, so an apostrophe inside the link
+    (``/it's/file``) stays part of it. A link that is not in quotes
+    keeps every apostrophe.
     """
     url = match.group(0)
-    if match.start() == 0 or text[match.start() - 1] != "'":
+    offset = match.start()
+    quoted = offset > 0 and text[offset - 1] == "'"
+    links: list[tuple[str, int]] = []
+    while True:
+        opening = _QUOTED_LINK_START.search(url)
+        if opening is None:
+            links.append((_close_quote(url, quoted), offset))
+            return links
+        links.append((_close_quote(url[: opening.start()], quoted), offset))
+        url = url[opening.start() + 1 :]
+        offset += opening.start() + 1
+        quoted = True
+
+
+def _close_quote(url: str, quoted: bool) -> str:
+    if not quoted or "'" not in url:
         return url
-    return url[: url.rfind("'")] if "'" in url else url
+    return url[: url.rfind("'")]
 
 
 def _url_spans(url: str, offset: int) -> list[tuple[int, int]]:

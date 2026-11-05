@@ -160,6 +160,46 @@ def test_flight_recorder_body_hides_the_secret_parts_of_a_link(
     _assert_hidden(text, secrets, readable)
 
 
+_ADJACENT_LINKS: Final = (
+    "['https://files.example.com/a',"
+    f"'https://deploy:{_PASSWORD}@files.example.com/b?sig={_AZURE_SIG}']"  # trufflehog:ignore
+)
+_ADJACENT_READABLE: Final = ("'https://files.example.com/a'", "@files.example.com/b")
+
+
+@pytest.mark.asyncio
+async def test_approval_request_hides_each_of_two_adjacent_quoted_links() -> None:
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="files.download"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),  # type: ignore[arg-type]
+        connector_id="files-1.x",
+        params={"urls": _ADJACENT_LINKS},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    _assert_hidden(
+        effect["params_echo"]["urls"],
+        (_PASSWORD, _AZURE_SIG),
+        _ADJACENT_READABLE,
+    )
+
+
+def test_flight_recorder_body_hides_each_of_two_adjacent_quoted_links() -> None:
+    body, fired = scrub_content({"source": {"urls": _ADJACENT_LINKS}})
+    assert fired
+    _assert_hidden(
+        body["source"]["urls"],
+        (_PASSWORD, _AZURE_SIG),
+        _ADJACENT_READABLE,
+    )
+
+    text, fired = scrub_content(f"download {_ADJACENT_LINKS} to the datastore")
+    assert fired
+    _assert_hidden(text, (_PASSWORD, _AZURE_SIG), _ADJACENT_READABLE)
+
+
 def test_token_link_keeps_its_api_key_label() -> None:
     body, _ = scrub_content(f"https://files.example.com/download?token={_TOKEN}")
     assert body == "https://files.example.com/download?[REDACTED:api_key]"
@@ -219,6 +259,20 @@ def test_token_link_keeps_its_api_key_label() -> None:
         (
             '"https://h.example.com/it\'s/f?sig=abc"',
             '"https://h.example.com/it\'s/f?sig=[REDACTED:url_secret]"',
+        ),
+        # Links in single quotes that follow each other are each read on their own.
+        (
+            "['https://h.example.com/a','https://user:abc@h.example.com/b']",
+            "['https://h.example.com/a','https://[REDACTED:url_secret]@h.example.com/b']",
+        ),
+        (
+            "('https://user:it's@h.example.com/a?x=o'k&sig=abc','https://h.example.com/b?sig=def')",
+            "('https://[REDACTED:url_secret]@h.example.com/a?x=o'k&sig=[REDACTED:url_secret]',"
+            "'https://h.example.com/b?sig=[REDACTED:url_secret]')",
+        ),
+        (
+            "https://h.example.com/a,'https://user:abc@h.example.com/b'",
+            "https://h.example.com/a,'https://[REDACTED:url_secret]@h.example.com/b'",
         ),
     ],
 )

@@ -76,6 +76,8 @@ methods that `AzureConnector` takes over.
   line per list for each family.
 - `_paths.py` keeps the paths, in one marked section per family. It has no
   `__all__`, because every family would add its names at the same place.
+- `trace_mask.py` holds what the flight recorder leaves out of every Azure
+  answer (see [Trace mask](#trace-mask)).
 
 Every place that collects the families has one fixed comment line per family,
 `# <family> (Task #<n>)`, in alphabetical order. A family adds its lines
@@ -308,6 +310,31 @@ itself fails, the text is withheld. The cleaned text goes only into
 `upstream_message`, which the dispatcher filters and cuts once more. The same
 function cleans the error message of a failed long-running operation. MEHO's
 own text names Azure's error code only when it looks like a code.
+
+## Trace mask
+
+When the flight recorder is on, it keeps Azure's answer to each call in the
+trace (the record of one call, for debugging). `AzureConnector.trace_response_body`
+hands it Azure's JSON with the value of each field below replaced by
+`<left out by MEHO: can hold a secret>`, at any depth, in any case and for
+every family; `send` asks this hook for every call, the Blob service calls
+too. The shared filter of the flight recorder then still runs on the result.
+An empty answer, or one that is not JSON, is left to the shared filter as it
+is. An answer the mask cannot parse or walk is left out.
+
+| Field | Where Azure sends it |
+|---|---|
+| `serviceKey`, `authorizationKey` | an ExpressRoute circuit and its authorizations |
+| `activationKey` | an ExpressRoute Direct port, a VPN site |
+| `keys`, `primaryKey`, `secondaryKey` | a `listKeys` answer (storage accounts, Automation accounts) |
+| `parameters` | Automation runbooks and job schedules, deployments, policy assignments |
+| `publishContentLink`, `draft` | Automation runbooks (signed links to the code) |
+
+The shared secret-name rule (`is_secret_param_name`) already hides
+`sharedKey` (VPN connections, ExpressRoute peerings), `adminPassword` (VMs),
+`serverAppSecret` and `secret` (AKS) and `connectionString` (any
+`*ConnectionString`), so `trace_mask.SECRET_FIELDS` does not list them. A test
+checks that the two lists never repeat each other.
 
 ## URL check
 
@@ -869,9 +896,8 @@ maintenance, their jobs and their schedules. Every operation is a read
 Files: `automation.py` (group text, guidance for the AI, operation table, and
 `AutomationOps`, a class whose methods `AzureConnector` takes over as one of
 its base classes), `automation_reads.py` (name checks, row shapes and the
-operation bodies), `automation_schemas.py` (name rules, parameter and
-response schemas), `automation_trace.py` (what the trace keeps of an
-answer). The paths are in the `automation` section of `_paths.py`.
+operation bodies) and `automation_schemas.py` (name rules, parameter and
+response schemas). The paths are in the `automation` section of `_paths.py`.
 
 ### Operations
 
@@ -914,11 +940,10 @@ secrets. No operation reads them:
   `azure.automation.job.list` has none either.
 - The trace (the flight recorder's record of each call) leaves these fields
   out too. Its shared filter finds secrets by their shape only, and a
-  parameter value or a signed link can have any shape. So every Automation
-  list is read through `TraceMaskingCaller` (`automation_trace.py`): the
-  trace gets Azure's answer with `parameters`, `publishContentLink` and
-  `draft` in each row replaced by a fixed text. A test switches the recorder
-  on and checks the spans.
+  parameter value or a signed link can have any shape. So the connector's
+  [trace mask](#trace-mask) replaces `parameters`, `publishContentLink` and
+  `draft` with a fixed text, like the key fields of every other family. A
+  test switches the recorder on and checks the spans.
 
 Names, descriptions, `last_modified_by` and `started_by` are text from Azure.
 MEHO copies them as data and never puts them into a path or a filter. The
@@ -1955,14 +1980,11 @@ such as `(` is written as a `%` code (`%28`), so it stays part of the name.
 **Secrets.** Every row is built from a fixed list of fields; nothing else
 from Azure's answer is passed on. An ExpressRoute circuit's answer holds its
 service key, its authorization keys and the BGP keys of its peerings; none
-of them reaches a result. Because the flight recorder would otherwise keep
-Azure's raw answer in the trace, `azure.network.expressroute.list` carries
-the tag `keys-withheld`: its `keys` word is a secret word for the flight
-recorder, so the trace of this call keeps no body. The same tag makes the
-dispatcher keep Azure's error text out of this operation's error result
-(`operations/_vendor_text.py`); the error code, the HTTP status and the hint
-stay. A gateway's answer no longer holds the RADIUS secret (Microsoft removed
-it from the list answer), so `azure.network.gateway.list` needs no such tag. The description of a
+of them reaches a result. The flight recorder keeps Azure's answer in the
+trace with these keys masked by the connector's [trace mask](#trace-mask),
+so the error text of `azure.network.expressroute.list` stays visible like
+that of every other read. A gateway's answer no longer holds the RADIUS
+secret (Microsoft removed it from the list answer). The description of a
 security rule is text from Azure; it is filtered with `clean_azure_text`
 like Azure's error text.
 

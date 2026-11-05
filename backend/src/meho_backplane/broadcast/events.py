@@ -1011,12 +1011,16 @@ _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
 #: pre-shared key of a VPN connection, the secret half of an access key
 #: pair. Followed by more tokens the pair is a reference, not the
 #: secret: the Kubernetes ``secret_key_ref`` names a Secret and a key in
-#: it, and must stay a plain field.
+#: it, and must stay a plain field. ``connection_string`` is a database or
+#: service URL with its password in it (Azure's ``primaryConnectionString``);
+#: ``connection_string_ref`` only names one.
 _SECRET_NAME_FINAL_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
     {
         ("secret", "key"),
         ("shared", "key"),
         ("preshared", "key"),
+        ("connection", "string"),
+        ("connection", "strings"),
     }
 )
 

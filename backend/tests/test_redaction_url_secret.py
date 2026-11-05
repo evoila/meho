@@ -21,8 +21,10 @@ import pytest
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.flight_recorder._capture_util import safe_url
 from meho_backplane.operations._preview import PreviewContext, build_proposed_effect
+from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.flight_recorder._content import scrub_content
 from meho_backplane.redaction.patterns import NAMED_PATTERNS, secret_spans
+from meho_backplane.redaction.resolver import get_default_policy
 from meho_backplane.redaction.url_secret import is_secret_query_name
 
 # Made-up values only. Each one must be gone from every output.
@@ -35,6 +37,9 @@ _PASSWORD: Final = "made-up-password-7"
 _TOKEN: Final = "made-up-token-value-12345"
 _SECURITY_TOKEN: Final = "made-up-security-token-6789"
 _QUOTE_PASSWORD: Final = "made-up-pass'word-8"
+_QUOTE_TOKEN_HEAD: Final = "made-up-tok"
+_QUOTE_TOKEN_TAIL: Final = "en-rest-4321"
+_QUOTE_TOKEN: Final = f"{_QUOTE_TOKEN_HEAD}'{_QUOTE_TOKEN_TAIL}"
 _CLUSTER_LINK: Final = f"https://admin:{_PASSWORD}@cluster.example.com"  # trufflehog:ignore
 
 #: (link, secret values in it, readable parts that must stay)
@@ -86,6 +91,13 @@ _LINKS: Final[list[tuple[str, tuple[str, ...], tuple[str, ...]]]] = [
         (_QUOTE_PASSWORD, _AZURE_SIG),
         ("@files.example.com/it's/installer.iso", "note=o'clock"),
     ),
+    # A ``token=`` value with an apostrophe is hidden whole: the part
+    # after the apostrophe goes too.
+    (
+        f"https://files.example.com/download?token={_QUOTE_TOKEN}",
+        (_QUOTE_TOKEN_HEAD, _QUOTE_TOKEN_TAIL),
+        ("files.example.com/download?token=",),
+    ),
 ]
 
 _LINK_IDS: Final = [
@@ -96,6 +108,7 @@ _LINK_IDS: Final = [
     "token",
     "security-token",
     "apostrophes",
+    "apostrophe-in-token",
 ]
 
 
@@ -267,9 +280,38 @@ def test_url_secret_reads_many_adjacent_quoted_links_fast() -> None:
     assert elapsed < 2.0, f"scan took {elapsed:.2f}s"
 
 
-def test_token_link_keeps_its_api_key_label() -> None:
-    body, _ = scrub_content(f"https://files.example.com/download?token={_TOKEN}")
-    assert body == "https://files.example.com/download?[REDACTED:api_key]"
+#: (link, the same link with its token value hidden). The URL rule runs
+#: before api_key and reads the value to its end, also past an
+#: apostrophe. When more parameters follow, the api_key rule then hides
+#: the placeholder and the rest as one value, as it did before.
+_TOKEN_LINKS: Final[list[tuple[str, str]]] = [
+    (
+        f"https://files.example.com/download?token={_TOKEN}",
+        "https://files.example.com/download?token=[REDACTED:url_secret]",
+    ),
+    (
+        f"https://files.example.com/download?token={_QUOTE_TOKEN}",
+        "https://files.example.com/download?token=[REDACTED:url_secret]",
+    ),
+    (
+        f"https://files.example.com/download?token={_QUOTE_TOKEN}&x=1",
+        "https://files.example.com/download?[REDACTED:api_key]",
+    ),
+]
+_TOKEN_LINK_IDS: Final = ["plain", "apostrophe", "apostrophe-then-more"]
+
+
+@pytest.mark.parametrize(("link", "expected"), _TOKEN_LINKS, ids=_TOKEN_LINK_IDS)
+def test_flight_recorder_body_hides_a_token_value_whole(link: str, expected: str) -> None:
+    body, fired = scrub_content(link)
+    assert fired
+    assert body == expected
+
+
+@pytest.mark.parametrize(("link", "expected"), _TOKEN_LINKS, ids=_TOKEN_LINK_IDS)
+def test_default_policy_hides_a_token_value_whole(link: str, expected: str) -> None:
+    result = redact({"url": link}, get_default_policy())
+    assert result.redacted == {"url": expected}
 
 
 @pytest.mark.parametrize(

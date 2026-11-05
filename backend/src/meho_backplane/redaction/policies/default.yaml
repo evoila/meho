@@ -62,17 +62,21 @@ rules:
     action: redact
     reason: "JWT in payload body"
 
-  - name: strip-api-key
-    pattern: api_key
-    action: redact
-    reason: "labelled credential pair (api_key/token/refresh_token/auth_token/session_token/secret/secret_id/private_key/password/passwd/pwd/client_secret)"
-
-  # After api_key: a ``token=...`` value keeps its api_key label, and
-  # this rule leaves a value that already is a placeholder alone.
+  # Before the api_key rule. This rule knows where a query value ends
+  # (at ``&`` or ``#``), and an apostrophe is part of the value. The
+  # api_key rule stops at an apostrophe, so a ``token=`` value with one
+  # would keep its tail. It also takes the parameter name, so this rule
+  # could not find the tail afterwards. A value that already is a
+  # placeholder (a JWT hidden by the jwt rule) is left alone.
   - name: strip-url-secret
     pattern: url_secret
     action: redact
     reason: "user part and signature / credential / token query values of a URL"
+
+  - name: strip-api-key
+    pattern: api_key
+    action: redact
+    reason: "labelled credential pair (api_key/token/refresh_token/auth_token/session_token/secret/secret_id/private_key/password/passwd/pwd/client_secret)"
 
   - name: strip-kubeconfig
     pattern: kubeconfig

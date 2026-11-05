@@ -85,6 +85,12 @@ _CONTENT_POLICY: Final[RedactionPolicy] = RedactionPolicy.model_validate(
                 "reason": "API key / access / refresh / session token / secret id",
             },
             {
+                "name": "fr-url-secret",
+                "pattern": "url_secret",
+                "action": "redact",
+                "reason": "user part and signature / credential / token query values of a URL",
+            },
+            {
                 "name": "fr-kubeconfig",
                 "pattern": "kubeconfig",
                 "action": "redact",

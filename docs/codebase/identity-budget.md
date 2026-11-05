@@ -35,7 +35,7 @@ reads the same rows.
 | `BudgetWindowKind` | `db/models.py` | Closed enum (`daily` / `weekly` / `monthly`) backed by a DB-level CHECK |
 | `PerMillionPricing` | `operations/identity_budget.py` | Per-1M-token published rates for one model |
 | `MODEL_PRICING` | `operations/identity_budget.py` | The pinned `provider:model -> PerMillionPricing` map |
-| `TokenUsage` | `operations/identity_budget.py` | Framework-free token-stream record (input / output / cache-read / cache-write) |
+| `TokenUsage` | `operations/identity_budget.py` | Framework-free token-stream record (uncached input / output / cache-read / cache-write) |
 | `BudgetReading` | `operations/identity_budget.py` | Read-side view: limits + consumption + remaining-headroom |
 
 ## Control flow
@@ -125,7 +125,18 @@ each model response of a run (and of each child run it invoked) into
 computation, so two short requests are never charged the long-prompt
 price because their prompts add up to more than the threshold. A
 runtime that reports no per-request usage gets the run's total priced
-as one request.
+as one request. A child run that completed some requests and then
+failed (for example, its turn budget tripped) is in the list too: its
+tokens are in the parent's shared total, so the parent's cost counts
+them.
+
+The framework (pydantic_ai 2.x) reports `input_tokens` as the whole
+prompt, cached tokens included. `TokenUsage.from_request_usage` and
+`from_run_usage` take the cache-read and cache-write tokens out of it,
+so `TokenUsage.input_tokens` is the uncached input only. A cached token
+is then counted once, at its cache rate, both in the cost and in the
+budget's token count. `prompt_tokens` adds the streams back up for the
+long-prompt threshold.
 
 A default model with no row is made visible in two places (#5771,
 `operations/unpriced_model.py`):

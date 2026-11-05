@@ -71,7 +71,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.db.models import BudgetWindowKind, IdentityBudget
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type-checking
-    from pydantic_ai.usage import RequestUsage, RunUsage
+    from pydantic_ai.usage import RequestUsage, RunUsage, UsageBase
 
 __all__ = [
     "MODEL_PRICING",
@@ -226,6 +226,13 @@ class TokenUsage:
     type. ``cache_read_tokens`` and ``cache_write_tokens`` are the
     Anthropic prompt-cache shapes; providers that do not separate
     them simply pass ``0``.
+
+    The four streams do not overlap. ``input_tokens`` holds only the
+    uncached input tokens, which the provider charges at the input
+    rate. The framework's ``input_tokens`` is different: it is the whole
+    prompt, cached tokens included (pydantic_ai 2.x). The ``from_*``
+    constructors take the cached streams out of it, so a cached token
+    is counted once, at its cache rate.
     """
 
     input_tokens: int
@@ -242,18 +249,25 @@ class TokenUsage:
         cost. Audio token streams (which the framework also tracks)
         are out of scope for the text-only agent runtime in v1.
         """
-        return cls(
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            cache_read_tokens=usage.cache_read_tokens,
-            cache_write_tokens=usage.cache_write_tokens,
-        )
+        return cls._from_framework_usage(usage)
 
     @classmethod
     def from_request_usage(cls, usage: RequestUsage) -> TokenUsage:
         """Build a :class:`TokenUsage` from one request's ``RequestUsage``."""
+        return cls._from_framework_usage(usage)
+
+    @classmethod
+    def _from_framework_usage(cls, usage: UsageBase) -> TokenUsage:
+        """Split the framework's inclusive input total into the uncached part.
+
+        The framework counts the cached streams inside ``input_tokens``.
+        A usage that does not follow that convention (a hand-made test
+        value with more cached than input tokens) cannot go below zero
+        uncached tokens.
+        """
+        cached = usage.cache_read_tokens + usage.cache_write_tokens
         return cls(
-            input_tokens=usage.input_tokens,
+            input_tokens=max(usage.input_tokens - cached, 0),
             output_tokens=usage.output_tokens,
             cache_read_tokens=usage.cache_read_tokens,
             cache_write_tokens=usage.cache_write_tokens,

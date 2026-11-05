@@ -24,6 +24,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic_ai.usage import RequestUsage, RunUsage
 from structlog.testing import capture_logs
 
 from meho_backplane import main as main_module
@@ -113,6 +114,72 @@ def test_cached_prompt_tokens_count_towards_the_long_prompt_threshold() -> None:
     assert rate is not None
     expected = (
         rate.input * 40_000 + rate.cache_read * 50_000 + rate.cache_write * 10_001
+    ) / _PER_MILLION
+    assert compute_cost(usage, _HAIKU) == expected
+
+
+def test_framework_usage_counts_a_cached_token_once() -> None:
+    """The framework's input total includes the cached tokens; the lift takes them out.
+
+    pydantic_ai 2.x reports ``input_tokens`` as the whole prompt, cached
+    tokens included. So a request of 80,000 prompt tokens with 60,000
+    read from the cache has 20,000 uncached input tokens, not 80,000.
+    """
+    usage = TokenUsage.from_request_usage(
+        RequestUsage(input_tokens=80_000, output_tokens=100, cache_read_tokens=60_000)
+    )
+    assert usage == TokenUsage(input_tokens=20_000, output_tokens=100, cache_read_tokens=60_000)
+    assert usage.prompt_tokens == 80_000
+    assert usage.total_tokens == 80_100
+    pricing = MODEL_PRICING[_HAIKU]
+    assert compute_cost(usage, _HAIKU) == Decimal("0.00265")
+    assert (
+        compute_cost(usage, _HAIKU)
+        == (pricing.input * 20_000 + pricing.cache_read * 60_000 + pricing.output * 100)
+        / _PER_MILLION
+    )
+
+
+def test_run_usage_is_split_the_same_way() -> None:
+    """A whole run's totals get the same split as one request."""
+    usage = TokenUsage.from_run_usage(
+        RunUsage(
+            requests=2,
+            input_tokens=80_000,
+            output_tokens=100,
+            cache_read_tokens=50_000,
+            cache_write_tokens=10_000,
+        )
+    )
+    assert usage == TokenUsage(
+        input_tokens=20_000, output_tokens=100, cache_read_tokens=50_000, cache_write_tokens=10_000
+    )
+
+
+def test_more_cached_than_input_tokens_gives_no_negative_uncached_count() -> None:
+    """A usage that does not follow the framework's convention stays at zero, not below."""
+    usage = TokenUsage.from_request_usage(RequestUsage(input_tokens=10, cache_read_tokens=20))
+    assert usage.input_tokens == 0
+    assert usage.cache_read_tokens == 20
+
+
+@pytest.mark.parametrize(
+    ("prompt_tokens", "long"), [(99_999, False), (100_000, False), (100_001, True)]
+)
+def test_framework_usage_with_cached_tokens_around_the_long_prompt_threshold(
+    prompt_tokens: int, long: bool
+) -> None:
+    """The threshold compares the whole prompt, with the cached tokens counted once."""
+    cached = 60_000
+    usage = TokenUsage.from_request_usage(
+        RequestUsage(input_tokens=prompt_tokens, output_tokens=100, cache_read_tokens=cached)
+    )
+    assert usage.prompt_tokens == prompt_tokens
+    pricing = MODEL_PRICING[_HAIKU]
+    rate = pricing.long_prompt if long else pricing
+    assert rate is not None
+    expected = (
+        rate.input * (prompt_tokens - cached) + rate.cache_read * cached + rate.output * 100
     ) / _PER_MILLION
     assert compute_cost(usage, _HAIKU) == expected
 

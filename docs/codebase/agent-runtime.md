@@ -57,8 +57,10 @@ All public types are re-exported from `meho_backplane.agent`
   count off its `TURN` events — so `run_status` reports the model-request
   turn total instead of a constant 0. `request_usages` carries the token
   usage of each model request (the run's own and those of its child
-  runs), so the cost can use a per-request price (see
-  `docs/codebase/identity-budget.md`).
+  runs, also the requests a child run completed before it failed), so
+  the cost can use a per-request price (see
+  `docs/codebase/identity-budget.md`). The token totals hold the
+  uncached input apart from the cached streams, as `TokenUsage` does.
 - **`AgentRunStatus`** — closed enum: `RUNNING` / `SUCCEEDED` / `FAILED`.
 - **`AgentRunError`** — domain exception raised when a run cannot start or
   its result is unavailable (turn budget exhausted, a tool raised, the

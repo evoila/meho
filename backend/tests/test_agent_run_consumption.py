@@ -238,6 +238,57 @@ async def test_finished_run_stamps_cost_and_applies_consumption(
         assert r.requests_consumed == 1
 
 
+async def test_run_with_cached_prompt_tokens_charges_each_token_once(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A cached prompt token is charged at the cache rate only, and counted once.
+
+    The framework reports the prompt length with the cached tokens
+    inside ``input_tokens``. The stored cost and the budget rows must
+    not count them a second time at the input rate.
+    """
+    await _seed_tenant_and_definition()
+    prompt_tokens, cached_tokens, output_tokens = 80_000, 60_000, 100
+    invoker = _invoker_with(
+        _final_text_with_usage(
+            "done",
+            input_tokens=prompt_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cached_tokens,
+        )
+    )
+
+    op = _make_operator(sub="agent-consumption-cached")
+    outcome = await invoker.run(op, "consumption-reader", "go")
+    assert outcome.status is AgentRunStatus.SUCCEEDED
+
+    pricing = MODEL_PRICING["anthropic:claude-sonnet-5-5"]
+    expected_cost = (
+        pricing.input * Decimal(prompt_tokens - cached_tokens)
+        + pricing.cache_read * Decimal(cached_tokens)
+        + pricing.output * Decimal(output_tokens)
+    ) / Decimal(1_000_000)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(select(AgentRunRow).where(AgentRunRow.id == outcome.run_id))
+        ).scalar_one()
+        rows = (
+            (
+                await session.execute(
+                    select(IdentityBudget).where(IdentityBudget.principal_sub == op.sub)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert row.cost == expected_cost
+    assert len(rows) == 3
+    for r in rows:
+        assert r.cost_consumed == expected_cost
+        assert r.tokens_consumed == Decimal(prompt_tokens + output_tokens)
+
+
 async def test_get_remaining_after_run_reports_correct_gap(
     stub_embedding_service: AsyncMock,
 ) -> None:

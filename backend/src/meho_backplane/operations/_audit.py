@@ -52,8 +52,10 @@ __all__ = [
     "parent_audit_id_var",
     "policy_decision_var",
     "resolve_agent_session_id",
+    "restore_audit_extras",
     "reveal_secret_var",
     "run_id_var",
+    "snapshot_audit_extras",
     "step_id_var",
     "with_audit_receipt",
     "work_ref_var",
@@ -305,7 +307,43 @@ agent_run_audit_meta_var: ContextVar[AgentRunAuditMeta | None] = ContextVar(
 #: result into the payload, mirroring the chassis HTTP behaviour so
 #: the typed-op dispatch path and the FastAPI route path produce the
 #: same shape of audit row.
+#:
+#: A handler's binds last for one dispatch (#5211): the dispatcher takes
+#: :func:`snapshot_audit_extras` on entry and :func:`restore_audit_extras`
+#: on exit, so the next call in the same context, a composite parent row
+#: written after its child, and the MCP / REST row around the call do not
+#: carry them. Keys the caller bound before the dispatch (the approved
+#: run's ``audit_approval_request_id``, a route's own labels) still reach
+#: the row and are kept afterwards.
 _AUDIT_PAYLOAD_PREFIX: str = "audit_"
+
+
+def snapshot_audit_extras() -> dict[str, Any]:
+    """Return the ``audit_*`` keys bound in the current context, ``None`` values too."""
+    return {
+        key: value
+        for key, value in structlog.contextvars.get_contextvars().items()
+        if key.startswith(_AUDIT_PAYLOAD_PREFIX)
+    }
+
+
+def restore_audit_extras(snapshot: dict[str, Any]) -> None:
+    """Put the ``audit_*`` keys back as they were in *snapshot*.
+
+    A key bound since the snapshot is unbound; a key whose value changed,
+    or that was unbound, gets its old value back.
+    """
+    current = snapshot_audit_extras()
+    added = [key for key in current if key not in snapshot]
+    if added:
+        structlog.contextvars.unbind_contextvars(*added)
+    changed = {
+        key: value
+        for key, value in snapshot.items()
+        if key not in current or current[key] is not value
+    }
+    if changed:
+        structlog.contextvars.bind_contextvars(**changed)
 
 
 def _resolve_audit_extras_from_contextvars() -> dict[str, Any]:

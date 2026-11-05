@@ -101,7 +101,7 @@ preview_dispatch(operator, connector_id, op_id, target, params)
         ├─ lookup_descriptor → None ? → status=error error_code=unknown_op
         │       (or unknown_connector; op_miss_result, #4031; a visible
         │       ingested licence read that is off → license_read_off)
-        ├─ ingested read whose path names licences ? → status=error
+        ├─ ingested op whose path names licences ? → status=error
         │       error_code=license_read_off (same answer and order as /call;
         │       the read never runs, see spec-ingestion.md)
         ├─ target is None and descriptor_requires_target ? → status=error
@@ -198,9 +198,9 @@ surfaces stay `OPERATOR`-gated at the route / tool layer.
 | `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `unknown_connector` / `target_required` / `unqualified_target_version` / `invalid_params` / `invalid_op_schema` / `no_connector` / `ambiguous_connector` / `dispatch_error`) + per-code detail (`invalid_op_schema` carries `extras.missing_ref`, #3095; `unknown_op` carries `extras.connectors_with_op`, #4031). Every code except `unknown_op` / `unknown_connector` / `target_required` / `unqualified_target_version` also carries the four governance fields below |
 | `unavailable` | not an HTTP-ingested op **and** not previewable in a governed tier (destructive, or non-credential-class requires_approval — a credential-class op like `vault.kv.put` stays here so its secret params never surface) | `source_kind`, `extras.error_code=preview_unavailable`, `extras.reason=not_ingested`, plus the four governance fields below |
 
-An ingested read whose path names licences answers `error` with
-`extras.error_code=license_read_off` and no governance fields: the read
-never runs (see `spec-ingestion.md`, "Ingested licence reads stay off").
+An ingested operation whose path names licences, with any HTTP method,
+answers `error` with `extras.error_code=license_read_off` and no
+governance fields: it never runs (see `spec-ingestion.md`, "Ingested licence reads stay off").
 
 **`params_digest` (synthetic previews only).** A governed-tier typed /
 composite preview also carries `params_digest`, a keyed hash of the full

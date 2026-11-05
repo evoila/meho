@@ -299,7 +299,9 @@ from meho_backplane.operations._audit import (
     descriptor_op_class,
     parent_audit_id_var,
     policy_decision_var,
+    restore_audit_extras,
     reveal_secret_var,
+    snapshot_audit_extras,
     with_audit_receipt,
 )
 from meho_backplane.operations._branches import (
@@ -3683,6 +3685,9 @@ async def dispatch(
     # (``composite.enforce_subop_policy``). A child dispatch inherits it and
     # reads it after its policy gate below.
     _approved_run_token = approved_run_var.set(True) if _approved else None
+    # #5211: ``audit_*`` keys the handler binds belong to this dispatch's
+    # row only; the ``finally`` puts the caller's keys back.
+    _audit_extras = snapshot_audit_extras()
     try:
         if reveal_secret and _agent_acts(operator):
             return await _refuse_agent_reveal(
@@ -3941,6 +3946,7 @@ async def dispatch(
         reveal_secret_var.reset(_reveal_token)
         if _approved_run_token is not None:
             approved_run_var.reset(_approved_run_token)
+        restore_audit_extras(_audit_extras)
         # #3500: release the concurrency slot (no-op when none was taken --
         # the disabled / non-top-level / approved paths). Best-effort: a
         # release hiccup must not turn a decided result into an exception,

@@ -948,6 +948,48 @@ async def test_dispatch_record_add_against_bind9_writes_state_before_after(
 
 
 @pytest.mark.asyncio
+async def test_read_after_record_add_row_has_no_state_before_after(
+    bind9_e2e: _Bind9Target,
+) -> None:
+    """A read dispatched right after ``bind9.record.add`` in the same context
+    gets its own audit row only: the add's ``audit_state_*`` binds do not
+    reach it (#5211).
+    """
+    operator = _web_operator("op-record-add-then-get")
+    added = await dispatch(
+        operator=operator,
+        connector_id="bind9-ssh-9.x",
+        op_id="bind9.record.add",
+        target=bind9_e2e,
+        params={
+            "fqdn": "scoped-e2e.evba.lab",
+            "ip": "10.5.50.43",
+            "type": "A",
+            "zone": "evba.lab",
+        },
+    )
+    assert added.status == "ok", added.error
+    read = await dispatch(
+        operator=operator,
+        connector_id="bind9-ssh-9.x",
+        op_id="bind9.record.get",
+        target=bind9_e2e,
+        params={"fqdn": "scoped-e2e.evba.lab", "type": "A"},
+    )
+    assert read.status == "ok", read.error
+
+    await _assert_audit_row(
+        "bind9.record.add",
+        operator_sub="op-record-add-then-get",
+        expect_state_before=True,
+        expect_state_after=True,
+    )
+    payload = await _assert_audit_row("bind9.record.get", operator_sub="op-record-add-then-get")
+    assert "state_before" not in payload
+    assert "state_after" not in payload
+
+
+@pytest.mark.asyncio
 async def test_governed_record_remove_gate_holds_against_real_bind9(
     bind9_e2e: _Bind9Target,
 ) -> None:

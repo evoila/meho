@@ -67,6 +67,13 @@ rules:
     action: redact
     reason: "labelled credential pair (api_key/token/refresh_token/auth_token/session_token/secret/secret_id/private_key/password/passwd/pwd/client_secret)"
 
+  # After api_key: a ``token=...`` value keeps its api_key label, and
+  # this rule leaves a value that already is a placeholder alone.
+  - name: strip-url-secret
+    pattern: url_secret
+    action: redact
+    reason: "user part and signature / credential / token query values of a URL"
+
   - name: strip-kubeconfig
     pattern: kubeconfig
     action: redact

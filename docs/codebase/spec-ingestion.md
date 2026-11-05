@@ -709,9 +709,13 @@ target for MEHO.
   This holds for the `net.*` probes and `pfsense.diag.ping`.
 - **The contract check.** Rule 13 (`caller_address`) of
   `tests/test_operation_contracts.py` fails for a parameter that looks
-  like an address but has no marker. A field that only looks like an
-  address, and MEHO never connects to it, is listed with its reason in
-  `NOT_CALLER_ADDRESSES` (`tests/_operation_contract_addresses.py`).
+  like an address but has no marker. A field looks like an address by
+  its name (for example `url`, `host`, or a name that ends in `_url`,
+  `_host` or `_address`) or by its schema `format`. A field that only
+  looks like an address is listed with its reason in
+  `NOT_CALLER_ADDRESSES` (`tests/_operation_contract_addresses.py`): MEHO
+  and the target never connect to it, or MEHO connects to it only on the
+  target's own host.
 
 Tests: `tests/test_caller_address_floor.py` (a fixture operation, no
 connector package) and `tests/test_operation_contract_rules.py`.

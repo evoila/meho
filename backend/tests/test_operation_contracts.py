@@ -49,7 +49,8 @@ registers at start-up, of every connector, against thirteen rules:
     (its name is ``url``, ``host``, ``resolver``, ends in ``_address``, ... or its ``format`` is
     ``uri``, ``hostname``, ...) carries ``x-meho-caller-address: true``, so
     MEHO runs the operation at ``caution`` or higher with approval. A field
-    that only looks like an address, and MEHO never connects to it, is in
+    that only looks like an address (MEHO and the target never connect to
+    it, or MEHO connects only on the target's own host) is in
     :data:`tests._operation_contract_addresses.NOT_CALLER_ADDRESSES` with
     its reason. The field checks are in :mod:`tests._operation_contract_addresses`.
 
@@ -405,8 +406,8 @@ def check_named_operations_exist(op: OperationContract, registered: Collection[s
 def check_caller_address(op: OperationContract) -> list[str]:
     return [
         f"parameter field {path!r} looks like an address but has no "
-        "'x-meho-caller-address: true'; mark it, or add a field MEHO never "
-        "connects to to NOT_CALLER_ADDRESSES with a reason"
+        "'x-meho-caller-address: true'; mark it, or add a field that is not "
+        "a caller address to NOT_CALLER_ADDRESSES with a reason"
         for path in unmarked_address_fields(op.op_id, op.parameter_schema)
     ]
 

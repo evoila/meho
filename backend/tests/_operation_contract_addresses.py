@@ -18,9 +18,10 @@ A field looks like an address when:
   ``ipv6``.
 
 A marker on the field itself or on a field around it counts (a list of URLs
-may carry the marker on the list). A field that only looks like an address,
-and MEHO never connects to it, goes in :data:`NOT_CALLER_ADDRESSES` with its
-reason. Used by ``test_operation_contracts.py``; tested with fake operations
+may carry the marker on the list). A field that only looks like an address
+goes in :data:`NOT_CALLER_ADDRESSES` with its reason: MEHO and the target
+never connect to it, or MEHO connects to it only on the target's own host
+(the Azure poll URL). Used by ``test_operation_contracts.py``; tested with fake operations
 in ``test_operation_contract_rules.py``.
 """
 
@@ -37,7 +38,7 @@ ADDRESS_NAMES: Final[frozenset[str]] = frozenset(
 ADDRESS_NAME_ENDINGS: Final[tuple[str, ...]] = ("_url", "_host", "_address")
 ADDRESS_FORMATS: Final[frozenset[str]] = frozenset({"uri", "url", "hostname", "ipv4", "ipv6"})
 
-#: Fields that look like an address, but MEHO never connects to them:
+#: Fields that look like an address, but are not a caller address:
 #: ``(operation id, field path) -> reason``. The live check fails when an
 #: entry no longer names a registered field that looks like an address.
 _EVIDENCE_LINK: Final[str] = "a link stored as evidence on the topology; MEHO never opens it"

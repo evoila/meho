@@ -223,18 +223,22 @@ The Deployment renders `startupProbe`, `livenessProbe`, and
 
 | Probe | Endpoint | Failure semantics | Default timings (operator-tunable) |
 | --- | --- | --- | --- |
-| `startupProbe` | `/healthz` | Pod **restarts** once the budget is exhausted; disables liveness/readiness until it first passes | `periodSeconds: 10`, `timeoutSeconds: 1`, `failureThreshold: 30` (30 × 10s = 300s / 5-min first-boot budget) |
+| `startupProbe` | `/healthz` | Pod **restarts** once the budget is exhausted; disables liveness/readiness until it first passes | `periodSeconds: 10`, `timeoutSeconds: 1`, `failureThreshold: 90` (90 × 10s = 900s / 15-min first-boot budget) |
 | `livenessProbe` | `/healthz` (always 200 if the process is up) | Pod **restarts** on failure | `initialDelaySeconds: 30`, `periodSeconds: 10`, `timeoutSeconds: 1`, `failureThreshold: 3` |
 | `readinessProbe` | `/ready` (200 only when every registered probe in the readiness registry passes; 503 with an empty registry at the chassis stage) | Pod **removed from Service endpoints**, no restart | `initialDelaySeconds: 5`, `periodSeconds: 5`, `timeoutSeconds: 2`, `failureThreshold: 3` |
 
 The `startupProbe` (Issue #2393) exists because first boot registers the
 full typed-op catalog and preloads the fastembed embedding model inside the
-FastAPI lifespan **before** the app binds `:8000` — ~2-3 minutes, and longer
-on a cold install where the fastembed cache PVC is empty and the model
-weights are downloaded. The kubelet disables the liveness and readiness
+FastAPI lifespan **before** the app binds `:8000`. On an empty database
+every operation also gets its embedding. On 2026-11-04 (#4102, OpenShift,
+v0.43.0) that took about 5 minutes for 1,302 operations at the 1-CPU limit;
+later boots, which find the rows, took about 20 seconds. Since #5019 a start
+that is stopped keeps none of the new rows, so the whole first boot must fit
+in one budget: with the old 300s, a fresh `helm install --wait` failed on
+the first try. The kubelet disables the liveness and readiness
 probes until the startup probe first succeeds, so a slow-but-healthy first
 boot no longer trips the short-delay liveness probe into a
-CrashLoopBackOff. The budget is `failureThreshold × periodSeconds` (300s by
+CrashLoopBackOff. The budget is `failureThreshold × periodSeconds` (900s by
 default); once it passes, the liveness probe's fast 30s detection window
 takes over for genuine hang detection. Inflating
 `probes.liveness.initialDelaySeconds` (the old-only lever) is strictly
@@ -275,6 +279,17 @@ read-only. `/tmp` is mounted as an `emptyDir` for libraries that insist on
 a writable tempdir. These defaults match cert-manager, ArgoCD, and Flux,
 and they're the minimum surface that admits a Pod under the cluster's
 **restricted** PodSecurity profile.
+
+On OpenShift, `global.openshift: true` makes every pod of the chart and its
+subcharts (the backplane, the setup and migration Jobs, Valkey, PostgreSQL,
+Keycloak, OpenBao and the `helm test` pods) leave out `runAsUser`,
+`runAsGroup` and `fsGroup`, through the shared helper
+`meho.core.podSecurityContext`. OpenShift's default rule `restricted-v2`
+then picks the user id from the project's range. The backplane image's files
+belong to group 0, which that user is in. Everything else above stays.
+`backend/tests/test_chart_openshift.py` checks every pod, and
+`deploy/values-examples/values-openshift.yaml` holds the tested OpenShift
+values (#4102).
 
 ### NetworkPolicy
 
@@ -1313,7 +1328,7 @@ them).
 | `service.type` / `service.port` | `ClusterIP` / `8000` | Service shape. |
 | `ingress.className` | `""` | Cluster default IngressClass when empty. |
 | `probes.liveness.*` / `probes.readiness.*` | `/healthz` / `/ready` httpGet + tuned timings | Operator-tunable; never disabled. |
-| `probes.startup.*` | `/healthz` httpGet + 5-min first-boot budget (#2393) | Operator-tunable; defaulted-on, opt-out by clearing `probes.startup`. Gates liveness/readiness through catalog registration + fastembed preload. |
+| `probes.startup.*` | `/healthz` httpGet + 15-min first-boot budget (#2393, #4102) | Operator-tunable; defaulted-on, opt-out by clearing `probes.startup`. Gates liveness/readiness through catalog registration + fastembed preload. |
 | `resources.requests` / `resources.limits` | `100m`/`256Mi` / `1000m`/`1Gi` | Conservative chassis baselines. |
 | `networkPolicy.ingressControllerNamespace` | `ingress-nginx` | RKE2 default; override per cluster. |
 | `audit.postgresOnly` | `true` | Postgres-only audit sink baseline. |

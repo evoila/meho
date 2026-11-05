@@ -906,7 +906,10 @@ is not set.
   state. It runs no tenant work (no credential check, no add-on
   pairings, no tool comparison). With a current tenant, `meho_status`
   answers as before and also lists `operator.tenants`, with `current`
-  set on the current one.
+  set on the current one. Inside an agent run that a person started, no
+  `tenants[].tenant_role` is higher than `operator.tenant_role`, the
+  run's own role (#5773): the person's login groups may give a higher
+  role, but the agent never gets it.
 - MEHO keeps no MCP session store (the session id only correlates audit
   rows), so nothing is kept per session that could mix tenants. Result
   links are stored per tenant and per person

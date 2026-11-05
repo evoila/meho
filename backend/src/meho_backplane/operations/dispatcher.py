@@ -400,6 +400,11 @@ from meho_backplane.operations.composite import (
     composite_depth_var,
     get_dispatch_child,
 )
+from meho_backplane.operations.deny_reasons import (
+    AGENT_REVEAL_REFUSED,
+    POLICY_DENIED,
+    ROLE_INSUFFICIENT,
+)
 from meho_backplane.operations.dispatch_limits import (
     acquire_dispatch_slot,
     check_dispatch_rate_limit,
@@ -1078,6 +1083,11 @@ async def _refuse_agent_reveal(
     without showing it.
     """
     duration_ms = _elapsed_ms(started)
+    reason = (
+        "reveal_secret is for people only. Call again without reveal_secret to get "
+        "the names without the values, or ask a person to read the secret."
+    )
+    result = result_denied(op_id, reason, duration_ms, reason_code=AGENT_REVEAL_REFUSED)
     receipt = await audit_safe(
         audit_id=uuid.uuid4(),
         event_class=AuditEventClass.POLICY_DECISION,
@@ -1087,12 +1097,9 @@ async def _refuse_agent_reveal(
         params_hash=params_hash,
         result_status="denied",
         duration_ms=duration_ms,
+        error_extras=_error_extras_for_audit(result),
     )
-    reason = (
-        "reveal_secret is for people only. Call again without reveal_secret to get "
-        "the names without the values, or ask a person to read the secret."
-    )
-    return with_audit_receipt(result_denied(op_id, reason, duration_ms), receipt)
+    return with_audit_receipt(result, receipt)
 
 
 def _composite_terminal_error_code(descriptor: EndpointDescriptor, envelope: Any) -> str | None:
@@ -3725,6 +3732,9 @@ async def dispatch(
             policy_decision_var.set(verdict.value)
             if verdict == PermissionVerdict.DENY:
                 duration_ms = _elapsed_ms(started)
+                # The row keeps the reason and its code (#5773), so the audit
+                # log says which rule refused the call.
+                denied = result_denied(op_id, gate_reason or "policy denied", duration_ms)
                 receipt = await audit_safe(
                     audit_id=uuid.uuid4(),
                     event_class=AuditEventClass.POLICY_DECISION,
@@ -3734,10 +3744,9 @@ async def dispatch(
                     params_hash=params_hash,
                     result_status="denied",
                     duration_ms=duration_ms,
+                    error_extras=_error_extras_for_audit(denied),
                 )
-                return with_audit_receipt(
-                    result_denied(op_id, gate_reason or "policy denied", duration_ms), receipt
-                )
+                return with_audit_receipt(denied, receipt)
             if verdict == PermissionVerdict.NEEDS_APPROVAL:
                 # G11.2-T4 (#817): write a durable ApprovalRequest row (+ its
                 # synchronous "request" audit row) and return an
@@ -3764,6 +3773,12 @@ async def dispatch(
                 # to execution. Any unexpected verdict (a future enum member, a
                 # bug in the resolver) denies rather than silently executing.
                 duration_ms = _elapsed_ms(started)
+                denied = result_denied(
+                    op_id,
+                    gate_reason or f"unexpected policy verdict {verdict!r}; denied",
+                    duration_ms,
+                    reason_code=POLICY_DENIED,
+                )
                 receipt = await audit_safe(
                     audit_id=uuid.uuid4(),
                     event_class=AuditEventClass.POLICY_DECISION,
@@ -3773,15 +3788,9 @@ async def dispatch(
                     params_hash=params_hash,
                     result_status="denied",
                     duration_ms=duration_ms,
+                    error_extras=_error_extras_for_audit(denied),
                 )
-                return with_audit_receipt(
-                    result_denied(
-                        op_id,
-                        gate_reason or f"unexpected policy verdict {verdict!r}; denied",
-                        duration_ms,
-                    ),
-                    receipt,
-                )
+                return with_audit_receipt(denied, receipt)
 
             # --- Opt-in announce gate (#3133) --------------------------
             # Verdict is AUTO_EXECUTE. In a tenant that has enabled the
@@ -3834,6 +3843,9 @@ async def dispatch(
             )
             if role_denial is not None:
                 duration_ms = _elapsed_ms(started)
+                denied = result_denied(
+                    op_id, role_denial, duration_ms, reason_code=ROLE_INSUFFICIENT
+                )
                 receipt = await audit_safe(
                     audit_id=uuid.uuid4(),
                     event_class=AuditEventClass.POLICY_DECISION,
@@ -3843,8 +3855,9 @@ async def dispatch(
                     params_hash=params_hash,
                     result_status="denied",
                     duration_ms=duration_ms,
+                    error_extras=_error_extras_for_audit(denied),
                 )
-                return with_audit_receipt(result_denied(op_id, role_denial, duration_ms), receipt)
+                return with_audit_receipt(denied, receipt)
 
         # --- Step 5: connector resolution ---------------------------------
         connector_instance: Connector | None

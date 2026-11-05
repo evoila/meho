@@ -78,6 +78,8 @@ part that starts with an underscore is private by its name too.
 | Register | `register_typed_op_registrar` | Queue the function that registers your operations when MEHO starts. |
 | Register | `register_typed_operation` | Register one operation: the shape of its inputs and its answer, its risk level, whether it waits for approval, and its texts for agents. |
 | Register | `register_connector_catalog` | Bring the catalog rows of your package: for a product and version, the vendor API file MEHO can load, the ingest profile, and the safety overlay for the operations made from that file. |
+| Register | `register_retired_operations` | List the operations a later version of your package removed, so MEHO deletes their stored rows at start. |
+| Register | `RetiredOp` | One entry of that list: product, version, implementation id and operation id. |
 | Register | `CALLER_ADDRESS_MARKER` | The schema keyword `x-meho-caller-address`. Put `CALLER_ADDRESS_MARKER: True` on each input that holds an address MEHO connects to. See "An input that holds an address" below. |
 | Register | `EmbeddingService` | The type of the `embedding_service` value that MEHO hands to your registering function. Pass it on unchanged. |
 | Connector | `Connector` | The base class of every connector. |
@@ -220,6 +222,26 @@ and call `kit.register_connector_catalog(__name__)` from the folder's
 own. A row for a product and version that MEHO already has stops the
 start. The details are in
 [connector-packages.md, "Bring catalog rows"](https://github.com/evoila/meho/blob/main/docs/codebase/connector-packages.md#bring-catalog-rows).
+
+**Remove an operation.** When a new version of your package drops an
+operation, MEHO still has its stored row from the older version. Agents
+would still find it, and every call would fail. So list it in the
+folder's `__init__.py`:
+
+```python
+kit.register_retired_operations(
+    __name__,
+    [kit.RetiredOp("example", "1.x", "example-widget", "example.widget.old_report")],
+)
+```
+
+At start, MEHO deletes each listed row that your package wrote, and logs
+`dead_handler_op_retired` once. It never deletes a row of MEHO itself or
+of another package. Keep each entry in later versions, because an
+install can skip a version. Never use a listed operation id again. A row
+whose code is gone and that no list names stays, and MEHO logs
+`dead_handler_op_kept` for it: during an upgrade, an older MEHO server
+can share the database with a newer one.
 
 ## 6. Say which MEHO releases fit
 

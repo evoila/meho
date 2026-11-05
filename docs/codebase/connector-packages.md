@@ -695,6 +695,39 @@ Limit: an op of a package whose handler lives outside the package's own
 folders (for example in a built-in shared module) is recorded as built
 in.
 
+### When a package version removes an op
+
+The rows above stay when the whole package is gone. When a new version of
+a package drops one op, its row from the older version stays too: no
+registrar writes it again, and its handler does not import. A package
+cannot add to the core's `RETIRED_OPS` list
+(`operations/dead_handler_sweep.py`). So it lists such ops itself, from
+the `__init__` of its connector folder:
+
+```python
+import meho_connector_kit as kit
+
+kit.register_retired_operations(
+    __name__,
+    [kit.RetiredOp("example", "1.x", "example-widget", "example.widget.old_report")],
+)
+```
+
+- At start, after every registrar ran, the sweep deletes each listed
+  built-in (`tenant_id IS NULL`) typed or composite row whose
+  `owner_package` is the listing package. It logs `dead_handler_op_retired`
+  once per row, with `owner_package`.
+- A listed entry that names a row of the core (`owner_package` `NULL`) or
+  of another package deletes nothing. A listing from a folder that is not
+  part of an installed package deletes nothing and logs
+  `package_retired_ops_ignored`.
+- A row that no list names is kept, as for the core
+  (`dead_handler_op_kept`).
+- The same promise as for `RETIRED_OPS`: a listed `op_id` is never used
+  again, and an entry stays in later versions of the package.
+
+`backend/tests/test_package_retired_ops.py` covers these cases.
+
 ## The connector kit
 
 A connector package imports MEHO only through one module:

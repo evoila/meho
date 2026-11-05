@@ -131,6 +131,9 @@
     "ProbeResult": {
       "kind": "class"
     },
+    "RetiredOp": {
+      "kind": "class"
+    },
     "Target": {
       "kind": "class",
       "parts": {
@@ -239,6 +242,14 @@
       "inputs": [
         "op_id: str",
         "builder: PreviewBuilder"
+      ],
+      "kind": "function",
+      "returns": "None"
+    },
+    "register_retired_operations": {
+      "inputs": [
+        "package: str",
+        "ops: Iterable[RetiredOp]"
       ],
       "kind": "function",
       "returns": "None"

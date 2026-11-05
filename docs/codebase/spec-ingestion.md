@@ -734,11 +734,14 @@ licence keys unmasked (SDDC Manager `GET /v1/license-keys`, the vCenter
 licence manager's `licenses` property, an NSX `/licenses` list). The
 ingest would give it the `safe` level of its HTTP method. A licence key
 is a paid secret, so MEHO never runs such a read. The rule is one word:
-a `GET` or `HEAD` whose path names licences (`license-keys`, `licenses`,
-`licensing`, `licence`) is a licence read
-(`operations/license_reads.py`). It is broad by design, like the flight
-recorder's family rule, and needs no list of vendor paths. Three places
-apply it:
+an ingested operation whose path names licences (`license-keys`,
+`licenses`, `licensing`, `licence`) is a licence read, whatever its HTTP
+method (`operations/license_reads.py`). The method does not count
+because a vendor file can read licences with `POST` (the vSphere API
+file's `QueryAssignedLicenses`, `QueryLicenseUsage`, `DecodeLicense`),
+and a licence change such as `AddLicense` answers with the licence key.
+It is broad by design, like the flight recorder's family rule, and needs
+no list of vendor paths. Three places apply it:
 
 - `enable-reads` (`bulk_enable_read_ops`) leaves such a row off and turns
   the other reads on.

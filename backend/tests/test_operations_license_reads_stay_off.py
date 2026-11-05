@@ -7,7 +7,7 @@ A vendor API file can describe a read whose answer carries licence keys
 unmasked. The ingest gives such a read the ``safe`` level of its HTTP
 method. MEHO keeps it off instead (``operations/license_reads.py``):
 
-* the rule: a ``GET`` or ``HEAD`` whose path names licences;
+* the rule: an ingested op whose path names licences, any HTTP method;
 * ``enable-reads`` leaves such a row off and turns the other reads on;
 * a call and a preview of such a read answer ``license_read_off`` before
   any vendor call, when the row is off and when it was turned on by hand,
@@ -247,24 +247,25 @@ def _descriptor(
         "GET:/api/v1/licenses",
         "GET:/pairings/{pairing_id}/srms/{srm_id}/licensing",
         "GET:/api/licence",
+        "POST:/v1/license-keys",
+        "DELETE:/v1/license-keys/{key}",
     ],
 )
-def test_rule_matches_a_read_whose_path_names_licences(op_id: str) -> None:
+def test_rule_matches_an_op_whose_path_names_licences(op_id: str) -> None:
     assert is_license_read_op_id(op_id) is True
 
 
 @pytest.mark.parametrize(
     "op_id",
     [
-        "POST:/v1/license-keys",
-        "DELETE:/v1/license-keys/{key}",
         _HOSTS,
+        "POST:/v1/hosts",
         "GET:/v1/credentials",
         "sddc.license.list",
         "vmware.license.list",
     ],
 )
-def test_rule_leaves_writes_other_reads_and_hand_written_ops_alone(op_id: str) -> None:
+def test_rule_leaves_other_paths_and_hand_written_ops_alone(op_id: str) -> None:
     assert is_license_read_op_id(op_id) is False
 
 

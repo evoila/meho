@@ -425,8 +425,10 @@ def result_license_read_off(op_id: str, duration_ms: float) -> OperationResult:
     operator turned the row on by hand (see
     :mod:`meho_backplane.operations.license_reads`). The message names the
     way to read licences: the connector's hand-written licence read, which
-    shows each key masked. Same envelope as ``target_required``: no audit
-    row, because nothing ran.
+    shows each key masked. Same envelope as ``target_required``. A refused
+    call writes one ``policy_decision`` audit row with the op id and this
+    code (#5791, :mod:`meho_backplane.operations._license_refusal`); a
+    refused preview writes none.
     """
     return OperationResult(
         status="error",

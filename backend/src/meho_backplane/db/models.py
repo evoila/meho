@@ -440,6 +440,11 @@ class AuditEventClass(StrEnum):
       it (#5717). The operation did not run on any of these rows.
     * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
       refresh-token replay or a broken satellite effect chain.
+    * :attr:`CONFIG_CHANGE` -- an operator changed the settings of one
+      operation with ``meho_connector_edit_op``: turned it on or off, or
+      changed its risk level, approval rule, description or guidance
+      (#5791). The operation did not run. The row's ``payload["op_id"]``
+      names the edited operation.
     * :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
       row written before migration ``0106`` reads as this class; it is never
       guessed from ``method`` / ``path``. The REST and MCP request wrapper
@@ -452,10 +457,11 @@ class AuditEventClass(StrEnum):
     POLICY_DECISION = "policy_decision"
     APPROVAL_DECISION = "approval_decision"
     SECURITY_EVENT = "security_event"
+    CONFIG_CHANGE = "config_change"
     LEGACY_REQUEST = "legacy_request"
 
 
-#: Closed tuple mirrored in migration ``0106``'s CHECK constraint.
+#: Closed tuple mirrored in the CHECK constraint of migrations ``0106`` and ``0137``.
 AUDIT_EVENT_CLASSES: tuple[str, ...] = tuple(c.value for c in AuditEventClass)
 
 

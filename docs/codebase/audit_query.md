@@ -17,13 +17,15 @@ inserts, updates, or deletes.
 ### Event class (#3733)
 
 Every row carries `event_class`, a closed set enforced by the database
-CHECK `ck_audit_log_event_class` (migration `0106`). Each writer sets the
+CHECK `ck_audit_log_event_class` (migration `0106`; `0137` added
+`config_change`). Each writer sets the
 class it knows. Nothing is guessed from `method` / `path`.
 
 | Class | Written by |
 |---|---|
 | `operation_execution` | Dispatch rows that ran (`ok` or `error`), the row of a multi-step operation that stopped part-way because a step waits for approval (`awaiting_approval`) or was denied (`denied`, #4275), runbook abort, gateway command mint / result, satellite effect rows, topology / ingest / add-on writes, sweepers and reapers. |
-| `policy_decision` | Dispatch rows a gate refused (`denied`, rate limit, unqualified target version), the `approval.request` park row, and the `denied` row of a step inside a multi-step operation. |
+| `policy_decision` | Dispatch rows a gate refused (`denied`, rate limit, unqualified target version), a call of an ingested licence read that MEHO keeps off (`denied`, `payload["error"]["error_code"] = license_read_off`, #5791), the `approval.request` park row, and the `denied` row of a step inside a multi-step operation. |
+| `config_change` | The `meho_connector_edit_op` row (`method = SERVICE`): an operator turned one operation on or off, or changed or removed its risk level, approval rule, description or guidance (#5791). `payload["op_id"]` names the edited operation, so a search by op id finds the edit. The operation did not run, so a filter on `operation_execution` does not return it. The other connector review rows (enable, disable, group edits) stay `operation_execution`. |
 
 A refused call's row says why (#5773). `payload["error"]` holds the
 `error_code` the caller got, a `reason_code`, and the `reason` text. The

@@ -13,6 +13,9 @@ method. MEHO keeps it off instead (``operations/license_reads.py``):
   any vendor call, when the row is off and when it was turned on by hand,
   so a made-up key the vendor would return reaches nothing: not the
   result, not the audit log; a row another tenant owns stays unknown;
+* a refused call leaves one ``policy_decision`` audit row that names the
+  op id and the code ``license_read_off`` (#5791); a refused preview and
+  an unknown op leave none;
 * the flight recorder never records the body of such a read, whatever
   the case of the letters in its path.
 """
@@ -36,7 +39,7 @@ from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor
+from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._errors import result_license_read_off
 from meho_backplane.operations._request_preview import preview_dispatch
@@ -371,6 +374,21 @@ async def _audit_rows_for(op_id: str) -> list[AuditLog]:
         )
 
 
+async def _assert_one_refusal_row(op_id: str, audit_id: UUID | None) -> None:
+    """The refused call left one ``policy_decision`` row naming the op and the code."""
+    (row,) = await _audit_rows_for(op_id)
+    assert row.id == audit_id
+    assert row.event_class == AuditEventClass.POLICY_DECISION
+    assert row.method == "DISPATCH"
+    assert row.operator_sub == "op-license-reads"
+    assert row.tenant_id == _TENANT
+    assert row.payload["op_id"] == op_id
+    assert row.payload["result_status"] == "denied"
+    assert row.payload["error"]["error_code"] == "license_read_off"
+    assert row.raw_payload is None
+    assert _MADE_UP_KEY not in json.dumps(row.payload)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("op_id", [_KEY_LIST, _KEY_ONE])
 async def test_call_refuses_a_licence_read_turned_on_by_hand(
@@ -392,7 +410,7 @@ async def test_call_refuses_a_licence_read_turned_on_by_hand(
     assert result.extras["error_code"] == "license_read_off"
     assert _KeyReturningConnector.calls == 0
     assert _MADE_UP_KEY not in json.dumps(result.model_dump(mode="json"))
-    assert await _audit_rows_for(op_id) == []
+    await _assert_one_refusal_row(op_id, result.audit_id)
 
 
 @pytest.mark.asyncio
@@ -412,6 +430,38 @@ async def test_call_refuses_the_licence_read_before_the_target_check(
     )
 
     assert result.extras["error_code"] == "license_read_off"
+    await _assert_one_refusal_row(_KEY_LIST, result.audit_id)
+
+
+@pytest.mark.asyncio
+async def test_call_is_still_refused_when_the_refusal_row_cannot_be_written(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed audit write never turns the refusal into a run; no row id is claimed."""
+    await _seed_ingested_licence_reads_after_enable_reads(
+        session, stub_embedding_service.encode_one.return_value
+    )
+
+    async def _fail(**_kwargs: Any) -> None:
+        raise RuntimeError("audit store down")
+
+    monkeypatch.setattr("meho_backplane.operations._audit.write_audit_row", _fail)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id=_KEY_LIST,
+        target=_FakeTarget(),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "license_read_off"
+    assert result.audit_id is None
+    assert _KeyReturningConnector.calls == 0
+    assert await _audit_rows_for(_KEY_LIST) == []
 
 
 @pytest.mark.asyncio
@@ -433,6 +483,7 @@ async def test_preview_refuses_a_licence_read_the_same_way(
     assert out["extras"]["error_code"] == "license_read_off"
     assert out["source_kind"] == "ingested"
     assert _KeyReturningConnector.calls == 0
+    assert await _audit_rows_for(_KEY_LIST) == []
 
 
 # ---------------------------------------------------------------------------
@@ -466,7 +517,7 @@ async def test_call_of_a_licence_read_that_is_off_answers_license_read_off(
     assert "hand-written" in result.error
     assert _KeyReturningConnector.calls == 0
     assert _MADE_UP_KEY not in json.dumps(result.model_dump(mode="json"))
-    assert await _audit_rows_for(op_id) == []
+    await _assert_one_refusal_row(op_id, result.audit_id)
 
 
 @pytest.mark.asyncio
@@ -489,6 +540,7 @@ async def test_preview_of_a_licence_read_that_is_off_answers_license_read_off(
     assert out["status"] == "error"
     assert out["extras"]["error_code"] == "license_read_off"
     assert _KeyReturningConnector.calls == 0
+    assert await _audit_rows_for(_KEY_LIST) == []
 
 
 @pytest.mark.asyncio
@@ -515,6 +567,7 @@ async def test_a_licence_read_of_another_tenant_stays_unknown(
     assert result.status == "error"
     assert result.extras["error_code"] == "unknown_op"
     assert _KeyReturningConnector.calls == 0
+    assert await _audit_rows_for(_KEY_LIST) == []
 
 
 @pytest.mark.asyncio
@@ -546,6 +599,7 @@ async def test_an_absent_licence_read_stays_unknown(
     )
 
     assert result.extras["error_code"] == "unknown_op"
+    assert await _audit_rows_for(_KEY_LIST) == []
 
 
 # ---------------------------------------------------------------------------

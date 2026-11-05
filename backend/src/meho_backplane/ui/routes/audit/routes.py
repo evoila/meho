@@ -167,6 +167,7 @@ _EVENT_CLASS_LABELS: Final[dict[str, str]] = {
     AuditEventClass.POLICY_DECISION.value: "Policy decision",
     AuditEventClass.APPROVAL_DECISION.value: "Approval decision",
     AuditEventClass.SECURITY_EVENT.value: "Security event",
+    AuditEventClass.CONFIG_CHANGE.value: "Config change",
     AuditEventClass.LEGACY_REQUEST.value: "Legacy row",
 }
 

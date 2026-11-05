@@ -69,8 +69,9 @@ Examples in current use:
 - `license_read_off` (`call_operation` and `preview_operation`: an
   ingested read whose path names licences; its answer would carry licence
   keys unmasked, so MEHO keeps it off. Refused before the target check and
-  any vendor call, no audit row, when the row is off and when it was
-  turned on by hand. Message: `license_read_off: MEHO keeps
+  any vendor call, when the row is off and when it was turned on by hand.
+  A refused call writes one `policy_decision` audit row with the op id and
+  the code; a refused preview writes none (#5791). Message: `license_read_off: MEHO keeps
   this ingested read off because its answer carries licence keys; use the
   connector's hand-written licence read, which shows each key masked` —
   see `docs/codebase/spec-ingestion.md`, "Ingested licence reads stay

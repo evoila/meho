@@ -169,9 +169,9 @@ them at once.
   sentence with its line, never a server error.
 - A YAML syntax error, or an unknown tag, gives only its line: PyYAML's own
   message can quote the input, and nothing has been checked for secrets yet.
-- A `!!binary` value is refused and never decoded: the bytes would pass the
-  secret check unseen and come out as text afterwards. Nothing else is
-  checked, as with a secret.
+- `!!binary`, `!!pairs`, `!!omap` and `!!set` values are refused and never
+  built: each would hide its contents from the secret check and reach JSON
+  as readable text. Nothing else is checked, as with a secret.
 - Stored data is checked too. When a tenant the file names already has a
   secret-shaped value stored (a target's `extras.password`, a JWT in
   `notes`, ...), the preview and the import stop with that path

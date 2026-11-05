@@ -537,19 +537,20 @@ def _plan_existing_target(
     fields: dict[str, Any] = {
         key: getattr(entry, key) for key in entry.model_fields_set if key != "name"
     }
-    if "secret_field_map" in fields:
-        # The file holds the whole map; the PATCH merges, so remove the stored
-        # entries the file leaves out (and clear the map when the file's is empty).
-        wanted = fields["secret_field_map"]
-        stored_map = row.secret_field_map or {}
-        fields["secret_field_map"] = (
-            {**{k: None for k in stored_map if k not in wanted}, **wanted} if wanted else None
-        )
+    if fields.get("secret_field_map") == {}:
+        fields["secret_field_map"] = None  # the PATCH's way to clear the map
     try:
         body = TargetUpdate(**fields)
     except ValidationError as exc:
         mistakes.extend(format_validation_errors(exc, loc_tuple))
         return None
+    if body.secret_field_map:
+        # The file holds the whole map, but the PATCH merges, so stored entries
+        # the file leaves out are sent as removals. They go in after validation:
+        # the field's entry limit would count them, while the limit that matters
+        # is on the final map, which merge_secret_field_map checks below.
+        stale = {k: None for k in row.secret_field_map or {} if k not in body.secret_field_map}
+        body.secret_field_map = {**stale, **body.secret_field_map}
     updates = body.model_dump(exclude_unset=True)
     try:
         _enforce_tls_trust_exclusion(

@@ -24,6 +24,7 @@ Drives the production ``meho_backplane.main:app`` so the real middleware chain
 
 from __future__ import annotations
 
+import base64
 import subprocess
 import uuid
 from collections.abc import Iterator
@@ -754,3 +755,79 @@ async def test_secret_field_map_round_trips_and_replaces(client: TestClient) -> 
     assert history[0]["diff"]["targets"]["changed"] == [change]
     (row,) = [t for t in await _rows(Target) if t.name == "mapped"]
     assert row.secret_field_map == {"password": "pass"}
+
+
+@pytest.mark.parametrize(
+    ("yaml_type", "value"),
+    [
+        ("binary", base64.b64encode(_JWT.encode()).decode()),
+        ("pairs", f"[[a, {_JWT}]]"),
+        ("omap", f"[a: {_JWT}]"),
+        ("set", f"{{{_JWT}: null}}"),
+    ],
+)
+def test_yaml_types_that_hide_values_are_refused(
+    client: TestClient, yaml_type: str, value: str
+) -> None:
+    content = (
+        "apiVersion: meho.evoila.com/v1\nkind: Settings\nspec:\n  tenants:\n"
+        f"    - id: {_TENANT}\n      targets:\n"
+        "        - {name: x, product: ssh, host: 10.0.0.5, "
+        f"extras: {{blob: !!{yaml_type} {value}}}}}\n"
+    )
+    key = make_rsa_keypair(f"kid-yaml-{yaml_type}")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        token = _token(key)
+        preview = _import(client, token, content, preview=True)
+        applied = _import(client, token, content)
+        history = client.get("/api/v1/settings/history", headers=_auth(token))
+
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["diff"] is None
+    (mistake,) = preview.json()["mistakes"]
+    assert mistake.startswith(f"Line 7: `!!{yaml_type}` values are not accepted")
+    assert applied.status_code == 422, applied.text
+    assert history.status_code == 200 and history.json() == []
+    for resp in (preview, applied, history):
+        assert _JWT.split(".")[1] not in resp.text
+        assert value not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_replacing_a_large_field_map_stays_within_the_limit(client: TestClient) -> None:
+    """30 removals plus 30 new entries is 60 in the PATCH, but only 30 in the final map."""
+    await _insert_target(
+        tenant_id=_TENANT,
+        name="mapped",
+        product="ssh",
+        secret_field_map={f"old{i}": "src" for i in range(30)},
+    )
+    wanted = {f"new{i}": "src" for i in range(30)}
+    content = _file_with_target(
+        name="mapped", product="ssh", host="10.0.0.1", secret_field_map=wanted
+    )
+    too_many = _file_with_target(
+        name="mapped",
+        product="ssh",
+        host="10.0.0.1",
+        secret_field_map={f"f{i}": "src" for i in range(51)},
+    )
+    key = make_rsa_keypair("kid-large-map")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        token = _token(key)
+        preview = _import(client, token, content, preview=True)
+        refused = _import(client, token, too_many)
+        applied = _import(client, token, content)
+
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["mistakes"] == []
+    (change,) = preview.json()["diff"]["targets"]["changed"]
+    assert change["after"] == {"secret_field_map": wanted}
+    assert refused.status_code == 422, refused.text
+    assert any("secret_field_map" in m for m in refused.json()["mistakes"])
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["ok"] is True, applied.text
+    (row,) = [t for t in await _rows(Target) if t.name == "mapped"]
+    assert row.secret_field_map == wanted

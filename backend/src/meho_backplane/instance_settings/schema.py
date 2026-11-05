@@ -295,7 +295,7 @@ class _DuplicateKeyLoader(yaml.SafeLoader):  # type: ignore[misc]  # yaml has no
         super().__init__(stream)
         self.duplicates: list[tuple[str, int]] = []
         self.unreadable: list[int] = []
-        self.binary: list[int] = []
+        self.refused: list[tuple[int, str]] = []
 
 
 def _construct_mapping_checked(loader: _DuplicateKeyLoader, node: yaml.MappingNode) -> Any:
@@ -323,14 +323,20 @@ def _construct_timestamp_checked(loader: _DuplicateKeyLoader, node: yaml.ScalarN
         return loader.construct_scalar(node)
 
 
-def _construct_binary_refused(loader: _DuplicateKeyLoader, node: yaml.ScalarNode) -> None:
-    # ``!!binary`` hides bytes from the secret check (a base64 JWT would decode
-    # to readable text after the check). The file has no binary setting, so
-    # record the line and never decode the value.
-    loader.binary.append(node.start_mark.line + 1)
+#: YAML types no setting uses, each of which would hide its contents from the
+#: secret check: ``binary`` holds encoded bytes (a base64 JWT comes out as text
+#: later), ``pairs`` and ``omap`` build tuples and ``set`` builds a set, which
+#: then reach JSON as plain lists.
+_REFUSED_YAML_TYPES: Final[tuple[str, ...]] = ("binary", "omap", "pairs", "set")
 
 
-_DuplicateKeyLoader.add_constructor("tag:yaml.org,2002:binary", _construct_binary_refused)
+def _construct_refused(loader: _DuplicateKeyLoader, node: yaml.Node) -> None:
+    # Record the line and build nothing, so the value is never decoded.
+    loader.refused.append((node.start_mark.line + 1, node.tag.rsplit(":", 1)[-1]))
+
+
+for _yaml_type in _REFUSED_YAML_TYPES:
+    _DuplicateKeyLoader.add_constructor(f"tag:yaml.org,2002:{_yaml_type}", _construct_refused)
 _DuplicateKeyLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
     _construct_mapping_checked,
@@ -467,7 +473,7 @@ def find_secret_shaped_values(data: Any, loc: tuple[int | str, ...] = ()) -> lis
                 )
                 continue
             sentences.extend(find_secret_shaped_values(value, child))
-    elif isinstance(data, list):
+    elif isinstance(data, list | tuple | set | frozenset):
         for index, item in enumerate(data):
             sentences.extend(find_secret_shaped_values(item, (*loc, index)))
     elif isinstance(data, str) and (kind := _secret_kind(data)):
@@ -532,7 +538,7 @@ def _repeated_item_mistakes(model: SettingsFile) -> list[str]:
 def parse_settings_file(content: bytes) -> ParsedSettings:
     """Parse and check *content*; collect every mistake as one sentence each.
 
-    Order: size and encoding, YAML syntax, repeated keys, binary values, ``apiVersion``,
+    Order: size and encoding, YAML syntax, repeated keys, refused YAML types, ``apiVersion``,
     secret-shaped values, the model, repeated items. All checks that can run
     do run, so a file with an unknown key, an unknown ``apiVersion`` and a
     target with no host yields three sentences. The one exception is a
@@ -577,12 +583,12 @@ def parse_settings_file(content: bytes) -> ParsedSettings:
         f"Line {line}: the value looks like a date but is not a real date."
         for line in loader.unreadable
     )
-    if loader.binary:
+    if loader.refused:
         # Stop like a secret does: the value was never decoded or checked.
         mistakes.extend(
-            f"Line {line}: binary values (`!!binary`) are not accepted; the settings "
-            f"file holds text only."
-            for line in loader.binary
+            f"Line {line}: `!!{yaml_type}` values are not accepted; the settings file "
+            f"holds only text, numbers, true/false, lists and mappings."
+            for line, yaml_type in dict.fromkeys(loader.refused)
         )
         return ParsedSettings(None, mistakes)
     if not isinstance(raw, dict):

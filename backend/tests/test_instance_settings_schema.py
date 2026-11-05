@@ -193,8 +193,34 @@ def test_binary_value_is_refused_without_decoding() -> None:
     )
     assert parsed.model is None
     assert parsed.mistakes == [
-        "Line 10: binary values (`!!binary`) are not accepted; the settings file holds text only."
+        "Line 10: `!!binary` values are not accepted; the settings file holds only text, "
+        "numbers, true/false, lists and mappings."
     ]
+
+
+@pytest.mark.parametrize(
+    ("yaml_type", "value"),
+    [
+        ("pairs", f"[[a, {_JWT}]]"),
+        ("omap", f"[a: {_JWT}]"),
+        ("set", f"{{{_JWT}: null}}"),
+    ],
+)
+def test_container_types_that_hide_values_are_refused(yaml_type: str, value: str) -> None:
+    parsed = parse_settings_file(
+        "apiVersion: meho.evoila.com/v1\nkind: Settings\nspec:\n  tenants:\n"
+        "    - targets:\n        - name: a\n          product: ssh\n          host: h\n"
+        f"          extras: {{blob: !!{yaml_type} {value}}}\n".encode()
+    )
+    assert parsed.model is None
+    (mistake,) = parsed.mistakes
+    assert mistake.startswith(f"Line 9: `!!{yaml_type}` values are not accepted")
+    assert "eyJ" not in mistake
+
+
+@pytest.mark.parametrize("wrapper", [tuple, set, frozenset])
+def test_the_walk_looks_inside_every_collection(wrapper: type) -> None:
+    assert find_secret_shaped_values({"blob": wrapper([_JWT])})
 
 
 @pytest.mark.parametrize(

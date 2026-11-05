@@ -86,8 +86,9 @@ import structlog
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict
 
+from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.jwt import verify_jwt_allow_unchosen
-from meho_backplane.auth.operator import Operator, TenantRole, group_grant
+from meho_backplane.auth.operator import Operator, TenantMembership, TenantRole, group_grant
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.checks.watchdog import sensor_runner_liveness
 from meho_backplane.connector_packages import ConnectorPackage, installed_connector_packages
@@ -105,6 +106,7 @@ from meho_backplane.mcp.registry import (
     get_tool,
     has_addon_gated_tools,
     registered_tool_names,
+    role_at_least,
     surface_visible,
 )
 from meho_backplane.mcp.schemas import PROTOCOL_VERSION
@@ -187,6 +189,11 @@ class OperatorIdentity(BaseModel):
     login with several tenants that chose none gets ``tenant_id`` and
     ``tenant_role`` as ``None``: the status answer then only lists the
     tenants.
+
+    Inside an agent run that a person started (an agent is bound as the
+    actor), no role in ``tenants`` is higher than ``tenant_role``, the
+    role of the run that every check uses (#5773). The person's own
+    login groups may give a higher role, but the agent never gets it.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -200,8 +207,20 @@ class OperatorIdentity(BaseModel):
 
 
 def _operator_identity(operator: Operator) -> OperatorIdentity:
-    """Build the identity block, with the person's tenants (#5239)."""
+    """Build the identity block, with the person's tenants (#5239).
+
+    In an agent run (an actor is bound), each tenant's role is capped at
+    the run's own role (#5773).
+    """
     chosen = operator.tenant_chosen
+    in_agent_run = resolve_actor_sub() is not None
+
+    def _entry_role(entry: TenantMembership) -> TenantRole:
+        role = group_grant(entry.group).role
+        if in_agent_run and not role_at_least(operator.tenant_role, role):
+            return operator.tenant_role
+        return role
+
     return OperatorIdentity(
         sub=operator.sub,
         name=operator.name,
@@ -212,7 +231,7 @@ def _operator_identity(operator: Operator) -> OperatorIdentity:
             TenantEntry(
                 tenant_id=entry.tenant_id,
                 name=entry.name,
-                tenant_role=group_grant(entry.group).role,
+                tenant_role=_entry_role(entry),
                 current=chosen and entry.tenant_id == operator.tenant_id,
             )
             for entry in operator.tenants

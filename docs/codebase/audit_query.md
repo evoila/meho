@@ -24,6 +24,19 @@ class it knows. Nothing is guessed from `method` / `path`.
 |---|---|
 | `operation_execution` | Dispatch rows that ran (`ok` or `error`), the row of a multi-step operation that stopped part-way because a step waits for approval (`awaiting_approval`) or was denied (`denied`, #4275), runbook abort, gateway command mint / result, satellite effect rows, topology / ingest / add-on writes, sweepers and reapers. |
 | `policy_decision` | Dispatch rows a gate refused (`denied`, rate limit, unqualified target version), the `approval.request` park row, and the `denied` row of a step inside a multi-step operation. |
+
+A refused call's row says why (#5773). `payload["error"]` holds the
+`error_code` the caller got, a `reason_code`, and the `reason` text. The
+`reason_code` names the rule that refused the call
+(`operations/deny_reasons.py`): `agent_grant_denied` (the agent's grants),
+`role_insufficient` (the role is below what the operation or tool needs),
+`read_scope_denied` (a service login's read scope), `connector_not_allowed`
+(the agent may not use the connector), `agent_reveal_refused` (an agent
+asked for hidden values) or `policy_denied` (any other refusal). In an
+agent run that a person started, `agent_grant_denied` means the agent's
+own grant refused the call, and `role_insufficient` means the role did.
+The text names operations, grant patterns, roles and logins only, never a
+secret or the call's arguments.
 | `approval_decision` | `approval.decision` rows (approve, reject, expire), the `approval.withdraw` row (the sender took its request back, #5717), and the standing-grant auto-approval row. |
 | `security_event` | Refresh-token replay, broken satellite effect chain, un-reported gateway mint alarm. |
 | `legacy_request` | Every row written before `0106` (server default; old rows are not reclassified), the REST and MCP request wrapper rows, and the `approval.result` read row. |
@@ -236,6 +249,8 @@ Field-to-source mapping:
 | `policy_decision` | `audit_log.policy_decision` — the synchronous policy-gate verdict stamped on the row (#130, migration `0051`). One of the closed `PermissionVerdict` set — `"auto-execute"` / `"needs-approval"` / `"deny"` — or `None` where no gate ran (pre-#130 rows, pre-gate usage errors like unknown-op / invalid-params / connector-resolution failures, and system-internal writers). Populated by both audit writers off the dispatch-scoped `policy_decision_var` contextvar: the parked "request" row carries `"needs-approval"`; the approval "decision" row carries `None` (an operator's approve/reject is not a gate verdict — it is recorded via `result_status`). A consumer reads the verdict directly (`WHERE policy_decision = '<verdict>'`) instead of reconstructing it from `method`+`path`+`payload`. **Verdict catalog:** the persisted set is exactly the three-value `PermissionVerdict` enum. `time_window_violation` / `quota_exceeded` are **not** implemented (no such policy classes exist in code); any external catalog listing them overstates the surface. |
 | `event_class` | `audit_log.event_class` — what kind of accountable event the row records (#3733, migration `0106`). See [Event class](#event-class-3733). |
 | `sandbox_mode` | `audit_log.sandbox_mode` — `true` when the instance ran in sandbox mode when it wrote the row (#4622, see [decisions/sandbox-mode.md](../decisions/sandbox-mode.md)). Rows from before the column existed read `false`. Every audit answer carries it (#5312), so a person can check the mark of a sandbox test with MEHO alone. Not a filter: one database has one mode. The CLI table shows no column for it; `--json` shows it. |
+| `actor_sub` | `audit_log.actor_sub` (#5773) — the agent that acted for the person in `principal_sub`, in an agent run the person started (`agent:<name>`). `None` when nobody acted for another login, for example a person's own call or an agent that runs on its own login. |
+| `actor_name` | The agent's name, read from `actor_sub` (the part after `agent:`). `None` when `actor_sub` is `None` or has another form. The CLI shows the actor in `audit show`, in the PRINCIPAL column of `audit query` (`<principal> via <actor>`) and at the end of each `audit replay` line. |
 | `broadcast_event_id` | **None in v0.2** — FK direction is reversed: `BroadcastEvent.audit_id` points at the audit row. |
 
 The three computed fields use the same rules the audit writers apply when

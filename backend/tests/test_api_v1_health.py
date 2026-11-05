@@ -410,7 +410,8 @@ def test_happy_path_returns_full_federation_response(
     }
 
     # #5771: the default agent model has a price, so its spend is counted.
-    assert body.pop("agent_model_spend") == {
+    agent_model_spend = body.pop("agent_model_spend")
+    assert agent_model_spend == {
         "model": "anthropic:claude-sonnet-5-5",
         "spend_counted": True,
     }

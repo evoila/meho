@@ -17,8 +17,8 @@ The finder reports only these parts, so the host, the path and the
 other parameters (such as the expiry time) stay readable. A secret in
 the path of a link cannot be found by name and is not reported.
 
-Every scan is linear: one regex pass finds the URLs, and each URL is
-split once.
+Every scan is linear: one regex pass finds the URLs, and each link in a
+URL match is read once, by its start and end in the text.
 """
 
 from __future__ import annotations
@@ -46,6 +46,10 @@ _QUOTED_LINK_START: Final = re.compile(r"'[A-Za-z][A-Za-z0-9+.\-]{0,31}://")
 _PLACEHOLDER: Final = re.compile(r"\[REDACTED:[^\]\s'\"]+\]")
 
 _AUTHORITY_END: Final = re.compile(r"[/?#]")
+
+#: A byte that marks a URL part. Text after the closing quote of a link
+#: has none of them.
+_URL_PART_MARK: Final = re.compile(r"[@/?&=#]")
 _CAMEL_BOUNDARY: Final = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _NAME_SPLIT: Final = re.compile(r"[^A-Za-z0-9]+")
 
@@ -101,30 +105,39 @@ def _links(text: str, match: re.Match[str]) -> list[tuple[str, int]]:
     A match holds more than one link when links in single quotes follow
     each other without white space (``['https://a','https://b']``). The
     match is split at each apostrophe that opens the next link, and each
-    link in single quotes is cut at its closing quote: the last
-    apostrophe of its part, so an apostrophe inside the link
-    (``/it's/file``) stays part of it. A link that is not in quotes
-    keeps every apostrophe.
+    link in single quotes is cut at its closing quote (see
+    :func:`_close_quote`). A link that is not in quotes keeps every
+    apostrophe. The match is walked by position, so each byte is read
+    once.
     """
-    url = match.group(0)
-    offset = match.start()
-    quoted = offset > 0 and text[offset - 1] == "'"
+    start = match.start()
+    end = match.end()
+    quoted = start > 0 and text[start - 1] == "'"
     links: list[tuple[str, int]] = []
     while True:
-        opening = _QUOTED_LINK_START.search(url)
+        opening = _QUOTED_LINK_START.search(text, start, end)
+        stop = end if opening is None else opening.start()
+        links.append((_close_quote(text[start:stop], quoted), start))
         if opening is None:
-            links.append((_close_quote(url, quoted), offset))
             return links
-        links.append((_close_quote(url[: opening.start()], quoted), offset))
-        url = url[opening.start() + 1 :]
-        offset += opening.start() + 1
+        start = opening.start() + 1
         quoted = True
 
 
 def _close_quote(url: str, quoted: bool) -> str:
-    if not quoted or "'" not in url:
+    """Cut a link in single quotes at its closing quote.
+
+    The closing quote is the last apostrophe, but only when no URL part
+    follows it (no ``@ / ? & = #``). Otherwise the apostrophe is inside
+    the link (``/it's/file``, ``?q=it's&sig=...``) and the whole part
+    stays one link.
+    """
+    if not quoted:
         return url
-    return url[: url.rfind("'")]
+    quote = url.rfind("'")
+    if quote == -1 or _URL_PART_MARK.search(url, quote + 1) is not None:
+        return url
+    return url[:quote]
 
 
 def _url_spans(url: str, offset: int) -> list[tuple[int, int]]:

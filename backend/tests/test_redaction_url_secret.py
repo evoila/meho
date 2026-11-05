@@ -11,6 +11,7 @@ query parameters, and keep the rest of the link readable.
 
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Final
@@ -200,6 +201,72 @@ def test_flight_recorder_body_hides_each_of_two_adjacent_quoted_links() -> None:
     _assert_hidden(text, (_PASSWORD, _AZURE_SIG), _ADJACENT_READABLE)
 
 
+#: Links that open with a single quote and have no closing quote. The
+#: apostrophes inside them do not end the link.
+_UNCLOSED_QUOTED_LINKS: Final[list[tuple[str, tuple[str, ...], tuple[str, ...]]]] = [
+    (
+        f"'https://files.example.com/x?q=it's&sig={_AZURE_SIG}",
+        (_AZURE_SIG,),
+        ("files.example.com/x?q=it's",),
+    ),
+    (
+        f"'https://deploy:{_QUOTE_PASSWORD}@files.example.com"  # trufflehog:ignore
+        f"/x?sig={_AZURE_SIG}",
+        (_QUOTE_PASSWORD, _AZURE_SIG),
+        ("@files.example.com/x",),
+    ),
+    (
+        f"['https://files.example.com/a','https://files.example.com/it's/b?x=o'k&sig={_AZURE_SIG}",
+        (_AZURE_SIG,),
+        ("'https://files.example.com/a'", "files.example.com/it's/b?x=o'k"),
+    ),
+]
+
+_UNCLOSED_QUOTED_IDS: Final = ["apostrophe-in-query", "apostrophe-in-password", "last-of-a-list"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "secrets", "readable"), _UNCLOSED_QUOTED_LINKS, ids=_UNCLOSED_QUOTED_IDS
+)
+async def test_approval_request_hides_a_quoted_link_without_closing_quote(
+    text: str, secrets: tuple[str, ...], readable: tuple[str, ...]
+) -> None:
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="files.download"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),  # type: ignore[arg-type]
+        connector_id="files-1.x",
+        params={"urls": text},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    _assert_hidden(effect["params_echo"]["urls"], secrets, readable)
+
+
+@pytest.mark.parametrize(
+    ("text", "secrets", "readable"), _UNCLOSED_QUOTED_LINKS, ids=_UNCLOSED_QUOTED_IDS
+)
+def test_flight_recorder_body_hides_a_quoted_link_without_closing_quote(
+    text: str, secrets: tuple[str, ...], readable: tuple[str, ...]
+) -> None:
+    body, fired = scrub_content({"source": {"urls": text}})
+    assert fired
+    _assert_hidden(body["source"]["urls"], secrets, readable)
+
+
+def test_url_secret_reads_many_adjacent_quoted_links_fast() -> None:
+    """Each link is read once, so a long run of quoted links is quick."""
+    count = 200_000
+    text = "'https://h.example.com/f?sig=abc'" * count
+    started = time.perf_counter()
+    spans = secret_spans(NAMED_PATTERNS["url_secret"], text)
+    elapsed = time.perf_counter() - started
+    assert len(spans) == count
+    assert elapsed < 2.0, f"scan took {elapsed:.2f}s"
+
+
 def test_token_link_keeps_its_api_key_label() -> None:
     body, _ = scrub_content(f"https://files.example.com/download?token={_TOKEN}")
     assert body == "https://files.example.com/download?[REDACTED:api_key]"
@@ -254,6 +321,20 @@ def test_token_link_keeps_its_api_key_label() -> None:
         (
             "'https://h.example.com/f?sig=abc'.",
             "'https://h.example.com/f?sig=[REDACTED:url_secret]'.",
+        ),
+        # A link in single quotes without a closing quote keeps its apostrophes.
+        (
+            "'https://h.example.com/f?q=it's&sig=abc",
+            "'https://h.example.com/f?q=it's&sig=[REDACTED:url_secret]",
+        ),
+        (
+            "'https://user:pa'ss@h.example.com/f?sig=abc",  # trufflehog:ignore
+            "'https://[REDACTED:url_secret]@h.example.com"  # trufflehog:ignore
+            "/f?sig=[REDACTED:url_secret]",
+        ),
+        (
+            "['https://h.example.com/a','https://h.example.com/b?q=it's&sig=abc",
+            "['https://h.example.com/a','https://h.example.com/b?q=it's&sig=[REDACTED:url_secret]",
         ),
         # A link in double quotes keeps its apostrophes.
         (

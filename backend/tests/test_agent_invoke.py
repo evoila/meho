@@ -50,7 +50,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
-from pydantic_ai.usage import RunUsage
+from pydantic_ai.usage import RequestUsage, RunUsage
 
 from meho_backplane.agent import (
     AGENT_INVOKE_DEPTH_TOP_LEVEL,
@@ -542,3 +542,73 @@ class _FakeCtx:
     def __init__(self, *, deps: Operator, usage: RunUsage) -> None:
         self.deps = deps
         self.usage = usage
+
+
+async def test_result_lists_the_usage_of_each_request_including_the_child_run() -> None:
+    """A run's per-request usage holds the parent's requests and the child's.
+
+    The child's messages are not in the parent's message history, while its
+    tokens are in the shared total. So the result lists the child's requests
+    too, and the per-request list adds up to the run's totals.
+    """
+    child_def = AgentDefinition(
+        name="deep-agent",
+        system_prompt="You answer hard sub-questions.",
+        request_limit=5,
+        toolset={"meta_tools": []},
+    )
+
+    async def resolver(operator: Operator, agent_name: str) -> AgentDefinition | None:
+        return child_def if agent_name == "deep-agent" else None
+
+    child_input, parent_first_input, parent_final_input = 100_001, 1_000, 2_000
+
+    def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        is_child = any(
+            part.part_kind == "system-prompt" and "hard sub-questions" in part.content
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        )
+        if is_child:
+            return ModelResponse(
+                parts=[TextPart("child answer")],
+                usage=RequestUsage(input_tokens=child_input, output_tokens=10),
+            )
+        has_tool_return = any(
+            part.part_kind == "tool-return"
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        )
+        if not has_tool_return:
+            return ModelResponse(
+                parts=[ToolCallPart("invoke_agent", {"agent_name": "deep-agent", "inputs": "x"})],
+                usage=RequestUsage(input_tokens=parent_first_input, output_tokens=20),
+            )
+        return ModelResponse(
+            parts=[TextPart("parent done")],
+            usage=RequestUsage(input_tokens=parent_final_input, output_tokens=30),
+        )
+
+    runtime = PydanticAgentRun(
+        model_factory=lambda: FunctionModel(model_fn),
+        child_agent_resolver=resolver,
+    )
+    parent_def = AgentDefinition(
+        name="cheap-agent",
+        system_prompt="You delegate hard sub-tasks.",
+        request_limit=5,
+        toolset={"meta_tools": []},
+    )
+
+    handle = runtime.start(parent_def, _make_operator(), "delegate this")
+    result = await runtime.result(handle)
+
+    assert result.output == "parent done"
+    assert sorted(u.input_tokens for u in result.request_usages) == sorted(
+        [child_input, parent_first_input, parent_final_input]
+    )
+    assert sum(u.input_tokens for u in result.request_usages) == result.input_tokens
+    assert sum(u.output_tokens for u in result.request_usages) == result.output_tokens
+    assert len(result.request_usages) == result.request_count

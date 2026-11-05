@@ -34,7 +34,7 @@ from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RequestUsage
 from sqlalchemy import select
@@ -339,3 +339,90 @@ async def test_failed_run_skips_consumption_application(
         ).scalar_one()
     assert rows == []
     assert row.cost is None
+
+
+def _long_then_short_request(
+    *, long_prompt_tokens: int, short_prompt_tokens: int, output_tokens: int
+) -> FunctionModel:
+    """A model whose first request has a long prompt and whose second, final one is short.
+
+    The first answer calls a meta-tool with a connector id that does not
+    exist; the tool's error goes back to the model, which then answers.
+    So the run has two model requests with known, different usage.
+    """
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        answered_before = any(isinstance(m, ModelResponse) for m in messages)
+        if not answered_before:
+            return ModelResponse(
+                parts=[ToolCallPart("list_operation_groups", {"connector_id": "guess-1.x"})],
+                usage=RequestUsage(input_tokens=long_prompt_tokens, output_tokens=output_tokens),
+            )
+        return ModelResponse(
+            parts=[TextPart("done")],
+            usage=RequestUsage(input_tokens=short_prompt_tokens, output_tokens=output_tokens),
+        )
+
+    return FunctionModel(fn)
+
+
+async def test_haiku_run_prices_each_request_on_its_own_rate(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Haiku 5.5 run charges the long-prompt price only to the request over 100,000 tokens."""
+    haiku = "anthropic:claude-haiku-5-5"
+    monkeypatch.setenv("AGENT_DEFAULT_MODEL", haiku)
+    get_settings.cache_clear()
+    await _seed_tenant_and_definition(name="consumption-haiku")
+    long_prompt, short_prompt, output = 100_010, 2_000, 300
+    invoker = _invoker_with(
+        _long_then_short_request(
+            long_prompt_tokens=long_prompt,
+            short_prompt_tokens=short_prompt,
+            output_tokens=output,
+        )
+    )
+
+    op = _make_operator(sub="agent-consumption-haiku")
+    outcome = await invoker.run(op, "consumption-haiku", "go")
+    assert outcome.status is AgentRunStatus.SUCCEEDED
+
+    pricing = MODEL_PRICING[haiku]
+    long_rate = pricing.long_prompt
+    assert long_rate is not None
+    expected_cost = (
+        long_rate.input * Decimal(long_prompt)
+        + long_rate.output * Decimal(output)
+        + pricing.input * Decimal(short_prompt)
+        + pricing.output * Decimal(output)
+    ) / Decimal(1_000_000)
+    # The same tokens priced as one request would all get the long-prompt rate.
+    as_one_request = (
+        long_rate.input * Decimal(long_prompt + short_prompt)
+        + long_rate.output * Decimal(2 * output)
+    ) / Decimal(1_000_000)
+    assert expected_cost < as_one_request
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(select(AgentRunRow).where(AgentRunRow.id == outcome.run_id))
+        ).scalar_one()
+        rows = (
+            (
+                await session.execute(
+                    select(IdentityBudget)
+                    .where(IdentityBudget.principal_sub == op.sub)
+                    .where(IdentityBudget.tenant_id == _TENANT)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert row.turns == 2
+    assert row.cost == expected_cost
+    assert len(rows) == 3
+    for r in rows:
+        assert r.cost_consumed == expected_cost
+        assert r.tokens_consumed == Decimal(long_prompt + short_prompt + 2 * output)
+        assert r.requests_consumed == 1

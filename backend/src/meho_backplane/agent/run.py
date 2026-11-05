@@ -90,7 +90,8 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -100,6 +101,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import Agent, RunContext, Tool, UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
+from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.usage import RunUsage
 
 from meho_backplane.agent.approval_wait import resume_or_surface_awaiting_approval
@@ -128,6 +130,7 @@ from meho_backplane.agent.toolset import (
     resolve_agent_toolset,
 )
 from meho_backplane.auth.operator import Operator
+from meho_backplane.operations.identity_budget import TokenUsage
 from meho_backplane.operations.meta_tools import call_operation, list_operation_groups
 from meho_backplane.settings import get_settings
 
@@ -643,6 +646,11 @@ class AgentRunResult:
     test model that does not stamp usage (e.g. a function model that
     short-circuits the loop) still produces a valid result.
 
+    ``request_usages`` holds the same four streams per model request
+    (the parent's requests and those of every child run it invoked),
+    so the cost can apply a per-request price such as Haiku 5.5's
+    long-prompt rate.
+
     ``context_receipt`` (#3763) says what hosted context MEHO supplied to
     a configured run (see
     :class:`~meho_backplane.agent.hosted_context.HostedContextReceipt`).
@@ -658,6 +666,24 @@ class AgentRunResult:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     context_receipt: HostedContextReceipt | None = None
+    request_usages: tuple[TokenUsage, ...] = ()
+
+
+#: The per-request usage list of the run on the current task. A child run
+#: (``invoke_agent``) appends its requests here, since its messages are not
+#: in the parent's message history while its tokens are in the shared total.
+_run_request_usages_var: ContextVar[list[TokenUsage] | None] = ContextVar(
+    "agent_run_request_usages", default=None
+)
+
+
+def _request_usages(messages: Iterable[ModelMessage]) -> list[TokenUsage]:
+    """Lift the token usage of each model response in *messages*."""
+    return [
+        TokenUsage.from_request_usage(message.usage)
+        for message in messages
+        if isinstance(message, ModelResponse)
+    ]
 
 
 def _capability_omissions(resolution: ToolsetResolution) -> tuple[ContextOmission, ...]:
@@ -1209,6 +1235,8 @@ class PydanticAgentRun:
         type is uniform regardless of which framework exception fired.
         """
         limits = UsageLimits(request_limit=definition.request_limit)
+        request_usages: list[TokenUsage] = []
+        token = _run_request_usages_var.set(request_usages)
         try:
             run_result = await agent.run(inputs, deps=operator, usage_limits=limits)
         except UsageLimitExceeded as exc:
@@ -1220,6 +1248,9 @@ class PydanticAgentRun:
                 operator_sub=operator.sub,
             )
             raise AgentRunError(f"turn budget exhausted: {exc}") from exc
+        finally:
+            _run_request_usages_var.reset(token)
+        request_usages.extend(_request_usages(run_result.new_messages()))
         usage = run_result.usage
         result = AgentRunResult(
             output=run_result.output,
@@ -1230,6 +1261,7 @@ class PydanticAgentRun:
             cache_read_tokens=usage.cache_read_tokens,
             cache_write_tokens=usage.cache_write_tokens,
             context_receipt=receipts[0] if receipts else None,
+            request_usages=tuple(request_usages),
         )
         _log.info(
             "agent_run_succeeded",
@@ -1294,6 +1326,9 @@ class PydanticAgentRun:
                 operator_sub=operator.sub,
             )
             raise AgentRunError(f"turn budget exhausted: {exc}") from exc
+        parent_request_usages = _run_request_usages_var.get()
+        if parent_request_usages is not None:
+            parent_request_usages.extend(_request_usages(run_result.new_messages()))
         return run_result.output
 
     def start(

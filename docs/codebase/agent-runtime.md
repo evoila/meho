@@ -55,7 +55,10 @@ All public types are re-exported from `meho_backplane.agent`
   accounting. On a successful run `request_count` is persisted as the run
   row's `turns` at finalize (#2743) — the streamed path tallies the same
   count off its `TURN` events — so `run_status` reports the model-request
-  turn total instead of a constant 0.
+  turn total instead of a constant 0. `request_usages` carries the token
+  usage of each model request (the run's own and those of its child
+  runs), so the cost can use a per-request price (see
+  `docs/codebase/identity-budget.md`).
 - **`AgentRunStatus`** — closed enum: `RUNNING` / `SUCCEEDED` / `FAILED`.
 - **`AgentRunError`** — domain exception raised when a run cannot start or
   its result is unavailable (turn budget exhausted, a tool raised, the

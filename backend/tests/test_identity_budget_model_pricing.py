@@ -8,6 +8,8 @@ per login does not count runs on it. These tests check that:
 
 * each current model has a price row, and a run on the default model
   costs more than 0;
+* Haiku 5.5 charges its higher price to a request whose prompt is over
+  100,000 tokens, and a run is priced one request at a time;
 * the default model is ``anthropic:claude-sonnet-5-5``;
 * MEHO warns at start when the default model has no price row, and still
   starts;
@@ -31,12 +33,15 @@ from meho_backplane.operations.identity_budget import (
     PerMillionPricing,
     TokenUsage,
     compute_cost,
+    compute_run_cost,
 )
 from meho_backplane.operations.unpriced_model import is_model_priced, warn_if_model_unpriced
 from meho_backplane.settings import Settings, get_settings
 
 _UNPRICED_EVENT = "agent_default_model_unpriced"
 _UNKNOWN_MODEL = "anthropic:claude-not-a-real-model"
+_HAIKU = "anthropic:claude-haiku-5-5"
+_PER_MILLION = Decimal(1_000_000)
 
 
 @pytest.fixture(autouse=True)
@@ -64,10 +69,80 @@ _CURRENT_MODEL_PRICES = {
 @pytest.mark.parametrize(("model_id", "prices"), sorted(_CURRENT_MODEL_PRICES.items()))
 def test_each_current_model_has_its_price_row(model_id: str, prices: tuple[str, ...]) -> None:
     """Each current model has a row with the published prices."""
-    input_, output, cache_read, cache_write = (Decimal(p) for p in prices)
-    assert MODEL_PRICING[model_id] == PerMillionPricing(
-        input=input_, output=output, cache_read=cache_read, cache_write=cache_write
+    pricing = MODEL_PRICING[model_id]
+    assert (pricing.input, pricing.output, pricing.cache_read, pricing.cache_write) == tuple(
+        Decimal(p) for p in prices
     )
+
+
+def test_haiku_5_5_has_a_price_for_a_long_prompt() -> None:
+    """Haiku 5.5 charges 5x more to a request whose prompt is over 100,000 tokens."""
+    pricing = MODEL_PRICING[_HAIKU]
+    assert pricing.long_prompt_over == 100_000
+    assert pricing.long_prompt == PerMillionPricing(
+        input=Decimal("0.50"),
+        output=Decimal("2.50"),
+        cache_read=Decimal("0.05"),
+        cache_write=Decimal("0.625"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("prompt_tokens", "long"),
+    [(99_999, False), (100_000, False), (100_001, True), (1_000_000, True)],
+)
+def test_haiku_5_5_request_over_100_000_prompt_tokens_costs_the_higher_price(
+    prompt_tokens: int, long: bool
+) -> None:
+    """The threshold is per request: up to 100,000 prompt tokens is the lower price."""
+    pricing = MODEL_PRICING[_HAIKU]
+    rate = pricing.long_prompt if long else pricing
+    assert rate is not None
+    usage = TokenUsage(input_tokens=prompt_tokens, output_tokens=1_000)
+    expected = (rate.input * prompt_tokens + rate.output * 1_000) / _PER_MILLION
+    assert compute_cost(usage, _HAIKU) == expected
+
+
+def test_cached_prompt_tokens_count_towards_the_long_prompt_threshold() -> None:
+    """The prompt length is every input stream: uncached, cache read and cache write."""
+    usage = TokenUsage(
+        input_tokens=40_000, output_tokens=0, cache_read_tokens=50_000, cache_write_tokens=10_001
+    )
+    assert usage.prompt_tokens == 100_001
+    rate = MODEL_PRICING[_HAIKU].long_prompt
+    assert rate is not None
+    expected = (
+        rate.input * 40_000 + rate.cache_read * 50_000 + rate.cache_write * 10_001
+    ) / _PER_MILLION
+    assert compute_cost(usage, _HAIKU) == expected
+
+
+def test_run_cost_prices_each_request_on_its_own_rate() -> None:
+    """A run adds up its requests, each at the rate its own prompt length picks."""
+    short = TokenUsage(input_tokens=60_000, output_tokens=500)
+    long = TokenUsage(input_tokens=100_001, output_tokens=500)
+    assert compute_run_cost([short, long], _HAIKU) == compute_cost(short, _HAIKU) + compute_cost(
+        long, _HAIKU
+    )
+    # Two short prompts add up to more than the threshold, but each
+    # request stays at the lower price.
+    assert compute_run_cost([short, short], _HAIKU) == 2 * compute_cost(short, _HAIKU)
+    as_one_request = TokenUsage(input_tokens=120_000, output_tokens=1_000)
+    assert compute_run_cost([short, short], _HAIKU) < compute_cost(as_one_request, _HAIKU)
+
+
+def test_run_without_requests_costs_nothing() -> None:
+    assert compute_run_cost([], _HAIKU) == Decimal(0)
+
+
+def test_a_model_with_one_price_charges_it_at_any_prompt_length() -> None:
+    """Sonnet 5.5 has no long-prompt price, so a long request costs the same rate."""
+    model = "anthropic:claude-sonnet-5-5"
+    pricing = MODEL_PRICING[model]
+    assert pricing.long_prompt is None
+    usage = TokenUsage(input_tokens=200_000, output_tokens=1)
+    expected = (pricing.input * 200_000 + pricing.output * 1) / _PER_MILLION
+    assert compute_cost(usage, model) == expected
 
 
 @pytest.mark.parametrize("model_id", sorted(_CURRENT_MODEL_PRICES))

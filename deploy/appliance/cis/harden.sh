@@ -17,22 +17,25 @@
 #      appliance_remediate
 #   4. the settings of the design, after the fixes so they win: /dev/shm and
 #      /tmp with nodev, nosuid and noexec; the AppArmor profiles Ubuntu ships
-#      unconfined turned off; IPv6 off; SSH with keys only and no root;
-#      the folders AIDE skips; nftables.service loads the MEHO firewall
-#      too, without its flush
+#      unconfined turned off; IPv6 off; SSH with keys only, no root and
+#      only for admin; root's PATH without /snap/bin; /etc/cron.allow in
+#      the group crontab; the folders AIDE skips; nftables.service loads
+#      the MEHO firewall too, without its flush
 #   5. the MEHO firewall blocks by default: policy drop on the chains input,
 #      forward and output. Last, because the fixes of step 3 install
 #      packages from the internet
 #   6. the scan (profile appliance). Its result list goes to the results
 #      file, one line per rule: "<result> <rule>". A failing rule that is in
-#      neither not-applicable.md nor exceptions.md gets a [WARN] line
+#      neither not-applicable.md nor exceptions.md gets a [WARN] line, and
+#      the build stops
 #
 # Usage:
 #   harden.sh --content <ssg-ubuntu2404-ds.xml> --results <file>
 #
 # Exit codes:
-#   0  hardened and scanned; failing rules are in the results file
-#   1  a step failed; the [FAIL] line says what to fix
+#   0  hardened and scanned; every failing rule is in exceptions.md
+#   1  a step failed, or a rule fails that is in neither list; the [FAIL]
+#      line says what to fix
 #   2  wrong usage
 #
 # The tests in ../tests/ run this script against a fake machine. See
@@ -67,8 +70,18 @@ readonly AIDE_SKIP=/etc/aide/aide.conf.d/90_meho_appliance
 readonly AIDE_SKIPPED=(/var/lib/rancher /var/lib/kubelet /var/lib/meho/volumes /var/log /run)
 # sshd keeps the first value it reads, and Ubuntu includes sshd_config.d/*.conf
 # first, in name order: after the fixes' 00- and 01-complianceascode-*.conf
-# (neither sets these three), before cloud-init's 50-cloud-init.conf.
+# (neither sets these four), before cloud-init's 50-cloud-init.conf.
 readonly SSHD_DROPIN=/etc/ssh/sshd_config.d/05-meho-appliance.conf
+# The one account that logs in; first start makes it.
+readonly ADMIN_USER=admin
+# CIS 5.4.2.5 checks the scanner's own PATH: through sudo it is secure_path,
+# in a login shell the one in /etc/environment. Both name /snap/bin, which
+# the appliance has not. sudo uses the last secure_path it reads, and it
+# reads sudoers.d after /etc/sudoers.
+readonly ENVIRONMENT=/etc/environment
+readonly SUDOERS_DROPIN=/etc/sudoers.d/meho-appliance
+readonly ROOT_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+readonly CRON_ALLOW=/etc/cron.allow
 readonly NFTABLES_CONF=/etc/nftables.conf
 readonly NFTABLES_DROPIN=/etc/systemd/system/nftables.service.d/meho-no-flush.conf
 readonly REMEDIATE_LOG=/run/meho-cis-remediate.log
@@ -270,15 +283,48 @@ turn_ipv6_off() {
 }
 
 # ADR 0009 decision 4: SSH takes keys only, and never root. CIS Level 1
-# alone does not turn password login off. The running sshd keeps its
-# settings until the appliance boots, so the build's own login is not cut.
+# alone does not turn password login off. CIS 5.1.4 wants a list of who may
+# log in. The running sshd keeps its settings until the appliance boots, so
+# the build's own login is not cut; after a restart of sshd the build user
+# could no longer log in.
 ssh_keys_only() {
-    printf '%s\n' '# MEHO appliance (harden.sh): SSH takes keys only, and never root.' \
-        'PasswordAuthentication no' 'KbdInteractiveAuthentication no' 'PermitRootLogin no' |
+    printf '%s\n' "# MEHO appliance (harden.sh): SSH takes keys only, never root, and only $ADMIN_USER." \
+        'PasswordAuthentication no' 'KbdInteractiveAuthentication no' 'PermitRootLogin no' \
+        "AllowUsers $ADMIN_USER" |
         write_root_file "$SSHD_DROPIN" 0600
     sshd -t ||
         fail "sshd does not accept its settings with $SSHD_DROPIN." "read sshd's message above."
-    ok "SSH takes keys only and refuses root (from the next start of sshd)"
+    ok "SSH takes keys only, refuses root and lets only $ADMIN_USER in (from the next start of sshd)"
+}
+
+drop_snap_from_root_path() {
+    local new dropin="${HOST_ROOT}${SUDOERS_DROPIN}" temporary
+    new=$(sed 's#:/snap/bin\([:"]\)#\1#g' "${HOST_ROOT}${ENVIRONMENT}")
+    printf '%s\n' "$new" | write_root_file "$ENVIRONMENT" 0644
+    # sudo skips names with a dot in sudoers.d, so it never reads the
+    # temporary file. A file visudo refuses would stop every later sudo.
+    temporary=$(mktemp "${dropin}.XXXXXX")
+    printf '%s\n' '# MEHO appliance (harden.sh): no /snap/bin, the appliance has no snaps.' \
+        "Defaults secure_path=\"$ROOT_PATH\"" >"$temporary"
+    chmod 0440 "$temporary"
+    if ! visudo -cqf "$temporary"; then
+        rm -f "$temporary"
+        fail "visudo does not accept the secure_path line, so $SUDOERS_DROPIN was not written." \
+            "read visudo's message above, then adapt drop_snap_from_root_path in harden.sh."
+    fi
+    mv -f "$temporary" "$dropin"
+    # The scan of step 6 runs in this process, which has the PATH sudo gave
+    # it before the change.
+    # shellcheck disable=SC2001 # a ${PATH//...} would also cut /snap/binx
+    PATH=$(sed 's#:/snap/bin\(:\|$\)#\1#g' <<<"$PATH")
+    ok "root's PATH has no /snap/bin in $ENVIRONMENT, in sudo's secure_path and for the scan (CIS 5.4.2.5)"
+}
+
+# After the fixes of step 3 the file is in the group root; CIS 2.4.1.8
+# wants crontab.
+set_cron_allow_group() {
+    chgrp crontab "${HOST_ROOT}${CRON_ALLOW}"
+    ok "$CRON_ALLOW is in the group crontab (CIS 2.4.1.8)"
 }
 
 set_aide_skipped_folders() {
@@ -378,11 +424,12 @@ scan() {
     done < <(grep -v '^#' "$RESULTS")
     while read -r rule; do
         if [[ -n $rule ]] && grep -qx -- "pass $rule" "$RESULTS"; then
-            note "$rule passes, so it can leave exceptions.md"
+            note "$rule passes on the build. If it passes on an appliance too, it can leave exceptions.md"
         fi
     done <<<"$expected"
     if ((unexpected > 0)); then
-        warn "$unexpected rules fail and are in neither list. Add each to exceptions.md with its reason, or fix it."
+        fail "$unexpected rules of the scan fail and are in neither not-applicable.md nor exceptions.md (the [WARN] lines above)." \
+            "fix each rule in harden.sh, or add it to exceptions.md with one sentence on why, then run the build again from step 3."
     fi
 }
 
@@ -401,6 +448,8 @@ main() {
     disable_unconfined_apparmor_profiles
     turn_ipv6_off
     ssh_keys_only
+    drop_snap_from_root_path
+    set_cron_allow_group
     set_aide_skipped_folders
     enable_nftables_service
     step "Hardening 5: the firewall blocks by default"

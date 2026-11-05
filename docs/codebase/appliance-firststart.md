@@ -115,7 +115,9 @@ cloud image's kernel line ends with `console=ttyS0`.
      The cloud image has systemd-timesyncd, not chrony.
    - The `admin` account (groups `sudo`; it joins the empty group `admin`
      that the cloud image already has, because `useradd` refuses to make a
-     second one, exit code 9, #5739), the wizard password through
+     second one, exit code 9, #5739). `useradd` copies `.bashrc`,
+     `.profile` and `.bash_logout` from `/etc/skel` with 0644; they get
+     0640 (CIS 7.2.10 wants 0740 or less). Then the wizard password through
      `chpasswd` on stdin, `passwd --expire` so the first login must change
      it, and the SSH key in `~admin/.ssh/authorized_keys` (0600). Without a
      key the file is removed, in case an earlier try wrote one.
@@ -169,7 +171,10 @@ cloud image's kernel line ends with `console=ttyS0`.
    build hardened the appliance but left the database out, because it
    must hold each appliance's own files. AIDE's daily check
    (`dailyaidecheck.timer`) compares the files with it. Which folders AIDE
-   skips is in [appliance-cis.md](appliance-cis.md).
+   skips is in [appliance-cis.md](appliance-cis.md). Then the log files
+   under `/var/log/aide` (from `aideinit`) and `/var/log/apt` (from the
+   build) get at most 0640 (CIS 6.1.4.1). This is the last step, so it also
+   catches a log an earlier step wrote.
 
 Each step writes `/var/lib/meho/firststart/<n>-<name>.done`, and
 `/var/lib/meho/firststart.done` follows the last one. A failed step writes

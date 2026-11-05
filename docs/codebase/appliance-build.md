@@ -82,7 +82,10 @@ the tests set it, as `install.sh` does.
    packages from the Ubuntu archive, runs the CIS fixes, sets the design's
    settings, sets the firewall to block by default, and scans. The scan's
    result list comes back as `meho-appliance-<version>-cis.txt` in the
-   out-dir.
+   out-dir. It comes back also when `harden.sh` stops after its scan, for
+   example on a failing rule that is in neither list; then the build
+   stops. Before the run, `build.sh` deletes the list of an earlier run on
+   the build VM.
 4. **Clean for copying.** `clean.sh` goes to `/run/meho-clean.sh` (a RAM
    disk, so it is not in the OVA) and starts with
    `systemd-run --unit=meho-clean --collect -p TTYPath=/dev/tty1 -p StandardOutput=tty /bin/bash /run/meho-clean.sh`

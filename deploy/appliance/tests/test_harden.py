@@ -46,6 +46,13 @@ UBUNTU_TMP_MOUNT = textwrap.dedent("""\
     WantedBy=local-fs.target
     """)
 
+# Ubuntu 24.04's /etc/environment.
+ENVIRONMENT = (
+    'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:'
+    '/usr/games:/usr/local/games:/snap/bin"\n'
+)
+SUDOERS_DROPIN = "/etc/sudoers.d/meho-appliance"
+
 FSTAB = textwrap.dedent("""\
     # /etc/fstab of the cloud image
     LABEL=cloudimg-rootfs / ext4 discard,commit=30,errors=remount-ro 0 1
@@ -77,6 +84,7 @@ STUBS = {
         case "$*" in
           *--remediate*) exit "$(cat "$MEHO_FAKE/remediate_rc")" ;;
         esac
+        printf '%s\\n' "$PATH" >"$MEHO_FAKE/scan_path"
         cat "$MEHO_FAKE/scan"
         exit "$(cat "$MEHO_FAKE/scan_rc")"
         """),
@@ -84,6 +92,8 @@ STUBS = {
     "mount": "",
     "sysctl": "",
     "sshd": 'exit "$(cat "$MEHO_FAKE/sshd_rc")"\n',
+    "visudo": 'exit "$(cat "$MEHO_FAKE/visudo_rc")"\n',
+    "chgrp": "",
     "apparmor_parser": "exit 1\n",
     "nft": textwrap.dedent("""\
         case "$*" in
@@ -149,6 +159,9 @@ class FakeBuildVM:
         self.firewall = render_firewall_file()
         self.host_file(FIREWALL, self.firewall)
         self.host_file("/etc/fstab", FSTAB)
+        self.host_file("/etc/environment", ENVIRONMENT)
+        self.host_file("/etc/cron.allow", "")
+        self.host_path("/etc/sudoers.d").mkdir()
         self.host_file("/usr/share/systemd/tmp.mount", UBUNTU_TMP_MOUNT)
         self.host_file(
             "/etc/apparmor.d/1password",
@@ -161,6 +174,7 @@ class FakeBuildVM:
         self.answer("scan_rc", "2")
         self.answer("nft_check_rc", "0")
         self.answer("sshd_rc", "0")
+        self.answer("visudo_rc", "0")
         self.answer("scan", scan_output({"package_aide_installed": "pass"}))
         self.answer("calls.log", "")
 
@@ -189,7 +203,8 @@ class FakeBuildVM:
 
     def run(self) -> subprocess.CompletedProcess[str]:
         env = {
-            "PATH": f"{self.stubs}:{self.tools}",
+            # sudo's secure_path on Ubuntu ends in /snap/bin too.
+            "PATH": f"{self.stubs}:{self.tools}:/snap/bin",
             "MEHO_TEST_ROOT": str(self.root),
             "MEHO_FAKE": str(self.fake),
             "LC_ALL": "C",
@@ -340,11 +355,44 @@ class HardenTests(unittest.TestCase):
             "PasswordAuthentication no",
             "KbdInteractiveAuthentication no",
             "PermitRootLogin no",
+            "AllowUsers admin",
         ):
             with self.subTest(setting=setting):
                 self.assertIn(setting, lines)
         self.assertEqual(0o600, self.vm.host_path(dropin).stat().st_mode & 0o777)
         self.assertIn("sshd -t", self.vm.calls())
+
+    def test_roots_path_has_no_snap_bin(self) -> None:
+        self.assert_succeeds(self.vm.run())
+
+        self.assertEqual(
+            'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:'
+            '/usr/games:/usr/local/games"\n',
+            self.vm.read("/etc/environment"),
+        )
+        self.assertIn(
+            'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n',
+            self.vm.read(SUDOERS_DROPIN),
+        )
+        self.assertEqual(0o440, self.vm.host_path(SUDOERS_DROPIN).stat().st_mode & 0o777)
+        [visudo] = self.vm.calls("visudo")
+        self.assertTrue(visudo.startswith(f"visudo -cqf {self.vm.host_path(SUDOERS_DROPIN)}."))
+        # The scan runs in the process sudo started, so its PATH changes too.
+        self.assertEqual(f"{self.vm.stubs}:{self.vm.tools}\n", (self.vm.fake / "scan_path").read_text())
+
+    def test_a_sudo_file_visudo_refuses_never_goes_in(self) -> None:
+        self.vm.answer("visudo_rc", "1")
+
+        self.assert_fails(self.vm.run(), "visudo does not accept the secure_path line")
+
+        self.assertEqual([], list(self.vm.host_path("/etc/sudoers.d").iterdir()))
+
+    def test_cron_allow_is_in_the_group_crontab(self) -> None:
+        self.assert_succeeds(self.vm.run())
+
+        self.assertEqual(
+            [f"chgrp crontab {self.vm.host_path('/etc/cron.allow')}"], self.vm.calls("chgrp")
+        )
 
     def test_settings_sshd_refuses_stop_the_hardening(self) -> None:
         self.vm.answer("sshd_rc", "1")
@@ -437,7 +485,7 @@ class HardenTests(unittest.TestCase):
 
         result = self.vm.run()
 
-        self.assert_succeeds(result)
+        self.assert_fails(result, "2 rules of the scan fail and are in neither")
         lines = [
             line for line in self.vm.results.read_text().splitlines() if not line.startswith("#")
         ]
@@ -454,16 +502,37 @@ class HardenTests(unittest.TestCase):
         )
         out = result.stdout
         self.assertIn("[note] grub2_password: fail, an exception in exceptions.md", out)
-        self.assertIn("[note] aide_build_database passes, so it can leave exceptions.md", out)
+        self.assertIn(
+            "[note] aide_build_database passes on the build. If it passes on an appliance "
+            "too, it can leave exceptions.md",
+            out,
+        )
         self.assertIn(
             "[WARN] sshd_set_max_auth_tries: fail, and it is in neither "
             "not-applicable.md nor exceptions.md",
             out,
         )
         self.assertIn("[WARN] file_permissions_grub2_cfg: error,", out)
-        self.assertIn("[WARN] 2 rules fail and are in neither list.", out)
         warnings = [line for line in out.splitlines() if line.startswith("[WARN]")]
-        self.assertEqual(3, len(warnings), warnings)
+        self.assertEqual(2, len(warnings), warnings)
+
+    def test_failing_exceptions_alone_do_not_stop_the_build(self) -> None:
+        self.vm.answer(
+            "scan",
+            scan_output(
+                {
+                    "package_aide_installed": "pass",
+                    "grub2_password": "fail",
+                    "grub2_uefi_password": "fail",
+                    "aide_build_database": "fail",
+                }
+            ),
+        )
+
+        result = self.vm.run()
+
+        self.assert_succeeds(result)
+        self.assertNotIn("[WARN]", result.stdout)
 
     def test_a_scan_oscap_cannot_run_stops(self) -> None:
         self.vm.answer("scan_rc", "1")
@@ -479,6 +548,8 @@ class HardenTests(unittest.TestCase):
                 FIREWALL,
                 "/etc/systemd/system/tmp.mount",
                 "/etc/nftables.conf",
+                "/etc/environment",
+                SUDOERS_DROPIN,
             )
         }
 

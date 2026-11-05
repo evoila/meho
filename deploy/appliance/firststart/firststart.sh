@@ -126,6 +126,17 @@ write_root_file() {
     mv -f "$temporary" "$target"
 }
 
+# at_most_0640 <file>...: take every right beyond rw-r----- away from those
+# that are plain files. Links stay as they are, so chmod never follows one.
+at_most_0640() {
+    local file
+    for file in "$@"; do
+        if [[ -f $file && ! -L $file ]]; then
+            chmod u-x,g-wx,o-rwx "$file"
+        fi
+    done
+}
+
 # split_list <text>: the comma-separated items of the text, one per line,
 # without spaces.
 split_list() {
@@ -431,6 +442,9 @@ set_up_admin() {
         getent group "$ADMIN_USER" >/dev/null && group=(--gid "$ADMIN_USER")
         useradd --create-home --shell /bin/bash --groups sudo "${group[@]}" "$ADMIN_USER"
     fi
+    # useradd copies .bashrc, .profile and .bash_logout from /etc/skel with
+    # 0644; CIS 7.2.10 wants 0740 or less.
+    at_most_0640 "$home"/.[!.]*
     # printf is a shell builtin, so the password is in no process's arguments.
     printf '%s:%s\n' "$ADMIN_USER" "$(field admin.password)" | chpasswd
     passwd --expire "$ADMIN_USER" >/dev/null
@@ -536,6 +550,10 @@ SCRIPT
 # out: it must hold this appliance's files, after the core is installed.
 build_aide_database() {
     aideinit --yes --force
+    # CIS 6.1.4.1 wants log files at 0640 or less. aideinit writes its logs
+    # with 0644, and the build left apt's logs with 0644. This is the last
+    # step, so it also catches a log an earlier step wrote.
+    at_most_0640 "${HOST_ROOT}"/var/log/aide/* "${HOST_ROOT}"/var/log/apt/*
     ok "AIDE has the database of this appliance's files; its daily check compares them with it"
 }
 

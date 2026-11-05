@@ -262,16 +262,17 @@ def test_token_link_keeps_its_api_key_label() -> None:
         ),
         # Links in single quotes that follow each other are each read on their own.
         (
-            "['https://h.example.com/a','https://user:abc@h.example.com/b']",
+            "['https://h.example.com/a','https://user:abc@h.example.com/b']",  # trufflehog:ignore
             "['https://h.example.com/a','https://[REDACTED:url_secret]@h.example.com/b']",
         ),
         (
-            "('https://user:it's@h.example.com/a?x=o'k&sig=abc','https://h.example.com/b?sig=def')",
+            "('https://user:it's@h.example.com/a?x=o'k&sig=abc',"  # trufflehog:ignore
+            "'https://h.example.com/b?sig=def')",
             "('https://[REDACTED:url_secret]@h.example.com/a?x=o'k&sig=[REDACTED:url_secret]',"
             "'https://h.example.com/b?sig=[REDACTED:url_secret]')",
         ),
         (
-            "https://h.example.com/a,'https://user:abc@h.example.com/b'",
+            "https://h.example.com/a,'https://user:abc@h.example.com/b'",  # trufflehog:ignore
             "https://h.example.com/a,'https://[REDACTED:url_secret]@h.example.com/b'",
         ),
     ],

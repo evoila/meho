@@ -42,8 +42,8 @@ _URL: Final = re.compile(r"(?<![A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]{0,31}://[
 #: (``'https://a','https://b'`` is one match of :data:`_URL`).
 _QUOTED_LINK_START: Final = re.compile(r"'[A-Za-z][A-Za-z0-9+.\-]{0,31}://")
 
-#: A value that already is a complete ``[REDACTED:<name>]`` placeholder.
-_PLACEHOLDER: Final = re.compile(r"\[REDACTED:[^\]\s'\"]+\]")
+_PLACEHOLDER_START: Final = "[REDACTED:"
+_PLACEHOLDER_NAME_STOP: Final = frozenset("]'\"") | frozenset(" \t\n\r\f\v")
 
 _AUTHORITY_END: Final = re.compile(r"[/?#]")
 
@@ -83,8 +83,16 @@ def is_secret_query_name(name: str) -> bool:
     return words[-1] in _SECRET_LAST_WORDS or words[-2:] == ["api", "key"]
 
 
+def _is_placeholder(value: str) -> bool:
+    """True when *value* is one complete ``[REDACTED:<name>]`` placeholder."""
+    if not value.startswith(_PLACEHOLDER_START) or not value.endswith("]"):
+        return False
+    name = value[len(_PLACEHOLDER_START) : -1]
+    return bool(name) and _PLACEHOLDER_NAME_STOP.isdisjoint(name)
+
+
 def _is_secret_value(value: str) -> bool:
-    return bool(value) and _PLACEHOLDER.fullmatch(value) is None
+    return bool(value) and not _is_placeholder(value)
 
 
 class UrlSecretFinder:

@@ -30,9 +30,12 @@ from urllib.parse import unquote_plus
 __all__ = ["URL_SECRET", "UrlSecretFinder", "is_secret_query_name"]
 
 #: A URL: a short scheme, ``://``, and every byte up to white space, a
-#: quote or an angle bracket. The scheme length is capped, so a long run
-#: of letters and dots without ``://`` is not scanned again and again.
-_URL: Final = re.compile(r"(?<![A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]{0,31}://[^\s'\"<>]+")
+#: double quote or an angle bracket. An apostrophe is a valid URL byte
+#: (RFC 3986 sub-delims), so it stays in the URL; a link written in
+#: single quotes is cut at its closing quote by :func:`_quoted_url`.
+#: The scheme length is capped, so a long run of letters and dots
+#: without ``://`` is not scanned again and again.
+_URL: Final = re.compile(r"(?<![A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]{0,31}://[^\s\"<>]+")
 
 #: A value that already is a complete ``[REDACTED:<name>]`` placeholder.
 _PLACEHOLDER: Final = re.compile(r"\[REDACTED:[^\]\s'\"]+\]")
@@ -82,8 +85,21 @@ class UrlSecretFinder:
         """Return ``(start, end)`` of every secret part, left to right."""
         spans: list[tuple[int, int]] = []
         for match in _URL.finditer(text):
-            spans.extend(_url_spans(match.group(0), match.start()))
+            spans.extend(_url_spans(_quoted_url(text, match), match.start()))
         return spans
+
+
+def _quoted_url(text: str, match: re.Match[str]) -> str:
+    """Return the URL of *match*, cut at its closing quote when it is in single quotes.
+
+    The last apostrophe of the match is the closing quote, so an
+    apostrophe inside the link (``/it's/file``) stays part of it. A link
+    that is not in quotes keeps every apostrophe.
+    """
+    url = match.group(0)
+    if match.start() == 0 or text[match.start() - 1] != "'":
+        return url
+    return url[: url.rfind("'")] if "'" in url else url
 
 
 def _url_spans(url: str, offset: int) -> list[tuple[int, int]]:

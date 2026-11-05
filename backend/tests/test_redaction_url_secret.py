@@ -33,6 +33,7 @@ _GOOGLE_CREDENTIAL: Final = "made-up-account%40project.iam"
 _PASSWORD: Final = "made-up-password-7"
 _TOKEN: Final = "made-up-token-value-12345"
 _SECURITY_TOKEN: Final = "made-up-security-token-6789"
+_QUOTE_PASSWORD: Final = "made-up-pass'word-8"
 _CLUSTER_LINK: Final = f"https://admin:{_PASSWORD}@cluster.example.com"  # trufflehog:ignore
 
 #: (link, secret values in it, readable parts that must stay)
@@ -77,9 +78,24 @@ _LINKS: Final[list[tuple[str, tuple[str, ...], tuple[str, ...]]]] = [
         (_SECURITY_TOKEN, _S3_SIGNATURE),
         ("files.example.com/download",),
     ),
+    # An apostrophe is a valid URL byte: in the path, in a query value and in a password.
+    (
+        f"https://deploy:{_QUOTE_PASSWORD}@files.example.com"  # trufflehog:ignore
+        f"/it's/installer.iso?note=o'clock&sig={_AZURE_SIG}",
+        (_QUOTE_PASSWORD, _AZURE_SIG),
+        ("@files.example.com/it's/installer.iso", "note=o'clock"),
+    ),
 ]
 
-_LINK_IDS: Final = ["s3", "azure-sas", "google", "user-password", "token", "security-token"]
+_LINK_IDS: Final = [
+    "s3",
+    "azure-sas",
+    "google",
+    "user-password",
+    "token",
+    "security-token",
+    "apostrophes",
+]
 
 
 def _operator() -> Operator:
@@ -176,6 +192,33 @@ def test_token_link_keeps_its_api_key_label() -> None:
         (
             "https://h.example.com?owner=a@b.example.com&sig=abc",
             "https://h.example.com?owner=a@b.example.com&sig=[REDACTED:url_secret]",
+        ),
+        # An apostrophe in the path or in a value does not end the link.
+        (
+            "get https://h.example.com/it's/f?note=o'clock&sig=abc now",
+            "get https://h.example.com/it's/f?note=o'clock&sig=[REDACTED:url_secret] now",
+        ),
+        (
+            "https://user:it's@h.example.com/f",
+            "https://[REDACTED:url_secret]@h.example.com/f",
+        ),
+        # A link in single quotes ends at its closing quote.
+        (
+            "<a href='https://h.example.com/f?sig=abc'>",
+            "<a href='https://h.example.com/f?sig=[REDACTED:url_secret]'>",
+        ),
+        (
+            "{'url': 'https://h.example.com/it's/f?sig=abc', 'name': 'f'}",
+            "{'url': 'https://h.example.com/it's/f?sig=[REDACTED:url_secret]', 'name': 'f'}",
+        ),
+        (
+            "'https://h.example.com/f?sig=abc'.",
+            "'https://h.example.com/f?sig=[REDACTED:url_secret]'.",
+        ),
+        # A link in double quotes keeps its apostrophes.
+        (
+            '"https://h.example.com/it\'s/f?sig=abc"',
+            '"https://h.example.com/it\'s/f?sig=[REDACTED:url_secret]"',
         ),
     ],
 )

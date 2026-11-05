@@ -45,8 +45,9 @@ Unlike the target-coupled :class:`~meho_backplane.connectors.adapters.http.HttpC
 a **fresh** ``httpx.AsyncClient(follow_redirects=False)`` per call and
 walks redirects manually so it can re-gate each hop — httpx's own
 redirect follower would dial the next host before the allowlist could
-see it. ``safety_level="safe"`` + ``requires_approval=False`` make the
-probe agent-auto-runnable; the probe allowlist is the sole floor.
+see it. ``url`` carries the caller-address marker, so the probe runs at
+risk level ``caution`` and waits for a person's approval
+(:mod:`meho_backplane.operations.caller_address`).
 """
 
 from __future__ import annotations
@@ -68,6 +69,7 @@ from meho_backplane.connectors.net.allowlist import (
     ProbeNotAllowedError,
     assert_probe_allowed,
 )
+from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
 from meho_backplane.operations.typed_register import register_typed_operation
 
 if TYPE_CHECKING:
@@ -104,6 +106,7 @@ NET_HTTP_PROBE_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "url": {
             "type": "string",
+            CALLER_ADDRESS_MARKER: True,
             "minLength": 1,
             "description": (
                 "Absolute http:// or https:// URL to probe. The host "
@@ -889,8 +892,8 @@ async def register_net_http_probe_operations(
     ``__init__`` (via ``register_typed_op_registrar``) and run by
     :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
     after the connector eager-import pass. Idempotent: a re-run against
-    unchanged text is a no-op for the embedding pipeline. ``safe`` +
-    ``requires_approval=False`` — the probe allowlist is the only floor.
+    unchanged text is a no-op for the embedding pipeline. ``caution`` +
+    ``requires_approval=True``: ``url`` carries the caller-address marker.
     """
     await register_typed_operation(
         product="net",
@@ -931,8 +934,8 @@ async def register_net_http_probe_operations(
         parameter_schema=NET_HTTP_PROBE_PARAMETER_SCHEMA,
         response_schema=_NET_HTTP_PROBE_RESPONSE_SCHEMA,
         tags=["net", "probe", "read", "diagnostics", "http"],
-        safety_level="safe",
-        requires_approval=False,
+        safety_level="caution",
+        requires_approval=True,
         llm_instructions=_NET_HTTP_PROBE_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )

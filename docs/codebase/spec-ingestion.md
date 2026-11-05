@@ -541,8 +541,8 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `tags` | `tags` | Spec tags + optional `spec:<source>` marker |
 | `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc`; `additionalProperties: false` (#293) |
 | `response_schema` | `response_schema` | Success-response schema or `None` |
-| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay`, then the op class floor (a `credential_read` is at least `caution`) |
-| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE`, destructive-action hints, a connector-owned minimum safety floor, a catalog `safety_overlay` rule, or a `credential_read` op class |
+| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay`, then the op class floor (a `credential_read` is at least `caution`), then the caller-address floor (an op with a parameter marked `x-meho-caller-address: true` is at least `caution`) |
+| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE`, destructive-action hints, a connector-owned minimum safety floor, a catalog `safety_overlay` rule, a `credential_read` op class, or a parameter marked `x-meho-caller-address: true` |
 | `llm_instructions` | `llm_instructions` | `None` from the parser; set only by a connector-owned spec correction |
 
 Every `DELETE` lands `dangerous` with `requires_approval=True` (#3827). A
@@ -656,7 +656,7 @@ rows" below).
 
 #### Op class floor for credential reads
 
-The op class is the third and last floor. An ingested operation that a
+The op class is the third floor. An ingested operation that a
 connector declares as `credential_read` (`declare_op_classes` in its
 `op_classes.py`, read through `classify_op`) is at least `caution` and
 waits for a person's approval. `apply_safety_floor` applies it after the
@@ -668,6 +668,64 @@ without a list, no longer leaves a credential read at `safe`. A declared
 credential read counts as governed in `has_safety_floor`, so a re-ingest
 never lowers a stricter stored row. Tests:
 `tests/test_credential_read_safety_floor.py`.
+
+#### Caller-address floor
+
+The caller-address floor is the fourth and last floor. It covers an
+operation that connects to an address the caller gives: a URL, a host
+name, or a host and port. The connection can come from MEHO or from the
+target for MEHO.
+
+- **The marker.** Such a parameter carries the schema keyword
+  `x-meho-caller-address: true`, next to `x-meho-param-loc`. The keyword
+  counts at any depth of the parameter schema, also inside nested
+  objects and lists. The name and the floor live in
+  `meho_backplane/operations/caller_address.py`; the connector kit
+  exports the name as `CALLER_ADDRESS_MARKER`.
+- **What it does.** A marked operation is at least `caution` and waits
+  for a person's approval. The floor only raises: a connector may set a
+  higher level, never a lower one.
+- **Where it runs.**
+  - Ingest: `apply_safety_floor` applies it after the op class floor. An
+    ingested operation gets the marker from the connector's spec
+    correction (`register_ingest_spec_correction`). A marked operation
+    counts as governed in `has_safety_floor`, so a new ingest never
+    lowers a stricter stored row.
+  - Typed and multi-step registration: `register_typed_operation` and
+    `register_composite_operation` apply it before they store the row.
+  - Dispatch: `effective_policy_map` in `op_policy.py` applies it last,
+    after the operator overrides. So an override that turns approval off
+    does not remove it, and a row stored before the floor is raised when
+    it is looked up. Dispatch, preview, search and the satellite runner
+    all read this value.
+  - Operator edits: `apply_policy_edit` refuses an edit that turns
+    approval off for a marked operation (`approval_off_caller_address`).
+    The override report (`list_overrides`) applies the floor too, so it
+    never lists approval as off for a marked operation, also not for an
+    override stored before the floor.
+  - Standing grants: a service principal's grant does not run a marked
+    operation. `consult_and_record_grant` in `service_grants.py` refuses
+    the operation before it looks a grant row up, so a grant stored
+    before the marker never auto-approves it, and grant create refuses a
+    new grant for it (`caller_address_grant_reason`). The call waits for
+    a person, and the park reason says so. A grant covers an operation,
+    a connector and a target, never the address in the call.
+- **Sensors.** A sensor runs only `safe` operations. So a sensor cannot
+  use a marked operation: a new one is refused, and the runner reports
+  an existing one as `unknown` with the reason `op_not_safe_at_dispatch`.
+  This holds for the `net.*` probes and `pfsense.diag.ping`.
+- **The contract check.** Rule 13 (`caller_address`) of
+  `tests/test_operation_contracts.py` fails for a parameter that looks
+  like an address but has no marker. A field looks like an address by
+  its name (for example `url`, `host`, or a name that ends in `_url`,
+  `_host` or `_address`) or by its schema `format`. A field that only
+  looks like an address is listed with its reason in
+  `NOT_CALLER_ADDRESSES` (`tests/_operation_contract_addresses.py`): MEHO
+  and the target never connect to it, or MEHO connects to it only on the
+  target's own host.
+
+Tests: `tests/test_caller_address_floor.py` (a fixture operation, no
+connector package) and `tests/test_operation_contract_rules.py`.
 
 #### Ingested licence reads stay off
 
@@ -1210,6 +1268,7 @@ review payload also carries `classified_safety_level` /
 | a level below the classification | anyone | - | refused, `risk_level_below_classification`: open a pull request |
 | `requires_approval=false` where the classification requires it | platform admin, with a non-empty `reason` and a person present | whole install (built-in) or the row's tenant | override `false`; listed in the reduced-approval report |
 | `requires_approval=false` on a destructive operation | anyone | - | always refused, `approval_off_destructive` |
+| `requires_approval=false` on an operation with a caller-address parameter | anyone | - | always refused, `approval_off_caller_address` |
 
 **Every edit that ends approval passes the same checks.** The rule looks
 at the result, not at the field in the request. When the effective
@@ -3010,6 +3069,26 @@ lifecycle timestamps, and -- on completion -- one of:
 `status="running"` leaves both clusters `None`. Clients branch on
 `status` rather than checking presence.
 
+**Which step runs now (#5786).** Every answer also carries `phase`
+and `phase_started_at` (epoch seconds), so an operator can tell a slow
+import from a stuck one. The steps, in order:
+
+| `phase` | What runs |
+|---|---|
+| `parse` | Read each API file and check its version. A new job starts here, at `started_at`. |
+| `register` | Parse each file and write its operations. |
+| `grouping` | The language model sorts the operations into groups. On a large file this is the longest step. |
+
+The pipeline reports each step when it starts
+(`report_ingest_phase` in `operations/ingest/job_phase.py`).
+`run_ingest_job` puts a reporter for its job in a context variable, so
+the pipeline needs no job id, and the sync path (no job) reports to
+nobody. A finished job keeps the step it ended in: a `failed` job
+shows the step that failed. The other fields of a finished answer do
+not change. `phase_started_at` is declared `format: double` in the
+OpenAPI document, so the generated Go client keeps it as a 64-bit
+float (a 32-bit float rounds an epoch time to about two minutes).
+
 **Why async by default.** The OpenAPI ingest path is the escape
 hatch per [api-shape-conventions.md §1](api-shape-conventions.md) --
 operators reach for it when the curated daily-driver doesn't cover
@@ -3085,10 +3164,12 @@ detached, or lost the waiting session, this verb re-reads the same
 `GET /api/v1/connectors/ingest/jobs/{job_id}` route. Without `--wait`
 it reads one snapshot -- a `running` job prints its identity +
 lifecycle echo (job_id, status, the originating request descriptors,
-`started_at`) and exits 0 (`--json` emits the raw
+`started_at`, and `phase: <step> (since <time>)`) and exits 0 (`--json` emits the raw
 `IngestJobStatusResponse`); a terminal job renders exactly what the
 waiting-ingest path renders. With `--wait` it re-attaches the same
-2s poll loop until terminal. Terminal rendering and the poll loop are
+2s poll loop until terminal. While the job runs, the shared poll loop
+prints one `ingest job phase: <step> (since <time>)` line to stderr
+each time the step changes (both verbs). Terminal rendering and the poll loop are
 **shared** with `ingest` (the extracted `renderIngestTerminal` switch
 + `pollIngestJob`), not duplicated, so succeeded / failed / degraded /
 undocumented-status / 401 / 403 / 404 all behave identically across

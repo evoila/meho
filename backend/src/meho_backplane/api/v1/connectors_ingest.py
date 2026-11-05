@@ -843,6 +843,8 @@ def _job_to_response(job: IngestJob) -> IngestJobStatusResponse:
         spec_uris=list(job.spec_uris),
         started_at=job.started_at,
         ended_at=job.ended_at,
+        phase=job.phase,
+        phase_started_at=job.phase_started_at,
         ingestion=ingestion_model,
         grouping=grouping_model,
         error=job.error,

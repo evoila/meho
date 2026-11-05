@@ -124,6 +124,8 @@ async def _dispatch_probe(params: dict[str, Any]) -> OperationResult:
         op_id=_OP_ID,
         target=None,
         params=params,
+        # Each net.* call waits for approval; this runs the approved call.
+        _approved=True,
     )
 
 
@@ -224,10 +226,10 @@ def test_http_probe_connector_id_round_trips() -> None:
     assert parse_connector_id(_CONNECTOR_ID) == ("net", "1.x", "net-probe")
 
 
-async def test_http_probe_registered_as_safe_ungated_typed_op(
+async def test_http_probe_registered_as_caution_with_approval_typed_op(
     _registered_http_probe_op: None,
 ) -> None:
-    """The descriptor row carries the synthetic identity + safe/ungated posture."""
+    """The descriptor row carries the synthetic identity + caution/approval posture."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         result = await session.execute(
@@ -240,8 +242,8 @@ async def test_http_probe_registered_as_safe_ungated_typed_op(
         )
         row = result.scalar_one()
     assert row.source_kind == "typed"
-    assert row.safety_level == "safe"
-    assert row.requires_approval is False
+    assert row.safety_level == "caution"
+    assert row.requires_approval is True
 
 
 def test_http_probe_module_registers_no_connector_class() -> None:

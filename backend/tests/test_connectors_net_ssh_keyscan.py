@@ -21,7 +21,7 @@ A ``net.*`` sibling probe on the T1 keystone. Covers:
 * The return-failures contract: refused / timeout / DNS / unreachable
   return ``scanned=false`` with a reason code and ``status="ok"``.
 * The audit row records the literal ``host``/``port``; the op registers
-  ``safe`` + ungated; ``net.ssh_keyscan`` classifies as ``read``.
+  ``caution`` + approval (caller-address floor); ``net.ssh_keyscan`` classifies as ``read``.
 
 The SSH server runs in-process on the same event loop; the handler dials
 it over loopback (added to ``MEHO_NETDIAG_PROBE_ALLOWLIST``).
@@ -110,6 +110,8 @@ async def _dispatch_scan(params: dict[str, Any]) -> OperationResult:
         op_id=_OP_ID,
         target=None,
         params=params,
+        # Each net.* call waits for approval; this runs the approved call.
+        _approved=True,
     )
 
 
@@ -413,7 +415,7 @@ async def test_key_exchange_failed_is_skipped_not_fatal(
 # ---------------------------------------------------------------------------
 
 
-async def test_ssh_keyscan_registered_as_safe_ungated_typed_op(
+async def test_ssh_keyscan_registered_as_caution_with_approval_typed_op(
     _registered_ssh_keyscan_op: None,
 ) -> None:
     sessionmaker = get_sessionmaker()
@@ -429,8 +431,8 @@ async def test_ssh_keyscan_registered_as_safe_ungated_typed_op(
             )
         ).scalar_one()
     assert row.source_kind == "typed"
-    assert row.safety_level == "safe"
-    assert row.requires_approval is False
+    assert row.safety_level == "caution"
+    assert row.requires_approval is True
 
 
 def test_ssh_keyscan_classifies_as_read() -> None:

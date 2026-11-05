@@ -59,6 +59,7 @@ from meho_backplane.operations._preview import (
     register_preview_builder,
 )
 from meho_backplane.operations._validate import compute_audit_digest_hash
+from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
 from meho_backplane.operations.ingest.catalog import register_connector_catalog
 from meho_backplane.operations.typed_register import (
     register_typed_op_registrar,
@@ -131,6 +132,7 @@ def target_cache_key(target: Target) -> tuple[str, str]:
 
 
 __all__ = [
+    "CALLER_ADDRESS_MARKER",
     "AuthModel",
     "Connector",
     "ConnectorAuthError",

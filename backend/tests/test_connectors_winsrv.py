@@ -171,8 +171,13 @@ def test_op_surface_ids_and_safety_tiers() -> None:
         # blast-radius preview is required at this tier).
         "winsrv.feature.remove",
     }
-    # Every dangerous op requires approval, and so does the time-source change.
-    assert {k for k, v in by_id.items() if v.requires_approval} == dangerous | {"winsrv.time.set"}
+    # Every dangerous op requires approval, and so do the time-source change
+    # and the iSCSI connect (the host connects to a portal address the caller gives).
+    assert {k for k, v in by_id.items() if v.requires_approval} == dangerous | {
+        "winsrv.time.set",
+        "winsrv.storage.iscsi.connect",
+    }
+    assert "winsrv.storage.iscsi.connect" in caution
     assert "winsrv.time.set" in caution
     assert "winsrv.time.get" in safe
     assert "winsrv.feature.install" in caution

@@ -116,6 +116,7 @@ from meho_backplane.operations import dispatch
 from meho_backplane.operations.addon_pairing import AddonPairingService
 from meho_backplane.operations.addon_pairing_contract import is_contract_compatible
 from meho_backplane.operations.catalog_release import catalog_release_status
+from meho_backplane.operations.unpriced_model import is_model_priced
 from meho_backplane.sandbox_mode import sandbox_mode_label
 from meho_backplane.settings import get_settings
 from meho_backplane.version import build_git_sha
@@ -442,6 +443,20 @@ class PairingHealth(BaseModel):
     last_seen: datetime | None
 
 
+class AgentModelSpend(BaseModel):
+    """Whether the spend limits count the cost of the default agent model (#5771).
+
+    ``model`` is ``AGENT_DEFAULT_MODEL``. ``spend_counted`` is ``False``
+    when MEHO has no price for that model: a run on it then costs 0, so
+    the spend limit per login does not limit it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    model: str
+    spend_counted: bool
+
+
 class SurfaceSummary(BaseModel):
     """Which working-surface MCP tools this session should see, and which it does.
 
@@ -548,6 +563,11 @@ class HealthResponse(BaseModel):
     operation rows and says whether it is this pod's release
     (:class:`OperationCatalogStatus`). The ``None`` default keeps older
     response decoders working; the handler always fills it.
+
+    ``agent_model_spend`` (#5771) says whether the spend limits count the
+    cost of runs on the default agent model (:class:`AgentModelSpend`).
+    The ``None`` default keeps older response decoders working; the
+    handler always fills it.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -567,6 +587,7 @@ class HealthResponse(BaseModel):
     features: list[FeatureStatus] = []
     connector_packages: list[ConnectorPackage] = []
     operation_catalog: OperationCatalogStatus | None = None
+    agent_model_spend: AgentModelSpend | None = None
 
 
 class LivenessResponse(BaseModel):
@@ -968,7 +989,14 @@ async def build_health_response(operator: Operator) -> HealthResponse:
         features=features,
         connector_packages=list(installed_connector_packages()),
         operation_catalog=await _operation_catalog_status(),
+        agent_model_spend=_agent_model_spend(),
     )
+
+
+def _agent_model_spend() -> AgentModelSpend:
+    """Whether the spend limits count the default agent model (#5771)."""
+    model = get_settings().agent_default_model
+    return AgentModelSpend(model=model, spend_counted=is_model_priced(model))
 
 
 async def _tenant_not_chosen_response(operator: Operator) -> HealthResponse:

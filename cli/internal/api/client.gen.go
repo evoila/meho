@@ -1236,6 +1236,16 @@ type AgentGrantRead struct {
 	Verdict       string             `json:"verdict"`
 }
 
+// AgentModelSpend Whether the spend limits count the cost of the default agent model (#5771).
+//
+// “model“ is “AGENT_DEFAULT_MODEL“. “spend_counted“ is “False“
+// when MEHO has no price for that model: a run on it then costs 0, so
+// the spend limit per login does not limit it.
+type AgentModelSpend struct {
+	Model        string `json:"model"`
+	SpendCounted bool   `json:"spend_counted"`
+}
+
 // AgentModelTier Logical model tier an agent definition runs against.
 //
 // The tier is *logical* -- G11.5's multi-provider resolver maps it to
@@ -6111,7 +6121,19 @@ type HTTPValidationError struct {
 // operation rows and says whether it is this pod's release
 // (:class:`OperationCatalogStatus`). The “None“ default keeps older
 // response decoders working; the handler always fills it.
+//
+// “agent_model_spend“ (#5771) says whether the spend limits count the
+// cost of runs on the default agent model (:class:`AgentModelSpend`).
+// The “None“ default keeps older response decoders working; the
+// handler always fills it.
 type HealthResponse struct {
+	// AgentModelSpend Whether the spend limits count the cost of the default agent model (#5771).
+	//
+	// ``model`` is ``AGENT_DEFAULT_MODEL``. ``spend_counted`` is ``False``
+	// when MEHO has no price for that model: a run on it then costs 0, so
+	// the spend limit per login does not limit it.
+	AgentModelSpend *AgentModelSpend `json:"agent_model_spend,omitempty"`
+
 	// Approvals The approval settings in force (#4830).
 	//
 	// ``custody`` is the state of the approval key: ``configured``,

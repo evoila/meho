@@ -90,7 +90,8 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -100,6 +101,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import Agent, RunContext, Tool, UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
+from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.usage import RunUsage
 
 from meho_backplane.agent.approval_wait import resume_or_surface_awaiting_approval
@@ -128,6 +130,7 @@ from meho_backplane.agent.toolset import (
     resolve_agent_toolset,
 )
 from meho_backplane.auth.operator import Operator
+from meho_backplane.operations.identity_budget import TokenUsage
 from meho_backplane.operations.meta_tools import call_operation, list_operation_groups
 from meho_backplane.settings import get_settings
 
@@ -639,9 +642,18 @@ class AgentRunResult:
     from the framework's usage so the G11.5-T5 per-identity budget
     bucketing (#1079) has the per-stream amounts the
     :func:`~meho_backplane.operations.identity_budget.compute_cost`
-    pricing table charges against. Default to 0 so a deterministic
-    test model that does not stamp usage (e.g. a function model that
-    short-circuits the loop) still produces a valid result.
+    pricing table charges against. The four streams do not overlap:
+    ``input_tokens`` holds only the uncached input tokens (see
+    :class:`~meho_backplane.operations.identity_budget.TokenUsage`).
+    Default to 0 so a deterministic test model that does not stamp
+    usage (e.g. a function model that short-circuits the loop) still
+    produces a valid result.
+
+    ``request_usages`` holds the same four streams per model request
+    (the parent's requests and those of every child run it invoked,
+    also the completed requests of a child run that then failed), so
+    the cost can apply a per-request price such as Haiku 5.5's
+    long-prompt rate.
 
     ``context_receipt`` (#3763) says what hosted context MEHO supplied to
     a configured run (see
@@ -658,6 +670,24 @@ class AgentRunResult:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     context_receipt: HostedContextReceipt | None = None
+    request_usages: tuple[TokenUsage, ...] = ()
+
+
+#: The per-request usage list of the run on the current task. A child run
+#: (``invoke_agent``) appends its requests here, since its messages are not
+#: in the parent's message history while its tokens are in the shared total.
+_run_request_usages_var: ContextVar[list[TokenUsage] | None] = ContextVar(
+    "agent_run_request_usages", default=None
+)
+
+
+def _request_usages(messages: Iterable[ModelMessage]) -> list[TokenUsage]:
+    """Lift the token usage of each model response in *messages*."""
+    return [
+        TokenUsage.from_request_usage(message.usage)
+        for message in messages
+        if isinstance(message, ModelResponse)
+    ]
 
 
 def _capability_omissions(resolution: ToolsetResolution) -> tuple[ContextOmission, ...]:
@@ -1209,6 +1239,8 @@ class PydanticAgentRun:
         type is uniform regardless of which framework exception fired.
         """
         limits = UsageLimits(request_limit=definition.request_limit)
+        request_usages: list[TokenUsage] = []
+        token = _run_request_usages_var.set(request_usages)
         try:
             run_result = await agent.run(inputs, deps=operator, usage_limits=limits)
         except UsageLimitExceeded as exc:
@@ -1220,16 +1252,21 @@ class PydanticAgentRun:
                 operator_sub=operator.sub,
             )
             raise AgentRunError(f"turn budget exhausted: {exc}") from exc
+        finally:
+            _run_request_usages_var.reset(token)
+        request_usages.extend(_request_usages(run_result.new_messages()))
         usage = run_result.usage
+        totals = TokenUsage.from_run_usage(usage)
         result = AgentRunResult(
             output=run_result.output,
             request_count=usage.requests,
             tool_call_count=usage.tool_calls,
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            cache_read_tokens=usage.cache_read_tokens,
-            cache_write_tokens=usage.cache_write_tokens,
+            input_tokens=totals.input_tokens,
+            output_tokens=totals.output_tokens,
+            cache_read_tokens=totals.cache_read_tokens,
+            cache_write_tokens=totals.cache_write_tokens,
             context_receipt=receipts[0] if receipts else None,
+            request_usages=tuple(request_usages),
         )
         _log.info(
             "agent_run_succeeded",
@@ -1278,13 +1315,21 @@ class PydanticAgentRun:
         """
         child = self._build_agent(definition, operator)
         limits = UsageLimits(request_limit=definition.request_limit)
+        parent_request_usages = _run_request_usages_var.get()
         try:
-            run_result = await child.run(
-                inputs,
-                deps=operator,
-                usage=usage,
-                usage_limits=limits,
-            )
+            async with child.iter(
+                inputs, deps=operator, usage=usage, usage_limits=limits
+            ) as child_run:
+                try:
+                    async for _node in child_run:
+                        pass
+                finally:
+                    # Also when the child fails: the requests it completed
+                    # before that spent tokens, and those tokens are in the
+                    # parent's shared total, so the parent's cost must
+                    # include them.
+                    if parent_request_usages is not None:
+                        parent_request_usages.extend(_request_usages(child_run.new_messages()))
         except UsageLimitExceeded as exc:
             _log.warning(
                 "agent_child_run_budget_exhausted",
@@ -1294,6 +1339,9 @@ class PydanticAgentRun:
                 operator_sub=operator.sub,
             )
             raise AgentRunError(f"turn budget exhausted: {exc}") from exc
+        run_result = child_run.result
+        if run_result is None:
+            raise AgentRunError(f"child agent {definition.name!r} ended without a result")
         return run_result.output
 
     def start(

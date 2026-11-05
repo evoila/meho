@@ -35,7 +35,7 @@ reads the same rows.
 | `BudgetWindowKind` | `db/models.py` | Closed enum (`daily` / `weekly` / `monthly`) backed by a DB-level CHECK |
 | `PerMillionPricing` | `operations/identity_budget.py` | Per-1M-token published rates for one model |
 | `MODEL_PRICING` | `operations/identity_budget.py` | The pinned `provider:model -> PerMillionPricing` map |
-| `TokenUsage` | `operations/identity_budget.py` | Framework-free token-stream record (input / output / cache-read / cache-write) |
+| `TokenUsage` | `operations/identity_budget.py` | Framework-free token-stream record (uncached input / output / cache-read / cache-write) |
 | `BudgetReading` | `operations/identity_budget.py` | Read-side view: limits + consumption + remaining-headroom |
 
 ## Control flow
@@ -90,10 +90,10 @@ best-effort partial usage on failure, but the v0.2 contract is
 `MODEL_PRICING` is a `Final[dict[str, PerMillionPricing]]` pinned at
 import time. The keys are the **resolved** provider-prefixed ids the
 runtime emits via `AgentRunAuditMeta.model` (e.g.
-`anthropic:claude-sonnet-4-6`). The runtime calls `compute_cost(usage,
-model_id)` with the *resolved* id, not the operator-facing logical
-tier, so the table keys directly on what the provider was actually
-billed for.
+`anthropic:claude-sonnet-5-5`, the default of `AGENT_DEFAULT_MODEL`).
+The runtime calls `compute_cost(usage, model_id)` with the *resolved*
+id, not the operator-facing logical tier, so the table keys directly
+on what the provider was actually billed for.
 
 Why in code and not the DB:
 
@@ -108,6 +108,48 @@ An unknown model id (lookup miss) yields `Decimal(0)` and logs a
 single `warning` per process — the "known unknown" contract. The gate
 that prevents a run from *starting* against an un-priced model lives
 in the multi-provider resolver (G11.5-C4).
+
+The table has a row for each current Claude model: `claude-opus-5-5`,
+`claude-sonnet-5-5` and `claude-haiku-5-5`. `cache_write` is the price
+of a 5-minute cache write.
+
+Haiku 5.5 has two prices. A request whose prompt is over 100,000 tokens
+(uncached input plus cache read plus cache write) costs 5x more. The
+row carries these rates as `long_prompt`, with the threshold in
+`long_prompt_over`. So the cost is computed one request at a time:
+`compute_cost(usage, model_id)` prices one request and picks the rate
+from that request's prompt length; `compute_run_cost(requests,
+model_id)` adds up a run's requests. The runtime lifts the usage of
+each model response of a run (and of each child run it invoked) into
+`AgentRunResult.request_usages` and passes that list to the cost
+computation, so two short requests are never charged the long-prompt
+price because their prompts add up to more than the threshold. A
+runtime that reports no per-request usage gets the run's total priced
+as one request. A child run that completed some requests and then
+failed (for example, its turn budget tripped) is in the list too: its
+tokens are in the parent's shared total, so the parent's cost counts
+them.
+
+The framework (pydantic_ai 2.x) reports `input_tokens` as the whole
+prompt, cached tokens included. `TokenUsage.from_request_usage` and
+`from_run_usage` take the cache-read and cache-write tokens out of it,
+so `TokenUsage.input_tokens` is the uncached input only. A cached token
+is then counted once, at its cache rate, both in the cost and in the
+budget's token count. `prompt_tokens` adds the streams back up for the
+long-prompt threshold.
+
+A default model with no row is made visible in two places (#5771,
+`operations/unpriced_model.py`):
+
+- **At start.** `warn_if_model_unpriced(settings.agent_default_model)`
+  logs one `agent_default_model_unpriced` warning. MEHO still starts:
+  an install may pick a new model before MEHO knows its price.
+- **In the status read.** `GET /api/v1/health` (and the `meho_status`
+  tool) carries `agent_model_spend: {model, spend_counted}`.
+  `meho status` prints one line when `spend_counted` is false.
+
+`is_model_priced` reads a bare model id (no `provider:` part) as an
+Anthropic id, the same way the runtime stores it.
 
 ## Window truncation
 

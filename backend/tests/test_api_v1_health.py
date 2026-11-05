@@ -90,6 +90,7 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
     monkeypatch.setenv("VAULT_TIMEOUT_SECONDS", "5.0")
     monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
+    monkeypatch.delenv("AGENT_DEFAULT_MODEL", raising=False)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -406,6 +407,13 @@ def test_happy_path_returns_full_federation_response(
         "this_release": build_git_sha(),
         "written_by_release": None,
         "written_at": None,
+    }
+
+    # #5771: the default agent model has a price, so its spend is counted.
+    agent_model_spend = body.pop("agent_model_spend")
+    assert agent_model_spend == {
+        "model": "anthropic:claude-sonnet-5-5",
+        "spend_counted": True,
     }
 
     head = ScriptDirectory.from_config(alembic_config()).get_current_head()

@@ -750,6 +750,7 @@ class AgentInvoker:
         error: str | None,
         usage: TokenUsage | None = None,
         turns: int | None = None,
+        request_usages: tuple[TokenUsage, ...] = (),
     ) -> None:
         """Record a run's terminal state on its durable row, committed.
 
@@ -776,7 +777,11 @@ class AgentInvoker:
            :data:`~meho_backplane.operations.identity_budget.MODEL_PRICING`
            lookup hits.
         2. Computes the run's USD cost via
-           :func:`~meho_backplane.operations.identity_budget.compute_cost`.
+           :func:`~meho_backplane.operations.identity_budget.compute_run_cost`,
+           one request of *request_usages* at a time, so a per-request
+           price (Haiku 5.5's long-prompt rate) lands on the right
+           request. A runtime that reports no per-request usage gets
+           *usage* priced as one request.
         3. Stamps that cost on ``agent_run.cost`` through the lifecycle
            ``succeed_run`` helper (which already accepts the parameter
            the v0.2 stub-out reserved for this slice).
@@ -803,7 +808,9 @@ class AgentInvoker:
                     cost: Decimal | None = None
                     if usage is not None:
                         model_id = _full_model_id(row.provider, row.model)
-                        cost = identity_budget.compute_cost(usage, model_id)
+                        cost = identity_budget.compute_run_cost(
+                            request_usages or (usage,), model_id
+                        )
                     await run_lifecycle.succeed_run(
                         session, row, output=output or {}, cost=cost, turns=turns
                     )
@@ -901,6 +908,7 @@ class AgentInvoker:
                 error=None,
                 usage=usage,
                 turns=result.request_count,
+                request_usages=result.request_usages,
             )
         finally:
             # Stop the heartbeat sidecar before resetting the contextvars:

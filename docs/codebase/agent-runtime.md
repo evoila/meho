@@ -55,7 +55,12 @@ All public types are re-exported from `meho_backplane.agent`
   accounting. On a successful run `request_count` is persisted as the run
   row's `turns` at finalize (#2743) — the streamed path tallies the same
   count off its `TURN` events — so `run_status` reports the model-request
-  turn total instead of a constant 0.
+  turn total instead of a constant 0. `request_usages` carries the token
+  usage of each model request (the run's own and those of its child
+  runs, also the requests a child run completed before it failed), so
+  the cost can use a per-request price (see
+  `docs/codebase/identity-budget.md`). The token totals hold the
+  uncached input apart from the cached streams, as `TokenUsage` does.
 - **`AgentRunStatus`** — closed enum: `RUNNING` / `SUCCEEDED` / `FAILED`.
 - **`AgentRunError`** — domain exception raised when a run cannot start or
   its result is unavailable (turn budget exhausted, a tool raised, the
@@ -749,7 +754,7 @@ model may write back in one answer. The setting
 
 Why the builders always send a value: since pydantic-ai 2.52, an unset
 `max_tokens` means the model's maximum (128,000 for
-`claude-sonnet-4-6`), and pydantic-ai then sends the request as a
+`claude-sonnet-5-5`), and pydantic-ai then sends the request as a
 stream.
 
 What a higher value costs:

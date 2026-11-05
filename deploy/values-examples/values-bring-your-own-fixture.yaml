@@ -181,7 +181,7 @@ extraEnv:
   - name: KEYCLOAK_CLI_CLIENT_ID
     value: "meho-cli"
   - name: AGENT_DEFAULT_MODEL
-    value: "claude-sonnet-4-6"
+    value: "claude-sonnet-5-5"
   - name: KEYCLOAK_ADMIN_CLIENT_SECRET
     valueFrom:
       secretKeyRef:

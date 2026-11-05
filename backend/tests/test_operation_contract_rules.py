@@ -15,6 +15,8 @@ from typing import Any, Final
 import pytest
 
 from meho_backplane.operations._validate import validate_params
+from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
+from tests._operation_contract_addresses import NOT_CALLER_ADDRESSES, unmarked_address_fields
 from tests._operation_contract_placeholders import REAL_TOP_LEVEL_DOMAINS, load_top_level_domains
 from tests.test_operation_contracts import (
     DESCRIPTION_MAX,
@@ -295,6 +297,14 @@ def test_a_new_gap_and_a_gone_gap_each_name_the_operation_and_rule() -> None:
     assert compare_with_gaps(problems, set(problems)) == []
 
 
+_UNMARKED_HOST_PARAMS: Final[dict[str, Any]] = {
+    **_GOOD_PARAMS,
+    "properties": {
+        **_GOOD_PARAMS["properties"],
+        "host": {"type": "string", "description": "The host to check."},
+    },
+}
+
 _NESTED_FIELD_NO_DESCRIPTION: Final[dict[str, Any]] = {
     **_GOOD_PARAMS,
     "properties": {"vm": {"type": "object", "description": "VM.", "properties": {"id": {}}}},
@@ -321,6 +331,7 @@ _NESTED_FIELD_NO_DESCRIPTION: Final[dict[str, Any]] = {
             {"llm_instructions": {**_GUIDANCE, "next_step": "Call `fake.vm.nope`."}},
             "named_operations_exist",
         ),
+        ({"parameter_schema": _UNMARKED_HOST_PARAMS}, "caller_address"),
     ],
 )
 def test_each_bad_operation_fails_with_a_message_naming_operation_and_rule(
@@ -593,3 +604,102 @@ def test_a_listed_non_operation_name_passes_and_an_unlisted_one_fails() -> None:
     name = next(iter(NOT_OPERATION_IDS))
     assert find_problems([_guided(f"Check `{name}`.")]) == {}
     assert find_problems([_guided("Check `status.phase`.")]) != {}
+
+
+# ---------------------------------------------------------------------------
+# Rule 13: an address field carries the caller-address marker
+# ---------------------------------------------------------------------------
+
+
+def _with_field(name: str, schema: dict[str, Any]) -> OperationContract:
+    return _good_op(
+        parameter_schema={
+            **_GOOD_PARAMS,
+            "properties": {**_GOOD_PARAMS["properties"], name: {"description": "x", **schema}},
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "schema"),
+    [
+        ("url", {"type": "string"}),
+        ("uri", {"type": "string"}),
+        ("host", {"type": "string"}),
+        ("hostname", {"type": "string"}),
+        ("address", {"type": "string"}),
+        ("server", {"type": "string"}),
+        ("resolver", {"type": "string"}),
+        ("Host", {"type": "string"}),
+        ("callback_url", {"type": "string"}),
+        ("jump_host", {"type": "string"}),
+        ("portal_address", {"type": "string"}),
+        ("to", {"type": "string", "format": "uri"}),
+        ("to", {"type": "string", "format": "url"}),
+        ("to", {"type": "string", "format": "hostname"}),
+        ("to", {"type": "string", "format": "ipv4"}),
+        ("to", {"type": "string", "format": "ipv6"}),
+    ],
+)
+def test_an_address_field_without_marker_fails_with_its_name(
+    name: str, schema: dict[str, Any]
+) -> None:
+    problems = _only_rule(_with_field(name, schema), "caller_address")
+    assert len(problems) == 1
+    assert problems[0].startswith(f"parameter field {name!r} looks like an address")
+
+
+@pytest.mark.parametrize(
+    ("name", "schema"),
+    [
+        ("host", {"type": "string", CALLER_ADDRESS_MARKER: True}),
+        ("to", {"type": "string", "format": "uri", CALLER_ADDRESS_MARKER: True}),
+        ("hostgroup", {"type": "string"}),
+        ("url_path", {"type": "string"}),
+        ("to", {"type": "string", "format": "date-time"}),
+    ],
+)
+def test_a_marked_or_other_field_passes(name: str, schema: dict[str, Any]) -> None:
+    assert check_operation(_with_field(name, schema)) == {}
+
+
+def test_a_marker_false_does_not_count() -> None:
+    op = _with_field("host", {"type": "string", CALLER_ADDRESS_MARKER: False})
+    assert _only_rule(op, "caller_address")
+
+
+def test_a_nested_address_field_fails_with_its_path() -> None:
+    nested = {
+        "type": "object",
+        "properties": {
+            "targets": {
+                "type": "array",
+                "items": {"type": "object", "properties": {"url": {"type": "string"}}},
+            }
+        },
+    }
+    assert unmarked_address_fields("fake.op", nested) == ["targets[].url"]
+
+
+def test_a_marker_on_a_list_covers_its_items() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "urls": {
+                "type": "array",
+                CALLER_ADDRESS_MARKER: True,
+                "items": {"type": "string", "format": "uri"},
+            }
+        },
+    }
+    assert unmarked_address_fields("fake.op", schema) == []
+
+
+def test_an_allow_listed_field_passes_and_every_entry_has_a_reason() -> None:
+    assert NOT_CALLER_ADDRESSES
+    for (op_id, path), reason in NOT_CALLER_ADDRESSES.items():
+        assert reason.strip(), f"{op_id} {path} has no reason"
+        schema = {"type": "object", "properties": {path: {"type": "string"}}}
+        if "." not in path and "[" not in path:
+            assert unmarked_address_fields(op_id, schema) == []
+            assert unmarked_address_fields("fake.other.op", schema) == [path]

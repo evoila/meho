@@ -370,6 +370,60 @@ async def test_delete_removes_every_match_and_counts_204_as_gone(azure: AzureCon
     assert result.result["scope"] == ACCOUNT_SCOPE
 
 
+SUBSCRIPTION_SCOPE = f"/subscriptions/{SUBSCRIPTION_A}"
+EXISTS = {"error": {"code": "RoleAssignmentExists", "message": "The role assignment exists."}}
+
+
+@pytest.mark.asyncio
+async def test_delete_leaves_an_inherited_assignment(azure: AzureConnector) -> None:
+    here = _assignment("aaaaaaaa-0000-4000-8000-000000000001", PRINCIPAL)
+    above = _assignment("aaaaaaaa-0000-4000-8000-000000000009", PRINCIPAL, SUBSCRIPTION_SCOPE)
+    with respx.mock(assert_all_called=False) as mock:
+        _login(mock)
+        _accounts(mock)
+        mock.get(url__startswith=_list_url(ACCOUNT_SCOPE)).respond(
+            200, json={"value": [above, here]}
+        )
+        gone = mock.delete(url__startswith=f"{ARM_BASE}{here['id']}").respond(200, json=here)
+        wrong = mock.delete(url__regex=r".*/aaaaaaaa-0000-4000-8000-000000000009.*").respond(204)
+        result = await _call("azure.role.assignment.delete", DELETE)
+
+    assert result.status == "ok", result.error
+    assert gone.called and not wrong.called
+    assert result.result["deleted"] == [here["id"]]
+    assert result.result["not_found"] == []
+
+
+@pytest.mark.asyncio
+async def test_create_409_ignores_an_inherited_assignment(azure: AzureConnector) -> None:
+    above = _assignment("aaaaaaaa-0000-4000-8000-000000000009", PRINCIPAL, SUBSCRIPTION_SCOPE)
+    with respx.mock() as mock:
+        _login(mock)
+        _accounts(mock)
+        mock.put(url__startswith=f"{_list_url(ACCOUNT_SCOPE)}/").respond(409, json=EXISTS)
+        mock.get(url__startswith=_list_url(ACCOUNT_SCOPE)).respond(200, json={"value": [above]})
+        result = await _call("azure.role.assignment.create", CREATE)
+
+    assert result.status == "error"
+
+
+@pytest.mark.asyncio
+async def test_create_409_of_another_kind_is_an_error(azure: AzureConnector) -> None:
+    existing = _assignment("11111111-2222-4333-8444-555555555555", PRINCIPAL)
+    locked = {"error": {"code": "ScopeLocked", "message": "The scope is locked."}}
+    with respx.mock(assert_all_called=False) as mock:
+        _login(mock)
+        _accounts(mock)
+        mock.put(url__startswith=f"{_list_url(ACCOUNT_SCOPE)}/").respond(409, json=locked)
+        listing = mock.get(url__startswith=_list_url(ACCOUNT_SCOPE)).respond(
+            200, json={"value": [existing]}
+        )
+        result = await _call("azure.role.assignment.create", CREATE)
+
+    assert result.status == "error"
+    assert not listing.called
+
+
 # ----------------------------------------------------------------------
 # Approval
 # ----------------------------------------------------------------------
@@ -645,3 +699,18 @@ async def test_key_request_403_names_the_role(
 
 def test_link_op_is_credential_mint() -> None:
     assert classify_op("azure.storage.blob.link.create") == "credential_mint"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["iso/a\nb.iso", "iso/a\rb.iso", "iso/a\tb.iso"])
+async def test_link_refuses_a_control_character_in_the_name(
+    azure: AzureConnector, vault_put: AsyncMock, fixed_now: datetime, bad: str
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        login = _login(mock)
+        anything = mock.route().respond(200)
+        result = await _call("azure.storage.blob.link.create", {**LINK, "name": bad})
+
+    assert result.status != "ok"
+    assert not login.called and not anything.called
+    vault_put.assert_not_awaited()

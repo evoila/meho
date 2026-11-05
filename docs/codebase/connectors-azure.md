@@ -2355,10 +2355,14 @@ caller gave.
   makes a second assignment. `principalType` is always sent, which avoids
   Azure's `PrincipalNotFound` right after a principal is made. When the
   principal already has the role under another name (made outside MEHO),
-  Azure answers 409; MEHO then answers `already_assigned` with that
-  assignment's id. Delete removes every assignment of that principal and
-  role made at exactly the scope; a 204 or 404 counts as `not_found`.
-  Inherited assignments stay.
+  Azure answers 409 `RoleAssignmentExists`; MEHO then answers
+  `already_assigned` with that assignment's id. Any other 409 is an error.
+  Delete removes every assignment of that principal and role made at exactly
+  the scope; a 204 or 404 counts as `not_found`. Azure's `atScope()` filter
+  also lists the assignments made above the scope, so MEHO compares each
+  one's own `scope`: inherited assignments are never touched or reported.
+- **File names.** A file whose name holds a control character (a line break,
+  for example) gets no link: the name is one line of the string-to-sign.
 - **Login roles for the lab.** User Access Administrator (or Role Based
   Access Control Administrator) at the test scope for the role writes;
   Storage Blob Data Reader (which holds

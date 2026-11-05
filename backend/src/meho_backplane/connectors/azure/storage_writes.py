@@ -98,6 +98,10 @@ _ASSIGNMENT_NAMESPACE: Final[uuid.UUID] = uuid.UUID("4f3c8a52-1d6e-4b7a-9c0e-416
 #: Only the assignments made at the scope itself, not those inherited from above.
 _AT_SCOPE: Final[str] = "atScope()"
 
+#: Azure's 409 code when the principal already has the role at the scope
+#: under another assignment name. Every other 409 is a real conflict.
+_ROLE_ASSIGNMENT_EXISTS: Final[str] = "RoleAssignmentExists"
+
 #: A role assignment name as Azure makes it. A name from Azure goes into a
 #: ``DELETE`` path only when it looks like this.
 _ASSIGNMENT_NAME: Final[re.Pattern[str]] = re.compile(
@@ -168,7 +172,11 @@ async def _matching(
     principal_id: str,
     role_guid: str,
 ) -> list[dict[str, Any]]:
-    """The assignments made at *scope* itself that give *principal_id* the role."""
+    """The assignments made at *scope* itself that give *principal_id* the role.
+
+    Azure's ``atScope()`` filter gives the assignments at or above the scope,
+    so each one's own ``scope`` is compared too.
+    """
     paged = await list_all_pages(
         connector,
         target,
@@ -186,7 +194,14 @@ async def _matching(
             continue
         principal = str(properties.get("principalId") or "").lower()
         role_id = str(properties.get("roleDefinitionId") or "").lower()
-        if principal == principal_id.lower() and role_id.endswith(f"/{role_guid.lower()}"):
+        # ``atScope()`` also returns the assignments made above the scope
+        # (resource group, subscription); only those made at it count.
+        made_at = str(properties.get("scope") or "").rstrip("/").lower()
+        if (
+            made_at == scope.lower()
+            and principal == principal_id.lower()
+            and role_id.endswith(f"/{role_guid.lower()}")
+        ):
             found.append(item)
     return found
 
@@ -229,7 +244,9 @@ async def role_assignment_create_impl(
             params={"api-version": AUTHORIZATION_API_VERSION},
             json=body,
         )
-    except AzureConflictError:
+    except AzureConflictError as exc:
+        if exc.azure_error_code != _ROLE_ASSIGNMENT_EXISTS:
+            raise
         existing = await _matching(connector, operator, target, scope, principal_id, role_guid)
         if not existing:
             raise
@@ -350,6 +367,22 @@ def _store_as(value: object, target_name: str) -> str:
     return value
 
 
+def _signable(blob: str, target_name: str) -> str:
+    """*blob*, when it holds no control character.
+
+    The file name is one line of the string-to-sign; a line break in it would
+    move the lines after it (the IP address among them) and change what the
+    signature covers.
+    """
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in blob):
+        raise StorageParameterError(
+            f"Azure target {target_name!r}: MEHO makes no download link for a file "
+            "whose name holds a control character (for example a line break).",
+            remediation="Rename the file in Azure, then call again.",
+        )
+    return blob
+
+
 def _key_request(start: datetime, expiry: datetime) -> bytes:
     return (
         '<?xml version="1.0" encoding="utf-8"?><KeyInfo>'
@@ -383,7 +416,7 @@ async def blob_link_create_impl(
 
     name = account_name(params.get("account"), target.name)
     container = container_name(params.get("container"), target.name)
-    blob = blob_name(params.get("name"), target.name)
+    blob = _signable(blob_name(params.get("name"), target.name), target.name)
     ip = _allowed_ip(params.get("allowed_ip"), target.name)
     hours = _hours(params.get("hours"), target.name)
     store_as = _store_as(params.get("store_as"), target.name)

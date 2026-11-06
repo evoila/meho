@@ -2,7 +2,8 @@
 
 MEHO ships as **one Helm chart**. By default the chart also brings its
 own PostgreSQL, Keycloak and OpenBao (an open-source fork of Vault).
-You can replace them with the ones you already run; the
+This is the normal way. You can connect your own PostgreSQL or secret
+store instead; the
 [install trail](install/index.md#two-ways-to-install) says how. The
 Helm chart is the install form available today. A Linux-server install
 and a VMware appliance are in progress; every shape below applies to
@@ -40,7 +41,7 @@ cloud-native install rather than replacing it.
 | Component | Who provides it | Notes |
 |---|---|---|
 | MEHO backplane | MEHO — `ghcr.io/evoila/meho` | One Deployment from the chart at `oci://ghcr.io/evoila/meho-chart`. Agents reach it over MCP; operators reach it over the REST API with the `meho` CLI and the optional browser console. Both fronts share one governed dispatch path — policy, approvals, audit, result handling. |
-| Keycloak realm | MEHO by default, or you | The OIDC issuer. The chart's built-in Keycloak makes the realm `meho`. Your [company login](install/login/index.md) connects to it (AD/LDAP, Entra ID, authentik, your own Keycloak). With your own (`coreKeycloak.enabled: false`), the backplane needs a confidential client plus the public `meho-cli` device-code client with audience mappers. |
+| Keycloak realm | MEHO | The login server MEHO trusts. MEHO's built-in Keycloak makes the realm `meho`. Connect your [company login](install/login/index.md) in front of it (AD/LDAP, Entra ID, authentik, your own Keycloak). Replacing it with your own Keycloak is an expert path: it needs realm admin rights to make MEHO's realm, clients and groups — see [Keycloak realm setup](install/keycloak-realm.md). |
 | PostgreSQL + pgvector | MEHO by default, or you | The chart's built-in PostgreSQL, with pgvector on. With your own (`corePostgres.enabled: false`), the `vector` extension is pre-created once by a superuser, and the chart expects an `asyncpg` DSN. |
 | Valkey broadcast | MEHO — in-tree subchart | Installed by the same release. See the availability posture below. |
 | Credential backend | MEHO by default, or you | The chart's built-in OpenBao (an open-source fork of Vault). With `coreVault.enabled: false`: your own HashiCorp Vault KV-v2 **or** Google Secret Manager, selected with `config.credentialBackend`. |

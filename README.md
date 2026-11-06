@@ -235,7 +235,7 @@ contract — operators bring their own MCP client.
   model. Bring your own MCP client.
 - You only need read-only chat over infrastructure with no write path,
   no per-action authorisation, and no audit requirement.
-- You're looking for a hosted SaaS — MEHO is self-hosted (you run the
+- You're looking for a hosted SaaS — MEHO is self-hosted (you run
   it in your own network; the chart brings PostgreSQL, Keycloak and
   OpenBao, or connects to yours).
 
@@ -393,8 +393,9 @@ above. **Required values** (must be set or the install stops):
 `coreKeycloak.firstTenantId` with the built-in parts. With your own
 parts, set instead `postgres.credentialsSecret`, `vault.address`,
 `keycloak.issuer`, the three `config.*` mirrors, and the three
-`networkPolicy.*CIDR` egress CIDRs (plus `image.tag` and
-`ingress.host`) — see the full
+`networkPolicy.*CIDR` egress CIDRs (plus `image.tag`, `ingress.host`
+and, while TLS is on, `ingress.tls.secretName`, the Secret that holds
+the TLS certificate) — see the full
 [operator-required and common-override tables](./docs/codebase/devops.md#full-values-reference)
 in [`docs/codebase/devops.md`](./docs/codebase/devops.md), which also
 covers the chart contract, probe semantics, NetworkPolicy posture,

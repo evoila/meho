@@ -130,6 +130,11 @@ class Connector(ABC):
     supported_version_range: str | None = None
     priority: int = 0
 
+    #: One plain sentence on what the connector does, shown in the
+    #: "What it does" column of the generated connector list on the docs
+    #: site. ``None`` (the default) leaves the column empty for this row.
+    summary: str | None = None
+
     # G0.28-T1 (#1967) — tri-state dispatchability classification. The
     # default ``"none"`` marks every connector a hand-coded class unless it
     # explicitly opts into a shim tier: ``GenericRestConnector`` sets
@@ -142,6 +147,16 @@ class Connector(ABC):
     #: descriptor with a resolved target before dispatch policy runs. The
     #: default keeps existing connectors and descriptor kinds unchanged.
     enforces_catalog_target_compatibility: bool = False
+
+    #: Whether operations ingested from an API file may run on this class.
+    #: An ingested operation sends the method and path of its file with the
+    #: connector's login, and runs none of the checks a hand-written
+    #: operation of the class runs. So the default is ``False``: the
+    #: dispatcher refuses such an operation with ``ingested_ops_not_accepted``
+    #: and the ingest pipeline refuses a file under the name of such a class.
+    #: The generic and profiled classes, and the hand-written classes built
+    #: to serve an ingested catalog, set it to ``True``.
+    accepts_ingested_operations: bool = False
 
     #: PEP 440 version spec (for example ``">=8.0,<9.0"``) of the target
     #: versions every composite (multi-step) operation of this connector's

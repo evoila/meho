@@ -43,6 +43,7 @@ from fastapi import HTTPException, Request, status
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.routes.agents.operator import (
     OperatorRoleProbe,
     _lift_operator,
@@ -78,7 +79,7 @@ async def resolve_grants_admin_or_403(
     if operator.tenant_role != TenantRole.TENANT_ADMIN:
         _log.info(
             "ui_agent_grants_non_admin_denied",
-            session_id=str(session_ctx.session_id),
+            session_ref=session_ref(session_ctx.session_id),
             operator_sub=session_ctx.operator_sub,
             tenant_role=operator.tenant_role.value,
         )

@@ -248,7 +248,7 @@ connector. It reads what MEHO registers at start-up and calls no vendor
 system. It runs in the normal unit test sweep. A new connector is covered
 as soon as its registrar runs; nothing needs to be added to the test.
 
-The thirteen rules (the rule name is in brackets):
+The fourteen rules (the rule name is in brackets):
 
 1. A one-line summary of at most 120 characters, and a description of at
    most 300 characters. Longer guidance goes into `llm_instructions`.
@@ -317,14 +317,23 @@ The thirteen rules (the rule name is in brackets):
     operations. So a test that checks one operation alone
     (`check_operation(op)`) skips it; the live check runs it.
     (`named_operations_exist`)
-13. An input that looks like an address (its name is `url`, `host`,
-    `resolver`, ends in `_address`, ... or its `format` is `uri`,
-    `hostname`, ...) has `x-meho-caller-address: true`. MEHO then runs
-    the operation at `caution` or higher, and it waits for approval. An
-    input that only looks like an address (MEHO and the target never
-    connect to it) goes into `NOT_CALLER_ADDRESSES` in
+13. A parameter field that looks like an address carries
+    `x-meho-caller-address: true`. A field looks like an address by its
+    name (`url`, `uri`, `host`, `hostname`, `fqdn`, `address`, `server`,
+    `remote`, `peer`, `endpoint`, `resolver`, or a name that ends in
+    `_url`, `_host` or `_address`) or by its schema `format` (`uri`,
+    `url`, `hostname`, `ipv4`, `ipv6`). A field that only looks like an
+    address goes into `NOT_CALLER_ADDRESSES` in
     `backend/tests/_operation_contract_addresses.py`, with a reason.
     (`caller_address`)
+14. An operation that takes a reference to a stored secret (a field named
+    `secret_ref`, or one that ends in `_secret_ref`, `password_ref` or
+    `credential_ref`) and an address the caller gives is `caution` or
+    higher and has `requires_approval: true`. MEHO reads the secret, and
+    the call sends it to that address. The secret field counts at any
+    depth, also inside a schema definition (`$defs`, `definitions`). A
+    field in `NOT_CALLER_ADDRESSES` does not count as an address here.
+    (`stored_secret_address`)
 
 Ingested (generic) operations are not checked here. Their safety level
 comes from the HTTP method and the safety floors in
@@ -342,6 +351,10 @@ The list may only get shorter:
 - A listed gap that is gone also fails the test. The message names the
   entry. Delete that rule line (and the operation, or the connector, when
   nothing is left under it).
+- The list never holds a `stored_secret_address` entry, and never a
+  `caller_address` entry for an operation that takes a stored secret and
+  an address the caller gives. The test refuses such an entry: fix the
+  operation instead.
 - A `requires_approval` or `write_name` entry is a safety gap. Each one
   has a comment with the reason it is still open. Fixing one changes who
   must approve the operation, so the pull request that fixes it names the
@@ -351,7 +364,7 @@ To shrink the list: fix the operation's texts or schemas, run
 `cd backend && uv run pytest tests/test_operation_contracts.py`,
 and delete the entries the test reports as fixed.
 
-A new connector should meet all thirteen rules from the start, so it adds
+A new connector should meet all fourteen rules from the start, so it adds
 nothing to the gap list. Every operation states `safety_level` and
 `requires_approval` in its own spec; no connector keeps a default for
 them in its spec class or registrar.

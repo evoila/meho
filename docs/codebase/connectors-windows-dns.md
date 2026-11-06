@@ -269,7 +269,7 @@ Code: `ops_zone_settings.py`, `ops_forwarder.py`. Tests:
 - Task #2759 (connector); PR #2760.
 - Molds: `docs/codebase/connectors-bind9.md` (op-surface mirror + #986
   probe discipline), `docs/codebase/connectors-holodeck.md`
-  (PowerShell-over-SSH transport), `docs/codebase/connectors-rke2.md`
+  (in the private connectors repository; PowerShell-over-SSH transport), `docs/codebase/connectors-rke2.md`
   (SSH-family doc shape).
 - DnsServer module cmdlet reference:
   <https://learn.microsoft.com/en-us/powershell/module/dnsserver/>

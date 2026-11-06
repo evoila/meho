@@ -116,6 +116,7 @@ from meho_backplane.ui.auth.flow import (
     exchange_code_for_tokens,
     resolve_oidc_endpoints,
 )
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.session_store import (
     create_session,
     revoke_session,
@@ -673,7 +674,7 @@ async def _handle_callback(
         tenant_id=str(tenant_id),
         tenant_chosen=tenant_chosen,
         return_to=tokens.return_to,
-        session_id=str(session_id),
+        session_ref=session_ref(session_id),
     )
     # A person with several tenants picks one first (#5240).
     location = (tokens.return_to or _DEFAULT_RETURN_TO) if tenant_chosen else TENANT_PICKER_PATH
@@ -705,7 +706,7 @@ async def _revoke_session_if_present(cookie_value: str | None) -> None:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session, session.begin():
         await revoke_session(session, cookie_id)
-    log.info("ui_auth_session_revoked", session_id=str(cookie_id))
+    log.info("ui_auth_session_revoked", session_ref=session_ref(cookie_id))
 
 
 async def _resolve_end_session_target(settings_: Settings) -> str:

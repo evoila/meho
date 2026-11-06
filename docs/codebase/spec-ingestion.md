@@ -650,12 +650,18 @@ target for MEHO.
 - **The contract check.** Rule 13 (`caller_address`) of
   `tests/test_operation_contracts.py` fails for a parameter that looks
   like an address but has no marker. A field looks like an address by
-  its name (for example `url`, `host`, or a name that ends in `_url`,
-  `_host` or `_address`) or by its schema `format`. A field that only
+  its name (for example `url`, `host`, `fqdn`, `server`, `remote`,
+  `peer`, `endpoint`, or a name that ends in `_url`, `_host` or
+  `_address`) or by its schema `format` (for example `hostname`, `ipv4`
+  or `ipv6`). A field that only
   looks like an address is listed with its reason in
   `NOT_CALLER_ADDRESSES` (`tests/_operation_contract_addresses.py`): MEHO
   and the target never connect to it, MEHO connects to it only on the
   target's own host, or it is the address of a built-in network check.
+  Rule 14 (`stored_secret_address`) fails for an operation that takes a
+  reference to a stored secret (for example `secret_ref`) and an address
+  the caller gives, unless it is `caution` or higher with approval. The
+  gap list may not hold such an operation under either rule.
 
 Tests: `tests/test_caller_address_floor.py` (a fixture operation, no
 connector package), `tests/test_operation_contract_rules.py`, and
@@ -696,6 +702,44 @@ no list of vendor paths. Three places apply it:
   case-insensitively, because a vendor path keeps the vendor's spelling).
 
 Tests: `tests/test_operations_license_reads_stay_off.py`.
+
+#### Which connector class ingested operations run on
+
+An ingested operation runs on the connector class that the target
+resolves to. It sends the method and path of its API file with that
+class's login, and it runs none of the checks of the class's
+hand-written operations. So a
+class says whether ingested operations may run on it:
+`Connector.accepts_ingested_operations` (`connectors/base.py`), default
+`False`.
+
+- `True` on `GenericRestConnector` (the shim), on
+  `ProfiledRestConnector`, and on the hand-written classes that serve an
+  ingested catalog: `GitHubRestConnector`, `HetznerRobotConnector`,
+  `HarborConnector` and `ArgoCdConnector`. A connector package sets it
+  on its own classes that serve an ingested catalog
+  ([connector-packages.md](connector-packages.md)).
+- **At ingest.** `IngestionPipelineService.ingest` refuses an API file
+  under the name of a class that does not accept ingested operations
+  (`assert_ingest_target_accepts` in `operations/_ingested_owner.py`):
+  the class registered for the `(product, version, impl_id)`, or the
+  hand-written class that serves the `(version, impl_id)`. It runs right
+  after the product check, before any file is read or row written, also
+  on a dry run. REST answers 422 and MCP `-32602`, both with the detail
+  `kind=ingested_ops_not_accepted`, the triple and `connector_class`. An
+  async ingest job fails with this error.
+- **At run time.** The ingest check cannot see every case: a file under
+  a new impl id gets a shim, but a target of the product can still
+  resolve to the hand-written class. So the dispatcher checks the class
+  it resolved (`_resolve_connector_instance`, and the class the catalog
+  guard picked). When the class does not accept ingested operations, the
+  call answers `ingested_ops_not_accepted`: before it waits for approval
+  (`_handle_needs_approval`), when an approved call runs, and in
+  `preview_operation`. Nothing reaches the vendor. A refused call writes
+  one `policy_decision` audit row with `result_status` `denied` and the
+  code under `payload["error"]`; a refused preview writes none.
+
+Tests: `tests/test_operations_ingested_ops_owner.py`.
 
 #### Applying corrected floors to existing rows
 

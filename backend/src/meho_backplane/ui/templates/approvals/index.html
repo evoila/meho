@@ -24,6 +24,7 @@
   the tab/filter/pager context).
 -#}
 {% extends "base.html" %}
+{% from "_tenant_label.html" import tenant_label %}
 
 {% block page_title %}Approvals &middot; MEHO Operator Console{% endblock %}
 
@@ -35,7 +36,7 @@
       <p class="text-sm opacity-70">
         Review pending agent actions and browse the decision history for
         {% if session_tenant is not none %}tenant
-        <span class="font-mono" data-tenant>{{ session_tenant.name or session_tenant.slug or session_tenant.id }}</span>{% else %}this tenant{% endif %}.
+        <span class="font-mono" data-tenant>{{ tenant_label(session_tenant) }}</span>{% else %}this tenant{% endif %}.
       </p>
     </div>
   </header>

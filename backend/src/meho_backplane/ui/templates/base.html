@@ -27,6 +27,7 @@
       the fragment template).
 -#}
 {% from "_icons.html" import icon %}
+{% from "_tenant_label.html" import tenant_label %}
 {#- ``active_surface`` highlights the matching sidebar link. Routes
     that render a surface pass it (e.g. ``"broadcast"``); the dashboard
     doesn't, so default to ``""`` here so the ``StrictUndefined``
@@ -301,7 +302,7 @@
                   title="Switch tenant"
                   data-testid="tenant-switch"
                 >
-                  <span class="truncate">{{ session_tenant.name or session_tenant.slug or session_tenant.id }}</span>
+                  <span class="truncate">{{ tenant_label(session_tenant) }}</span>
                   <span class="shrink-0 font-sans text-[0.7rem] text-primary">Switch</span>
                 </a>
                 {% else %}
@@ -310,7 +311,7 @@
                   {% if session_tenant is not none %}aria-label="Active tenant"{% endif %}
                   title="{% if session_tenant is not none %}Active tenant{% else %}Sign in to choose a tenant{% endif %}"
                 >
-                  {% if session_tenant is not none %}{{ session_tenant.name or session_tenant.slug or session_tenant.id }}{% else %}(sign in to choose){% endif %}
+                  {% if session_tenant is not none %}{{ tenant_label(session_tenant) }}{% else %}(sign in to choose){% endif %}
                 </div>
                 {% endif %}
               </div>

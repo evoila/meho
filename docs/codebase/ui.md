@@ -504,6 +504,22 @@ session still produces a readable chip (the `web_session.tenant_id`
 FK is intentionally soft; the chassis logs
 `ui_session_tenant_row_missing` and serves the page).
 
+That `name → slug → id` fall-through is a macro,
+[`_tenant_label.html`](../../backend/src/meho_backplane/ui/templates/_tenant_label.html),
+not a spelling each template repeats (#810). The dashboard header and
+the broadcast feed subtitle printed the bare `tenant_id` until then —
+a UUID says nothing about which tenant an operator is in, which is the
+one thing on screen that matters when someone holds several tenants
+and is about to run a write. Both now call the macro; the id stays in
+`title=` so a support thread can still quote it.
+
+The id also stays in the attributes that address the DOM —
+`data-meho-tenant` on `<body>`, the per-tenant SSE bridge URL, the
+`hx-*` targets. Those are read by the client JS and by routing, so
+"show the name" applies to text only. `tests/test_ui_tenant_chip.py`
+pins both halves: the name reaches the rendered text, and
+`data-meho-tenant` still carries the UUID.
+
 The processor also exposes `session_operator_sub` (the signed-in
 operator's Keycloak `sub`, or `None` outside a session). The sidebar
 account chip (`base.html`) used to be the hardcoded literal

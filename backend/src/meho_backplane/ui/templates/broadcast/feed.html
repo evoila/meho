@@ -36,6 +36,7 @@
   server-authored ``broadcast/_event_row.html`` partial.
 -#}
 {% extends "base.html" %}
+{% from "_tenant_label.html" import tenant_label %}
 
 {% block page_title %}Broadcast &middot; MEHO Operator Console{% endblock %}
 
@@ -50,7 +51,7 @@
       <h1 class="flex items-center gap-2 text-2xl font-semibold">Broadcast{% include "_maturity_badge.html" %}</h1>
       <p class="text-sm opacity-70">
         Live activity across tenant
-        <code class="badge badge-outline">{{ tenant_id }}</code>.
+        <code class="badge badge-outline" title="{{ tenant_id }}">{% if session_tenant is not none %}{{ tenant_label(session_tenant) }}{% else %}{{ tenant_id }}{% endif %}</code>.
       </p>
     </div>
     {# ---------- Wall-monitor entry (work item #5) ----------

@@ -298,3 +298,168 @@ def test_broadcast_surface_renders_with_session_tenant_present() -> None:
     # _render_page flow (which also reads session_ctx.tenant_id when
     # building the target-name dropdown).
     assert "/ui/broadcast/stream" in body
+
+
+# ---------------------------------------------------------------------------
+# #810 -- the console names the tenant instead of printing its UUID.
+#
+# The dashboard header and the broadcast subtitle both used to render the
+# raw ``tenant_id``. A UUID says nothing about which tenant the operator is
+# in, which is the one thing on screen that matters when someone holds
+# several tenants and is about to run a write.
+# ---------------------------------------------------------------------------
+
+
+def _visible_text(markup: str) -> str:
+    """Return *markup* with tags and script/style bodies removed.
+
+    The tenant UUID legitimately stays in attributes (``data-meho-tenant``,
+    the SSE bridge URL, ``title=``) -- those are load-bearing. Asserting on
+    the rendered text is the only way to tell "the operator reads a UUID"
+    from "the DOM addresses a row by one".
+    """
+    import html as _html
+    import re as _re
+
+    without_scripts = _re.sub(r"(?s)<(script|style).*?</\1>", " ", markup)
+    return _html.unescape(_re.sub(r"(?s)<[^>]+>", " ", without_scripts))
+
+
+def test_dashboard_header_names_the_tenant_instead_of_its_uuid() -> None:
+    """``GET /ui/`` reads "in tenant <name>", never the bare UUID."""
+    _seed_tenant()
+    session_id = _seed_session_sync()
+    response = _authenticated_get("/ui/", session_id)
+    assert response.status_code == 200, response.text
+
+    text = _visible_text(response.text)
+    assert _TENANT_NAME in text
+    assert str(_TENANT_ID) not in text
+
+
+def test_dashboard_header_keeps_the_uuid_reachable() -> None:
+    """The id stays one hover away -- support threads still quote it."""
+    _seed_tenant()
+    session_id = _seed_session_sync()
+    response = _authenticated_get("/ui/", session_id)
+    assert f'title="{_TENANT_ID}"' in response.text
+
+
+def test_broadcast_subtitle_names_the_tenant_instead_of_its_uuid() -> None:
+    """``GET /ui/broadcast`` gets the same treatment through the same macro."""
+    _seed_tenant()
+    session_id = _seed_session_sync()
+    response = _authenticated_get("/ui/broadcast", session_id)
+    assert response.status_code == 200, response.text
+
+    text = _visible_text(response.text)
+    assert _TENANT_NAME in text
+    assert str(_TENANT_ID) not in text
+
+
+def test_tenant_uuid_still_addresses_the_dom() -> None:
+    """``data-meho-tenant`` is read by the client JS and must not change.
+
+    This is the regression that a naive "replace UUIDs with names" sweep
+    would cause: the console would read nicely and stop working.
+    """
+    _seed_tenant()
+    session_id = _seed_session_sync()
+    response = _authenticated_get("/ui/", session_id)
+    assert f'data-meho-tenant="{_TENANT_ID}"' in response.text
+
+
+@pytest.mark.parametrize(
+    ("name", "slug", "expected"),
+    [
+        ("Tenant Chip Fixture", "tenant-chip-fixture", "Tenant Chip Fixture"),
+        (None, "tenant-chip-fixture", "tenant-chip-fixture"),
+        ("", "tenant-chip-fixture", "tenant-chip-fixture"),
+        (None, None, str(_TENANT_ID)),
+        ("", "", str(_TENANT_ID)),
+    ],
+    ids=[
+        "name",
+        "slug-when-name-unset",
+        "slug-when-name-blank",
+        "id-when-both-unset",
+        "id-when-both-blank",
+    ],
+)
+def test_tenant_label_falls_back_name_then_slug_then_id(
+    name: str | None, slug: str | None, expected: str
+) -> None:
+    """The macro's fallback chain, exercised directly.
+
+    Both DB columns are ``NOT NULL``, so a nameless tenant cannot come
+    from the table -- but ``UISessionContext`` defaults both fields to
+    ``None`` and the pre-session surfaces render with them unset, so the
+    chain has to hold for ``None`` and for the empty string alike.
+    """
+    from meho_backplane.ui.templating import get_templates
+
+    template = get_templates().env.from_string(
+        '{% from "_tenant_label.html" import tenant_label %}{{ tenant_label(tenant) }}'
+    )
+    rendered = template.render(tenant={"id": str(_TENANT_ID), "slug": slug, "name": name})
+    assert rendered.strip() == expected
+
+
+def test_broadcast_wall_names_the_tenant_instead_of_its_uuid() -> None:
+    """The wall monitor is read from across a room -- a UUID is least legible there.
+
+    ``wall.html`` and ``feed.html`` are rendered by the same function
+    with the same context (``routes/broadcast/feed.py``,
+    ``template = "broadcast/wall.html" if wall else "broadcast/feed.html"``),
+    so the two headers have to agree. The wall is a standalone document
+    and does not inherit ``base.html``, which is how it was missed: it
+    imports the macro itself.
+    """
+    _seed_tenant()
+    session_id = _seed_session_sync()
+    response = _authenticated_get("/ui/broadcast?wall=1", session_id)
+    assert response.status_code == 200, response.text
+
+    text = _visible_text(response.text)
+    assert _TENANT_NAME in text
+    assert str(_TENANT_ID) not in text
+    # The wall's own body attribute still addresses the tenant for the
+    # client JS, exactly as the in-chrome view does.
+    assert f'data-meho-tenant="{_TENANT_ID}"' in response.text
+
+
+def test_account_surface_names_the_tenant_through_the_shared_macro() -> None:
+    """The account page held a fourth hand-spelled copy of the fall-through.
+
+    A macro introduced to end a drifting spelling has to actually replace
+    every copy, or the next change to the chain lands in one place and
+    not the other.
+    """
+    _seed_tenant()
+    session_id = _seed_session_sync()
+    response = _authenticated_get("/ui/account", session_id)
+    assert response.status_code == 200, response.text
+
+    text = _visible_text(response.text)
+    assert _TENANT_NAME in text
+    assert f'title="{_TENANT_ID}"' in response.text
+
+
+def test_no_template_hand_spells_the_tenant_fall_through() -> None:
+    """Guard the macro's reason for existing.
+
+    Four copies of ``name or slug or id`` were in the tree before #810 and
+    one survived the first pass. This fails if a fifth appears.
+    """
+    from meho_backplane.ui.paths import templates_dir
+
+    offenders = [
+        path.relative_to(templates_dir()).as_posix()
+        for path in templates_dir().rglob("*.html")
+        if path.name != "_tenant_label.html"
+        and "session_tenant.name or session_tenant.slug" in path.read_text()
+    ]
+    assert offenders == [], (
+        f"these templates spell out the tenant fall-through instead of "
+        f"using the _tenant_label.html macro: {offenders}"
+    )

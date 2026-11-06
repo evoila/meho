@@ -44,6 +44,10 @@ Probe, enable and disable of a global (``tenant_id IS NULL``) row need a
 platform admin. The service refuses anyone else with
 :class:`DocCollectionGlobalUpdateForbiddenError`; the console shows a 403
 ``global_collection_update_forbidden`` alert and the row does not change.
+Every refusal alert (403, 409, 503) is an HTML fragment that carries the
+readiness card's id; htmx does not swap an error response on its own, so
+the detail page loads ``static/src/app/corpus-collection-actions.js``,
+which turns the swap on for the probe, enable and disable controls.
 
 Why in-process services, not the Bearer REST API
 ------------------------------------------------

@@ -243,6 +243,16 @@ nothing is refused too. The REST routes and the console get the check from
 the service. A tenant admin can still probe, enable and disable their own
 tenant's rows, also a tenant row that has the same key as a global row.
 
+In the console, a refused probe, enable or disable answers with the alert
+fragment `corpus/_probe_alert.html` (403, 409 or 503) whose root carries the
+readiness card's id. htmx does not swap an error response on its own, so the
+detail page loads `static/src/app/corpus-collection-actions.js`: on
+`htmx:beforeSwap` it turns the swap on for an HTML error answer to one of
+the three controls (`data-collection-action`), and closes the Disable
+confirm modal first. Every control targets `#collection-readiness-card`
+with `outerHTML`, so the alert replaces the readiness card and a later
+successful re-probe swaps the card back.
+
 ### REST routes (`meho_backplane.api.v1.doc_collections`)
 
 Three **tenant_admin-gated** routes (mirroring the connector

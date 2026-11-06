@@ -268,7 +268,7 @@ public-CA deploy needs neither.
 ## One-time realm redirect URIs
 
 `mcp-remote`'s OAuth callback path is **`/oauth/callback`** — not the
-`/callback` that Claude Code and the bootstrap script use. On a fixed
+`/callback` that Claude Code uses. On a fixed
 local port (below, `8456`), the `meho-mcp` client therefore needs
 **both** loopback forms as valid redirect URIs:
 
@@ -278,8 +278,11 @@ http://127.0.0.1:8456/oauth/callback
 ```
 
 `mcp-remote` tries `localhost` and its `127.0.0.1` twin, so register
-both. The port must match the one in the config below. The rest of the
-`meho-mcp` client shape (public PKCE client, five protocol mappers,
+both. The port must match the one in the config below. A realm made from
+the chart's realm file, or with `meho admin keycloak bootstrap-clients`,
+already has `http://localhost:*` and `http://127.0.0.1:*`, which cover
+both paths on any port. The rest of the
+`meho-mcp` client shape (public PKCE client, eight protocol mappers,
 four default scopes, and `offline_access`, `mcp:read`, `mcp:execute` and
 `mcp:admin` optional) is in
 [Keycloak realm setup](../install/keycloak-realm.md).

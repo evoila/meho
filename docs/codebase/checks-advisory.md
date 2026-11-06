@@ -46,7 +46,8 @@ dispatcher._reduce_and_audit_success(...)   # after audit + broadcast
           advisory:{tenant}:{principal_sub}:{actor_sub|-}:{dashboard_id}:
           {state} 1 NX EX <window-seconds>   # ONE awaited round-trip
         → include the dashboard ONLY when its SET claimed the key
-  → wrap_ok_result(..., extras={**activity, **checks})
+  → build_reflex_advisory(...)             # third fragment (agent sessions)
+  → wrap_ok_result(..., extras={**activity, **checks, **reflex})
 ```
 
 ## Design contract

@@ -27,7 +27,10 @@ self-authorizes.
 This package (`backend/src/meho_backplane/runner/`, #2497) is the runner
 **chassis**: entrypoint, settings, tick loop, poll/report client,
 on-disk retry spool, and work-item executor. The central endpoints the
-client polls land in #2499; the long-poll command plane in #2498.
+client polls are `GET /api/v1/checks/assignment` and
+`POST /api/v1/checks/results`. The long-poll command plane is
+`GET /api/v1/gateway/{runner}/next` and
+`POST /api/v1/gateway/{runner}/result`.
 
 ## Key types
 
@@ -161,7 +164,7 @@ value, so it needs no migration:
 | `safety_level` | Satellite tier | Mint outcome |
 |---|---|---|
 | `safe` | `SAFE` | mints on `AUTO_EXECUTE` — the read path, **unchanged** |
-| `caution` | `REMOTE_WRITE` | mints **only** through the composed write-path gate; fail-closed today |
+| `caution` | `REMOTE_WRITE` | mints **only** through the composed write-path gate: a committed approval, the central signing key and a matching allowlist entry must all be in place, or the mint is refused |
 | `dangerous`, `destructive` (or unknown) | `EXCLUDED` | **never** minted to a satellite |
 
 One exception: a `safe` operation that its connector marks as a safe write
@@ -291,6 +294,11 @@ are ever materialised into recurring assignments (`_is_runnable_safe`), and
 `remote-write` work rides the one-shot capability-mint path exclusively, so it
 never reaches that layer.
 
+The central MEHO reads its signing key from `SATELLITE_WRITE_SIGNING_KEY`.
+The runner reads the verification key from `SATELLITE_WRITE_VERIFY_KEY`
+and its own allowlist from `SATELLITE_WRITE_ALLOWLIST` (`settings.py`).
+When either is unset, every remote-write item is refused.
+
 Credential brokering (#3191) and revocation hardening (#3192) are the remaining
 sibling mechanisms.
 
@@ -344,8 +352,8 @@ the read path's coarse kill switch is untouched.
   already-delivered write in a revoked runner's spool still refuses at
   execution today. The residual in-flight window composes with the #3191
   credential seam (`screen_remote_write_credential` +
-  `WrappedCredentialBackend`): the wrapped vendor credential is brokered only
-  at the authorised mint — which this task blocks for a revoked runner — and
+  `WrappedCredentialBackend`): the wrapped vendor credential is meant to be
+  brokered only at the authorised mint — which this task blocks for a revoked runner — and
   is **single-use and TTL-bounded ≤ the capability expiry**, so a
   delivered-but-not-yet-executed write carries a short-lived one-shot secret,
   never a standing credential. Tying the wrapped-credential unwrap directly
@@ -388,9 +396,11 @@ standing credential and without the operator JWT:
   payload with a TTL bounded so the credential never outlives the capability
   (`credential TTL ≤ expires_at`). It returns only a `wrapped:<token>`
   reference; the credential value never leaves the centre. The brokered
-  reference is set as the runner-bound target descriptor's `secret_ref` at
-  mint (the approval-bound mint seam, #3189, calls the broker — this function
-  *is* the seam).
+  reference is meant to be set as the runner-bound target descriptor's
+  `secret_ref` at mint. The remote-write mint does not call the broker yet
+  (`operations/gateway_commands.py` does not import `wrapped_creds`), so a
+  remote-write item with no `wrapped:` reference is refused at the edge
+  (`screen_remote_write_credential`).
 - **Runner unwrap backend** (`WrappedCredentialBackend`, registered under kind
   `wrapped` on the shared credential seam) — the disk-spooled item carries only
   the single-use token as `secret_ref = wrapped:<token>`, honouring the
@@ -443,7 +453,7 @@ silence and tampering **observable**, they do not make a lying edge honest (that
 residual is bounded by the composition: allowlist × credential TTL).
 
 **Store-and-forward tamper-evident effect audit** (`runner/effect_audit.py`,
-DB-free — stdlib + pydantic, imported verbatim by the centre). For a
+DB-free — stdlib, pydantic and structlog, imported verbatim by the centre). For a
 `remote-write` item the runner appends a **hash-chained** record **before** the
 mutation (`intent`) and **after** it (`outcome`), keyed by a strictly-monotonic
 per-runner `seq`; each record's `record_hash = sha256(prev_hash + canonical_body)`
@@ -695,8 +705,8 @@ default), `GATEWAY_DEADMAN_TICK_INTERVAL_SECONDS` (default 30),
 ## Dependencies
 
 - `httpx` (already a direct backend dependency) for the poll/report
-  client; `httpx.MockTransport` stands in for the not-yet-built central
-  endpoints in tests.
+  client; `httpx.MockTransport` stands in for the central endpoints in
+  the runner client tests.
 - `pydantic` v2 for the wire models and settings.
 - `structlog` for JSON-to-stdout logging (`configure_logging`).
 - Reused DB-free chassis primitives: `logging.configure_logging`,

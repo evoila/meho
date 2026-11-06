@@ -166,9 +166,9 @@ parent's identity (the cheap tier's `Operator`). This means:
 - The deep tier's own `AgentPermission` rows (keyed on the deep
   tier's principal `sub` from `agent:r1-deep-tier-investigator`)
   layer on top of the inherited operator's role.
-- The audit row for the deep tier's child run records both
-  identities: `act_sub` = the deep tier's principal, `parent_run_id`
-  = the cheap tier's run id.
+- The deep tier's child `agent_run` row records `parent_run_id` =
+  the cheap tier's run id (`AgentRun.parent_run_id`; `audit_log` has
+  no `parent_run_id` column, and its actor column is `actor_sub`).
 
 Lineage is therefore reconstructable from the audit log: a
 forensic walker follows `parent_run_id` up to the cheap tier's
@@ -207,7 +207,8 @@ Two budgets fire on every closed-loop tick:
   for a `PolicyDecision`, but the cheaper model produces it). A
   hit on `cost_limit` raises `BudgetExceededError`; the cheap
   tier's `invoke_agent` call surfaces a `ModelRetry` ("child agent
-  failed: budget_exceeded"). The cheap tier can then decide
+  '<name>' failed: <error>. Try a different approach or answer
+  directly.", `agent/invoke.py`). The cheap tier can then decide
   whether to skip the event, defer it, or surface it to the
   operator as an unprocessable escalation.
 
@@ -249,9 +250,9 @@ than land on a multi-thousand-dollar cap by accident.
   of an in-prompt `add_to_memory` call.
 - The cheap tier's "rate baseline crossed by 3x" rule is documented
   in the system prompt as a signal source but requires the event
-  payload to carry `rate_baseline_x`. The broadcast feed does not
-  yet stamp that field; an in-flight enhancement to the broadcast
-  publisher would close that gap.
+  payload to carry `rate_baseline_x`. Broadcast carries agent
+  announcements only, and MEHO does not stamp that field. The caller
+  must add it to each event it passes in.
 - The harness builds a fresh `PydanticAgentRun` per
   `run_closed_loop` call rather than reusing the caller's
   runtime. A consumer wanting per-tick metrics on the same

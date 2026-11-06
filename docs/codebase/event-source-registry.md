@@ -65,7 +65,9 @@ soft-deleted tombstone frees the `name`/`slug` for re-use (the `targets`
   `event_source_secret_ref(tenant_id, slug)` derives
   `tenants/<tenant_id>/event-sources/<slug>`;
   `store_event_source_secret(operator, secret_ref, secret)` writes the
-  value through the secret-broker vault-kv sink.
+  value through the secret-broker vault-kv sink;
+  `read_event_source_secret(operator, secret_ref)` reads it back for the
+  ingest path.
 - **REST surface** (`api/v1/event_source.py`) — the CRUD router at
   `/api/v1/event-sources`, wired in `main.py`.
 
@@ -93,6 +95,10 @@ soft-deleted tombstone frees the `name`/`slug` for re-use (the `targets`
   `deleted_at`); the row stays for audit history, the partial indexes free
   the `name`/`slug`, and a second DELETE collapses to the uniform 404.
 
+Create, update and delete need `tenant_admin`. MEHO caps an agent
+token's role at `operator` (`auth/jwt.py`, `_cap_agent_role`), so an
+agent gets 403 `insufficient_role` on these writes.
+
 ## Secret-custody discipline
 
 The auth secret lives in Vault, never in the DB. The registry row stores
@@ -109,11 +115,16 @@ guards the log surface across the whole suite; the store path logs only
 `secret_ref` and never the traceback locals that would render the
 `secret` parameter name.
 
+At intake, MEHO reads the secret with the check runner's Vault role. That
+role's policy must cover `secret/data/tenants/+/event-sources/*`, or a
+source with a secret answers 503 (`events/ingest/service.py`). See
+`docs/cross-repo/vault-provisioning.md`, section 7.
+
 ## Extras (forward config for the ingest path)
 
-Per-source tuning the #2881 ingest reads — body-size cap, rate limit,
-replay window, dedupe config, and (for `basic` auth) the non-secret
-username — lives in the `extras` JSONB blob rather than first-class
+Per-source tuning the ingest path reads — body-size cap, rate limit,
+replay window, whether a timestamp is required, the header names, and
+(for `basic` auth) the non-secret username (`events/ingest/config.py`) — lives in the `extras` JSONB blob rather than first-class
 columns, keeping the schema to #2880's explicit column set.
 
 ## Dependencies

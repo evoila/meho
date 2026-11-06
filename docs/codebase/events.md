@@ -59,8 +59,8 @@ Plus the persistence shape in
   (`NULL` for internal producers; a producer-supplied idempotency token
   for at-least-once external ingest), and `origin` (`NULL` = internal
   producer, else the external event-source id). Two partial indexes:
-  `(processed_at, event_id)` on `processed_at IS NULL` drives the
-  drain's claim query, and the **unique** `event_outbox_tenant_dedupe_idx`
+  `event_outbox_unprocessed_idx` on `(event_id)` `WHERE processed_at IS
+  NULL` drives the drain's claim query, and the **unique** `event_outbox_tenant_dedupe_idx`
   on `(tenant_id, dedupe_key)` `WHERE dedupe_key IS NOT NULL` makes a
   duplicate external delivery collide at insert.
 - `EVENT_OUTBOX_NOTIFY_CHANNEL` — the PG channel name the producer
@@ -176,12 +176,12 @@ On each tick (default 10s, settable via
    `SKIP LOCKED` is the belt-and-braces guarantee: even with the
    advisory-lock guard removed, two concurrent claimers never receive
    the same row. The partial index
-   `event_outbox_unprocessed_idx ON (processed_at, event_id) WHERE
-   processed_at IS NULL` keeps the claim query O(log unprocessed)
+   `event_outbox_unprocessed_idx ON (event_id) WHERE processed_at IS
+   NULL` (a plain index on `event_id` on SQLite) keeps the claim query O(log unprocessed)
    rather than O(total rows).
 
 3. **Stamp `claimed_at` + `claimed_by`** (observability — the
-   `claimed_by` column carries `pod_name` so a stuck poll can be
+   `claimed_by` column carries `<hostname>:<pid>` so a stuck poll can be
    traced to the holding replica). The claim is a separate UPDATE on
    the same open session as the SELECT; the FOR UPDATE row-lock
    carries through to the UPDATE.
@@ -627,11 +627,11 @@ comfortable; revisit if a connector emits bursts.
 
 ## Settings
 
-Both gated via env vars (defaults shown in parens):
+All three are set through env vars (defaults shown in parens):
 
 - `EVENT_DRAIN_ENABLED` (`true`) — start the drain task at lifespan
-  startup. `false` opts out cleanly (the start helper returns `None`
-  and the lifespan shutdown tolerates that shape).
+  startup. `false` opts out cleanly (the lifespan does not start the
+  drain task, and shutdown skips the stop step).
 - `EVENT_DRAIN_TICK_INTERVAL_SECONDS` (`10`, range `[1, 3600]`) —
   bound between consecutive polled scans. The `NOTIFY` hint can cut
   the actual wake-up shorter than this interval; this bounds the

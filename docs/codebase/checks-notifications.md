@@ -108,6 +108,11 @@ a malformed one) and
 forwards the raw comma-separated string; the server splits and validates
 each entry).
 
+Each recipient must be a plain address: the part before the `@` may
+hold only letters, digits and `.`, `_`, `+` and `-`
+(`connectors/mail/allowlist.py`). MEHO refuses any other recipient
+before it connects to the mail server.
+
 ## The notify rule
 
 ```
@@ -456,8 +461,10 @@ from the memo would mean re-mailing every unchanged evaluation.
   still out of scope: routing rules, per-recipient `notify_min_state`,
   per-Sensor recipients, templating, and digests/batching — the flat
   closed list is deliberate (#2716 boundary). More when a consumer asks.
-- **Deployment-level SMTP.** One MTA and one allowlist for the whole
-  backplane; there is no per-tenant mail config. A tenant admin can
+- **Deployment-level SMTP.** One mail server and one deployment
+  allowlist cover all check mails. The per-tenant recipient allowlist
+  (`connectors/mail/tenant_policy.py`) applies only to a dispatched
+  `mail.send`; check mails do not use it. A tenant admin can
   therefore name a recipient the allowlist refuses. Since #2764 that
   refusal is per-entry: the offending recipient is dropped and
   warn-logged (`checks_notify_recipient_refused`) while the allowlisted

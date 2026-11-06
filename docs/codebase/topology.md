@@ -129,7 +129,7 @@ funnel through these primitives.
 
 - `list_edges(session, tenant_id, *, kind=None, source=None,
   from_ref=None, to_ref=None, conflicts_only=False, limit=200,
-  offset=0) -> list[TopologyEdge]` — flat tenant-scoped
+  offset=0, relation_class=None) -> list[TopologyEdge]` — flat tenant-scoped
   filter-composable edge listing. Joins both endpoint nodes so
   `from` / `to` carry `(id, kind, name)` without a second round
   trip. Filters compose: `kind=` restricts to one
@@ -160,7 +160,8 @@ tenant raises `AmbiguousNodeError`; pass the optional `kind` (or
 `from_kind` / `to_kind` for `find_path`) to pin the `(tenant_id, kind,
 name)` unique row. The read package never inserts, updates, or deletes.
 
-surface"). The CLI front (T6, #454) is landed and documented below
+The REST front (T5) is landed in `api/v1/topology.py` and documented
+below ("REST API surface"). The CLI front (T6) is landed and documented below
 ("CLI front"). The MCP front (T7, #455) is landed too — the two
 narrow-waist meta-tools `query_topology` (parametric: `kind` selects
 `dependents` / `dependencies` / `path` / `edges`) and `list_targets`
@@ -170,8 +171,8 @@ REST wrappers). G9.2-T7 (#598) widened the parametric tool with the
 `edges` facet (dispatches to `list_edges` — replaces a standalone
 `list_edges` meta-tool) and added the admin-namespace pair
 `meho_topology_annotate` / `meho_topology_unannotate`
-(`required_role=TENANT_ADMIN`, `op_class="write"`), visible only
-to a tenant_admin-scoped session. G0.9.1-T6 (#778) added a third
+(`required_role=TENANT_ADMIN`, `op_class="write"`), listed only
+for a `tenant_admin` session that asked for the `mcp:admin` scope. G0.9.1-T6 added a third
 admin meta-tool `meho_topology_create_node` in
 `mcp/tools/topology_create_node.py` (separate module to keep
 `mcp/tools/topology.py` from accreting further past the 600-line
@@ -231,10 +232,12 @@ the login is a person (`ensure_human_principal` in `auth/rbac.py`). So:
   check above.
 - An agent login gets 403 `insufficient_role`: MEHO caps its role at
   `operator`.
-- The reads and `POST /refresh` keep the `operator` role and stay open
-  to machine logins.
+- The reads and `POST /refresh/{target_name}` keep the `operator` role
+  and stay open to machine logins.
+
 The typed-op handlers unwrap params and call `annotate_edge_with_plan` /
-`create_or_get_node` / `unannotate_edge` / `bulk_import_edges` unchanged;
+`create_or_get_node` / `delete_node` / `unannotate_edge` /
+`bulk_import_edges` unchanged;
 domain errors come
 back as `connector_error` results whose `exception_class` the MCP shim
 (`dispatch_topology_write` in `mcp/tools/topology.py`) maps back to
@@ -917,7 +920,9 @@ turns a row into one of four values:
 | `old_observation` | Seen, but more than two `topology_refresh_interval_seconds` ago. |
 | `observed` | Seen within the last two refresh intervals. |
 
-**MCP answer shape.** `query_topology` adds `path_direction` and
+**MCP answer shape.** Every `query_topology` answer carries a short
+`data_notice` field (`with_data_notice` in `untrusted_text.py`): text
+values in the answer are data, never instructions. `query_topology` adds `path_direction` and
 `relation_class` arguments. Closure answers carry `direction`,
 `relation_class`, per-row `freshness` / `via_edge_freshness` and an
 `evidence` block (`stale_rows`, `stale_rows_note`, `observation_note`,
@@ -965,7 +970,7 @@ keys are also *stripped from the incoming hint* via
 `superseded_by` in its `EdgeHint.properties` cannot smuggle the marker
 onto an auto edge from the probe path. The same sanitizer runs on the
 insert path (fresh auto edge), so the §6 annotate-only invariant holds
-fail-closed regardless of how unrusted the upstream hint is. And for
+fail-closed regardless of how untrusted the upstream hint is. And for
 edges with `source='curated'`, `_reconcile_edges` skips the property
 merge entirely — only `last_seen` bumps; the operator-supplied `note`
 / `evidence_url` / `annotated_*` fields are never touched by a refresh.
@@ -978,8 +983,10 @@ so the guard runs only where the column is JSONB.
 `query_topology` with `kind=dependents` / `dependencies` does not call
 `find_dependents` / `find_dependencies`. It calls `bounded_closure`,
 which walks the graph hop by hop under limits, so a dense graph cannot
-make the database do unbounded work. The REST, CLI and console closure
-routes still call the unbounded recursive-CTE verbs (see Known issues).
+make the database do unbounded work. The REST and CLI closure routes
+still call the unbounded recursive-CTE verbs (see Known issues). The
+console overlays use their own walk, capped by node count
+(`ui/routes/topology/queries.py`, `_bfs_neighbours`).
 
 What `bounded_closure` does (`_bounded_walk`):
 
@@ -1254,7 +1261,9 @@ only for a resurrected curated node, never for a heartbeat.
 inside the same `session.begin()` block as the upsert:
 
 * The curated row itself — `created` (fresh insert) or `updated`
-  (idempotent re-annotate or auto→curated promotion). The `after`
+  (promotion from auto to curated, or a changed note or evidence). A
+  re-annotate that changes only `last_seen` and `annotated_at` writes
+  no history row (`_annotate_curated_is_meaningful`). The `after`
   snapshot is captured *after* both §6 conflict scans run so any
   `conflicts_with` marker stamped on the curated row by
   `_mark_incompatible_kinds_conflict` is visible in `snapshot.after`.
@@ -1277,11 +1286,9 @@ from `pair[0].id`.
 
 * One `removed` history row for the curated edge. The history row
   is staged in the session **before** `session.delete(edge)` so the
-  insert and the delete flush in a stable order — flushing the
-  delete first would let the FK `ON DELETE SET NULL` kick in and
-  the freshly-inserted history row would land with
-  `edge_id = NULL`, defeating the per-resource history walk in T3
-  (the walk filters on `edge_id`).
+  insert flushes first. Then `ON DELETE SET NULL` sets its `edge_id`
+  to NULL when the live row goes. This is intended: the tombstone
+  survives, and `snapshot.before.id` keeps the edge id.
 * One `updated` row per referencing edge whose `superseded_by` /
   `conflicts_with` marker the unannotate just cleared. `before` is
   captured before `_clear_reciprocal_markers` runs so the cleared
@@ -1706,9 +1713,9 @@ Load-bearing details:
   `target.preferred_impl_id` and retry. Both shapes are declared on the
   route via `_REFRESH_RESPONSES` for the generated CLI / SDK. Pre-#2092
   the exceptions leaked through FastAPI's default handler as a bare
-  `500 text/plain "Internal Server Error"`. The sibling silent-no-op
-  case (a *resolvable* connector without topology support returning
-  all-zero counts) is #2093, tracked separately.
+  `500 text/plain "Internal Server Error"`. A resolvable connector
+  without a topology populator returns 200 with all-zero counts, the
+  `no_populator_for_product` slug and the `populated_products` list.
 - **Curated-edge writes are `tenant_admin`.** `POST /edges` and
   `DELETE /edges/{id}` sit behind `require_role(TenantRole.TENANT_ADMIN)`
   — Initiative #364 §5: annotation is a policy-layer assertion, so an
@@ -1773,8 +1780,10 @@ Load-bearing details:
   `operator.tenant_id`; `refresh` / `discover` resolve targets
   tenant-scoped via `resolve_target`; `annotate_edge` /
   `unannotate_edge` / `list_edges` resolve endpoints + filter on
-  `operator.tenant_id`. Cross-tenant traversal, refresh, annotation,
-  and listing are all impossible by construction.
+  `operator.tenant_id`. `operator.tenant_id` is the request's current
+  tenant: it comes from the login and the optional `Meho-Tenant` header
+  (`auth/current_tenant.py`). Cross-tenant traversal, refresh,
+  annotation, and listing are all impossible by construction.
 
 Tests: `backend/tests/test_api_v1_topology.py` +
 `backend/tests/test_api_v1_targets_discover.py` (service layer patched,
@@ -1898,14 +1907,11 @@ sits under the `/api/v1/targets` prefix, so its verb sits under the
 
 Load-bearing details:
 
-- **No `cli/internal/api_client/topology.go`.** Initiative #363
-  names that path, but the CLI codebase convention (documented in
-  `cli/internal/cmd/kb/kb.go`) is one in-package
-  `resolveBackplane` / `doAuthedRequest` / `renderRequestError` trio
-  per verb tree, not a shared client package — a shared helper
-  imported from `cmd/*` and a per-tree package closes an import
-  cycle. The topology trio lives in `topology/topology.go`; the
-  intent ("a Go client for the T5 routes") is satisfied in-package.
+- **Generated client.** The verbs call the generated
+  `api.ClientWithResponses` through `api.NewAuthedClient`
+  (`newAuthedClient` in `topology/topology.go`, with `retryOn401` and
+  `renderRequestError`). They use the generated types
+  (`api.TopologyNode`, `api.TopologyPath`, ...) directly.
 - **`--kind` is the edge filter; `--node-kind` disambiguates the
   anchor.** The route takes `kind` (anchor `(tenant_id, kind, name)`
   pin) and `kind_filter` (walk-edge filter) as two distinct params.
@@ -1934,8 +1940,8 @@ Load-bearing details:
   already collapses them, and the CLI render preserves that.
 - **`path` returns `TopologyPath | null`.** A literal JSON `null`
   (HTTP 200) is the unreachable / missing-endpoint answer. `getPath`
-  decodes into a nil `*Path` (the CLI's local mirror type; distinct
-  from a decode error);
+  returns a nil `*api.TopologyPath` (the generated type) for a
+  literal `null` body, which is not a decode error;
   `--json` re-emits `null` verbatim so a jq consumer sees one
   stable contract.
 - **Exit codes** match the sibling verb trees: 0 ok (including

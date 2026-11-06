@@ -88,12 +88,14 @@ rollup (no LLM), and the *deep tier* is the scheduled agent run.
    `topology.query.find_dependencies` returns the forward closure. Members
    whose closures intersect are unioned into one cause group. The group key is
    the deepest shared closure node (maximal minimum depth, ties broken by
-   `(kind, name)`), slugified — the deterministic key that is both the
+   `(kind, name)`), slugified, plus a short hash of the node's kind and
+   name — the deterministic key that is both the
    `work_ref` group segment and the memory-slug suffix. A member whose anchor
    is unresolvable — no `name` in the target dict, or an untracked / ambiguous
    node (`NodeNotFoundError` / `AmbiguousNodeError`, the expected state for
    every non-k8s target today, since only the Kubernetes connector overrides
-   `discover_topology`) — forms a singleton keyed on its own Sensor slug. So
+   `discover_topology`) — forms a singleton keyed on its own Sensor slug
+   plus the first 8 hex characters of the Sensor id. So
    correlation degrades gracefully to per-Sensor investigations when topology
    has no data.
 3. **Suppression** (`_is_suppressed`). Read the `checks-noise-<group-key>`

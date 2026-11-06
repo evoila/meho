@@ -83,8 +83,8 @@ was closed as not planned).
   card shows when it was updated. Both need the `operator` role, the
   same minimum as the audit API: a `read_only` session (or a role lift
   that cannot complete) sees a notice instead of rows, and the fragment
-  answers 403 (`ui/roles.py::is_ui_operator`, `connectors/operator.py`
-  `is_operator`).
+  answers 403 (`ui/roles.py::is_ui_operator`,
+  `ui/routes/connectors/operator.py` `OperatorRoleProbe.is_operator`).
 - *Checks.* See [`checks-broadcast.md`](checks-broadcast.md).
 
 Plain JS timers are used instead of `hx-trigger="every 5s [filter]"`
@@ -162,9 +162,8 @@ CSP does not allow.
   - `credential_write` (`vault.kv.put`, `vault.auth.userpass.write` /
     `.update_password`, `k8s.secret.create`, G11.7-T1 #1401) —
     **request params** carry the secret; aggregate-only.
-  - `approval` (`approval.*` lifecycle events, G10.7-T3 #1778) — full
-    detail; exists so the approvals console bell can filter the SSE
-    bridge server-side.
+  - `approval` (`approval.*` lifecycle op ids) — full detail. Every
+    `approval.*` op id gets this class.
   - `checks` (`checks.transition`) — full detail. Checks publish
     no Broadcast event; the class stays so older stream entries and
     stored op-ids classify the same way. Matched by an **exact-membership allowlist**
@@ -207,12 +206,11 @@ CSP does not allow.
   - With no declared class, the class is `classify_op(op_id)`.
 
   Where it is used:
-  - **MCP `tools/call`** (`mcp/handlers.py`): the row and the event carry
-    the resolved class, and the event carries the row's `op_id` (the tool
-    name, or the `audit_op_id` the handler bound). `call_operation` keeps
-    `tool_call` on both; only the redaction detail comes from the inner op.
-    `resources/read` rows carry `op_id = mcp.resource.read` and `read`, like
-    their events.
+  - **MCP `tools/call`** (`mcp/handlers.py`): the audit row carries the
+    resolved class and the row's `op_id` (the tool name, or the
+    `audit_op_id` the handler bound). `call_operation` keeps `tool_call`.
+    `resources/read` rows carry `op_id = mcp.resource.read` and `read`.
+    No Broadcast event is published.
   - **Dispatch rows** (`operations/_audit.py`): the row's `op_id` is
     always the op that ran, and the row stores its class
     (`descriptor_op_class`, see below). A route label that is still bound
@@ -311,7 +309,7 @@ MCP tools/call meho_broadcast_announce   (REST: POST /api/v1/broadcast/announce)
       → (skipped when broadcast_announce_rate_per_minute == 0)
       → MULTI: INCR meho:ratelimit:announce:{tenant}:{sub}:{minute}
                EXPIRE …  60
-      → count > limit → AnnounceRateLimitExceeded
+      → count > limit → AnnounceRateLimitError
            → McpRateLimitedError → JSON-RPC -32000 (retry-after in data)
     → build_trusted_announcement(admission, …)  (broadcast/announcement_claims.py)
       → stamps principal, owner, actor, run, work_ref; mints claim_id on
@@ -606,7 +604,10 @@ claim columns from migration `0112` (#3736): `claim_id`, `owner_sub`,
 `actor_sub`, `admission`, `idempotency_key`, `stream_entry_id`, plus
 `seq` from migration `0114` (#3748). Indexes:
 `(tenant_id, created_at DESC)` (recent backfill + prune) and
-`(tenant_id, work_ref)` (filter). This is the split Kubernetes draws
+`(tenant_id, work_ref)` (filter). Migration `0135` adds
+`(tenant_id, principal_sub, created_at DESC)`, so the caller's
+active-claim lookup (`announce_claim_lookup.py`) reads only the caller's
+own rows. This is the split Kubernetes draws
 between its bounded Events TTL and the durable records it expects
 elsewhere.
 
@@ -776,11 +777,14 @@ instead of claiming to be complete:
 - `BROADCAST_REDIS_URL` env var — production points at the Helm
   chart's `redis://{{ .Release.Name }}-broadcast:6379/0` Service.
   Dev default is `redis://localhost:6379`. Schemes other than
-  `redis://` / `rediss://` / `unix://` are rejected at startup.
-- `prometheus_client.Counter` — two counters surface the publish
-  path on `/metrics` (`broadcast/publisher.py`):
-  `broadcast_publish_errors_total`,
-  `broadcast_agent_announcements_total{phase}`.
+  `redis://` / `rediss://` / `unix://` are rejected at startup. The
+  same Valkey store also holds the per-person request limits and the MCP
+  session-start limits (`operations/dispatch_limits.py`,
+  `mcp/session_limit.py`).
+- `prometheus_client.Counter` — three counters on `/metrics`:
+  `broadcast_publish_errors_total` and
+  `broadcast_agent_announcements_total{phase}` (`broadcast/publisher.py`),
+  and `broadcast_announce_rate_limited_total` (`broadcast/rate_limit.py`).
 
 ## Known issues
 
@@ -834,18 +838,10 @@ frame. A genuine transport failure — socket dead past the 35 s
 window — still raises `redis.TimeoutError` and still produces the
 T11 error frame (the operator-side remediation is the same).
 
-**Acceptance tests** live in `backend/tests/test_api_v1_feed.py`
-under `TestFeedGenerator`:
+**Tests.** The stream reader and its tests are gone; `TestFeedGenerator`
+in `backend/tests/test_api_v1_feed.py` covers the archive reader. Still
+in place:
 
-- `test_quiet_stream_block_timeout_yields_no_error_frame` — quiet
-  BLOCK returns `None` → heartbeat, NOT `feed_error`.
-- `test_fresh_dollar_quiet_stream_survives_past_fast_socket_timeout`
-  — direct repro of the consumer signal: fresh `$` connection
-  survives a window longer than the fast client's 5 s timeout and
-  emits a heartbeat.
-- `test_transport_timeout_mid_stream_emits_feed_error_after_prior_events`
-  — `redis.TimeoutError` (now a genuine transport failure
-  post-fix) still produces the T11 error frame.
 - `test_broadcast_client.py:TestBlockingClientLifecycle` —
   asserts the fast / blocking split, distinct pools, and the
   ≥30 s socket_timeout invariant on the blocking client.
@@ -914,12 +910,8 @@ The cap (`_BACKLOG_PRELUDE_COUNT = 50`) matches the MCP
 `tenant_feed` snapshot ceiling so the SSE prelude and the MCP
 resource surface the same window of context on first connection.
 
-**Acceptance test** lives in `backend/tests/test_api_v1_feed.py`
-under `TestFeedBacklogPrelude`. The test mirrors the reported repro:
-publish via `_publish_event_into_mock` → open the SSE generator →
-assert the published events show up in the first batch of frames
-within bounded latency. A second test asserts that an explicit
-`since=` cursor skips the prelude.
+**Tests.** The stream reader and its tests are gone; `TestFeedGenerator`
+in `backend/tests/test_api_v1_feed.py` covers the archive reader.
 
 ### SSE feed delivers zero bytes on deploy — `AuditMiddleware` buffered the stream (FIXED, #1389)
 
@@ -989,7 +981,8 @@ investigation. #1305 is the closing fix.
   - MCP tools: `backend/src/meho_backplane/mcp/tools/broadcast.py`.
   - Override CRUD (REST): `backend/src/meho_backplane/api/v1/broadcast_overrides.py`.
   - Override UI tab (BFF, tenant_admin): `backend/src/meho_backplane/ui/routes/broadcast/overrides.py` — the Overrides tab on `/ui/broadcast` (#1891). Lists/creates/deletes `BroadcastOverride` rows through the REST plane's `list_overrides_impl` / `create_override_impl` / `delete_override_impl` in-process (the same impl the admin MCP tools call), gated to `tenant_admin` via `resolve_operator_or_403`; delete is a two-step `<dialog>` confirm that spells out the re-exposure consequence; the create form echoes the 422 glob-not-regex / 409 already-exists as inline errors. The sensitive-op cross-link in the event drawer (`_event_drawer.html`) pre-fills the create form's `op_id_pattern`.
-  - History (XRANGE) helper: `backend/src/meho_backplane/broadcast/history.py`.
+  - Shared read helpers (filter, parse, serialise): `backend/src/meho_backplane/broadcast/history.py`.
+  - The archive reader: `backend/src/meho_backplane/broadcast/archive_reader.py`.
   - Dispatch-time target-activity advisory (#2550): `backend/src/meho_backplane/broadcast/target_advisory.py`.
   - Caller's active-claim lookup (#4091): `backend/src/meho_backplane/broadcast/announce_claim_lookup.py`.
   - Client / lifespan: `backend/src/meho_backplane/broadcast/client.py`.

@@ -426,6 +426,7 @@ func TestStatus_RefreshRejected_ExitsAuthExpiredWithSessionMessage(t *testing.T)
 	idpMux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(mustJSON(map[string]any{
+			"issuer":                        idp.URL,
 			"token_endpoint":                idp.URL + "/token",
 			"device_authorization_endpoint": idp.URL + "/device",
 		}))

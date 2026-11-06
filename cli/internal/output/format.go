@@ -283,7 +283,9 @@ func RenderError(stderrW io.Writer, err *StructuredError, jsonOut bool) error {
 	// rendering to stderr ourselves so we don't depend on cobra's
 	// default printer (status.go runs with SilenceErrors=true so
 	// the JSON envelope on the --json path stays uncontaminated).
-	fmt.Fprintln(stderrW, err.Error())
+	// The detail often carries text from the server; SafeLines shows its
+	// control characters as visible escapes and keeps the line breaks.
+	fmt.Fprintln(stderrW, SafeLines(err.Error()))
 	return &silentError{exit: err.Exit}
 }
 

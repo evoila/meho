@@ -15,8 +15,19 @@ Routes
   of steps and a Start button. Mints a CSRF token and re-sets the cookie,
   like the detail modal.
 * ``POST /ui/approvals/in-order`` (form: ``work_ref``, ``reason``,
-  ``confirm_id``) -- runs the steps on the server, oldest first, and
-  renders the modal again with what happened to each step.
+  ``confirm_id``, one ``step_id`` per step shown) -- runs the steps on the
+  server, oldest first, and renders the modal again with what happened to
+  each step.
+
+The run covers only the steps the operator saw
+---------------------------------------------
+
+Every form of the modal carries one hidden ``step_id`` for each step it
+lists. Before anything is approved, the POST reads the change ticket
+again and compares: when a pending request of the ticket is not among the
+posted ids (it joined the ticket after the modal was rendered), the run
+approves nothing. It shows the list again with the new steps marked, and
+the operator starts again from there.
 
 How a run goes
 --------------
@@ -196,6 +207,8 @@ class _Run:
     stopped: _Step | None = None
     #: The run stopped because the step's approval needs a new sign-in.
     sign_in_needed: bool = False
+    #: Pending steps the operator was not shown; the run approved nothing.
+    unseen: list[_Step] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -226,13 +239,24 @@ def build_in_order_router() -> APIRouter:
         work_ref: str = Form(min_length=1, max_length=_MAX_WORK_REF_LENGTH),
         reason: str = Form(default="", max_length=MAX_REASON_LENGTH),
         confirm_id: str = Form(default=""),
+        step_id: list[str] = Form(default_factory=list),
     ) -> HTMLResponse:
         """Run the steps in order; render what happened to each."""
         operator = await _routes._resolve_operator(session)
         confirmed = _parse_confirm_id(confirm_id)
+        shown = {_parse_request_id(raw, "step_id") for raw in step_id}
         ref = work_ref.strip()
         run = _Run(steps=await _load_steps(operator, ref))
         run.warnings = group_warnings([s.row for s in run.steps])
+        run.unseen = _unseen_pending(run.steps, shown)
+        if run.unseen:
+            log.info(
+                "ui_approval_in_order_unseen_steps",
+                work_ref=ref,
+                unseen=[str(s.row.id) for s in run.unseen],
+                operator_sub=operator.sub,
+            )
+            return await _render(request, session, ref, run, reason=reason, started=False)
         await _run_steps(operator, run, reason=reason, confirmed=confirmed)
         response = await _render(request, session, ref, run, reason=reason, started=True)
         if run.approved_now:
@@ -247,10 +271,25 @@ def build_in_order_router() -> APIRouter:
 def _parse_confirm_id(raw: str) -> uuid.UUID | None:
     if not raw:
         return None
+    return _parse_request_id(raw, "confirm_id")
+
+
+def _parse_request_id(raw: str, name: str) -> uuid.UUID:
     try:
         return uuid.UUID(raw)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail="confirm_id is not a request id") from exc
+        raise HTTPException(status_code=422, detail=f"{name} is not a request id") from exc
+
+
+def _unseen_pending(steps: list[_Step], shown: set[uuid.UUID]) -> list[_Step]:
+    """The pending steps whose id the form did not post.
+
+    The form posts the id of every step it listed. A pending step that is
+    not among them joined the change ticket after the modal was rendered,
+    so the operator has not seen it.
+    """
+    pending = ApprovalRequestStatus.PENDING.value
+    return [s for s in steps if s.row.status == pending and s.row.id not in shown]
 
 
 async def _load_steps(operator: Operator, work_ref: str) -> list[_Step]:
@@ -465,6 +504,7 @@ async def _render(
         "waiting": _project_step(run.waiting) if run.waiting else None,
         "waiting_context": waiting_context,
         "stopped": _project_step(run.stopped) if run.stopped else None,
+        "unseen": [_project_step(s) for s in run.unseen],
         "sign_in_url": (
             login_location(_ticket_page(work_ref), fresh_sign_in=True)
             if run.sign_in_needed

@@ -25788,6 +25788,13 @@
             "type": "string",
             "title": "Confirm Id",
             "default": ""
+          },
+          "step_id": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Step Id"
           }
         },
         "type": "object",

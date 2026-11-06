@@ -304,6 +304,10 @@ async def test_gateway_add_config_read_failure_raises() -> None:
         {"name": "LAB_GW", "interface": "lan rm", "gateway": "10.0.0.1"},
         {"name": "LAB_GW", "interface": "lan", "gateway": "not-an-ip"},
         {"name": "LAB_GW", "interface": "lan", "gateway": "10.0.0.1; rm -rf /"},
+        {"name": "LAB_GW", "interface": "lan", "gateway": "fe80::1%x;id"},
+        {"name": "LAB_GW", "interface": "lan", "gateway": "2001:db8::1%a b"},
+        {"name": "LAB_GW", "interface": "lan", "gateway": "fe80::1%em0"},
+        {"name": "LAB_GW", "interface": "lan", "gateway": " 10.0.0.1"},
         {"name": "LAB_GW", "interface": "lan"},  # missing gateway
         {"name": "LAB_GW", "interface": "lan", "gateway": "10.0.0.1", "descr": "a\nb"},
         {"name": "LAB_GW", "interface": "lan", "gateway": "10.0.0.1", "descr": "   "},
@@ -655,3 +659,22 @@ def test_write_ops_are_caution_no_approval_with_write_tag() -> None:
         assert op.parameter_schema.get("additionalProperties") is False, op.op_id
         assert op.llm_instructions and op.llm_instructions.get("when_to_use"), op.op_id
     assert seen == write_ids
+
+
+@pytest.mark.parametrize(
+    ("gateway", "valid"),
+    [
+        ("10.0.0.1", True),
+        ("2001:db8::1", True),
+        ("fe80::1%x;id", False),
+        ("2001:db8::1%a b", False),
+        (" 10.0.0.1", False),
+    ],
+)
+def test_gateway_add_schema_refuses_a_zone_or_spaces(gateway: str, valid: bool) -> None:
+    from jsonschema import Draft202012Validator
+
+    op = next(o for o in PFSENSE_OPS if o.op_id == "pfsense.gateway.add")
+    validator = Draft202012Validator(op.parameter_schema)
+    params = {"name": "LAB_GW", "interface": "lan", "gateway": gateway}
+    assert validator.is_valid(params) is valid

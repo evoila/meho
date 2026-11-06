@@ -48,6 +48,25 @@ checks the person who runs it from an approvals surface once more. The
 requester's own run is not checked again: the agent's resume, and the
 re-run of a failed approved call by the requester, also a service login.
 
+**REST writes are for people.** `POST`, `PATCH` and `DELETE
+/api/v1/targets` use one gate, `_require_admin_person` in
+`api/v1/targets.py`. It checks the `tenant_admin` role first, then that
+the login is a person (`ensure_human_principal` in `auth/rbac.py`). So:
+
+- A person with `tenant_admin` writes at once (the CLI, scripts).
+- A service login with `tenant_admin` gets 403 `human_principal_required`.
+  The text names `targets.register` and `targets.remove`, the operations
+  a machine login uses. Both go through the approval check above. No
+  operation changes a target, so a machine login cannot change one.
+- An agent login gets 403 `insufficient_role`: MEHO caps its role at
+  `operator`.
+- Reads (`GET`, `probe`) keep the `operator` role and stay open to
+  machine logins.
+
+The console and the operations call `create_target`, `update_target` and
+`soft_delete_target` as functions, not through the routes, so the gate
+does not apply to them. The console signs people in through the browser.
+
 This document covers the two **list** paths, how `list_targets`
 bounds its response (#3858), how the single-target REST routes find a
 target, the name and host rules for new targets (#5244), the per-target
@@ -391,7 +410,7 @@ automation pack therefore works for SSH key login with no map at all. When
 both fields are present, `ssh_private_key` wins.
 ## Control flow — deleting a target
 
-`DELETE /api/v1/targets/{name}` (`tenant_admin`) and the CLI verb
+`DELETE /api/v1/targets/{name}` (a person with `tenant_admin`) and the CLI verb
 `meho targets delete <name> [--force] [--confirm]` (#3943) on top of it:
 
 1. The CLI asks y/N first unless `--confirm` is given. Closed stdin

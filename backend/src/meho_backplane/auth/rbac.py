@@ -283,7 +283,9 @@ HUMAN_ONLY_REST_REMEDIATION: Final[str] = (
 )
 
 
-def ensure_human_principal(operator: Operator) -> None:
+def ensure_human_principal(
+    operator: Operator, *, remediation: str = HUMAN_ONLY_REST_REMEDIATION
+) -> None:
     """Refuse a machine principal on a human-only governance verb (#289).
 
     Transport-independent guard for the verbs that are a **human**
@@ -305,6 +307,11 @@ def ensure_human_principal(operator: Operator) -> None:
     (#3243) and the seniority self-approval rules are preserved unchanged
     for **human** principals: this gate only removes machine kinds; every
     human decision path downstream is untouched.
+
+    ``remediation`` is the text after the ``human_principal_required:``
+    prefix. A person-only route that is not an approval decision passes
+    its own text (the target writes name the operations a machine login
+    uses instead).
     """
     if is_human_principal(operator):
         return
@@ -315,7 +322,7 @@ def ensure_human_principal(operator: Operator) -> None:
     )
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail=f"human_principal_required: {HUMAN_ONLY_REST_REMEDIATION}",
+        detail=f"human_principal_required: {remediation}",
     )
 
 

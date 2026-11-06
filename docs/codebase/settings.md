@@ -169,6 +169,13 @@ them at once.
   sentence with its line, never a server error.
 - A YAML syntax error, or an unknown tag, gives only its line: PyYAML's own
   message can quote the input, and nothing has been checked for secrets yet.
+- YAML anchors (`&name`) and aliases (`*name`), merge keys with an alias
+  included, are refused with their line: "The file is not valid YAML on
+  line N: anchors (`&`) and aliases (`*`) are not accepted; write each value
+  out." The file is refused before any node is built, so no later check runs.
+  The anchor name is never shown back.
+- The file is parsed and checked in a worker thread, not on the event loop,
+  so a large file does not hold up other requests.
 - `!!binary`, `!!pairs`, `!!omap` and `!!set` values are refused and never
   built: each would hide its contents from the secret check and reach JSON
   as readable text. Nothing else is checked, as with a secret.
@@ -213,7 +220,9 @@ on it: stored data that would be refused on import (a JWT in a target's
 export with 409 `settings_export_refused` and a `mistakes` list naming each
 path, never the value. Move the secret into OpenBao and export again. Tenants are sorted by id, conventions by slug, targets
 by name, and keys come in a fixed order, so the same state always gives the
-same `spec`.
+same `spec`. The export writes each value out each time it appears
+and never writes a YAML anchor or alias, so an exported file always imports
+again.
 
 ### `POST /api/v1/settings/import?preview=true`
 

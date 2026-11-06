@@ -25,6 +25,7 @@ their product, impl-id, ``secret_ref`` scope and TLS checks) for targets.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import re
@@ -301,11 +302,23 @@ async def export_settings(session: AsyncSession, tenant_ids: list[uuid.UUID]) ->
     }
 
 
+class _NoAliasDumper(yaml.SafeDumper):  # type: ignore[misc]  # yaml has no stubs here
+    """``SafeDumper`` that writes a value out each time it appears.
+
+    The import refuses anchors and aliases, so the export never writes one,
+    even when one object appears twice in the document.
+    """
+
+    def ignore_aliases(self, data: Any) -> bool:
+        return True
+
+
 def dump_settings_yaml(document: dict[str, Any]) -> str:
     """Render *document* as YAML; stable for equal input (key order kept)."""
     return str(
-        yaml.safe_dump(
+        yaml.dump(
             document,
+            Dumper=_NoAliasDumper,
             sort_keys=False,
             allow_unicode=True,
             default_flow_style=False,
@@ -614,7 +627,8 @@ async def build_plan(
     tenants the file names (the preview has the same rules as the apply).
     """
     plan = ImportPlan(file_sha256=hashlib.sha256(content).hexdigest())
-    parsed = parse_settings_file(content)
+    # In a worker thread: parsing a large file must not hold up other requests.
+    parsed = await asyncio.to_thread(parse_settings_file, content)
     plan.mistakes.extend(parsed.mistakes)
     model = parsed.model
     if model is None:

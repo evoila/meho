@@ -6,6 +6,7 @@ package auth
 import (
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 )
@@ -51,6 +52,39 @@ func checkEndpointURL(field, raw string) error {
 	default:
 		return fmt.Errorf("%s %q must use https://", field, raw)
 	}
+}
+
+// maxRedirects is how many redirects one request may follow, the same
+// as the default policy of net/http.
+const maxRedirects = 10
+
+// WithRedirectCheck returns a copy of c that follows a redirect only
+// to an https address, or to http on a loopback host. Every request
+// to the identity provider goes through such a client: the discovery
+// request, the device-code requests, the code exchange and the token
+// refresh. The new address is checked with the same rule as the
+// addresses of the discovery document, before the request goes there.
+// A nil c means http.DefaultClient. A redirect policy already set on c
+// runs after the check.
+func WithRedirectCheck(c *http.Client) *http.Client {
+	if c == nil {
+		c = http.DefaultClient
+	}
+	inner := c.CheckRedirect
+	clone := *c
+	clone.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := checkEndpointURL("redirect target", req.URL.String()); err != nil {
+			return err
+		}
+		if inner != nil {
+			return inner(req, via)
+		}
+		if len(via) >= maxRedirects {
+			return fmt.Errorf("stopped after %d redirects", maxRedirects)
+		}
+		return nil
+	}
+	return &clone
 }
 
 // realmFromDiscoveryURL returns the realm address that discoveryURL

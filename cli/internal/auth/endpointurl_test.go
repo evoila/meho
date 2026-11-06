@@ -7,10 +7,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/oauth2"
 )
 
 // docTransport answers every request with one discovery document, for
@@ -106,11 +112,17 @@ func TestFetchDiscoveryRefusesAnIssuerThatIsNotTheRealm(t *testing.T) {
 	}
 }
 
+// TestFetchDiscoveryRefusesHTTPOnARoutedHost checks that the discovery
+// address is checked before the request: no request goes out.
 func TestFetchDiscoveryRefusesHTTPOnARoutedHost(t *testing.T) {
 	realm := "http://kc.example.test/realms/meho"
-	_, err := fetchWith(t, realm, realmDoc(realm))
+	transport := &docTransport{doc: realmDoc(realm)}
+	_, err := FetchDiscovery(context.Background(), &http.Client{Transport: transport}, realm+oidcWellKnownPath)
 	if err == nil || !strings.Contains(err.Error(), "https") {
 		t.Fatalf("http realm on a routed host: err = %v, want an https error", err)
+	}
+	if transport.hits != 0 {
+		t.Errorf("hits = %d, want 0 (the address is checked before the request)", transport.hits)
 	}
 }
 
@@ -252,5 +264,260 @@ func TestRunFreshSignInOpensAnHTTPSLink(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "https://kc.example.test/realms/meho/auth?") {
 		t.Errorf("opened %q, want the https sign-in link", got)
+	}
+}
+
+// routeTransport answers each request by its address (scheme, host
+// and path) and records every address it sees, so a test can show
+// that an address never received a request.
+type routeTransport struct {
+	routes map[string]func(r *http.Request) *http.Response
+	seen   []string
+}
+
+func (t *routeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	key := r.URL.Scheme + "://" + r.URL.Host + r.URL.Path
+	t.seen = append(t.seen, key)
+	route, ok := t.routes[key]
+	if !ok {
+		return nil, fmt.Errorf("no route for %s", key)
+	}
+	resp := route(r)
+	resp.Request = r
+	return resp, nil
+}
+
+func redirectTo(status int, target string) func(*http.Request) *http.Response {
+	return func(*http.Request) *http.Response {
+		return &http.Response{
+			StatusCode: status,
+			Header:     http.Header{"Location": []string{target}},
+			Body:       http.NoBody,
+		}
+	}
+}
+
+func jsonAnswer(v any) func(*http.Request) *http.Response {
+	return func(*http.Request) *http.Response {
+		body, _ := json.Marshal(v)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(string(body))),
+		}
+	}
+}
+
+// redirectStatuses are the answers net/http follows as redirects.
+var redirectStatuses = []int{
+	http.StatusMovedPermanently,
+	http.StatusFound,
+	http.StatusSeeOther,
+	http.StatusTemporaryRedirect,
+	http.StatusPermanentRedirect,
+}
+
+func TestFetchDiscoveryRefusesARedirectToHTTP(t *testing.T) {
+	realm := "https://kc.example.test/realms/meho"
+	from := realm + oidcWellKnownPath
+	to := "http://kc.example.test/realms/meho" + oidcWellKnownPath
+	for _, status := range redirectStatuses {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			transport := &routeTransport{routes: map[string]func(*http.Request) *http.Response{
+				from: redirectTo(status, to),
+				to:   jsonAnswer(realmDoc(realm)),
+			}}
+			_, err := FetchDiscovery(context.Background(), &http.Client{Transport: transport}, from)
+			if err == nil || !strings.Contains(err.Error(), "https") {
+				t.Fatalf("err = %v, want an https error", err)
+			}
+			if slices.Contains(transport.seen, to) {
+				t.Errorf("the http address received a request: %v", transport.seen)
+			}
+		})
+	}
+}
+
+func TestFetchDiscoveryFollowsARedirectToASafeAddress(t *testing.T) {
+	realm := "https://kc.example.test/realms/meho"
+	from := realm + oidcWellKnownPath
+	for name, to := range map[string]string{
+		"https":         "https://kc.example.test/auth/realms/meho" + oidcWellKnownPath,
+		"http loopback": "http://127.0.0.1:8080/realms/meho" + oidcWellKnownPath,
+	} {
+		t.Run(name, func(t *testing.T) {
+			transport := &routeTransport{routes: map[string]func(*http.Request) *http.Response{
+				from: redirectTo(http.StatusFound, to),
+				to:   jsonAnswer(realmDoc(realm)),
+			}}
+			doc, err := FetchDiscovery(context.Background(), &http.Client{Transport: transport}, from)
+			if err != nil {
+				t.Fatalf("FetchDiscovery: %v", err)
+			}
+			if doc.Issuer != realm {
+				t.Errorf("issuer = %q, want %q", doc.Issuer, realm)
+			}
+			if !slices.Equal(transport.seen, []string{from, to}) {
+				t.Errorf("requests = %v, want the redirect followed once", transport.seen)
+			}
+		})
+	}
+}
+
+func TestWithRedirectCheck(t *testing.T) {
+	t.Run("nil client copies the default client", func(t *testing.T) {
+		c := WithRedirectCheck(nil)
+		if c == http.DefaultClient || c.CheckRedirect == nil {
+			t.Fatal("want a copy of http.DefaultClient with a redirect check")
+		}
+		if http.DefaultClient.CheckRedirect != nil {
+			t.Error("http.DefaultClient was changed")
+		}
+	})
+	t.Run("keeps the transport and stops after ten redirects", func(t *testing.T) {
+		loop := "https://kc.example.test/loop"
+		transport := &routeTransport{routes: map[string]func(*http.Request) *http.Response{
+			loop: redirectTo(http.StatusFound, loop),
+		}}
+		c := WithRedirectCheck(&http.Client{Transport: transport})
+		resp, err := c.Get(loop)
+		if err == nil {
+			_ = resp.Body.Close()
+			t.Fatal("want an error after ten redirects")
+		}
+		if !strings.Contains(err.Error(), "10 redirects") {
+			t.Errorf("err = %v, want the redirect limit", err)
+		}
+		if len(transport.seen) != maxRedirects {
+			t.Errorf("requests = %d, want %d", len(transport.seen), maxRedirects)
+		}
+	})
+	t.Run("a redirect policy of the client runs after the check", func(t *testing.T) {
+		from := "https://kc.example.test/from"
+		transport := &routeTransport{routes: map[string]func(*http.Request) *http.Response{
+			from: redirectTo(http.StatusFound, "https://kc.example.test/to"),
+		}}
+		c := WithRedirectCheck(&http.Client{
+			Transport:     transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		})
+		resp, err := c.Get(from)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusFound || len(transport.seen) != 1 {
+			t.Errorf("status = %d, requests = %v; want the redirect answer itself", resp.StatusCode, transport.seen)
+		}
+		transport.routes[from] = redirectTo(http.StatusFound, "http://kc.example.test/to")
+		resp, err = c.Get(from)
+		if err == nil {
+			_ = resp.Body.Close()
+			t.Fatal("want an error for a redirect to http, before the client's own policy")
+		}
+	})
+}
+
+// TestRunDeviceFlowRefusesARedirectToHTTP checks the device-code
+// request and the token request: a redirect to plain http on a routed
+// host ends the login, and the http address receives no request.
+func TestRunDeviceFlowRefusesARedirectToHTTP(t *testing.T) {
+	realm := "https://kc.example.test/realms/meho"
+	doc := &DiscoveryDocument{
+		Issuer:                      realm,
+		DeviceAuthorizationEndpoint: realm + "/protocol/openid-connect/auth/device",
+		TokenEndpoint:               realm + "/protocol/openid-connect/token",
+	}
+	deviceAnswer := jsonAnswer(map[string]any{
+		"device_code": "dc", "user_code": "ABCD-EFGH",
+		"verification_uri": realm + "/device", "expires_in": 600, "interval": 1,
+	})
+	tokenAnswer := jsonAnswer(map[string]any{"access_token": "at", "token_type": "Bearer", "expires_in": 300})
+	for name, redirecting := range map[string]string{
+		"device request": doc.DeviceAuthorizationEndpoint,
+		"token request":  doc.TokenEndpoint,
+	} {
+		t.Run(name, func(t *testing.T) {
+			to := "http://" + strings.TrimPrefix(redirecting, "https://")
+			transport := &routeTransport{routes: map[string]func(*http.Request) *http.Response{
+				doc.DeviceAuthorizationEndpoint: deviceAnswer,
+				doc.TokenEndpoint:               tokenAnswer,
+				to:                              tokenAnswer,
+			}}
+			transport.routes[redirecting] = redirectTo(http.StatusTemporaryRedirect, to)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_, err := RunDeviceFlow(ctx, doc, "meho-cli", DeviceFlowOptions{
+				HTTPClient: &http.Client{Transport: transport},
+				Prompter:   func(context.Context, *oauth2.DeviceAuthResponse) error { return nil },
+			})
+			if err == nil || !strings.Contains(err.Error(), "https") {
+				t.Fatalf("err = %v, want an https error", err)
+			}
+			if slices.Contains(transport.seen, to) {
+				t.Errorf("the http address received a request: %v", transport.seen)
+			}
+		})
+	}
+}
+
+// TestRunFreshSignInRefusesARedirectToHTTP checks the code exchange of
+// the browser sign-in.
+func TestRunFreshSignInRefusesARedirectToHTTP(t *testing.T) {
+	realm := "https://kc.example.test/realms/meho"
+	doc := &DiscoveryDocument{
+		Issuer:                realm,
+		AuthorizationEndpoint: realm + "/protocol/openid-connect/auth",
+		TokenEndpoint:         realm + "/protocol/openid-connect/token",
+	}
+	to := "http://kc.example.test/realms/meho/protocol/openid-connect/token"
+	transport := &routeTransport{routes: map[string]func(*http.Request) *http.Response{
+		doc.TokenEndpoint: redirectTo(http.StatusTemporaryRedirect, to),
+		to:                jsonAnswer(map[string]any{"access_token": "at", "token_type": "Bearer", "expires_in": 300}),
+	}}
+	open := func(link string) error {
+		u, err := url.Parse(link)
+		if err != nil {
+			return err
+		}
+		q := u.Query()
+		go func() {
+			resp, err := http.Get(q.Get("redirect_uri") + "?code=the-code&state=" + url.QueryEscape(q.Get("state")))
+			if err == nil {
+				_ = resp.Body.Close()
+			}
+		}()
+		return nil
+	}
+	_, err := RunFreshSignIn(context.Background(), doc, "meho-cli", FreshSignInOptions{
+		HTTPClient:  &http.Client{Transport: transport},
+		OpenBrowser: open,
+		Timeout:     10 * time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("err = %v, want an https error", err)
+	}
+	if slices.Contains(transport.seen, to) {
+		t.Errorf("the http address received a request: %v", transport.seen)
+	}
+}
+
+// TestFreshSignInTokenSourceRefusesARedirectToHTTP checks the renewal
+// of an approval sign-in token.
+func TestFreshSignInTokenSourceRefusesARedirectToHTTP(t *testing.T) {
+	realm := "https://kc.example.test/realms/meho"
+	doc := &DiscoveryDocument{Issuer: realm, TokenEndpoint: realm + "/protocol/openid-connect/token"}
+	to := "http://kc.example.test/realms/meho/protocol/openid-connect/token"
+	transport := &routeTransport{routes: map[string]func(*http.Request) *http.Response{
+		doc.TokenEndpoint: redirectTo(http.StatusTemporaryRedirect, to),
+		to:                jsonAnswer(map[string]any{"access_token": "at", "token_type": "Bearer", "expires_in": 300}),
+	}}
+	expired := &oauth2.Token{AccessToken: "first", RefreshToken: "r1", Expiry: time.Now().Add(-time.Minute)}
+	_, err := FreshSignInTokenSource(context.Background(), doc, "meho-cli-approve", expired, &http.Client{Transport: transport}).Token()
+	if err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("err = %v, want an https error", err)
+	}
+	if slices.Contains(transport.seen, to) {
+		t.Errorf("the http address received a request: %v", transport.seen)
 	}
 }

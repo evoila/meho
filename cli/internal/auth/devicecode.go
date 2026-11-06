@@ -84,18 +84,20 @@ func (e *DiscoveryError) Unwrap() error { return e.Underlying }
 // expose the device-authorization-endpoint field we depend on, so we
 // don't differentiate at the call site.
 //
-// The document is refused unless its issuer is the realm address the
-// URL was built from, and its issuer and endpoints use https (http
-// only to a loopback host). Login, token refresh and the approval
-// sign-in all load the document here, so all of them get this check.
+// The discovery URL itself, every redirect on the way, the issuer
+// and the endpoints of the document must use https (http only to a
+// loopback host), and the issuer must be the realm address the URL
+// was built from. Login, token refresh and the approval sign-in all
+// load the document here, so all of them get these checks.
 //
 // httpClient is injectable so tests can pass an httptest.Server's
 // client; pass nil to use http.DefaultClient (which is what every
 // production call site does).
 func FetchDiscovery(ctx context.Context, httpClient *http.Client, discoveryURL string) (*DiscoveryDocument, error) {
-	if httpClient == nil {
-		httpClient = http.DefaultClient
+	if err := checkEndpointURL("discovery URL", discoveryURL); err != nil {
+		return nil, &DiscoveryError{URL: discoveryURL, Underlying: err}
 	}
+	httpClient = WithRedirectCheck(httpClient)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, discoveryURL, http.NoBody)
 	if err != nil {
 		return nil, &DiscoveryError{URL: discoveryURL, Underlying: err}
@@ -262,14 +264,9 @@ func RunDeviceFlow(ctx context.Context, doc *DiscoveryDocument, clientID string,
 
 	// Push the HTTPClient through the oauth2 context handle — that's
 	// the package's documented mechanism for injecting an
-	// http.Client. http.DefaultClient is fine when no override is
-	// supplied; oauth2 falls back to it on its own when the context
-	// key is absent, but we set it explicitly for symmetry with the
-	// FetchDiscovery call earlier in the chain.
-	httpClient := opts.HTTPClient
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
+	// http.Client. The redirect check applies to the device-code
+	// request and to every token request, as it does to discovery.
+	httpClient := WithRedirectCheck(opts.HTTPClient)
 	flowCtx := context.WithValue(ctx, oauth2.HTTPClient, httpClient)
 
 	scopes := opts.Scopes

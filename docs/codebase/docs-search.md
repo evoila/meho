@@ -1421,7 +1421,8 @@ read.
   `corpus_service_token` / `corpus_allowed_hosts` /
   `corpus_timeout_seconds` (default 10) / `corpus_answer_timeout_seconds`
   (default 60) / `docs_debug_log_query_text`, and
-  `ui_session_encryption_key` for reads (`CORPUS_*` env vars).
+  `ui_session_encryption_key` for reads (`CORPUS_*` env vars, plus
+  `DOCS_DEBUG_LOG_QUERY_TEXT` and `UI_SESSION_ENCRYPTION_KEY`).
   `corpus_require_filters` still exists, but nothing reads it.
 
 ## Cross-surface entitlement contract + diagnosability (T2 #1802)

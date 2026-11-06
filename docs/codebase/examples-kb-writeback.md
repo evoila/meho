@@ -158,8 +158,10 @@ gates a consumer adds:
   `create_entry`. If a top hit's fused score exceeds a threshold,
   prefer extending the existing entry (read via `get_entry`,
   write it again with the merged body under the same slug). MEHO
-  embeds the new body and keeps the old text as a revision. Only an
-  unchanged body skips the embedding.
+  embeds the new body and keeps the old text as a revision. An
+  unchanged body skips the embedding, unless the index generation
+  changed (a new chunker or embedding model): then MEHO builds and
+  embeds the passages again (`kb/revisions.py`).
 - **Confidence gate.** Add a `confidence: float` field to
   `Finding`; the harness only persists when confidence exceeds a
   configured floor. Findings below the floor land somewhere else

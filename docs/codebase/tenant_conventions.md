@@ -171,8 +171,10 @@ shipped the schema; T3-T5 layer CLI / preamble / seed on top.
    verb. Ordering is `priority DESC, created_at ASC, id ASC` -- the
    same key T4's preamble assembler uses, so the list view surfaces
    conventions in the order T4 considers them. The three GET routes
-   need the `operator` role; `read_only` reads conventions only through
-   the MCP resources.
+   need the `operator` role. A `read_only` caller still sees the
+   conventions in three other places: the MCP resources, the MCP
+   `initialize` preamble (`mcp/server.py`), and the console read pages
+   (`ui/routes/conventions/operator.py`).
 
 5. **GET /api/v1/conventions/{slug}** (T2) -- single-row lookup by
    `(tenant_id, slug)`; the unique index makes it a btree probe.

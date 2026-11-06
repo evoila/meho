@@ -269,7 +269,7 @@ labels.
 | Cache occupancy | metric `result_cache_memory_bytes` | `kind` (`used`, `max`) |
 | Where a read found its record | metric `result_cache_reads_total` | `source` (`v2`, `legacy`, `miss`) |
 | Retained prefix length | log `result_handle_spilled` | `stored_rows`, `total_rows`, `namespace` |
-| Record over the cap | logs `result_handle_document_over_record_cap`, `result_handle_record_over_cap` | `record_bytes`, `max_record_bytes` |
+| Record over the cap | logs `result_handle_document_over_record_cap`, `result_handle_record_over_cap` | `record_bytes`, `max_record_bytes`, plus handle id and tenant id (and `op_id` on the document log) |
 | Executor admission rejection | log `result_read_rejected` | `reason`, `scope` |
 | Output encoded size | error fields on `output_too_large`; `extras.delivered_bytes` on a trimmed call | byte counts only |
 | Delivery-partial reason | `delivery` and `extras` on the response; log `delivery_receipt_over_ceiling` | state, byte counts |

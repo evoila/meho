@@ -302,9 +302,19 @@ probe route.
 (#1739), `update` (#3601), and `delete` (#2487) are the registry
 write verbs (all tenant_admin). The `meho docs` commands are always
 visible: the CLI does not check capabilities itself
-(`cli/internal/cmd/docs/collections.go`). The server checks the role and
-the `meho-docs:<key>` entitlement, so a caller who may not run the verb
-gets a 403 from the server. `probe` renders the `BackendReadiness` block;
+(`cli/internal/cmd/docs/collections.go`). The server does the checks:
+
+- `list` needs the `operator` role. It shows only the collections the
+  caller holds the `meho-docs:<key>` entitlement for.
+- `probe`, `enable`, `disable`, `create`, `update`, and `delete` need
+  the `tenant_admin` role. They do not check the `meho-docs:<key>`
+  entitlement. A caller below `tenant_admin` gets a 403. A key that does
+  not exist gets a 404 (not for `create`).
+- A global (not tenant-owned) collection has more rules. `probe`,
+  `enable`, `disable`, and `update` answer 403 unless the caller is a
+  platform admin. `delete` always answers 403 for a global collection.
+
+`probe` renders the `BackendReadiness` block;
 `enable` / `disable` confirm the transition. See
 [Catalogue discovery](#catalogue-discovery-g46-t4-1553) for `list`.
 

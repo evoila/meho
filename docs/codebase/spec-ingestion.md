@@ -725,12 +725,18 @@ target for MEHO.
 - **The contract check.** Rule 13 (`caller_address`) of
   `tests/test_operation_contracts.py` fails for a parameter that looks
   like an address but has no marker. A field looks like an address by
-  its name (for example `url`, `host`, or a name that ends in `_url`,
-  `_host` or `_address`) or by its schema `format`. A field that only
+  its name (for example `url`, `host`, `fqdn`, `server`, `remote`,
+  `peer`, `endpoint`, or a name that ends in `_url`, `_host` or
+  `_address`) or by its schema `format` (for example `hostname`, `ipv4`
+  or `ipv6`). A field that only
   looks like an address is listed with its reason in
   `NOT_CALLER_ADDRESSES` (`tests/_operation_contract_addresses.py`): MEHO
   and the target never connect to it, MEHO connects to it only on the
   target's own host, or it is the address of a built-in network check.
+  Rule 14 (`stored_secret_address`) fails for an operation that takes a
+  reference to a stored secret (for example `secret_ref`) and an address
+  the caller gives, unless it is `caution` or higher with approval. The
+  gap list may not hold such an operation under either rule.
 
 Tests: `tests/test_caller_address_floor.py` (a fixture operation, no
 connector package), `tests/test_operation_contract_rules.py`, and

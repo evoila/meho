@@ -9,10 +9,11 @@ need it, and each of those pages sends you back here.
 The Helm chart brings its own PostgreSQL (the database, with pgvector),
 Keycloak (the login server) and OpenBao (the password safe, an
 open-source fork of Vault). This is the default since v0.45.0. The
-chart connects MEHO to these parts by itself. If you already run your
-own PostgreSQL, Keycloak and Vault, you can turn the built-in parts off
-and use yours. [Two ways to install](#two-ways-to-install) below says
-which steps each way needs.
+chart connects MEHO to these parts by itself, and MEHO manages them.
+This is the normal way to run MEHO. If you already run your own
+PostgreSQL or Vault, you can connect them instead.
+[Two ways to install](#two-ways-to-install) below says which steps each
+way needs.
 
 !!! tip "Just exploring?"
 
@@ -28,7 +29,7 @@ which steps each way needs.
 | **Kubernetes cluster** | Kubernetes 1.28 or newer, with an ingress controller (the examples use ingress-nginx) and a default storage class (the built-in parts keep their data on disks the cluster makes). [Helm](https://helm.sh/) 3.8 or newer on your workstation, so it can install from an OCI registry. The chart is tested with Helm 3.16.4. Helm 4 recommended — the [upgrades](upgrades.md) page's server-side-apply guidance assumes it. |
 | **A DNS name + TLS story** | A hostname for the backplane (e.g. `meho.example.com`) and a certificate for it — public CA or internal CA both work; [TLS and ingress](tls-ingress.md) covers the differences. With the built-in parts, the chart can also make a self-signed certificate for you. |
 | *Only with your own parts:* **PostgreSQL** | A reachable PostgreSQL server with the [pgvector](https://github.com/pgvector/pgvector) extension *available* (installed as a server package). Steps 1 and 3. |
-| *Only with your own parts:* **Keycloak** | A [Keycloak](https://www.keycloak.org/) you administer, with a realm for MEHO (an existing realm works). Step 4. |
+| *Only on the expert path:* **Keycloak** | A [Keycloak](https://www.keycloak.org/) where you have realm admin rights, to make MEHO's realm, clients and groups. Step 4. |
 | *Only with your own parts:* **Credential backend** | HashiCorp Vault **or** access to Google Secret Manager. Step 2. |
 
 Everything else — the activity-feed store (Valkey), database
@@ -36,24 +37,53 @@ migrations, the operations catalog — ships inside the Helm release.
 
 ## Two ways to install
 
-**1. With the built-in parts (the default).** One `helm install`
-installs MEHO, PostgreSQL, Keycloak and OpenBao, and connects them. The
-chart makes every password and key itself and keeps them in Kubernetes
-Secrets. The values file needs only the hostname and an id for your
-first tenant. Skip Steps 1 to 4 and go to
-[Step 5](#step-5-decide-ingress-tls-and-trust).
+### 1. The normal way: MEHO brings its parts (recommended)
 
-**2. With your own PostgreSQL, Keycloak and Vault.** Set
-`corePostgres.enabled`, `coreKeycloak.enabled` and `coreVault.enabled`
-to `false`, and point MEHO at your own services. Follow every step
-below.
+One `helm install` installs MEHO, PostgreSQL, Keycloak and OpenBao, and
+connects them. MEHO manages these parts. The chart makes every password
+and key itself and keeps them in Kubernetes Secrets. The values file
+needs only the hostname and an id for your first tenant. Skip Steps 1
+to 4 and go to [Step 5](#step-5-decide-ingress-tls-and-trust).
 
-You can also replace only some parts, with one rule: the built-in
-Keycloak needs the built-in PostgreSQL, and the built-in OpenBao needs
-the built-in Keycloak. So with your own PostgreSQL, turn all three off.
-With your own Keycloak, turn Keycloak and OpenBao off. Your own Vault
-(or Google Secret Manager) works with the built-in PostgreSQL and
-Keycloak: turn only `coreVault` off.
+**Company login.** People can log in with their company account:
+Active Directory or LDAP, Microsoft Entra ID, authentik, or your own
+Keycloak. All four connect *in front of* MEHO's Keycloak. MEHO still
+trusts only its own Keycloak. Keycloak works as a broker: it sends
+people on to the company login, then writes the MEHO token. See
+[Company login with authentik](company-login-authentik.md) for how the
+broker works, and [Company login](login/index.md) for each of the four
+systems.
+
+### 2. Connect your own PostgreSQL or secret store
+
+You can connect a PostgreSQL or a secret store (HashiCorp Vault or
+Google Secret Manager) that you already run. Follow every step below
+that applies to you.
+
+- **Your own secret store.** Set `coreVault.enabled: false`. It works
+  with the built-in PostgreSQL and Keycloak.
+- **Your own PostgreSQL.** Set `corePostgres.enabled: false`. The
+  built-in Keycloak keeps its data in the built-in PostgreSQL, and the
+  built-in OpenBao needs the built-in Keycloak. So today your own
+  PostgreSQL also needs your own Keycloak and your own secret store:
+  set all three to `false`, and read the expert note below first.
+
+!!! warning "Your own Keycloak (expert path)"
+
+    You can replace MEHO's Keycloak with your own
+    (`coreKeycloak.enabled: false`, which also needs
+    `coreVault.enabled: false`). This is not the normal way. It needs:
+
+    - realm admin rights on your Keycloak, to make MEHO's realm,
+      clients and groups by hand —
+      [Keycloak realm setup](keycloak-realm.md) is the recipe;
+    - a service account client for MEHO itself in that realm
+      (values key `keycloakAdmin`), so MEHO can manage its agents and
+      service accounts there.
+
+    If you only want people to log in with their company account, you
+    do not need this. Keep MEHO's Keycloak and connect your login in
+    front of it: see [Company login with authentik](company-login-authentik.md).
 
 ## Step 1 — Pre-create the pgvector extension
 
@@ -200,7 +230,7 @@ empty there.
 
 ## Step 4 — Set up the Keycloak realm
 
-*Only with your own Keycloak.* MEHO authenticates every caller against
+*Only on the expert path, with your own Keycloak.* MEHO authenticates every caller against
 Keycloak. The built-in Keycloak (`coreKeycloak.enabled: true`, the
 default) makes the realm `meho` at the first start, with everything
 listed below, and two first users. Skip to the end of this step.
@@ -293,7 +323,16 @@ empty: the chart sets them. If you set them, Helm stops with an error
 that names the key. The NetworkPolicy is on by default, and it reaches
 the built-in parts without any address ranges from you.
 
-### With your own PostgreSQL, Keycloak and Vault
+### With your own PostgreSQL, Keycloak and Vault (expert path)
+
+!!! warning "This example also replaces MEHO's Keycloak"
+
+    This example turns off all three built-in parts, so it uses your own
+    Keycloak. That is the expert path: read
+    [Your own Keycloak](#2-connect-your-own-postgresql-or-secret-store)
+    first. With only your own secret store, start from the built-in
+    example above and set `coreVault.enabled: false` (see the Google
+    Secret Manager note below for the values that change).
 
 The first three keys turn the built-in parts off. The rest points MEHO
 at your own services. Without the first three keys, Helm stops with an

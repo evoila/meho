@@ -196,6 +196,8 @@ class HetznerRobotConnector(HttpConnector):
     impl_id = "hetzner-rest"
     supported_version_range = None  # Webservice API versioned by date, not semver
     priority = 1
+    # This class serves the operations of its ingested catalog.
+    accepts_ingested_operations = True
 
     def __init__(
         self,

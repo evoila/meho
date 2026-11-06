@@ -231,7 +231,13 @@ lines. The **Backfill** item below adds the lines for them.
 3. **Roll.** Move every `[Unreleased]` bullet that ships in this release
    under a new `## [X.Y.Z] - YYYY-MM-DD` heading; leave a fresh empty
    `## [Unreleased]`. **Leave behind** any bullet whose commit is *not*
-   in this tag (post-tag work stays in `[Unreleased]`).
+   in this tag (post-tag work stays in `[Unreleased]`). End the new
+   section with this line, so the Release text says what the Linux
+   download is:
+
+   ```markdown
+   - `meho-linux-*.tar`: the install on a plain Linux server, available and in testing. Ask evoila before you use it in production. See [Ways to install MEHO](https://evoila.github.io/meho/latest/install/ways-to-install/).
+   ```
 
 4. **Update the public "What's new" page.** In the same release-cutting
    PR, add a `## [vX.Y.Z](release-link) — YYYY-MM-DD` section to

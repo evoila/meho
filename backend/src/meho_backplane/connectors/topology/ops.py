@@ -20,14 +20,22 @@ same ``path`` value.
 
 Approval posture — the load-bearing dial (#2537):
 
-* ``safety_level="caution"`` + ``requires_approval=False`` parks **agent
-  principals only**: the AGENT verdict floor
-  (``_SAFETY_DEFAULT["caution"]`` → ``needs-approval`` in
-  :mod:`meho_backplane.auth.permissions`) routes an agent write to the
-  durable :class:`~meho_backplane.db.models.ApprovalRequest` queue, while
-  a human / service principal rides the default-allow branch in
-  :func:`~meho_backplane.operations._validate.policy_gate` and executes
-  immediately — today's zero-friction tenant_admin UX, unchanged.
+* ``safety_level="caution"`` + ``requires_approval=False`` decides who
+  waits for approval in
+  :func:`~meho_backplane.operations._validate.policy_gate`. The write
+  goes to the durable :class:`~meho_backplane.db.models.ApprovalRequest`
+  queue for:
+
+  - an agent (the AGENT verdict floor, ``_SAFETY_DEFAULT["caution"]`` →
+    ``needs-approval`` in :mod:`meho_backplane.auth.permissions`);
+  - a service login without a standing grant that covers the write;
+  - a person's call made with a token (MCP, the CLI, the REST dispatch
+    route).
+
+  A person in the web interface runs the write at once.
+* The REST graph writes in :mod:`meho_backplane.api.v1.topology` do not
+  go through this gate. They are for people only: a machine login gets
+  403 there and uses these operations instead.
 * The role floor of all five writes is ``tenant_admin``, the same as
   their REST routes and MCP tools. It is registered below with
   :func:`~meho_backplane.operations.role_floors.register_role_floor`, so
@@ -551,8 +559,9 @@ async def register_topology_graph_operations(
     ``embedding_service`` kwarg is the test seam every connector
     registrar carries.
 
-    ``safety_level="caution"`` + ``requires_approval=False`` is the
-    agents-park / humans-immediate combination — see the module
+    ``safety_level="caution"`` + ``requires_approval=False`` makes agents,
+    service logins without a grant and token calls wait, while a person
+    in the web interface runs the write at once — see the module
     docstring for why neither ``requires_approval=True`` nor
     ``safety_level="dangerous"`` fits.
     """

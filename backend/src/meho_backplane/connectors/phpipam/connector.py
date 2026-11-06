@@ -115,6 +115,7 @@ class PhpipamConnector(HttpConnector):
     product = "phpipam"
     version = "1.x"
     impl_id = "phpipam-rest"
+    summary = "Lists phpIPAM subnets and free addresses, and reserves or releases an IP address."
     supported_version_range: str | None = None
     priority = 1
 

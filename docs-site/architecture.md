@@ -2,8 +2,9 @@
 
 MEHO deploys as **one Kubernetes application** (a Helm release). By
 default the chart also brings its own PostgreSQL, Keycloak and OpenBao
-(an open-source fork of Vault). You can replace them with the ones you
-already run ([two ways to install](install/index.md#two-ways-to-install)). This page names every box in the picture, what it
+(an open-source fork of Vault). This is the normal way. You can connect
+your own PostgreSQL or secret store instead
+([two ways to install](install/index.md#two-ways-to-install)). This page names every box in the picture, what it
 does, and — the part that matters when you plan an install — which
 boxes MEHO ships and which ones you can bring.
 
@@ -50,7 +51,7 @@ flowchart LR
 | Backplane (container image) | **MEHO** — `ghcr.io/evoila/meho` | One Deployment, rendered by the Helm chart. |
 | Valkey (activity feed) | **MEHO** — bundled subchart | Installed by the same Helm release; no separate setup. |
 | PostgreSQL + pgvector | **MEHO** by default, or **you** | The chart's built-in PostgreSQL, with pgvector on. Turn it off (`corePostgres.enabled: false`) to use any reachable PostgreSQL with the `vector` extension available — see [the install trail](install/index.md#step-1-pre-create-the-pgvector-extension) for the one privilege nuance. |
-| Keycloak | **MEHO** by default, or **you** | The chart's built-in Keycloak makes the realm `meho`. Turn it off (`coreKeycloak.enabled: false`) to use an existing realm; MEHO then needs a handful of clients configured in it — see [Keycloak realm setup](install/keycloak-realm.md). |
+| Keycloak | **MEHO** | MEHO's built-in Keycloak makes the realm `meho`. Connect your [company login](install/login/index.md) in front of it (AD/LDAP, Entra ID, authentik, your own Keycloak). Replacing it with your own Keycloak is an expert path: it needs realm admin rights to make MEHO's realm, clients and groups — see [Keycloak realm setup](install/keycloak-realm.md). |
 | Credential backend | **MEHO** by default, or **you** | The chart's built-in OpenBao (an open-source fork of Vault). Turn it off (`coreVault.enabled: false`) to use your own HashiCorp Vault **or** Google Secret Manager — see [Credential backends](install/credential-backends.md). |
 | AI agent / MCP client | **You** | MEHO governs agents; it does not run a model. Bring Claude, Cursor, or any MCP client. |
 
@@ -158,10 +159,11 @@ settings.
 A **connector** is the code that operates a class of targets. Each
 connector publishes a catalog of operations with descriptions, safety
 levels, and approval requirements — that catalog is what agents search
-and call. The connector surface today is deepest for the VMware/VCF
-estate (vCenter, NSX, SDDC Manager, VCF Operations/Fleet/Logs/
-Automation), alongside Kubernetes, cloud, and network-appliance
-connectors.
+and call. The public image carries connectors for Kubernetes, the
+Microsoft estate, Linux hosts, Vault, Keycloak, cloud and network
+systems ([connector inventory](reference/connectors.md)). evoila's
+enterprise pack adds the VMware and VCF estate (vCenter, NSX, SDDC
+Manager, VCF Operations, Fleet, Logs and Automation).
 
 ## Operators: CLI and browser console
 
@@ -193,8 +195,10 @@ The satellite gateway is a **Beta** feature — see its entry in the
 
 ## What MEHO is not
 
-- **Not an agent runtime.** MEHO does not run a model and does not
-  schedule prompts. It governs what any MCP client is allowed to do.
+- **Not an agent runtime first.** MEHO governs what any MCP client is
+  allowed to do. It can also run agents on the backplane
+  ([hosted agents](guides/hosted-agents.md), experimental), under the
+  same rules.
 - **Not a session broker.** Tools like Teleport or StrongDM broker
   *human* sessions (SSH, database, kubectl). MEHO authorises and audits
   *individual agent actions*, per call, with infrastructure-aware

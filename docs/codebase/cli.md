@@ -960,6 +960,26 @@ not count as a setting. `usage_errors_test.go` walks every command and
 checks that an unknown flag prints a message that names the flag. Missing
 required flags (`MarkFlagRequired`) are not covered by this path yet.
 
+### Server text on the terminal
+
+Text that comes from the server can hold characters a terminal does not
+print as text: ESC (cursor moves, line erases), CR, BEL, Unicode bidi
+controls and other format characters. `output.SafeText`
+(`internal/output/safetext.go`) shows each of them as a visible escape
+(`\x1b`, `\x0d`, `\u202e`) and leaves other text as it is.
+`output.SafeLines` does the same for each line of a block that spans
+lines (indented JSON, an error message) and keeps the line breaks.
+
+- The approval commands (`meho approvals show`, `list`, `approve`,
+  `approve --work-ref ... --in-order`, `withdraw`) pass every
+  server string through them. So the request the approver reads right
+  before "Type yes" is the request the server holds: a subject or
+  summary cannot overwrite the risk level line.
+- `output.RenderError` passes the human error line through `SafeLines`,
+  so a server body in an error message is shown the same way. The
+  `--json` paths are unchanged: JSON encoding already escapes control
+  characters.
+
 ### Sensitive-data discipline
 
 The bearer token is the only credential the CLI handles and it

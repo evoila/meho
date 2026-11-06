@@ -260,13 +260,13 @@ func printListTable(w io.Writer, items []api.ApprovalRequestView, statusFilter, 
 	for _, e := range items {
 		fmt.Fprintf(w, "%-36s %-9s %-11s %-23s %-24s %-32s %-20s %s\n",
 			e.Id.String(),
-			string(e.Status),
-			runStateLabel(e.ResultState),
-			approveRightLabel(e.MayApprove, e.MayApproveReason),
-			truncate(e.ConnectorId, 24),
-			truncate(e.OpId, 32),
+			output.SafeText(string(e.Status)),
+			output.SafeText(runStateLabel(e.ResultState)),
+			output.SafeText(approveRightLabel(e.MayApprove, e.MayApproveReason)),
+			truncate(output.SafeText(e.ConnectorId), 24),
+			truncate(output.SafeText(e.OpId), 32),
 			truncate(principalScanLabel(e.PrincipalSub, e.PrincipalName), 20),
-			e.CreatedAt,
+			output.SafeText(e.CreatedAt),
 		)
 	}
 	fmt.Fprintf(w, "\nShowing %d.\n", len(items))

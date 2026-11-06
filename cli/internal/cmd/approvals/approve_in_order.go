@@ -157,7 +157,7 @@ func runInOrder(cmd *cobra.Command, opts inOrderOpts) error {
 
 	res := inOrderResult{WorkRef: opts.WorkRef, Warnings: groupWarnings(items)}
 	for _, w := range res.Warnings {
-		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", w)
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", output.SafeText(w))
 	}
 	r := &inOrderRunner{
 		cmd: cmd, client: client, opts: opts, in: bufio.NewReader(cmd.InOrStdin()),
@@ -342,7 +342,7 @@ func (r *inOrderRunner) confirm(ctx context.Context, item *api.ApprovalRequestVi
 	if level == "" {
 		level = "of unknown risk level"
 	}
-	showRequest(w, fmt.Sprintf("Step %d of %d is %s. Approving it runs it at once.", step.Step, r.total, level), detail)
+	showRequest(w, fmt.Sprintf("Step %d of %d is %s. Approving it runs it at once.", step.Step, r.total, output.SafeText(level)), detail)
 	return askYes(r.in, w, fmt.Sprintf("Type yes to approve step %d and go on. Anything else stops here: ", step.Step)), nil
 }
 
@@ -398,9 +398,10 @@ func printInOrderStep(w io.Writer, step inOrderStep, total int) {
 	if level == "" {
 		level = "-"
 	}
-	fmt.Fprintf(w, "step %d/%d  %-8s %-11s %s  %s", step.Step, total, step.Outcome, level, step.OpID, step.ID)
+	fmt.Fprintf(w, "step %d/%d  %-8s %-11s %s  %s", step.Step, total, step.Outcome,
+		output.SafeText(level), output.SafeText(step.OpID), step.ID)
 	if step.Detail != "" {
-		fmt.Fprintf(w, "  (%s)", step.Detail)
+		fmt.Fprintf(w, "  (%s)", output.SafeText(step.Detail))
 	}
 	fmt.Fprintln(w)
 	if step.SelfApproval != "" {
@@ -417,10 +418,10 @@ func printInOrderSummary(w io.Writer, res inOrderResult) {
 			}
 		}
 		if approved == 0 {
-			fmt.Fprintf(w, "\nNothing to approve: every step of %s already ran OK.\n", res.WorkRef)
+			fmt.Fprintf(w, "\nNothing to approve: every step of %s already ran OK.\n", output.SafeText(res.WorkRef))
 			return
 		}
-		fmt.Fprintf(w, "\nDone: approved %d step(s) of %s in order.\n", approved, res.WorkRef)
+		fmt.Fprintf(w, "\nDone: approved %d step(s) of %s in order.\n", approved, output.SafeText(res.WorkRef))
 		return
 	}
 	for _, s := range res.Steps {
@@ -428,7 +429,7 @@ func printInOrderSummary(w io.Writer, res inOrderResult) {
 			printInOrderStep(w, s, len(res.Steps))
 		}
 	}
-	fmt.Fprintf(w, "\n%s\n", stopMessage(res))
+	fmt.Fprintf(w, "\n%s\n", output.SafeText(stopMessage(res)))
 }
 
 // stopMessage names the step the run stopped at and the steps it did

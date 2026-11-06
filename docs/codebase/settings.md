@@ -198,13 +198,19 @@ settings page (#4048) or `meho settings import`.
 | Caller | Export | Preview / import | History |
 |---|---|---|---|
 | `tenant_admin` | own tenant | a file with only their own tenant | revisions that touched only their tenant |
-| `platform_admin` | every tenant, or `?tenant_id=` | any file | every revision |
+| `platform_admin`, a person | every tenant, or `?tenant_id=` | any file | every revision |
+| `platform_admin`, a machine login | own tenant | 403 | revisions that touched only its tenant |
 | any other role | 403 | 403 | 403 |
 
 - The preview has the same rules as the apply.
 - The import is a human-only verb: a machine principal (agent, service,
   runner) gets 403 `human_principal_required`. So a revision's `actor_sub`
   is always a real person.
+- The all-tenant export and the all-tenant history belong to a
+  `platform_admin` who is a person. A machine principal stays in its own
+  tenant, also when its token carries the platform-admin claim: the same
+  rule as `authorize_tenant_scope` (`auth/rbac.py`). Tests:
+  `tests/test_tenant_scope_person_only.py`.
 - Open, decided by 2026-10-24 (#3325 rule 1): whether an import from the
   command line writes at once, as the target routes do today, or waits for
   someone to approve it in the web console. Today it writes at once.

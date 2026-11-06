@@ -223,7 +223,12 @@ context window, which the REST front does not feed.
 ### MCP: `list_targets`
 
 1. **Tenant scope.** No `tenant_id` → the caller's tenant. A slug or
-   UUID naming another tenant requires `platform_admin` (#1641).
+   UUID naming another tenant requires `platform_admin`, held by a
+   person. A caller without it may name only their own tenant;
+   every other value gets one fixed `-32602` error, whether that tenant
+   exists or not, and MEHO reads no tenant row but the caller's own. A
+   platform admin naming a tenant that does not exist gets
+   `no tenant matches`.
 2. **One query.** A single SELECT of the five projected columns —
    `id`, `name`, `aliases`, `product`, `host` — keyset on `name`,
    `limit` default 100 / max 500, optionally narrowed by the product

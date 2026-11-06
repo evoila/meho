@@ -52,7 +52,7 @@ from meho_backplane.api.v1.targets import (
     update_target,
 )
 from meho_backplane.audit import bind_preallocated_audit_id
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, is_human_principal
 from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
 from meho_backplane.conventions._internal import OverBudgetError, enforce_budget
 from meho_backplane.conventions.schemas import ConventionCreate, ConventionKind, ConventionUpdate
@@ -934,10 +934,13 @@ async def list_history(
 ) -> list[dict[str, Any]]:
     """The revisions the caller may see, newest first, each with its diff.
 
-    A platform_admin sees every revision. A tenant_admin sees the revisions
-    that touched only their own tenant (a revision's spec holds every tenant it
-    touched, so a multi-tenant one would show other tenants' settings).
+    A platform_admin who is a person sees every revision. Everyone else, also
+    a machine principal whose token carries the platform-admin claim, sees the
+    revisions that touched only their own tenant (a revision's spec holds every
+    tenant it touched, so a multi-tenant one would show other tenants'
+    settings).
     """
+    every_tenant = operator.platform_admin and is_human_principal(operator)
     rows = (
         await session.execute(
             select(InstanceSettingsRevision).order_by(
@@ -949,7 +952,7 @@ async def list_history(
     out: list[dict[str, Any]] = []
     for row in rows:
         before, after = _view(row.spec_before), _view(row.spec_after)
-        if not operator.platform_admin and set(before) | set(after) != {own}:
+        if not every_tenant and set(before) | set(after) != {own}:
             continue
         out.append(
             {

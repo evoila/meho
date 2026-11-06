@@ -2821,7 +2821,7 @@ no new gate, service call, route, or migration.
 | `POST` | `/ui/approvals/{id}/approve` | Approve in-process + re-dispatch the parked op + the fail-open `approval.approved` add-on step event. Needs a recent console sign-in that asked for the credentials (the fresh approval sign-in rule above); otherwise the modal re-renders with the sign-in link. |
 | `POST` | `/ui/approvals/{id}/reject` | Reject in-process + the `approval.rejected` add-on step event; the op never runs. |
 | `GET` | `/ui/approvals/in-order?work_ref=` | The "Approve group in order" modal: the change ticket's requests oldest first and a Start button (#3597). |
-| `POST` | `/ui/approvals/in-order` | Runs the steps in order (form: `work_ref`, `reason`, `confirm_id`); renders what happened to each step (#3597). |
+| `POST` | `/ui/approvals/in-order` | Runs the steps in order (form: `work_ref`, `reason`, `confirm_id`, one `step_id` per step shown); renders what happened to each step (#3597). Approves nothing when a pending request of the ticket is not among the posted `step_id`s. |
 
 The console is **read-only over substrate that already exists** — it adds
 no new service call, no `api/v1` Bearer route, no CLI verb, and no
@@ -2984,7 +2984,13 @@ requester.
   round trip per step. At a dangerous or destructive step the POST returns
   the modal with that step's context and an **Approve step k and go on**
   button. That button posts `confirm_id` = the id of that one request, so a
-  yes never covers another step. Every form in the modal carries a CSRF
+  yes never covers another step. Every form also carries one hidden
+  `step_id` for each step it lists. Before anything is approved, the POST
+  reads the ticket again: when a pending request is not among the posted
+  ids (it joined the ticket after the modal was rendered), the run
+  approves nothing and shows the list again with a banner that names the
+  new steps and marks them "new". The operator starts again from that
+  list. So a run covers only the requests the operator saw. Every form in the modal carries a CSRF
   token minted for that render, and the response re-sets the cookie. The
   response fires `meho:approval-bump`, not `meho:approval-decided`, so the
   bell and the history refresh but the modal stays open.

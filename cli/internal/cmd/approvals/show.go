@@ -142,79 +142,79 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 	// The redacted "what will happen" sentence (#3353) leads the detail so
 	// a human reads what the request DOES before scanning the ids below.
 	if rc != nil && rc.Summary != nil && *rc.Summary != "" {
-		fmt.Fprintf(w, "Summary:      %s\n", *rc.Summary)
+		fmt.Fprintf(w, "Summary:      %s\n", output.SafeText(*rc.Summary))
 	}
 	fmt.Fprintf(w, "ID:           %s\n", d.Id.String())
-	fmt.Fprintf(w, "Status:       %s\n", string(d.Status))
+	fmt.Fprintf(w, "Status:       %s\n", output.SafeText(string(d.Status)))
 	if right := approveRightText(d.MayApprove, d.MayApproveReason); right != "" {
-		fmt.Fprintf(w, "May approve:  %s\n", right)
+		fmt.Fprintf(w, "May approve:  %s\n", output.SafeText(right))
 	}
-	fmt.Fprintf(w, "Connector:    %s\n", d.ConnectorId)
-	fmt.Fprintf(w, "Operation:    %s\n", d.OpId)
+	fmt.Fprintf(w, "Connector:    %s\n", output.SafeText(d.ConnectorId))
+	fmt.Fprintf(w, "Operation:    %s\n", output.SafeText(d.OpId))
 	// Resolved subject of a path-variable op (#3353): the concrete entity
 	// (name + moid) recovered from identity params, so the reviewer reads
 	// `web-01 (vm-1042)` instead of the unresolved `{vm}` in the op id.
 	if rc != nil && rc.Subject != nil && *rc.Subject != "" {
-		fmt.Fprintf(w, "Subject:      %s\n", *rc.Subject)
+		fmt.Fprintf(w, "Subject:      %s\n", output.SafeText(*rc.Subject))
 	}
 	if d.TargetId != nil {
 		fmt.Fprintf(w, "Target:       %s\n", targetLabel(d.TargetId.String(), rc))
 	}
 	// Parent composite op for a composite-child park (#3353, #3348 lineage).
 	if rc != nil && rc.ParentCompositeOpId != nil && *rc.ParentCompositeOpId != "" {
-		fmt.Fprintf(w, "Part of:      %s\n", *rc.ParentCompositeOpId)
+		fmt.Fprintf(w, "Part of:      %s\n", output.SafeText(*rc.ParentCompositeOpId))
 	}
 	fmt.Fprintf(w, "Principal:    %s\n", principalLabel(d.PrincipalSub, d.PrincipalName))
 	if d.PrincipalAct != nil {
-		fmt.Fprintf(w, "Acting as:    %s\n", *d.PrincipalAct)
+		fmt.Fprintf(w, "Acting as:    %s\n", output.SafeText(*d.PrincipalAct))
 	}
 	// Run context (#3353): the change-ticket ref and originating run id, so
 	// the reviewer can trace the request to the work that issued it.
 	if d.WorkRef != nil && *d.WorkRef != "" {
-		fmt.Fprintf(w, "Change ref:   %s\n", *d.WorkRef)
+		fmt.Fprintf(w, "Change ref:   %s\n", output.SafeText(*d.WorkRef))
 	}
 	if d.RunId != nil {
 		fmt.Fprintf(w, "Agent run:    %s\n", d.RunId.String())
 	}
-	fmt.Fprintf(w, "Params hash:  %s\n", d.ParamsHash)
-	fmt.Fprintf(w, "Created:      %s\n", d.CreatedAt)
+	fmt.Fprintf(w, "Params hash:  %s\n", output.SafeText(d.ParamsHash))
+	fmt.Fprintf(w, "Created:      %s\n", output.SafeText(d.CreatedAt))
 	// The MEHO release the request was made under (#5030). An approval
 	// covers one exact release; an update ends waiting requests.
 	if d.ReleaseId != nil && *d.ReleaseId != "" {
-		fmt.Fprintf(w, "Release:      %s\n", *d.ReleaseId)
+		fmt.Fprintf(w, "Release:      %s\n", output.SafeText(*d.ReleaseId))
 	}
 	if d.ExpiresAt != nil {
-		fmt.Fprintf(w, "Expires:      %s\n", *d.ExpiresAt)
+		fmt.Fprintf(w, "Expires:      %s\n", output.SafeText(*d.ExpiresAt))
 	}
 	// Why an expired request expired, with the advice to ask again (#5030).
 	if d.ExpiredMessage != nil && *d.ExpiredMessage != "" {
-		fmt.Fprintf(w, "Expired:      %s\n", *d.ExpiredMessage)
+		fmt.Fprintf(w, "Expired:      %s\n", output.SafeText(*d.ExpiredMessage))
 	}
 	if d.ReviewedBy != nil {
 		fmt.Fprintf(w, "Reviewed by:  %s\n", principalLabel(*d.ReviewedBy, d.ReviewedByName))
 	}
 	if d.DecidedAt != nil {
-		fmt.Fprintf(w, "Decided at:   %s\n", *d.DecidedAt)
+		fmt.Fprintf(w, "Decided at:   %s\n", output.SafeText(*d.DecidedAt))
 	}
 	// Withdrawn by the sender (#4987): not a decision, so no reviewer.
 	if d.WithdrawnAt != nil {
-		fmt.Fprintf(w, "Withdrawn:    by the sender at %s\n", *d.WithdrawnAt)
+		fmt.Fprintf(w, "Withdrawn:    by the sender at %s\n", output.SafeText(*d.WithdrawnAt))
 	}
 	if d.WithdrawReason != nil && *d.WithdrawReason != "" {
-		fmt.Fprintf(w, "Reason:       %s\n", *d.WithdrawReason)
+		fmt.Fprintf(w, "Reason:       %s\n", output.SafeText(*d.WithdrawReason))
 	}
 	// Delegated decision (#3692): the reviewer acted on another human's
 	// written instruction, read off the decision audit row.
 	if dl := d.Delegation; dl != nil {
-		fmt.Fprintf(w, "Instructed by: %s\n", dl.InstructedBy)
+		fmt.Fprintf(w, "Instructed by: %s\n", output.SafeText(dl.InstructedBy))
 		fmt.Fprintf(w, "Instruction:  %q\n", dl.Instruction)
-		fmt.Fprintf(w, "Refs:         %s\n", strings.Join(dl.Refs, ", "))
+		fmt.Fprintf(w, "Refs:         %s\n", output.SafeText(strings.Join(dl.Refs, ", ")))
 	}
 	printRunOutcome(w, d)
 	printResultHint(w, d)
 	if d.ProposedEffect != nil {
 		b, _ := json.MarshalIndent(d.ProposedEffect, "  ", "  ")
-		fmt.Fprintf(w, "Effect:\n  %s\n", string(b))
+		fmt.Fprintf(w, "Effect:\n  %s\n", output.SafeLines(string(b)))
 	}
 }
 
@@ -226,24 +226,24 @@ func printRunOutcome(w io.Writer, d *api.ApprovalRequestView) {
 	if d.ResultState == nil {
 		return
 	}
-	fmt.Fprintf(w, "Run:          %s\n", runStateLabel(d.ResultState))
+	fmt.Fprintf(w, "Run:          %s\n", output.SafeText(runStateLabel(d.ResultState)))
 	o := d.ResumeOutcome
 	if o == nil {
 		return
 	}
 	if o.ResumedAt != nil {
-		fmt.Fprintf(w, "Run started:  %s\n", *o.ResumedAt)
+		fmt.Fprintf(w, "Run started:  %s\n", output.SafeText(*o.ResumedAt))
 	}
 	if o.ResultStatus != nil {
-		fmt.Fprintf(w, "Run result:   %s\n", *o.ResultStatus)
+		fmt.Fprintf(w, "Run result:   %s\n", output.SafeText(*o.ResultStatus))
 	}
 	if o.ErrorCode != nil {
-		fmt.Fprintf(w, "Error code:   %s\n", *o.ErrorCode)
+		fmt.Fprintf(w, "Error code:   %s\n", output.SafeText(*o.ErrorCode))
 	}
 	// The next step a failed multi-step operation names (#5377), for
 	// example the VM question that holds the change.
 	if o.Guidance != nil && *o.Guidance != "" {
-		fmt.Fprintf(w, "Next step:    %s\n", *o.Guidance)
+		fmt.Fprintf(w, "Next step:    %s\n", output.SafeText(*o.Guidance))
 	}
 	if o.AuditId != nil {
 		fmt.Fprintf(w, "Run audit:    %s (meho audit show %s)\n", o.AuditId.String(), o.AuditId.String())
@@ -290,7 +290,7 @@ func runStateLabel(s *api.ApprovalResultState) string {
 // stable id stays directly reachable.
 func targetLabel(id string, rc *api.ReviewerContextView) string {
 	if rc == nil || rc.TargetName == nil || *rc.TargetName == "" {
-		return id
+		return output.SafeText(id)
 	}
 	label := *rc.TargetName
 	if rc.TargetProduct != nil && *rc.TargetProduct != "" {
@@ -300,5 +300,5 @@ func targetLabel(id string, rc *api.ReviewerContextView) string {
 			label += fmt.Sprintf(" (%s)", *rc.TargetProduct)
 		}
 	}
-	return fmt.Sprintf("%s [%s]", label, id)
+	return output.SafeText(fmt.Sprintf("%s [%s]", label, id))
 }

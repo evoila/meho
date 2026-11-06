@@ -1062,7 +1062,7 @@ vendor answer that carries a secret in a field the shape net cannot place
 and the op family does not exclude: the HCX connector masks every
 secret-named field (`password`, `vcPassword`, `token`, ...) of every
 answer this way, so a stored pairing password never reaches the trace
-(`docs/codebase/connectors-hcx.md`). The Keycloak connector runs its
+(`docs/codebase/connectors-hcx.md`, in the private connectors repository). The Keycloak connector runs its
 result scrubber (`redact_secret_fields`) on every recorded Admin REST
 answer the same way (`docs/codebase/connectors-keycloak.md`). The hook
 runs only while a trace is being captured.

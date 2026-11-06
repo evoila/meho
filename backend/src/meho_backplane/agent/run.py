@@ -89,6 +89,7 @@ flags. Concrete non-Anthropic backends are #1076 / #1077 / #1078.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextvars import ContextVar
@@ -746,10 +747,19 @@ class AgentRunEvent:
     as a plain value object (not a framework type) so the SSE transport
     serialises it without importing ``pydantic_ai`` — the seam-confinement
     invariant the package docstring states.
+
+    ``usage`` and ``request_usages`` are set only on the
+    :attr:`~AgentRunEventKind.FINAL` event: the run's token totals and the
+    usage of each model request (also those of child runs), the same
+    amounts :class:`AgentRunResult` carries. The invoker charges them to the
+    person's spend cap. They are not part of ``data``, so the SSE frame does
+    not send them to the client.
     """
 
     kind: AgentRunEventKind
     data: dict[str, Any]
+    usage: TokenUsage | None = None
+    request_usages: tuple[TokenUsage, ...] = ()
 
 
 @dataclass(slots=True)
@@ -1469,8 +1479,14 @@ class PydanticAgentRun:
         the run's message history after the call-tools node completes —
         the plain (non-streaming) node-graph path the deterministic test
         model supports.
+
+        The ``FINAL`` event carries the run's usage, the same totals and
+        per-request usages :meth:`_run_loop` returns, so the invoker charges a
+        streamed run like a run that is not streamed.
         """
         emitted_tool_returns = 0
+        request_usages: list[TokenUsage] = []
+        usages_token = _run_request_usages_var.set(request_usages)
         try:
             agent = self._build_agent(definition, operator, run_id)
             limits = UsageLimits(request_limit=definition.request_limit)
@@ -1482,9 +1498,12 @@ class PydanticAgentRun:
                 result = run.result
                 if result is None:  # pragma: no cover - iter always sets a result
                     raise AgentRunError(f"agent run {run_id} produced no result")
+                request_usages.extend(_request_usages(result.new_messages()))
                 yield AgentRunEvent(
                     kind=AgentRunEventKind.FINAL,
                     data={"output": _coerce_output(result.output)},
+                    usage=TokenUsage.from_run_usage(result.usage),
+                    request_usages=tuple(request_usages),
                 )
         except UsageLimitExceeded as exc:
             _log.warning(
@@ -1510,3 +1529,8 @@ class PydanticAgentRun:
                 kind=AgentRunEventKind.ERROR,
                 data={"error": str(exc)},
             )
+        finally:
+            # A generator closed by the event loop's finalizer runs this in
+            # another context, where the token does not apply.
+            with contextlib.suppress(ValueError):
+                _run_request_usages_var.reset(usages_token)

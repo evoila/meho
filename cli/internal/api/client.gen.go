@@ -860,6 +860,12 @@ const (
 	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPreferTenant  GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "tenant"
 )
 
+// Defines values for ListKbApiV1KbGetParamsOrder.
+const (
+	ListKbApiV1KbGetParamsOrderNewest ListKbApiV1KbGetParamsOrder = "newest"
+	ListKbApiV1KbGetParamsOrderSlug   ListKbApiV1KbGetParamsOrder = "slug"
+)
+
 // Defines values for UsageEndpointApiV1RetrieveUsageGetParamsSurface.
 const (
 	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceAll        UsageEndpointApiV1RetrieveUsageGetParamsSurface = "all"
@@ -11770,11 +11776,17 @@ type ListKbApiV1KbGetParams struct {
 	Q *string `form:"q,omitempty" json:"q,omitempty"`
 
 	// Filter Deprecated alias for `q`; still honoured.
-	Filter        *string `form:"filter,omitempty" json:"filter,omitempty"`
-	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
-	Offset        *int    `form:"offset,omitempty" json:"offset,omitempty"`
-	Authorization *string `json:"authorization,omitempty"`
+	Filter *string `form:"filter,omitempty" json:"filter,omitempty"`
+	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset *int    `form:"offset,omitempty" json:"offset,omitempty"`
+
+	// Order Row order. 'slug' (default) sorts A to Z by slug; 'newest' lists the most recently updated entry first.
+	Order         *ListKbApiV1KbGetParamsOrder `form:"order,omitempty" json:"order,omitempty"`
+	Authorization *string                      `json:"authorization,omitempty"`
 }
+
+// ListKbApiV1KbGetParamsOrder defines parameters for ListKbApiV1KbGet.
+type ListKbApiV1KbGetParamsOrder string
 
 // CreateKbApiV1KbPostParams defines parameters for CreateKbApiV1KbPost.
 type CreateKbApiV1KbPostParams struct {
@@ -30404,6 +30416,22 @@ func NewListKbApiV1KbGetRequest(server string, params *ListKbApiV1KbGetParams) (
 		if params.Offset != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Order != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "order", runtime.ParamLocationQuery, *params.Order); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

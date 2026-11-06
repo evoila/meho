@@ -2887,7 +2887,8 @@ meho kb list [flags]
 - `--filter` — narrow entries by a SQL LIKE pattern (e.g. `vcenter%`)
 - `--json` — emit raw KbListResponse JSON instead of the human table
 - `--limit` — max entries per page (1..500, server default 100 when omitted)
-- `--offset` — offset into the slug-sorted result set (default 0)
+- `--offset` — offset into the result set, in the chosen order (default 0)
+- `--order` — sort order: slug (A to Z) or newest (most recently updated first) (default: slug)
 
 ### `meho kb search`
 

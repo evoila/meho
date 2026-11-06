@@ -78,6 +78,15 @@ _CONTENT_POLICY: Final[RedactionPolicy] = RedactionPolicy.model_validate(
                 "action": "redact",
                 "reason": "JSON Web Token",
             },
+            # Before api_key: this rule reads a query value to its end, also
+            # past an apostrophe. The api_key rule would stop there and take
+            # the parameter name, so the tail could not be found afterwards.
+            {
+                "name": "fr-url-secret",
+                "pattern": "url_secret",
+                "action": "redact",
+                "reason": "user part and signature / credential / token query values of a URL",
+            },
             {
                 "name": "fr-api-key",
                 "pattern": "api_key",

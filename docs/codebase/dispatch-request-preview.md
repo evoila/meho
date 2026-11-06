@@ -202,6 +202,11 @@ An ingested operation whose path names licences, with any HTTP method,
 answers `error` with `extras.error_code=license_read_off` and no
 governance fields: it never runs (see `spec-ingestion.md`, "Ingested licence reads stay off").
 
+An ingested operation whose target resolves to a connector class that
+does not accept ingested operations answers `error` with
+`extras.error_code=ingested_ops_not_accepted`, like the call (see
+`spec-ingestion.md`, "Which connector class ingested operations run on").
+
 When the op has its own check that runs before the wait for approval
 (`_park_check_envelope` in `operations/_request_preview.py`), the preview
 runs that check too. A refusal answers `error` with

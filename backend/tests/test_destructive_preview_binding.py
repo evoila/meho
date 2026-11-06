@@ -154,6 +154,7 @@ class _RecordingHttpConnector(HttpConnector):
     """Connector whose transport records calls instead of sending (no egress)."""
 
     product = "gh"
+    accepts_ingested_operations = True
     version = "3"
     impl_id = "gh-rest"
     supported_version_range = ">=3,<4"

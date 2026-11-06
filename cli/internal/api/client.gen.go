@@ -2580,7 +2580,7 @@ type BodyRunbooksRunsStartUiRunbooksRunsPost struct {
 
 // BodyUiAccountRevokeSessionUiAccountSessionsRevokePost defines model for Body_ui_account_revoke_session_ui_account_sessions_revoke_post.
 type BodyUiAccountRevokeSessionUiAccountSessionsRevokePost struct {
-	SessionId *string `json:"session_id,omitempty"`
+	SessionRef *string `json:"session_ref,omitempty"`
 }
 
 // BodyUiAgentGrantsCreateSubmitUiAgentsGrantsCreatePost defines model for Body_ui_agent_grants_create_submit_ui_agents_grants_create_post.

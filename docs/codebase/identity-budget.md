@@ -20,6 +20,13 @@ on a `(tenant, principal, window-kind, window-start)` tuple. Task #1079
   cost on every successful run, stamps it on `agent_run.cost`, and
   increments the three active budget buckets (daily + weekly + monthly)
   atomically in the same transaction as the `succeed_run` transition.
+  This holds for a run that is not streamed (`_run_loop_to_completion`)
+  and for a streamed run (`_stream_delegated_run`, used by the REST
+  route `POST /api/v1/agents/{name}/run/events` and by the console's
+  agent run page). A streamed run gets its usage from the `final`
+  event: `AgentRunEvent.usage` and `AgentRunEvent.request_usages`. These
+  two fields are not part of the event's `data`, so the SSE frame does
+  not send them to the client.
 
 Enforcement (the *"refuse at the cap, downgrade at the threshold"*
 half) is Task #1080 (G11.5-T6 / C3-b) — see "Enforcement" below.

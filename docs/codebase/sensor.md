@@ -402,7 +402,9 @@ change.
   error, not a reading*.
 - **An evaluation that is already running when an edit commits** still
   records its result, measured with the old settings. The run the edit
-  makes due replaces it on the next tick.
+  makes due is not lost: the runner leaves a row due while its previous
+  evaluation is running (it does not advance `next_fire_at`), so the new
+  settings run on the first tick after that evaluation ends.
 - The safe-only guard's descriptor read and the insert are in separate
   sessions (a TOCTOU window); acceptable because the runner re-asserts the
   safe-tier floor at dispatch (#303), so a race that lands a non-safe

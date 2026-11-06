@@ -162,7 +162,7 @@ func decodeRunResult(v *api.ApprovalResultView) (*operation.CallResult, error) {
 
 func printResult(w io.Writer, idArg string, v *api.ApprovalResultView, run *operation.CallResult) {
 	if run == nil {
-		fmt.Fprintf(w, "approval_request %s → %s\n", idArg, string(v.Status))
+		fmt.Fprintf(w, "approval_request %s → %s\n", idArg, output.SafeText(string(v.Status)))
 		fmt.Fprintln(w, noResultMessage(v))
 		return
 	}

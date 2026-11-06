@@ -2337,9 +2337,10 @@ type BodyApprovalRejectUiApprovalsRequestIdRejectPost struct {
 
 // BodyApprovalsInOrderRunUiApprovalsInOrderPost defines model for Body_approvals_in_order_run_ui_approvals_in_order_post.
 type BodyApprovalsInOrderRunUiApprovalsInOrderPost struct {
-	ConfirmId *string `json:"confirm_id,omitempty"`
-	Reason    *string `json:"reason,omitempty"`
-	WorkRef   string  `json:"work_ref"`
+	ConfirmId *string   `json:"confirm_id,omitempty"`
+	Reason    *string   `json:"reason,omitempty"`
+	StepId    *[]string `json:"step_id,omitempty"`
+	WorkRef   string    `json:"work_ref"`
 }
 
 // BodyBulkImportUiTopologyEdgesBulkPost defines model for Body_bulk_import_ui_topology_edges_bulk_post.

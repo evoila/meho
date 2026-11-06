@@ -16,6 +16,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/output"
 )
 
 // approvalSignIn is the approval sign-in of one CLI run (#5515).
@@ -167,22 +168,24 @@ func isDestructive(item *api.ApprovalRequestView) bool {
 
 // showRequest writes what one approval would run, so the person can
 // decide on it: the operation and connector (with its version), the
-// target, the risk level, what it does and its parameters.
+// target, the risk level, what it does and its parameters. Every text
+// from the server goes through output.SafeText, so it cannot move the
+// cursor or overwrite the lines around it.
 func showRequest(w io.Writer, header string, d *api.ApprovalRequestView) {
 	fmt.Fprintf(w, "\n%s\n", header)
 	rc := d.ReviewerContext
 	printRevealNotice(w, "  ", d)
 	if rc != nil && rc.Summary != nil && *rc.Summary != "" {
-		fmt.Fprintf(w, "  What it does: %s\n", *rc.Summary)
+		fmt.Fprintf(w, "  What it does: %s\n", output.SafeText(*rc.Summary))
 	}
 	fmt.Fprintf(w, "  Request:      %s\n", d.Id.String())
-	fmt.Fprintf(w, "  Operation:    %s\n", d.OpId)
-	fmt.Fprintf(w, "  Connector:    %s\n", d.ConnectorId)
+	fmt.Fprintf(w, "  Operation:    %s\n", output.SafeText(d.OpId))
+	fmt.Fprintf(w, "  Connector:    %s\n", output.SafeText(d.ConnectorId))
 	if level, ok := d.ProposedEffect["safety_level"].(string); ok && level != "" {
-		fmt.Fprintf(w, "  Risk level:   %s\n", level)
+		fmt.Fprintf(w, "  Risk level:   %s\n", output.SafeText(level))
 	}
 	if rc != nil && rc.Subject != nil && *rc.Subject != "" {
-		fmt.Fprintf(w, "  Subject:      %s\n", *rc.Subject)
+		fmt.Fprintf(w, "  Subject:      %s\n", output.SafeText(*rc.Subject))
 	}
 	if d.TargetId != nil {
 		fmt.Fprintf(w, "  Target:       %s\n", targetLabel(d.TargetId.String(), rc))
@@ -190,11 +193,11 @@ func showRequest(w io.Writer, header string, d *api.ApprovalRequestView) {
 	fmt.Fprintf(w, "  Requested by: %s\n", principalLabel(d.PrincipalSub, d.PrincipalName))
 	if rc != nil && rc.BlastRadius != nil {
 		b, _ := json.MarshalIndent(*rc.BlastRadius, "    ", "  ")
-		fmt.Fprintf(w, "  What else is affected:\n    %s\n", string(b))
+		fmt.Fprintf(w, "  What else is affected:\n    %s\n", output.SafeLines(string(b)))
 	}
 	if len(d.ProposedEffect) > 0 {
 		b, _ := json.MarshalIndent(d.ProposedEffect, "    ", "  ")
-		fmt.Fprintf(w, "  Parameters and preview:\n    %s\n", string(b))
+		fmt.Fprintf(w, "  Parameters and preview:\n    %s\n", output.SafeLines(string(b)))
 	}
 }
 

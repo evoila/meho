@@ -5571,7 +5571,7 @@
           "knowledge"
         ],
         "summary": "List Kb",
-        "description": "List kb entries for the operator's tenant, slug-sorted.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``read_only`` operators get 403\nvia :func:`require_role` before reaching this handler;\n``operator`` and ``tenant_admin`` both pass.\n\n``q`` is the canonical free-text filter param across the kb /\nmemory / operations-search list surfaces (#1854); ``filter`` is its\ndeprecated alias, kept working for back-compat. The resolved value\nis forwarded to :meth:`KbService.list_entries` as a SQL ``LIKE``\npattern; the operator is the trust boundary for pattern shape.\nSupplying both ``q`` and ``filter`` with different values is a 422\nrather than a silent pick. ``limit`` is capped at 500 (the\nsubstrate's :data:`DEFAULT_LIST_LIMIT` is 100; the API surface\nallows higher explicit values so a one-shot dump of a 200-entry\ncorpus completes in one round trip).\n\nBinds ``audit_op_id=\"kb.list\"`` + ``audit_op_class=\"read\"`` before\nthe substrate call so a handler exception still produces an\naudit row classified under the canonical op id.",
+        "description": "List kb entries for the operator's tenant, slug-sorted by default.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``read_only`` operators get 403\nvia :func:`require_role` before reaching this handler;\n``operator`` and ``tenant_admin`` both pass.\n\n``q`` is the canonical free-text filter param across the kb /\nmemory / operations-search list surfaces (#1854); ``filter`` is its\ndeprecated alias, kept working for back-compat. The resolved value\nis forwarded to :meth:`KbService.list_entries` as a SQL ``LIKE``\npattern; the operator is the trust boundary for pattern shape.\nSupplying both ``q`` and ``filter`` with different values is a 422\nrather than a silent pick. ``limit`` is capped at 500 (the\nsubstrate's :data:`DEFAULT_LIST_LIMIT` is 100; the API surface\nallows higher explicit values so a one-shot dump of a 200-entry\ncorpus completes in one round trip). ``order=\"newest\"`` sorts by\n``updated_at``, newest first, for \"what changed lately\" reads such\nas the Claude Code plugin's session-start digest (#5679).\n\nBinds ``audit_op_id=\"kb.list\"`` + ``audit_op_class=\"read\"`` before\nthe substrate call so a handler exception still produces an\naudit row classified under the canonical op id.",
         "operationId": "list_kb_api_v1_kb_get",
         "parameters": [
           {
@@ -5624,6 +5624,22 @@
               "default": 0,
               "title": "Offset"
             }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "slug",
+                "newest"
+              ],
+              "type": "string",
+              "description": "Row order. 'slug' (default) sorts A to Z by slug; 'newest' lists the most recently updated entry first.",
+              "default": "slug",
+              "title": "Order"
+            },
+            "description": "Row order. 'slug' (default) sorts A to Z by slug; 'newest' lists the most recently updated entry first."
           },
           {
             "name": "authorization",

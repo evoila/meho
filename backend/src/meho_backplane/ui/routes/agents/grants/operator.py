@@ -28,6 +28,11 @@ One dependency:
   :class:`~meho_backplane.auth.operator.Operator` after asserting
   :class:`~meho_backplane.auth.operator.TenantRole.TENANT_ADMIN`; a
   non-admin caller raises 403 so a crafted request cannot bypass it.
+* :func:`resolve_grants_human_admin_or_403` -- the gate of the create and
+  elevate submits: the same check, then a person
+  (:func:`~meho_backplane.ui.routes.agents.operator.ensure_ui_human`).
+  A console session of an agent, service or runner login gets 403
+  ``human_principal_required``, as on REST.
 
 The soft :func:`~meho_backplane.ui.routes.agents.operator.resolve_role_probe`
 is re-exported for the templates' affordance hints, but on this surface
@@ -46,12 +51,14 @@ from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_sessi
 from meho_backplane.ui.routes.agents.operator import (
     OperatorRoleProbe,
     _lift_operator,
+    ensure_ui_human,
     resolve_role_probe,
 )
 
 __all__ = [
     "OperatorRoleProbe",
     "resolve_grants_admin_or_403",
+    "resolve_grants_human_admin_or_403",
     "resolve_role_probe",
 ]
 
@@ -86,4 +93,18 @@ async def resolve_grants_admin_or_403(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="agent_grants_require_tenant_admin",
         )
+    return operator
+
+
+async def resolve_grants_human_admin_or_403(
+    request: Request,
+    session_ctx: UISessionContext | None = None,
+) -> Operator:
+    """FastAPI dependency: :func:`resolve_grants_admin_or_403`, then a person.
+
+    Used by the create and elevate submits: only a person creates or
+    widens an agent grant.
+    """
+    operator = await resolve_grants_admin_or_403(request, session_ctx)
+    ensure_ui_human(operator)
     return operator

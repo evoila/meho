@@ -28,7 +28,9 @@ Rule 14 uses :func:`stored_secret_fields` and :func:`caller_address_fields`:
 an operation that takes a reference to a stored secret (a field named
 ``secret_ref``, or ending in ``_secret_ref``, ``password_ref`` or
 ``credential_ref``) and an address the caller gives runs at ``caution`` or
-higher and waits for approval.
+higher and waits for approval. Both scans walk the same schema parts:
+``properties``, ``items``, ``additionalProperties``, ``anyOf``, ``oneOf``,
+``allOf``, ``prefixItems``, ``$defs`` and ``definitions``.
 
 Used by ``test_operation_contracts.py``; tested with fake operations in
 ``test_operation_contract_rules.py``.
@@ -193,6 +195,11 @@ def _stored_secret_paths(schema: object, path: str) -> Iterator[str]:
     for key in _LIST_KEYS:
         for sub in schema.get(key) or ():
             yield from _stored_secret_paths(sub, path)
+    for key in _MAP_KEYS:
+        defs = schema.get(key)
+        if isinstance(defs, Mapping):
+            for def_name, sub in defs.items():
+                yield from _stored_secret_paths(sub, f"{key}/{def_name}")
 
 
 def stored_secret_fields(parameter_schema: Mapping[str, Any]) -> list[str]:

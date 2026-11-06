@@ -16,7 +16,11 @@ import pytest
 
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
-from tests._operation_contract_addresses import NOT_CALLER_ADDRESSES, unmarked_address_fields
+from tests._operation_contract_addresses import (
+    NOT_CALLER_ADDRESSES,
+    stored_secret_fields,
+    unmarked_address_fields,
+)
 from tests._operation_contract_placeholders import REAL_TOP_LEVEL_DOMAINS, load_top_level_domains
 from tests.test_operation_contracts import (
     DESCRIPTION_MAX,
@@ -759,6 +763,57 @@ def test_a_stored_secret_in_a_nested_field_counts() -> None:
     op = _secret_op({"endpoint": _MARKED_FQDN, "login": login})
     problems = _only_rule(op, "stored_secret_address")
     assert "'login.secret_ref'" in problems[0]
+
+
+def _login_definition_params(defs_key: str, host: dict[str, Any]) -> dict[str, Any]:
+    """Parameters whose ``login`` field points at a schema definition that holds the secret."""
+    return {
+        "type": "object",
+        "properties": {
+            "host": host,
+            "login": {"$ref": f"#/{defs_key}/login", "description": "The login."},
+        },
+        defs_key: {
+            "login": {
+                "type": "object",
+                "description": "The login.",
+                "properties": {"secret_ref": _SECRET_REF},
+            }
+        },
+        "examples": [{"host": "<value>", "login": {"secret_ref": "<value>"}}],
+    }
+
+
+@pytest.mark.parametrize("defs_key", ["$defs", "definitions"])
+def test_a_stored_secret_in_a_schema_definition_counts(defs_key: str) -> None:
+    schema = _login_definition_params(defs_key, _MARKED_FQDN)
+    assert stored_secret_fields(schema) == [f"{defs_key}/login.secret_ref"]
+    op = _good_op(
+        op_id="fake.location.check",
+        parameter_schema=schema,
+        safety_level="safe",
+        requires_approval=False,
+    )
+    problems = _only_rule(op, "stored_secret_address")
+    assert f"'{defs_key}/login.secret_ref'" in problems[0]
+
+
+@pytest.mark.parametrize("defs_key", ["$defs", "definitions"])
+def test_the_gap_list_may_not_hold_an_unmarked_host_with_a_secret_in_a_definition(
+    defs_key: str,
+) -> None:
+    schema = _login_definition_params(defs_key, {"type": "string", "description": "The host."})
+    op = _good_op(
+        op_id="fake.location.check",
+        parameter_schema=schema,
+        safety_level="safe",
+        requires_approval=False,
+    )
+    assert set(check_operation(op)) == {"caller_address", "stored_secret_address"}
+    known = {("vmware-rest", "fake.location.check", "caller_address")}
+    assert [m.split(":")[0] for m in refused_gaps([op], known)] == [
+        "REFUSED vmware-rest fake.location.check rule 'caller_address'"
+    ]
 
 
 @pytest.mark.parametrize(

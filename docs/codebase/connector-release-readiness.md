@@ -340,8 +340,10 @@ The fourteen rules (the rule name is in brackets):
     `secret_ref`, or one that ends in `_secret_ref`, `password_ref` or
     `credential_ref`) and an address the caller gives is `caution` or
     higher and has `requires_approval: true`. MEHO reads the secret, and
-    the call sends it to that address. A field in `NOT_CALLER_ADDRESSES`
-    does not count as an address here. (`stored_secret_address`)
+    the call sends it to that address. The secret field counts at any
+    depth, also inside a schema definition (`$defs`, `definitions`). A
+    field in `NOT_CALLER_ADDRESSES` does not count as an address here.
+    (`stored_secret_address`)
 
 Ingested (generic) operations are not checked here. Their safety level
 comes from the HTTP method and the connector's safety floor, for example

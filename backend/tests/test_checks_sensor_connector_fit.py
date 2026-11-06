@@ -36,7 +36,7 @@ from meho_backplane.connectors import (
     ProbeResult,
 )
 from meho_backplane.connectors import registry as connector_registry
-from meho_backplane.connectors.resolver import connector_serves_target
+from meho_backplane.connectors.resolver import connector_serves_target, resolve_connector_or_label
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, Tenant
 from meho_backplane.db.models import Target as TargetORM
@@ -243,6 +243,26 @@ def test_version_outside_range_names_the_matching_connector() -> None:
 
 def test_version_outside_every_range_says_no_connector_fits() -> None:
     fit = connector_fit(_CONNECTOR_9, _Target(_PRODUCT, version="7.0"))
+    assert fit.matching_connector_id is None
+    assert fit.warning is not None
+    assert "No connector in MEHO fits this target." in fit.warning
+
+
+def test_fallback_registration_sharing_a_class_is_not_named(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resolver may pick a fallback that accepts every version.
+
+    It shares its class with the 8.0 registration, so the id built from the
+    class is the 8.0 one. That id does not fit a 7.0 target, and a create
+    with it would be refused, so the warning must not name it.
+    """
+    monkeypatch.setitem(connector_registry._REGISTRY_V2, (_PRODUCT, "", ""), _Fit8)
+    target = _Target(_PRODUCT, version="7.0")
+    assert resolve_connector_or_label(target)[0] is _Fit8
+    assert connector_fit(_CONNECTOR_8, target).warning is not None
+
+    fit = connector_fit(_CONNECTOR_9, target)
     assert fit.matching_connector_id is None
     assert fit.warning is not None
     assert "No connector in MEHO fits this target." in fit.warning

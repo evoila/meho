@@ -13,8 +13,9 @@ so the Sensor list and the create call can warn.
 The match is the resolver's own
 (:func:`~meho_backplane.connectors.resolver.connector_serves_target`), and the
 connector named as the one that fits is the one the resolver picks for the
-target (:func:`~meho_backplane.connectors.resolve_connector_or_label`). No
-second version check is written here.
+target (:func:`~meho_backplane.connectors.resolve_connector_or_label`), and
+its id is checked with the same match before it is named. No second version
+check is written here.
 
 The check runs each time a Sensor is listed, so a new probe that changes the
 target's version shows in the next list.
@@ -100,13 +101,25 @@ def connector_fit(connector_id: str, target: Any) -> SensorConnectorFit:
 
 
 def _matching_connector_id(target: Any, own_class: type[Any]) -> str | None:
-    """The id of the connector the resolver picks for *target*, if not *own_class*."""
+    """The id of the connector the resolver picks for *target*, if not *own_class*.
+
+    The resolver returns a class, not the registration it picked. A class
+    can be registered twice: once under its version, and once as a fallback
+    that accepts every version. The id built from the class names the
+    versioned registration, which may not fit the target the fallback was
+    picked for. So the id is checked the way the create check checks it,
+    and ``None`` comes back when it does not fit.
+    """
     resolved, _label, _message = resolve_connector_or_label(target)
     if resolved is None or resolved is own_class:
         return None
     if resolved.impl_id and resolved.version:
-        return f"{resolved.impl_id}-{resolved.version}"
-    return str(resolved.product)
+        connector_id = f"{resolved.impl_id}-{resolved.version}"
+    else:
+        connector_id = str(resolved.product)
+    if not connector_serves_target(*parse_connector_id(connector_id), target):
+        return None
+    return connector_id
 
 
 async def _find_target(session: AsyncSession, tenant_id: uuid.UUID, name: str) -> Any:

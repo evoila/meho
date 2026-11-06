@@ -203,7 +203,11 @@ probe that changes the target's version shows in the next list.
   resolver's own candidate filter (product equal, version inside the
   connector's `supported_version_range`). No second version check exists.
 - The connector named in the warning is the one `resolve_connector_or_label`
-  picks for the target, when it is another connector.
+  picks for the target, when it is another connector. The resolver returns
+  a class, and a class can also be registered as a fallback that accepts
+  every version. So the id built from the class is checked with
+  `connector_serves_target` first. When it does not fit, the warning says
+  no connector fits.
 - No warning when MEHO cannot tell: no target, a target not found, no
   product, an unknown version, or a `connector_id` with no registered
   class.

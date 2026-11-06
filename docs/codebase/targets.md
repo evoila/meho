@@ -63,7 +63,7 @@ These four routes take a name, an alias or an id in the path (#5245):
 - `POST /api/v1/targets/{value}/probe`
 - `DELETE /api/v1/targets/{value}`
 
-All four call `_resolve_route_target` in `api/v1/targets.py`. It tries,
+All four call `resolve_route_target` in `api/v1/targets.py`. It tries,
 in this order:
 
 1. Exact name, then exact alias, through `resolve_target`. Everything
@@ -497,8 +497,9 @@ params={"name": "<target-name>"})`. So a target the agent registered with
 
 - SQLAlchemy 2.0 async sessions. A column select returns `Row` objects
   with attribute access by column name, not ORM instances.
-- `JsonFluxReducer` and `ResultHandleStore`, which shares the broadcast
-  Valkey client (`BROADCAST_REDIS_URL`). If the store cannot persist the
+- `JsonFluxReducer` and `ResultHandleStore`, which uses the result-cache
+  Valkey (`RESULT_CACHE_REDIS_URL`; when unset, the broadcast Valkey
+  `BROADCAST_REDIS_URL`). If the store cannot persist the
   spill, the handle still ships with `drill_in.available=false` and
   `reason="result_store_unavailable"`; the agent falls back to
   `native_pagination` (narrow with `connector_id`, or a smaller

@@ -50,7 +50,7 @@ All in `connectors/profile.py`, all frozen + `extra="forbid"`:
 |-------|-------|-------------|
 | `none` | version verbatim, no build | clean `MAJOR.MINOR.PATCH` endpoints |
 | `dash` | split on first `-`: `v2.11.0-abc1234` → `(v2.11.0, abc1234)` | harbor `_parse_harbor_version` |
-| `vrli_five_part` | dot-split `9.0.0.0.21761695` → `(9.0.0, 21761695)` (`parts[0:3]` joined, `parts[4]`) | vcf_logs `_parse_vrli_version` |
+| `vrli_five_part` | dot-split `9.0.0.0.21761695` → `(9.0.0, 21761695)` (`parts[0:3]` joined, `parts[4]`) | the VCF Logs version shape (its connector is not in the public tree) |
 
 Adding a value is a deliberate act backed by a real connector's parse
 shape. There is no `regex` / `custom` escape hatch — that would re-open
@@ -83,7 +83,6 @@ the rejected-DSL door (#1177).
   when a vendor needs it (#1972 out-of-scope note).
 - **Migrating typed paginators** (gcloud's hand-rolled `nextPageToken`
   loops) — typed ops don't dispatch through `dispatch_ingested`.
-- **Profile auth wiring** — `auth_headers` still raises until T4 (#1970).
 
 ## Dependencies
 
@@ -96,7 +95,7 @@ the rejected-DSL door (#1177).
 
 ## Known issues
 
-- `profile.py` is ~640 lines (over the 600-line code-quality soft limit).
+- `profile.py` is about 860 lines (over the 600-line code-quality soft limit).
   Splitting the fingerprint/probe/pagination sub-models into a sibling
   module is a candidate follow-up; kept together here because they are
   one cohesive schema surface.
@@ -107,7 +106,6 @@ the rejected-DSL door (#1177).
   `operations/_branches.py`.
 - Grounding: `docs/codebase/connector-auth-coverage.md`,
   `connectors/harbor/connector.py` (`_parse_harbor_version`),
-  `connectors/vcf_logs/connector.py` (`_parse_vrli_version`),
   `connectors/gcloud/connector.py` (cursor-token paginators).
 - Parent #1964 / #1965. The literal-key constraint is the #1177
   "no JSONPath" line.

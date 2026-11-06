@@ -2,7 +2,6 @@
 
 **Initiative:** #1666 — G0.24 v0.13.0 log-sentry extended dogfood hardening
 **Task:** #1683 — expose the literal would-be HTTP request for a dispatch
-**Consumer signal:** `claude-rdc-hetzner-dc#1138`
 
 ## Overview
 
@@ -143,8 +142,9 @@ After the descriptor lookup, every envelope — `ok`, `unavailable`, and the
 dispatcher runs at Step 4, called with `decide_only=True`. The verdict is
 what MEHO would do with this call for this caller and this target:
 `auto-execute` (runs at once), `needs-approval` (waits for a second
-person), or `deny` (refused, with the reason). Only the `unknown_op` /
-`unknown_connector` envelope has no descriptor and so no fields. The
+person), or `deny` (refused, with the reason). The `unknown_op` /
+`unknown_connector`, `license_read_off` and `target_required` envelopes
+have no governance fields. The
 `unqualified_target_version` envelope has no fields either: like the real
 call, the preview stops there, before the params check and the policy gate
 (#4984).
@@ -195,12 +195,19 @@ surfaces stay `OPERATOR`-gated at the route / tool layer.
 | `status` | meaning | extra fields |
 |---|---|---|
 | `ok` | request (or synthetic preview) resolved | `method`, `resolved_path`, `query` (object/null), `redacted_body` (object/null), `source_kind`, `preview_hash` (#3197 — SHA-256 over the resolved-request projection; the caller presents it on a `destructive`-tier `call_operation` and the dispatcher recomputes + matches it before parking the approval), and — on a governed-tier synthetic preview whose builder populated — `proposed_effect` (#3312, the reused park-time effect block; unhashed, so it never perturbs the `preview_hash` binding). Every synthetic preview also carries `plan_shown` (#4028): `true` with `proposed_effect`, or `false` with a plain `plan_note` when the builder needs the target and declined (both unhashed). Plus the four governance fields below |
-| `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `unknown_connector` / `target_required` / `unqualified_target_version` / `invalid_params` / `invalid_op_schema` / `no_connector` / `ambiguous_connector` / `dispatch_error`) + per-code detail (`invalid_op_schema` carries `extras.missing_ref`, #3095; `unknown_op` carries `extras.connectors_with_op`, #4031). Every code except `unknown_op` / `unknown_connector` / `target_required` / `unqualified_target_version` also carries the four governance fields below |
+| `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `unknown_connector` / `target_required` / `unqualified_target_version` / `invalid_params` / `invalid_op_schema` / `no_connector` / `ambiguous_connector` / `refused_before_approval` / `dispatch_error`) + per-code detail (`invalid_op_schema` carries `extras.missing_ref`, #3095; `unknown_op` carries `extras.connectors_with_op`, #4031). Every code except `unknown_op` / `unknown_connector` / `target_required` / `unqualified_target_version` also carries the four governance fields below |
 | `unavailable` | not an HTTP-ingested op **and** not previewable in a governed tier (destructive, or non-credential-class requires_approval — a credential-class op like `vault.kv.put` stays here so its secret params never surface) | `source_kind`, `extras.error_code=preview_unavailable`, `extras.reason=not_ingested`, plus the four governance fields below |
 
 An ingested operation whose path names licences, with any HTTP method,
 answers `error` with `extras.error_code=license_read_off` and no
 governance fields: it never runs (see `spec-ingestion.md`, "Ingested licence reads stay off").
+
+When the op has its own check that runs before the wait for approval
+(`_park_check_envelope` in `operations/_request_preview.py`), the preview
+runs that check too. A refusal answers `error` with
+`extras.error_code=refused_before_approval` and the same `error` and
+`extras` the call would give, plus the four governance fields. See
+`approvals.md`.
 
 **`params_digest` (synthetic previews only).** A governed-tier typed /
 composite preview also carries `params_digest`, a keyed hash of the full

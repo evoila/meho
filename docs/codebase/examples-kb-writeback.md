@@ -55,7 +55,7 @@ against (usually) different operator contexts. Splitting them as two
 
 The example deliberately persists the finding **after** the
 investigation completes, in plain Python via
-[`KbService.create_entry`](./kb.md#kbservice-kbserviceservicepy) —
+[`KbService.create_entry`](./kb.md#kbservice-kbservicepy) —
 not by giving the model an `add_to_knowledge` tool inside the loop.
 Two reasons:
 
@@ -77,6 +77,12 @@ call. The structured-output `Finding` becomes optional in that
 shape; the model-driven path uses the MCP tool description as the
 write contract.
 
+On MCP, an agent below `tenant_admin` can change only the knowledge
+entries it created, and it cannot set `source_kind`
+(`mcp/tools/knowledge.py`; refusals carry `reason="entry_not_owned"` or
+`"reserved_metadata"`). So such an agent writes a new slug instead of
+extending an entry someone else wrote.
+
 ## End-to-end flow
 
 ```
@@ -94,11 +100,12 @@ operator                                  MEHO chassis
    |                                          | persist_finding_to_kb
    |                                          |   validate_slug
    |                                          |   KbService.create_entry
-   |                                          |     -> documents row + embed
+   |                                          |     -> head row + revision + passages
    |                                          |
    |                                          | retrieve_as_context
    |                                          |   KbService.search_entries
-   |                                          |     -> BM25 + cosine + RRF
+   |                                          |     -> passages, BM25 + cosine + RRF,
+   |                                          |        one hit per entry
    |                                          |
    |   WriteBackResult                        |
    |<-----------------------------------------|
@@ -150,8 +157,9 @@ gates a consumer adds:
 - **Dedup search.** Call `KbService.search_entries` before
   `create_entry`. If a top hit's fused score exceeds a threshold,
   prefer extending the existing entry (read via `get_entry`,
-  re-write with the merged body — the body-hash short-circuit
-  means a same-slug re-write is cheap).
+  write it again with the merged body under the same slug). MEHO
+  embeds the new body and keeps the old text as a revision. Only an
+  unchanged body skips the embedding.
 - **Confidence gate.** Add a `confidence: float` field to
   `Finding`; the harness only persists when confidence exceeds a
   configured floor. Findings below the floor land somewhere else
@@ -195,8 +203,8 @@ The directory uses snake_case so Python treats it as a regular
 package (a hyphenated directory cannot be `import`ed without a
 custom shim). The pattern's full reference name in docs and issues
 remains **R3 — closed-loop kb write-back**; on disk the package is
-`kb_writeback`. The sibling R1 / R2 / R4 packages will follow the
-same convention.
+`kb_writeback`. The sibling samples use hyphenated folders
+(`r1-tiered-triage`, `r2-approval-gate`, `r4-local-claude`).
 
 ## References
 

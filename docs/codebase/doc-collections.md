@@ -42,14 +42,15 @@ deliberately **no operator/tenant path to ingest document content into a
 collection, and none is planned** — the corpus / ops layer owns document
 indexing (the managed-RAG bulk import), and MEHO federates the query
 afterward. An in-MEHO ingest plane would mean standing up a separate
-database + meho-knowledge API deployment, which is out of the substrate
+database + docs-service API deployment, which is out of the substrate
 model (dumb substrate, #1177).
 
 The design is federation-only by construction: the only registered
 backend is `corpus-http` (federates search / probe to an external
 ops-run corpus, `meho_backplane.auth.corpus`), the `SearchBackend`
-interface is `search()` + `probe()` only — there is **no `ingest()`
-seam** (`docs_search/backends/base.py`) — and `doc_count` /
+interface has `search()` and `probe()`, plus the optional `answer()` and
+`read()` (each with a `supports_*()` check) and `is_configured()` — there
+is **no `ingest()` seam** (`docs_search/backends/base.py`) — and `doc_count` /
 `last_ingested_at` are **probe-read** from the backend, never
 MEHO-written.
 
@@ -108,7 +109,8 @@ fields plus the operator-facing liveness fields but **omits `backend`**
 response, the backend-agnostic contract from #1548) and `extras`.
 
 The write / response half: `DocCollectionCreate` (#1739) is the create
-request body (operator-set identity + routing fields only; `extra="forbid"`
+request body (operator-set identity + routing fields, plus an optional
+`extras` map; `extra="forbid"`
 so a smuggled `tenant_id` is rejected), and `DocCollectionCreateResponse`
 (#1756) is the REST create reply — `DocCollection` plus a `next_step`
 string that names the `create → probe → ready` flow while the row is
@@ -159,8 +161,10 @@ suggestions without a second query.
 3. The caller reads `row.backend` to route the query server-side (T2)
    and `row.status` / `row.readiness` to fail typed against a not-ready
    collection (T3).
-4. An unknown key raises `DocCollectionNotFoundError` with the visible
-   keys for a "did you mean…?" diagnostic.
+4. An unknown key raises `DocCollectionNotFoundError` (404) with the
+   visible keys for a "did you mean…?" diagnostic. On the search path the
+   access gate (`docs_search/collection_access.py`) turns it into
+   `UnknownCollectionError` (REST 422, MCP `-32602`).
 
 ## Readiness probe + lifecycle (G4.6-T6 #1555)
 
@@ -187,10 +191,11 @@ managed-RAG footgun: reachable but the index is not yet answerable.
 
 `CorpusHttpBackend.probe` reads the corpus's readiness via
 `corpus_status` (a GET to the corpus `/readyz` endpoint — the search
-URL's host root plus `/readyz`, derived by `derive_status_url`;
-MEHO.Knowledge exposes `/readyz`, not a `/status` sibling, #1732 —
-forwarding the operator JWT, bounded by `corpus_timeout_seconds`, failing
-closed to one `CorpusUnavailable`). A `/readyz` 200 with no explicit
+URL's host root plus `/readyz`, derived by `derive_status_url`; the docs
+service exposes `/readyz`, not a `/status` sibling — sending the
+deployment's docs-service token (`CORPUS_SERVICE_TOKEN`), never the
+operator's JWT, bounded by `corpus_timeout_seconds`, failing closed to
+one `CorpusUnavailable`). A `/readyz` 200 with no explicit
 readiness flag reads as `index_built=True` (the 200 *is* the ready
 signal); a body advertising `index_built`/`ready`/`index_ready` `false`
 maps to `index_built=False`.
@@ -275,9 +280,11 @@ probe route.
 #1553, operator) is the catalogue-discovery verb; `probe` / `enable` /
 `disable` (T6 #1555, tenant_admin) are the lifecycle face; `create`
 (#1739), `update` (#3601), and `delete` (#2487) are the registry
-write verbs (all tenant_admin). All four lifecycle verbs are
-capability-gated like `meho docs search` (hidden + refusing when the
-tenant lacks `meho-docs`). `probe` renders the `BackendReadiness` block;
+write verbs (all tenant_admin). The `meho docs` commands are always
+visible: the CLI does not check capabilities itself
+(`cli/internal/cmd/docs/collections.go`). The server checks the role and
+the `meho-docs:<key>` entitlement, so a caller who may not run the verb
+gets a 403 from the server. `probe` renders the `BackendReadiness` block;
 `enable` / `disable` confirm the transition. See
 [Catalogue discovery](#catalogue-discovery-g46-t4-1553) for `list`.
 
@@ -319,20 +326,23 @@ The REST sibling — OPERATOR-gated, same tenant-scope + dedupe +
 entitlement filter, keyset by `collection_key`, returns
 `list[DocCollectionSummary]`, binds the same canonical audit op_id. An
 unprovisioned tenant (no `meho-docs:*` capability) gets an empty list.
-`--vendor` is an exact-match query filter.
+The `vendor` query parameter is an exact-match filter (the CLI flag is
+`--vendor`). `limit` defaults to 100 (at most 500), and `cursor` is the
+last key of the previous page.
 
 ### CLI `meho docs collections list` (`cli/internal/cmd/docs/collections_list.go`)
 
 The operator-facing verb on the existing `collections` parent, mirroring
 `meho targets list` (`--vendor` / `--limit` / `--cursor` / `--json`).
-Capability-gated (the typed `addon_not_provisioned` refusal before any
-network call); renders a KEY / VENDOR / PRODUCTS / STATUS / DOCS table.
+The server decides who may list; the CLI renders a KEY / VENDOR /
+PRODUCTS / STATUS / DOCS table.
 
 ### `initialize.instructions` catalogue band (`meho_backplane.docs_collections.preamble`)
 
-`assemble_doc_catalogue(...)` — the third preamble band, after the tenant
-conventions (G7.1-T4 #316) and runbook priming (G12.4-T2 #1316). It
-renders a guard-delimited `<<DOC_COLLECTIONS_AVAILABLE>> … >>` block
+`assemble_doc_catalogue(...)` — the last preamble band, after broadcast
+discipline, the tenant conventions and runbook priming
+(`conventions/preamble.py`). It renders a guard-delimited block between
+`<<DOC_COLLECTIONS_AVAILABLE>>` and `<<END_DOC_COLLECTIONS_AVAILABLE>>`
 listing the operator's entitled collections so an agent can pick a
 `collection` from the session preamble. Threaded into
 `assemble_preamble` / `assemble_preamble_detailed` via an **optional**
@@ -354,12 +364,9 @@ a second boundary, and the assembled band holds exactly one delimiter pair.
 ## Create / register a collection (#1739)
 
 The write half of the registry, mirroring the `create_target` precedent
-(`backend/src/meho_backplane/api/v1/targets.py`). It closes the gap Ops
-hit on the first co-located corpus round-trip
-(claude-rdc-hetzner-dc#975): before #1739 the only way to register a
-collection was a raw `INSERT INTO doc_collections`, which bypassed every
-guardrail the rest of MEHO's registry writes enforce (backend
-routability, tenant scoping, typed conflict, audit).
+(`backend/src/meho_backplane/api/v1/targets.py`). A registered
+collection gets the same checks as MEHO's other registry writes: backend
+routability, tenant scoping, typed conflict, and audit.
 
 The service primitive
 `create_doc_collection(session, operator, body)`
@@ -374,11 +381,11 @@ The service primitive
   a structured `422` whose detail enumerates the registered types (the
   `create_target` unknown-product shape). This moves the failure forward
   from a deferred probe/search-time `503` to create time.
-- **`backend.ref` corpus endpoint SSRF-screened (#290)** — for a
+- **`backend.ref` corpus endpoint screened** — for a
   `corpus-http` collection the `backend.ref["endpoint"]` (alias `url`) is
   the URL later dialed with a credential, so it is screened at create:
   `https` scheme + a public, allowlist-aware host, via the shared target
-  SSRF guard (`assert_public_destination_async` — the same
+  destination check (`assert_public_destination_async` — the same
   `MEHO_TARGET_SSRF_ALLOWLIST`-aware guard the connector target dial uses).
   Plain `http` is accepted only when the host is an exact entry on
   `MEHO_TARGET_SSRF_ALLOWLIST`: a hostname listed verbatim, or a single
@@ -386,8 +393,8 @@ The service primitive
   range still needs `https` (#3573, the trusted in-cluster corpus).
   Any other non-`https` or private/link-local/metadata endpoint raises
   `DocCollectionEndpointError` → `422` (`kind="endpoint_not_allowed"`) and
-  is never persisted, closing a credential-capture + SSRF path a
-  `tenant_admin` could otherwise open. Absent endpoint (the legacy global
+  is never persisted, so MEHO sends its credential only to a screened
+  endpoint. Absent endpoint (the legacy global
   `settings.corpus_url` deploy) is nothing to screen here; that global is
   deployment-owned and screened again at dial time.
 - **Only a docs-service host of the deployment** — each of the three
@@ -399,7 +406,10 @@ The service primitive
   service the deployment named. Any other host is the same
   `DocCollectionEndpointError` → `422` (`kind="endpoint_not_allowed"`),
   with a message naming the two settings. The update path runs the same
-  check on a repoint.
+  check on a repoint. A collection already registered on a host outside
+  `CORPUS_URL` / `CORPUS_ALLOWED_HOSTS` fails at each call with 503
+  (`CorpusUnavailable`) until an admin adds the host or repoints the
+  collection.
 - **Server-derived fields** — `id` / `created_at` / `updated_at` are
   generated; `status` defaults to `provisioning` (a follow-up `probe`
   promotes it); the probe-written liveness stays `NULL`.
@@ -410,7 +420,7 @@ The service primitive
   `op_class="write"`, so the registration joins the `op_id="meho.docs.*"`
   who-touched trail every other docs operation shares.
 
-Three fronts forward to the same primitive:
+Four fronts forward to the same primitive:
 
 - **REST** — `POST /api/v1/doc_collections` → `201` with the full
   `DocCollection` read shape plus a `next_step` hint
@@ -425,10 +435,13 @@ Three fronts forward to the same primitive:
   `INVALID_PARAMS` with the structured detail in `error.data`. The tool's
   description already names the probe-to-`ready` step, so it returns the
   bare created collection (no `next_step` field — the REST hint is the
-  surface that lacked the cue).
+  surface that lacked the cue). It is an operator tool, so it is listed
+  only on a session that asked for the `mcp:admin` scope.
 - **CLI** — `meho docs collections create <key> --vendor … --backend-type …
   --backend-ref '{…}'` (or `--from-file <path>`), in
   `cli/internal/cmd/docs/collections_create.go`.
+- **Console** — the "Register collection" form at `/ui/corpus/collections`
+  (`POST /ui/corpus/collections/register`, `ui/routes/corpus/collections.py`).
 
 ### The `create → probe → ready` flow (#1756)
 
@@ -486,7 +499,9 @@ Shipped across the three fronts, tenant_admin-gated, the create precedent:
   resolved tenant-first via `resolve_doc_collection` (unknown key → the
   existing 404 + `known_keys` hint).
 - **MCP** — `delete_doc_collections` (tenant_admin, `op_class="write"`,
-  the same `meho-docs` capability the create tool declares).
+  the same `meho-docs` capability the create tool declares). It is an
+  operator tool, so it is listed only on a session that asked for the
+  `mcp:admin` scope.
 - **CLI** — `meho docs collections delete <collection_key>`.
 
 Two guards, checked in order (both owned by the service, so the three
@@ -518,7 +533,7 @@ The in-place update the registry lacked. A collection carries its own
 `backend.ref["endpoint"]`, and `CorpusHttpBackend` falls back to the
 deployment's global `settings.corpus_url` only when the ref is **absent** —
 so when a deployment moves its corpus endpoint (e.g. plain-`http` →
-internal-CA `https`, which the v0.34.x corpus SSRF screen now requires), a
+internal-CA `https`, which the corpus endpoint screen requires), a
 values-only repoint of `CORPUS_URL` does **not** touch a row that carries
 its own ref. The row keeps dialing the old endpoint and `search_docs` /
 `ask_docs` fail closed (`CorpusUnavailable` → 503) while `list_doc_collections`
@@ -540,7 +555,7 @@ create/delete precedent:
   audited `op_id="meho.docs.collections.update"` (the `meho.docs.*`
   who-touched family). Applies only the fields present in the body
   (`model_dump(exclude_unset=True)`); a supplied `backend` runs the **same**
-  `backend.type` registry validation + `https` / SSRF-allowlist endpoint
+  `backend.type` registry validation + `https` / allowlist endpoint
   screen the create path runs (shared `_validate_backend_type` /
   `_screen_backend_endpoint` helpers), so a repoint can never land a
   non-`https` / private / metadata endpoint dialed with a credential (#290).
@@ -655,14 +670,13 @@ explicitly out of scope per #1920).
   terminal `disabled` (403 / `-32602`) from the transient `provisioning` /
   `rebuilding` (409 / `-32603`). There is no second `ensure_collection_searchable`
   duplicate.
-- **Create and delete are the write halves; update / sharing are not.** A
-  tenant_admin registers a collection through the create surface (#1739,
-  see [Create / register a collection](#create--register-a-collection-1739))
-  and deregisters a disabled, tenant-owned one through the delete surface
-  (#2487, see
-  [Delete / deregister a collection](#delete--deregister-a-collection-2487));
-  there is still no PATCH and no cross-tenant sharing API — those
-  are a later follow-up (out of scope per #1739). A shared/global row
+- **Create, update and delete are the write paths; sharing is not.** A
+  tenant_admin registers a collection through the create surface (see
+  [Create / register a collection](#create--register-a-collection-1739)),
+  changes it through the update surface, and deregisters a disabled,
+  tenant-owned one through the delete surface (see
+  [Delete / deregister a collection](#delete--deregister-a-collection-2487)).
+  There is no cross-tenant sharing API. A shared/global row
   (`tenant_id IS NULL`) is still seeded out-of-band, since the create
   always scopes to the caller's tenant. A **data migration** is the
   in-repo mechanism for enriching such a global row's metadata — migration

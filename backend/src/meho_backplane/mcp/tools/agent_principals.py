@@ -16,6 +16,10 @@ tools that mirror the REST surface (``/api/v1/agent-principals``):
 RBAC is enforced at two layers: the registry filter hides write tools
 from non-admins in ``tools/list``, and the dispatcher re-checks at
 call time.
+``meho_agent_principals_register`` also needs a person, as on REST:
+its handler calls
+:func:`~meho_backplane.mcp.human_only.ensure_human_mcp_caller` first, so
+an agent, service or runner login gets ``human_principal_required``.
 
 Error mapping
 -------------
@@ -61,6 +65,7 @@ from meho_backplane.auth.keycloak_admin import (
     KeycloakAdminNotConfiguredError,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.mcp.human_only import ensure_human_mcp_caller
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpExecutionFailedError, McpInvalidParamsError
 from meho_backplane.scheduler.vault_credentials import (
@@ -145,6 +150,12 @@ async def _register_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
+    ensure_human_mcp_caller(
+        operator,
+        "meho_agent_principals_register",
+        "A person registers an agent principal in the operator console, or with the "
+        "CLI: `meho agent-principal register <name>`.",
+    )
     name = _require_name(arguments)
     owner_sub: str | None = arguments.get("owner_sub") or None
     if owner_sub is not None and not isinstance(owner_sub, str):

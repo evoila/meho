@@ -2898,7 +2898,8 @@ same first-match discipline `/ui/agents/create` follows).
   `keycloak_internal_id` is never surfaced. The `include_revoked` toggle
   flips the service query so revoked rows join the inventory for audit.
 - `GET/POST /ui/agents/principals/register` — register a new principal
-  (**tenant_admin**). An upstream side-effecting op: the service creates a
+  (**tenant_admin**; the `POST` also needs a person: a session of an
+  agent, service or runner login gets 403 `human_principal_required`). An upstream side-effecting op: the service creates a
   Keycloak client + writes its generated credential to Vault before the DB
   row lands. Failures re-render the modal inline (not a generic error):
   empty / bad-character `name` → 422 `name` field error; duplicate
@@ -2992,7 +2993,8 @@ agents list links to `/ui/agents/grants` only for admins (a non-admin would
   body fragment). An absent / malformed / cross-tenant id renders 404
   (existence-leak avoidance, mirroring the REST 404 collapse).
 - `GET/POST /ui/agents/grants/create` — create a permanent or time-bounded
-  grant. The `verdict` `<select>` defaults to the conservative `deny`. A
+  grant. The `POST` here and on `elevate` also needs a person: a session of
+  an agent, service or runner login gets 403 `human_principal_required`. The `verdict` `<select>` defaults to the conservative `deny`. A
   Pydantic `ValidationError` or a service `GrantValidationError` (past /
   naive `expires_at`, bad `target_scope` UUID, duplicate grant) re-renders
   the modal inline with the matching field error + 422.
@@ -3507,7 +3509,9 @@ discipline is pinned.
 service-principal grants, matching that plane's operator-read REST authority.
 A `tenant_admin` additionally sees agent grants and receives the issue and
 revoke controls for both planes. The BFF repeats that tenant-admin check on
-every write route; hiding the controls is only a usability affordance. Agent
+every write route; hiding the controls is only a usability affordance. Create,
+renew and revoke also need a person (`_human_admin`): a session of an agent,
+service or runner login gets 403 `human_principal_required`. Agent
 grant rows keep the existing agent-principal name resolution. Service grants
 have no service-principal registry, so their stored subject is shown directly;
 concrete target UUIDs resolve through the tenant-scoped target resolver and

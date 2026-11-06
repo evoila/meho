@@ -62,7 +62,8 @@ front doors and one governed pipeline behind both:
 - **`/mcp`** — an MCP server. AI agents authenticate with OAuth 2.1
   authorization-code + PKCE (the flow the MCP specification mandates)
   and see a catalog of tools: search operations, preview them, call
-  them, query results, read the audit trail.
+  them, query results. A session that asks for the `mcp:admin` scope
+  also gets the operator tools, for example to read the audit trail.
 - **`/api`** — a REST API. The `meho` CLI drives it after a device-code
   login; anything that can send a Bearer token can use it directly.
 
@@ -76,12 +77,14 @@ The pipeline stages:
    Keycloak. The backplane validates issuer, audience, and the tenant
    claims that scope everything downstream.
 2. **Policy gate** — the operation is checked against the caller's role
-   and per-target grants. Operations flagged as dangerous can require
-   an explicit approval from a human before they run.
+   and per-target grants. A call made with a token (MCP, the CLI or
+   REST) runs only `safe` operations at once. Every other change waits
+   until a person approves it. Service principals keep their standing
+   grants.
 3. **Connector dispatch** — the operation executes through a
-   *connector*: a typed implementation that knows how to talk to a
-   class of infrastructure (vCenter, NSX, Kubernetes, cloud APIs,
-   network appliances). Connectors encode operational sequences — for
+   *connector*: the code that knows how to talk to a class of
+   infrastructure (vCenter, NSX, Kubernetes, cloud APIs, network
+   appliances). Connectors encode operational sequences — for
    example, evacuating a hypervisor host as one governed operation —
    not just raw API passthrough.
 4. **Just-in-time credentials** — if the target needs a credential, the
@@ -155,7 +158,11 @@ target carries its address, how to authenticate to it (a reference into
 the credential backend — never the secret itself), and TLS trust
 settings.
 
-A **connector** is the code that operates a class of targets. Each
+A **connector** is the code that operates a class of targets. MEHO has
+two kinds, and an agent uses both the same way. A **generic** connector
+is made from a vendor's API file (for example an OpenAPI file). A
+**typed** connector is written by hand against a vendor SDK or
+protocol, where no usable API file exists. Each
 connector publishes a catalog of operations with descriptions, safety
 levels, and approval requirements — that catalog is what agents search
 and call. The connector surface today is deepest for the VMware/VCF
@@ -169,9 +176,12 @@ The **`meho` CLI** is a static Go binary (Linux/macOS, amd64/arm64),
 released with signed checksums on every release. It logs in with the
 device-code flow — which works from private networks and
 jump hosts, because only the operator's browser needs to reach
-Keycloak's login page. Registering targets and secrets is CLI (or REST)
-work by design: those write paths are deliberately not exposed as MCP
-tools.
+Keycloak's login page. Registering targets and storing secrets is
+operator work, done with the CLI, the console or REST. On MCP, the
+default tools only read targets (`list_targets`). Target registration
+is an operator tool: it lists only for a session with the `mcp:admin`
+scope and needs the `tenant_admin` role. MEHO has no MCP tool to store
+a secret.
 
 The **browser console** (`/ui`) is an optional, read-heavy operator
 surface: dashboards for sensors, approvals, audit, and the activity
@@ -184,9 +194,13 @@ behind NAT, in a private control plane, on an isolated management
 network. The **satellite gateway** is a second deploy mode of the same
 backplane image that runs *inside* such a network and dials **out** to
 the central instance — never the reverse. It polls for authorised work,
-executes read-only operations locally against the same connector
-surface, and reports results back. Authorisation, approval, and audit
-all stay central: a satellite cannot self-authorise anything.
+executes it locally against the same connector surface, and reports
+results back. By default a satellite runs only `safe` operations. A
+tenant admin can turn on a write tier per runner: then `caution` changes on
+an allowlist also run there, each after a person approves it.
+`dangerous` and `destructive` operations never run on a satellite.
+Authorisation, approval, and audit all stay central: a satellite cannot
+self-authorise anything.
 
 The satellite gateway is a **Beta** feature — see its entry in the
 [feature maturity index](reference/maturity.md).

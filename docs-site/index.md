@@ -34,8 +34,9 @@ and keeps the receipts.
 ## What every operation gets
 
 - **Policy-gated** — operations are authorised against the caller's
-  role and per-target grants before they execute; destructive
-  operations can require explicit human approval.
+  role and per-target grants before they execute. A call made with a
+  token (MCP, the CLI or REST) runs only `safe` operations at once;
+  every other change waits until a person approves it.
 - **Credential-federated** — the agent never holds a backend
   credential. A short-lived identity token is exchanged with your
   secret store ([Vault or Google Secret
@@ -73,11 +74,12 @@ same ones the product itself displays.
 
 | Section | What lives there |
 |---|---|
-| **Start here** | This page, plus the [reference architecture](architecture.md). |
+| **Start here** | This page, plus the [reference architecture](architecture.md) and the [deployment shapes](deployment-shapes.md). |
 | **[Install & operate](install/index.md)** | The [install trail](install/index.md) — one continuous path from a bare Kubernetes cluster to a running backplane and a successful login — plus [credential backends](install/credential-backends.md), [Keycloak realm setup](install/keycloak-realm.md), [TLS and ingress](install/tls-ingress.md), [upgrades](install/upgrades.md), and a [local quickstart](install/kind-quickstart.md). |
 | **[Connect clients](clients/index.md)** | Connecting the CLI and MCP clients (Claude Desktop, Claude Code, and others) to a running backplane. |
 | **[Do real work](guides/index.md)** | Task guides: register targets and secrets, run first operations, watch your estate. |
-| **[Reference](reference/index.md)** | Generated reference material, starting with the [feature maturity index](reference/maturity.md). |
+| **[Extend MEHO](extend/connector-kit.md)** | Write your own connector package against the connector kit. |
+| **[Reference](reference/index.md)** | [What's new](reference/whats-new.md) in each release, plus generated reference material, such as the [feature maturity index](reference/maturity.md). |
 | **[Project](project/index.md)** | How the project is run: versioning, security policy, roadmap. |
 
 ## Where to start

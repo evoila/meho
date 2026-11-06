@@ -429,6 +429,24 @@ async def test_human_token_dispatch_waits_for_approval(
 
 
 @pytest.mark.asyncio
+async def test_service_login_annotate_without_grant_waits_for_approval(
+    _registered_topology_ops: None,
+    _seeded_tenant: None,
+) -> None:
+    """A service login with ``tenant_admin`` and no grant waits: no edge, one request."""
+    await _seed_edge_endpoints()
+    service = _make_operator("service:graph-bot", principal_kind=PrincipalKind.SERVICE)
+
+    result = await _dispatch_topology(service, TOPOLOGY_ANNOTATE_OP_ID, _ANNOTATE_PARAMS)
+
+    assert result.status == "awaiting_approval", result.error
+    assert await _fetch_edges() == []
+    rows = await _fetch_approval_rows()
+    assert len(rows) == 1
+    assert rows[0].op_id == TOPOLOGY_ANNOTATE_OP_ID
+
+
+@pytest.mark.asyncio
 async def test_human_web_dispatch_executes_immediately_no_approval_row(
     _registered_topology_ops: None,
     _seeded_tenant: None,

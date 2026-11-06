@@ -5,10 +5,14 @@ subscription. The connector logs in to Microsoft Entra ID with a login (a
 service principal) from Vault, keeps the access token in its own cache, and
 calls Azure Resource Manager (Azure's management API) with it.
 
-Today the connector has three operations: `azure.about`,
-`azure.location.list` and `azure.operation.status`. Later reads (inventory, compute, network, storage,
-cost and more) build on the login, the cache, the retry budget, the paging
-helper and the polling helper described here.
+The connector has 71 operations in 12 groups. The group `account` holds
+`azure.about`, `azure.location.list` and `azure.operation.status`. The other
+groups are the families (inventory, compute, network, storage, cost and
+more), each with its own section at the end of this page. Every family builds
+on the login, the cache, the retry budget, the paging helper and the polling
+helper described here. Two operations change something in Azure and wait for
+a person's approval (`caution`): `azure.tag.update` and
+`azure.patching.assessment.start`. All the others are `safe` reads.
 
 Package: `backend/src/meho_backplane/connectors/azure/`. Shared login code:
 `backend/src/meho_backplane/connectors/_shared/microsoft_login.py`.
@@ -21,7 +25,7 @@ Package: `backend/src/meho_backplane/connectors/azure/`. Shared login code:
 | Connector ID | `azure-arm-2026.10` (implementation `azure-arm`, version `2026.10`) |
 | Registration | the versioned row plus the wildcard row `("azure", "", "")` |
 | Kind | typed operations only; nothing is ingested from a spec |
-| Operations | `azure.about`, `azure.location.list` and `azure.operation.status` (group `account`, `safe`) |
+| Operations | 71 in 12 groups: `account`, `aks`, `arc`, `automation`, `avs`, `compute`, `cost`, `inventory`, `migrate`, `network`, `security`, `storage` |
 | Spec path check | `backend/tests/test_connectors_azure_spec_reconcile.py` against the shelf folder `azure-arm-2026.10` |
 | Onboarding | [`docs/cross-repo/azure-onboarding.md`](../cross-repo/azure-onboarding.md) |
 
@@ -215,7 +219,7 @@ and for a system call that read fails on purpose.
 
 ## Recovery
 
-- **Azure answers 401** (the token is no longer accepted): `send` calls
+- **Azure answers 401** (Azure does not accept the token): `send` calls
   `invalidate_session(target)`, which drops the target's tokens, and tries
   once more inside the same retry budget. The retry logs in again with the
   cached secret. When Azure answers 401 again, the call fails with
@@ -305,7 +309,7 @@ For `connector_error` the extras carry `exception_class` (the kind above),
 `remediation` (what to do). Azure's message is untrusted data. `clean_azure_text`
 filters secrets out of it with MEHO's default redaction policy and then cuts
 it to 2,048 characters, in that order: cutting first could split a token at
-the boundary into a fragment the filter no longer recognises. When the filter
+the boundary into a fragment the filter does not recognise. When the filter
 itself fails, the text is withheld. The cleaned text goes only into
 `upstream_message`, which the dispatcher filters and cuts once more. The same
 function cleans the error message of a failed long-running operation. MEHO's
@@ -693,7 +697,7 @@ the paging fields of `PagedRows.as_dict()` (`truncated`, `omission`,
   with `values` (not `value`) and no next page, so this read is one GET
   without paging fields. Rows and patch versions are sorted by version
   number, so `1.29.10` comes after `1.29.9`. A cluster version that is in no
-  row's `patch_versions` is no longer offered in the region, and its support
+  row's `patch_versions` is not offered in the region any more, and its support
   ends after a short grace period. A minor version in no row is out of
   regular support. A row whose `support_plans` holds only
   `AKSLongTermSupport` is supported only for clusters on the long-term
@@ -736,7 +740,7 @@ proves this too.
 ### Untrusted text
 
 Cluster, pool and resource group names, versions and add-on names are text
-from Azure. They are copied as data and never used to build a request: the
+from Azure. They are copied as data, and MEHO never builds a request from them: the
 paths take only the caller's checked parameters. The guidance of every
 operation tells the AI to treat this text as data, never as instructions.
 
@@ -1668,8 +1672,8 @@ The result:
  "omissions": {"count": 1, "items": [{"kind": "subscriptions_denied", "count": 1, "message": "..."}]}}
 ```
 
-`complete` is true only when every requested subscription was read in full
-and nothing is missing. The omission kinds:
+`complete` is true only when every requested subscription was read to the
+end and nothing is missing. The omission kinds:
 
 | Kind | Meaning |
 |---|---|
@@ -1983,8 +1987,8 @@ service key, its authorization keys and the BGP keys of its peerings; none
 of them reaches a result. The flight recorder keeps Azure's answer in the
 trace with these keys masked by the connector's [trace mask](#trace-mask),
 so the error text of `azure.network.expressroute.list` stays visible like
-that of every other read. A gateway's answer no longer holds the RADIUS
-secret (Microsoft removed it from the list answer). The description of a
+that of every other read. A gateway's list answer holds no RADIUS secret
+(Microsoft keeps it out of the list answer). The description of a
 security rule is text from Azure; it is filtered with `clean_azure_text`
 like Azure's error text.
 
@@ -2138,9 +2142,9 @@ list can pass 50 rows, with the real reducer and `result_query`.
 ### Untrusted text
 
 Names, display names, alert titles, affected resource names and callers are
-text from Azure. Some of it can be chosen by an attacker (for example a
-resource name in an alert). It is copied as data and never used to build a
-request, and the guidance of every operation tells the AI to treat it as
+text from Azure. Some of it can be chosen by anyone who can name a resource
+(for example a resource name in an alert). It is copied as data, and MEHO
+never builds a request from it, and the guidance of every operation tells the AI to treat it as
 data, never as instructions.
 
 ### Spec path check

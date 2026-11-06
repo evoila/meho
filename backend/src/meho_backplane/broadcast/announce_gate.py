@@ -50,6 +50,7 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.announce_claim_lookup import caller_has_active_announce_claim
 from meho_backplane.broadcast.history import WRITE_OP_CLASSES
+from meho_backplane.db.change_counter import ChangeCounter
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Tenant
 
@@ -82,6 +83,10 @@ _SAFETY_GATE_THRESHOLD: Final[int] = _SAFETY_RANK["caution"]
 _CACHE_TTL_SECONDS: Final[float] = 60.0
 _TENANT_GATE_CACHE: dict[UUID, tuple[bool, float]] = {}
 
+#: Change counts per tenant. A read that overlaps a clear of its tenant does
+#: not fill the cache (see :mod:`meho_backplane.db.change_counter`).
+_TENANT_GATE_CHANGES = ChangeCounter()
+
 #: The structured, fail-loud remediation. Names the exact meta-tool and
 #: what to declare, in the remediation style the rest of dispatch uses.
 _ANNOUNCE_REQUIRED_REMEDIATION: Final[str] = (
@@ -92,12 +97,17 @@ _ANNOUNCE_REQUIRED_REMEDIATION: Final[str] = (
 
 
 def reset_announce_gate_cache_for_testing() -> None:
-    """Clear the per-tenant enablement cache (test isolation only)."""
+    """Clear the per-tenant enablement cache and its change counts (test isolation only)."""
     _TENANT_GATE_CACHE.clear()
+    _TENANT_GATE_CHANGES.reset_for_testing()
 
 
 def invalidate_announce_gate_cache(tenant_id: UUID) -> None:
-    """Evict *tenant_id*'s cached enablement so a flip applies on the next dispatch."""
+    """Evict *tenant_id*'s cached enablement so a flip applies on the next dispatch.
+
+    A read of the tenant that is still running does not fill the cache.
+    """
+    _TENANT_GATE_CHANGES.bump(tenant_id)
     _TENANT_GATE_CACHE.pop(tenant_id, None)
 
 
@@ -114,6 +124,7 @@ async def announce_gate_enabled(tenant_id: UUID) -> bool:
     cached = _TENANT_GATE_CACHE.get(tenant_id)
     if cached is not None and cached[1] > now:
         return cached[0]
+    seen = _TENANT_GATE_CHANGES.current(tenant_id)
     try:
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
@@ -124,7 +135,8 @@ async def announce_gate_enabled(tenant_id: UUID) -> bool:
     except Exception:
         _log.warning("announce_gate_enablement_read_failed", tenant_id=str(tenant_id))
         return False
-    _TENANT_GATE_CACHE[tenant_id] = (enabled, now + _CACHE_TTL_SECONDS)
+    if _TENANT_GATE_CHANGES.unchanged_since(tenant_id, seen):
+        _TENANT_GATE_CACHE[tenant_id] = (enabled, now + _CACHE_TTL_SECONDS)
     return enabled
 
 

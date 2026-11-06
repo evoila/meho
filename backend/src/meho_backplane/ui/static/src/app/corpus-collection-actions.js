@@ -15,8 +15,11 @@
 //
 // This module listens for ``htmx:beforeSwap`` on <body> and, for a response
 // to one of these controls that is an error AND an HTML fragment, turns the
-// swap on. The target and swap style come from the control itself: every
-// action control targets ``#collection-readiness-card`` with ``outerHTML``,
+// swap on. htmx fires ``htmx:beforeSwap`` on the swap target, so the event's
+// ``detail.elt`` is the readiness card; the control that sent the request is
+// ``detail.requestConfig.elt``. The target and swap style come from the
+// control itself: every action control targets ``#collection-readiness-card``
+// with ``outerHTML``,
 // and the alert fragment carries that same id, so the alert replaces the
 // readiness card and a later successful re-probe swaps the card back.
 // A JSON error (a session gone, the CSRF check, a role refusal) has no
@@ -37,12 +40,20 @@
   var DISABLE_MODAL_ID = "corpus-disable-modal";
 
   // The action control that issued the request, or ``null`` when the
-  // request came from any other element.
+  // request came from any other element. ``elt`` is the element that sent
+  // the request (``detail.requestConfig.elt``), not the swap target.
   function actionControl(elt) {
     if (!elt || typeof elt.closest !== "function") {
       return null;
     }
     return elt.closest("[" + ACTION_ATTR + "]");
+  }
+
+  // The element that sent the request, or ``null`` when the event has no
+  // request config (a swap that htmx did not start from a request).
+  function requestElement(detail) {
+    var config = detail && detail.requestConfig;
+    return (config && config.elt) || null;
   }
 
   // True when the response body is an HTML fragment made for the page.
@@ -68,7 +79,7 @@
     if (!detail || !detail.xhr || detail.shouldSwap) {
       return false;
     }
-    if (!actionControl(detail.elt)) {
+    if (!actionControl(requestElement(detail))) {
       return false;
     }
     if (detail.xhr.status < 400 || !isHtmlResponse(detail.xhr)) {
@@ -86,6 +97,7 @@
   window.mehoCorpusCollectionActions = {
     onBeforeSwap: onBeforeSwap,
     actionControl: actionControl,
+    requestElement: requestElement,
     isHtmlResponse: isHtmlResponse,
     ACTION_ATTR: ACTION_ATTR,
     CARD_ID: CARD_ID,

@@ -39,8 +39,10 @@ requires_node = pytest.mark.skipif(
 
 # A small fake DOM: a body that records listeners, a readiness card, the
 # three action controls (one inside the Disable modal) and one plain
-# element. Each case builds a synthetic ``htmx:beforeSwap`` event and
-# reports what the handler did with it.
+# element. Each case builds a synthetic ``htmx:beforeSwap`` event with the
+# shape htmx 2.0.9 uses -- fired on the swap target, so ``detail.elt`` is the
+# readiness card, and the control that sent the request is only in
+# ``detail.requestConfig.elt`` -- and reports what the handler did with it.
 _DRIVER = r"""
 "use strict";
 const fs = require("fs");
@@ -85,9 +87,11 @@ function xhr(status, contentType) {
     name.toLowerCase() === "content-type" ? contentType : null };
 }
 
-function run(elt, status, contentType, options) {
+function run(control, status, contentType, options) {
   const detail = {
-    elt, xhr: xhr(status, contentType), target: card,
+    elt: card, target: card, xhr: xhr(status, contentType),
+    requestConfig: (options && options.noRequestConfig) ? undefined
+      : { elt: control, target: card, verb: "post" },
     shouldSwap: (options && options.shouldSwap) || false, isError: status >= 400,
   };
   byId[api.DISABLE_MODAL_ID] = (options && options.modalOpen) ? modal : null;
@@ -109,6 +113,7 @@ const result = {
   probe403Json: run(probeButton, 403, "application/json"),
   other403: run(otherButton, 403, html),
   alreadySwapping: run(probeButton, 403, html, { shouldSwap: true }),
+  noRequestConfig: run(probeButton, 403, html, { noRequestConfig: true }),
 };
 process.stdout.write(JSON.stringify(result));
 """
@@ -122,6 +127,10 @@ def test_handler_source_contract() -> None:
     assert 'var ACTION_ATTR = "data-collection-action"' in source
     assert 'var CARD_ID = "collection-readiness-card"' in source
     assert 'var DISABLE_MODAL_ID = "corpus-disable-modal"' in source
+    # The control that sent the request comes from the request config: htmx
+    # fires the event on the swap target, so ``detail.elt`` is the card.
+    assert "detail.requestConfig" in source
+    assert "actionControl(detail.elt)" not in source
     assert "detail.xhr.status < 400" in source
     assert '"text/html"' in source
     assert "detail.shouldSwap = true" in source
@@ -179,3 +188,6 @@ def test_handler_turns_the_alert_swap_on_for_the_action_controls(tmp_path: Path)
     assert result["other403"]["shouldSwap"] is False
     assert result["alreadySwapping"]["handled"] is False
     assert result["alreadySwapping"]["shouldSwap"] is True
+    # An event without a request config names no control: left alone.
+    assert result["noRequestConfig"]["handled"] is False
+    assert result["noRequestConfig"]["shouldSwap"] is False

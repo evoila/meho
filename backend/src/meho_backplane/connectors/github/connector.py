@@ -163,6 +163,10 @@ class GitHubRestConnector(HttpConnector):
     product = "gh"
     version = "3"
     impl_id = "gh-rest"
+    summary = (
+        "Reads GitHub repositories, issues, pull requests and projects, and creates issues, "
+        "comments, repositories and commits."
+    )
     priority = 1
 
     # vSphere-style class constant for the API base. Subclassed connectors

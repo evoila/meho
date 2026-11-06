@@ -729,8 +729,8 @@ and no audit.
   this way.
 - **Safe to run twice.** If a rule with the id already exists and does the
   same thing, the add returns `already_present` and changes nothing. If it
-  does something different, the add returns `conflict` and changes nothing,
-  and `guidance` names the settings that differ. "The same thing" means every
+  does something different, the add refuses with `conflict` and changes
+  nothing, and the message names the settings that differ. "The same thing" means every
   setting the add can write is equal, the stored rule is not disabled, it
   does not negate its source or destination, and it has none of the settings
   the add never writes (a gateway, a schedule, a tag, a queue, a state
@@ -742,7 +742,10 @@ and no audit.
   `any`, an IP address or a CIDR, each with an optional port or port range
   (protocol `tcp`, `udp` or `tcp/udp` only). Aliases, `not`, gateways and
   schedules are not supported. The interface must exist in `<interfaces>` or
-  `<ifgroups>` (`unknown_interface` otherwise).
+  `<ifgroups>`, or be one of pfSense's built-in rule tabs: `openvpn`
+  (OpenVPN), `enc0` (IPsec), `l2tp` (L2TP VPN) or `pppoe` (PPPoE Server).
+  Those tabs have no `<interfaces>` entry, but their rules store these names
+  (#5136). Any other name is refused (`unknown_interface`).
 - **Order.** The first matching rule wins, so a block rule under a broad pass
   rule does nothing. `position` puts the rule at the `top` (default) or
   `bottom` of its interface's rules (or of the floating rules), the same way
@@ -758,6 +761,17 @@ and no audit.
   (`mgmt_path_unknown`). Only the SSH path is checked, not the web GUI.
 - **NAT rules.** The delete refuses a rule linked to a NAT port forward
   (`nat_associated`); remove it together with the NAT rule.
+- **A refusal fails the call (#5136).** Every refusal above (`conflict`,
+  `ambiguous`, `unknown_interface`, `mgmt_path`, `mgmt_path_unknown`,
+  `nat_associated`) changes nothing and raises
+  `PfSenseFilterRuleRefusedError`. The call then ends with `status: error`,
+  the audit record says it failed, and an approved request shows
+  `result_state: failed`. The message reads
+  `pfsense.filter.rule.add refused (<code>): <why>`. Before #5136 the
+  handlers returned the refusal as a result, so an approver read "ran OK"
+  for a rule that was never added. Only the "safe to run twice" answers stay
+  results: `already_present` (add) and `not_found` (delete), because the
+  wanted state is already true.
 - **One edit at a time.** Both handlers hold the appliance's config-write
   lock (`serialized_config_write` in `ops_write.py`, one `asyncio.Lock` per
   SSH host on the connector) from the first read to the read-back. The

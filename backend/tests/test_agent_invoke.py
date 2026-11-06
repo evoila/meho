@@ -63,7 +63,7 @@ from meho_backplane.agent import (
     current_agent_run_id_var,
     make_invoke_agent_tool,
 )
-from meho_backplane.agent.run import PydanticAgentRun
+from meho_backplane.agent.run import AgentRunEventKind, PydanticAgentRun
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.settings import get_settings
 
@@ -544,13 +544,11 @@ class _FakeCtx:
         self.usage = usage
 
 
-async def test_result_lists_the_usage_of_each_request_including_the_child_run() -> None:
-    """A run's per-request usage holds the parent's requests and the child's.
+_CHILD_INPUT, _PARENT_FIRST_INPUT, _PARENT_FINAL_INPUT = 100_001, 1_000, 2_000
 
-    The child's messages are not in the parent's message history, while its
-    tokens are in the shared total. So the result lists the child's requests
-    too, and the per-request list adds up to the run's totals.
-    """
+
+def _delegating_runtime() -> tuple[PydanticAgentRun, AgentDefinition]:
+    """A parent run that calls one child run, each request with known usage."""
     child_def = AgentDefinition(
         name="deep-agent",
         system_prompt="You answer hard sub-questions.",
@@ -560,8 +558,6 @@ async def test_result_lists_the_usage_of_each_request_including_the_child_run() 
 
     async def resolver(operator: Operator, agent_name: str) -> AgentDefinition | None:
         return child_def if agent_name == "deep-agent" else None
-
-    child_input, parent_first_input, parent_final_input = 100_001, 1_000, 2_000
 
     def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         is_child = any(
@@ -573,7 +569,7 @@ async def test_result_lists_the_usage_of_each_request_including_the_child_run() 
         if is_child:
             return ModelResponse(
                 parts=[TextPart("child answer")],
-                usage=RequestUsage(input_tokens=child_input, output_tokens=10),
+                usage=RequestUsage(input_tokens=_CHILD_INPUT, output_tokens=10),
             )
         has_tool_return = any(
             part.part_kind == "tool-return"
@@ -584,11 +580,11 @@ async def test_result_lists_the_usage_of_each_request_including_the_child_run() 
         if not has_tool_return:
             return ModelResponse(
                 parts=[ToolCallPart("invoke_agent", {"agent_name": "deep-agent", "inputs": "x"})],
-                usage=RequestUsage(input_tokens=parent_first_input, output_tokens=20),
+                usage=RequestUsage(input_tokens=_PARENT_FIRST_INPUT, output_tokens=20),
             )
         return ModelResponse(
             parts=[TextPart("parent done")],
-            usage=RequestUsage(input_tokens=parent_final_input, output_tokens=30),
+            usage=RequestUsage(input_tokens=_PARENT_FINAL_INPUT, output_tokens=30),
         )
 
     runtime = PydanticAgentRun(
@@ -601,17 +597,55 @@ async def test_result_lists_the_usage_of_each_request_including_the_child_run() 
         request_limit=5,
         toolset={"meta_tools": []},
     )
+    return runtime, parent_def
+
+
+async def test_result_lists_the_usage_of_each_request_including_the_child_run() -> None:
+    """A run's per-request usage holds the parent's requests and the child's.
+
+    The child's messages are not in the parent's message history, while its
+    tokens are in the shared total. So the result lists the child's requests
+    too, and the per-request list adds up to the run's totals.
+    """
+    runtime, parent_def = _delegating_runtime()
 
     handle = runtime.start(parent_def, _make_operator(), "delegate this")
     result = await runtime.result(handle)
 
     assert result.output == "parent done"
     assert sorted(u.input_tokens for u in result.request_usages) == sorted(
-        [child_input, parent_first_input, parent_final_input]
+        [_CHILD_INPUT, _PARENT_FIRST_INPUT, _PARENT_FINAL_INPUT]
     )
     assert sum(u.input_tokens for u in result.request_usages) == result.input_tokens
     assert sum(u.output_tokens for u in result.request_usages) == result.output_tokens
     assert len(result.request_usages) == result.request_count
+
+
+async def test_streamed_final_event_carries_the_usage_including_the_child_run() -> None:
+    """The final event of a streamed run carries the same usage as a run that is not streamed.
+
+    Only the final event has usage. The usage is not in the event's
+    ``data``, so the SSE frame does not carry it.
+    """
+    runtime, parent_def = _delegating_runtime()
+
+    events = [
+        event
+        async for event in runtime.stream_events(
+            parent_def, _make_operator(), "delegate this", uuid4()
+        )
+    ]
+
+    final = events[-1]
+    assert final.kind is AgentRunEventKind.FINAL
+    assert final.data == {"output": "parent done"}
+    assert final.usage is not None
+    assert sorted(u.input_tokens for u in final.request_usages) == sorted(
+        [_CHILD_INPUT, _PARENT_FIRST_INPUT, _PARENT_FINAL_INPUT]
+    )
+    assert final.usage.input_tokens == _CHILD_INPUT + _PARENT_FIRST_INPUT + _PARENT_FINAL_INPUT
+    assert final.usage.output_tokens == 10 + 20 + 30
+    assert all(e.usage is None and e.request_usages == () for e in events[:-1])
 
 
 async def test_result_keeps_the_requests_of_a_child_that_ran_out_of_budget() -> None:

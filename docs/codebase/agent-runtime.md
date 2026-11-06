@@ -603,6 +603,10 @@ stream T1's `stream` deferred to T4. It drives the framework node graph
 the seam (`AgentRunEvent` is a plain value object; `AgentRunEventKind` a
 closed enum). A tripped turn budget surfaces as a terminal `error` event,
 not a raised exception, so an SSE consumer always sees a terminal frame.
+The `final` event also carries the run's usage (`usage` and
+`request_usages`, with the requests of child runs), outside `data`. The
+invoker passes it to `_finalize_run`, so a streamed run gets its cost and
+is charged to the person's spend cap like a run that is not streamed.
 
 ### Fronts
 

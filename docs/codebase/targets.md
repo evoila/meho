@@ -231,8 +231,7 @@ context window, which the REST front does not feed.
    `result_query` reads back under the JWT's tenant and subject, so that
    is the only key the caller can drill into.
 5. The MCP dispatcher (`mcp/handlers.py`) packs the result as a text
-   block **and** `structuredContent` (#2774), then writes the audit row
-   and publishes the broadcast event.
+   block **and** `structuredContent` (#2774), then writes the audit row.
 
 An agent reads a reduced page with `result_query(handle_id=…)`: page
 with `offset` / `limit`, or pass a `query` such as

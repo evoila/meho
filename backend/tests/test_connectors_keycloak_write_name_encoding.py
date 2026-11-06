@@ -21,7 +21,6 @@ import pytest
 import pytest_asyncio
 import respx
 
-import meho_backplane.connectors.keycloak  # noqa: F401 -- import for registry side-effects
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_write import (

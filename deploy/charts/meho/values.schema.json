@@ -798,6 +798,15 @@
         "secretKey": { "type": "string", "minLength": 1 }
       }
     },
+    "paramsHashKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The key of the params hashes and value fingerprints in audit rows and approval requests, injected as PARAMS_HASH_KEY only via secretKeyRef. A new database password keeps this key. With no Secret, MEHO makes the key from DATABASE_URL. See docs/codebase/approvals.md.",
+      "properties": {
+        "secretName": { "type": "string", "description": "Your own Secret with the key. Empty = `<release>-core-params-hash`, which the install makes when a built-in part is on." },
+        "secretKey": { "type": "string", "minLength": 1 }
+      }
+    },
     "corePostgres": {
       "type": "object",
       "description": "Built-in PostgreSQL subchart values (`charts/postgres/`, #4039): one PostgreSQL 17 server with pgvector and two databases, `meho` and `keycloak`, each owned by a role of the same name that is not a superuser. The chart creates the `vector` extension itself. It reads the Secrets `<release>-core-postgres-superuser`, `-meho` and `-keycloak` (key `password`), which the install's secrets Job makes. On by default; with it on the chart also points the backplane's DATABASE_URL at `<release>-core-postgres-meho` and its NetworkPolicy at the PostgreSQL pod (#4047). With it off the chart renders exactly what it rendered before.",

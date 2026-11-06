@@ -517,7 +517,7 @@ is `meho.keycloakSettings` in `_core-keycloak.tpl` (#4591).
 | --- | --- | --- |
 | `corePostgres` | `DATABASE_URL` from `<release>-core-postgres-meho`, key `url` (`migrate` init container, helm test pod; the running backplane uses `<release>-core-postgres-meho-app`, #5699); NetworkPolicy egress by pod | `postgres.credentialsSecret` (or that name), `eso.enabled` |
 | `coreVault` | `VAULT_ADDR=http://<release>-vault:<coreVault.service.port>`, `VAULT_OIDC_ROLE=meho-mcp`, `VAULT_OIDC_MOUNT_PATH=jwt`, `VAULT_SCHEDULER_TOKEN_FILE` from `<release>-core-vault-scheduler` (an optional Secret volume, so the pod starts before the setup Job made it, and the file is read at every use); NetworkPolicy egress by pod | `vault.address`, `config.vaultAddr`; `config.credentialBackend` must be `vault`; `extraEnv` must not set `VAULT_KV_TENANT_SCOPE_PREFIX` empty |
-| any part | `APPROVAL_HANDOFF_ENCRYPTION_KEY` from `<release>-core-approval-handoff` while `approvalHandoff.enabled` is unset; the Ingress certificate `<release>-core-tls` while `ingress.tls.secretName` is empty | |
+| any part | `APPROVAL_HANDOFF_ENCRYPTION_KEY` from `<release>-core-approval-handoff` while `approvalHandoff.enabled` is unset; `PARAMS_HASH_KEY` from `<release>-core-params-hash` while `paramsHashKey.secretName` is empty; the Ingress certificate `<release>-core-tls` while `ingress.tls.secretName` is empty | |
 
 **Tenant separation.** The setup Job makes one login role, `meho-mcp`, for
 every tenant: it copies the token's `tenant_id` into the login, and the

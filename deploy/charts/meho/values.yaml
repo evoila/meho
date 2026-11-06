@@ -1219,6 +1219,23 @@ approvalHandoff:
   secretName: ""
   secretKey: approval_handoff_encryption_key
 
+# The key of the params hashes and value fingerprints that audit rows and
+# approval requests carry. It is wired only by secretKeyRef, as
+# PARAMS_HASH_KEY. It is a secret of its own, so a new database password
+# keeps every hash and fingerprint as it is.
+#
+# With a built-in core part on, the install makes the key in
+# `<release>-core-params-hash` and keeps it on every upgrade. Without one,
+# store at least 32 random characters in a Kubernetes Secret and set
+# `secretName`. With no Secret, MEHO makes the key from DATABASE_URL, and a
+# new database password changes it. Steps and key rotation:
+# docs/codebase/approvals.md.
+paramsHashKey:
+  # -- Your own Secret with the key. Empty = `<release>-core-params-hash`
+  # with a built-in core part, no key without one.
+  secretName: ""
+  secretKey: params_hash_key
+
 # Built-in core (#3974): PostgreSQL, Keycloak and OpenBao, each on by
 # default, and wired to the backplane by the chart (#4591, #4047). An install
 # that brings its own PostgreSQL, Keycloak or Vault sets the matching

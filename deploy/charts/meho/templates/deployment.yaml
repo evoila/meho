@@ -274,6 +274,15 @@ spec:
                   name: {{ $handoff.secretName | quote }}
                   key: {{ $handoff.secretKey | quote }}
             {{- end }}
+            {{- /* The key of the params hashes and value fingerprints, kept when the database password changes. */}}
+            {{- $hashKey := include "meho.paramsHashKey" . | fromYaml }}
+            {{- if $hashKey.secretName }}
+            - name: PARAMS_HASH_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $hashKey.secretName | quote }}
+                  key: {{ $hashKey.secretKey | quote }}
+            {{- end }}
             {{- if .Values.checkRunner.enabled }}
             # #2642 — the in-process check-runner's service-principal
             # identity for background dispatch. Wired only when

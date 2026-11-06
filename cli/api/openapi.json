@@ -1637,7 +1637,7 @@
           "settings"
         ],
         "summary": "Export",
-        "description": "Build ``meho-settings.yaml`` from the live state.\n\nA ``tenant_admin`` gets their own tenant. A ``platform_admin`` gets every\ntenant, or the one named by ``tenant_id``. 409 ``settings_export_refused``\nwhen stored data holds a secret; ``mistakes`` names each path.",
+        "description": "Build ``meho-settings.yaml`` from the live state.\n\nA ``tenant_admin`` gets their own tenant. A ``platform_admin`` who is a\nperson gets every tenant, or the one named by ``tenant_id``. A machine\nprincipal gets its own tenant, with or without the platform-admin claim\n(the same rule as :func:`authorize_tenant_scope`). 409\n``settings_export_refused`` when stored data holds a secret; ``mistakes``\nnames each path.",
         "operationId": "export_api_v1_settings_export_get",
         "parameters": [
           {

@@ -109,13 +109,18 @@ as opt-in and validate it in your own environment before you rely on it.
 ## Enroll and deploy a satellite
 
 **1. Register a runner principal** on central. This mints the
-satellite's identity (a Keycloak client tagged `kind=runner`) and its
-credentials:
+satellite's identity (a Keycloak client `runner:<name>`, tagged
+`kind=runner`):
 
 ```bash
 meho runner-principal register edge-dc-a
-# → runner_id + token (deploy these to the satellite as MEHO_RUNNER_ID / MEHO_RUNNER_TOKEN)
+# → the principal: id, Keycloak client runner:edge-dc-a, owner
 ```
+
+Register prints no token. MEHO stores the client's secret in Vault
+(under the same path pattern as agent secrets). Set `MEHO_RUNNER_ID` to
+the runner name (`edge-dc-a`). `MEHO_RUNNER_TOKEN` is a bearer token of
+that Keycloak client.
 
 **2. Deploy the runner** inside the isolated network — the same image,
 started in runner mode, configured entirely through `MEHO_RUNNER_*` env:
@@ -123,7 +128,7 @@ started in runner mode, configured entirely through `MEHO_RUNNER_*` env:
 ```bash
 MEHO_RUNNER_CENTRAL_URL=https://meho.example.com \
 MEHO_RUNNER_ID=edge-dc-a \
-MEHO_RUNNER_TOKEN=<token-from-step-1> \
+MEHO_RUNNER_TOKEN=<token-of-runner:edge-dc-a> \
 python -m meho_backplane.runner
 ```
 
@@ -138,10 +143,12 @@ meho runner-principal list
 meho runner-principal show edge-dc-a
 ```
 
-Once the satellite is polling, central assigns it the checks whose
-targets live in its network, and their results flow into the same
-dashboards and sensor state as every locally-run check — the satellite
-is invisible to the consumer of the data.
+**4. Assign its checks.** A tenant_admin sets the checks of each runner
+with `PUT /api/v1/checks/assignment/{runner}`. Each check names a
+target, a `safe` operation, its params and a cadence in seconds. There
+is no CLI verb for it. The satellite picks up its list on its next
+poll. MEHO stores the results per runner; they do not feed sensors or
+dashboards.
 
 ## Liveness and the kill switch
 
@@ -156,8 +163,8 @@ silently reporting last-known-good forever. Liveness is enforced on the
   wedged work loop cannot masquerade as alive.
 - **Dead-man staleness.** When a runner's `last_seen_at` falls behind
   the cutoff, central flips its assignment rows to stale and writes an
-  internal audit row (`gateway.runner.stale`) — the affected checks
-  surface as `unknown`, not a stale green.
+  internal audit row (`gateway.runner.stale`) — the runner shows as
+  `unknown` on the console page `/ui/runners`, not a stale green.
 
 To decommission or contain a satellite, revoke its principal — the kill
 switch:
@@ -169,21 +176,19 @@ meho runner-principal revoke edge-dc-a
 ## Satellite vs. the in-process check runner
 
 Do not confuse the satellite with the **in-process check runner** that
-evaluates [sensors](sensors-quickstart.md) inside the central pod. They
-run the same safe check evaluations; the difference is *where*. The
-in-process runner handles targets central can reach directly (and its
-background-credential story is in
-[Sensors and your credential backend](sensors-quickstart.md#sensors-and-your-credential-backend));
-the satellite handles the targets it cannot. A sensor's author does not
-choose — central routes each check to whichever runner can reach its
-target.
+evaluates [sensors](sensors-quickstart.md) inside the central pod.
+Sensors always run in the central pod, on targets central can reach
+directly (the background-credential story is in
+[Sensors and your credential backend](sensors-quickstart.md#sensors-and-your-credential-backend)).
+Satellite checks are a separate list that a tenant_admin writes for each
+runner (step 4 above), for the targets central cannot reach.
 
 ## What can go wrong here
 
 | Symptom | What it means | Fix |
 |---|---|---|
 | The runner exits 1 at startup naming a variable | A required `MEHO_RUNNER_*` var (`CENTRAL_URL` / `ID` / `TOKEN`) is missing or malformed. | Set all three; the error names the offender. |
-| Checks on a satellite's targets go `unknown` after the satellite stops | The dead-man sweep flipped its assignments stale because `last_seen_at` fell behind — working as designed, not a false green. | Bring the satellite back; restart it or check its outbound path to `MEHO_RUNNER_CENTRAL_URL`. |
+| The runner shows `unknown` on `/ui/runners` after the satellite stops | The dead-man sweep flipped its assignments stale because `last_seen_at` fell behind — working as designed, not a false green. | Bring the satellite back; restart it or check its outbound path to `MEHO_RUNNER_CENTRAL_URL`. |
 | A work item comes back `refused` | The satellite declined it — most often because the `safety_level` is one it is not authorised to run, or the opt-in write tier is not enabled for it. | Read-class checks always belong on a satellite; a *change* runs only on the [opt-in write tier](#writes-through-a-satellite); `dangerous` / `destructive` work always runs centrally through the approval path. |
 | Results lag but eventually appear | The uplink was down; results spooled to disk and re-posted when it recovered. | Nothing — this is the spool working. If the spool fills (`SPOOL_MAX_FILES`), fix the uplink. |
 | `403` registering a runner principal | `meho runner-principal register` / `revoke` need **tenant_admin**. | Enroll under a tenant_admin session; `show` / `list` are operator-level. |

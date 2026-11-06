@@ -143,7 +143,8 @@ with these rules:
 The same view lives in the operator console at `/ui/checks` (list)
 and `/ui/checks/{dashboard_id}` (member breakdown). Dashboards have
 CLI, REST, and UI surfaces; sensors additionally have MCP tools
-(`meho_sensor_list` / `meho_sensor_create` / `meho_sensor_delete`) —
+(`meho_sensor_list` / `meho_sensor_create` / `meho_sensor_delete` /
+`meho_sensor_results`) —
 **dashboards have no MCP
 tools today**.
 
@@ -176,7 +177,10 @@ Then watch the timeline unfold:
 
 Each evaluation stores its evidence on the sensor's projection
 (`last_value`, `last_evidence`, `last_evaluated_at`) — enough to see
-*what* the assertion saw without a results-history table.
+*what* the assertion saw last. MEHO also keeps each evaluation: see the
+history with `meho sensor results <sensor_id>` (filters `--from`,
+`--to`, `--state`). MEHO keeps this history for 7 days by default
+(`CHECKS_EVIDENCE_RETENTION_DAYS`).
 
 ## The investigator (optional deep tier)
 
@@ -258,11 +262,9 @@ fine on every backend, with zero extra configuration.
     and
     [`docs/cross-repo/vault-provisioning.md` § Bounding the check-runner principal](https://github.com/evoila/meho/blob/main/docs/cross-repo/vault-provisioning.md).
 
-Long-unattended operation has one more open edge: durable machine
-credentials for background execution (the "still running on day 30"
-promise) are actively being hardened — tracked in
-[evoila/meho#2668](https://github.com/evoila/meho/issues/2668), which
-is also the sensors feature's road-to-GA tracker.
+For the agent-run side of long unattended operation, see
+[Durable credentials](scheduler.md#durable-credentials-surviving-unattended)
+in the scheduler guide.
 
 ## What can go wrong here
 

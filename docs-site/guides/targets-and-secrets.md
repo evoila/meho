@@ -32,13 +32,15 @@ which is why this is the first guide.
 | **Operator console — `/ui/connectors`** | Create/edit forms plus a paste-or-upload `targets.yaml` import with a preview table. | Console-first operators. Produces byte-identical writes to the CLI import. |
 | **REST — `POST /api/v1/targets`** | The API the other two paths call. | Automation that already speaks REST. |
 
-**There are no MCP tools for registering targets or staging secrets —
-deliberately.** Registration is an operator-trust decision, so it
-lives on the operator surfaces above; agents get the read-only
-`list_targets` tool and consume whatever you registered. This is also
-why the CLI is worth installing before your first agent session. If
-that boundary ever moves, the change will be tracked on the
-[feature-maturity index](../reference/maturity.md).
+**Register targets on the operator surfaces above.** Registration is an
+operator-trust decision. For agents, the default MCP tools only read
+targets (`list_targets`). A session that asked for the `mcp:admin`
+scope also has `meho_targets_register` (tenant_admin only). Through
+`call_operation`, the connector `targets-registry-1.x` offers
+`targets.register`, `targets.remove` and `targets.probe`; an agent's
+register waits for a person's approval, and `targets.remove` always
+waits for one. MEHO has no MCP tool to stage a secret. This is also why
+the CLI is worth installing before your first agent session.
 
 ## Write a `targets.yaml`
 
@@ -56,7 +58,7 @@ targets:
 
   - name: lab-vcenter
     product: vmware
-    host: 10.20.0.15                # reached by IP...
+    host: 192.0.2.15                # reached by IP...
     tls_server_name: vc01.lab.example.com   # ...but the cert's SAN is the FQDN
     tls_ca_pin: |
       -----BEGIN CERTIFICATE-----
@@ -65,17 +67,23 @@ targets:
     notes: vCenter reached by IP; SNI + cert verification pinned to the SAN name.
 ```
 
+The `vmware` entry needs a VMware connector package. Without one, MEHO
+refuses `product: vmware` with 422 `unknown_product`.
+
 Mapping rules the importer applies:
 
 - **Recognised top-level keys** map 1:1 to real columns: `name`,
   `aliases`, `product`, `host`, `port`, `fqdn`, `secret_ref`,
   `auth_model`, `vpn_required`, `notes`, `preferred_impl_id`,
   `verify_tls`, `tls_ca_pin`, `tls_server_name`, `secret_field_map`,
-  `extras`.
+  `version` (a quoted string, for example `version: "9.0"`),
+  `flight_recorder_capture`, `extras`.
 - **`name`, `product`, and `host` are required** and validated
   locally before any HTTP request.
 - **Unknown keys are not errors** — they spill into the target's
-  `extras` JSON column, so you can carry your own annotations.
+  `extras` JSON column, and the importer prints a warning for each one.
+  To carry your own annotations without the warning, put them under an
+  `extras:` block.
 - **`fingerprint` is server-managed** and dropped with a warning; the
   probe verb is its only writer.
 - `verify_tls: false` and `tls_ca_pin` are mutually exclusive (422):
@@ -311,7 +319,7 @@ Real failure modes, with the errors they actually produce:
 | Dispatch fails, `connector_auth_failed` (HTTP 401 at session establish) | The credential resolved but the vendor rejected it — usually a password rotated upstream while the store copy lagged. | Re-stage the current credential at the same path, then retry. |
 | Dispatch fails TLS: `extras.error_code` is `connector_tls_verify_failed` and `extras.exception_message` contains *"IP address mismatch"* (CPython `ssl` text relayed verbatim, not a MEHO string — MEHO's own summary says the chain "is not trusted") | You reach the appliance by IP but its certificate only names the FQDN. | Set `tls_server_name: <cert-fqdn>` on the target and re-import with `--update`. |
 | Probe shows `reachable: false` / `auth_failed` on a GSM deploy with per-operator Workload Identity Federation | Probes run under a system placeholder identity that cannot complete the per-operator token exchange, so credentialed-target probes cannot read the secret on that configuration. Reachability of *uncredentialed* endpoints still probes fine. | Known limitation — documented in [`docs/deploying.md`](https://github.com/evoila/meho/blob/main/docs/deploying.md); verify credentialed dispatch with a real operation call instead. |
-| Registration accepted, but *every* dispatch fails with a `no_connector` error naming the wrong thing | A `product` no connector implementation actually serves can slip through registration in some cases; the dispatch-time error then misattributes the cause. | Known issue, tracked in [evoila/meho#2701](https://github.com/evoila/meho/issues/2701). Re-check the target's `product` against the connector catalog. |
+| Dispatch fails with `no_connector: no implementation for product='…' version='…'` | No connector implementation matches the target's product and version. | Check the target's `product` and `version` against the connector catalog. Probe the target, or set its `version`. |
 
 !!! tip "Prove the secret is readable — without printing it"
 

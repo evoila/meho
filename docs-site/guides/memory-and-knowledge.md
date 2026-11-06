@@ -17,9 +17,13 @@ fragmenting.
 
     - A running backplane and a connected client
       ([Connect clients](../clients/index.md)).
-    - Reading and personal writes need the **operator** role. Writing
-      to a **tenant-shared** scope (memory `tenant`, or any kb entry)
-      needs **tenant_admin**.
+    - Personal writes need the **operator** role. On MCP, reading
+      needs **operator** too. On REST and the CLI, a `read_only` login
+      can read memory.
+    - Writing memory in the `tenant` scope needs **tenant_admin**.
+    - `meho kb add` and `POST /api/v1/kb` need **tenant_admin**. Over
+      MCP, `add_to_knowledge` is open to an **operator**, who can add
+      kb entries and change only the ones they created.
     - Memory and knowledge are **GA** — the 1.0 stability promise
       applies (see the
       [feature-maturity index](../reference/maturity.md#ga-features)).
@@ -57,7 +61,7 @@ narrowest scope that captures intent:
 | `user-tenant` | you, within this tenant (the CLI default) | — |
 | `user-target` | you, for one target | `target_name` |
 | `tenant` | everyone in the tenant | **tenant_admin** to write |
-| `target` | everyone touching that target | `target_name` |
+| `target` | everyone in the tenant (tied to one target) | `target_name` |
 
 Write one with the CLI:
 
@@ -84,8 +88,9 @@ The write returns the full entry so you can confirm it landed:
 
 ## Memory: TTL
 
-Memory can **expire** — the difference from the durable kb. TTL is an
-ISO-8601 duration (`P7D` = 7 days, `PT1H` = 1 hour):
+Memory can **expire** — the difference from the durable kb. On MCP,
+`ttl` is an ISO-8601 duration (`P7D` = 7 days, `PT1H` = 1 hour). On the
+CLI, `--ttl` takes a short form such as `30m`, `24h` or `7d`:
 
 - A `user`-scope write with **no** `ttl` picks up the backend default
   (7 days, `MEMORY_USER_DEFAULT_TTL_DAYS`) — a personal note self-cleans.
@@ -94,7 +99,7 @@ ISO-8601 duration (`P7D` = 7 days, `PT1H` = 1 hour):
   conventions are meant to last.
 
 ```bash
-meho remember "debugging the flaky RKE2 upgrade" --scope user --ttl PT2H
+meho remember "debugging the flaky RKE2 upgrade" --scope user --ttl 2h
 meho remember "team convention: always --dry-run first" --scope tenant --persist
 ```
 
@@ -104,7 +109,7 @@ Retrieval fuses BM25 (lexical) and cosine (semantic) ranks. Search
 memory scoped or unscoped:
 
 ```bash
-meho recall --query "DRS automation" --scope target --target prod-vc-1
+meho recall --query "DRS automation" --scope target
 ```
 
 ```json
@@ -149,7 +154,7 @@ Omitting `scope` on `search_memory` searches every scope you can read;
 ## Write knowledge
 
 ```bash
-meho kb add vcenter-session-auth --body-file ./vcenter-session-auth.md
+meho kb add vcenter-session-auth --body @./vcenter-session-auth.md
 ```
 
 ```json

@@ -52,8 +52,8 @@ The design is in the
   adds them from v0.39.0 on. To add them to an older realm, run the
   setup again (see [Upgrades](../install/upgrades.md#version-specific-notes)).
 - MEHO v0.40.0 or later. In v0.40.0 to v0.43.0 the web interface answers
-  `tenant_not_chosen` to a person in several tenants. The tenant picker
-  of the web interface comes in the release after v0.43.0. The CLI and
+  `tenant_not_chosen` to a person in several tenants. The web interface
+  has the tenant picker from v0.44.0 on. The CLI and
   MCP work from v0.40.0 on.
 - A MEHO-SA-Operator who approves their own changes, a second person
   who can approve, or the agent setup from

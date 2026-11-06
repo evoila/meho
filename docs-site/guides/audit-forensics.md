@@ -8,8 +8,8 @@ fails, the operation fails. That property is what makes the audit log
 answer *"who did X to Y, and when?"* with authority rather than
 best-effort.
 
-This guide covers the `query_audit` filter surface, how to correlate an
-audit row with the live broadcast feed, and how to reconstruct an entire
+This guide covers the `query_audit` filter surface, how the audit log
+relates to the broadcast feed, and how to reconstruct an entire
 agent session end to end. For the actual vendor request/response traffic
 behind a single dispatch — one level below the audit row — see the
 [flight recorder](flight-recorder.md).
@@ -35,7 +35,7 @@ Each `AuditEntry` carries the forensic fields you filter and pivot on:
 | `principal_sub` / `principal_name` | the subject that acted (the JWT `sub`) |
 | `target_name` | the target it acted on |
 | `op_id` / `op_class` | the operation and its sensitivity class |
-| `result_status` | `ok` / `error` / `denied`, or `withdrawn` when the sender took its approval request back (the operation never ran) |
+| `result_status` | `ok` / `error` / `denied`; `pending` when the run stopped to wait for approval (the row stays `pending` after the decision); or `withdrawn` when the sender took its approval request back (the operation never ran) |
 | `policy_decision` | the gate verdict: `auto-execute`, `needs-approval`, or `deny` |
 | `agent_session_id` | the originating agent's MCP session id — the key for session tracing |
 | `parent_audit_id` | the id of the row that caused this one. An approval's decision row and run row point at the approval request row. |
@@ -48,8 +48,10 @@ Each `AuditEntry` carries the forensic fields you filter and pivot on:
 ## The filter surface
 
 The agent sees **one** tool, `query_audit` — every forensic shape is a
-filter combination, not a separate tool. The CLI adds pre-canned
-shortcuts over the same substrate.
+filter combination, not a separate tool. On MCP, `query_audit` is an
+operator-plane tool: a session lists it only when it asked for the
+`mcp:admin` scope. The CLI adds pre-canned shortcuts over the same
+substrate.
 
 | Filter | `query_audit` arg | CLI |
 |---|---|---|
@@ -59,19 +61,22 @@ shortcuts over the same substrate.
 | Arbitrary combination | any of the below | `meho audit query …` |
 
 `query_audit` (and `meho audit query`) accept: `target`, `principal`
-(operator-sub substring), `op_id` (glob, e.g. `vault.*`), `op_class`
-(`read` / `write` / `credential_read` / `audit_query`), `result_status`,
+(part of the user id or of the name; case does not matter), `op_id`
+(glob, e.g. `vault.*`), `op_class` (`read` / `write` /
+`credential_read` / `credential_write` / `credential_mint` /
+`audit_query` / `approval` / `checks` / `other`), `result_status`,
 `since` / `until` (ISO-8601 **or** shorthand: `30m`, `24h`, `7d`, `2w`),
 `audit_id`, `parent_audit_id`, `agent_session_id`, `work_ref`, `limit` (default 100, max
 1000), and `cursor`. Calling it with **no** filters returns the most
 recent 100 rows of your tenant — bounded, never the whole ledger.
 
 `query_audit` and the REST route `POST /api/v1/audit/query` also accept
-`event_class` (one of the five record kinds above). It returns only rows
-of that kind. Without it you get every kind, as before. The CLI has no
+`event_class` (one of the six record kinds above). It returns only rows
+of that kind. Without it you get every kind. The CLI has no
 flag for it yet.
 
-`POST /api/v1/audit/class-counts` takes the same filters and returns how
+`POST /api/v1/audit/class-counts` takes the same filters (except
+`event_class`, `limit` and `cursor`) and returns how
 many rows of each class match. Without `since` it counts only the last
 24 hours. The answer's `since` field says where the counted window starts.
 The console audit page shows the same counts, with the same window, and has
@@ -97,11 +102,11 @@ The agent surface returns the same rows, sorted newest-first, in a paged
 envelope:
 
 ```json
-// query_audit {"target": "rdc-vcenter", "op_class": "write", "since": "7d"}
+// query_audit {"target": "prod-rke2", "op_class": "write", "since": "7d"}
 {
   "rows": [
     {"id": "…", "ts": "2026-07-29T14:03:11Z", "principal_sub": "…",
-     "target_name": "rdc-vcenter", "op_id": "vsphere.host.maintenance",
+     "target_name": "prod-rke2", "op_id": "k8s.delete",
      "op_class": "write", "result_status": "ok",
      "policy_decision": "needs-approval", "agent_session_id": "…",
      "work_ref": "gh:evoila/meho#221"}
@@ -115,36 +120,14 @@ page is the end of the matching set. Tenant scoping is automatic — the
 JWT sets the boundary, and there is no `tenant_id` argument, so a
 cross-tenant probe is structurally impossible.
 
-## Correlating with the broadcast feed
+## The audit log and the broadcast feed
 
-The audit ledger and the [broadcast feed](broadcast.md) are two views of
-the same operations — the audit row is the durable forensic record; the
-broadcast event is the live, redacted announcement. They are linked, but
-mind the direction:
+The [broadcast feed](broadcast.md) carries only notes that agents post.
+MEHO does not post operation runs to it, and an announcement does not
+link to an audit row. To find what ran, query the audit log.
 
-!!! warning "The link lives on the broadcast event, not the audit row"
-
-    The `AuditEntry` carries a `broadcast_event_id` field, but in this
-    version it is a **placeholder that is always `null`** — the
-    foreign key runs the *other* way. Each **broadcast event** carries
-    an `audit_id` pointing back at its audit row.
-
-So the correct pivot is broadcast → audit:
-
-1. You spot an event on the feed (`meho status --watch --json`) and read
-   its `audit_id`.
-2. You pull the full forensic row with that id:
-
-    ```bash
-    meho audit show <audit_id>
-    ```
-
-Do **not** try to filter audit rows by `broadcast_event_id` — it is
-unpopulated. Going the other way (audit → feed) is not an id lookup
-either: match on the operation's attributes instead (`principal`,
-`target`, `op_id`, and the timestamp window), remembering that
-`credential_read` and `audit_query` events are aggregate-only on the
-feed by redaction policy while the audit row keeps the full detail.
+The `AuditEntry` carries a `broadcast_event_id` field. It is always
+`null`. Do not filter audit rows by it.
 
 ## Tracing an agent session end to end
 
@@ -181,21 +164,19 @@ Two guard rails worth knowing:
 ## What you never leak
 
 A `query_audit` call is itself an audited operation (`op_class:
-audit_query`), and the **contents** of your query — which target,
-which principal — are never published to the broadcast feed. Only the
-`{op_id, result_status, row_count}` aggregate appears, so an
-investigator searching for a compromised credential does not themselves
-broadcast the credential's path.
+audit_query`). Your query is not posted to the broadcast feed at all,
+so an investigator searching for a compromised credential does not
+themselves broadcast the credential's path.
 
 ## What can go wrong here
 
 | Symptom | What it means | Fix |
 |---|---|---|
-| `broadcast_event_id` is `null` on every row | Working as designed — it is a v0.2 placeholder; the FK lives on the broadcast event's `audit_id`. | Pivot broadcast → audit: read the event's `audit_id`, then `meho audit show <id>`. |
+| `broadcast_event_id` is `null` on every row | Working as designed — the field is always `null`. The broadcast feed carries only agent notes, which do not link to audit rows. | Filter the audit log by `target`, `principal`, `op_id` and time instead. |
 | `parent_audit_id` returns fewer rows than the full tree | The filter returns direct children only, not grandchildren. | Run it again with a child's `id`, or use `meho audit replay` for a whole session. |
 | `shape="tree"` rejected with `-32602` naming your session | The tree path is **self-session only** for operators — the `agent_session_id` must equal your own MCP session id. | To replay another session, use the tenant_admin `meho audit replay <session-id>`. |
 | A replay is refused with `session_too_large` | The session exceeds the 10,000-row replay cap. | Narrow with `--since` / `--until` and page the flat `meho audit query --session-id …` shape. |
 | `meho audit query --since Tuesday` errors | `since` / `until` want ISO-8601 or the duration shorthand, not prose. | Use `--since 3d` or `--since 2026-07-28T00:00:00Z`. |
 | An empty result when you expected rows | The tenant boundary is on your JWT — a target/session in another tenant returns zero rows, not another tenant's data. | Confirm you are authenticated to the right tenant. |
 
-**Next:** [Runbooks](runbooks.md).
+**Next:** [Flight recorder](flight-recorder.md).

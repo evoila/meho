@@ -194,7 +194,10 @@ an admin or an approver to approve it.
 That is a REST `403` (the command line prints it), and a disabled
 **Approve** button in the console. For a `dangerous` or `destructive`
 change the text asks for a MEHO-SA-Operator or a MEHO-Admin and does not
-name the switch, because the switch never reaches these levels. Another
+name the switch, because the switch never reaches these levels. For your
+own `caution` change that waits only because you sent it with a token,
+the text says instead that you may approve it yourself with a click in
+the web interface. Another
 person's `dangerous` or `destructive` change, approved by someone who is
 neither, gets `403 approval_group_required`.
 
@@ -258,13 +261,18 @@ meho agent-principal register nightly-writer
 
 # 2. Author an agent definition bound to that principal. Its toolset and
 #    prompt are what perform the write when the definition runs.
-meho agent create nightly-writer --identity-ref <client-id-from-step-1>
+#    All four flags are required.
+meho agent create nightly-writer --identity-ref agent:nightly-writer \
+  --model-tier standard --turn-budget 20 \
+  --system-prompt "<what the agent does>"
 
-# 3. Schedule the definition. The autonomous run parks the write under the
+# 3. Schedule the definition. --agent-definition takes its UUID: copy
+#    the id: line of `meho agent show nightly-writer`. --inputs is the
+#    task of each run. The autonomous run parks the write under the
 #    agent's sub (principal_sub=<agent-sub>). Use --kind one_off with
 #    --fire-at <ISO8601> instead for a single run rather than a cron.
-meho scheduler create --kind cron --agent-definition nightly-writer \
-  --cron-expr "0 2 * * *"
+meho scheduler create --kind cron --agent-definition <definition-uuid> \
+  --cron-expr "0 2 * * *" --inputs '{"prompt": "<the nightly task>"}'
 
 # 4. The write now waits under the agent. Approve as yourself — your
 #    sub differs from the agent's, so it runs.
@@ -311,16 +319,16 @@ change. Understand exactly what you traded away:
 
 - **It covers the whole deploy, not one write.** The flag re-opens the
   single-account *request-and-grant* hole for every **lower-risk**
-  operation across the whole tenant, not just the one you are trying to
-  clear. There is no scoping to a single write.
+  operation in every tenant of this deploy, not just the one you are
+  trying to clear. There is no scoping to a single write.
 - **It never reaches a `dangerous` or `destructive` operation.**
   Break-glass self-approval applies only to the `safe` and `caution`
   risk levels. For `dangerous` and `destructive` changes only the group
   rules count: a MEHO-SA-Operator may approve their own, everyone else
   needs a MEHO-SA-Operator or a MEHO-Admin.
 - **It is for emergencies, not the solo default.** Reach for Option 1
-  first. Leaving this on lets every person approve their own lower-risk
-  changes across the whole tenant.
+  first. Leaving this on lets every person in every tenant approve their
+  own lower-risk changes.
 - **It is still audited.** Self-approval is not silent (see below). A
   reject never needs the flag.
 
@@ -404,7 +412,9 @@ deleted after it. On such an instance a tenant admin may give a service
 principal a standing grant that also covers deletes, a **delete grant**.
 So an automated test run can build, change and delete its own test
 systems with no wait for a person. Every other instance keeps the rules
-above; it shows `"sandbox_mode": "off"` on `/ready` and in `meho status`.
+above; it shows `"sandbox_mode": "off"` on `/ready` and in
+`meho status --json`. The normal `meho status` output shows a line only
+when sandbox mode is on.
 
 What stays the same on a sandbox:
 

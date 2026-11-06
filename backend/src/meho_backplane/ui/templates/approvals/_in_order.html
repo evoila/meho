@@ -110,6 +110,9 @@
               {% if s.safety_level %}
                 <span class="badge badge-sm {{ 'badge-error' if s.safety_level in ('dangerous', 'destructive') else 'badge-ghost' }}">{{ s.safety_level }}</span>
               {% endif %}
+              {% if s.request.reveal_secret %}
+                <span class="badge badge-sm badge-error" data-approval-in-order-reveal-secret title="The approved run returns the hidden values to the requester">returns hidden values</span>
+              {% endif %}
             </div>
             {% if s.detail %}
               <p class="text-xs text-base-content/60 [overflow-wrap:anywhere]">{{ s.detail }}</p>

@@ -455,9 +455,13 @@ cluster access to the chart needed:
 
 ```bash
 curl -s https://<your-backplane>/ready | jq .features.approval_queue.effective_posture
-# "four_eyes_enforced"            → the default; self-approval is OFF
+# "four_eyes_enforced"            → the default; the emergency switch is off
 # "single_operator_break_glass"   → APPROVAL_ALLOW_SELF_APPROVAL=true is set
 ```
+
+The posture reports only the emergency switch. A MEHO-SA-Operator may
+approve their own change under either posture; that shows on the
+decision row, not here.
 
 `/ready` returns the `features` block only when you send the metrics
 token. Add `-H "Authorization: Bearer <metrics-token>"` to the `curl`

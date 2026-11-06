@@ -2223,15 +2223,20 @@ enforcement that #3196/#3197 left, plus one machinery limitation:
   (`consult_and_record_grant` already refuses the tier).
 - **The self-approval break-glass hole.** `_check_self_approval`
   (`operations/approval_queue.py`) honoured `APPROVAL_ALLOW_SELF_APPROVAL`
-  for every tier. It now refuses self-approval of a `dangerous` **or**
-  `destructive` row *unconditionally* (`_NO_SELF_APPROVAL_TIERS`) — the
-  break-glass switch does not reach either tier (decision requirement 1).
+  for every tier. The break-glass switch now never reaches a `dangerous`
+  **or** `destructive` row (`_HIGH_RISK_TIERS`, decision requirement 1).
   #3198 scoped this to `destructive` only, but a delete-class op can
   legitimately register on the reversible `dangerous` tier (e.g. a KV
   secret-version soft-delete) while still being the four-eyes-critical
   action the requirement protects, so #3290 widened the refusal to cover
-  it; `caution` / `safe` still honour break-glass. A single-operator
-  tenant uses the agent-requester pattern, never self-approval.
+  it; `caution` / `safe` still honour break-glass. Since #3328 the
+  group rules decide the rest: a MEHO-SA-Operator may approve their own
+  `dangerous` or `destructive` change (`approval_rule`
+  `sa_operator_self_approval`), and another person's change at these
+  levels needs a MEHO-SA-Operator or a tenant admin (see
+  [Who may approve, by group](#the-approval-groups-and-how-a-person-approves-3325)).
+  A single-operator tenant puts its operator in MEHO-SA-Operators, or
+  uses the agent-requester pattern.
 - **Registration fail-fast.** `_register_in_session` (`operations/typed_register.py`)
   now rejects a `destructive` descriptor declared `requires_approval=False`
   at registration time — an inconsistent row can't exist. Belt-and-suspenders
@@ -2239,8 +2244,9 @@ enforcement that #3196/#3197 left, plus one machinery limitation:
 
 Conformance for the op — an agent's request waits for a person like any
 other destructive request (agent verdict `NEEDS_APPROVAL`, #3980), no standing
-grant (`ServicePrincipalGrant` refuses), no self-approval even under
-break-glass, no satellite mint (`MintRefusalCode.OP_NOT_SAFE`), dispatch
+grant (`ServicePrincipalGrant` refuses), no break-glass self-approval
+(only a MEHO-SA-Operator may approve their own), no satellite mint
+(`MintRefusalCode.OP_NOT_SAFE`), dispatch
 refused without a matching hash, park refused without a blast-radius block,
 and the full preview→park→human-approve→audited-resume flow — is pinned in
 `tests/test_connectors_vmware_rest_vm_destroy.py`.
@@ -2616,7 +2622,7 @@ token-decode + live decouple verification, and a rollback note — lives in
 | `GET` | `/api/v1/approvals` | operator **or** approver | List, newest first, filtered by `status` (default: `pending`; `all` = every state, #5129). Optional `limit` (1..500, no limit when omitted) and `offset`. Optional `order=oldest\|newest` (default `newest`, #3596): `oldest` lists `created_at ASC`. |
 | `GET` | `/api/v1/approvals/{id}` | operator **or** approver | **Inspect one request** (T5). 404 on cross-tenant. |
 | `GET` | `/api/v1/approvals/{id}/result` | **request owner** (any role) | **Read the approved dispatch's result** (#3209). Principal-scoped: only `principal_sub` reads it; any other principal gets 403 `not_request_owner`. Writes an `approval.result` audit row. |
-| `POST` | `/api/v1/approvals/{id}/approve` | **human** operator **or** approver, **fresh approval sign-in** | Approve. 401 `fresh_sign_in_required` / `fresh_sign_in_already_used` without a fresh approval sign-in, or for a destructive request without a sign-in of its own (#3979, #5515). Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1); 403 `human_principal_required` for a machine `principal_kind` (#289). |
+| `POST` | `/api/v1/approvals/{id}/approve` | **human** operator **or** approver, **fresh approval sign-in** | Approve. 401 `fresh_sign_in_required` / `fresh_sign_in_already_used` without a fresh approval sign-in, or for a destructive request without a sign-in of its own (#3979, #5515). Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and no self-approval rule allows it: a MEHO-SA-Operator may approve their own change at every risk level, break-glass covers only `safe` and `caution` (G11.7-T1, #3328); 403 `approval_group_required` for another person's `dangerous` or `destructive` change when the approver is neither a MEHO-SA-Operator nor a tenant admin; 403 `human_principal_required` for a machine `principal_kind` (#289). |
 | `POST` | `/api/v1/approvals/{id}/decide` | **human** operator **or** approver; **fresh sign-in** for `approved` | Decide (`approved` / `rejected`) by id alone. `approved` needs a fresh approval sign-in like `/approve` (#3979, #5515). On every approval it runs the op with the **stored** params (#1503) and returns the outcome in `dispatch_*`. This is the same for a direct op and an agent-run request (#2293): `claim_resume` lets only one caller run it, so when the waiting agent ran it first, `dispatch_status` is `already_resumed`. 403 `human_principal_required` for a machine `principal_kind` (#289). |
 | `POST` | `/api/v1/approvals/{id}/reject` | **human** operator **or** approver | Reject. The op never executes. 403 `human_principal_required` for a machine `principal_kind` (#289). |
 | `POST` | `/api/v1/approvals/{id}/withdraw` | **request sender** (any role, any principal kind) | The sender takes back its own pending request (#4987). Not a decision. 403 `not_request_sender` for anyone else; 409 on a closed request. Writes an `approval.withdraw` audit row. |
@@ -3553,9 +3559,11 @@ and `/preview`. Paths are under `backend/src/meho_backplane/`.
    lives on the row's `proposed_effect`. The add-on gets
    `status="awaiting_approval"` and `extras.approval_request_id`. It should
    store that id.
-4. **A human approves.** The approver must be a different person: there is
-   no self-approval for this tier, not even with break-glass
-   (`operations/approval_queue.py:1835` `_check_self_approval`). The approve
+4. **A human approves.** A MEHO-SA-Operator may approve their own delete.
+   Everyone else needs a MEHO-SA-Operator or a tenant admin to approve it,
+   and break-glass never covers this tier
+   (`operations/approval_queue.py` `_check_self_approval`,
+   `_check_approver_group`, #3328). The approve
    step checks the preview hash again (`:1926`
    `_check_destructive_preview_binding`). The decision verbs are human-only
    on every surface, so the add-on cannot approve its own request.

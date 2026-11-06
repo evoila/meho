@@ -55,6 +55,29 @@ call we want the runner to repeat is the one you already ran by hand:
 `k8s.pod.list` with `{"all_namespaces": true, "field_selector":
 "status.phase!=Running"}` — a healthy estate returns `total: 0`.
 
+### Pick the connector version that matches the target
+
+A connector can state the target versions its operations work on, for
+example `vmware-rest-8.0` for vCenter 8.0.x and `vmware-rest-9.0` for
+vCenter 9.0.x. MEHO checks the target's version each time the sensor
+runs. When the version is outside the connector's range, MEHO does not
+run the operation, and the sensor can read `unknown`. Its evidence has the
+reason `dispatch_not_ok`, and the field `dispatch_error` holds an error
+like this one:
+
+```text
+unqualified_target_version: this operation works only on target versions >=9.0,<10.0; the target runs version 8.0.3
+```
+
+The text after `unqualified_target_version:` can differ between
+connectors. For an operation from an API file, MEHO first looks for the
+same operation on the connector version that matches the target, and
+runs it there when it exists and is turned on.
+
+So pin the connector whose version matches the target. To see the
+target's version, run `meho targets describe <name>`. A sensor cannot
+be changed: delete it and create it again with the right connector.
+
 ## Step 2 — create the sensor
 
 The **assertion** is a bounded two-part spec: one `select` (a path
@@ -278,6 +301,7 @@ is also the sensors feature's road-to-GA tracker.
 | Sensor `unknown` though it was green a minute ago | Staleness: no fresh evaluation past `next_fire_at` + 60 s grace — the runner is down, or the previous evaluation is still in flight and the overlap guard skipped this tick. | Check the runner's health. A *parked* sensor is a different symptom: it shows `paused` and rolls up `skip`, never `unknown`. |
 | Dashboard `unknown` with all members green | The dashboard has zero members — an empty member set rolls up `unknown` by rule. | Add members (delete + recreate the dashboard). |
 | A sensor reads `unknown` with the reason `op_not_safe_at_dispatch` | The pinned operation is not `safe` now. For example, a connector re-ingest changed its safety class (the ingest result names the affected sensors in `safety_changes`), or the operation connects to an address you give (`pfsense.diag.ping` since v0.45.0). Sensors never run an operation that is not `safe`. | Pin a safe operation instead. For a ping, use `net.ping`. |
+| A sensor reads `unknown`, reason `dispatch_not_ok`, and `dispatch_error` starts with `unqualified_target_version` | The target's version is outside the version range of the sensor's connector, for example `vmware-rest-9.0` on a vCenter 8.0.3 target. The error names the range and the target's version. If it says the target has no known version, MEHO does not know the target's version yet. | Delete the sensor and create it again on the connector that matches the target's version (`vmware-rest-8.0` for vCenter 8.0.x). For a target with no known version, run `meho targets probe <name>` or set its version. See [Pick the connector version that matches the target](#pick-the-connector-version-that-matches-the-target). |
 
 **Where next:** compose sensors with the approvals workflow (a red
 dashboard, an investigator finding, a gated remediation) — the

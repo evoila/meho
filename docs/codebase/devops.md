@@ -230,12 +230,19 @@ The Deployment renders `startupProbe`, `livenessProbe`, and
 The `startupProbe` (Issue #2393) exists because first boot registers the
 full typed-op catalog and preloads the fastembed embedding model inside the
 FastAPI lifespan **before** the app binds `:8000`. On an empty database
-every operation also gets its embedding. On 2026-11-04 (#4102, OpenShift,
-v0.43.0) that took about 5 minutes for 1,302 operations at the 1-CPU limit;
-later boots, which find the rows, took about 20 seconds. Since #5019 a start
-that is stopped keeps none of the new rows, so the whole first boot must fit
-in one budget: with the old 300s, a fresh `helm install --wait` failed on
-the first try. The kubelet disables the liveness and readiness
+every operation also gets its embedding, so the time grows with the
+catalog. Measured at the 1-CPU limit on OpenShift (#4102):
+
+- the plain public image (574 operations, since #5665 moved evoila's VMware
+  connectors out): about 1 minute (2026-11-06);
+- v0.43.0, which still had the VMware connectors (1,302 operations, about
+  what an overlay image with the connector packages now has): about
+  5 minutes (2026-11-04);
+- later boots, which find the rows: about 20 seconds.
+
+Since #5019 a start that is stopped keeps none of the new rows, so the whole
+first boot must fit in one budget: with the old 300s, a fresh
+`helm install --wait` of v0.43.0 failed on the first try. The kubelet disables the liveness and readiness
 probes until the startup probe first succeeds, so a slow-but-healthy first
 boot no longer trips the short-delay liveness probe into a
 CrashLoopBackOff. The budget is `failureThreshold × periodSeconds` (900s by

@@ -390,10 +390,13 @@ ingress:
 # succeeds. First boot registers the full typed-op catalog and preloads the
 # fastembed embedding model before the app binds :8000, so the short-delay
 # liveness probe would otherwise CrashLoopBackOff a slow-but-healthy pod. On
-# an empty database every operation also gets its embedding: about 5 min
-# for the 1,302 operations of v0.43.0 at the 1-CPU limit (measured on
-# OpenShift, #4102). Since #5019 a stopped start keeps none of that work, so
-# the whole first boot must fit in one budget; later boots take about 20s.
+# an empty database every operation also gets its embedding, so the time
+# grows with the catalog. Measured at the 1-CPU limit on OpenShift (#4102):
+# about 1 min for the 574 operations of the plain public image, about 5 min
+# for 1,302 operations (v0.43.0, which still had the VMware connectors that
+# an overlay image with connector packages now adds back). Since #5019 a
+# stopped start keeps none of that work, so the whole first boot must fit
+# in one budget; later boots take about 20s.
 # The default budget is `failureThreshold` × `periodSeconds` = 90 × 10s =
 # 900s (15 min); once it passes the kubelet hands off to the liveness probe
 # for fast hang detection. Clear `probes.startup` to opt out on a fast

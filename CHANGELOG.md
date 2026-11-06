@@ -94,6 +94,10 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security
+- The container image takes the fixed Debian `apt` packages: `apt` and
+  `libapt-pkg7.0` are at version 3.0.4, which fixes CVE-2026-109518.
+
 ## [0.44.0] - 2026-11-04
 
 **This is the first release whose public image has no VMware

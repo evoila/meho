@@ -215,6 +215,9 @@ class ProfiledRestConnector(HttpConnector):
     # G0.28-T1 (#1967) — the "profiled" tier of the tri-state classifier.
     _shim_kind: ShimKind = "profiled"
 
+    # A profiled connector exists to run the operations of its ingested catalog.
+    accepts_ingested_operations: bool = True
+
     # Explicit (matches the inherited default) so the resolver-relevant
     # contract is readable at the class: a profiled connector never wins the
     # priority rung against a hand-coded class.

@@ -14,7 +14,8 @@ for hosts VMware Tools cannot reach — Tools-less appliances,
 non-VMware-hypervisor guests, bare metal, or any host no vCenter target
 fronts. It is complementary to the `vmware.composite.vm.guest.*` family
 (branch (a), #3255), not a replacement; the two coexist by target
-fingerprint (see `connectors-vmware-rest-guest-ops.md`).
+fingerprint (see `connectors-vmware-rest-guest-ops.md`,
+in the private connectors repository).
 
 This page documents **T1 (#3360)**, the keystone read floor: the connector
 skeleton, transport, probe / fingerprint, and the `safe` read verbs plus
@@ -506,7 +507,7 @@ connector has no `command.run` verb to extend it to.
 - **T3 (#3362) verification recipe** — the day-0 verification recipe as an
   ordered sequence of T1 read ops, documented and wired into consumer
   onboarding. Depends on T1.
-- **`connectors-vmware-rest-guest-ops.md`** still names tier (b) as
+- **`connectors-vmware-rest-guest-ops.md`** (in the private connectors repository) still names tier (b) as
   deferred; that pointer is updated to reference this built connector as
   part of the initiative wrap-up (T3), not T1.
 - **Host-key verification** is inherited from the base adapter, which is
@@ -538,7 +539,7 @@ provisioning run that deploys a services host, powers it on, and applies a
 couple of perimeter reach ops has proven only that the VM is *running* —
 not that its in-guest day-0 configuration succeeded. For a Tools-less host
 (outside the VMware-Tools guest-ops path — see
-`connectors-vmware-rest-guest-ops.md`),
+`connectors-vmware-rest-guest-ops.md`, in the private connectors repository),
 this connector is the only governed channel that can look inside. This
 recipe is the ordered sequence of T1 read ops a run (or an operator) issues
 **at the moment it would declare readiness**, so a silently-aborted

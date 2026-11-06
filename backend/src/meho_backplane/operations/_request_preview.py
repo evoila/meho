@@ -85,6 +85,11 @@ from meho_backplane.operations._errors import (
     result_unqualified_target_version,
 )
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._ingested_owner import (
+    INGESTED_OPS_NOT_ACCEPTED,
+    accepts_ingested_operations,
+    ingested_ops_refusal_message,
+)
 from meho_backplane.operations._lookup import (
     lookup_descriptor,
     parse_connector_id,
@@ -592,9 +597,11 @@ async def _build_ingested_preview(
     resolve (shared with :func:`dispatch_ingested`) and body redaction.
     Returns the ``status="ok"`` envelope, a structured ``no_connector`` /
     ``ambiguous_connector`` error envelope when the target resolves no
-    connector, or a ``dispatch_error`` envelope when the request can't be
-    resolved (an unsubstituted path var or a descriptor missing its
-    method/path -- the two faults :func:`resolve_ingested_request` raises).
+    connector, an ``ingested_ops_not_accepted`` error envelope when the
+    target's class does not accept ingested operations, or a
+    ``dispatch_error`` envelope when the request can't be resolved (an
+    unsubstituted path var or a descriptor missing its method/path -- the
+    two faults :func:`resolve_ingested_request` raises).
     Never sends the request; never raises for those faults.
     """
     cls, label, exc_message = resolve_connector_or_label(target)
@@ -609,6 +616,15 @@ async def _build_ingested_preview(
         }
     # ``label is None`` ⇔ ``cls`` is set (resolver contract).
     assert cls is not None
+    if not accepts_ingested_operations(cls):
+        return {
+            "status": "error",
+            "op_id": op_id,
+            "connector_id": connector_id,
+            "source_kind": descriptor.source_kind,
+            "error": f"{INGESTED_OPS_NOT_ACCEPTED}: {ingested_ops_refusal_message(cls)}",
+            "extras": {"error_code": INGESTED_OPS_NOT_ACCEPTED},
+        }
     connector_instance = get_or_create_connector_instance(cls)
 
     # The literal request, resolved through the SAME code path

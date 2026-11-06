@@ -11,9 +11,9 @@ for a person's approval (``meho_backplane.operations.caller_address``).
 This module finds the fields that look like an address but have no marker.
 A field looks like an address when:
 
-- its name is ``url``, ``uri``, ``host``, ``hostname``, ``address``,
-  ``server`` or ``resolver``, or ends in ``_url``, ``_host`` or
-  ``_address``; or
+- its name is ``url``, ``uri``, ``host``, ``hostname``, ``fqdn``,
+  ``address``, ``server``, ``remote``, ``peer``, ``endpoint`` or
+  ``resolver``, or ends in ``_url``, ``_host`` or ``_address``; or
 - its schema ``format`` is ``uri``, ``url``, ``hostname``, ``ipv4`` or
   ``ipv6``.
 
@@ -22,8 +22,17 @@ may carry the marker on the list). A field that only looks like an address
 goes in :data:`NOT_CALLER_ADDRESSES` with its reason: MEHO and the target
 never connect to it, MEHO connects to it only on the target's own host
 (the Azure poll URL), or it is the address of a built-in network check
-(``net.*``), which the probe allowlist guards instead of approval. Used by
-``test_operation_contracts.py``; tested with fake operations in
+(``net.*``), which the probe allowlist guards instead of approval.
+
+Rule 14 uses :func:`stored_secret_fields` and :func:`caller_address_fields`:
+an operation that takes a reference to a stored secret (a field named
+``secret_ref``, or ending in ``_secret_ref``, ``password_ref`` or
+``credential_ref``) and an address the caller gives runs at ``caution`` or
+higher and waits for approval. Both scans walk the same schema parts:
+``properties``, ``items``, ``additionalProperties``, ``anyOf``, ``oneOf``,
+``allOf``, ``prefixItems``, ``$defs`` and ``definitions``.
+
+Used by ``test_operation_contracts.py``; tested with fake operations in
 ``test_operation_contract_rules.py``.
 """
 
@@ -35,10 +44,27 @@ from typing import Any, Final
 from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
 
 ADDRESS_NAMES: Final[frozenset[str]] = frozenset(
-    {"url", "uri", "host", "hostname", "address", "server", "resolver"}
+    {
+        "url",
+        "uri",
+        "host",
+        "hostname",
+        "fqdn",
+        "address",
+        "server",
+        "remote",
+        "peer",
+        "endpoint",
+        "resolver",
+    }
 )
 ADDRESS_NAME_ENDINGS: Final[tuple[str, ...]] = ("_url", "_host", "_address")
 ADDRESS_FORMATS: Final[frozenset[str]] = frozenset({"uri", "url", "hostname", "ipv4", "ipv6"})
+STORED_SECRET_NAME_ENDINGS: Final[tuple[str, ...]] = (
+    "secret_ref",
+    "password_ref",
+    "credential_ref",
+)
 
 #: Fields that look like an address, but are not a caller address:
 #: ``(operation id, field path) -> reason``. The live check fails when an
@@ -48,21 +74,36 @@ BUILT_IN_CHECK_REASON: Final[str] = (
     "a built-in network check; the probe allowlist (MEHO_NETDIAG_PROBE_ALLOWLIST) "
     "bounds where it connects, so it needs no approval and a sensor can run it"
 )
+_DNS_RECORD_NAME: Final[str] = "the name of a DNS record in a bind9 zone; nothing connects to it"
+_FREEIPA_HOST_NAME: Final[str] = (
+    "the name of a host entry in the FreeIPA directory; nothing connects to it"
+)
+_NEW_TARGET_ADDRESS: Final[str] = (
+    "the address of a new target, stored in the registry; registering connects to nothing, "
+    "and later calls run that target's own operations"
+)
 NOT_CALLER_ADDRESSES: Final[Mapping[tuple[str, str], str]] = {
     ("azure.operation.status", "operation.poll_url"): (
         "the poll URL an earlier Azure write returned; MEHO polls it only when it is "
         "on the target's own Azure host (check_poll_url)"
     ),
+    ("bind9.record.add", "fqdn"): _DNS_RECORD_NAME,
+    ("bind9.record.delete", "fqdn"): _DNS_RECORD_NAME,
+    ("bind9.record.get", "fqdn"): (
+        "a DNS name that the bind9 server looks up on its own host (dig @localhost); "
+        "nothing connects to the name"
+    ),
+    ("bind9.record.remove", "fqdn"): _DNS_RECORD_NAME,
     ("freeipa.hbac.test", "host"): (
         "a host name that FreeIPA checks against its access rules; nothing connects to it"
     ),
+    ("freeipa.host.delete", "fqdn"): _FREEIPA_HOST_NAME,
+    ("freeipa.host.show", "fqdn"): _FREEIPA_HOST_NAME,
     ("phpipam.address.reserve", "hostname"): (
         "the host name stored with the reserved address in phpIPAM; nothing connects to it"
     ),
-    ("targets.register", "host"): (
-        "the host of a new target, stored in the registry; registering connects to nothing, "
-        "and later calls run that target's own operations"
-    ),
+    ("targets.register", "host"): _NEW_TARGET_ADDRESS,
+    ("targets.register", "fqdn"): _NEW_TARGET_ADDRESS,
     ("topology.annotate", "evidence_url"): _EVIDENCE_LINK,
     ("winsrv.storage.iscsi.connect", "node_address"): (
         "the iSCSI name (IQN) of the target, not a network address; the host connects "
@@ -128,6 +169,42 @@ def address_fields(parameter_schema: Mapping[str, Any]) -> dict[str, bool]:
     for path, marked in _address_fields(parameter_schema, "", name=None, marked=False):
         found[path] = found.get(path, True) and marked
     return found
+
+
+def caller_address_fields(op_id: str, parameter_schema: Mapping[str, Any]) -> list[str]:
+    """The address-shaped fields of *op_id*, marked or not, that are not in the allow list."""
+    return [
+        path
+        for path in address_fields(parameter_schema)
+        if (op_id, path) not in NOT_CALLER_ADDRESSES
+    ]
+
+
+def _stored_secret_paths(schema: object, path: str) -> Iterator[str]:
+    if not isinstance(schema, Mapping):
+        return
+    properties = schema.get("properties")
+    if isinstance(properties, Mapping):
+        for prop, sub in properties.items():
+            sub_path = f"{path}.{prop}" if path else str(prop)
+            if str(prop).lower().endswith(STORED_SECRET_NAME_ENDINGS):
+                yield sub_path
+            yield from _stored_secret_paths(sub, sub_path)
+    for key in _NESTED_KEYS:
+        yield from _stored_secret_paths(schema.get(key), f"{path}[]")
+    for key in _LIST_KEYS:
+        for sub in schema.get(key) or ():
+            yield from _stored_secret_paths(sub, path)
+    for key in _MAP_KEYS:
+        defs = schema.get(key)
+        if isinstance(defs, Mapping):
+            for def_name, sub in defs.items():
+                yield from _stored_secret_paths(sub, f"{key}/{def_name}")
+
+
+def stored_secret_fields(parameter_schema: Mapping[str, Any]) -> list[str]:
+    """The fields of *parameter_schema* that name a stored secret MEHO reads for the call."""
+    return list(dict.fromkeys(_stored_secret_paths(parameter_schema, "")))
 
 
 def unmarked_address_fields(op_id: str, parameter_schema: Mapping[str, Any]) -> list[str]:

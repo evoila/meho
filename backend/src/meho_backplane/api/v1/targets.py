@@ -16,6 +16,13 @@
   :mod:`meho_backplane.targets.vault_login_extras`.
 * ``DELETE /api/v1/targets/{name}``       — soft-delete. ``tenant_admin`` role.
 
+The three writes (``POST``, ``PATCH``, ``DELETE``) are for people only.
+A service or runner login with ``tenant_admin`` gets 403
+``human_principal_required``; an agent login, capped at ``operator``, gets
+403 ``insufficient_role``. A machine login registers and removes targets
+with the ``targets.register`` and ``targets.remove`` operations, which go
+through the approval check (:mod:`meho_backplane.connectors.targets.ops`).
+
 All routes are tenant-scoped via ``operator.tenant_id`` extracted from the
 JWT by :func:`~meho_backplane.middleware.verify_jwt_and_bind`. Cross-tenant
 reads are impossible — the WHERE clause always includes ``tenant_id``.
@@ -148,7 +155,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.rbac import ensure_human_principal, require_role
 from meho_backplane.connectors._shared.credential_backend import split_credential_ref
 from meho_backplane.connectors._shared.gsm_creds import (
     ALLOWED_PROJECTS_SETTING,
@@ -209,6 +216,30 @@ router = APIRouter(prefix="/api/v1/targets", tags=["targets"])
 #: :mod:`meho_backplane.api.v1.retrieve`.
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
+
+#: The 403 text a machine login gets on a target write.
+MACHINE_TARGET_WRITE_REMEDIATION: Final[str] = (
+    "target writes on REST are for people. A machine login (agent, service "
+    "or runner) registers a target with call_operation(connector_id="
+    "'targets-registry-1.x', op_id='targets.register') and removes one with "
+    "op_id='targets.remove'; MEHO checks both against the approval rules. A "
+    "person changes a target in the operator console or with the meho CLI."
+)
+
+
+def _require_admin_person(operator: Operator = _require_admin) -> Operator:
+    """The gate of ``POST``, ``PATCH`` and ``DELETE``: ``tenant_admin``, then a person.
+
+    The role check runs first, so a login with a lower role (also an
+    agent, whose role MEHO caps at ``operator``) gets ``insufficient_role``.
+    A machine login with ``tenant_admin`` then gets 403
+    ``human_principal_required``.
+    """
+    ensure_human_principal(operator, remediation=MACHINE_TARGET_WRITE_REMEDIATION)
+    return operator
+
+
+_require_admin_person_dep = Depends(_require_admin_person)
 
 #: Canonical op id for the discover route's audit row + broadcast.
 #: ``.discover`` is not one of the broadcast classifier's read/write
@@ -1522,7 +1553,7 @@ def _validate_create_body_fields(body: TargetCreate, operator: Operator) -> str:
 @router.post("", response_model=Target, status_code=201)
 async def create_target(
     body: TargetCreate,
-    operator: Operator = _require_admin,
+    operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_session),
 ) -> Target:
     """Create a new target in the requesting tenant.
@@ -1730,7 +1761,7 @@ def _validate_update_body_fields(
 async def update_target(
     name: str,
     body: TargetUpdate,
-    operator: Operator = _require_admin,
+    operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_session),
 ) -> Target:
     """Partially update a target.
@@ -1891,7 +1922,7 @@ async def update_target(
 async def delete_target(
     name: str,
     force: bool = Query(default=False),
-    operator: Operator = _require_admin,
+    operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     """Soft-delete a target.

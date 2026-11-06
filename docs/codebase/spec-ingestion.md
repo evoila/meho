@@ -900,9 +900,12 @@ Two operator-facing surfaces flag an unreplaced shim:
 `GenericRestConnector` subclass — that a reviewed declarative
 `ExecutionProfile` plugs into to make an ingested REST connector
 dispatchable (Initiative #1965; the profile schema/machinery land in
-T3–T7). `ProfiledRestConnector` runs calls from its attached profile. It
-raises `NotImplementedError` only when no profile is attached, or when the
-target asks for an auth model other than a shared service account.
+T3–T7). `ProfiledRestConnector` runs calls from its attached profile. Its login
+and request code raises `NotImplementedError` only when no profile is
+attached, or when the target asks for an auth model other than a shared
+service account. Its `execute` always raises `NotImplementedError`: like
+every typed connector's `execute`, it is an unused shim, because an
+ingested operation runs through the dispatcher from its stored row.
 
 The gate that makes this possible is the **tri-state dispatchability
 classifier** that replaces the binary `issubclass(GenericRestConnector)`
@@ -1683,7 +1686,7 @@ per-class `except` arms. The nine siblings and their builders:
 * `build_product_impl_id_mismatch_detail(exc)` — `ProductImplIdMismatch`
   (the `product` does not match the first part of `impl_id`).
 
-The first two are the G0.9.1-T5 (#777) originals; the remaining six
+The first two are the G0.9.1-T5 (#777) originals; the remaining seven
 complete the pattern in #1534. Pre-#1534 the MCP path caught only
 `VersionMismatchError` / `UncoveredVersionLabel` — the other six
 fell through to the dispatcher's generic `except Exception` arm in
@@ -1713,7 +1716,7 @@ The op-count rollup counts every `source_kind` (`ingested`,
 `typed`, `composite`) — the visibility driver is the paired groups
 query, which has never filtered on `source_kind`. The earlier
 filter that excluded typed/composite rows from the count (G0.7-era
-artefact) was the cause of Signal #4 in the 2026-05-20 RDC dogfood:
+artefact) was the cause of the fourth finding of the 2026-05-20 dogfood run:
 typed connectors surfaced with `group_count > 0` but
 `operation_count: 0`, the asymmetry between the two paired queries.
 The renamer "list_*ingested*_connectors" is now misleading and is a
@@ -2310,7 +2313,7 @@ so they can never diverge on *which row* they act on. The resolver:
   - neither → 404 `ConnectorNotFoundError`.
 
 G0.13-T5 (#1135) first landed the fallback on the *read* route after
-the v0.6.0 RDC dogfood flagged that every global connector returned
+the v0.6.0 dogfood flagged that every global connector returned
 404 on review even though the listing surfaced them. G0.26-T1 (#1801)
 extended it to the write path and added the disambiguation after the
 v0.16.0 dogfood hit `POST /{id}/enable-reads` 404'ing on a label
@@ -3001,7 +3004,7 @@ what they need and they're willing to handle vendor-shape responses.
 Real-world vendor specs are large: `vmware/9.0.0.0` is 7.55 MB / 1275
 typed REST ops, and a synchronous ingest call blocks the event loop
 for ~30 s in the register + LLM-grouping phases -- past the kubelet
-liveness probe deadline (default 25 s). RDC #771 Finding 20 caught
+liveness probe deadline (default 25 s). A consumer report caught
 the pod restart in production; G0.16-T1 (#1303) replaced the
 synchronous default with the 202 + job-handle shape so an operator
 reaching for the escape hatch doesn't kill the pod.
@@ -3376,7 +3379,9 @@ All three delegate to `ReviewService.delete_connector`
   (VCF Automation's vra-sdk-go fragments are the worked example);
   Harbor's ops are hand-written in MEHO, so Harbor needs no spec
   conversion (see [`harbor-onboarding.md`](../cross-repo/harbor-onboarding.md),
-  "No spec ingest or curation needed").
+  "No spec ingest or curation needed"). `HarborConnector` still accepts
+  ingested operations from a Harbor API file that an operator adds (see
+  "Which connector class ingested operations run on" above).
 * **`$ref` drill-down rejected.** Refs that walk into a component's
   sub-tree (`#/components/schemas/X/properties/y`,
   `#/components/parameters/X/schema`) raise `InvalidSchemaError`.

@@ -20,6 +20,10 @@
 //   - `meho sensor delete <sensor_id> [--tenant <id>] [--json]` —
 //     hard-delete one sensor via DELETE /api/v1/sensors/{id}.
 //     Role: tenant_admin.
+//   - `meho sensor edit <sensor_id> [--name ...] [--connector-id ...] ...` —
+//     change some fields in place via PATCH /api/v1/sensors/{id}; the id,
+//     the result history and the dashboard memberships stay.
+//     Role: tenant_admin.
 //   - `meho sensor results <sensor_id> [--from T] [--to T] [--state S]
 //     [--limit N] [--cursor C] [--json]` — the per-tick evidence trend
 //     query (#2756) via GET /api/v1/sensors/{id}/results: raw rows in
@@ -140,14 +144,14 @@ func loadJSONObjectFlag(cmd *cobra.Command, raw, flagName string) (map[string]an
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sensor",
-		Short: "Manage deterministic-check sensors (list / create / delete)",
+		Short: "Manage deterministic-check sensors (list / create / edit / delete)",
 		Long: "Manage tenant-scoped sensors wired by the deterministic " +
 			"check layer (Initiative #2416). A sensor pins an (op + args + " +
 			"assertion + cadence + severity) tuple the check runner " +
 			"evaluates on a schedule (kind=interval for sub-minute cadence, " +
 			"kind=cron for >=1-minute cadence). The op must be safe (a " +
-			"caution/dangerous op is refused at create). Write verbs " +
-			"(create / delete) require tenant_admin; the read verb (list) is " +
+			"caution/dangerous op is refused at create and edit). Write verbs " +
+			"(create / edit / delete) require tenant_admin; the read verb (list) is " +
 			"operator-level. Tenant scoping is enforced server-side via the " +
 			"JWT; platform_admin callers may use --tenant to act on another " +
 			"tenant's sensors.",
@@ -156,6 +160,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newCreateCmd())
 	cmd.AddCommand(newDeleteCmd())
+	cmd.AddCommand(newEditCmd())
 	cmd.AddCommand(newResultsCmd())
 	return cmd
 }

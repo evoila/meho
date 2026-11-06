@@ -10297,6 +10297,79 @@
             }
           }
         }
+      },
+      "patch": {
+        "tags": [
+          "sensors"
+        ],
+        "summary": "Edit Sensor",
+        "description": "Change some fields of one sensor; keep its id, history and dashboards.\n\n``tenant_admin`` only. Only the fields in the body change. The changed\nsensor is checked like a new one: an invalid result is 422\n``sensor_edit_invalid``, an unknown or non-safe operation is 422, and a\nname that is taken is 409. A cross-tenant / absent id is 404\n``sensor_not_found``. After the change the sensor is due at once, so the\nrunner checks it on its next tick. The audit row of the request carries\n``before`` and ``after`` with the changed fields (secret-named values\nhidden).",
+        "operationId": "edit_sensor_api_v1_sensors__sensor_id__patch",
+        "parameters": [
+          {
+            "name": "sensor_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Sensor Id"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SensorUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SensorRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/sensors/{sensor_id}/results": {
@@ -10651,6 +10724,79 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "checks-dashboards"
+        ],
+        "summary": "Edit Dashboard",
+        "description": "Change members, name or mail settings of one Dashboard; keep its id.\n\n``tenant_admin`` only. Only the fields in the body change. An added\nsensor that is not in the tenant is 422 ``sensor_not_found``; more than\nthe member limit is 422 ``dashboard_edit_invalid``; a name that is taken\nis 409. A cross-tenant / absent id is 404 ``dashboard_not_found``. The\naudit row of the request carries ``before`` and ``after`` with the\nchanged fields.",
+        "operationId": "edit_dashboard_api_v1_checks_dashboards__dashboard_id__patch",
+        "parameters": [
+          {
+            "name": "dashboard_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Dashboard Id"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DashboardUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardDetail"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -29201,7 +29347,7 @@
           "name"
         ],
         "title": "DashboardCreate",
-        "description": "Request body for ``POST /api/v1/checks/dashboards``.\n\nMembership is set at create only (no PUT; \"edit\" is delete + recreate,\nthe trigger-immutability posture). An empty ``sensor_ids`` is permitted --\na member-less Dashboard rolls up to ``unknown`` (the zero-member rule) --\nbut duplicates are de-duplicated by the service before insert. A foreign\nor absent sensor id is refused 422 ``sensor_not_found`` at the boundary.\n\n*tenant_id* (optional) lets a platform-admin caller target another\ntenant; the boundary enforces the RBAC via ``authorize_tenant_scope``.\n\n``notify_email`` / ``notify_min_state`` are the #2719 notification config,\nset at create only like membership. Omitting ``notify_email`` leaves\nnotifications off for this Dashboard. Since #2764 it carries **one or more**\ncomma-separated recipients: each entry is validated individually with\npydantic's ``EmailStr`` (``email-validator``), so a single malformed entry\nis a boundary 422 naming it rather than a delivery failure discovered hours\nlater on the first transition. The normalised, comma-joined form is what\npersists (the existing ``text`` column from migration ``0068``, no new\nmigration), and a lone address is stored and read back unchanged.\n\n``investigator_prompt`` is the #2721 operator context appended to the\ndiagnose-only investigator's briefing. Bounded at\n``_INVESTIGATOR_PROMPT_MAX_LENGTH``; oversize is a structured 422\n(``string_too_long`` with the limit in ``ctx``) rather than a truncation\nthe operator never learns about."
+        "description": "Request body for ``POST /api/v1/checks/dashboards``.\n\nMembership, name and mail settings can be changed later with\n``PATCH`` (:mod:`meho_backplane.checks.dashboard_edit`). An empty\n``sensor_ids`` is permitted --\na member-less Dashboard rolls up to ``unknown`` (the zero-member rule) --\nbut duplicates are de-duplicated by the service before insert. A foreign\nor absent sensor id is refused 422 ``sensor_not_found`` at the boundary.\n\n*tenant_id* (optional) lets a platform-admin caller target another\ntenant; the boundary enforces the RBAC via ``authorize_tenant_scope``.\n\n``notify_email`` / ``notify_min_state`` are the #2719 notification\nconfig. Omitting ``notify_email`` leaves notifications off for this\nDashboard. Since #2764 it carries **one or more** comma-separated\nrecipients: each entry is validated individually with pydantic's\n``EmailStr`` (``email-validator``), so a single malformed entry is a\nboundary 422 naming it rather than a delivery failure discovered hours\nlater on the first transition. The normalised, comma-joined form is\nwhat persists (the existing ``text`` column from migration ``0068``,\nno new migration), and a lone address is stored and read back\nunchanged.\n\n``investigator_prompt`` is the #2721 operator context appended to the\ndiagnose-only investigator's briefing. Bounded at\n``_INVESTIGATOR_PROMPT_MAX_LENGTH``; oversize is a structured 422\n(``string_too_long`` with the limit in ``ctx``) rather than a truncation\nthe operator never learns about."
       },
       "DashboardDetail": {
         "properties": {
@@ -29536,6 +29682,55 @@
         ],
         "title": "DashboardRead",
         "description": "Response shape for one Dashboard row on the list surface.\n\nCarries the rolled-up ``state`` (evaluated on read) and the\n``member_count`` so the list answers \"is everything OK?\" per Dashboard\nwithout a detail fetch. ``last_rollup_state`` is the memo column (always\nNULL until #2507 writes it). ``frozen=True`` so a handler cannot mutate\nthe row after returning it."
+      },
+      "DashboardUpdate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Name"
+          },
+          "add_sensor_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "nullable": true,
+            "title": "Add Sensor Ids"
+          },
+          "remove_sensor_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "nullable": true,
+            "title": "Remove Sensor Ids"
+          },
+          "notify_email": {
+            "type": "string",
+            "nullable": true,
+            "title": "Notify Email"
+          },
+          "notify_min_state": {
+            "type": "string",
+            "enum": [
+              "degraded",
+              "critical"
+            ],
+            "nullable": true,
+            "title": "Notify Min State"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "DashboardUpdate",
+        "description": "Request body for ``PATCH /api/v1/checks/dashboards/{dashboard_id}``.\n\nEvery field is optional; at least one must be set. A field that is left\nout, or sent as ``null``, keeps its value.\n\n* ``add_sensor_ids`` / ``remove_sensor_ids`` -- Sensors to add to or\n  remove from the members. One id cannot be in both lists.\n* ``notify_email`` -- one or more comma-separated recipients. An empty\n  string turns mail off.\n* ``notify_min_state`` -- the state a change must reach before mail is\n  sent."
       },
       "DbStatus": {
         "properties": {
@@ -36461,6 +36656,74 @@
         ],
         "title": "SensorStatus",
         "description": "Closed lifecycle status of a :class:`Sensor`.\n\n``ScheduledTriggerStatus`` minus the trigger-only terminal states:\na sensor is either eligible for evaluation (:attr:`ACTIVE`) or held\n(:attr:`PAUSED`). This Task never writes ``paused`` -- ``status`` is\nnot accepted at create; #2505 parks a row to ``paused`` (plus a\n``status_reason``) when it hits an unparseable persisted cadence, and\n#2506's rollup derives ``skip`` for paused rows."
+      },
+      "SensorUpdate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Name"
+          },
+          "connector_id": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Op Id"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Params"
+          },
+          "assertion": {
+            "$ref": "#/components/schemas/AssertionSpec",
+            "nullable": true
+          },
+          "cadence_kind": {
+            "$ref": "#/components/schemas/SensorCadenceKind",
+            "nullable": true
+          },
+          "interval_seconds": {
+            "type": "integer",
+            "maximum": 86400.0,
+            "minimum": 5.0,
+            "nullable": true,
+            "title": "Interval Seconds"
+          },
+          "cron_expr": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Cron Expr"
+          },
+          "timezone": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Timezone"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/SensorSeverity",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "SensorUpdate",
+        "description": "Request body for ``PATCH /api/v1/sensors/{sensor_id}``.\n\nEvery field is optional. A field that is left out, or sent as ``null``,\nkeeps its value. At least one field must be set.\n\nTo change the cadence kind, send ``cadence_kind`` with its matching\nfield: ``interval_seconds`` for ``interval``, ``cron_expr`` (and\noptionally ``timezone``) for ``cron``. The field of the old kind is\ncleared."
       },
       "ServiceGrantCreate": {
         "properties": {

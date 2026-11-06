@@ -321,6 +321,9 @@ is `0137`. Read "Breaking changes" and "Steps after the upgrade" first.
   and the log files follow the CIS rules. The build stops when a CIS
   rule fails that is on neither the exception list nor the
   not-applicable list (#5762). The appliance is not published yet.
+- Appliance: the CIS exception list (`deploy/appliance/cis/exceptions.md`)
+  names each rule that still fails, why, and where it fails: on the
+  build, on the appliance, or both (#5762).
 
 ### Fixed
 - A person whose email is on a special-use domain, such as `.local` or

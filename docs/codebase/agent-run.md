@@ -93,6 +93,26 @@ What is **not** in T6 or T4 (other tasks own these):
   stays NULL in v0.2; `succeed_run` already accepts a `cost` argument so
   C3 lands without a service-signature change.
 
+## Token counts
+
+Since #5853 (migration `0138`) a succeeded run stores its token counts, summed
+over all its model requests, in four nullable `BIGINT` columns:
+
+- `input_tokens` — input the model read and did not take from its prompt
+  cache. The framework counts cached tokens inside its own input total; MEHO
+  takes them out, so each token is counted once (`TokenUsage` in
+  `operations/identity_budget.py`).
+- `output_tokens` — tokens the model wrote.
+- `cache_read_tokens`, `cache_write_tokens` — input read from or written to
+  the prompt cache. `0` when the provider reports no cache.
+
+The counts are written by `succeed_run`, in the same transaction as the cost
+and the spend-limit increments. A run that did not succeed, and every row
+written before `0138`, reads `NULL`. `GET /api/v1/agents/runs/{handle}` and
+`meho agent run-status` show the four counts. The cost of a run on a model
+MEHO has no price for can come from a price the tenant admin set: see
+`identity-budget.md`, "Prices a tenant sets".
+
 ## Key types
 
 `meho_backplane.db.models`:
@@ -107,8 +127,8 @@ What is **not** in T6 or T4 (other tasks own these):
   `act` null; a child run copies the actor in force for its parent.
   The REST, MCP and CLI run views show both), `trigger`, `model_tier` (logical tier; the G11.5
   resolver maps it to a concrete pair), `provider` / `model` (resolved,
-  nullable until `start`), `status`, `turns`, `cost` (stub until C3),
-  `output`, `error`, `parent_run_id` (self-referential soft-FK for
+  nullable until `start`), `status`, `turns`, `cost`, the four token
+  counts (see "Token counts" below), `output`, `error`, `parent_run_id` (self-referential soft-FK for
   agent-invoked child runs, G11.1-T5), `work_ref` (nullable Text — the
   external change-ticket reference the run works under, work_ref I3-T2
   #1662, migration `0041`; set at create time, distinct from `id`),
@@ -216,8 +236,8 @@ one transaction):
   it) and `ended_at` on any terminal state.
 - `start_run(session, row, *, provider, model)` — records the resolved
   provider+model, then `pending`/`awaiting_approval` -> `running`.
-- `succeed_run(session, row, *, output, cost=None, turns=None)` — records
-  output (+ optional C3 cost) and the loop's model-request `turns` total
+- `succeed_run(session, row, *, output, cost=None, turns=None, usage=None)` —
+  records output, the cost, the token counts of `usage` (#5853) and the loop's model-request `turns` total
   (#2743; lifted from `AgentRunResult.request_count` and persisted at run
   finalize, written only on this succeed path so a run that failed before
   reaching the model — the #2644 model-init class — keeps `turns == 0`),
@@ -341,7 +361,8 @@ Settings (all in `Settings`, all opt-out via env):
   Tightening to a real FK is deferred to a future migration once both
   tables are settled — the same soft-FK discipline `audit_log.target_id`
   / `audit_log.parent_audit_id` follow.
-- `cost` is a stub (`Numeric(12, 6)`, NULL in v0.2) until G11.5/C3.
+- `cost` (`Numeric(12, 6)`) is set on a succeeded run; it is `0` for a
+  model with no price.
 - SQLite (the dev/test driver) returns naive datetimes from
   `timestamptz` columns; the chassis-wide "naive means UTC" convention
   applies. PG returns tz-aware values (covered by the testcontainers

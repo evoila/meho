@@ -378,7 +378,12 @@ def _window_end_for(kind: BudgetWindowKind, start: datetime) -> datetime:
 _PRICING_MISS_LOGGED: set[str] = set()
 
 
-def compute_cost(usage: TokenUsage, model_id: str | None) -> Decimal:
+def compute_cost(
+    usage: TokenUsage,
+    model_id: str | None,
+    *,
+    fallback: PerMillionPricing | None = None,
+) -> Decimal:
     """Convert one model request's :class:`TokenUsage` into a USD cost.
 
     The rate is picked per request: a model with a long-prompt price
@@ -402,6 +407,10 @@ def compute_cost(usage: TokenUsage, model_id: str | None) -> Decimal:
         model_id: The resolved provider-prefixed id the runtime
             stamped on the agent run row's ``model`` column. ``None``
             falls through to the unknown-model path.
+        fallback: The price to use when *model_id* is not in
+            :data:`MODEL_PRICING`: the tenant's own price for the model
+            (:mod:`meho_backplane.operations.tenant_model_prices`, #5853).
+            A model in :data:`MODEL_PRICING` always keeps that price.
 
     Returns:
         The USD cost as a :class:`~decimal.Decimal`,
@@ -409,10 +418,12 @@ def compute_cost(usage: TokenUsage, model_id: str | None) -> Decimal:
         ``Numeric(14, 6)`` storage; arithmetic precision is
         preserved here.
     """
-    if model_id is None:
-        return Decimal(0)
-    model_pricing = MODEL_PRICING.get(model_id)
+    model_pricing = MODEL_PRICING.get(model_id) if model_id is not None else None
     if model_pricing is None:
+        model_pricing = fallback
+    if model_pricing is None:
+        if model_id is None:
+            return Decimal(0)
         if model_id not in _PRICING_MISS_LOGGED:
             _PRICING_MISS_LOGGED.add(model_id)
             _log.warning(
@@ -430,19 +441,25 @@ def compute_cost(usage: TokenUsage, model_id: str | None) -> Decimal:
     ) / _PER_MILLION
 
 
-def compute_run_cost(requests: Iterable[TokenUsage], model_id: str | None) -> Decimal:
+def compute_run_cost(
+    requests: Iterable[TokenUsage],
+    model_id: str | None,
+    *,
+    fallback: PerMillionPricing | None = None,
+) -> Decimal:
     """Add up the cost of a run's model requests, each at its own rate.
 
     Args:
         requests: The token usage of each model request of the run, in
             any order.
         model_id: As for :func:`compute_cost`.
+        fallback: As for :func:`compute_cost`.
 
     Returns:
         The sum of :func:`compute_cost` over *requests*; ``Decimal(0)``
         for a run without requests.
     """
-    return sum((compute_cost(usage, model_id) for usage in requests), Decimal(0))
+    return sum((compute_cost(usage, model_id, fallback=fallback) for usage in requests), Decimal(0))
 
 
 async def _get_or_create_bucket(

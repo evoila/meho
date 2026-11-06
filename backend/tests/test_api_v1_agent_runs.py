@@ -974,3 +974,47 @@ async def test_run_input_at_limit_streams(client: TestClient) -> None:
             body = "".join(chunk for chunk in resp.iter_text())
     assert "event: final" in body
     assert "fits" in body
+
+
+@pytest.mark.asyncio
+async def test_run_status_shows_token_counts(client: TestClient) -> None:
+    """``GET /agents/runs/{handle}`` shows a finished run's token counts (#5853)."""
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[TextPart("counted")],
+            usage=RequestUsage(input_tokens=900, output_tokens=120, cache_read_tokens=400),
+        )
+
+    await _seed_definition()
+    reset_agent_invoker_for_testing(
+        AgentInvoker(runtime=PydanticAgentRun(model_factory=lambda: FunctionModel(fn)))
+    )
+    key = make_rsa_keypair("kid-tokens")
+    headers = {"Authorization": f"Bearer {_token(key)}"}
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        run = client.post("/api/v1/agents/triage/run", json={"input": "go"}, headers=headers)
+        assert run.status_code == 200, run.text
+        poll = client.get(f"/api/v1/agents/runs/{run.json()['run_id']}", headers=headers)
+    assert poll.status_code == 200, poll.text
+    body = poll.json()
+    assert body["input_tokens"] == 500
+    assert body["cache_read_tokens"] == 400
+    assert body["cache_write_tokens"] == 0
+    assert body["output_tokens"] == 120
+
+
+@pytest.mark.asyncio
+async def test_run_status_tokens_are_null_before_the_run_succeeds(client: TestClient) -> None:
+    handle = await _seed_run()
+    key = make_rsa_keypair("kid-tokens-null")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        poll = client.get(
+            f"/api/v1/agents/runs/{handle}", headers={"Authorization": f"Bearer {_token(key)}"}
+        )
+    assert poll.status_code == 200, poll.text
+    body = poll.json()
+    for field in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
+        assert body[field] is None

@@ -111,6 +111,10 @@ Why in code and not the DB:
 - A DB-row pricing table invites drift between published rates and
   the live row, plus adds a join to every cost computation.
 
+A tenant can still price a model that is *not* in the table (see "Prices a
+tenant sets" below). That is a fallback only, never a change of a price in
+the table.
+
 An unknown model id (lookup miss) yields `Decimal(0)` and logs a
 single `warning` per process — the "known unknown" contract. The gate
 that prevents a run from *starting* against an un-priced model lives
@@ -157,6 +161,40 @@ A default model with no row is made visible in two places (#5771,
 
 `is_model_priced` reads a bare model id (no `provider:` part) as an
 Anthropic id, the same way the runtime stores it.
+
+### Prices a tenant sets
+
+A tenant admin can give an agent model that is not in `MODEL_PRICING` a
+price: input and output, in USD per million tokens (#5853). This is for a
+model MEHO cannot know, such as an open model on a model server the tenant
+runs itself.
+
+- **Where.** The prices are in `tenant.agent_model_prices` (JSON, migration
+  `0138`): `{"<model>": {"input": "0.40", "output": "1.60"}}`. Prices are
+  decimal strings, so no float rounding gets in. The code is
+  `operations/tenant_model_prices.py`.
+- **How to set them.** `GET` and `PATCH /api/v1/tenants/model-prices`, or
+  `meho tenants model-prices list|set|remove`. Only a `tenant_admin` of the
+  tenant may call them; an agent token is never `tenant_admin`. A change is
+  named in the request's audit row (`agent_model_price_*`). Prices are 0 to
+  100,000 with at most six decimals; a tenant can price at most 200 models.
+- **Which price a run uses.** `MODEL_PRICING` first: a model there always
+  keeps MEHO's price, and `PATCH` refuses to price it. Else the tenant price
+  for the full id (`openai:my-model`), then for the model name alone
+  (`my-model`). The run's tenant is the only tenant read.
+- **What it changes.** `_finalize_run` passes the tenant price to
+  `compute_run_cost(..., fallback=...)`. The run gets a cost, and
+  `apply_consumption` adds it to the person's daily, weekly and monthly
+  buckets like any other run. The setting has one input price, so cached
+  input tokens (read or written) cost the same as other input tokens.
+- **No price.** The run costs 0, and `compute_cost` logs the same
+  `identity_budget_pricing_miss` warning as before. A stored entry that is
+  not readable counts as no price and logs `tenant_model_price_unreadable`.
+- **Not changed.** The start warning and the `agent_model_spend` status field
+  above read `MODEL_PRICING` only. They are about the install's default model,
+  not one tenant.
+- **Not in the settings file.** `meho-settings.yaml` (`settings.md`) does not
+  carry the prices yet.
 
 ## Window truncation
 

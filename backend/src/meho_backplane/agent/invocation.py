@@ -115,7 +115,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentRun as AgentRunRow
 from meho_backplane.db.models import AgentRunStatus, AgentRunTrigger
 from meho_backplane.operations import agent_run as run_lifecycle
-from meho_backplane.operations import identity_budget
+from meho_backplane.operations import identity_budget, tenant_model_prices
 from meho_backplane.operations._audit import (
     AgentRunAuditMeta,
     agent_run_audit_meta_var,
@@ -250,6 +250,13 @@ class AgentRunStatusView:
     #: definition's ``identity_ref``). ``None`` when the agent is itself
     #: the subject (a scheduled run) and on rows written before #4237.
     identity_act: str | None = None
+    #: Token counts of a succeeded run (#5853). ``input_tokens`` is the
+    #: uncached input; the cached input is in the two cache counts.
+    #: ``None`` while the run is not succeeded, and on older rows.
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -776,16 +783,18 @@ class AgentInvoker:
            :func:`_split_model_id`) so the
            :data:`~meho_backplane.operations.identity_budget.MODEL_PRICING`
            lookup hits.
-        2. Computes the run's USD cost via
+        2. For a model not in ``MODEL_PRICING``, reads the tenant's own
+           price for it, if a tenant admin set one (#5853,
+           :mod:`~meho_backplane.operations.tenant_model_prices`).
+        3. Computes the run's USD cost via
            :func:`~meho_backplane.operations.identity_budget.compute_run_cost`,
            one request of *request_usages* at a time, so a per-request
            price (Haiku 5.5's long-prompt rate) lands on the right
            request. A runtime that reports no per-request usage gets
            *usage* priced as one request.
-        3. Stamps that cost on ``agent_run.cost`` through the lifecycle
-           ``succeed_run`` helper (which already accepts the parameter
-           the v0.2 stub-out reserved for this slice).
-        4. Applies one increment per active budget bucket (daily +
+        4. Stamps that cost and the token counts on the ``agent_run`` row
+           through the lifecycle ``succeed_run`` helper.
+        5. Applies one increment per active budget bucket (daily +
            weekly + monthly) for the principal via
            :func:`~meho_backplane.operations.identity_budget.apply_consumption`.
 
@@ -808,11 +817,14 @@ class AgentInvoker:
                     cost: Decimal | None = None
                     if usage is not None:
                         model_id = _full_model_id(row.provider, row.model)
+                        tenant_price = await tenant_model_prices.price_for_model(
+                            session, row.tenant_id, row.provider, row.model
+                        )
                         cost = identity_budget.compute_run_cost(
-                            request_usages or (usage,), model_id
+                            request_usages or (usage,), model_id, fallback=tenant_price
                         )
                     await run_lifecycle.succeed_run(
-                        session, row, output=output or {}, cost=cost, turns=turns
+                        session, row, output=output or {}, cost=cost, turns=turns, usage=usage
                     )
                     if usage is not None and cost is not None:
                         await identity_budget.apply_consumption(
@@ -1832,6 +1844,10 @@ def _row_to_view(row: AgentRunRow, *, agent_name: str | None = None) -> AgentRun
         agent_name=agent_name,
         identity_sub=row.identity_sub,
         identity_act=row.identity_act,
+        input_tokens=row.input_tokens,
+        output_tokens=row.output_tokens,
+        cache_read_tokens=row.cache_read_tokens,
+        cache_write_tokens=row.cache_write_tokens,
     )
 
 

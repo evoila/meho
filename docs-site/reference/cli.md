@@ -4905,7 +4905,7 @@ meho targets update <name, alias or id> [flags]
 
 ## `meho tenants`
 
-Choose the current tenant and operate per-tenant policy (flight-recorder capture, mail-recipient allowlist)
+Choose the current tenant and operate per-tenant policy (flight-recorder capture, mail-recipient allowlist, model prices)
 
 ```
 meho tenants
@@ -4965,6 +4965,49 @@ meho tenants mail-recipient-policy set [flags]
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
 - `--clear` — clear the per-tenant override back to inheriting the instance floor
 - `--json` — emit the resolved policy as JSON instead of the human summary
+
+### `meho tenants model-prices`
+
+Prices for agent models MEHO has no price for (tenant_admin)
+
+```
+meho tenants model-prices
+```
+
+#### `meho tenants model-prices list`
+
+List the tenant's model prices (tenant_admin)
+
+```
+meho tenants model-prices list [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit the tenant's prices as JSON instead of a table
+
+#### `meho tenants model-prices remove`
+
+Remove the price of one model (tenant_admin)
+
+```
+meho tenants model-prices remove <model> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit the tenant's prices as JSON instead of a table
+
+#### `meho tenants model-prices set`
+
+Set the price of one model, in USD per million tokens (tenant_admin)
+
+```
+meho tenants model-prices set <model> --input <usd> --output <usd> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--input` — price of one million input tokens, in USD
+- `--json` — emit the tenant's prices as JSON instead of a table
+- `--output` — price of one million output tokens, in USD
 
 ### `meho tenants use`
 

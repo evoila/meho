@@ -12,9 +12,13 @@ what the caller needs, and an immutable audit row records who did what,
 where, and when.
 
 MEHO is open source (Apache 2.0) and runs entirely on infrastructure
-you control. There is no hosted service and no phone-home: you deploy
-the backplane into your own Kubernetes cluster, next to your own
-PostgreSQL, Keycloak, and secret store.
+you control. There is no hosted service and no phone-home. You install
+it with one Helm chart into your own Kubernetes cluster. The chart
+brings its own PostgreSQL, Keycloak and OpenBao (an open-source fork of
+Vault), or connects to the ones you already run. Two more ways to
+install are coming: the install on a plain Linux server is available
+and in testing, and a VMware appliance is in progress. See
+[Ways to install MEHO](install/ways-to-install.md).
 
 ## The problem it solves
 
@@ -82,10 +86,11 @@ same ones the product itself displays.
 
 ## Where to start
 
-- **Deploying MEHO for your team?** Follow the
-  [install trail](install/index.md). It assumes a Kubernetes cluster, a
-  PostgreSQL database, and a Keycloak — and takes you from there to a
-  running backplane and a working `meho login`.
+- **Deploying MEHO for your team?** Read
+  [Ways to install MEHO](install/ways-to-install.md), then follow the
+  [install trail](install/index.md). You need a Kubernetes cluster, a
+  DNS name and a certificate. The chart brings the database, the login
+  server and the password safe.
 - **Just want to see it run?** The
   [local kind quickstart](install/kind-quickstart.md) brings the
   backplane up on your workstation in minutes — with placeholder

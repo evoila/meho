@@ -29,7 +29,7 @@ meho doctor
 - The **authenticated layer** checks DNS, TLS, and your token, then runs
   the MCP handshake. It shows your scopes and any working-surface tool
   your session should see but does not.
-- The **server layer** appears only on a Linux server where MEHO was
+- The **server layer** appears only on [a Linux server](../install/ways-to-install.md) where MEHO was
   installed with its own install script (the file
   `/usr/local/sbin/meho-host` exists). Run `sudo meho doctor` there. As
   root, the doctor runs `meho-host check` and shows its lines last: the

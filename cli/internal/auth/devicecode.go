@@ -78,11 +78,16 @@ func (e *DiscoveryError) Error() string {
 func (e *DiscoveryError) Unwrap() error { return e.Underlying }
 
 // FetchDiscovery loads the OAuth 2.0 / OIDC discovery document at the
-// supplied URL. The URL should end in either
+// supplied URL. The URL must end in either
 // .well-known/openid-configuration (OIDC) or
 // .well-known/oauth-authorization-server (RFC 8414). Both shapes
 // expose the device-authorization-endpoint field we depend on, so we
 // don't differentiate at the call site.
+//
+// The document is refused unless its issuer is the realm address the
+// URL was built from, and its issuer and endpoints use https (http
+// only to a loopback host). Login, token refresh and the approval
+// sign-in all load the document here, so all of them get this check.
 //
 // httpClient is injectable so tests can pass an httptest.Server's
 // client; pass nil to use http.DefaultClient (which is what every
@@ -138,6 +143,9 @@ func FetchDiscovery(ctx context.Context, httpClient *http.Client, discoveryURL s
 			Underlying: errors.New("discovery document missing token_endpoint"),
 		}
 	}
+	if err := checkDiscoveryDocument(discoveryURL, &doc); err != nil {
+		return nil, &DiscoveryError{URL: discoveryURL, Underlying: err}
+	}
 	return &doc, nil
 }
 
@@ -152,8 +160,8 @@ func FetchDiscovery(ctx context.Context, httpClient *http.Client, discoveryURL s
 func DiscoveryURLs(realmURL string) []string {
 	base := strings.TrimRight(realmURL, "/")
 	return []string{
-		base + "/.well-known/openid-configuration",
-		base + "/.well-known/oauth-authorization-server",
+		base + oidcWellKnownPath,
+		base + oauthWellKnownPath,
 	}
 }
 

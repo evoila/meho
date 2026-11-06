@@ -78,6 +78,11 @@ func RunFreshSignIn(ctx context.Context, doc *DiscoveryDocument, clientID string
 	if doc.AuthorizationEndpoint == "" {
 		return nil, errors.New("meho: the identity provider has no authorization_endpoint")
 	}
+	// The link goes to the system opener, which starts whatever app
+	// handles its scheme. Only a web link may reach it.
+	if err := checkEndpointURL("authorization_endpoint", doc.AuthorizationEndpoint); err != nil {
+		return nil, fmt.Errorf("meho: %w", err)
+	}
 	timeout := opts.Timeout
 	if timeout == 0 {
 		timeout = FreshSignInTimeout

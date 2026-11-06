@@ -405,6 +405,7 @@ async def test_retrieve_threads_metadata_filters_to_candidate_helpers() -> None:
             query="anything",
             metadata_filters={"source_kind": "evoila-distilled", "product": "vcenter"},
             session=fake_session,
+            all_principals=True,
         )
 
     assert hits == []
@@ -466,7 +467,7 @@ async def test_retrieve_passes_none_metadata_filters_by_default() -> None:
             side_effect=fake_cosine,
         ),
     ):
-        await retrieve(tenant_id=uuid.uuid4(), query="q", session=MagicMock())
+        await retrieve(tenant_id=uuid.uuid4(), query="q", session=MagicMock(), all_principals=True)
 
     assert captured_bm25["metadata_filters_json"] is None
 
@@ -515,7 +516,13 @@ async def test_retrieve_normalises_empty_dict_to_none() -> None:
             side_effect=fake_cosine,
         ),
     ):
-        await retrieve(tenant_id=uuid.uuid4(), query="q", metadata_filters={}, session=MagicMock())
+        await retrieve(
+            tenant_id=uuid.uuid4(),
+            query="q",
+            metadata_filters={},
+            session=MagicMock(),
+            all_principals=True,
+        )
 
     assert captured["metadata_filters_json"] is None
 
@@ -570,12 +577,14 @@ async def test_retrieve_serialises_metadata_filters_with_sorted_keys() -> None:
             query="q",
             metadata_filters={"b": 2, "a": 1, "c": 3},
             session=MagicMock(),
+            all_principals=True,
         )
         await retrieve(
             tenant_id=uuid.uuid4(),
             query="q",
             metadata_filters={"c": 3, "a": 1, "b": 2},
             session=MagicMock(),
+            all_principals=True,
         )
 
     assert payloads[0] == payloads[1]

@@ -307,10 +307,14 @@ async def test_kb_search_ranks_current_passages_without_duplicates(pg_engine: No
         )
 
         kb_hits = await retrieve(tenant_id, "zebracode", source="kb", limit=50)
-        all_hits = await retrieve(tenant_id, "zebracode", limit=50)
-        memory_hits = await retrieve(tenant_id, "zebracode", source="memory", limit=50)
+        all_hits = await retrieve(tenant_id, "zebracode", limit=50, all_principals=True)
+        memory_hits = await retrieve(
+            tenant_id, "zebracode", source="memory", limit=50, all_principals=True
+        )
         old_term = await retrieve(tenant_id, "oldtermxyz", source="kb", limit=50)
-        kind_hits = await retrieve(tenant_id, "newtermxyz", kind="kb-entry", limit=50)
+        kind_hits = await retrieve(
+            tenant_id, "newtermxyz", kind="kb-entry", limit=50, all_principals=True
+        )
         search = await service.search_entries(tenant_id, "zebracode restart", limit=5)
 
     head_ids = {h.source_id for h in kb_hits if h.source == "kb"}

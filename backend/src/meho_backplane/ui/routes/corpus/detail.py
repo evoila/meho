@@ -105,7 +105,7 @@ from meho_backplane.docs_collections import (
     resolve_doc_collection,
     set_collection_enabled,
 )
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.connectors.operator import (
     OperatorRoleProbe,
@@ -128,7 +128,7 @@ _COLLECTION_KEY_MAX = 128
 #: Module-level :class:`fastapi.Depends` closures -- ruff B008 idiom matching
 #: the connectors detail / probe routes (no function calls in default
 #: argument positions).
-_require_session_dep = Depends(require_ui_session)
+_require_operator_dep = Depends(require_ui_operator)
 _get_session_dep = Depends(get_session)
 _role_probe_dep = Depends(resolve_role_probe)
 _require_admin_dep = Depends(resolve_operator_or_403)
@@ -410,7 +410,7 @@ def build_corpus_collection_detail_router() -> APIRouter:
     async def _probe_handler(
         request: Request,
         collection_key: str,
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
         db_session: AsyncSession = _get_session_dep,
         operator: Operator = _require_admin_dep,
     ) -> HTMLResponse:
@@ -426,7 +426,7 @@ def build_corpus_collection_detail_router() -> APIRouter:
     async def _disable_modal_handler(
         request: Request,
         collection_key: str,
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
         db_session: AsyncSession = _get_session_dep,
         operator: Operator = _require_admin_dep,
     ) -> HTMLResponse:
@@ -438,7 +438,7 @@ def build_corpus_collection_detail_router() -> APIRouter:
     async def _disable_handler(
         request: Request,
         collection_key: str,
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
         db_session: AsyncSession = _get_session_dep,
         operator: Operator = _require_admin_dep,
     ) -> HTMLResponse:
@@ -455,7 +455,7 @@ def build_corpus_collection_detail_router() -> APIRouter:
     async def _enable_handler(
         request: Request,
         collection_key: str,
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
         db_session: AsyncSession = _get_session_dep,
         operator: Operator = _require_admin_dep,
     ) -> HTMLResponse:
@@ -472,7 +472,7 @@ def build_corpus_collection_detail_router() -> APIRouter:
     async def _detail_handler(
         request: Request,
         collection_key: str,
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
         db_session: AsyncSession = _get_session_dep,
         role_probe: OperatorRoleProbe = _role_probe_dep,
     ) -> HTMLResponse:

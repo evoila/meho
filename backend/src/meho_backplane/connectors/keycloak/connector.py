@@ -832,7 +832,9 @@ class KeycloakConnector(HttpConnector):
         try:
             role = await self._get_admin_json(
                 target,
-                fill_path(_ROLE_PATH, {"realm": managed_realm, "role-name": role_name}),
+                fill_path(
+                    _ROLE_PATH, {"realm": managed_realm, "role-name": quote_segment(role_name)}
+                ),
                 operator=operator,
             )
         except httpx.HTTPStatusError as exc:

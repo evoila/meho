@@ -414,9 +414,15 @@ nothing is missing and the result is not called cut. Inside `PagedRows`, the
 
 A long-running Azure call answers 201 or 202. `operation_reference`
 (`_polling.py`) reads the poll URL: `Azure-AsyncOperation` when present, else
-`Location`. It checks the URL (the URL check above, plus: one part of the
-path has "operation" in it, such as `operations`, `operationStatuses` or
-`operationResults`) and returns an `OperationReference`:
+`Location`. It checks the URL with `check_poll_url`: the URL check above,
+plus the shape of an operation status URL. The path ends in `<kind>/<id>`,
+where `<kind>` is `operations`, `operationStatuses`, `operationResults` or
+`asyncOperations` (any case) and the id is not empty. Before that comes
+`/subscriptions/<sub>`, optionally `/resourceGroups/<group>`, then optionally
+`/providers/<namespace>` and `/locations/<location>`. No path part may be
+empty. Any other URL, such as a VM read or a Log Analytics query, is refused
+before MEHO sends a token. `azure.operation.status` runs the same check on the
+reference a caller passes back. It returns an `OperationReference`:
 
 ```json
 {"poll_url": "...", "poll_kind": "azure-asyncoperation", "resource_id": "...",

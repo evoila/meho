@@ -92,12 +92,12 @@ func runWithdraw(
 
 // printWithdrawal renders the result: the new status, when, and why.
 func printWithdrawal(w io.Writer, idArg string, detail *api.ApprovalRequestView) {
-	fmt.Fprintf(w, "approval_request %s → %s (withdrawn by the sender)\n", idArg, string(detail.Status))
+	fmt.Fprintf(w, "approval_request %s → %s (withdrawn by the sender)\n", idArg, output.SafeText(string(detail.Status)))
 	if detail.WithdrawnAt != nil {
-		fmt.Fprintf(w, "withdrawn at: %s\n", *detail.WithdrawnAt)
+		fmt.Fprintf(w, "withdrawn at: %s\n", output.SafeText(*detail.WithdrawnAt))
 	}
 	if detail.WithdrawReason != nil && *detail.WithdrawReason != "" {
-		fmt.Fprintf(w, "reason:       %s\n", *detail.WithdrawReason)
+		fmt.Fprintf(w, "reason:       %s\n", output.SafeText(*detail.WithdrawReason))
 	}
 }
 

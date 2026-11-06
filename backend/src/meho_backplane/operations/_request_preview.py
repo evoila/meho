@@ -28,6 +28,9 @@ Scope (honouring #1683's out-of-scope dispositions):
 
 * **No dispatch.** The connector's HTTP transport is never called; no
   network egress, no audit row, no broadcast event, no policy-gate park.
+  The one exception is an op's opt-in check before the wait for approval
+  (:mod:`._park_check`): it runs here when the call would wait, and it may
+  make the same vendor read it makes on the call.
 * **No replay.** Inspecting a *would-be* request only; re-dispatching a
   past audited request is a separate governance concern (Goal #1651).
 * **Ingested ops, plus a synthetic preview for the approval tiers.** A
@@ -87,6 +90,7 @@ from meho_backplane.operations._lookup import (
     parse_connector_id,
 )
 from meho_backplane.operations._op_miss import op_miss_result
+from meho_backplane.operations._park_check import park_check_refusal, park_check_registered
 from meho_backplane.operations._preview import _SENSITIVE_CLASSES
 from meho_backplane.operations._preview_steps import preview_step_verdict
 from meho_backplane.operations._validate import (
@@ -387,6 +391,19 @@ def _gate_and_validate(
             op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
         )
 
+    return _validate_params_envelope(
+        descriptor=descriptor, connector_id=connector_id, op_id=op_id, params=params
+    )
+
+
+def _validate_params_envelope(
+    *,
+    descriptor: EndpointDescriptor,
+    connector_id: str,
+    op_id: str,
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Dispatch Step 3: the ``invalid_params`` / ``invalid_op_schema`` envelope, or ``None``."""
     # --- Step 3: parameter_schema validation (mirrors dispatch) -----------
     try:
         validation_errors = validate_params(descriptor.parameter_schema, params)
@@ -406,6 +423,60 @@ def _gate_and_validate(
             validation_errors=validation_errors,
         )
     return None
+
+
+async def _park_check_envelope(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    connector_id: str,
+    op_id: str,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    """The ``refused_before_approval`` envelope when the call would be refused.
+
+    The preview gives the same answer the call gives: when the op has a
+    check before the wait for approval
+    (:mod:`~meho_backplane.operations._park_check`), its params pass the
+    schema, and the policy gate says the call would wait for approval, the
+    check runs here. A refusal returns the same ``error`` and ``extras``
+    the call returns. Writes nothing, like every preview. The check is
+    the op's own code: it may read the vendor (for example the form that
+    says which fields are secret), the same read the call makes.
+    """
+    if not park_check_registered(descriptor.op_id):
+        return None
+    if (
+        _validate_params_envelope(
+            descriptor=descriptor, connector_id=connector_id, op_id=op_id, params=params
+        )
+        is not None
+    ):
+        return None  # the call fails the params check first; the preview says so below
+    verdict, _reason = await policy_gate(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        decide_only=True,
+    )
+    if verdict is not PermissionVerdict.NEEDS_APPROVAL:
+        return None
+    refusal = await park_check_refusal(
+        op_id=op_id,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+        duration_ms=0.0,
+    )
+    if refusal is None:
+        return None
+    return _refused_envelope(
+        refusal, op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
+    )
 
 
 async def _governance_fields(
@@ -660,7 +731,9 @@ async def preview_dispatch(
     Returns a JSON-shaped envelope: ``status`` ``"ok"`` (request/synthetic
     preview resolved), ``"error"`` (structured ``unknown_op`` /
     ``target_required`` / ``unqualified_target_version`` / ``invalid_params`` /
-    ``no_connector`` / ``ambiguous_connector`` / ``dispatch_error``), or
+    ``no_connector`` / ``ambiguous_connector`` / ``dispatch_error`` /
+    ``refused_before_approval`` -- the op's check before the wait for
+    approval refused the call, see :func:`_park_check_envelope`), or
     ``"unavailable"`` (a non-governed typed/composite op). ``op_id`` /
     ``connector_id`` / ``source_kind`` echo for correlation. Every envelope
     whose op resolved (every status except ``unknown_op`` /
@@ -683,7 +756,14 @@ async def preview_dispatch(
     if isinstance(resolved, dict):
         return resolved  # the op or the target did not resolve (see _resolve_descriptor)
     descriptor, connector_id = resolved
-    envelope = await _preview_resolved_op(
+    envelope = await _park_check_envelope(
+        operator=operator,
+        descriptor=descriptor,
+        connector_id=connector_id,
+        op_id=op_id,
+        target=target,
+        params=params,
+    ) or await _preview_resolved_op(
         operator=operator,
         connector_id=connector_id,
         op_id=op_id,

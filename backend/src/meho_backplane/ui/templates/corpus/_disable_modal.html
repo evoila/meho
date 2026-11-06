@@ -17,12 +17,16 @@
   delete-confirm modal's destructive-action warning.
 
   Submit contract: the form ``hx-post``s to
-  ``/ui/corpus/collections/{key}/disable``, targeting itself
-  (``hx-target="this"`` + ``hx-swap="outerHTML"``).
+  ``/ui/corpus/collections/{key}/disable``, targeting the readiness card on
+  the page behind the modal (``hx-target="#collection-readiness-card"`` +
+  ``hx-swap="outerHTML"``).
     * Success -> 204 + ``HX-Redirect`` to the detail page (re-renders the page
       with the new ``disabled`` pill + the Enable button replacing Disable).
-    * A forbidden transition -> 409 + a legible ``invalid_collection_transition``
-      alert fragment swapped in place of the form (not a stack trace).
+    * A refused disable -> 403 (a global row without platform admin) or 409
+      (a forbidden transition) + a legible alert fragment (not a stack
+      trace). The form's ``data-collection-action`` lets
+      ``corpus-collection-actions.js`` turn the swap on for that error
+      answer; it closes this modal and the alert replaces the readiness card.
 
   CSRF: this form declares its OWN ``hx-headers`` ``X-CSRF-Token`` -- HTMX
   does NOT propagate ``hx-headers`` from an ancestor to a descendant form
@@ -61,8 +65,9 @@
 
     <form
       id="corpus-disable-form"
+      data-collection-action="disable"
       hx-post="/ui/corpus/collections/{{ collection_key | urlencode }}/disable"
-      hx-target="this"
+      hx-target="#collection-readiness-card"
       hx-swap="outerHTML"
       hx-disabled-elt="find button[type=submit]"
       hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'

@@ -119,6 +119,11 @@ _require_operator = Depends(require_role(TenantRole.OPERATOR))
 _LIST_OP_ID = "meho.docs.collections.list"
 
 
+def _global_forbidden(exc: DocCollectionGlobalUpdateForbiddenError) -> HTTPException:
+    """Map the service's global-row refusal to the structured REST 403."""
+    return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=exc.detail)
+
+
 def _dedupe_tenant_first(rows: list[DocCollectionORM]) -> list[DocCollectionORM]:
     """Collapse global+tenant rows sharing a ``collection_key``, tenant wins.
 
@@ -355,6 +360,15 @@ async def update_doc_collection_endpoint(
     "/{collection_key}/probe",
     response_model=BackendReadiness,
     responses={
+        403: {
+            "description": (
+                "The resolved collection is a global (``tenant_id IS NULL``) "
+                "platform-catalogue row and the operator lacks "
+                "``platform_admin`` (structured "
+                "``detail.error='global_collection_update_forbidden'``); the "
+                "row is not changed."
+            ),
+        },
         404: {"description": "No collection with this key is visible to the tenant."},
         409: {
             "description": (
@@ -386,11 +400,15 @@ async def probe_collection_endpoint(
     ``last_ingested_at`` + the ``status`` transition onto the row. A
     failed probe is mapped to 503 and leaves the row unchanged: the
     ``get_session`` transaction rolls back on the raise, so nothing the
-    service flushed survives.
+    service flushed survives. Probing a global row needs ``platform_admin``
+    (403 ``global_collection_update_forbidden``), because the probe writes
+    the row's status for every tenant.
     """
     collection = await resolve_doc_collection(session, collection_key, operator.tenant_id)
     try:
         return await probe_collection(session, operator, collection)
+    except DocCollectionGlobalUpdateForbiddenError as exc:
+        raise _global_forbidden(exc) from exc
     except CorpusUnavailable as exc:
         # Fail-closed: an unconfigured / unreachable / non-2xx / unroutable
         # backend is 503. The transport never attaches the raw body, so
@@ -413,6 +431,15 @@ async def probe_collection_endpoint(
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
     responses={
+        403: {
+            "description": (
+                "The resolved collection is a global (``tenant_id IS NULL``) "
+                "platform-catalogue row and the operator lacks "
+                "``platform_admin`` (structured "
+                "``detail.error='global_collection_update_forbidden'``); the "
+                "row is not changed."
+            ),
+        },
         404: {"description": "No collection with this key is visible to the tenant."},
         409: {"description": "Enable is forbidden from the collection's current state."},
     },
@@ -427,10 +454,14 @@ async def enable_collection_endpoint(
     Idempotent: re-enabling an already-live collection writes nothing and
     returns 204. A forbidden source state raises 409 via the lifecycle
     guard. A follow-up probe promotes the re-enabled collection to
-    ``ready`` once its index confirms.
+    ``ready`` once its index confirms. Enabling a global row needs
+    ``platform_admin`` (403 ``global_collection_update_forbidden``).
     """
     collection = await resolve_doc_collection(session, collection_key, operator.tenant_id)
-    await set_collection_enabled(session, collection, enabled=True)
+    try:
+        await set_collection_enabled(session, operator, collection, enabled=True)
+    except DocCollectionGlobalUpdateForbiddenError as exc:
+        raise _global_forbidden(exc) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -439,6 +470,15 @@ async def enable_collection_endpoint(
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
     responses={
+        403: {
+            "description": (
+                "The resolved collection is a global (``tenant_id IS NULL``) "
+                "platform-catalogue row and the operator lacks "
+                "``platform_admin`` (structured "
+                "``detail.error='global_collection_update_forbidden'``); the "
+                "row is not changed."
+            ),
+        },
         404: {"description": "No collection with this key is visible to the tenant."},
         409: {"description": "Disable is forbidden from the collection's current state."},
     },
@@ -456,10 +496,14 @@ async def disable_collection_endpoint(
     ``-32602``), distinct from the retryable 409 a ``provisioning`` /
     ``rebuilding`` collection returns, via the shared
     :func:`~meho_backplane.docs_search.resolve_entitled_ready_collection`
-    gate — never an empty result.
+    gate — never an empty result. Disabling a global row needs
+    ``platform_admin`` (403 ``global_collection_update_forbidden``).
     """
     collection = await resolve_doc_collection(session, collection_key, operator.tenant_id)
-    await set_collection_enabled(session, collection, enabled=False)
+    try:
+        await set_collection_enabled(session, operator, collection, enabled=False)
+    except DocCollectionGlobalUpdateForbiddenError as exc:
+        raise _global_forbidden(exc) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

@@ -871,7 +871,7 @@
           "docs"
         ],
         "summary": "Probe Collection Endpoint",
-        "description": "Probe a collection's backend and persist its liveness on success.\n\nResolves the collection tenant-first, reads its backend's typed\nreadiness (forwarding the operator JWT under the operator identity),\nand on success persists ``readiness`` / ``doc_count`` /\n``last_ingested_at`` + the ``status`` transition onto the row. A\nfailed probe is mapped to 503 and leaves the row unchanged: the\n``get_session`` transaction rolls back on the raise, so nothing the\nservice flushed survives.",
+        "description": "Probe a collection's backend and persist its liveness on success.\n\nResolves the collection tenant-first, reads its backend's typed\nreadiness (forwarding the operator JWT under the operator identity),\nand on success persists ``readiness`` / ``doc_count`` /\n``last_ingested_at`` + the ``status`` transition onto the row. A\nfailed probe is mapped to 503 and leaves the row unchanged: the\n``get_session`` transaction rolls back on the raise, so nothing the\nservice flushed survives. Probing a global row needs ``platform_admin``\n(403 ``global_collection_update_forbidden``), because the probe writes\nthe row's status for every tenant.",
         "operationId": "probe_collection_endpoint_api_v1_doc_collections__collection_key__probe_post",
         "parameters": [
           {
@@ -905,6 +905,9 @@
               }
             }
           },
+          "403": {
+            "description": "The resolved collection is a global (``tenant_id IS NULL``) platform-catalogue row and the operator lacks ``platform_admin`` (structured ``detail.error='global_collection_update_forbidden'``); the row is not changed."
+          },
           "404": {
             "description": "No collection with this key is visible to the tenant."
           },
@@ -933,7 +936,7 @@
           "docs"
         ],
         "summary": "Enable Collection Endpoint",
-        "description": "Return a disabled collection to service (\u2192 ``provisioning``).\n\nIdempotent: re-enabling an already-live collection writes nothing and\nreturns 204. A forbidden source state raises 409 via the lifecycle\nguard. A follow-up probe promotes the re-enabled collection to\n``ready`` once its index confirms.",
+        "description": "Return a disabled collection to service (\u2192 ``provisioning``).\n\nIdempotent: re-enabling an already-live collection writes nothing and\nreturns 204. A forbidden source state raises 409 via the lifecycle\nguard. A follow-up probe promotes the re-enabled collection to\n``ready`` once its index confirms. Enabling a global row needs\n``platform_admin`` (403 ``global_collection_update_forbidden``).",
         "operationId": "enable_collection_endpoint_api_v1_doc_collections__collection_key__enable_post",
         "parameters": [
           {
@@ -960,6 +963,9 @@
           "204": {
             "description": "Successful Response"
           },
+          "403": {
+            "description": "The resolved collection is a global (``tenant_id IS NULL``) platform-catalogue row and the operator lacks ``platform_admin`` (structured ``detail.error='global_collection_update_forbidden'``); the row is not changed."
+          },
           "404": {
             "description": "No collection with this key is visible to the tenant."
           },
@@ -985,7 +991,7 @@
           "docs"
         ],
         "summary": "Disable Collection Endpoint",
-        "description": "Hide a collection from search (\u2192 ``disabled``).\n\nIdempotent and lifecycle-guarded \u2014 same shape as the enable handler.\nA disabled collection fails ``search_docs`` typed with a **terminal**\nrejection (REST 403 ``detail.error='collection_disabled'`` / MCP\n``-32602``), distinct from the retryable 409 a ``provisioning`` /\n``rebuilding`` collection returns, via the shared\n:func:`~meho_backplane.docs_search.resolve_entitled_ready_collection`\ngate \u2014 never an empty result.",
+        "description": "Hide a collection from search (\u2192 ``disabled``).\n\nIdempotent and lifecycle-guarded \u2014 same shape as the enable handler.\nA disabled collection fails ``search_docs`` typed with a **terminal**\nrejection (REST 403 ``detail.error='collection_disabled'`` / MCP\n``-32602``), distinct from the retryable 409 a ``provisioning`` /\n``rebuilding`` collection returns, via the shared\n:func:`~meho_backplane.docs_search.resolve_entitled_ready_collection`\ngate \u2014 never an empty result. Disabling a global row needs\n``platform_admin`` (403 ``global_collection_update_forbidden``).",
         "operationId": "disable_collection_endpoint_api_v1_doc_collections__collection_key__disable_post",
         "parameters": [
           {
@@ -1011,6 +1017,9 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "403": {
+            "description": "The resolved collection is a global (``tenant_id IS NULL``) platform-catalogue row and the operator lacks ``platform_admin`` (structured ``detail.error='global_collection_update_forbidden'``); the row is not changed."
           },
           "404": {
             "description": "No collection with this key is visible to the tenant."

@@ -80,6 +80,17 @@ waiting out the TTL or a restart (proven by the without-restart tests in
 `test_api_v1_tenants_flight_recorder.py`, `test_targets_flight_recorder_capture.py`,
 and `test_flight_recorder_config.py`).
 
+The change is saved when the request's session commits, after the route
+returns. A dispatch that reads the policy between the write and the commit
+still reads the saved (old) row and caches it. So each write clears the cache
+twice: at once, and again after the commit
+(`db/after_commit.py::clear_now_and_after_commit`, a listener on the session's
+`after_commit` event). The listener waits for the outer commit: releasing a
+savepoint (the settings import writes inside `begin_nested`) also fires
+`after_commit`, but saves nothing yet. The announce gate and the broadcast
+overrides clear their 60s caches the same way. Proven by
+`test_policy_cache_cleared_after_commit.py`.
+
 ## CLI
 
 - `meho tenants flight-recorder-policy show [--json]` — reads the same

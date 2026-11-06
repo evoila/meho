@@ -28,6 +28,8 @@ from tests.test_operation_contracts import (
     check_operation,
     compare_with_gaps,
     find_problems,
+    load_gaps,
+    refused_gaps,
 )
 
 _GOOD_PARAMS: Final[dict[str, Any]] = {
@@ -628,7 +630,11 @@ def _with_field(name: str, schema: dict[str, Any]) -> OperationContract:
         ("host", {"type": "string"}),
         ("hostname", {"type": "string"}),
         ("address", {"type": "string"}),
+        ("fqdn", {"type": "string"}),
         ("server", {"type": "string"}),
+        ("remote", {"type": "string"}),
+        ("peer", {"type": "string"}),
+        ("endpoint", {"type": "string"}),
         ("resolver", {"type": "string"}),
         ("Host", {"type": "string"}),
         ("callback_url", {"type": "string"}),
@@ -703,3 +709,97 @@ def test_an_allow_listed_field_passes_and_every_entry_has_a_reason() -> None:
         if "." not in path and "[" not in path:
             assert unmarked_address_fields(op_id, schema) == []
             assert unmarked_address_fields("fake.other.op", schema) == [path]
+
+
+# ---------------------------------------------------------------------------
+# Rule 14: a stored secret sent to an address the caller gives needs approval
+# ---------------------------------------------------------------------------
+
+_MARKED_FQDN: Final[dict[str, Any]] = {
+    "type": "string",
+    "description": "The host to log in to.",
+    CALLER_ADDRESS_MARKER: True,
+}
+_SECRET_REF: Final[dict[str, Any]] = {"type": "string", "description": "Vault path of the login."}
+
+
+def _secret_op(
+    properties: dict[str, Any], *, safety_level: str = "safe", requires_approval: bool = False
+) -> OperationContract:
+    return _good_op(
+        op_id="fake.location.check",
+        safety_level=safety_level,
+        requires_approval=requires_approval,
+        parameter_schema={
+            "type": "object",
+            "properties": properties,
+            "examples": [dict.fromkeys(properties, "<value>")],
+        },
+    )
+
+
+@pytest.mark.parametrize("secret_name", ["secret_ref", "admin_secret_ref", "password_ref"])
+def test_a_stored_secret_sent_to_a_caller_address_below_caution_fails(secret_name: str) -> None:
+    op = _secret_op({"fqdn": _MARKED_FQDN, secret_name: _SECRET_REF})
+    problems = _only_rule(op, "stored_secret_address")
+    assert problems[0].startswith(f"takes a stored secret ('{secret_name}')")
+
+
+def test_a_stored_secret_sent_to_a_caller_address_without_approval_fails() -> None:
+    op = _secret_op({"fqdn": _MARKED_FQDN, "secret_ref": _SECRET_REF}, safety_level="dangerous")
+    assert set(check_operation(op)) == {"requires_approval", "stored_secret_address"}
+
+
+def test_a_stored_secret_in_a_nested_field_counts() -> None:
+    login = {
+        "type": "object",
+        "description": "The login.",
+        "properties": {"secret_ref": _SECRET_REF},
+    }
+    op = _secret_op({"endpoint": _MARKED_FQDN, "login": login})
+    problems = _only_rule(op, "stored_secret_address")
+    assert "'login.secret_ref'" in problems[0]
+
+
+@pytest.mark.parametrize(
+    "properties",
+    [
+        {"fqdn": _MARKED_FQDN, "secret_ref": _SECRET_REF},
+        {"fqdn": _MARKED_FQDN},
+    ],
+)
+def test_caution_with_approval_or_no_secret_passes(properties: dict[str, Any]) -> None:
+    op = _secret_op(properties, safety_level="caution", requires_approval=True)
+    assert check_operation(op) == {}
+
+
+def test_a_stored_secret_with_no_caller_address_passes() -> None:
+    assert check_operation(_secret_op({"secret_ref": _SECRET_REF})) == {}
+
+
+def test_a_stored_secret_with_an_allow_listed_address_passes() -> None:
+    (op_id, path) = ("targets.register", "fqdn")
+    assert (op_id, path) in NOT_CALLER_ADDRESSES
+    schema = {"type": "object", "properties": {path: {"type": "string"}, "secret_ref": {}}}
+    op = OperationContract(connector="targets", op_id=op_id, parameter_schema=schema)
+    assert check_operation(op).get("stored_secret_address") is None
+
+
+def test_the_gap_list_may_not_hold_a_stored_secret_operation() -> None:
+    secret_op = _secret_op({"fqdn": {"type": "string", "description": "x"}, "secret_ref": {}})
+    plain_op = _good_op(op_id="fake.vm.read", parameter_schema=_UNMARKED_HOST_PARAMS)
+    known = {
+        ("vmware-rest", "fake.location.check", "caller_address"),
+        ("vmware-rest", "fake.location.check", "summary"),
+        ("vmware-rest", "fake.vm.read", "caller_address"),
+        ("vmware-rest", "fake.other.op", "stored_secret_address"),
+    }
+    messages = refused_gaps([secret_op, plain_op], known)
+    assert [m.split(":")[0] for m in messages] == [
+        "REFUSED vmware-rest fake.location.check rule 'caller_address'",
+        "REFUSED vmware-rest fake.other.op rule 'stored_secret_address'",
+    ]
+
+
+def test_the_live_gap_list_holds_no_stored_secret_rule() -> None:
+    assert not {gap for gap in load_gaps() if gap[2] == "stored_secret_address"}

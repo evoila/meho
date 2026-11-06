@@ -36,11 +36,12 @@ names.
 - `meho retrieval ...` (G4.3 #373) — retrieval-quality + migration-
   decision tooling. v0.2 ships `eval`, `usage`, and
   `retire-checklist`.
-- `meho operation ...` (G0.6-T13 #481) — dispatcher meta-tools
-  (`groups`, `search`, `call`).
-- `meho connector ...` (G0.7-T5 #405) — spec-ingestion + review
-  workflow (`ingest`, `list`, `review`, `edit-group`, `edit-op`,
-  `overrides`, `remove-override`, `enable`, `disable`, `delete`).
+- `meho operation ...` — dispatcher meta-tools
+  (`groups`, `search`, `call`, `preview`, `result-query`, `subops`).
+- `meho connector ...` — spec-ingestion + review
+  workflow (`ingest`, `ingest-status`, `list`, `catalog`, `review`,
+  `edit-group`, `edit-op`, `overrides`, `remove-override`, `enable`,
+  `enable-reads`, `disable`, `delete`, `tenant-setting`).
 - `meho audit ...` (G8.1-T3 #467) — audit-log query surface
   (`query`, `recent`, `show`, `who-touched`, `my-recent`) wrapping
   the four `/api/v1/audit/*` routes shipped by G8.1-T2 (#466). G8.2-T5
@@ -48,6 +49,8 @@ names.
   tree over `GET /api/v1/audit/sessions/{id}/replay` (`--json`,
   `--max-depth`; a 413 `session_too_large` redirects to
   `query --session-id`) — plus a `--session-id` filter on `query`.
+  `reflex` reads the reflex-adoption numbers from
+  `GET /api/v1/audit/reflex`.
   `count` (#4983) counts the rows that match the `query` filters, per
   event class, in one call (`POST /api/v1/audit/class-counts`).
   #4855 adds `trace list` (the operation runs that still have a stored
@@ -78,14 +81,15 @@ names.
   for `jq`/`diff -u` pipelines. The dropped-slug warning the issue
   body expected on `list` lives behind a T4 API surface that hasn't
   shipped yet; the verb is structurally ready.
-- `meho remember / recall / forget / list` (G5.1-T4 #424) — memory
+- `meho remember / recall / forget / list / promote` — memory
   operator surface, registered as **top-level** verbs (no `memory`
   parent — per consumer-needs.md §G5's ergonomic shape:
   `meho remember "note"` rather than `meho memory remember "note"`).
   Wraps the four `/api/v1/memory*` routes shipped by G5.1-T2 (#422)
   plus `POST /api/v1/memory/search` (#3741, the same
   `MemoryService.search_memories` call MCP `search_memory` makes) for
-  `meho recall --query`. Five scopes: `user` /
+  `meho recall --query`. `meho promote` calls
+  `POST /api/v1/memory/{scope}/{slug}/promote`. Five scopes: `user` /
   `user-tenant` / `user-target` / `tenant` / `target`. The two
   target-scoped values require `--target NAME`; the CLI rejects a
   missing `--target` client-side before the round-trip.
@@ -172,6 +176,7 @@ cli/
 │   ├── oapi.config.yaml    # oapi-codegen v2 generation config.
 │   └── snapshot-openapi.py # FastAPI → 3.0-downgrade helper.
 ├── cmd/
+│   ├── docgen/             # writes the CLI reference page `docs-site/reference/cli.md` (`make cli-docs`).
 │   └── meho/
 │       └── main.go         # entry point; honours output.ExitCoder.
 └── internal/
@@ -332,14 +337,14 @@ cli/
     │   │   └── runs_test.go             # T2 — 7-column table render (incl. 8-char RUN_ID truncation) + JSON full-UUIDs + operator-omits-assignee-query + admin-with-assignee + empty list one-liner + 403 + bad --status / --limit + OPACITY (no leaked nested step body) + listRunsParams pointer-omission matrix.
     │   ├── vmware/            # G3.1-T7 #511 — `meho vmware …` alias verb tree (connector_id="vmware-rest-9.0" pre-baked).
     │   ├── vault/             # G3.3-T6 #550 — `meho vault …` alias verb tree (connector_id="vault-1.x" pre-baked).
-    │   └── topology/          # G9.1-T6 #454 + G9.2-T6 #599 — `meho topology refresh/dependents/dependencies/path/annotate/unannotate/list-edges` over the T5 REST surface (#453, #597).
+    │   │   ├── vault.go          # NewRootCmd + ConnectorID const + per-package renderRequestError (auth-ladder + *dispatch.APIResponseError); transport now lives in `cli/internal/dispatch`.
+    │   │   ├── dispatch.go       # Alias CallResult/callRequestBody to dispatch types + `var conn = dispatch.New(ConnectorID)` (transport owned by dispatch.Connector).
+    │   │   ├── kv.go             # `meho vault kv read|list|put|versions|delete` (vault.kv.* ops).
+    │   │   ├── sys.go            # `meho vault sys health|seal-status|mounts-list|auth-list` (vault.sys.* ops).
+    │   │   ├── auth.go           # `meho vault auth userpass/approle list+read` (vault.auth.* ops).
+    │   │   └── vault_test.go     # helpers + verb-tree wiring + flag→params wire-shape + e2e mocked-backplane tests.
+    │   └── topology/          # `meho topology refresh/dependents/dependencies/path/annotate/unannotate/list-edges/timeline/diff/history/bulk-import` over the topology REST surface.
     │                          #   (the 5th G9.1-T6 verb, `meho targets discover`, lives in targets/discover.go.)
-    │       ├── vault.go          # NewRootCmd + ConnectorID const + per-package renderRequestError (auth-ladder + *dispatch.APIResponseError); transport now lives in `cli/internal/dispatch` (G0.12-T16 #1274).
-    │       ├── dispatch.go       # Alias CallResult/callRequestBody to dispatch types + `var conn = dispatch.New(ConnectorID)` (transport owned by dispatch.Connector after G0.12-T16 #1274).
-    │       ├── kv.go             # `meho vault kv read|list|put|versions|delete` (vault.kv.* ops, #545).
-    │       ├── sys.go            # `meho vault sys health|seal-status|mounts-list|auth-list` (vault.sys.* ops, #546).
-    │       ├── auth.go           # `meho vault auth userpass/approle list+read` (vault.auth.* ops, #547).
-    │       └── vault_test.go     # helpers + verb-tree wiring + flag→params wire-shape + e2e mocked-backplane tests.
     ├── migrate/               # G5.3 — pure-logic helpers for the memory migration flow (Initiative #375).
     │   ├── doc.go                # package doc.
     │   ├── machinelocal.go       # DetectMachineLocal — heuristic detector for laptop-local content (#610).
@@ -367,6 +372,23 @@ cli/
         ├── version.go         # build-time identity (Version/Commit/Date).
         └── skew.go            # GET /version fetch + CLI/backplane version-gap warning (#3871).
 ```
+
+The tree shows only part of `cli/internal/`. These packages are not
+drawn in it:
+
+- Shared code: `internal/backplane` (backplane URL resolution),
+  `internal/dispatch` (the shared `call_operation` transport of the
+  vendor verbs), `internal/typedops` (test helper that reads the
+  backend typed-op lists), and `internal/cmd/workref`
+  (the `--work-ref` flag).
+- Command trees: `addon`, `admin`, `agent`, `agent-principal`,
+  `approvals`, `automation`, `broadcast`, `dashboard`, `docs`,
+  `event-source`, `runner-principal`, `scheduler`, `secret`,
+  `sensor`, `service-principal`, `targets`, `tenants`.
+- Vendor verb trees: `argocd`, `bind9`, `gcloud`, `harbor`,
+  `hetzner-robot`, `holodeck`, `k8s`, `keycloak`, `nsx`, `pfsense`,
+  `sddc-manager`, `vcf-automation`, `vcf-fleet`, `vcf-logs`,
+  `vcf-operations`.
 
 `internal/` enforces the Go-visibility seal: only packages under
 `cli/` can import them. The split between `internal/cmd/` (cobra
@@ -397,6 +419,7 @@ The Makefile is the single source of truth for build invocations:
 | `make clean` | Removes `dist/` and the meho binary (keeps `bin/oapi-codegen`). |
 | `make tools` | Installs `bin/oapi-codegen` at the pinned v2.5.0. |
 | `make generate` | Regenerates `internal/api/client.gen.go` from `api/openapi.json`. |
+| `make cli-docs` | Regenerates `docs-site/reference/cli.md` from the command tree (`go run ./cmd/docgen`). |
 | `make snapshot-openapi` | Re-snapshots `api/openapi.json` from the backplane's FastAPI app. |
 | `make goreleaser` | Installs `bin/goreleaser` at the pinned v2.15.4. |
 | `make release-check` | Runs `goreleaser check` against `.goreleaser.yaml` (config-only validation). |
@@ -780,7 +803,7 @@ companion file at `$XDG_CONFIG_HOME/meho/config.json` carrying
 the operator's preferred backplane URL:
 
 ```json
-{ "backplane_url": "https://meho.evba.lab" }
+{ "backplane_url": "https://meho.example.test" }
 ```
 
 After `meho tenants use <name>` (#5241) the file also holds the chosen
@@ -1519,8 +1542,9 @@ downgrade on the way out:
 Both transforms are lossless for v0.1's spec. If a richer 3.1
 construct ever lands on the backplane (the `type: ["string","null"]`
 array form, tuples via `prefixItems`, etc.), extend `snapshot-openapi.py`
-alongside the change. A CI drift check that re-snapshots and
-diffs against the committed copy is a G2.7 follow-up.
+alongside the change. The `CLI API snapshot freshness` CI job
+re-snapshots and diffs against the committed copy (see "Known issues"
+below).
 
 ### Generation
 
@@ -1570,8 +1594,9 @@ heavyweight — that path is covered by the G2.8 integration suite).
 
 ## Operation dispatch (`meho operation`, G0.6-T13 #481)
 
-`cli/internal/cmd/operation/` registers the three cobra verbs that
-wrap the G0.6 substrate's operation meta-tool surface (G0.6-T8 #399).
+`cli/internal/cmd/operation/` registers the six cobra verbs that
+wrap the operation meta-tool surface (`groups`, `search`, `call`,
+`preview`, `result-query`, `subops`).
 The verbs are operator-side parity for the agent-facing MCP tools
 (`list_operation_groups`, `search_operations`, `call_operation`); the
 agent and the operator hit the same dispatcher path. The earlier v1
@@ -1668,7 +1693,7 @@ narrow-waist contract.
   and exits 0. Any other 404 stays an error. `--json` prints the answer
   as it came (`subops.go`).
 
-### Reserved flags (same shape across all three verbs)
+### Reserved flags (same shape across every verb)
 
 - `--json` — emit the raw JSON envelope to stdout instead of the human
   render. Useful for piping into `jq` or capturing for diff.
@@ -1840,7 +1865,10 @@ removes one through `DELETE /api/v1/targets/{name}`.
   credential and dispatch takes the auth-optional path — the way to
   register a product that needs no login. `--extra key=value`
   (repeatable) seeds the `extras` map with string values, for example
-  `--extra scheme=http` for a plain-HTTP Prometheus. `tenant_id` is never
+  `--extra scheme=http` for a plain-HTTP Prometheus.
+  `--secret-field <connector_field>=<source_field>` (repeatable) maps a
+  field the connector reads to another key name in the secret; only the
+  field names are stored. `tenant_id` is never
   sent; the backplane binds it from the operator's JWT. All validation
   stays server-side: an unknown product, an out-of-tenant `secret_ref`,
   or an SSRF-guarded host come back as a 422 whose body the CLI prints
@@ -1857,9 +1885,12 @@ removes one through `DELETE /api/v1/targets/{name}`.
   update without `--vpn-required` leaves it as it is (#5075).
   `--alias` replaces the whole alias list and `--extra key=value`
   replaces the whole `extras` map, matching the server's PATCH
-  semantics. `--clear <field>` (repeatable) sends an explicit JSON null
+  semantics. `--secret-field <connector_field>=<source_field>` adds or
+  replaces one entry of the secret field map and keeps the others;
+  `<connector_field>=` removes one entry. `--clear <field>` (repeatable) sends an explicit JSON null
   for a nullable column: `secret-ref`, `version`, `port`, `fqdn`,
-  `tls-ca-pin`, `tls-server-name`, `preferred-impl`, `note`. The two
+  `tls-ca-pin`, `tls-server-name`, `preferred-impl`, `note`, and
+  `secret-field` (removes the whole secret field map). The two
   collection columns are NOT NULL, so `--clear alias` sends
   `"aliases": []` and `--clear extra` sends `"extras": {}` instead of
   null; that is how an operator removes every alias or every extra.
@@ -1923,7 +1954,9 @@ removes one through `DELETE /api/v1/targets/{name}`.
   (one-shot auto-registration is not yet available). `--seed-target` scopes discovery
   to one already-registered target's reach; it is resolved
   tenant-scoped server-side, so a cross-tenant seed name 404s like a
-  typo. Documented in depth under "Topology verbs" (the verb is part
+  typo. `--import-yaml` prints the candidates as a file for
+  `meho targets import` instead of the tables (skipped connectors go to
+  stderr). Documented in depth under "Topology verbs" (the verb is part
   of G9.1-T6 and shares that initiative's contract).
 
 ### Reserved flags (same shape across the verbs)
@@ -2109,9 +2142,9 @@ recurrence guard). The contract for every future typed read op:
 
 ## Topology verbs (`meho topology`, G9.1-T6 #454 + G9.2-T6 #599)
 
-`cli/internal/cmd/topology/` registers seven operator-facing topology
-verbs that wrap the T5 REST surface (#453 / #597). The eighth
-G9.1-T6 verb, `meho targets discover`, lives under the `meho targets`
+`cli/internal/cmd/topology/` registers eleven operator-facing topology
+verbs that wrap the topology REST surface. One more topology
+verb, `meho targets discover`, lives under the `meho targets`
 parent (`cli/internal/cmd/targets/discover.go`) because the backend
 registers `GET /api/v1/targets/discover` on the targets router, under
 the canonical `/api/v1/targets` prefix.
@@ -2181,6 +2214,20 @@ the canonical `/api/v1/targets` prefix.
   `KIND / SOURCE / FROM / TO / LAST_SEEN` table; `--json` emits the
   raw `[]Edge` envelope so consumers can pipe ids into the
   `unannotate <edge-id>` form. Role: `operator`.
+
+### Subcommands (graph history and bulk edges)
+
+- `meho topology timeline` — `GET /api/v1/topology/timeline`. The
+  tenant's timeline of graph changes.
+- `meho topology diff <ts1> <ts2>` — `GET /api/v1/topology/diff`. The
+  graph changes between two timestamps.
+- `meho topology history <node-name|alias>` —
+  `GET /api/v1/topology/history/<name>`. The history of one node.
+- `meho topology bulk-import <file>` — `POST
+  /api/v1/topology/edges/bulk`. Annotates a list of curated edges from
+  one file in a single transaction.
+
+Run `meho topology <verb> --help` for their flags.
 
 ### Flag → query-param mapping
 
@@ -2322,9 +2369,11 @@ the issue body's acceptance criterion calls for.
 
 ## Lint configuration rationale
 
-`.golangci.yml` enables nine linters — the six golangci-lint runs by
-default (`errcheck`, `gosimple`, `govet`, `ineffassign`,
-`staticcheck`, `unused`) plus `gofmt`, `goimports`, and `revive`.
+`.golangci.yml` is a golangci-lint v2 config (`version: "2"`,
+`linters.default: none`). It enables six linters (`errcheck`,
+`govet`, `ineffassign`, `staticcheck`, `unused`, `revive`) and two
+formatters (`gofmt`, `goimports`, under `formatters.enable`). The
+`gosimple` checks are part of `staticcheck` in v2.
 
 Choices deliberately omitted:
 
@@ -2341,7 +2390,7 @@ Choices deliberately omitted:
 * **`gocyclo` / `cyclop`** — premature at the scaffold stage; will
   be revisited when subcommand RunE functions grow real branches.
 
-The exclude-rules block relaxes `errcheck` and `revive` on
+The `linters.exclusions.rules` block relaxes `errcheck` and `revive` on
 `_test.go` files only — test code routinely uses blank identifiers
 and dot imports in ways production code shouldn't.
 
@@ -2357,6 +2406,15 @@ attaches a sigstore bundle to every release artefact in the same
 GoReleaser invocation; the `signs:` block runs after `archives:`
 and `checksum:`, so the same single workflow produces both the
 artefacts and the signatures atomically.
+
+The same workflow does two more things after GoReleaser:
+
+- It builds the Claude Desktop `.mcpb` bundle, writes and signs its
+  `SHA256SUMS-mcpb` file, and attaches both to the release (see
+  [claude-desktop-mcpb.md](claude-desktop-mcpb.md)).
+- Its second job calls `linux-download.yml`, which builds the one
+  download of install form 2 (`meho-linux-<version>-amd64.tar`) and
+  attaches it to the same release.
 
 ### Trigger surface
 
@@ -2716,6 +2774,13 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      empty value, so Keycloak drops the `S256` that a run of 0.40.0,
      0.41.0 or 0.42.0 set. Implicit, password and service-account flows
      stay off.
+     Next to it, the public approval sign-in client (default name
+     `meho-cli-approve`, `--cli-approve-client-id`; it must match the
+     chart's `config.keycloakCliApproveClientId`). It gets the same
+     mappers except `meho-mcp-audience` and the same 4 default scopes,
+     and it uses its own login flow `meho approval sign-in` (password
+     form, then the one-time code when the person has one), which the
+     verb makes when it is missing (`bootstrap.go`, step 3a).
   2. Public authorization-code+PKCE MCP client (default name
      `meho-mcp`, `standardFlowEnabled=true`,
      `pkce.code.challenge.method=S256`, default redirect URIs for the
@@ -3013,10 +3078,11 @@ fixed-value mappers is upgraded, with a second run changing nothing.
   backplane yet (G2.2 coordination, identical to `/api/v1/auth-config`).
   The CLI's discovery fetch degrades to "no extra commands"
   silently until G2.2 lands the endpoint.
-* No CI drift check on the OpenAPI snapshot. If a backend
-  contributor adds a route without running `make snapshot-openapi`,
-  the snapshot drifts out of sync silently. G2.7 will add a CI
-  job that re-snapshots and diffs against the committed copy.
+* CI checks the OpenAPI snapshot. The `CLI API snapshot freshness`
+  job in `.github/workflows/ci.yml` runs `make snapshot-openapi`,
+  `make generate` and `make cli-docs`, and fails when
+  `cli/api/openapi.json`, `cli/internal/api/client.gen.go` or
+  `docs-site/reference/cli.md` differ from the committed copy.
 * The 401-refresh happy path isn't yet covered by a unit test —
   mocking Keycloak's well-known + token-exchange end to end is
   heavyweight, and the G2.8 integration suite covers it against a
@@ -3031,9 +3097,9 @@ fixed-value mappers is upgraded, with a second run changing nothing.
 `cli/internal/cmd/targets/` registers cobra verbs for the G0.3
 targets registry (Initiative #224). The v0.2 surface ships:
 
-- `meho targets import <file>` (G0.3-T6 #257) — bulk-import a
-  `targets.yaml` file. Sibling verbs (`list`, `describe`, `probe`)
-  land separately via G0.3-T5 #256.
+- `meho targets import <file>` — bulk-import a `targets.yaml` file.
+  The other verbs are described in the first "Targets registry"
+  section above.
 
 ### Import verb
 
@@ -3042,7 +3108,9 @@ flags called out in the issue body: `--update` (PATCH existing
 targets instead of erroring), `--dry-run` (print the plan; one
 listing `GET`, zero writes — #1785 made the preview existence-aware,
 so it is read-only rather than offline), `--json` (structured plan
-output), `--backplane` (override the configured backplane URL).
+output), `--backplane` (override the configured backplane URL),
+`--secret-field connector_field=source_field` (repeatable; adds the
+pair to every target's secret field map).
 
 **Mapping rules.** The CLI parses the YAML as a generic
 `map[string]any` per entry and partitions every key:
@@ -3139,11 +3207,8 @@ the plan / execute path against an in-process `fakeDoer` without
 the auth/token-store machinery (which is independently covered by
 `cli/internal/auth`'s own tests).
 
-The helper is duplicated from `cmd/operation/operation.go` because
-`cmd/operation` can't be imported from `cmd/targets` without an
-import cycle (both packages are grafted onto the same tree by
-`cmd/root.go`). If a third subcommand package grows, the duplicated
-helper should be extracted to a shared `cmd/_authed` package.
+The helper is private to `import.go`; `cmd/event-source` keeps its
+own copy.
 
 ### Tests
 
@@ -3155,8 +3220,7 @@ helper should be extracted to a shared `cmd/_authed` package.
   integration tests against `/api/v1/targets` exercising the
   CREATE / PATCH semantics the CLI relies on. The
   real-`targets.yaml` round-trip test replays every conformant
-  entry from a pinned snapshot of
-  `evoila-bosnia/claude-rdc-hetzner-dc/rdc-hetzner-dc/targets.yaml`
+  entry from a pinned snapshot of a real lab `targets.yaml` file
   (24 entries; SHA pinned in the test module).
 
 ### Out-of-scope

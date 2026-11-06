@@ -398,8 +398,9 @@ def _access_denied() -> httpx.Response:
 
 
 def test_the_family_holds_four_safe_reads_in_one_group() -> None:
-    assert [op.op_id for op in storage.OPS] == STORAGE_OP_IDS
-    for op in storage.OPS:
+    reads = [op for op in storage.OPS if "write" not in op.tags]
+    assert [op.op_id for op in reads] == STORAGE_OP_IDS
+    for op in reads:
         assert op.group_key == storage.GROUP_STORAGE == "storage"
         assert op.safety_level == "safe" and op.requires_approval is False
         assert "read-only" in op.tags
@@ -451,7 +452,7 @@ async def test_the_reads_are_stored_as_typed_safe_and_enabled(
     )
     by_op = {row.op_id: row for row in rows}
     assert set(by_op) == set(STORAGE_OP_IDS)
-    for op in storage.OPS:
+    for op in (op for op in storage.OPS if op.op_id in by_op):
         row = by_op[op.op_id]
         assert row.source_kind == "typed" and row.is_enabled is True
         assert row.safety_level == "safe" and row.requires_approval is False

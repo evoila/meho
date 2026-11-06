@@ -19,12 +19,21 @@ from meho_backplane.connectors.azure.storage_parse import DEFAULT_MAX_RESULTS, M
 
 __all__ = [
     "ACCOUNT_LIST_RESPONSE",
+    "BLOB_LINK_CREATE_PARAMS",
+    "BLOB_LINK_CREATE_RESPONSE",
     "BLOB_LIST_PARAMS",
     "BLOB_LIST_RESPONSE",
     "BLOB_READ_PARAMS",
     "BLOB_READ_RESPONSE",
     "CONTAINER_LIST_PARAMS",
     "CONTAINER_LIST_RESPONSE",
+    "DEFAULT_LINK_HOURS",
+    "MAX_LINK_HOURS",
+    "ROLE_ASSIGNMENT_CREATE_PARAMS",
+    "ROLE_ASSIGNMENT_CREATE_RESPONSE",
+    "ROLE_ASSIGNMENT_DELETE_PARAMS",
+    "ROLE_ASSIGNMENT_DELETE_RESPONSE",
+    "STORAGE_DATA_ROLES",
 ]
 
 _ACCOUNT_PARAM: Final[dict[str, Any]] = {
@@ -342,4 +351,227 @@ BLOB_READ_RESPONSE: Final[dict[str, Any]] = {
         "encoding",
         "content",
     ],
+}
+
+
+# ---- writes (Task #4169) ----
+
+#: How long a download link works when the caller does not say, and at most, in hours.
+DEFAULT_LINK_HOURS: Final[int] = 4
+MAX_LINK_HOURS: Final[int] = 24
+
+#: The roles the storage writes may give or take, by name, with their built-in
+#: role id (Azure built-in roles for Storage). No other role is accepted.
+STORAGE_DATA_ROLES: Final[dict[str, str]] = {
+    "Storage Blob Data Reader": "2a2b9908-6ea1-4ae2-8e65-a410df84e7d1",
+    "Storage Blob Data Contributor": "ba92f5b4-2d11-453d-a403-e96b0029c9fe",
+}
+
+_GUID_PATTERN: Final[str] = (
+    "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+_OPTIONAL_CONTAINER_PARAM: Final[dict[str, Any]] = {
+    **_CONTAINER_PARAM,
+    "description": (
+        f"{_CONTAINER_PARAM['description']} Leave it out for the whole storage account."
+    ),
+}
+
+_PRINCIPAL_ID_PARAM: Final[dict[str, Any]] = {
+    "type": "string",
+    "pattern": _GUID_PATTERN,
+    "description": (
+        "The object id of the user, group or service principal in Entra ID, for "
+        "example from entra.user.list."
+    ),
+}
+
+_ROLE_PARAM: Final[dict[str, Any]] = {
+    "type": "string",
+    "enum": sorted(STORAGE_DATA_ROLES),
+    "description": "The data role. Only these two roles are accepted.",
+}
+
+_EXAMPLE_PRINCIPAL: Final[str] = "<principal-object-id>"
+
+BLOB_LINK_CREATE_PARAMS: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "account": _ACCOUNT_PARAM,
+        "container": _CONTAINER_PARAM,
+        "name": BLOB_READ_PARAMS["properties"]["name"],
+        "allowed_ip": {
+            "type": "string",
+            "format": "ipv4",
+            "description": (
+                "The one IPv4 address the link works from, for example the public "
+                "address of the server that downloads the file."
+            ),
+        },
+        "hours": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": MAX_LINK_HOURS,
+            "default": DEFAULT_LINK_HOURS,
+            "description": (
+                f"How long the link works, in hours ({DEFAULT_LINK_HOURS} when left "
+                f"out, at most {MAX_LINK_HOURS})."
+            ),
+        },
+        "store_as": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "description": (
+                "The name the link is stored under in this tenant's Vault: "
+                "tenants/<tenant>/azure-blob-links/<store_as>, field url. A second "
+                "link with the same name replaces the first in Vault."
+            ),
+        },
+    },
+    "required": ["account", "container", "name", "allowed_ip", "store_as"],
+    "additionalProperties": False,
+    "examples": [
+        {
+            "account": "examplestore01",
+            "container": "iso",
+            "name": "esxi/VMware-ESXi-8.0U3.iso",
+            "allowed_ip": "198.51.100.7",
+            "hours": 4,
+            "store_as": "esxi-host-07",
+        }
+    ],
+}
+
+BLOB_LINK_CREATE_RESPONSE: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "secret_ref": {
+            "type": "string",
+            "description": "The Vault path that holds the link. The link itself is never returned.",
+        },
+        "field": {"type": "string", "description": "The Vault field of the link: url."},
+        "expires_at": {
+            "type": "string",
+            "description": "When the link stops working (ISO 8601, UTC).",
+        },
+        "allowed_ip": {"type": "string", "description": "The address the link works from."},
+        "account": _ACCOUNT_OBJECT,
+        "container": {"type": "string", "description": "The container of the file."},
+        "name": {"type": "string", "description": "The full file (blob) name."},
+        "value_fingerprint": {
+            "type": "string",
+            "description": (
+                "Keyed fingerprint of the link (HMAC-SHA256 under the server key), to "
+                "compare two stored links without showing them."
+            ),
+        },
+        "length": {"type": "integer", "description": "The length of the link in bytes."},
+    },
+    "required": [
+        "secret_ref",
+        "field",
+        "expires_at",
+        "allowed_ip",
+        "account",
+        "container",
+        "name",
+        "value_fingerprint",
+        "length",
+    ],
+    "additionalProperties": False,
+}
+
+_ROLE_ASSIGNMENT_COMMON: Final[dict[str, Any]] = {
+    "account": _ACCOUNT_PARAM,
+    "container": _OPTIONAL_CONTAINER_PARAM,
+    "principal_id": _PRINCIPAL_ID_PARAM,
+    "role": _ROLE_PARAM,
+}
+
+ROLE_ASSIGNMENT_CREATE_PARAMS: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        **_ROLE_ASSIGNMENT_COMMON,
+        "principal_type": {
+            "type": "string",
+            "enum": ["User", "Group", "ServicePrincipal"],
+            "description": (
+                "What the principal is. Azure needs it to find a principal that was "
+                "made a moment ago."
+            ),
+        },
+    },
+    "required": ["account", "principal_id", "principal_type", "role"],
+    "additionalProperties": False,
+    "examples": [
+        {
+            "account": "examplestore01",
+            "container": "iso",
+            "principal_id": _EXAMPLE_PRINCIPAL,
+            "principal_type": "User",
+            "role": "Storage Blob Data Reader",
+        }
+    ],
+}
+
+ROLE_ASSIGNMENT_DELETE_PARAMS: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": _ROLE_ASSIGNMENT_COMMON,
+    "required": ["account", "principal_id", "role"],
+    "additionalProperties": False,
+    "examples": [
+        {
+            "account": "examplestore01",
+            "container": "iso",
+            "principal_id": _EXAMPLE_PRINCIPAL,
+            "role": "Storage Blob Data Reader",
+        }
+    ],
+}
+
+_SCOPE_PROPERTY: Final[dict[str, Any]] = {
+    "type": "string",
+    "description": "The Azure scope: the storage account, or one container in it.",
+}
+
+ROLE_ASSIGNMENT_CREATE_RESPONSE: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "assignment_id": {"type": "string", "description": "The full id of the role assignment."},
+        "scope": _SCOPE_PROPERTY,
+        "principal_id": {"type": "string", "description": "The principal that has the role."},
+        "role": {"type": "string", "description": "The role name."},
+        "state": {
+            "type": "string",
+            "enum": ["created", "already_assigned"],
+            "description": (
+                "created: this call made or confirmed the assignment. already_assigned: "
+                "the principal had the role at this scope under another assignment."
+            ),
+        },
+    },
+    "required": ["assignment_id", "scope", "principal_id", "role", "state"],
+    "additionalProperties": False,
+}
+
+ROLE_ASSIGNMENT_DELETE_RESPONSE: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "scope": _SCOPE_PROPERTY,
+        "principal_id": {"type": "string", "description": "The principal."},
+        "role": {"type": "string", "description": "The role name."},
+        "deleted": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "The ids of the assignments this call removed.",
+        },
+        "not_found": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Ids that were already gone when MEHO asked to remove them.",
+        },
+    },
+    "required": ["scope", "principal_id", "role", "deleted", "not_found"],
+    "additionalProperties": False,
 }

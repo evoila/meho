@@ -2189,14 +2189,18 @@ logins' own role assignments, and the activity log of the last 7 days.
 
 The `storage` family reads Azure Storage: the storage accounts of the
 target's subscription, the containers of one account, the files (blobs) of
-one container, and one small text file. All four operations are in the group
-`storage`, all are `safe`, and none needs approval. Nothing changes in Azure,
-and MEHO never reads account keys, SAS tokens or connection strings.
+one container, and one small text file. These four reads are `safe` and need
+no approval; they change nothing in Azure and never read account keys, SAS
+tokens or connection strings. Three writes (#4169) sign a download link for
+one file and give or take away a blob data role; see "Writes" below. All
+seven operations are in the group `storage`.
 
 Files: `storage.py` (group text, guidance for the AI, operation table, and
 the `StorageOps` methods `AzureConnector` inherits), `storage_schemas.py`
 (parameter and response schemas), `storage_parse.py` (name checks, rows, the
-XML of the blob list, the text check) and `storage_reads.py` (the calls).
+XML of the blob list, the text check), `storage_reads.py` (the read calls),
+`storage_writes.py` (the write calls), `storage_sas.py` (the user delegation
+SAS, no HTTP) and `op_classes.py` (the link op is `credential_mint`).
 
 ### Operations
 
@@ -2330,6 +2334,68 @@ hold a SAS token, is never copied. MEHO never calls `listKeys`.
 - Spec path check: the blob paths are data-plane paths, relative to the
   account's host. The check cuts the fixed query part, so List Blobs compares
   as `GET /{container}`, which Get Container Properties also matches.
+
+### Writes
+
+| Operation | Calls | Parameters |
+|---|---|---|
+| `azure.storage.blob.link.create` | Blob host: `HEAD /{container}/{name}`, `POST /?restype=service&comp=userdelegationkey`; then Vault | `account`, `container`, `name`, `allowed_ip`, `hours` (1 to 24, default 4), `store_as` |
+| `azure.role.assignment.create` | Resource Manager: `PUT {scope}/providers/Microsoft.Authorization/roleAssignments/{name}` (api-version 2022-04-01); a `GET` of the scope's assignments after a 409 | `account`, `container` (optional), `principal_id`, `principal_type`, `role` |
+| `azure.role.assignment.delete` | Resource Manager: `GET` the scope's assignments (`$filter=atScope()`), then `DELETE` each match | `account`, `container` (optional), `principal_id`, `role` |
+
+All three are `dangerous` and wait for a person's approval. The scope is
+built from the account MEHO found in the target's subscription
+(`/subscriptions/<id>/resourceGroups/<group>/providers/Microsoft.Storage/storageAccounts/<account>`,
+plus `/blobServices/default/containers/<container>`), never from a path the
+caller gave.
+
+- **The link goes to Vault, not to the caller.** The caller is an AI agent,
+  and the secret broker's rule is that a secret value never reaches an
+  answer, a log, the broadcast or the audit row. MEHO writes the link to
+  `tenants/<tenant>/azure-blob-links/<store_as>`, field `url`, with the
+  operator's own Vault login, and answers with that ref, `expires_at`, a
+  keyed fingerprint and the length. A person reads it with `vault.kv.get`,
+  or `secret.move` hands it to the host. A second link with the same
+  `store_as` replaces the stored one; the earlier link still works until it
+  expires (a user delegation SAS cannot be revoked one by one).
+- **The link.** A user delegation SAS (Blob service version 2026-10-06, the
+  28-line string-to-sign of 2026-04-06 and later): read only (`sp=r`), one
+  file (`sr=b`), HTTPS only, one IPv4 address (`sip`; Azure takes no IPv6).
+  It starts 5 minutes before now, for a host whose clock is a little behind,
+  and the key lasts exactly as long as the link. The key value and the link
+  live only in memory; `UserDelegationKey` hides its value when printed. A
+  Vault write that fails names the path, not the link.
+- **Trace and broadcast.** The op is `credential_mint`: the flight recorder
+  keeps no body of the run, the broadcast is aggregate-only and vendor text
+  is withheld. The key answer is XML, which the recorder never stores
+  anyway.
+- **Roles.** Only Storage Blob Data Reader (`2a2b9908-6ea1-4ae2-8e65-a410df84e7d1`)
+  and Storage Blob Data Contributor (`ba92f5b4-2d11-453d-a403-e96b0029c9fe`);
+  any other role is refused before a call. The assignment name is
+  `uuid5(<fixed namespace>, "<scope>|<principal>|<role guid>")` in lower case,
+  so the same call again sends the same `PUT` (Azure answers 200) and never
+  makes a second assignment. `principalType` is always sent, which avoids
+  Azure's `PrincipalNotFound` right after a principal is made. When the
+  principal already has the role under another name (made outside MEHO),
+  Azure answers 409 `RoleAssignmentExists`; MEHO then answers
+  `already_assigned` with that assignment's id. Any other 409 is an error.
+  Delete removes every assignment of that principal and role made at exactly
+  the scope; a 204 or 404 counts as `not_found`. Azure's `atScope()` filter
+  also lists the assignments made above the scope, so MEHO compares each
+  one's own `scope`: inherited assignments are never touched or reported.
+- **File names.** A file whose name holds a control character (a line break,
+  for example) gets no link: the name is one line of the string-to-sign.
+- **Login roles for the lab.** User Access Administrator (or Role Based
+  Access Control Administrator) at the test scope for the role writes;
+  Storage Blob Data Reader (which holds
+  `generateUserDelegationKey/action`) or Storage Blob Delegator on the account
+  for the link.
+
+Proven live: not yet. The lab proof after the merge: the role writes
+recover (the same call twice, and a refused approval sends nothing); a search
+of the trace, the audit rows and the broadcast finds no link and no key; the
+link downloads from `allowed_ip` and is refused from another address and
+after `expires_at`; the run is logged and reported on #4169.
 
 ### Proven
 

@@ -347,7 +347,10 @@ The `agent.openai` block itself renders `OPENAI_API_KEY` as a
 `<release>-agent-openai` Secret that `eso.agentOpenai.enabled` makes from
 `<vault.paths.kv>/agent-openai`), and `OPENAI_BASE_URL` /
 `OPENAI_DEFAULT_MODEL` as plain values only when they are set. The schema
-has no field for the key, so a plain key is refused. Off by default, and
+has no field for the key, so a plain key is refused. `agent.modelBackend`
+renders `AGENT_MODEL_BACKEND` (which backend every agent run uses) only
+when set; the schema accepts `anthropic`, `openai`, `bedrock` and
+`vcf-paif`. Both are off by default, and
 then the render is unchanged; `backend/tests/test_chart_openai_endpoint.py`
 and a step in `.github/workflows/chart.yml` check both.
 

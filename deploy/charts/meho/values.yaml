@@ -1083,6 +1083,11 @@ agent:
   # 21000 the request is sent as a stream. The default 4096 keeps requests
   # as they were before this setting existed.
   maxOutputTokens: 4096
+  # -- Which model backend every agent run uses (`AGENT_MODEL_BACKEND`):
+  # `anthropic`, `openai` (the endpoint in `agent.openai` below), `bedrock`
+  # or `vcf-paif`. Empty: the chart does not set it, and the backplane uses
+  # its own default (`anthropic`). Plain value, not a secret.
+  modelBackend: ""
   # An OpenAI-compatible model endpoint (#5851): a server that accepts the
   # same requests as OpenAI's API, for example vLLM, Ollama or OpenAI itself.
   # Separate from `agent.enabled`: you can turn on this block, the Anthropic

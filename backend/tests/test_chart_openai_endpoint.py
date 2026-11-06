@@ -148,6 +148,8 @@ def test_filled_in_but_off_renders_the_same_as_the_default() -> None:
         "eso.agentOpenai.enabled=false",
         "--set",
         "eso.agentOpenai.remoteKey=secret/meho/model",
+        "--set",
+        "agent.modelBackend=",
     )
     assert _mask_random(off) == _mask_random(_render())
 
@@ -311,6 +313,18 @@ def test_helm_test_pod_reads_the_key_from_the_same_secret() -> None:
     }
     assert env["OPENAI_BASE_URL"]["value"] == _BASE_URL
     assert "OPENAI_DEFAULT_MODEL" not in env
+
+
+def test_model_backend_renders_only_when_set() -> None:
+    assert "AGENT_MODEL_BACKEND" not in _render()
+    env = _backplane_env(_render("--set", "agent.modelBackend=openai"))
+    assert env["AGENT_MODEL_BACKEND"] == {"name": "AGENT_MODEL_BACKEND", "value": "openai"}
+
+
+def test_model_backend_refuses_an_unknown_name() -> None:
+    result = _helm_template("--set", "agent.modelBackend=gpt")
+    assert result.returncode != 0
+    assert "agent.modelBackend" in result.stderr
 
 
 def test_helm_test_pod_absent_by_default() -> None:

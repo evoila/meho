@@ -296,7 +296,12 @@ agent:
     baseUrl: https://model.example.internal/v1
     defaultModel: openai:meta-llama/Llama-3.1-8B-Instruct
     secretName: model-endpoint-creds   # a Secret you make, key `api_key`
+  modelBackend: openai   # AGENT_MODEL_BACKEND: send agent runs to this endpoint
 ```
+
+`agent.modelBackend` sets `AGENT_MODEL_BACKEND`, the backend every agent
+run uses: `anthropic`, `openai`, `bedrock` or `vcf-paif`. Empty (the
+default): the chart does not set it, and the backplane uses `anthropic`.
 
 - The block is separate from `agent.enabled` (the Anthropic key). Turn
   on one of them or both.

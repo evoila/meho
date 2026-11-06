@@ -683,6 +683,11 @@
           "maximum": 128000,
           "description": "Most output tokens the agent asks the model for in one answer. Rendered as `AGENT_MAX_OUTPUT_TOKENS`. Used by the Anthropic backend only. Range [1, 128000], the same bounds the backplane checks at start. Default 4096."
         },
+        "modelBackend": {
+          "type": "string",
+          "enum": ["", "anthropic", "openai", "bedrock", "vcf-paif"],
+          "description": "Which model backend every agent run uses, rendered as `AGENT_MODEL_BACKEND`. Empty: not rendered, and the backplane uses its own default (`anthropic`)."
+        },
         "openai": {
           "type": "object",
           "additionalProperties": false,

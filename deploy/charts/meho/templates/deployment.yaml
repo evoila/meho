@@ -217,6 +217,11 @@ spec:
                   name: {{ include "meho.agentSecretName" . | quote }}
                   key: {{ .Values.agent.secretKey | quote }}
             {{- end }}
+            {{- with .Values.agent.modelBackend }}
+            # #5851 — which model backend every agent run uses. Plain config.
+            - name: AGENT_MODEL_BACKEND
+              value: {{ . | quote }}
+            {{- end }}
             {{- if .Values.agent.openai.enabled }}
             # #5851 — an OpenAI-compatible model endpoint. The key is
             # `secretKeyRef` only, never plaintext; the base URL and the model

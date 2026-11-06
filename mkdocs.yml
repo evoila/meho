@@ -53,6 +53,7 @@ nav:
       - Reference architecture: architecture.md
       - Deployment shapes: deployment-shapes.md
   - Install & operate:
+      - Ways to install MEHO: install/ways-to-install.md
       - The install trail: install/index.md
       - Credential backends: install/credential-backends.md
       - Keycloak realm setup: install/keycloak-realm.md

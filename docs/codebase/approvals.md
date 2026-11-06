@@ -2309,6 +2309,51 @@ MCP-tool ops such as `meho_broadcast_overrides_set` from `other` to
 `topology.refresh` at render time. Exact-pinning the dotted argocd op-ids
 avoids both collisions. See [`events.md`](events.md).
 
+## Check before the wait for approval
+
+A call that waits for approval is stored with its params as they are, so
+a reviewer can read them and the approved call can run with them. Some
+values must never be stored there, for example a secret that the caller
+gave as a plain value. Name-based redaction does not know every such
+field, so an op can turn on its own check.
+
+- **Turn it on.** `_park_check.register_park_check(op_id, check)`. The
+  check gets the same `PreviewContext` as a preview builder. It answers
+  with the reason it refuses the call, or `None`. The reason is shown to
+  the caller, so it must name no param value.
+- **Where it runs.** `_park_check.park_check_refusal` runs it at every
+  point where a call would wait for approval, before anything else:
+  - the dispatcher, first in `_handle_needs_approval`;
+  - the gate of a step of a multi-step operation
+    (`composite.enforce_subop_policy`);
+  - `preview_operation` (`_request_preview.preview_dispatch`), when the
+    params pass the schema and the policy gate says the call would wait.
+    So the preview gives the same answer as the call.
+- **A refusal.** The call answers `status="denied"` with
+  `error_code="refused_before_approval"` and the reason under
+  `extras["reason"]`. The reason goes through the free-text redaction. MEHO
+  stores no approval request and runs no handler, so nothing goes to the
+  vendor. The call writes one `denied` audit row through
+  `_audit_denied_and_return`, like the other refusals; the row has the
+  params hash, not the params. The preview returns the same `error` and
+  `extras` in a `status="error"` envelope and writes nothing.
+- **A call that does not wait** (it runs at once) is not checked: the
+  check guards only what is stored for approval.
+- **Fail-closed.** A check that raises refuses the call. The reason and
+  the log line name only the exception class: a traceback could show a
+  param value, a login header or a vendor text.
+- **Expired login.** The check runs before the dispatcher's
+  session-recovery step. So `run_park_check` takes the same step: when the
+  vendor answers an auth-class status and the connector has the
+  `invalidate_session(target, rejected=...)` hook, the login is dropped and
+  the check runs once more. A second rejection is the fail-closed refusal.
+  A connector without the hook is not retried.
+- **The connector resolves first.** A connector that does not resolve
+  reaches the check as `connector_instance=None`; the check decides what
+  that means.
+
+Tests: `backend/tests/test_operations_park_check.py`.
+
 ## Permission preflight hook (#1504)
 
 The generic `proposed_effect` *preview* above is suppressed for

@@ -53,7 +53,18 @@ only, nothing of the lab, so it can be a public workflow artifact.
 under `/opt/meho/appliance/download`, for the firewall file's path, its
 unit and `firewall_state`. In order:
 
-1. **Packages.** `apt-get install` of `aide`, `aide-common`,
+1. **Packages.** First every package update of the build day, because the
+   base image is a fixed serial and OS fixes reach an appliance only with
+   MEHO versions (form-1 design, section 7; #5778): `apt-get upgrade
+   --with-new-pkgs` with `APT::Get::Always-Include-Phased-Updates=true`
+   (also the updates Ubuntu hands out to a share of the machines at a
+   time) and `--force-confdef --force-confold`. Like the update in place
+   (`deploy/linux-server/lib/update.sh`), it may add a package and never
+   removes one. A new kernel is installed but not started on the build VM;
+   the appliance starts it. After the packages below, `apt-get -s
+   dist-upgrade` with the same package lists must name no package (no
+   `Inst` line), or the build stops and names the packages left. Then
+   `apt-get install` of `aide`, `aide-common`,
    `openscap-scanner`, `libpam-pwquality`, `libpwquality-tools`,
    `cracklib-runtime` and `apparmor-utils`, which the cloud image does not
    have, and `rsyslog-gnutls`, rsyslog's TLS module for
@@ -134,6 +145,23 @@ unit and `firewall_state`. In order:
      `meho-firewall.service` stays: `meho-host check` and RKE2's start
      depend on it. Both load the same file; it replaces its own table in
      one step, so loading it twice is safe.
+   - The SSH login message gives no advice about updates, a new Ubuntu
+     release, Ubuntu Pro or news (#5778): the appliance cannot reach the
+     Ubuntu archive, and its OS fixes come with MEHO versions. The scripts
+     `10-help-text`, `85-fwupd`, `90-updates-available`,
+     `91-contract-ua-esm-status`, `91-release-upgrade`,
+     `92-unattended-upgrades` and `95-hwe-eol` go from
+     `/etc/update-motd.d/`. They are configuration files of their
+     packages, so a package update does not bring them back.
+     `91-release-upgrade` must go even with `Prompt=never`: for one day it
+     shows the result of a release check that a root login of the build
+     saved before step 4 (seen in the lab).
+     `50-motd-news` stays, because `motd-news.timer` runs it;
+     `ENABLED=0` in `/etc/default/motd-news` makes it print nothing.
+     `Prompt=never` in `/etc/update-manager/release-upgrades` stops
+     `do-release-upgrade` from offering a new release; a file without a
+     `Prompt` line stops the build. The header, the system information and
+     "restart required" stay.
 5. **The firewall blocks by default.** The form-2 file has the chains
    `input`, `forward` and `output` with `policy accept`; `harden.sh` sets
    all three to `drop` (CIS 4.3.5 to 4.3.8; ADR 0009 decision 1). Each line

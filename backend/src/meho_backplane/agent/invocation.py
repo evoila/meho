@@ -1606,6 +1606,10 @@ class AgentInvoker:
 
         terminal_output: dict[str, object] | None = None
         terminal_error: str | None = None
+        # The FINAL event carries the run's usage; finalize charges it to the
+        # person's spend cap, the same as :meth:`_run_loop_to_completion`.
+        usage: TokenUsage | None = None
+        request_usages: tuple[TokenUsage, ...] = ()
         # Tally ``TURN`` events (one per model-request node, so == the
         # non-streamed ``request_count``) to persist at finalize (#2743).
         turns = 0
@@ -1638,6 +1642,8 @@ class AgentInvoker:
             ):
                 if event.kind is AgentRunEventKind.FINAL:
                     terminal_output = _project_output(event.data.get("output"))
+                    usage = event.usage
+                    request_usages = event.request_usages
                 elif event.kind is AgentRunEventKind.ERROR:
                     terminal_error = str(event.data.get("error"))
                 elif event.kind is AgentRunEventKind.TURN:
@@ -1651,7 +1657,12 @@ class AgentInvoker:
             agent_session_id_var.reset(session_token)
             current_agent_run_id_var.reset(run_token)
             await self._finalize_run(
-                run_id, output=terminal_output, error=terminal_error, turns=turns
+                run_id,
+                output=terminal_output,
+                error=terminal_error,
+                usage=usage,
+                turns=turns,
+                request_usages=request_usages,
             )
 
 

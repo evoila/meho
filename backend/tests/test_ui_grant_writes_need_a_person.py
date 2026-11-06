@@ -27,13 +27,11 @@ role gets 403 on create and on renew; a tenant admin makes the grant.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 from typing import Any
 
 import pytest
 from sqlalchemy import func, select
 
-import tests.test_ui_agent_grants as agent_grants_test
 from meho_backplane.auth.operator import TenantRole
 
 # Importing the ops module registers the role floor of targets.register.
@@ -49,6 +47,7 @@ from tests.test_ui_agent_grants import (
     _TENANT_A,
     _admin_token,
     _authenticated_client,
+    _bff_env,  # noqa: F401  (autouse fixture)
     _csrf_headers,
     _future_iso,
     _make_keypair_and_jwks,
@@ -59,11 +58,6 @@ from tests.test_ui_agent_grants import (
     _seed_tenant,
 )
 from tests.test_ui_unified_grants import _seed_service
-
-
-@pytest.fixture(autouse=True)
-def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    yield from agent_grants_test._bff_env.__wrapped__(monkeypatch)
 
 
 def _machine_client(kind: str) -> Any:

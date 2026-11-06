@@ -10193,7 +10193,7 @@
           "sensors"
         ],
         "summary": "Create Sensor",
-        "description": "Create one sensor under the operator's tenant.\n\n``tenant_admin`` only. ``body.tenant_id`` is optional: when set, the\nsensor is created under that tenant (cross-tenant admin); when null,\nunder ``operator.tenant_id``. The safe-only guard refuses a non-safe or\nunknown op with 422; a duplicate name returns 409.",
+        "description": "Create one sensor under the operator's tenant.\n\n``tenant_admin`` only. ``body.tenant_id`` is optional: when set, the\nsensor is created under that tenant (cross-tenant admin); when null,\nunder ``operator.tenant_id``. The safe-only guard refuses a non-safe or\nunknown op with 422; a duplicate name returns 409. A connector that does\nnot fit the target's product and version is refused with 422\n``sensor_connector_mismatch`` unless the body sets ``force``.",
         "operationId": "create_sensor_api_v1_sensors_post",
         "parameters": [
           {
@@ -36026,6 +36026,37 @@
         "title": "SensorCadenceKind",
         "description": "Closed enum of the two cadence shapes a :class:`Sensor` may carry.\n\nInitiative #2416 (parent goal #221), Task #2503. One ``sensor`` row\ncarries exactly one cadence, selected by this discriminator; the\ninvariant is enforced by the DB-side ``ck_sensor_cadence_fields``\nCHECK that pairs each kind with its mandatory column (mirroring\n:class:`ScheduledTriggerKind`).\n\nMembers:\n\n* :attr:`INTERVAL` -- fire every ``interval_seconds`` (5..86400). The\n  sub-minute path #2505's interval-tick loop drives.\n* :attr:`CRON` -- fire on a 5-field ``cron_expr`` in ``timezone``. The\n  >=1-minute path #2505 rides on #804's durable scheduler discipline.\n\nClosed enum: widening it is a coordinated DB + model change so the\nenum, the :data:`_SENSOR_CADENCE_KINDS` literal, and migration\n``0064``'s frozen tuple cannot drift."
       },
+      "SensorConnectorFit": {
+        "properties": {
+          "target_product": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Product"
+          },
+          "target_version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Version"
+          },
+          "warning": {
+            "type": "string",
+            "nullable": true,
+            "title": "Warning"
+          },
+          "matching_connector_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Matching Connector Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "target_product",
+          "target_version"
+        ],
+        "title": "SensorConnectorFit",
+        "description": "How a Sensor's connector fits its target, checked each time it is read.\n\nMEHO reads the target's detected product and version (the last probe,\nelse the version an operator set) and checks it against the version\nrange the connector declares, with the same match the dispatcher uses\nto pick a connector for a target. ``warning`` is ``None`` when the\nconnector fits, or when MEHO cannot tell (no known product or version,\nor a connector MEHO does not know). Otherwise it says in plain words\nwhat does not match, and ``matching_connector_id`` names the connector\nthat fits the target, when there is one."
+      },
       "SensorCreate": {
         "properties": {
           "name": {
@@ -36117,6 +36148,11 @@
             "format": "uuid",
             "nullable": true,
             "title": "Tenant Id"
+          },
+          "force": {
+            "type": "boolean",
+            "title": "Force",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -36303,6 +36339,10 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "connector_fit": {
+            "$ref": "#/components/schemas/SensorConnectorFit",
+            "nullable": true
           }
         },
         "type": "object",

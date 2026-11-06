@@ -98,9 +98,43 @@ Verify:
 
 ```bash
 meho sensor list
-# ID          NAME              STATUS  LAST_STATE  CADENCE     NEXT_FIRE_AT          SEVERITY
-# <uuid>      pods-not-running  active  ok          every 60s   2026-07-31T09:21:12Z  critical
+# ID      NAME              CONNECTOR  TARGET       STATUS  LAST_STATE  CADENCE    NEXT_FIRE_AT          SEVERITY
+# <uuid>  pods-not-running  k8s-1.x    k8s 1.31.4   active  ok          every 60s  2026-07-31T09:21:12Z  critical
 ```
+
+`CONNECTOR` is the connector the sensor uses. `TARGET` is the target's
+product and version, as the last probe found them (or as you set them).
+
+### When the connector does not fit the target
+
+Each connector works with a range of product versions. MEHO runs an
+operation only on a target inside that range. So a sensor on the wrong
+connector reads `unknown` at its next run. This happens most often after
+an upgrade: a new probe finds a new version, and the sensor's connector
+does not cover it.
+
+MEHO checks this for you. The check uses the version from the target's
+last probe, so it is always up to date:
+
+- **`meho sensor list`** and the **Sensors** page (`/ui/sensors`) show a
+  warning for each sensor whose connector does not fit its target. The
+  warning names the connector that fits, when there is one:
+
+    ```text
+    warning: sensor vm-count: The target runs vmware 8.0.3. Connector
+    vmware-rest-9.0 works only with versions >=9,<10. Connector
+    vmware-rest-8.0 fits this target. The Sensor may read unknown until
+    this is fixed.
+    ```
+
+- **`meho sensor create`** refuses a sensor whose connector does not fit
+  its target, with 422 `sensor_connector_mismatch` and the same warning.
+  Use the connector the warning names. If you want this sensor anyway,
+  add `--force` (`force: true` in REST and MCP). The warning then stays
+  in the list.
+
+MEHO cannot check a sensor whose target has no known version yet. Probe
+the target, or set its version, and the list shows the result.
 
 There is deliberately **no update or pause verb** — a sensor is
 immutable after create ("edit" is delete + recreate). Nor is `paused`
@@ -271,6 +305,7 @@ is also the sensors feature's road-to-GA tracker.
 | 422 `sensor_requires_safe_operation` | The pinned op is `caution`/`dangerous`. Sensors auto-execute unattended, so only `safe` ops qualify — by design. | Pick a read-class op; check `safety_level` on the search hit. |
 | 422 `sensor_operation_not_found` | `(connector_id, op_id)` resolves to nothing — usually a bare product name as `connector_id`. | Use the `<impl_id>-<version>` form (`k8s-1.x`), and an `op_id` from `meho operation search`. |
 | 409 `sensor_name_conflict` | Sensor names are unique per tenant. | Rename or delete the old one. |
+| 422 `sensor_connector_mismatch`, or a warning in `meho sensor list` | The connector does not work with the target's product or version. The sensor would read `unknown`. | Use the connector the warning names. See [When the connector does not fit the target](#when-the-connector-does-not-fit-the-target). |
 | A plain 422 validation error *before* any of the codes above | Schema validation runs first: the comparator `type` must be one of `threshold` / `equals` / `in` / `bool` / `freshness` (not `gt`/`lt` — those are the threshold's `op`), the cadence must be exactly one of interval (5–86400 s) XOR cron, the assertion is capped at 8 KiB, and a `status` field in the body is rejected. | Fix the spec shape; the error names the field. |
 | Sensor stuck `unknown`, evidence says *"selection is not a scalar, found array"* | Your `select.path` points at a list (e.g. `$.rows`), not a scalar. | Select a scalar — `$.total` for list-shaped Kubernetes results — or add an `aggregate` (`count`, `max`, …) to the select. |
 | Target-bound sensor `unknown` forever, dispatch error names a credential read | No background credential identity on this deploy — the table above. | Work [Sensors and your credential backend](#sensors-and-your-credential-backend). |

@@ -9243,6 +9243,23 @@ type SelectSpecAggregate string
 // “0064“'s frozen tuple cannot drift.
 type SensorCadenceKind string
 
+// SensorConnectorFit How a Sensor's connector fits its target, checked each time it is read.
+//
+// MEHO reads the target's detected product and version (the last probe,
+// else the version an operator set) and checks it against the version
+// range the connector declares, with the same match the dispatcher uses
+// to pick a connector for a target. “warning“ is “None“ when the
+// connector fits, or when MEHO cannot tell (no known product or version,
+// or a connector MEHO does not know). Otherwise it says in plain words
+// what does not match, and “matching_connector_id“ names the connector
+// that fits the target, when there is one.
+type SensorConnectorFit struct {
+	MatchingConnectorId *string `json:"matching_connector_id"`
+	TargetProduct       *string `json:"target_product"`
+	TargetVersion       *string `json:"target_version"`
+	Warning             *string `json:"warning"`
+}
+
 // SensorCreate Request body for “POST /api/v1/sensors“.
 //
 // Discriminated by *cadence_kind*: exactly one of “interval_seconds“
@@ -9298,6 +9315,7 @@ type SensorCreate struct {
 	ConnectorId         string                  `json:"connector_id"`
 	CronExpr            *string                 `json:"cron_expr"`
 	ForSeconds          *int                    `json:"for_seconds,omitempty"`
+	Force               *bool                   `json:"force,omitempty"`
 	IdentitySub         *string                 `json:"identity_sub,omitempty"`
 	IntervalSeconds     *int                    `json:"interval_seconds"`
 	Name                string                  `json:"name"`
@@ -9361,7 +9379,19 @@ type SensorRead struct {
 	// Closed enum: widening it is a coordinated DB + model change so the
 	// enum, the :data:`_SENSOR_CADENCE_KINDS` literal, and migration
 	// ``0064``'s frozen tuple cannot drift.
-	CadenceKind         SensorCadenceKind       `json:"cadence_kind"`
+	CadenceKind SensorCadenceKind `json:"cadence_kind"`
+
+	// ConnectorFit How a Sensor's connector fits its target, checked each time it is read.
+	//
+	// MEHO reads the target's detected product and version (the last probe,
+	// else the version an operator set) and checks it against the version
+	// range the connector declares, with the same match the dispatcher uses
+	// to pick a connector for a target. ``warning`` is ``None`` when the
+	// connector fits, or when MEHO cannot tell (no known product or version,
+	// or a connector MEHO does not know). Otherwise it says in plain words
+	// what does not match, and ``matching_connector_id`` names the connector
+	// that fits the target, when there is one.
+	ConnectorFit        *SensorConnectorFit     `json:"connector_fit,omitempty"`
 	ConnectorId         string                  `json:"connector_id"`
 	CreatedAt           time.Time               `json:"created_at"`
 	CreatedBySub        string                  `json:"created_by_sub"`

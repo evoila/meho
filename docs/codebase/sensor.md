@@ -79,7 +79,7 @@ See `docs/codebase/audit_query.md` § *Loose rows: the standing check*.
   `list_results` (the trend query) + the guard exceptions
   (`SensorIdentitySubForbiddenError`, `SensorOperationNotFoundError`,
   `SensorRequiresSafeOperationError`, `SensorNameConflictError`,
-  `SensorResultsCursorError`), each carrying an `error_code` the transports
+  `SensorConnectorMismatchError`, `SensorResultsCursorError`), each carrying an `error_code` the transports
   surface verbatim.
 - `meho_backplane.checks.evidence_retention` — the lifespan-owned retention
   prune sweeper for `sensor_results` (#2756).
@@ -130,7 +130,14 @@ See `docs/codebase/audit_query.md` § *Loose rows: the standing check*.
    `ingest_safety_class_changed` warning per change, so the operator
    knows which sensors to re-audit (see
    `docs/codebase/spec-ingestion.md`, `IngestionResult`).
-5. `create_sensor` inserts the row, materialising `next_fire_at`
+5. **Connector fit check (#5858)**: when the body names a target, the
+   service looks it up in the Sensor's tenant and checks the connector
+   against the target's product and version (see **Connector fit** below).
+   A connector that does not fit ⇒ 422 `sensor_connector_mismatch` (the
+   validation-error list shape, `msg` is the plain warning), unless the
+   body sets `force: true`. A target that is not found does not block the
+   create; the runner reports it, as before.
+6. `create_sensor` inserts the row, materialising `next_fire_at`
    (`now + interval_seconds` for interval; `next_fire_after(cron_expr, …)`
    for cron) so #2505's claim query (`status='active' AND next_fire_at <= now`)
    is uniform across kinds. A duplicate `(tenant_id, name)` ⇒ 409
@@ -180,6 +187,35 @@ transaction** as the projection update, gated on retention being enabled —
 history and projection can never diverge. The row records the *observed*
 outcome of each evaluation (committed, soft/pending, or re-confirmed), so a
 flapping reading that never commits still lands in history.
+
+### Connector fit (#5858)
+
+`checks/connector_fit.py` answers one question: does the Sensor's
+connector work with its target's product and version? The answer is
+`SensorRead.connector_fit` (`SensorConnectorFit`: `target_product`,
+`target_version`, `warning`, `matching_connector_id`). It is not a column.
+`SensorAdminService.list_` and `create` fill it on every read, so a new
+probe that changes the target's version shows in the next list.
+
+- The target version is `resolve_target_version` (the probed version, else
+  the version an operator set), the same value the dispatcher reads.
+- The match is `connectors.resolver.connector_serves_target`: the
+  resolver's own candidate filter (product equal, version inside the
+  connector's `supported_version_range`). No second version check exists.
+- The connector named in the warning is the one `resolve_connector_or_label`
+  picks for the target, when it is another connector.
+- No warning when MEHO cannot tell: no target, a target not found, no
+  product, an unknown version, or a `connector_id` with no registered
+  class.
+
+Targets are looked up once per name, in the Sensor's tenant, with
+`targets.resolver.resolve_target` (name, then alias). The lookup runs
+inside `structlog.contextvars.bound_contextvars`, so it does not leave a
+`target_id` on the audit row of the list call.
+
+Surfaces: the `connector_fit` field on REST and MCP, the `CONNECTOR` and
+`TARGET` columns plus a warning line in `meho sensor list`, and the
+`Target` column plus a warning under the operation on `/ui/sensors`.
 
 ### The rule runs over the full result (#4117)
 

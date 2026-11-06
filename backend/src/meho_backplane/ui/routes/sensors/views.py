@@ -55,12 +55,23 @@ def project_sensor_to_row(sensor: SensorRead) -> dict[str, object]:
     ``last_value`` is coerced to a string (``None`` -> the em-dash placeholder
     is the template's job) so the cell never renders a Python repr; every
     timestamp is coerced tz-aware for the relative-time macro.
+    ``target_label`` is the target's detected product and version, and
+    ``fit_warning`` the plain warning when the connector does not fit them
+    (both from ``connector_fit``).
     """
+    fit = sensor.connector_fit
+    target = sensor.target or {}
+    target_label = None
+    if fit is not None:
+        target_label = " ".join(p for p in (fit.target_product, fit.target_version) if p) or None
     return {
         "id": str(sensor.id),
         "name": sensor.name,
         "connector_id": sensor.connector_id,
         "op_id": sensor.op_id,
+        "target_name": target.get("name") if isinstance(target.get("name"), str) else None,
+        "target_label": target_label,
+        "fit_warning": fit.warning if fit is not None else None,
         "status": sensor.status.value,
         "cadence_kind": sensor.cadence_kind.value,
         "cadence_label": cadence_label(sensor),

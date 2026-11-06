@@ -4571,6 +4571,7 @@ meho sensor create [flags]
 - `--connector-id` — connector id of the operation to evaluate
 - `--cron-expr` — 5-field cron expression (required when --cadence-kind=cron)
 - `--for-seconds` — hold-time hysteresis in seconds a failing state must persist (default 0)
+- `--force` — create the sensor even when its connector does not fit the target's product and version
 - `--identity-sub` — identity sub the runner dispatches under (default '__sensor__')
 - `--interval-seconds` — interval in seconds, 5..86400 (required when --cadence-kind=interval)
 - `--json` — emit raw Sensor JSON instead of the human summary

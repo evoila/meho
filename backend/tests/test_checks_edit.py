@@ -497,6 +497,37 @@ async def test_dashboard_edit_name_and_mail_settings(client: TestClient) -> None
 
 
 @pytest.mark.asyncio
+async def test_dashboard_edit_rename_to_taken_name_and_remove_member(client: TestClient) -> None:
+    """A taken name is 409 also when the same edit removes a member.
+
+    The member delete flushes the name change first, so the name conflict
+    is raised before the commit. It must still be a 409 that changes nothing.
+    """
+    await _setup()
+    one = await _seed_sensor(name="one")
+    two = await _seed_sensor(name="two")
+    key = make_rsa_keypair("kid-dash-rename-remove")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = _headers(key)
+        dash_id = await _create_dashboard(client, headers, [one, two])
+        taken = client.post("/api/v1/checks/dashboards", json={"name": "taken"}, headers=headers)
+        assert taken.status_code == 201
+        url = f"/api/v1/checks/dashboards/{dash_id}"
+        resp = client.patch(
+            url, json={"name": "taken", "remove_sensor_ids": [str(two)]}, headers=headers
+        )
+        assert resp.status_code == 409, resp.text
+        assert "dashboard_name_conflict" in resp.text
+        shown = client.get(url, headers=headers).json()
+    assert shown["name"] == "estate"
+    assert sorted(m["sensor_id"] for m in shown["members"]) == sorted([str(one), str(two)])
+    payload = (await _dashboard_audit(dash_id))[0]
+    assert payload.get("before") in (None, {})
+    assert payload.get("after") in (None, {})
+
+
+@pytest.mark.asyncio
 async def test_dashboard_edit_bad_cases_change_nothing(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

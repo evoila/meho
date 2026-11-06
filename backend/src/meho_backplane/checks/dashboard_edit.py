@@ -216,9 +216,11 @@ async def edit_dashboard(
             before["sensor_ids"] = sorted(str(sid) for sid in current)
             after["sensor_ids"] = sorted(str(sid) for sid in new_ids)
         if after:
-            row.updated_at = now
-            await _apply(session, row, new, to_add, to_remove)
+            # The member delete flushes the settings write, so a taken name
+            # can raise inside ``_apply`` as well as at the commit.
             try:
+                row.updated_at = now
+                await _apply(session, row, new, to_add, to_remove)
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()

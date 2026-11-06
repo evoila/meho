@@ -91,7 +91,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 
@@ -126,7 +126,12 @@ from meho_backplane.kb.schemas import (
 )
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RetrievalHit, retrieve
 
-__all__ = ["KbIngestRootError", "KbService"]
+__all__ = ["KbIngestRootError", "KbListOrder", "KbService"]
+
+#: Row order of :meth:`KbService.list_entries`. ``"slug"`` (the default)
+#: sorts A to Z by slug; ``"newest"`` puts the most recently updated
+#: entry first, like the memory list (#5679).
+KbListOrder = Literal["slug", "newest"]
 
 
 #: First-N characters of a body returned in :class:`KbEntrySearchHit.snippet`
@@ -188,12 +193,15 @@ class KbService:
         filter_pattern: str | None = None,
         limit: int = DEFAULT_LIST_LIMIT,
         offset: int = 0,
+        order: KbListOrder = "slug",
     ) -> list[KbEntry]:
-        """Return up to *limit* kb entries for *tenant_id*, slug-sorted.
+        """Return up to *limit* kb entries for *tenant_id*, slug-sorted by default.
 
         Pure list, no retrieval -- this is the ``meho kb list`` (T4)
         and ``GET /api/v1/kb`` (T2) backend. Sorted by slug so a
-        casual ``meho kb list`` output is predictable across runs.
+        casual ``meho kb list`` output is predictable across runs;
+        ``order="newest"`` sorts by ``updated_at``, newest first, with
+        the slug as tie-breaker so pages stay stable.
 
         ``filter_pattern`` is a SQL ``LIKE`` pattern matched against
         the slug; pass ``"vcenter-%"`` to narrow to vcenter entries.
@@ -217,6 +225,8 @@ class KbService:
         offset
             Pagination offset. ``0`` (default) returns from the top.
             Negative offset raises :class:`ValueError`.
+        order
+            ``"slug"`` (default) or ``"newest"``; see :data:`KbListOrder`.
         """
         if limit < 0:
             raise ValueError(f"limit must be >= 0; got {limit}")
@@ -233,7 +243,13 @@ class KbService:
                     Document.tenant_id == tenant_id,
                     Document.source == KB_SOURCE,
                 )
-                .order_by(Document.source_id)
+                .order_by(
+                    *(
+                        (Document.updated_at.desc(), Document.source_id)
+                        if order == "newest"
+                        else (Document.source_id,)
+                    )
+                )
                 .limit(limit)
                 .offset(offset)
             )

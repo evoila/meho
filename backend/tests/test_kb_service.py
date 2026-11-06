@@ -667,6 +667,59 @@ async def test_list_entries_returns_slug_sorted_entries(
 
 
 @pytest.mark.asyncio
+async def test_list_entries_newest_order_sorts_by_updated_at(
+    tmp_path: Path,
+    stub_embedding: AsyncMock,
+) -> None:
+    """``order="newest"`` lists the most recently updated entry first (#5679).
+
+    Entries with the same ``updated_at`` fall back to slug order, so a
+    page boundary never splits them differently between two calls.
+    """
+    for slug in ("alpha", "beta", "gamma", "delta"):
+        _write(tmp_path / f"{slug}.md", f"{slug}.")
+    tenant_id = uuid.uuid4()
+    service = KbService()
+    await service.ingest_directory(tmp_path, tenant_id)
+
+    stamps = {
+        "alpha": datetime(2026, 1, 1, tzinfo=UTC),
+        "beta": datetime(2026, 3, 1, tzinfo=UTC),
+        "gamma": datetime(2026, 2, 1, tzinfo=UTC),
+        "delta": datetime(2026, 3, 1, tzinfo=UTC),
+    }
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s:
+        docs = (
+            (
+                await s.execute(
+                    select(Document).where(
+                        Document.tenant_id == tenant_id,
+                        Document.source == KB_SOURCE,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for doc in docs:
+            doc.updated_at = stamps[doc.source_id]
+        await s.commit()
+
+    newest = await service.list_entries(tenant_id, order="newest")
+    assert [e.slug for e in newest] == ["beta", "delta", "gamma", "alpha"]
+    second_page = await service.list_entries(tenant_id, order="newest", limit=2, offset=2)
+    assert [e.slug for e in second_page] == ["gamma", "alpha"]
+    # The default stays slug order.
+    assert [e.slug for e in await service.list_entries(tenant_id)] == [
+        "alpha",
+        "beta",
+        "delta",
+        "gamma",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_list_entries_filter_pattern_narrows(
     tmp_path: Path,
     stub_embedding: AsyncMock,

@@ -139,6 +139,20 @@ explicit — no wildcards** on `principal_sub`, `op_id`, or `connector_id`
 model). Creating the grant IS the operator's upfront review, deny-by-default
 absent a match.
 
+**Role floor.** Some ops need a role from the person who runs them
+(`operations/role_floors.py`): `targets.register` and the `topology.*`
+writes need `tenant_admin`. A grant lets the service principal run the op
+with no approval, so the person who makes the grant needs the same role,
+like the person who approves a parked call. `_review` checks
+`role_floor_denial(op_id, creator_role)` and raises `GrantRoleFloorError`
+(a `GrantValidationError`) below the floor. Every path that makes a grant
+passes `_review`: `create` and the renewal of delete grants. Both take
+`creator_role`, the role of the person. Its default is `operator`, the
+lowest role that makes grants, so a caller that does not pass it is held to
+the floor. REST answers 403 `role_floor_required: <op> needs the
+tenant_admin role; your role is operator`. The console passes the
+session's role; its grant writes need `tenant_admin` anyway.
+
 The **target scope** is one of three shapes:
 
 - a concrete `target_id` — the op on exactly that target (matched
@@ -463,7 +477,7 @@ What the code does:
   on (a `Settings` field, read at boot only, default `false`; chart value
   `sandboxMode.deleteGrantsFromApi`), REST and the CLI may create a delete
   grant too: `POST /api/v1/service-principals/grants` passes
-  `by_tenant_admin`, and an `operator` without `tenant_admin` gets
+  the caller's role as `creator_role`, and an `operator` without `tenant_admin` gets
   `DeleteGrantNeedsTenantAdminError`, HTTP 403
   `grants_require_tenant_admin`. A machine token still gets 403 before the
   route runs. The checks are the console's (`_review`). The mode check
@@ -587,7 +601,9 @@ Create and revoke need a person. A token of an agent, a service principal
 or a runner gets 403 `human_principal_required` (the same check
 `require_human_principal` in `auth/rbac.py` that the approval decision
 routes and the agent-grant create / elevate routes use, #4616). List and
-show keep the role check alone.
+show keep the role check alone. Create also checks the op's role floor
+(see "Role floor" above): an `operator` gets 403 `role_floor_required` for
+`targets.register` and the `topology.*` writes.
 
 | Verb | Path | Purpose |
 |---|---|---|

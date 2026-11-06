@@ -92,7 +92,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AuditEventClass,
@@ -104,6 +104,7 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.delete_names import destructive_action_name_in_op_id
 from meho_backplane.operations.caller_address import has_caller_address
+from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate, ServiceGrantRead
 from meho_backplane.sandbox_mode import SANDBOX_DELETE_GRANT_MAX_DAYS, sandbox_mode_active
 
@@ -153,6 +154,20 @@ class GrantValidationError(Exception):
     def __init__(self, message: str) -> None:
         self.message = message
         super().__init__(message)
+
+
+class GrantRoleFloorError(GrantValidationError):
+    """The person who makes the grant is below the op's role floor.
+
+    A standing grant lets a service principal run the op with no person in
+    the loop, so the person who makes it must hold the role the op needs
+    from a person (:mod:`meho_backplane.operations.role_floors`), the same
+    rule as for the person who approves a parked call. ``targets.register``
+    and the ``topology.*`` writes need ``tenant_admin``. The REST route
+    maps this to HTTP 403 ``role_floor_required``. It subclasses
+    :class:`GrantValidationError`, so a caller that catches that one still
+    refuses the grant.
+    """
 
 
 class DeleteGrantConsoleOnlyError(Exception):
@@ -567,7 +582,7 @@ class ServicePrincipalGrantService:
         payload: ServiceGrantCreate,
         *,
         from_console: bool = False,
-        by_tenant_admin: bool = False,
+        creator_role: TenantRole = TenantRole.OPERATOR,
     ) -> ServiceGrantRead:
         """Create one standing grant row after the full create-time review.
 
@@ -586,12 +601,17 @@ class ServicePrincipalGrantService:
         expire within :data:`~meho_backplane.sandbox_mode.SANDBOX_DELETE_GRANT_MAX_DAYS`
         days. With ``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` on (#5251) a
         caller outside the console may create one too, but only when
-        ``by_tenant_admin`` is set (otherwise
+        ``creator_role`` is ``tenant_admin`` (otherwise
         :exc:`DeleteGrantNeedsTenantAdminError`). Ordinary grants keep
         today's rules in every mode.
+
+        ``creator_role`` is the role of the person who makes the grant. An
+        op with a role floor needs at least that role
+        (:exc:`GrantRoleFloorError`). The default is the lowest role that
+        makes grants, so a caller that does not pass it is held to the floor.
         """
         model = await self._review(
-            tenant_id, payload, from_console=from_console, by_tenant_admin=by_tenant_admin
+            tenant_id, payload, from_console=from_console, creator_role=creator_role
         )
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
@@ -621,17 +641,26 @@ class ServicePrincipalGrantService:
         payload: ServiceGrantCreate,
         *,
         from_console: bool,
-        by_tenant_admin: bool = False,
+        creator_role: TenantRole,
     ) -> GrantModel:
         """Run the full create-time review; return the table the grant goes in.
 
         Every grant, new or renewed, passes here (#4622: a renewal is
         checked like a new grant). Opens no session of its own except the
-        descriptor lookup, so a caller may run it before it writes.
+        descriptor lookup, so a caller may run it before it writes. The
+        role floor of the op is checked against *creator_role* here, so
+        every path that makes a grant checks it.
         """
         from meho_backplane.settings import get_settings
 
         _reject_wildcards(payload)
+        floor_denial = role_floor_denial(payload.op_id, creator_role)
+        if floor_denial is not None:
+            raise GrantRoleFloorError(
+                f"a standing grant for {payload.op_id!r} lets the service principal run it "
+                f"with no approval, so the person who makes it needs the op's role: "
+                f"{floor_denial}"
+            )
         _validate_expires_at(payload.expires_at)
 
         descriptor = await _resolve_descriptor_for_classification(
@@ -655,7 +684,7 @@ class ServicePrincipalGrantService:
                     "and only on an instance in sandbox mode. REST and the CLI refuse it "
                     "unless MEHO_SANDBOX_DELETE_GRANTS_FROM_API is on."
                 )
-            if not by_tenant_admin:
+            if creator_role is not TenantRole.TENANT_ADMIN:
                 raise DeleteGrantNeedsTenantAdminError(
                     f"op {payload.op_id!r} has a delete sign, so this is a delete grant. "
                     "Only a tenant admin creates a delete grant."
@@ -728,6 +757,7 @@ class ServicePrincipalGrantService:
         expires_at: datetime | None,
         reason: str | None = None,
         from_console: bool = False,
+        creator_role: TenantRole = TenantRole.OPERATOR,
     ) -> list[ServiceGrantRead]:
         """Renew the delete grants of one service principal as one set (#4622).
 
@@ -740,7 +770,9 @@ class ServicePrincipalGrantService:
         each old row is revoked with the reason ``renewed`` and a new row
         with the new expiry takes its place. ``reason`` replaces the
         recorded reason of every grant; ``None`` keeps each one. Returns
-        the new entries. MEHO never calls this by itself.
+        the new entries. MEHO never calls this by itself. ``creator_role``
+        is the role of the person who renews; each grant is checked against
+        the op's role floor like a new one.
         """
         if not sandbox_mode_active():
             raise GrantValidationError(
@@ -785,7 +817,9 @@ class ServicePrincipalGrantService:
                 reason=reason or old.reason,
                 expires_at=expires_at,
             )
-            model = await self._review(tenant_id, payload, from_console=True)
+            model = await self._review(
+                tenant_id, payload, from_console=True, creator_role=creator_role
+            )
             if model is not SandboxDeleteGrant:
                 raise GrantValidationError(
                     f"op {old.op_id!r} on connector {old.connector_id!r} no longer has a "

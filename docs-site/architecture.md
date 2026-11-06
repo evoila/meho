@@ -1,9 +1,11 @@
 # Reference architecture
 
-MEHO deploys as **one Kubernetes application** (a Helm release)
-surrounded by services you already run. This page names every box in
-the picture, what it does, and — the part that matters when you plan an
-install — which boxes MEHO ships and which ones you bring.
+MEHO deploys as **one Kubernetes application** (a Helm release). By
+default the chart also brings its own PostgreSQL, Keycloak and OpenBao
+(an open-source fork of Vault). You can replace them with the ones you
+already run ([two ways to install](install/index.md#two-ways-to-install)). This page names every box in the picture, what it
+does, and — the part that matters when you plan an install — which
+boxes MEHO ships and which ones you can bring.
 
 ```mermaid
 flowchart LR
@@ -47,9 +49,9 @@ flowchart LR
 |---|---|---|
 | Backplane (container image) | **MEHO** — `ghcr.io/evoila/meho` | One Deployment, rendered by the Helm chart. |
 | Valkey (activity feed) | **MEHO** — bundled subchart | Installed by the same Helm release; no separate setup. |
-| PostgreSQL + pgvector | **You** | Any reachable PostgreSQL with the `vector` extension available. Not bundled — see [the install trail](install/index.md#step-1-pre-create-the-pgvector-extension) for the one privilege nuance. |
-| Keycloak | **You** | An existing realm; MEHO needs a handful of clients configured in it — see [Keycloak realm setup](install/keycloak-realm.md). |
-| Credential backend | **You** | HashiCorp Vault **or** Google Secret Manager — see [Credential backends](install/credential-backends.md). |
+| PostgreSQL + pgvector | **MEHO** by default, or **you** | The chart's built-in PostgreSQL, with pgvector on. Turn it off (`corePostgres.enabled: false`) to use any reachable PostgreSQL with the `vector` extension available — see [the install trail](install/index.md#step-1-pre-create-the-pgvector-extension) for the one privilege nuance. |
+| Keycloak | **MEHO** by default, or **you** | The chart's built-in Keycloak makes the realm `meho`. Turn it off (`coreKeycloak.enabled: false`) to use an existing realm; MEHO then needs a handful of clients configured in it — see [Keycloak realm setup](install/keycloak-realm.md). |
+| Credential backend | **MEHO** by default, or **you** | The chart's built-in OpenBao (an open-source fork of Vault). Turn it off (`coreVault.enabled: false`) to use your own HashiCorp Vault **or** Google Secret Manager — see [Credential backends](install/credential-backends.md). |
 | AI agent / MCP client | **You** | MEHO governs agents; it does not run a model. Bring Claude, Cursor, or any MCP client. |
 
 ## The backplane
@@ -120,9 +122,9 @@ vector similarity search behind semantic operation discovery and
 knowledge retrieval — it is the reason the install trail has a
 [one-time extension step](install/index.md#step-1-pre-create-the-pgvector-extension).
 
-The database is deliberately **not** bundled in the Helm chart: audit
-data has retention and backup requirements that belong with your
-platform's PostgreSQL practice, not inside an application chart.
+The chart brings its own PostgreSQL by default. If your platform team
+must own the audit data (backup, retention), turn the built-in
+PostgreSQL off and use theirs.
 
 ## Activity feed: Valkey
 
@@ -138,7 +140,9 @@ Target credentials (the vCenter password, the Kubernetes token, the
 appliance API key) live in a secret store MEHO reads *per operation*,
 scoped to the calling tenant — never cached in the agent, never
 embedded in MEHO's own configuration. Two backends are supported:
-HashiCorp **Vault** (the default) and **Google Secret Manager**. The
+HashiCorp **Vault** and **Google Secret Manager**. By default the chart
+brings OpenBao, an open-source fork of Vault, and MEHO uses it like
+Vault. The
 choice shapes the install, so it has its own
 [decision page](install/credential-backends.md) with an honest support
 matrix per backend.

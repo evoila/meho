@@ -11,6 +11,15 @@ Two backends are supported. Both use the same chart and the same
 target model; they differ in what you must run, how background work
 authenticates, and maturity.
 
+!!! note "The chart brings OpenBao by default"
+
+    Since v0.45.0 the chart brings its own password safe, OpenBao (an
+    open-source fork of Vault), and connects MEHO to it. MEHO uses it
+    like Vault, so you need nothing from this page. To use your own
+    Vault or Google Secret Manager, set `coreVault.enabled: false`
+    first. Google Secret Manager works only with the built-in OpenBao
+    off.
+
 | | **Vault** (default) | **Google Secret Manager** |
 |---|---|---|
 | You run | A HashiCorp Vault (KV v2) reachable from the cluster | Nothing extra — GSM is a Google Cloud API |

@@ -6,6 +6,14 @@ bottom; every side quest (choosing a credential backend, configuring
 the Keycloak realm, TLS trust) is linked at the exact step where you
 need it, and each of those pages sends you back here.
 
+The Helm chart brings its own PostgreSQL (the database, with pgvector),
+Keycloak (the login server) and OpenBao (the password safe, an
+open-source fork of Vault). This is the default since v0.45.0. The
+chart connects MEHO to these parts by itself. If you already run your
+own PostgreSQL, Keycloak and Vault, you can turn the built-in parts off
+and use yours. [Two ways to install](#two-ways-to-install) below says
+which steps each way needs.
+
 !!! tip "Just exploring?"
 
     If you only want to see the backplane come up on your workstation —
@@ -17,16 +25,40 @@ need it, and each of those pages sends you back here.
 
 | You bring | Requirements |
 |---|---|
-| **Kubernetes cluster** | Any conformant cluster with an ingress controller (the examples assume ingress-nginx). [Helm](https://helm.sh/) 3.8+ on your workstation; Helm 4 recommended — the [upgrades](upgrades.md) page's server-side-apply guidance assumes it. |
-| **PostgreSQL** | A reachable PostgreSQL server with the [pgvector](https://github.com/pgvector/pgvector) extension *available* (installed as a server package — Step 1 covers enabling it). MEHO does not bundle a database. |
-| **Keycloak** | A [Keycloak](https://www.keycloak.org/) you administer, with a realm for MEHO (an existing realm works), or the built-in one (`coreKeycloak.enabled: true`). Step 4 covers the realm configuration. |
-| **Credential backend** | HashiCorp Vault **or** access to Google Secret Manager. Step 2 helps you choose. |
-| **A DNS name + TLS story** | A hostname for the backplane (e.g. `meho.example.com`) and a certificate for it — public CA or internal CA both work; [TLS and ingress](tls-ingress.md) covers the differences. |
+| **Kubernetes cluster** | Kubernetes 1.28 or newer, with an ingress controller (the examples use ingress-nginx) and a default storage class (the built-in parts keep their data on disks the cluster makes). [Helm](https://helm.sh/) 3.8 or newer on your workstation, so it can install from an OCI registry. The chart is tested with Helm 3.16.4. Helm 4 recommended — the [upgrades](upgrades.md) page's server-side-apply guidance assumes it. |
+| **A DNS name + TLS story** | A hostname for the backplane (e.g. `meho.example.com`) and a certificate for it — public CA or internal CA both work; [TLS and ingress](tls-ingress.md) covers the differences. With the built-in parts, the chart can also make a self-signed certificate for you. |
+| *Only with your own parts:* **PostgreSQL** | A reachable PostgreSQL server with the [pgvector](https://github.com/pgvector/pgvector) extension *available* (installed as a server package). Steps 1 and 3. |
+| *Only with your own parts:* **Keycloak** | A [Keycloak](https://www.keycloak.org/) you administer, with a realm for MEHO (an existing realm works). Step 4. |
+| *Only with your own parts:* **Credential backend** | HashiCorp Vault **or** access to Google Secret Manager. Step 2. |
 
 Everything else — the activity-feed store (Valkey), database
 migrations, the operations catalog — ships inside the Helm release.
 
+## Two ways to install
+
+**1. With the built-in parts (the default).** One `helm install`
+installs MEHO, PostgreSQL, Keycloak and OpenBao, and connects them. The
+chart makes every password and key itself and keeps them in Kubernetes
+Secrets. The values file needs only the hostname and an id for your
+first tenant. Skip Steps 1 to 4 and go to
+[Step 5](#step-5-decide-ingress-tls-and-trust).
+
+**2. With your own PostgreSQL, Keycloak and Vault.** Set
+`corePostgres.enabled`, `coreKeycloak.enabled` and `coreVault.enabled`
+to `false`, and point MEHO at your own services. Follow every step
+below.
+
+You can also replace only some parts, with one rule: the built-in
+Keycloak needs the built-in PostgreSQL, and the built-in OpenBao needs
+the built-in Keycloak. So with your own PostgreSQL, turn all three off.
+With your own Keycloak, turn Keycloak and OpenBao off. Your own Vault
+(or Google Secret Manager) works with the built-in PostgreSQL and
+Keycloak: turn only `coreVault` off.
+
 ## Step 1 — Pre-create the pgvector extension
+
+*Only with your own PostgreSQL.* The built-in PostgreSQL creates the
+extension itself.
 
 MEHO's semantic search runs on pgvector, and the chart's pre-install
 migration Job executes `CREATE EXTENSION IF NOT EXISTS vector` on
@@ -86,6 +118,9 @@ psql -d meho -c "SELECT extname FROM pg_extension WHERE extname='vector';"
 
 ## Step 2 — Choose your credential backend
 
+*Only with your own Vault or Google Secret Manager.* With the built-in
+OpenBao, the chart sets up the password safe and connects MEHO to it.
+
 MEHO fetches target credentials (the vCenter password, the appliance
 API key) from a secret store at operation time — that store is the
 **credential backend**, and the chart supports two: HashiCorp
@@ -97,6 +132,9 @@ matrix of what works on each today. Come back with a decision; Step 6
 shows the values for both.
 
 ## Step 3 — Provision the database credentials Secret
+
+*Only with your own PostgreSQL.* The built-in PostgreSQL makes this
+Secret itself.
 
 The chart never embeds credentials in values. It references a
 Kubernetes Secret **by name**; the Secret must hold the full database
@@ -162,12 +200,13 @@ empty there.
 
 ## Step 4 — Set up the Keycloak realm
 
-MEHO authenticates every caller against Keycloak, and MEHO ships a
-built-in one: set `coreKeycloak.enabled: true` in your values and the chart
-makes the realm `meho` at install, with everything listed below. Skip
-to the end of this step.
+*Only with your own Keycloak.* MEHO authenticates every caller against
+Keycloak. The built-in Keycloak (`coreKeycloak.enabled: true`, the
+default) makes the realm `meho` at the first start, with everything
+listed below, and two first users. Skip to the end of this step.
 
-Before the backplane can be logged into, the realm needs:
+With your own Keycloak, before the backplane can be logged into, the
+realm needs:
 
 1. the **confidential `meho-backplane` client** — the resource-server
    identity MEHO validates tokens against;
@@ -222,14 +261,57 @@ backplane cannot start without is blank by default and **rejected at
 install time** with the exact failing field path — so a misconfigured
 release fails at `helm install`, not as a crash-looping Pod at 2 a.m.
 
-A minimal Vault-backed file:
+### With the built-in parts (default)
 
 ```yaml
 image:
   # Pin an immutable tag: v<x.y.z> for a release (see
   # https://github.com/evoila/meho/releases), or sha-<git-sha> from CI.
   # :latest is never published; :main is a dev-only moving alias.
-  tag: "<REPLACE: v0.25.0 or later>"
+  tag: "v0.45.0"
+
+ingress:
+  enabled: true
+  className: nginx
+  host: meho.example.com          # drives the MCP audience — see Step 5
+  tls:
+    enabled: true
+    # Empty: the install makes a self-signed certificate in the Secret
+    # meho-core-tls. Or name your own TLS Secret here.
+    secretName: ""
+
+coreKeycloak:
+  hostname: meho.example.com      # the same value as ingress.host
+  # A UUID you pick once for your first tenant, and keep.
+  # For example, make one with: uuidgen | tr 'A-Z' 'a-z'
+  firstTenantId: "<REPLACE: a new UUID>"
+```
+
+That is all. Leave `postgres.credentialsSecret`, `vault.address`,
+`config.vaultAddr`, `config.keycloakIssuerUrl` and `keycloak.issuer`
+empty: the chart sets them. If you set them, Helm stops with an error
+that names the key. The NetworkPolicy is on by default, and it reaches
+the built-in parts without any address ranges from you.
+
+### With your own PostgreSQL, Keycloak and Vault
+
+The first three keys turn the built-in parts off. The rest points MEHO
+at your own services. Without the first three keys, Helm stops with an
+error.
+
+```yaml
+corePostgres:
+  enabled: false
+coreKeycloak:
+  enabled: false
+coreVault:
+  enabled: false
+
+image:
+  # Pin an immutable tag: v<x.y.z> for a release (see
+  # https://github.com/evoila/meho/releases), or sha-<git-sha> from CI.
+  # :latest is never published; :main is a dev-only moving alias.
+  tag: "v0.45.0"
 
 ingress:
   enabled: true
@@ -294,11 +376,14 @@ networkPolicy:
     your Postgres / Vault / Keycloak resolve to, set `enabled: true`, and
     re-run the same `helm upgrade` from Step 7. The broadcast subchart
     renders its own ingress NetworkPolicy and Valkey auth alongside.
+    The CIDRs are needed only for the parts you bring yourself. The
+    policy reaches the built-in parts by their pods.
 
 ### Let MEHO reach the systems it manages
 
 With `networkPolicy.enabled: true`, MEHO can only connect to PostgreSQL,
-Vault and Keycloak (the three CIDRs above), its own stores, and DNS.
+Vault and Keycloak (the built-in parts, or the three CIDRs above), its
+own stores, and DNS.
 Everything else is blocked: vCenter, NSX, ESXi, SSH and WinRM hosts, and
 the AI service. MEHO still reports ready, because its readiness check only
 tests its own parts. So list those networks in `networkPolicy.extraEgress`.
@@ -375,12 +460,14 @@ usually 443.
 The same applies to any rule: name the real Pod or address and its port,
 not the load balancer address.
 
-For a **Google Secret Manager** deploy, replace the `vault` block and
-`config.vaultAddr` with the GSM fields — the exact delta is on the
+For a **Google Secret Manager** deploy, set `coreVault.enabled: false`
+(the chart refuses Google Secret Manager while the built-in OpenBao is
+on), then replace the `vault` block and `config.vaultAddr` with the GSM
+fields — the exact delta is on the
 [credential backends](credential-backends.md#helm-values-per-backend)
 page.
 
-Notes:
+Notes for your own parts:
 
 - `config.keycloakIssuerUrl` / `config.vaultAddr` mirror
   `keycloak.issuer` / `vault.address` — the config block is what the
@@ -429,24 +516,41 @@ uses the latest published chart.
     verification recipes — image, chart, and CLI — are in the
     [repository README](https://github.com/evoila/meho#verify-image--chart--cli-signatures).
 
-What happens, in order:
+What happens, in order, **with the built-in parts**:
+
+1. A setup Job makes every password and key once and keeps them in
+   Secrets named `meho-core-*`. Every upgrade keeps them.
+2. PostgreSQL, Keycloak and OpenBao start. Keycloak loads the realm
+   `meho`. A second Job sets up OpenBao, and a third one makes the two
+   first users in Keycloak.
+3. MEHO runs its database migrations, then starts.
+
+What happens, in order, **with your own parts**:
 
 1. A **pre-install migration Job** runs all database migrations before
    any application Pod exists. If a migration fails, the release fails
    — an unmigrated Pod never takes traffic. Failed Jobs stick around
    for ten minutes, so `kubectl logs job/<name> -n meho` shows why.
    This is where Step 1's pgvector prerequisite is enforced.
-2. The Deployment rolls out. First boot registers the full operations
-   catalog and loads the embedding model **before** the app starts
-   listening — the chart's startup probe budgets **300 seconds** for
-   this, so a Pod that is `Running` but not `Ready` for a couple of
-   minutes on first boot is normal.
+2. The Deployment rolls out.
+
+The **first start takes up to 15 minutes** either way. On an empty
+database, MEHO first registers the full operations catalog and builds
+the search data for every operation, **before** the app starts
+listening. The chart's startup probe allows 15 minutes for this, so a
+Pod that is `Running` but not `Ready` for several minutes on the first
+start is normal. Later starts take about 20 seconds.
+
+With the built-in parts, the install notes (`helm status meho -n meho`)
+also print OpenBao's unseal key Secret, `meho-core-vault-unseal`. Copy
+the key to your own key store now; see
+[OpenBao unseal key](openbao-unseal-key.md).
 
 ## Step 8 — Verify the backplane
 
 ```bash
 # Rollout completes inside the startup budget.
-kubectl -n meho rollout status deploy/meho --timeout=360s
+kubectl -n meho rollout status deploy/meho --timeout=960s
 
 # The runtime image is python:3.14-slim — it ships neither curl nor
 # wget — so reach the Pod with a port-forward instead of `kubectl exec`.
@@ -508,6 +612,13 @@ install that CA into your workstation's **OS trust store** first — the
 CLI verifies TLS against it, and on macOS it ignores the
 `SSL_CERT_FILE` environment variable entirely. Details:
 [TLS and ingress](tls-ingress.md#your-workstation-os-trust-store).
+If the install made the self-signed certificate (built-in parts with an
+empty `ingress.tls.secretName`), its CA is the `ca.crt` key of the
+Secret `meho-core-tls`:
+
+```bash
+kubectl -n meho get secret meho-core-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > meho-ca.crt
+```
 
 Then log in:
 
@@ -516,8 +627,25 @@ meho login https://meho.example.com
 ```
 
 This runs the OAuth device-code flow: the CLI prints a verification
-URL and code, you approve it in a browser as the user created in
-Step 4, and the CLI stores the resulting token in your OS keyring.
+URL and code, you approve it in a browser, and the CLI stores the
+resulting token in your OS keyring.
+
+**Who logs in with the built-in Keycloak.** The install made two users
+with temporary passwords: the first admin (`admin`) and a second person
+who can approve the admin's changes (`approver`). Both are in the
+Secret `meho-core-first-login`. Keycloak asks for a new password, a
+name and an email at the first login. Read the admin's login with:
+
+```bash
+kubectl -n meho get secret meho-core-first-login \
+  -o jsonpath='{.data.admin_username}' | base64 -d; echo
+kubectl -n meho get secret meho-core-first-login \
+  -o jsonpath='{.data.admin_password}' | base64 -d; echo
+```
+
+Keep these passwords in your own key store.
+
+**Who logs in with your own Keycloak.** The user you created in Step 4.
 Prove the whole chain end to end:
 
 ```bash

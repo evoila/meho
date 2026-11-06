@@ -159,7 +159,7 @@ def render_connector_index() -> str:
     _eager_import_connectors()
     kinds = _catalog_kind_by_triple()
 
-    rows: list[tuple[str, str, str, str]] = []
+    rows: list[tuple[str, str, str, str, str]] = []
     for (product, version, impl_id), cls in all_connectors_v2().items():
         # Skip the wildcard / v1-compat padding rows (empty version /
         # impl_id): they are resolver-internal, never operator-addressable.
@@ -168,7 +168,8 @@ def render_connector_index() -> str:
         connector_id = f"{impl_id}-{version}"
         supported = cls.supported_version_range or "—"
         kind = kinds.get((product, version, impl_id), "—")
-        rows.append((product, connector_id, supported, kind))
+        summary = cls.summary or "—"
+        rows.append((product, connector_id, summary, supported, kind))
     rows.sort(key=lambda row: (row[0], row[1]))
 
     lines = _generated_header(
@@ -186,6 +187,11 @@ def render_connector_index() -> str:
         "groups, search operations, then call — so the vendor never leaks "
         "into the tool names.",
         "",
+        "This page lists the connectors of the public image. evoila's "
+        "enterprise pack adds the VMware and VCF connectors as a signed "
+        "package on top of this image. You can add your own connectors the "
+        "same way: see [Write a connector package](../extend/connector-kit.md).",
+        "",
         "MEHO has two kinds of connector, both first-class and "
         "indistinguishable to an agent. **Generic** connectors are built by "
         "ingesting a vendor's protocol spec (OpenAPI, GraphQL, WSDL, proto); "
@@ -195,13 +201,13 @@ def render_connector_index() -> str:
         "it, and is blank otherwise — it is a property of how a connector's "
         "operations are sourced, not something this table infers.",
         "",
-        "| Connector | Product | Supported versions | Kind |",
-        "| --- | --- | --- | --- |",
+        "| Connector | Product | What it does | Supported versions | Kind |",
+        "| --- | --- | --- | --- | --- |",
     ]
-    for product, connector_id, supported, kind in rows:
+    for product, connector_id, summary, supported, kind in rows:
         lines.append(
             f"| `{_md_escape(connector_id)}` | `{_md_escape(product)}` "
-            f"| {_md_escape(supported)} | {kind} |"
+            f"| {_md_escape(summary)} | {_md_escape(supported)} | {kind} |"
         )
     lines += [
         "",

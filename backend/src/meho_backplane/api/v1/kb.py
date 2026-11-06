@@ -138,6 +138,7 @@ from meho_backplane.kb import (
     KbService,
 )
 from meho_backplane.kb.schemas import InvalidKbSlugError
+from meho_backplane.kb.service import KbListOrder
 
 __all__ = ["router"]
 
@@ -324,9 +325,16 @@ async def list_kb(
     ),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    order: KbListOrder = Query(
+        default="slug",
+        description=(
+            "Row order. 'slug' (default) sorts A to Z by slug; 'newest' lists "
+            "the most recently updated entry first."
+        ),
+    ),
     operator: Operator = _require_operator,
 ) -> KbListResponse:
-    """List kb entries for the operator's tenant, slug-sorted.
+    """List kb entries for the operator's tenant, slug-sorted by default.
 
     Tenant-scoped to ``operator.tenant_id`` -- no surface accepts a
     tenant id from the query string. ``read_only`` operators get 403
@@ -342,7 +350,9 @@ async def list_kb(
     rather than a silent pick. ``limit`` is capped at 500 (the
     substrate's :data:`DEFAULT_LIST_LIMIT` is 100; the API surface
     allows higher explicit values so a one-shot dump of a 200-entry
-    corpus completes in one round trip).
+    corpus completes in one round trip). ``order="newest"`` sorts by
+    ``updated_at``, newest first, for "what changed lately" reads such
+    as the Claude Code plugin's session-start digest (#5679).
 
     Binds ``audit_op_id="kb.list"`` + ``audit_op_class="read"`` before
     the substrate call so a handler exception still produces an
@@ -363,6 +373,7 @@ async def list_kb(
         filter_pattern=filter_pattern,
         limit=limit,
         offset=offset,
+        order=order,
     )
     return KbListResponse(entries=[_build_preview(entry) for entry in entries])
 

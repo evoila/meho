@@ -63,6 +63,7 @@ from meho_backplane.ui.routes.agents.forms import (
 )
 from meho_backplane.ui.routes.agents.operator import (
     OperatorRoleProbe,
+    resolve_human_admin_or_403,
     resolve_operator_or_403,
     resolve_role_probe,
     resolve_run_operator_or_403,
@@ -99,6 +100,7 @@ __all__ = ["build_agents_router"]
 _require_operator_dep = Depends(require_ui_operator)
 _role_probe_dep = Depends(resolve_role_probe)
 _require_admin_dep = Depends(resolve_operator_or_403)
+_require_human_admin_dep = Depends(resolve_human_admin_or_403)
 _require_run_operator_dep = Depends(resolve_run_operator_or_403)
 
 
@@ -342,7 +344,7 @@ async def _principals_register_submit_handler(
     name: str = Form(default="", max_length=PRINCIPAL_NAME_MAX),
     owner_sub: str | None = Form(default=None, max_length=OWNER_SUB_MAX),
     session_ctx: UISessionContext = _require_operator_dep,
-    operator: Operator = _require_admin_dep,
+    operator: Operator = _require_human_admin_dep,
 ) -> HTMLResponse:
     """``POST /ui/agents/principals/register`` -- register a new principal."""
     return await submit_register(

@@ -76,6 +76,7 @@ from meho_backplane.ui.auth.flow import (
     clear_discovery_cache,
     reset_verifier_store_for_testing,
 )
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.session_store import (
     create_session,
     reset_fernet_cache_for_testing,
@@ -486,8 +487,8 @@ async def test_session_revoke_audit_row_path_carries_no_session_id(
 ) -> None:
     """Revoking a session writes one row whose ``path`` is the fixed revoke URL.
 
-    The revoked session id travels in the form body, so the audit row
-    (and any access log that records the request path) never holds it.
+    The form body names the session by its session ref, never its id, so
+    neither the audit row nor the request path holds the session id.
     """
     operator_sub = "op-ui-42"
     session_id = await _seed_ui_session(operator_sub=operator_sub)
@@ -498,7 +499,7 @@ async def test_session_revoke_audit_row_path_carries_no_session_id(
     client.cookies.set(CSRF_COOKIE_NAME, csrf)
     response = client.post(
         "/ui/account/sessions/revoke",
-        data={"session_id": str(other)},
+        data={"session_ref": session_ref(other)},
         headers={"X-CSRF-Token": csrf, "HX-Request": "true"},
         follow_redirects=False,
     )
@@ -511,3 +512,4 @@ async def test_session_revoke_audit_row_path_carries_no_session_id(
     assert row.path == "/ui/account/sessions/revoke"
     assert str(other) not in row.path
     assert str(other) not in str(row.payload.get("op_id", ""))
+    assert str(other) not in str(row.payload)

@@ -183,12 +183,17 @@ def _validate_gateway_ip(value: Any) -> tuple[str, str]:
     """Parse *value* as an IP address; return ``(canonical_ip, ipprotocol)``.
 
     ``ipprotocol`` is ``inet`` for IPv4 and ``inet6`` for IPv6 -- the value
-    pfSense stores on ``gateway_item`` to select the address family.
+    pfSense stores on ``gateway_item`` to select the address family. An
+    IPv6 zone (``%eth0``) and spaces are refused, as for rule addresses.
     """
     if not isinstance(value, str):
         raise ValueError(f"gateway must be a string IP address; got {value!r}")
+    if "%" in value or any(ch.isspace() for ch in value):
+        raise ValueError(
+            f"gateway must be an IPv4 or IPv6 address without a zone or spaces; got {value!r}"
+        )
     try:
-        addr = ipaddress.ip_address(value.strip())
+        addr = ipaddress.ip_address(value)
     except ValueError as exc:
         raise ValueError(f"gateway must be a valid IPv4 or IPv6 address; got {value!r}") from exc
     return str(addr), ("inet6" if addr.version == 6 else "inet")
@@ -753,9 +758,11 @@ _GATEWAY_ADD_PARAMETER_SCHEMA: dict[str, Any] = {
         "gateway": {
             "type": "string",
             "minLength": 1,
+            "pattern": "^[0-9A-Fa-f.:]{2,45}$",
             "description": (
-                "Next-hop IP address (IPv4 or IPv6). Parsed and "
-                "re-serialised; the address family selects ``ipprotocol``."
+                "Next-hop IP address (IPv4 or IPv6), with no zone and no "
+                "spaces. Parsed and re-serialised; the address family "
+                "selects ``ipprotocol``."
             ),
         },
         "monitor_disable": {

@@ -166,6 +166,7 @@ from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
 )
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token, verify_csrf_token
 from meho_backplane.ui.templating import get_templates
 
@@ -274,7 +275,7 @@ async def _resolve_operator_softly(session: UISessionContext) -> Operator | None
     except Exception as exc:
         log.info(
             "ui_retrieval_operator_probe_unavailable",
-            session_id=str(session.session_id),
+            session_ref=session_ref(session.session_id),
             reason=type(exc).__name__,
         )
         return None

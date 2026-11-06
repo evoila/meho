@@ -168,6 +168,8 @@ class GitHubRestConnector(HttpConnector):
         "comments, repositories and commits."
     )
     priority = 1
+    # This class serves the operations of its ingested catalog.
+    accepts_ingested_operations = True
 
     # vSphere-style class constant for the API base. Subclassed connectors
     # for GHES would override this (the GHES instance's base URL is the

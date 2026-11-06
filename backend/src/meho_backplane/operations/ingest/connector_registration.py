@@ -121,6 +121,9 @@ class GenericRestConnector(HttpConnector):
     # shim_kind() without an issubclass check. See base.ShimKind.
     _shim_kind: ShimKind = "bare"
 
+    # The shim exists only to carry the operations of an ingested catalog.
+    accepts_ingested_operations: bool = True
+
     #: Default base URL the auto-shim uses when the target carries
     #: no explicit base URL of its own. Set by the class factory
     #: from the ``base_url`` arg to

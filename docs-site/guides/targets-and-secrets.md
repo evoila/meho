@@ -30,7 +30,13 @@ which is why this is the first guide.
 |---|---|---|
 | **CLI — `meho targets import`** | Bulk-import from a `targets.yaml` file you keep in version control. | The canonical path. Your target registry becomes a reviewable, re-runnable file. |
 | **Operator console — `/ui/connectors`** | Create/edit forms plus a paste-or-upload `targets.yaml` import with a preview table. | Console-first operators. Produces byte-identical writes to the CLI import. |
-| **REST — `POST /api/v1/targets`** | The API the other two paths call. | Automation that already speaks REST. |
+| **REST — `POST /api/v1/targets`** | The API the other two paths call. | Scripts that a person runs with their own login. |
+
+Create, edit and delete on REST are for people only. A service login
+gets `403 human_principal_required`, also with the **tenant_admin**
+role. It registers a target with the `targets.register` operation and
+removes one with `targets.remove` (connector `targets-registry-1.x`).
+MEHO checks both against the approval rules.
 
 **There are no MCP tools for registering targets or staging secrets —
 deliberately.** Registration is an operator-trust decision, so it

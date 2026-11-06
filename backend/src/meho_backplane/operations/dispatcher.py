@@ -353,6 +353,12 @@ from meho_backplane.operations._handler_resolve import (
     reset_connector_instance_cache,
     reset_handler_cache,
 )
+from meho_backplane.operations._ingested_owner import (
+    INGESTED_OPS_NOT_ACCEPTED,
+    accepts_ingested_operations,
+    ingested_ops_refusal_message,
+    result_ingested_ops_not_accepted,
+)
 from meho_backplane.operations._license_refusal import (
     LICENSE_READ_OFF,
     audit_license_read_off,
@@ -650,6 +656,10 @@ async def _resolve_connector_instance(
             return None, label, exc_message
         # cls is guaranteed non-None here (label is None ⇔ cls is set).
         assert cls is not None
+        # An ingested op runs none of the checks of a hand-written class,
+        # so it runs only on a class that accepts ingested operations.
+        if not accepts_ingested_operations(cls):
+            return None, INGESTED_OPS_NOT_ACCEPTED, ingested_ops_refusal_message(cls)
         return get_or_create_connector_instance(cls), None, None
     if descriptor.source_kind in ("typed", "composite") and target is not None:
         cls, label, exc_message = resolve_connector_or_label(target)
@@ -670,6 +680,27 @@ async def _resolve_connector_instance(
     ):
         return None, "target_required", None
     return None, None, None
+
+
+async def _ingested_ops_refusal(
+    descriptor: EndpointDescriptor,
+    target: Any,
+    op_id: str,
+    duration_ms: float,
+) -> OperationResult | None:
+    """The ``ingested_ops_not_accepted`` result, or ``None``.
+
+    Refuses an ingested op whose target resolves to a class that does not
+    accept ingested operations (:mod:`~meho_backplane.operations._ingested_owner`).
+    Runs before a call waits for approval, so no approval is spent on a call
+    that cannot run. Any other resolution outcome is left to Step 5.
+    """
+    if descriptor.source_kind != "ingested" or target is None:
+        return None
+    _instance, label, message = await _resolve_connector_instance(descriptor, target)
+    if label != INGESTED_OPS_NOT_ACCEPTED:
+        return None
+    return result_ingested_ops_not_accepted(op_id, message or "", duration_ms)
 
 
 def _maybe_bind_method(
@@ -3311,6 +3342,8 @@ async def _handle_needs_approval(
         params=params,
         duration_ms=duration_ms,
     )
+    if refusal is None:
+        refusal = await _ingested_ops_refusal(descriptor, target, op_id, duration_ms)
     if refusal is not None:
         return await _audit_denied_and_return(
             refusal,
@@ -3927,18 +3960,26 @@ async def dispatch(
         connector_instance: Connector | None
         resolution_error: ResolutionLabel | None
         exception_message: str | None
-        if pre_resolved_connector_class is not None:
-            connector_instance, resolution_error, exception_message = (
-                get_or_create_connector_instance(pre_resolved_connector_class),
-                None,
-                None,
-            )
-        else:
+        if pre_resolved_connector_class is None:
             (
                 connector_instance,
                 resolution_error,
                 exception_message,
             ) = await _resolve_connector_instance(descriptor, target)
+        elif descriptor.source_kind == "ingested" and not accepts_ingested_operations(
+            pre_resolved_connector_class
+        ):
+            connector_instance, resolution_error, exception_message = (
+                None,
+                INGESTED_OPS_NOT_ACCEPTED,
+                ingested_ops_refusal_message(pre_resolved_connector_class),
+            )
+        else:
+            connector_instance, resolution_error, exception_message = (
+                get_or_create_connector_instance(pre_resolved_connector_class),
+                None,
+                None,
+            )
         if resolution_error == "target_required":
             # G0.20-T6 (#1506): a connector-bound (self-first) typed/composite
             # handler invoked with ``target=None``. Clean usage error before
@@ -3946,6 +3987,18 @@ async def dispatch(
             # self-guard RuntimeError (preserved for genuine instance-cache
             # faults, which only arise when a target *was* supplied).
             return result_target_required(op_id, _elapsed_ms(started))
+        if resolution_error == INGESTED_OPS_NOT_ACCEPTED:
+            # Also an approved call: nothing reaches the vendor.
+            duration_ms = _elapsed_ms(started)
+            return await _audit_denied_and_return(
+                result_ingested_ops_not_accepted(op_id, exception_message or "", duration_ms),
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                duration_ms=duration_ms,
+            )
         if resolution_error == "no_connector":
             # #2701: the resolver miss is on the TARGET's product/version,
             # not the ``connector_id`` the caller passed. That connector_id

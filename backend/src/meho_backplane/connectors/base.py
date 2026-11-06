@@ -148,6 +148,16 @@ class Connector(ABC):
     #: default keeps existing connectors and descriptor kinds unchanged.
     enforces_catalog_target_compatibility: bool = False
 
+    #: Whether operations ingested from an API file may run on this class.
+    #: An ingested operation sends the method and path of its file with the
+    #: connector's login, and runs none of the checks a hand-written
+    #: operation of the class runs. So the default is ``False``: the
+    #: dispatcher refuses such an operation with ``ingested_ops_not_accepted``
+    #: and the ingest pipeline refuses a file under the name of such a class.
+    #: The generic and profiled classes, and the hand-written classes built
+    #: to serve an ingested catalog, set it to ``True``.
+    accepts_ingested_operations: bool = False
+
     #: PEP 440 version spec (for example ``">=8.0,<9.0"``) of the target
     #: versions every composite (multi-step) operation of this connector's
     #: catalog works on. A composite runs its steps itself, so the catalog

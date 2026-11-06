@@ -1755,6 +1755,7 @@ class _FakeHttpConnector(HttpConnector):
     """Ingested-dispatch test fixture: records ``_request_json`` calls."""
 
     product = "demo"
+    accepts_ingested_operations = True
     version = "1.0"
     impl_id = "demo-rest"
     supported_version_range = ">=1.0,<2.0"
@@ -1908,6 +1909,7 @@ class _RoundTripHttpConnector(HttpConnector):
     """
 
     product = "gh"
+    accepts_ingested_operations = True
     version = "3.0"
     impl_id = "gh-rest"
     supported_version_range = ">=3.0,<4.0"

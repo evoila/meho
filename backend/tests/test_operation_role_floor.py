@@ -312,8 +312,11 @@ async def test_an_agent_still_waits_for_approval(_registered_ops: None) -> None:
     assert await _target_rows() == []
 
 
-async def test_a_service_login_still_waits_for_approval(_registered_ops: None) -> None:
-    result = await _register(_person(TenantRole.OPERATOR, kind=PrincipalKind.SERVICE, sub="svc:a"))
+@pytest.mark.parametrize("role", [TenantRole.OPERATOR, TenantRole.TENANT_ADMIN])
+async def test_a_service_login_still_waits_for_approval(
+    _registered_ops: None, role: TenantRole
+) -> None:
+    result = await _register(_person(role, kind=PrincipalKind.SERVICE, sub="svc:a"))
 
     assert result.status == "awaiting_approval", result
     assert len(await _approval_rows()) == 1

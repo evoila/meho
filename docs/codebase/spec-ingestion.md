@@ -777,7 +777,7 @@ Tests: `tests/test_operations_license_reads_stay_off.py`.
 An ingested operation runs on the connector class that the target
 resolves to. It sends the method and path of its API file with that
 class's login, and it runs none of the checks of the class's
-hand-written operations (for example the Keycloak realm guards). So a
+hand-written operations. So a
 class says whether ingested operations may run on it:
 `Connector.accepts_ingested_operations` (`connectors/base.py`), default
 `False`.

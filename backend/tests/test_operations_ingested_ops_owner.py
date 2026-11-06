@@ -3,13 +3,13 @@
 
 """Ingested operations run only on a connector class that accepts them.
 
-MEHO picks the connector class from the target. An ingested operation
-sends its method and path with that class's login and runs none of the
-checks of the class's hand-written operations. So:
+MEHO picks the connector class from the target. A hand-written class
+accepts ingested operations only when it sets
+``accepts_ingested_operations``. So:
 
 * the ingest refuses an API file under the name of a class that does not
-  accept ingested operations (``keycloak/26.x/keycloak-admin``), before it
-  reads the file; REST answers 422, MCP ``-32602``;
+  accept ingested operations, before it reads the file; REST answers 422,
+  MCP ``-32602``;
 * a call of such a row is refused before it waits for approval, and an
   approved call of such a row is refused when it runs; nothing reaches the
   vendor, and the refusal has one ``denied`` audit row;
@@ -72,10 +72,9 @@ _PRODUCT = KeycloakConnector.product
 _VERSION = KeycloakConnector.version
 _IMPL_ID = KeycloakConnector.impl_id
 _CONNECTOR_ID = f"{_IMPL_ID}-{_VERSION}"
-_OP_ID = "DELETE:/admin/realms/{realm}"
+_OP_ID = "DELETE:/admin/items/{item}"
 _TARGET_NAME = "kc-main"
-#: The realm of MEHO's own login in these tests.
-_PARAMS = {"realm": "meho"}
+_PARAMS = {"item": "item-1"}
 
 
 @pytest.fixture(autouse=True)
@@ -99,7 +98,7 @@ def _reset_module_state() -> Iterator[None]:
 
 @pytest.fixture
 def vendor_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
-    """Register the real Keycloak class and record every request it would send."""
+    """Register a hand-written class and record every request it would send."""
     calls: list[tuple[str, str]] = []
 
     async def _request_json(
@@ -177,8 +176,8 @@ async def _seed_target() -> TargetORM:
         return target
 
 
-async def _seed_ingested_realm_delete(impl_id: str = _IMPL_ID) -> None:
-    """The row an ingest of the Keycloak admin API file would leave, turned on."""
+async def _seed_ingested_delete(impl_id: str = _IMPL_ID) -> None:
+    """An ingested delete row under the connector name, turned on."""
     async with get_sessionmaker()() as s:
         s.add(
             EndpointDescriptor(
@@ -190,15 +189,15 @@ async def _seed_ingested_realm_delete(impl_id: str = _IMPL_ID) -> None:
                 op_id=_OP_ID,
                 source_kind="ingested",
                 method="DELETE",
-                path="/admin/realms/{realm}",
+                path="/admin/items/{item}",
                 handler_ref=None,
-                summary="Delete the realm",
-                description="Ingested realm delete.",
+                summary="Delete the item",
+                description="Ingested delete.",
                 tags=[],
                 parameter_schema={
                     "type": "object",
-                    "properties": {"realm": {"type": "string", "x-meho-param-loc": "path"}},
-                    "required": ["realm"],
+                    "properties": {"item": {"type": "string", "x-meho-param-loc": "path"}},
+                    "required": ["item"],
                 },
                 response_schema=None,
                 llm_instructions=None,
@@ -264,7 +263,9 @@ def test_hand_written_classes_refuse_ingested_ops_by_default() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ingest_under_the_keycloak_name_is_refused(vendor_calls: list[tuple[str, str]]) -> None:
+def test_ingest_under_a_hand_written_class_name_is_refused(
+    vendor_calls: list[tuple[str, str]],
+) -> None:
     with pytest.raises(IngestedOperationsNotAccepted) as info:
         assert_ingest_target_accepts(product=_PRODUCT, version=_VERSION, impl_id=_IMPL_ID)
     assert info.value.class_name == "KeycloakConnector"
@@ -272,17 +273,17 @@ def test_ingest_under_the_keycloak_name_is_refused(vendor_calls: list[tuple[str,
 
 
 @pytest.mark.asyncio
-async def test_rows_under_another_name_are_refused_when_the_target_picks_keycloak(
+async def test_rows_under_another_name_are_refused_when_the_target_resolves_to_the_class(
     vendor_calls: list[tuple[str, str]],
 ) -> None:
-    """A new impl id passes the ingest (it gets a shim), but a Keycloak target
-    still resolves to the Keycloak class, so the call is refused at run time."""
+    """A new impl id passes the ingest (it gets a shim), but the target still
+    resolves to the hand-written class, so the call is refused at run time."""
     assert_ingest_target_accepts(product=_PRODUCT, version=_VERSION, impl_id="keycloak-custom")
     assert ensure_connector_class_registered(
         product=_PRODUCT, version=_VERSION, impl_id="keycloak-custom", base_url=None
     )
     await _seed_target()
-    await _seed_ingested_realm_delete(impl_id="keycloak-custom")
+    await _seed_ingested_delete(impl_id="keycloak-custom")
 
     result = await call_operation(
         _operator(),
@@ -400,7 +401,7 @@ async def test_call_is_refused_before_it_waits_for_approval(
     vendor_calls: list[tuple[str, str]],
 ) -> None:
     await _seed_target()
-    await _seed_ingested_realm_delete()
+    await _seed_ingested_delete()
 
     result = await call_operation(
         _operator(),
@@ -422,12 +423,12 @@ async def test_call_is_refused_before_it_waits_for_approval(
 
 
 @pytest.mark.asyncio
-async def test_approved_realm_delete_never_reaches_keycloak(
+async def test_approved_call_sends_no_request(
     vendor_calls: list[tuple[str, str]],
 ) -> None:
     """A row approved earlier is refused when the approved call runs."""
     target = await _seed_target()
-    await _seed_ingested_realm_delete()
+    await _seed_ingested_delete()
     requester = _operator("op-requester")
     async with get_sessionmaker()() as s:
         request = await create_pending_request(
@@ -464,7 +465,7 @@ async def test_approved_realm_delete_never_reaches_keycloak(
 
 @pytest.mark.asyncio
 async def test_preview_gives_the_same_refusal(vendor_calls: list[tuple[str, str]]) -> None:
-    await _seed_ingested_realm_delete()
+    await _seed_ingested_delete()
 
     envelope = await preview_dispatch(
         operator=_operator(),

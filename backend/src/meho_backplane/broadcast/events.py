@@ -987,7 +987,8 @@ _SECRET_NAME_TOKENS_FINAL: Final[frozenset[str]] = frozenset(
 #: positional rules above don't (``api_key``, ``private_key``,
 #: ``secret_id`` -- the Vault AppRole SecretID is secret material
 #: even though ``secret`` is non-final there; ``license_key`` -- a
-#: product licence is a credential a vendor file may show in clear;
+#: product licence is a credential a vendor file may show in clear, and
+#: ``licenseKeys`` is a list of them (the vSphere licence source);
 #: ``product_key`` -- the Windows product key of a vSphere guest
 #: customization spec, the same kind of value).
 _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
@@ -998,6 +999,8 @@ _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
         ("encryption", "key"),
         ("license", "key"),
         ("licence", "key"),
+        ("license", "keys"),
+        ("licence", "keys"),
         ("product", "key"),
         ("secret", "id"),
         ("secret", "value"),

@@ -62,7 +62,8 @@ MEHO's one rule for secret-named fields,
 anywhere in the name; `secret`, `secrets`, `token`, `credential`,
 `credentials`, `psk` (the pre-shared key of a VPN session) at the end of
 the name; the pairs `api_key`, `access_key`, `private_key`,
-`encryption_key`, `license_key`, `licence_key`, `product_key` (the
+`encryption_key`, `license_key`, `licence_key`, `license_keys`,
+`licence_keys` (a list of licence keys), `product_key` (the
 Windows key of a vSphere guest customization spec), `secret_id`,
 `secret_value`, `secret_data` anywhere in the name; and the pairs
 `secret_key`, `shared_key`, `preshared_key` only at the end of the name

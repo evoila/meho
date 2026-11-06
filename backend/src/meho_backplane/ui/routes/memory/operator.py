@@ -85,6 +85,11 @@ def build_read_operator(session_ctx: UISessionContext) -> Operator:
     middleware already enforced authentication; this helper avoids the
     JWT round-trip on every list refresh.
 
+    It checks no role, so it is for memory reads only: their REST floor
+    is ``read_only``. A console read whose REST twin needs the operator
+    role uses
+    :func:`~meho_backplane.ui.routes.operator_read.require_ui_read_operator`.
+
     The synthesised ``raw_jwt`` is a stable string (``"ui-session"``)
     so any consumer that introspects it for chain-of-custody logging
     can distinguish a UI-mediated read from an ``/api/*`` request

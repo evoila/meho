@@ -375,6 +375,34 @@ five groups for you. On a later run, pass the same `--tenant-id`:
 without it, the command writes the all-zero UUID to the five groups.
 `--tenant-name` sets the short name in `meho_tenant` (default `main`).
 
+### Who may approve their own changes
+
+A person in **`MEHO-SA-Operators`** may approve their own changes, on
+purpose: with a click in the web interface, or on the command line after
+a fresh sign-in. They may also approve other people's `dangerous` and
+`destructive` changes. The rules for every group are in
+[Approvals and break-glass](../guides/approvals-and-break-glass.md#who-may-approve).
+
+To make a person a MEHO-SA-Operator:
+
+1. In the Keycloak admin console, open the person: **Users** → the
+   person → **Groups**.
+2. Leave their current role group (a person is in exactly one of the
+   five groups) and join **`MEHO-SA-Operators`**. With `bootstrap-clients`
+   the group already exists.
+3. The person signs in again. MEHO reads the group from the new login
+   token; an older token still has the old group.
+
+With a company login, put the person in the company group that your
+setup maps to `MEHO-SA-Operators` instead
+([Company login](login/index.md)). The design of the five groups is in
+the [login groups decision record](https://github.com/evoila/meho/blob/main/docs/decisions/login-role-groups.md)
+([#3959](https://github.com/evoila/meho/issues/3959)).
+
+Keep at least one person in `MEHO-SA-Operators`. A person in
+`MEHO-Admins` may approve other people's `dangerous` and `destructive`
+changes, but not their own.
+
 ### More than one tenant
 
 A person can be in role groups of several tenants, one group per
@@ -415,10 +443,12 @@ one. Create at least one user with:
 - membership in the **`MEHO-Admins`** group, so the user gets the
   `tenant_admin` role, and in **`MEHO-Platform-Admins`**.
 
-Create a second person in **`MEHO-SA-Operators`**. A risky change
-waits until a second person approves it, and nobody approves their own
-request. So the first admin needs this second person (or a member of
-`MEHO-Approvers`) to approve their changes.
+Create a second person in **`MEHO-SA-Operators`**. A `dangerous` or
+`destructive` change waits until a MEHO-SA-Operator or an admin approves
+it, and an admin cannot approve their own. So the first admin needs this
+second person to approve their risky changes. The MEHO-SA-Operator may
+also approve their own changes (see
+[Who may approve their own changes](#who-may-approve-their-own-changes)).
 
 The user's email does not need to be verified for device-code login to
 complete.
@@ -686,7 +716,7 @@ separation of duties you can instead grant a dedicated approver the
 role. A principal provisioned as `read_only` role **plus**
 `approver=true` may approve and reject parked requests but is refused
 `call_operation`: "approve, but never operate." (See
-[Approvals and break-glass](../guides/approvals-and-break-glass.md#a-third-path-a-segregated-approver).)
+[Approvals and break-glass](../guides/approvals-and-break-glass.md#a-segregated-approver).)
 
 The claim is fail-closed — absent or malformed means *not* an approver.
 To make a person an approver, put them in the **`MEHO-Approvers`**

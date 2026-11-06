@@ -4,28 +4,30 @@ A tenant is a separate space in MEHO, with its own systems and
 passwords. This guide adds a new tenant to a running MEHO and lets its
 first people log in.
 
-!!! warning "You need a second person"
+!!! warning "Each step waits for approval"
 
     Every step that changes a Keycloak group runs at the **dangerous**
-    risk level. MEHO waits until a **second person** approves each one.
-    The self-approval switch (`APPROVAL_ALLOW_SELF_APPROVAL`) does **not**
-    cover the dangerous risk level. So **one operator alone cannot add a
-    tenant**, even with that switch on.
+    risk level, so each one waits for approval. Only a
+    **MEHO-SA-Operator** may approve their own `dangerous` change. Anyone
+    else needs a second person: a MEHO-SA-Operator or an admin. The
+    self-approval switch (`APPROVAL_ALLOW_SELF_APPROVAL`) does **not**
+    cover the dangerous risk level.
 
     Before you start, pick one of these:
 
-    - **A second operator** in your current tenant approves each step.
+    - **You are a MEHO-SA-Operator** in your current tenant, and you
+      approve each step yourself, on purpose, in the web interface.
+    - **A second person** in your current tenant (a MEHO-SA-Operator or
+      an admin) approves each step.
     - **An agent makes the requests** and you approve them. This is the
       agent-requester pattern in
-      [Approvals and break-glass](approvals-and-break-glass.md#option-1-the-agent-requester-pattern-recommended).
-      The agent needs a grant with `--verdict needs-approval` on the
-      `keycloak.group.*` and `vault.identity.*` operations, because
-      agents are refused dangerous operations by default.
+      [Approvals and break-glass](approvals-and-break-glass.md#option-2-the-agent-requester-pattern).
+      The agent needs no grant for this: an agent's `dangerous` request
+      waits for a person's approval by default.
 
-    This is a decision of 28 October 2026. It stays like this until the
-    rules for people who may approve their own changes are done. The
-    decision record is
-    [tenant groups stay at the dangerous risk level](https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-tenant-groups-stay-dangerous.md).
+    The group operations stay at the dangerous risk level (decision
+    record:
+    [tenant groups stay at the dangerous risk level](https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-tenant-groups-stay-dangerous.md)).
 
 ## How a person gets a tenant
 
@@ -303,7 +305,7 @@ Pick one of these two ways to get an approver:
   before.
 - **An agent requester in the new tenant.** The new `tenant_admin` sets
   up the agent-requester pattern from
-  [Approvals and break-glass](approvals-and-break-glass.md#option-1-the-agent-requester-pattern-recommended)
+  [Approvals and break-glass](approvals-and-break-glass.md#option-2-the-agent-requester-pattern)
   in the new tenant. A scheduled run of the agent makes the test write
   and, later, the delete instead of the person. The `tenant_admin`
   approves both. The agent needs the setup below first. MEHO checks the
@@ -328,17 +330,15 @@ the new tenant, but its Vault identity is written through your current
 tenant's Vault target, like every identity in Step 6. So the Vault
 writes below wait for your current approver, as before.
 
-1. **Register the agent and grant it the delete.** The new
-   `tenant_admin`, logged in to the new tenant, registers the agent
-   principal. Agents are refused `dangerous` operations by default, so
-   the cleanup (`vault.kv.delete`) needs a grant with
-   `--verdict needs-approval`. The test write (`vault.kv.put`, risk
-   level `caution`) waits for approval without a grant.
+1. **Register the agent.** The new `tenant_admin`, logged in to the new
+   tenant, registers the agent principal. The test write
+   (`vault.kv.put`, risk level `caution`) and the cleanup
+   (`vault.kv.delete`, risk level `dangerous`) both wait for approval
+   without a grant: an agent's request above `safe` always waits for a
+   person.
 
    ```bash
    meho agent-principal register tenant-check
-   meho agent grant create --principal agent:tenant-check \
-     --op vault.kv.delete --verdict needs-approval
    ```
 
 2. **Find the agent's login id.** The agent logs in to Vault with its own
@@ -410,5 +410,5 @@ meho approvals approve <approval-id>
 | Login works, but an operation fails with `permission denied` from Vault | The person's Vault identity has no `tenant_id` metadata, or is not in the tenant's Vault group. An approved write runs as the approver, so this can be the approver's identity. | Step 6 for that person. Check with section 5 of the [per-tenant Vault policies runbook](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md). |
 | The approved test write or its cleanup fails with `permission denied` from Vault | The approver is an `operator`, not a `tenant_admin`. Or the `meho-tenant-admin` policy lacks the `secret/delete/...` grant for the cleanup. | Let a `tenant_admin` approve. Add the grant from section 2.3 of the [per-tenant Vault policies runbook](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md). |
 | The test write or the cleanup answers `write_capability_denied`, and no approval request appears | The requester's Vault identity has no `tenant_id` metadata, or is not in the tenant's `tenant_admin` Vault group. MEHO checks the requester's access before it stores the request. | Step 6 for the requester. For an agent requester, the agent setup in Step 8. |
-| `approve` answers `self_approval_forbidden` | You asked for the change and tried to approve it yourself. | A second person approves, or use the agent-requester pattern (see the box at the top). |
+| `approve` answers `self_approval_forbidden` | You asked for the change and tried to approve it yourself, and you are not a MEHO-SA-Operator. | A MEHO-SA-Operator or an admin approves, or use the agent-requester pattern (see the box at the top). |
 | `meho approvals list` in the new tenant shows nothing, but a request is waiting | The request was made in another tenant. Approvals belong to one tenant. | Log in to the tenant where the request was made, or set up an approver in the new tenant (Step 8). |

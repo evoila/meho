@@ -45,21 +45,26 @@ one-liner + surface + gating claim for all 81 tools — lives in
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import inspect
+import types
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
+from meho_backplane.api.v1 import approvals as approvals_api
 from meho_backplane.api.v1 import connector_tenant_settings, service_grants, service_read_scopes
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.main import app
 from meho_backplane.mcp import registry as mcp_registry
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.handlers import handle_tools_list
-from meho_backplane.mcp.human_only import HUMAN_ONLY_MCP_TOOLS
+from meho_backplane.mcp.human_only import HUMAN_ONLY_MCP_TOOLS, human_only_remediation
 from meho_backplane.mcp.registry import MCP_ADMIN_SCOPE
+from meho_backplane.operations import approval_queue
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
@@ -444,6 +449,159 @@ def test_human_only_verbs_absent_from_both_surfaces() -> None:
     human_only = set(HUMAN_ONLY_MCP_TOOLS)
     assert human_only.isdisjoint(set(WORKING_SURFACE_SORTED))
     assert human_only.isdisjoint(set(OPERATOR_SURFACE_SORTED))
+
+
+#: The three verbs that have no MCP path under any claim set (#3155). The
+#: approval groups of #3325 decide which *people* may approve; they never
+#: add an MCP path.
+_HUMAN_ONLY_VERBS: frozenset[str] = frozenset(
+    {"meho_approvals_approve", "meho_approvals_reject", "meho_agents_grant_elevate"}
+)
+
+#: The functions that decide an approval or run the approved operation:
+#: the queue service and the REST route handlers. An MCP tool handler that
+#: uses one of them would give an agent the approve or reject button.
+_APPROVAL_DECISION_NAMES: frozenset[str] = frozenset(
+    {
+        "approve_request",
+        "reject_request",
+        "resume_dispatch_after_approval",
+        "approve_approval_request",
+        "reject_approval_request",
+        "decide_approval_request",
+    }
+)
+
+#: Name parts that mean a decision verb. No registered tool name may have one.
+_DECISION_NAME_PARTS: frozenset[str] = frozenset({"approve", "reject", "decide", "elevate"})
+
+
+def _code_names(code: types.CodeType) -> set[str]:
+    """Return the global and attribute names *code* and its nested code use."""
+    names = set(code.co_names)
+    for const in code.co_consts:
+        if isinstance(const, types.CodeType):
+            names |= _code_names(const)
+    return names
+
+
+def _names_reached(handler: Callable[..., Any]) -> set[str]:
+    """Return every global and attribute name the handler's code uses.
+
+    Follows the functions of the handler's own module that the handler
+    calls (and that they call), so a helper in the same tool module counts
+    too. It reads the compiled code only, so a docstring that names a
+    decision function does not count.
+    """
+    start = inspect.unwrap(handler)
+    module = getattr(start, "__module__", None)
+    seen: set[int] = set()
+    names: set[str] = set()
+    stack: list[Any] = [start]
+    while stack:
+        func = inspect.unwrap(stack.pop())
+        code = getattr(func, "__code__", None)
+        if code is None or id(func) in seen:
+            continue
+        seen.add(id(func))
+        used = _code_names(code)
+        names |= used
+        for name in used:
+            target = func.__globals__.get(name)
+            if inspect.isfunction(target) and target.__module__ == module:
+                stack.append(target)
+    return names
+
+
+def test_human_only_remediation_answers_for_every_human_only_verb() -> None:
+    """``human_only_remediation`` answers for all three verbs and for no registered tool.
+
+    The map holds exactly the three verbs. Each one gets the "no MCP path"
+    text that points to the console and the CLI. No registered tool name
+    is one of them, so the pre-registry denial in ``tools/call`` and the
+    registry never disagree.
+    """
+    assert set(HUMAN_ONLY_MCP_TOOLS) == _HUMAN_ONLY_VERBS
+    for name in _HUMAN_ONLY_VERBS:
+        message = human_only_remediation(name)
+        assert message is not None, name
+        assert "no MCP path" in message, message
+        assert "console" in message, message
+    for name in mcp_registry._TOOLS:
+        assert human_only_remediation(name) is None, name
+
+
+def test_no_registered_tool_name_is_a_decision_verb() -> None:
+    """No registered tool name says approve, reject, decide or elevate (#3155, #3325).
+
+    A new tool with such a name would be a decision verb under another
+    name. The read tools ``meho_approvals_list`` / ``meho_approvals_get``
+    stay allowed.
+    """
+    offenders = sorted(
+        name for name in mcp_registry._TOOLS if _DECISION_NAME_PARTS & set(name.split("_"))
+    )
+    assert offenders == [], f"tool names that read as a decision verb: {offenders}"
+
+
+def test_no_registered_tool_reaches_an_approval_decision() -> None:
+    """No registered tool handler uses a function that decides an approval.
+
+    Walks every tool in the live registry, wherever it was registered,
+    and reads the names its handler code uses (with the helpers of its
+    own module). None may be an approval decision function. This keeps
+    approve and reject off MCP even when a new tool gets a harmless name.
+    """
+    offenders: list[str] = []
+    for name, (_definition, handler) in sorted(mcp_registry._TOOLS.items()):
+        hits = _names_reached(handler) & _APPROVAL_DECISION_NAMES
+        if hits:
+            offenders.append(f"{name}: {', '.join(sorted(hits))}")
+    assert offenders == [], f"MCP tools that reach an approval decision: {offenders}"
+
+
+async def _helper_that_approves() -> None:
+    """A same-module helper that names an approval decision function (never run)."""
+    _ = approval_queue.approve_request
+
+
+async def _handler_that_reaches_a_decision(arguments: dict[str, Any]) -> None:
+    """A tool handler that reaches a decision through a helper (never run)."""
+    del arguments
+    await _helper_that_approves()
+
+
+async def _handler_without_a_decision(arguments: dict[str, Any]) -> dict[str, Any]:
+    """A tool handler that reaches no decision function (never run)."""
+    return dict(arguments)
+
+
+def test_decision_reach_check_finds_a_decision_behind_a_helper() -> None:
+    """The reach check finds a decision function used by a same-module helper.
+
+    The bad case for :func:`test_no_registered_tool_reaches_an_approval_decision`:
+    a handler that does not name the function itself, but calls a helper
+    that does. A handler without such a helper reaches nothing.
+    """
+    assert "approve_request" in _names_reached(_handler_that_reaches_a_decision)
+    assert "approve_request" in _names_reached(_helper_that_approves)
+    assert _names_reached(_handler_without_a_decision) & _APPROVAL_DECISION_NAMES == set()
+
+
+def test_approval_decision_names_are_real_functions() -> None:
+    """Every name in the decision list is still a real function.
+
+    The reach check matches by name. If one of these functions is renamed,
+    the old name would match nothing and the check would pass for the
+    wrong reason. This test fails first, so the list gets updated.
+    """
+    modules = (approval_queue, approvals_api)
+    missing = [
+        name
+        for name in sorted(_APPROVAL_DECISION_NAMES)
+        if not any(inspect.isfunction(getattr(module, name, None)) for module in modules)
+    ]
+    assert missing == [], f"decision names that are no longer functions: {missing}"
 
 
 # ---------------------------------------------------------------------------

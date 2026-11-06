@@ -1100,7 +1100,10 @@ registration at all.
 
 The map + remediation strings live in `mcp/human_only.py`; the
 registry-absence + wire-behaviour + static re-add guards are in
-`tests/test_mcp_human_only_surface.py`.
+`tests/test_mcp_human_only_surface.py`. The approval groups
+(MEHO-SA-Operators, MEHO-Admins, MEHO-Approvers, #3325) decide only
+*which people* may approve on REST, the command line and the web
+interface; they never open an MCP path.
 
 ### Elevation: the `mcp:admin` scope
 
@@ -1245,10 +1248,11 @@ policy gate (`operations/_validate.py`) runs per call. The write is
 modelled as a **targetless typed op on a synthetic connector** (no
 vendor connector backs it), registered with `safety_level="caution"` +
 `requires_approval=False` — the dial that parks agent principals only
-(`caution` AGENT verdict floor → `needs-approval`) while a human rides
-the default-allow immediate branch. `requires_approval=True` would park
-humans too; `safety_level="dangerous"` would deny agents rather than
-park them.
+(`caution` AGENT verdict floor → `needs-approval`) while a person in the
+web interface runs it at once (a call made with a token waits, #3980).
+`requires_approval=True` would make the web interface wait too; so would
+`safety_level="dangerous"`. For an agent, `dangerous` waits for approval
+just like `caution` (#3980); it is not refused.
 
 Five synthetic connectors follow this mould (natural key
 `(product, "1.x", impl_id)` → wire `connector_id`):

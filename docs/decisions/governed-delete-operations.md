@@ -65,7 +65,9 @@ The four requirements each *tighten* an existing seam; none relaxes one:
   `_check_self_approval`) already refuses `operator.sub == request.principal_sub`
   unless the audited emergency break-glass switch is set. The destructive tier
   **removes even that escape**: for this tier self-approval is refused with no
-  break-glass, and no standing grant can pre-clear it.
+  break-glass, and no standing grant can pre-clear it. (Narrowed later by
+  [approval-groups-and-self-approval.md](approval-groups-and-self-approval.md):
+  a MEHO-SA-Operator may approve their own destructive change.)
 - Standing grants already exclude deletes. `ServicePrincipalGrantService.create`
   refuses delete-shaped op-ids at creation
   (`operations/service_grants.py:136` `_delete_shaped_reason_by_pattern` +
@@ -136,7 +138,9 @@ Reuses the approvals substrate unchanged in mechanism: the dispatcher parks a
 `operations/approval_queue.py`), and a human clears it on a REST/CLI/console
 surface. The destructive tier's specialisation: the verdict is **always**
 `NEEDS_APPROVAL` for a human and **DENY** for an agent (no `requires_approval=False`
-fast path, no grant pre-clear, no self-approval even under break-glass).
+fast path, no grant pre-clear, no self-approval even under break-glass;
+[approval-groups-and-self-approval.md](approval-groups-and-self-approval.md)
+later let a MEHO-SA-Operator approve their own).
 
 ### Requirement 2 — mandatory preview + result-hash binding
 
@@ -189,7 +193,9 @@ render path.
   is required to expose a delete until it is modeled into this tier.
 - **The break-glass `APPROVAL_ALLOW_SELF_APPROVAL` switch does not reach this
   tier.** A single-operator tenant that must run a governed delete uses the
-  agent-requester pattern (`docs/codebase/approvals.md`), never self-approval.
+  agent-requester pattern (`docs/codebase/approvals.md`), or since
+  [approval-groups-and-self-approval.md](approval-groups-and-self-approval.md)
+  a MEHO-SA-Operator who approves their own change.
 
 ## Implementation shape (for the follow-up Tasks)
 
@@ -335,11 +341,12 @@ That is only true for agent principals. A paired add-on that signs in as a
 
 - **Any principal may start a destructive op.** Starting it does not run it.
   The call waits for a human to approve.
-- **Agent principals** (`principal_kind=agent`) are the one exception. For
-  them the tier is DENY. The call does not wait for approval; it is refused
-  (`auth/permissions.py` `_SAFETY_DEFAULT` and `_SAFETY_CEILING` map
-  `destructive` to DENY, applied on the agent branch of
-  `operations/_validate.py::policy_gate`).
+- **Agent principals** (`principal_kind=agent`) were the one exception at
+  first: for them the tier was DENY. Since #3980 an agent's call waits for a
+  person's approval too (`auth/permissions.py` `_SAFETY_DEFAULT` and
+  `_SAFETY_CEILING` map `destructive` to NEEDS_APPROVAL, applied on the
+  agent branch of `operations/_validate.py::policy_gate`). It needs a
+  matching preview hash first, and an agent never approves.
 - **Service and user principals** always wait for approval
   (`NEEDS_APPROVAL`). They are never denied by the tier, and they never run
   without approval (`operations/_validate.py::_non_agent_verdict`, the
@@ -354,8 +361,11 @@ That is only true for agent principals. A paired add-on that signs in as a
   `operations/meta_tools.py`). The blast-radius statement is built when the
   call is parked and is stored on the parked row's `proposed_effect`. It is
   not part of the preview reply.
-- **Approval runs the op under the approver.** A different human approves
-  (no self-approval, not even with break-glass). The op then runs with the
+- **Approval runs the op under the approver.** A human approves: a
+  MEHO-SA-Operator may approve their own delete, everyone else needs a
+  MEHO-SA-Operator or an admin, and break-glass never covers this tier
+  ([approval-groups-and-self-approval.md](approval-groups-and-self-approval.md)).
+  The op then runs with the
   approver's identity
   (`operations/approval_queue.py::resume_dispatch_after_approval`), and the
   audit row names the approver.

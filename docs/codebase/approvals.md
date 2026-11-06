@@ -13,12 +13,22 @@ guard, resume-target fix, write-op secret redaction) + #1503 (G0.20-T3
 Which calls wait for approval depends on the op's safety level and on who
 calls it (an agent, a person, or a service account). The table in
 [agent-permission-model.md](agent-permission-model.md#safety-levels-at-a-glance)
-shows each case.
+shows each case. In short (#3325):
 
-The approval substrate parks `requires_approval` / `caution` / `dangerous` / `destructive`
-dispatches durably and lets an operator approve or reject them
-across **REST, MCP, and CLI** transports. Two layers, one source of
-truth:
+- **A person in the web interface:** `safe` and `caution` run at once.
+  `dangerous`, `destructive` and ops marked `requires_approval` wait.
+- **Every call made with a token, and every agent:** MCP, the `meho`
+  command line and REST, also with a person's own token. Only `safe` runs
+  at once. `caution`, `dangerous` and `destructive` wait.
+- **Service principals** (fixed automation) keep their standing-grant
+  rule: a grant can let `caution` and `dangerous` changes run; without
+  one they wait. `destructive` always waits for a person.
+
+A person approves or rejects a waiting request on **REST, the `meho`
+command line and the web interface** only. Approve and reject have no
+MCP path. Who may approve which request follows the approval groups (see
+[The approval groups and how a person approves](#the-approval-groups-and-how-a-person-approves-3325)).
+Two layers, one source of truth:
 
 - **T4 owns the queue lifecycle** (`backend/src/meho_backplane/operations/approval_queue.py`):
   `create_pending_request`, `approve_request`, `reject_request`,
@@ -27,7 +37,8 @@ truth:
   create; the "decision" row on approve/reject/expire; the
   `approval.withdraw` row when the sender takes the request back).
 - **T5 wires the operator surfaces on top:** `GET /api/v1/approvals/{id}`
-  (inspect), `meho_approvals_{list,get,approve,reject}` MCP tools, and
+  (inspect), the two read MCP tools `meho_approvals_list` and
+  `meho_approvals_get` (see [MCP](#mcp-backendsrcmeho_backplanemcptoolsapprovalspy)), and
   `meho approvals {list,show,result,approve,reject,withdraw}` CLI verbs. Since #3758 no
   approval step is published to Broadcast. `record_approval_step_event`
   records `approval.{pending,approved,rejected,expired,withdrawn}` only for the
@@ -702,15 +713,17 @@ model, or resume endpoint):
    never carries the reason and keeps the group rules below.
 2. **Self-approval guard (requester != approver).** `approve_request`
    raises `SelfApprovalForbiddenError` (→ HTTP 403 `self_approval_forbidden`
-   on REST, invalid-params on MCP) when `operator.sub ==
-   request.principal_sub`, unless the audited **emergency break-glass**
-   switch `APPROVAL_ALLOW_SELF_APPROVAL=true`
+   on REST; the console shows the plain text) when `operator.sub ==
+   request.principal_sub` and none of the self-approval rules below
+   allows it. The person is not a MEHO-SA-Operator, the change did not
+   wait only because it came with a token, and the audited **emergency
+   break-glass** switch `APPROVAL_ALLOW_SELF_APPROVAL=true`
    (`Settings.approval_allow_self_approval`, default `False` =
-   fail-closed) is set. Both wire strings keep the
-   `self_approval_forbidden` token as a prefix and append the
-   exception message, so the `APPROVAL_ALLOW_SELF_APPROVAL` break-glass
-   hint reaches the operator-facing REST `detail` and MCP error message
-   rather than being dropped to a bare token (#1483). Even under break-glass the self-approval writes
+   fail-closed) does not cover it. There is no MCP form of this error:
+   approve has no MCP path. The REST `detail` keeps the
+   `self_approval_forbidden` token as a prefix and appends the
+   exception message, which says who may approve instead and, for a
+   `safe` or `caution` change, names the break-glass switch (#1483). Even under break-glass the self-approval writes
    its decision audit row, so the use is forensically visible. Reject
    has no self-guard. To take back your own pending request, do not
    reject it: use withdraw (see
@@ -753,12 +766,12 @@ model, or resume endpoint):
 
    `APPROVAL_ALLOW_SELF_APPROVAL` is an **emergency** escape, not the
    endorsed single-operator posture: enabling it posture-wide re-opens,
-   for every op, the single-account request+grant hole this guard
-   closes (#1401). Single-operator tenants should park their four-eyes
-   writes under an **agent-requester** (a distinct
-   `principal_kind=agent` `sub`) instead
-   — see [Single-operator tenants: use an agent-requester, not
-   break-glass](#single-operator-tenants-use-an-agent-requester-not-break-glass-1738)
+   for every `safe` and `caution` op, the single-account request+grant
+   hole this guard closes (#1401). On a single-operator tenant, put the
+   operator in MEHO-SA-Operators: they approve their own change on
+   purpose, with a click in the web interface. The agent-requester (a
+   distinct `principal_kind=agent` `sub`) still works too — see
+   [Single-operator tenants](#single-operator-tenants-a-meho-sa-operator-approves-their-own-change-3325-1738)
    below.
 3. **Resume target re-hydration.** The REST `…/approve` route persists
    only `target_id` on the row, so it re-loads the live `Target` by id
@@ -786,6 +799,66 @@ is unchanged in mechanism but now matters for humans too: with humans
 routed to `NEEDS_APPROVAL`, re-running the gate on resume would re-queue
 the call instead of executing it, so the bypass is what lets the
 approved op run.
+
+## The approval groups and how a person approves (#3325)
+
+The rules come from the decision record
+[approval-groups-and-self-approval.md](../decisions/approval-groups-and-self-approval.md).
+Initiative [#3325](https://github.com/evoila/meho/issues/3325) has the
+full table of who may approve what. The code is `_check_approver_group`
+and `_check_self_approval` in `operations/approval_queue.py`.
+
+**Who may approve.** The person's login group decides. MEHO reads the
+group only from the signed login token (`Operator.may_self_approve`,
+read by `auth/jwt.py` from the `meho_tenants` entry of the current
+tenant, or from the `groups` claim on a site with one tenant). No
+request field, header or command-line flag can set it.
+
+| Group | Their own change | Another person's `safe` or `caution` change (also one marked `requires_approval`) | Another person's `dangerous` or `destructive` change |
+|---|---|---|---|
+| MEHO-SA-Operators | yes, at every risk level, on purpose | yes | yes |
+| MEHO-Admins | only a `caution` change that waited because it came with a token, with a click in the web interface | yes | yes |
+| MEHO-Operators | the same as MEHO-Admins | yes | no |
+| MEHO-Approvers | (they cannot run changes) | yes | no |
+| MEHO-Readers | (they cannot run changes) | no | no |
+
+- Agents, service principals and runners never approve, on any path
+  (`NonHumanApprovalError`, checked first).
+- The emergency switch `APPROVAL_ALLOW_SELF_APPROVAL` adds only one
+  thing: anyone may approve their own `safe` or `caution` change. It
+  never reaches `dangerous` or `destructive`.
+- There are no exceptions per system, per connector or for a limited
+  time.
+- An op with a role floor (for example `targets.register` and the
+  `topology.*` writes) also needs an approver with that role, whatever
+  the group (`_check_approver_role_floor`).
+- The groups decide *which people* may approve. They never open an MCP
+  path: approve and reject stay human-only (`mcp/human_only.py`).
+
+**How a person approves.** The web interface is the normal place.
+
+- **Web interface:** a click on **Approve**. The sign-in behind the
+  console session must be recent (`FRESH_SIGN_IN_MAX_AGE_SECONDS`,
+  default 15 minutes) and must have asked for the password. A
+  `destructive` change needs a sign-in of its own, at most
+  `PER_ACTION_SIGN_IN_MAX_AGE_SECONDS` old (default 5 minutes). When the
+  sign-in is too old, the console offers **Sign in to approve**.
+- **Command line:** `meho approvals approve <id>` opens a browser
+  sign-in made only for approvals (the client `meho-cli-approve`, #3979,
+  #5515). It asks for the password, and for the code from the person's
+  authenticator app when the realm asks for one. The same age limits
+  apply. One sign-in may approve several requests inside the window; a
+  `destructive` change needs a sign-in of its own. The stored `meho
+  login` token, an MCP token and an API token never approve.
+- **REST:** the same rule as the command line: the token must come from
+  the approval sign-in. Details:
+  [Approve needs a fresh approval sign-in](#rest-backendsrcmeho_backplaneapiv1approvalspy).
+- **Reject** needs no fresh sign-in, on every surface.
+
+Every approval records who approved (`reviewed_by`), whether it was a
+self-approval (`self_approved`), which rule allowed it (`approval_rule`)
+and how the person proved they were present (`approval_auth`: channel
+`web` or `rest`, method `fresh_sign_in` or `one_time_code`).
 
 ## The "may I approve this?" answer (#3329)
 
@@ -1005,36 +1078,57 @@ person, and was a decision an agent must never make.
 - **MCP:** there is no withdraw tool. Adding one to the agent tool list
   is a separate team decision.
 
-## Single-operator tenants: use an agent-requester, not break-glass (#1738)
+## Single-operator tenants: a MEHO-SA-Operator approves their own change (#3325, #1738)
 
 The self-approval guard enforces requester != approver on the stable
-`sub` claim. On a tenant with **one** human operator this looks like a
-deadlock: that operator parks a `requires_approval` write as a human
-(`USER`) principal, then is the only identity available to approve it,
-so `approve_request` raises `self_approval_forbidden`. The break-glass
-switch `APPROVAL_ALLOW_SELF_APPROVAL` exists for that case — but it is an
+`sub` claim. On a tenant with **one** human operator this used to be a
+deadlock: the operator's change waits, and the only person who could
+approve it is the operator. Since #3328 the main answer is the
+**MEHO-SA-Operators** group:
+
+1. Put the operator in MEHO-SA-Operators (the login group,
+   [keycloak-realm.md](../../docs-site/install/keycloak-realm.md)).
+2. The operator's change waits as before. The wait keeps the preview
+   binding, the blast-radius review and the approval record.
+3. The operator opens the request in the web interface and approves it
+   with a click. The `approval.decision` row records
+   `self_approved: true` and `approval_rule: sa_operator_self_approval`.
+   On the command line the same works with a fresh approval sign-in (see
+   [The approval groups and how a person approves](#the-approval-groups-and-how-a-person-approves-3325)).
+
+This works at every risk level, also for `dangerous` and `destructive`
+changes. A MEHO-Admin is not a MEHO-SA-Operator: a person is in exactly
+one role group per tenant, so a single admin cannot approve their own
+`dangerous` or `destructive` change. Give the single operator the
+MEHO-SA-Operators group for their daily changes.
+
+The break-glass switch `APPROVAL_ALLOW_SELF_APPROVAL` is still an
 **emergency** escape, not the everyday answer. Flipping it posture-wide
-re-opens, for every op, the single-account *request + grant* hole #1401
-was created to close. Whether a deploy has it set is surfaced on
+re-opens, for every `safe` and `caution` op, the single-account
+*request + grant* hole #1401 was created to close, and it never reaches
+`dangerous` or `destructive`. Whether a deploy has it set is surfaced on
 `GET /ready` → `features.approval_queue.effective_posture`
 (`"single_operator_break_glass"` vs the default
 `"four_eyes_enforced"`, #2087).
 
-The everyday answer is an **agent-requester**: park the write under an
+The **agent-requester** pattern below stays valid. It fits when the
+change should run on a schedule, or when a site wants two different
+identities on every change: park the write under an
 **agent principal** (`principal_kind=agent`) rather than under the human.
 An agent principal is a first-class identity — a Keycloak
 `client_credentials` client `agent:<name>` with its own stable `sub`,
 minted by `meho agent-principal register` (see
 [`keycloak-agent-client.md`](../cross-repo/keycloak-agent-client.md)).
 When the agent parks the request, `create_pending_request` sets
-`principal_sub=<agent-sub>` (it always reads `operator.sub` —
-`approval_queue.py:338`). The human operator who later approves carries a
-**distinct** `sub`, so `_check_self_approval`
-(`approval_queue.py:816-831`) takes its `operator.sub != request.principal_sub`
-early-return and the approval clears — **with no break-glass flag and no
-new tunable**, and with the full subject/actor lineage intact (the
+`principal_sub=<agent-sub>` (it always reads `operator.sub`). The human
+operator who later approves carries a **distinct** `sub`, so
+`_check_self_approval` takes its `operator.sub != request.principal_sub`
+early-return, and the group rules for another person's change apply
+(for a `dangerous` or `destructive` change: a MEHO-SA-Operator or a
+MEHO-Admin). The full subject/actor lineage stays intact (the
 decision audit row records the human approver; the request row records
-the agent requester).
+the agent requester). Since #3980 every agent request above `safe`
+waits for a person, also a `dangerous` or `destructive` one.
 
 ### How the agent becomes the requester
 
@@ -1067,11 +1161,11 @@ and it is the difference between the two agent-run entry points in
 
 | Identity shape | How it parks | `principal_sub` | `principal_act` | Approve by the human op |
 |---|---|---|---|---|
-| Direct human op | human dispatches a `requires_approval` write as `USER` | the human's `sub` | `NULL` | **Blocked** — `requester == approver` (needs break-glass) |
-| Human-initiated delegated agent run (`run`) | human launches an agent; agent binds as RFC 8693 *actor* | the human's `sub` | the agent's `sub` | **Blocked** — RFC 8693 subject is the human; `requester == approver` |
-| Autonomous / scheduled agent run (`run_scheduled`) | agent authenticates as itself; **no** delegation bound | the agent's `sub` | `NULL` | **Clears** — distinct `sub`, no break-glass, full audit lineage |
+| Direct human op | human dispatches a write that waits, as `USER` | the human's `sub` | `NULL` | **Clears only for a MEHO-SA-Operator** (or a token `caution` change approved with a web click, or break-glass for `safe` / `caution`); else blocked — `requester == approver` |
+| Human-initiated delegated agent run (`run`) | human launches an agent; agent binds as RFC 8693 *actor* | the human's `sub` | the agent's `sub` | Same as a direct human op — RFC 8693 subject is the human; `requester == approver` |
+| Autonomous / scheduled agent run (`run_scheduled`) | agent authenticates as itself; **no** delegation bound | the agent's `sub` | `NULL` | **Clears** under the group rules for another person's change — distinct `sub`, no break-glass, full audit lineage |
 
-### End-to-end recipe (single-operator four-eyes write)
+### End-to-end recipe (agent-requester write)
 
 1. **Register the agent principal** —
    [`keycloak-agent-client.md`](../cross-repo/keycloak-agent-client.md)
@@ -1086,16 +1180,18 @@ and it is the difference between the two agent-run entry points in
    [`scheduler.md`](scheduler.md); a cron or one-off
    `scheduled_trigger` fires `run_scheduled`, so the
    `requires_approval` op parks with `principal_sub=<agent-sub>`.
-4. **The human operator approves the parked row** — via any surface
-   (REST `/decide`, `meho approvals approve <id>`, MCP). Their `sub`
-   differs from the agent's, so the gate clears and the approved op
-   re-dispatches.
+4. **The human operator approves the parked row** — in the web
+   interface, with `meho approvals approve <id>`, or on REST `/decide`
+   (approve has no MCP path). Their `sub` differs from the agent's, so
+   the self-approval guard does not apply and the approved op
+   re-dispatches. A `dangerous` or `destructive` write needs a
+   MEHO-SA-Operator or a MEHO-Admin as the approver.
 
 ### Troubleshooting — `self_approval_forbidden` on a single-operator tenant
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `approve` returns `self_approval_forbidden` and you are the tenant's only operator | The write was parked under **your own** `sub` — a direct human op, or a human-initiated delegated agent run (where RFC 8693 keeps you the subject). | Re-park the write under an **agent-requester**: wire it as a scheduled trigger under an agent definition (the four-step recipe above) so `run_scheduled` parks it with `principal_sub=<agent-sub>`. Then approve as yourself — your distinct `sub` clears the gate. Reserve `APPROVAL_ALLOW_SELF_APPROVAL` for genuine emergencies; it re-opens the #1401 single-account hole posture-wide. |
+| `approve` returns `self_approval_forbidden` and you are the tenant's only operator | The write was parked under **your own** `sub` — a direct human op, or a human-initiated delegated agent run (where RFC 8693 keeps you the subject) — and you are not in MEHO-SA-Operators. | Put yourself in **MEHO-SA-Operators** (the change applies at your next login), then approve with a click in the web interface. Or re-park the write under an **agent-requester** (the four-step recipe above). Reserve `APPROVAL_ALLOW_SELF_APPROVAL` for genuine emergencies; it re-opens the #1401 single-account hole posture-wide for `safe` and `caution`. |
 
 ### Operator-facing discoverability of this story (#2669)
 
@@ -1297,7 +1393,7 @@ the existing exactly-one-resumer substrate rather than duplicating it:
 
 1. **Capture at the winning resume path.** `resume_dispatch_after_approval`
    — the single execute-after-approve entry point shared by REST `/approve`
-   \+ `/decide`, MCP by-id approve, and the async approve background task
+   \+ `/decide`, the console approve, and the async approve background task
    (#3079) — persists the re-dispatch's reduced result envelope onto
    `approval_request.resume_result` (nullable JSON, migration `0096`) right
    after the dispatch returns. Only the resumer that **won**
@@ -2073,8 +2169,11 @@ the failure from first-use to CI. The console modal
 (`operations/composite.py::enforce_subop_policy`) parks via its own
 `create_pending_request` call and is **not** gated here — a destructive op
 reached as a composite subop is a separate governance seam (a follow-up,
-not this task). In practice an agent cannot reach it: the destructive tier
-is `DENY` for agent principals at `resolve_verdict`.
+not this task). That path still refuses a destructive step on its own: it
+calls `_destructive_binding_refusal` with no preview hash, so the step is
+refused and no approval row is written. A person's approval of the whole
+multi-step run does not cover a destructive step
+(`_covered_by_approved_run`).
 
 ## First governed delete: `vmware.composite.vm.destroy` (#3198)
 
@@ -2124,23 +2223,30 @@ enforcement that #3196/#3197 left, plus one machinery limitation:
   (`consult_and_record_grant` already refuses the tier).
 - **The self-approval break-glass hole.** `_check_self_approval`
   (`operations/approval_queue.py`) honoured `APPROVAL_ALLOW_SELF_APPROVAL`
-  for every tier. It now refuses self-approval of a `dangerous` **or**
-  `destructive` row *unconditionally* (`_NO_SELF_APPROVAL_TIERS`) — the
-  break-glass switch does not reach either tier (decision requirement 1).
+  for every tier. The break-glass switch now never reaches a `dangerous`
+  **or** `destructive` row (`_HIGH_RISK_TIERS`, decision requirement 1).
   #3198 scoped this to `destructive` only, but a delete-class op can
   legitimately register on the reversible `dangerous` tier (e.g. a KV
   secret-version soft-delete) while still being the four-eyes-critical
   action the requirement protects, so #3290 widened the refusal to cover
-  it; `caution` / `safe` still honour break-glass. A single-operator
-  tenant uses the agent-requester pattern, never self-approval.
+  it; `caution` / `safe` still honour break-glass. Since #3328 the
+  group rules decide the rest: a MEHO-SA-Operator may approve their own
+  `dangerous` or `destructive` change (`approval_rule`
+  `sa_operator_self_approval`), and another person's change at these
+  levels needs a MEHO-SA-Operator or a tenant admin (see
+  [Who may approve, by group](#the-approval-groups-and-how-a-person-approves-3325)).
+  A single-operator tenant puts its operator in MEHO-SA-Operators, or
+  uses the agent-requester pattern.
 - **Registration fail-fast.** `_register_in_session` (`operations/typed_register.py`)
   now rejects a `destructive` descriptor declared `requires_approval=False`
   at registration time — an inconsistent row can't exist. Belt-and-suspenders
   with the runtime park guarantee above.
 
-Conformance for the op — no agent path (agent verdict `DENY`), no standing
-grant (`ServicePrincipalGrant` refuses), no self-approval even under
-break-glass, no satellite mint (`MintRefusalCode.OP_NOT_SAFE`), dispatch
+Conformance for the op — an agent's request waits for a person like any
+other destructive request (agent verdict `NEEDS_APPROVAL`, #3980), no standing
+grant (`ServicePrincipalGrant` refuses), no break-glass self-approval
+(only a MEHO-SA-Operator may approve their own), no satellite mint
+(`MintRefusalCode.OP_NOT_SAFE`), dispatch
 refused without a matching hash, park refused without a blast-radius block,
 and the full preview→park→human-approve→audited-resume flow — is pinned in
 `tests/test_connectors_vmware_rest_vm_destroy.py`.
@@ -2339,7 +2445,7 @@ sees that write. One shared module checks it:
 
 **Execution runs as the reviewer. The requester's policy on the second
 target is still enforced.** The operator approval surfaces (REST
-`/approve` and `/decide`, the MCP by-id approve) run the approved call as
+`/approve` and `/decide`, the console approve) run the approved call as
 the reviewer. Without this module, only the reviewer's policy would be
 checked, and an agent's `deny` on the Vault target would be skipped.
 
@@ -2561,7 +2667,7 @@ token-decode + live decouple verification, and a rollback note — lives in
 | `GET` | `/api/v1/approvals` | operator **or** approver | List, newest first, filtered by `status` (default: `pending`; `all` = every state, #5129). Optional `limit` (1..500, no limit when omitted) and `offset`. Optional `order=oldest\|newest` (default `newest`, #3596): `oldest` lists `created_at ASC`. |
 | `GET` | `/api/v1/approvals/{id}` | operator **or** approver | **Inspect one request** (T5). 404 on cross-tenant. |
 | `GET` | `/api/v1/approvals/{id}/result` | **request owner** (any role) | **Read the approved dispatch's result** (#3209). Principal-scoped: only `principal_sub` reads it; any other principal gets 403 `not_request_owner`. Writes an `approval.result` audit row. |
-| `POST` | `/api/v1/approvals/{id}/approve` | **human** operator **or** approver, **fresh approval sign-in** | Approve. 401 `fresh_sign_in_required` / `fresh_sign_in_already_used` without a fresh approval sign-in, or for a destructive request without a sign-in of its own (#3979, #5515). Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1); 403 `human_principal_required` for a machine `principal_kind` (#289). |
+| `POST` | `/api/v1/approvals/{id}/approve` | **human** operator **or** approver, **fresh approval sign-in** | Approve. 401 `fresh_sign_in_required` / `fresh_sign_in_already_used` without a fresh approval sign-in, or for a destructive request without a sign-in of its own (#3979, #5515). Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and no self-approval rule allows it: a MEHO-SA-Operator may approve their own change at every risk level, break-glass covers only `safe` and `caution` (G11.7-T1, #3328); 403 `approval_group_required` for another person's `dangerous` or `destructive` change when the approver is neither a MEHO-SA-Operator nor a tenant admin; 403 `human_principal_required` for a machine `principal_kind` (#289). |
 | `POST` | `/api/v1/approvals/{id}/decide` | **human** operator **or** approver; **fresh sign-in** for `approved` | Decide (`approved` / `rejected`) by id alone. `approved` needs a fresh approval sign-in like `/approve` (#3979, #5515). On every approval it runs the op with the **stored** params (#1503) and returns the outcome in `dispatch_*`. This is the same for a direct op and an agent-run request (#2293): `claim_resume` lets only one caller run it, so when the waiting agent ran it first, `dispatch_status` is `already_resumed`. 403 `human_principal_required` for a machine `principal_kind` (#289). |
 | `POST` | `/api/v1/approvals/{id}/reject` | **human** operator **or** approver | Reject. The op never executes. 403 `human_principal_required` for a machine `principal_kind` (#289). |
 | `POST` | `/api/v1/approvals/{id}/withdraw` | **request sender** (any role, any principal kind) | The sender takes back its own pending request (#4987). Not a decision. 403 `not_request_sender` for anyone else; 409 on a closed request. Writes an `approval.withdraw` audit row. |
@@ -3083,7 +3189,7 @@ parent-link to `request_audit_id`.
 The executed-dispatch row must also carry `parent_audit_id` for the
 chain to replay as one subtree, and both resume paths bind it:
 
-- **Operator surfaces** (REST `/approve` + `/decide`, MCP, UI) —
+- **Operator surfaces** (REST `/approve` + `/decide`, UI) —
   `resume_dispatch_after_approval` →
   `_dispatch_resume_with_bound_context` re-binds `agent_session_id_var`
   \+ `parent_audit_id_var` (token-scoped, alongside `work_ref_var`)
@@ -3430,8 +3536,9 @@ runtime can use the row's `id` (returned from `meho_approvals_get`) to
 construct an elicitation URL of the form
 `meho://approvals/{request_id}/decide`. MCP-2025-11-25 hosts that
 support elicitation URL-mode can open this URL in the operator's
-decision UI; until that lands, the operator approves/rejects via the
-explicit `meho_approvals_{approve,reject}` tools.
+decision UI; until that lands, the operator approves or rejects in the
+web interface or with `meho approvals approve|reject`. There are no MCP
+approve or reject tools (`mcp/human_only.py`).
 
 ## Agent-runtime resume on `approval.{approved,rejected}` (T9 #1117)
 
@@ -3463,17 +3570,17 @@ the op alone: a human must approve it. It needs no standing grant. This is
 the supported way for an add-on to do two-person deletes without a person
 typing each delete on the CLI.
 
-The rule that confuses people: the destructive tier is DENY **only for
-agent principals**. For service and user principals it waits for approval.
-The rule is recorded in
+Since #3980 the destructive tier waits for a person's approval for every
+principal kind, agents included. What differs is who may approve: an agent
+never approves. The rule is recorded in
 [`governed-delete-operations.md`](../decisions/governed-delete-operations.md)
 ("Who may propose").
 
 | Principal kind | Destructive op | Code |
 |---|---|---|
-| `agent` | Refused (DENY). Nothing is parked. | `auth/permissions.py:131` `_SAFETY_DEFAULT` + `:154` `_SAFETY_CEILING`; agent branch of `operations/_validate.py:450` `policy_gate` |
-| `service` | Waits for approval. No grant can approve it in advance. | `operations/_validate.py:362` `_non_agent_verdict` (the `destructive` branch); `operations/service_grants.py:758` `consult_and_record_grant` refuses the tier before any grant lookup |
-| `user` | Waits for approval. | `operations/_validate.py:362` `_non_agent_verdict` |
+| `agent` | Waits for a person's approval. It needs a matching preview hash first. No grant lets it run without a person: the grant limit is `needs-approval`. Agents never approve. | `auth/permissions.py:134` `_SAFETY_DEFAULT` + `:150` `_SAFETY_CEILING`; agent branch of `operations/_validate.py:825` `policy_gate` |
+| `service` | Waits for approval. No grant can approve it in advance, except a delete grant on an instance in sandbox mode (see [service-principal-grants.md](service-principal-grants.md)). | `operations/_validate.py:724` `_non_agent_verdict` (the `destructive` branch); `operations/service_grants.py:1272` `consult_and_record_grant` refuses the tier before any grant lookup |
+| `user` | Waits for approval. | `operations/_validate.py:724` `_non_agent_verdict` |
 
 ### The round trip
 
@@ -3497,9 +3604,11 @@ and `/preview`. Paths are under `backend/src/meho_backplane/`.
    lives on the row's `proposed_effect`. The add-on gets
    `status="awaiting_approval"` and `extras.approval_request_id`. It should
    store that id.
-4. **A human approves.** The approver must be a different person: there is
-   no self-approval for this tier, not even with break-glass
-   (`operations/approval_queue.py:1835` `_check_self_approval`). The approve
+4. **A human approves.** A MEHO-SA-Operator may approve their own delete.
+   Everyone else needs a MEHO-SA-Operator or a tenant admin to approve it,
+   and break-glass never covers this tier
+   (`operations/approval_queue.py` `_check_self_approval`,
+   `_check_approver_group`, #3328). The approve
    step checks the preview hash again (`:1926`
    `_check_destructive_preview_binding`). The decision verbs are human-only
    on every surface, so the add-on cannot approve its own request.
@@ -3586,8 +3695,8 @@ the web console by a tenant admin, a **delete grant**, may cover a delete
 by a service principal. The instance holds only disposable test systems,
 so nothing waits for a person there. Everything else in this document
 stays as it is: people and agents keep their rules, a run approval never
-covers a delete, satellites get no delete, and self-approval stays
-forbidden.
+covers a delete, satellites get no delete, and self-approval follows the
+group rules (only a MEHO-SA-Operator approves their own delete).
 
 - The mode is one instance-wide switch, set at install time and fixed for
   the life of the database (`meho_backplane/sandbox_mode.py`). Every other

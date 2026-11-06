@@ -18,7 +18,7 @@ Then, when an operation needs a second pair of eyes:
 
 | Guide | What you will have at the end |
 |---|---|
-| [Approvals and break-glass](approvals-and-break-glass.md) | A clear path through the four-eyes rule, including the two ways a **single operator** clears a gated write — the recommended agent-requester pattern and the audited emergency break-glass — and how to prove to an auditor which one your deploy runs. |
+| [Approvals and break-glass](approvals-and-break-glass.md) | What waits for approval and who may approve it, how to approve in the web interface or on the command line, how a **single operator** approves their own change as a MEHO-SA-Operator (or with an agent-requester or the emergency break-glass), and how to prove to an auditor which way your deploy runs. |
 | [Add a tenant](tenant-bootstrap.md) | A new tenant with its role groups and first users, each change approved by a second person, a first login that shows the new tenant, and a first secret read from Vault. |
 | [One person in several tenants](several-tenants.md) | A second tenant in Keycloak with its own Vault login role, a person in both tenants, and a switch between them in the web interface, on the command line and in MCP. |
 

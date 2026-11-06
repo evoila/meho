@@ -55,6 +55,12 @@ One sentence per level:
   stores no approval request (#3197). Who may approve it follows the
   group rules (for example a MEHO-SA-Operator). Agents never approve.
 
+So an agent's `caution`, `dangerous` and `destructive` requests all wait
+for a person's approval (#3980). Agents never approve, on any path: not
+their own requests and not anyone else's. Who may approve follows the
+approval groups
+([approvals.md](approvals.md#the-approval-groups-and-how-a-person-approves-3325)).
+
 An op marked `requires_approval` also waits for approval, for every kind of
 login. There are two exceptions. A refusal for an agent login stays a
 refusal. A service account's standing grant can still let the op run, but

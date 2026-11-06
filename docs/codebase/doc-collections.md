@@ -231,8 +231,17 @@ reads `BackendReadiness`, and — **on success only** — writes `readiness`
 / `doc_count` / `last_ingested_at` and transitions `status`. A raising
 probe leaves the row untouched (the route's `session.begin()` rolls back,
 the `probe_target` / `Target.fingerprint` write-back split).
-`set_collection_enabled(session, collection, enabled)` is the
+`set_collection_enabled(session, operator, collection, enabled)` is the
 guarded, idempotent enable/disable transition.
+
+Both change a **global** row (`tenant_id IS NULL`) only for a platform admin
+(`operator.platform_admin`), the same rule as the update path. Anyone else
+gets `DocCollectionGlobalUpdateForbiddenError` (REST 403
+`{"error": "global_collection_update_forbidden"}`). The check runs first:
+the probe backend is not called, and an enable or disable that would change
+nothing is refused too. The REST routes and the console get the check from
+the service. A tenant admin can still probe, enable and disable their own
+tenant's rows, also a tenant row that has the same key as a global row.
 
 ### REST routes (`meho_backplane.api.v1.doc_collections`)
 
@@ -240,10 +249,11 @@ Three **tenant_admin-gated** routes (mirroring the connector
 enable/disable gate):
 
 - `POST /api/v1/doc_collections/{key}/probe` → 200 `BackendReadiness`
-  (row written back), 404 unknown key, 409 forbidden transition, 503
-  backend unavailable (row untouched).
+  (row written back), 403 global row without platform admin, 404 unknown
+  key, 409 forbidden transition, 503 backend unavailable (row untouched).
 - `POST /api/v1/doc_collections/{key}/enable` / `.../disable` → 204,
-  idempotent, 409 on a forbidden move.
+  idempotent, 403 global row without platform admin, 409 on a forbidden
+  move.
 
 ### `/ready` backend configuredness (`meho_backplane.docs_search.readiness_probe`)
 

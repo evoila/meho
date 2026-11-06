@@ -292,6 +292,7 @@ def _client_with_role(
     operator_sub: str,
     role: TenantRole,
     capabilities: list[str] | None = None,
+    platform_admin: bool | None = None,
 ) -> tuple[TestClient, respx.MockRouter, str]:
     """Return a TestClient + respx mock + csrf token for the role-gated routes."""
     keypair, jwks = _make_keypair_and_jwks()
@@ -301,6 +302,7 @@ def _client_with_role(
         tenant_id=str(tenant_id),
         tenant_role=role.value,
         capabilities=capabilities,
+        platform_admin=platform_admin,
     )
     session_id = _seed_session_sync(
         tenant_id=tenant_id,
@@ -678,3 +680,74 @@ def test_empty_state_links_register_flow_for_admin() -> None:
     assert 'href="/ui/corpus/collections"' in body
     # The old dead-end copy is gone from the unprovisioned arm.
     assert "ask an administrator to register and entitle a collection" not in body
+
+
+# ---------------------------------------------------------------------------
+# A global collection: probe / enable / disable need a platform admin
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("verb", "start_status"),
+    [("disable", "ready"), ("enable", "disabled"), ("probe", "provisioning")],
+)
+def test_global_collection_change_403_for_tenant_admin(
+    _restore_registry: None, verb: str, start_status: str
+) -> None:
+    """A tenant admin gets a 403 alert on a global row; the row does not change."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware", tenant_id=None, status_value=start_status)
+    _register_stub(readiness=BackendReadiness(reachable=True, index_built=True, doc_count=9))
+
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.post(
+            f"/ui/corpus/collections/vmware/{verb}",
+            headers=_form_headers(csrf),
+        )
+    finally:
+        mock.stop()
+
+    assert response.status_code == 403, response.text
+    assert "global_collection_update_forbidden" in response.text
+    assert "Traceback" not in response.text
+    row = _load_collection(None, "vmware")
+    assert row is not None
+    assert row.status == start_status
+    assert row.doc_count is None
+
+
+def test_global_collection_change_allowed_for_platform_admin(_restore_registry: None) -> None:
+    """A platform admin can disable, enable and probe a global row in the console."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware", tenant_id=None, status_value="ready")
+    _register_stub(readiness=BackendReadiness(reachable=True, index_built=True, doc_count=9))
+
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
+    try:
+        disable = client.post("/ui/corpus/collections/vmware/disable", headers=_form_headers(csrf))
+        assert disable.status_code == 204, disable.text
+        assert _load_collection(None, "vmware").status == "disabled"
+
+        enable = client.post("/ui/corpus/collections/vmware/enable", headers=_form_headers(csrf))
+        assert enable.status_code == 204, enable.text
+        assert _load_collection(None, "vmware").status == "provisioning"
+
+        probe = client.post("/ui/corpus/collections/vmware/probe", headers=_form_headers(csrf))
+        assert probe.status_code == 200, probe.text
+    finally:
+        mock.stop()
+
+    row = _load_collection(None, "vmware")
+    assert row is not None
+    assert row.status == "ready"
+    assert row.doc_count == 9

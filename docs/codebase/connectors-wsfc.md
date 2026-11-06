@@ -259,7 +259,9 @@ disks offline) are skipped automatically for online disks; scope the run with th
 `Network` / `System Configuration`) to keep it short. The op is `caution`, not
 `safe`, precisely because it is a real, resource-touching validation RUN. It
 writes reports under `%SystemRoot%\Cluster\Reports`; enumerate them with the
-safe `wsfc.cluster.validation-report`.
+safe `wsfc.cluster.validation-report`. The optional `report_name` must be a
+plain file name (1 to 64 letters, digits, spaces, dots, dashes or
+underscores; no `\`, `/` or `..`), so the report always stays in that folder.
 
 ## Sensor pin recipes (checks plane)
 

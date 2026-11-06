@@ -88,8 +88,16 @@ twice: at once, and again after the commit
 `after_commit` event). The listener waits for the outer commit: releasing a
 savepoint (the settings import writes inside `begin_nested`) also fires
 `after_commit`, but saves nothing yet. The announce gate and the broadcast
-overrides clear their 60s caches the same way. Proven by
-`test_policy_cache_cleared_after_commit.py`.
+overrides clear their 60s caches the same way.
+
+A read can also start before the commit and finish after it: it reads the old
+row, awaits its session cleanup, and only then stores the value. Each cache
+keeps a change count per key (`db/change_counter.py::ChangeCounter`). A clear
+bumps the count, and a read stores its value only when the count is still the
+one it took before the read. So a read that overlaps a clear returns its
+answer but leaves the cache empty, and the next read loads the saved row.
+Proven by `test_policy_cache_cleared_after_commit.py`, including the tests
+that pause a read over the commit.
 
 ## CLI
 

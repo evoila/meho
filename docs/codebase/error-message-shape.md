@@ -76,6 +76,16 @@ Examples in current use:
   connector's hand-written licence read, which shows each key masked` —
   see `docs/codebase/spec-ingestion.md`, "Ingested licence reads stay
   off")
+- `ingested_ops_not_accepted` (`call_operation` and `preview_operation`:
+  an ingested op whose target resolves to a connector class that runs
+  only its own hand-written operations. Refused before the call waits for
+  approval and again when an approved call runs; nothing reaches the
+  vendor. A refused call writes one `policy_decision` audit row; a
+  refused preview writes none. The ingest of an API file under the name
+  of such a class answers the same code (REST 422, MCP `-32602`).
+  Message: `ingested_ops_not_accepted: connector <class> runs only its
+  own hand-written operations; ...` — see `docs/codebase/spec-ingestion.md`,
+  "Which connector class ingested operations run on")
 - `receipt_too_large` (`call_operation`: the receipt of a completed run
   could not fit `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`, so the call is
   refused before dispatch and nothing runs — #3641)

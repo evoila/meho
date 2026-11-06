@@ -130,6 +130,11 @@ class Connector(ABC):
     supported_version_range: str | None = None
     priority: int = 0
 
+    #: One plain sentence on what the connector does, shown in the
+    #: "What it does" column of the generated connector list on the docs
+    #: site. ``None`` (the default) leaves the column empty for this row.
+    summary: str | None = None
+
     # G0.28-T1 (#1967) — tri-state dispatchability classification. The
     # default ``"none"`` marks every connector a hand-coded class unless it
     # explicitly opts into a shim tier: ``GenericRestConnector`` sets

@@ -235,6 +235,9 @@ is `0137`. Read "Breaking changes" and "Steps after the upgrade" first.
   details under "Governance").
 - With the built-in OpenBao, each tenant reads and writes only its own
   path, `secret/tenants/<tenant id>/` (#5654).
+- The container image takes the fixed Debian `apt` packages: `apt` and
+  `libapt-pkg7.0` are at version 3.0.4, which fixes CVE-2026-109518
+  (#5808).
 
 ### Governance
 - Who waits for approval (#5764):

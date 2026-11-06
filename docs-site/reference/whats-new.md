@@ -29,6 +29,9 @@ notes.
 - **More secrets stay hidden.** Link secrets are hidden in approvals and
   traces. The Azure connector masks keys in traces. Licence operations
   from a vendor API file stay off for every method.
+- **Security fix in the container image.** The Debian `apt` packages in
+  the base image are updated to a version that fixes a known
+  vulnerability.
 - **Connector kit 1.2.** A connector package can mark address
   parameters, and can remove the operations that a newer version
   dropped.

@@ -16,11 +16,13 @@ public because core code and the public connectors import it:
 
 - `operations/dispatcher.py` and `operations/_errors.py` turn
   `ConnectorAuthError` into the `connector_auth_failed` error envelope.
-- `connectors/profiled.py` and `connectors/_shared/profile_auth.py` use
-  the credential cache and the auth-model check for profile-backed
-  connectors.
-- The `azure`, `entra`, `keycloak` and `phpipam` connectors import the
-  Basic header helper, the credential cache or the error class.
+- `connectors/profiled.py` uses the auth-model check and
+  `session_establish_auth_error` for profile-backed connectors.
+- The `azure`, `entra`, `freeipa`, `keycloak` and `phpipam` connectors
+  import the auth-model check, the Basic header helper (`phpipam`),
+  `session_establish_auth_error` (`freeipa`) or the error class. No
+  connector in this repo uses `CredentialsCache` or `vcf_session_login`;
+  the control flows below are guidance for a connector that does.
 - `connectors/_shared/microsoft_login.py` builds on the same error class.
 
 The test is `backend/tests/test_connectors_vcf_shared_auth.py`.
@@ -32,18 +34,23 @@ The test is `backend/tests/test_connectors_vcf_shared_auth.py`.
 - **`is_acceptable_auth_model(value) -> bool`** — accepts the
   `AuthModel.SHARED_SERVICE_ACCOUNT` enum member, its string value, or
   `None` (the column-not-yet-populated sentinel); rejects everything else.
-- **`VcfTargetLike`** — runtime-checkable Protocol with fields `name`,
-  `host`, `port`, `secret_ref`, `auth_model`. The concrete `Target`
+- **`VcfTargetLike`** — runtime-checkable Protocol with fields `id`,
+  `tenant_id`, `name`, `host`, `port`, `secret_ref`, `auth_model`. The concrete `Target`
   model in `meho_backplane.targets` satisfies it structurally.
-- **`VcfCredentialsLoader`** — async callable resolving a target to
+- **`VcfCredentialsLoader`** — async callable resolving a
+  `(target, operator)` pair to
   `{"username": ..., "password": ...}`. Injected on connector
-  construction; tests override the default loader.
+  construction; tests override the default loader. The default is
+  **`load_credentials_from_vault(target, operator)`**, which reads the
+  target's secret from Vault under the caller's own login.
 - **`CredentialsCache`** — small per-target cache around a
-  `VcfCredentialsLoader`. Methods are all coroutines: `await get(target)`,
+  `VcfCredentialsLoader`. Methods are all coroutines:
+  `await get(target, operator)`,
   `await invalidate(target)`, `await clear()`. Each acquires the same
   internal `asyncio.Lock`, so a rotation or connector teardown cannot
-  race an in-flight load. Property: `cached_targets`. Construct with
-  `CredentialsCache(loader, product_label="phpipam")`; the label goes
+  race an in-flight load. Properties: `cached_targets`, `readers` (the
+  `SecretReaders`). Construct with
+  `CredentialsCache(loader, product_label="my-connector")`; the label goes
   into error messages so an operator can attribute a failure to one
   connector. Since #5619 the cache records which caller read a secret, so
   a second caller reads the target's secret once before it may use the
@@ -56,11 +63,16 @@ The test is `backend/tests/test_connectors_vcf_shared_auth.py`.
   `vcf_session_login` on a non-2xx response, a transport error, or a
   structurally invalid 2xx (empty token).
 - **`vcf_session_login(client, path, *, username, password, target_name,
-  payload_builder, token_extractor, request_headers)`** — POSTs
+  payload_builder, token_extractor, request_headers, request_extensions)`** — POSTs
   credentials to *path* and returns the extracted session token, or
   raises `SessionLoginError` naming the target. The 401-retry-once loop
   around downstream calls stays in the consuming connector; only the
-  login round trip is shared.
+  login round trip is shared. `request_extensions` carries the target's
+  TLS settings for the login request.
+- **`session_establish_auth_error(exc, *, message, target=None,
+  target_name=None)`** — turns an `httpx.HTTPStatusError` from a login into
+  a `ConnectorAuthError` when the status is 401 or 403, else returns `None`.
+  `profiled.py` and `freeipa` use it.
 
 ## Control flow
 
@@ -71,7 +83,7 @@ The test is `backend/tests/test_connectors_vcf_shared_auth.py`.
 2. `auth_headers(target, operator)` checks
    `is_acceptable_auth_model(target.auth_model)` and raises
    `NotImplementedError` when the model is rejected.
-3. `auth_headers` calls `await self._creds.get(target)`, which returns
+3. `auth_headers` calls `await self._creds.get(target, operator)`, which returns
    `{"username": ..., "password": ...}` from the cache (loading on first
    use).
 4. `auth_headers` returns

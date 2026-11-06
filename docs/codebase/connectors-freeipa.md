@@ -336,7 +336,8 @@ The other writes show the generic echo of their parameters.
 - Adding a host that is already a member fails, because FreeIPA lists it in
   `failed`. The message names it with FreeIPA's reason.
 - FreeIPA's answer to an expired session is a 401 by its source code
-  (`ipaserver/rpcserver.py`, `need_login`). The lab proof confirms it.
+  (`ipaserver/rpcserver.py`, `need_login`). The lab proof is still to
+  confirm it.
 - A target that points at a load balancer in front of several IPA servers
   fails the `Referer` check: each server accepts only its own host name.
   Use one target per server.

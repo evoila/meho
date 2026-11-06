@@ -18,9 +18,9 @@ on the `SshConnector` base, built on the PowerShell-over-SSH transport
 `_shared/pwsh` (base64 UTF-16LE `-EncodedCommand` + stdlib `json` parse), with
 the `rke2` approval-parked-write mold for its destructive ops. It complements
 evoila/meho#3256 (the vSphere shared-disk layer *beneath* the guest cluster);
-this connector is the cluster layer *inside* it. Its named consumer is the
-c1sql1 SQL Server FCI (evoila-bosnia/claude-rdc-hetzner-dc#2794 / #2795), whose
-cluster state today is only visible by hand inside the guest.
+this connector is the cluster layer *inside* it. A typical use is a SQL Server
+failover cluster instance, whose cluster state is otherwise only visible by
+hand inside the guest.
 
 **The target is any single cluster node.** The `FailoverClusters` cmdlets talk
 to the local Cluster Service, which is the cluster-wide database, so they fan
@@ -44,6 +44,14 @@ Safety tier is a reach decision per the Initiative #3259 satellite table: reads
 executable only through the Stage-3 composed write gate, #2901); destructive =
 `dangerous` + `requires_approval` (satellite-EXCLUDED by the tier ladder,
 central-dial / on-site only).
+
+A call made with a token (MCP, the command line, REST) runs only `safe` ops at
+once. A `caution` op without its own approval flag then waits for an approval
+click; in the web interface it runs at once (`_person_park_reason` in
+`operations/_validate.py`). An agent's call of any op that is not `safe` waits
+for a person (`auth/permissions.py`). An op with a caller-address field
+(`wsfc.witness.set`) waits for a person on every call, and no standing grant
+covers it (`operations/caller_address.py`).
 
 | op | safety | approval | cmdlet(s) |
 | --- | --- | --- | --- |
@@ -100,7 +108,7 @@ non-parked offline/online on a throwaway role uses the same approval path
   attributes: `product="wsfc"`, `version="2022.x"`, `impl_id="wsfc-ssh"`,
   `POWERSHELL_EXECUTABLE="powershell"`. Ships `fingerprint`, `probe`, `about`,
   the 18 bound-method op shims, `register_operations`, and the operator-less
-  `execute` dispatcher shim. Inherits the per-target asyncssh connection pool,
+  `execute` dispatcher shim. Inherits the asyncssh connection pool (one login per caller and target),
   `_auth_config`, `_run_command`, `_assert_reachable`, and `aclose()` from the
   adapter.
 - **Shared pwsh transport** (`_shared/pwsh.py`, #3260) — `pwsh_run` (the single
@@ -164,21 +172,20 @@ casing difference, the count scripts compare the **stringified** state
 (`"$($_.State)" -eq 'Up'` — case-insensitive in PowerShell) rather than the raw
 enum, and `wsfc.cluster.get` additionally returns the raw per-state count maps
 (`nodes_by_state` / `groups_by_state` / `resources_by_state`), so a state the
-hardcoded scalars don't name still surfaces. The live c1sql1 probe (an OPEN
-acceptance criterion) is where the exact strings get confirmed against a real
-cluster.
+hardcoded scalars don't name still surfaces. The exact strings are not yet
+confirmed against a live cluster.
 
 ### Injection safety
 
 Operator-supplied strings (node / group name, target node, disk-resource name,
-file-share path, `Test-Cluster -Include` categories) are interpolated only
+file-share path, `Test-Cluster -Include` categories and `-ReportName`) are interpolated only
 inside **single-quoted** PowerShell literals via `ps_single_quote` (every
 single-quote character PowerShell accepts — `'` and the typographic quotes U+2018
 to U+201B — is doubled, which is complete escaping inside a single-quoted
 PowerShell string). The
 `Resume-ClusterNode -Failback` value and the `witness_type` are validated against
 bounded enums before they select a fixed cmdlet flag. Every non-parameterized
-script (`cluster.get`, `cluster.quorum`, `validation-report`, the two `list`
+script (`cluster.get`, `cluster.quorum`, `validation-report`, the three `list`
 reads, `dependency-report`, `witness.get`, the fingerprint / probe) is a constant
 with no injection surface. A unit test decodes the `-EncodedCommand` base64 back
 to the script and asserts the single-quote doubling on every parameterized op.
@@ -226,7 +233,9 @@ cluster-membership reasons the issue asks for:
 Uses the base `SshConnector._auth_config` **unchanged** (see the winsrv doc). The
 transport prerequisite is an **OpenSSH server on the cluster node** with
 `powershell` reachable, and the SSH principal must have cluster-administrative
-rights (the `FailoverClusters` cmdlets require it). `probe()` carries no operator,
+rights (the `FailoverClusters` cmdlets require it). The secret also holds a
+`known_hosts` line for the node or `known_hosts_insecure: true` (see the winsrv
+doc). `probe()` carries no operator,
 so its Vault read runs under the synthesised system operator and fails closed to
 `ssh_auth_failed`.
 
@@ -244,7 +253,7 @@ so its Vault read runs under the synthesised system operator and fails closed to
    `connector_id="wsfc-ssh-2022.x"` + the target and invokes the bound handler
    through the policy/audit path. `dangerous` + `requires_approval` ops park at
    `needs-approval` first. The CLI reaches the same path via `meho operation call
-   wsfc-ssh-2022.x <op_id> --params-json '{...}'` (no dedicated `meho wsfc` verb
+   wsfc-ssh-2022.x <op_id> --target <name> --params '{...}'` (no dedicated `meho wsfc` verb
    package — the winsrv / rke2 precedent for SSH-typed connectors).
 
 ### `cluster.test` duration semantics
@@ -281,8 +290,8 @@ Two constraints shape these recipes:
   `groups_failed`, ...) and `wsfc.groups.state` / `wsfc.witness.get` return flat
   dicts — those are the sensor-shaped ops.
 
-The five recipes (`c1sql1` is the named 2-node SQL FCI consumer; substitute your
-own target name). Each shows the op + params + the `assertion` JSON and a runnable
+The five recipes use `sql-cluster` as the target name of a 2-node SQL Server
+failover cluster; substitute your own target name. Each shows the op + params + the `assertion` JSON and a runnable
 `meho sensor create` invocation. The `--target` names the cluster-node target the
 runner dispatches against.
 
@@ -298,9 +307,9 @@ is `critical`.
 ```
 
 ```bash
-meho sensor create --name c1sql1-nodes-up \
+meho sensor create --name sql-cluster-nodes-up \
   --connector-id wsfc-ssh-2022.x --op-id wsfc.cluster.get \
-  --target '{"name": "c1sql1"}' \
+  --target '{"name": "sql-cluster"}' \
   --assertion '{"select":{"path":"$.nodes_up"},"compare":{"type":"threshold","op":"lt","degraded":2,"critical":1}}' \
   --cadence-kind interval --interval-seconds 60 --severity critical
 ```
@@ -317,9 +326,9 @@ than `Online` is `critical` (the equals comparator emits `ok` on match,
 ```
 
 ```bash
-meho sensor create --name c1sql1-fci-online \
+meho sensor create --name sql-cluster-fci-online \
   --connector-id wsfc-ssh-2022.x --op-id wsfc.groups.state \
-  --target '{"name": "c1sql1"}' \
+  --target '{"name": "sql-cluster"}' \
   --params '{"name": "SQL Server (MSSQLSERVER)"}' \
   --assertion '{"select":{"path":"$.state"},"compare":{"type":"equals","value":"Online"}}' \
   --cadence-kind interval --interval-seconds 30 --severity critical
@@ -338,9 +347,9 @@ this only where a witness is expected — a node-majority cluster reads
 ```
 
 ```bash
-meho sensor create --name c1sql1-witness-online \
+meho sensor create --name sql-cluster-witness-online \
   --connector-id wsfc-ssh-2022.x --op-id wsfc.witness.get \
-  --target '{"name": "c1sql1"}' \
+  --target '{"name": "sql-cluster"}' \
   --assertion '{"select":{"path":"$.online"},"compare":{"type":"bool","expect":true}}' \
   --cadence-kind interval --interval-seconds 60 --severity critical
 ```
@@ -356,9 +365,9 @@ meho sensor create --name c1sql1-witness-online \
 ```
 
 ```bash
-meho sensor create --name c1sql1-groups-failed \
+meho sensor create --name sql-cluster-groups-failed \
   --connector-id wsfc-ssh-2022.x --op-id wsfc.cluster.get \
-  --target '{"name": "c1sql1"}' \
+  --target '{"name": "sql-cluster"}' \
   --assertion '{"select":{"path":"$.groups_failed"},"compare":{"type":"threshold","op":"gt","degraded":0,"critical":1}}' \
   --cadence-kind interval --interval-seconds 60 --severity degraded
 ```
@@ -374,16 +383,15 @@ grain (an IP / network-name / disk resource in `Failed`).
 ```
 
 ```bash
-meho sensor create --name c1sql1-resources-failed \
+meho sensor create --name sql-cluster-resources-failed \
   --connector-id wsfc-ssh-2022.x --op-id wsfc.cluster.get \
-  --target '{"name": "c1sql1"}' \
+  --target '{"name": "sql-cluster"}' \
   --assertion '{"select":{"path":"$.resources_failed"},"compare":{"type":"threshold","op":"gt","degraded":0,"critical":1}}' \
   --cadence-kind interval --interval-seconds 60 --severity degraded
 ```
 
-Pinning at least one of these on a live c1sql1 read is the consumer proof for the
-checks plane (an OPEN acceptance criterion — the cluster does not exist yet; see
-*Known issues / scope*).
+These recipes are not yet proven against a live cluster (see *Known issues /
+scope*).
 
 ## Tests
 
@@ -409,21 +417,19 @@ this ordinary unit suite.
 
 No dedicated `meho wsfc` verb package (the winsrv / rke2 precedent for SSH-typed
 connectors). CLI parity is the generic dispatch path — `meho operation call
-wsfc-ssh-2022.x <op_id> --params-json '{...}'` — plus the `wsfc` product token
+wsfc-ssh-2022.x <op_id> --target <name> --params '{...}'` — plus the `wsfc` product token
 added to the OpenAPI `TargetCreate.product` enum (regenerated from the live
 registry, so `meho targets create --product wsfc ...` validates and the generated
 Go client knows the token). The CLI OpenAPI snapshot (`cli/api/openapi.json` +
-the generated `cli/internal/api/client.gen.go`) is regenerated in this PR.
+the generated `cli/internal/api/client.gen.go`) carries the `wsfc` token.
 
 ## Known issues / scope
 
-- **Consumer proof against a live c1sql1 cluster is an OPEN acceptance
-  criterion** — the c1sql1 Windows Server 2022 SQL FCI does not exist yet (it is
-  built by evoila-bosnia/claude-rdc-hetzner-dc#2794 / #2795). The green probe, the
-  governed `groups.move` failover, the approval-parked `evict` / `offline` /
-  `online`, and the live Sensor pin are all deferred to that lab program; the exact
-  `ClusterNodeState` / `ClusterGroupState` / `QuorumType` strings get confirmed
-  against the real cluster there.
+- **No live proof against a Windows Server 2022 cluster yet.** The green probe,
+  the `groups.move` failover, the `evict` / `offline` / `online` writes that wait
+  for approval, and a live sensor are checked by the unit tests only. The exact
+  `ClusterNodeState` / `ClusterGroupState` / `QuorumType` strings are not yet
+  confirmed against a real cluster.
 - **No cloud witness** — `witness.set` supports `disk` / `file_share` /
   `node_majority` only; the cloud witness's `-AccessKey` is a secret that cannot
   ride the pwsh transport (a Vault-brokered flow is a follow-up).
@@ -433,8 +439,11 @@ the generated `cli/internal/api/client.gen.go`) is regenerated in this PR.
 - **`cluster.test` is long-running** — a full `Test-Cluster` can take minutes (the
   handler raises the transport timeout to 15 minutes). Scope it with `include` on
   a busy cluster.
-- Host-key checking is disabled (`known_hosts=None`) at the adapter level for
-  v0.2, shared across the whole SSH family; pinning is deferred repo-wide.
+- Host-key checking is on for the whole SSH family. The target's Vault secret
+  holds a `known_hosts` pin for the host, or `known_hosts_insecure: true` to
+  turn the check off for that one target. A secret with neither stops the
+  connection before any credential is sent (`SshHostKeyUnpinnedError` in
+  `connectors/adapters/ssh.py`).
 
 ## References
 
@@ -445,6 +454,5 @@ the generated `cli/internal/api/client.gen.go`) is regenerated in this PR.
   transport, "building the next estate connector"),
   `docs/codebase/connectors-rke2.md` (approval-parked-write mold),
   `docs/codebase/sensor.md` (the checks-plane conventions the recipes follow).
-- Consumer: evoila-bosnia/claude-rdc-hetzner-dc#2794 / #2795 (the c1sql1 SQL FCI).
 - Cmdlet references (Windows Server 2022 / PowerShell 5.1):
   <https://learn.microsoft.com/en-us/powershell/module/failoverclusters/>.

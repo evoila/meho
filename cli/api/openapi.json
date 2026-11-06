@@ -24384,6 +24384,11 @@
             "type": "object",
             "title": "Proposed Effect"
           },
+          "reveal_secret": {
+            "type": "boolean",
+            "title": "Reveal Secret",
+            "default": false
+          },
           "status": {
             "$ref": "#/components/schemas/ApprovalRequestStatus"
           },

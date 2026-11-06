@@ -174,6 +174,7 @@ func isDestructive(item *api.ApprovalRequestView) bool {
 func showRequest(w io.Writer, header string, d *api.ApprovalRequestView) {
 	fmt.Fprintf(w, "\n%s\n", header)
 	rc := d.ReviewerContext
+	printRevealNotice(w, "  ", d)
 	if rc != nil && rc.Summary != nil && *rc.Summary != "" {
 		fmt.Fprintf(w, "  What it does: %s\n", output.SafeText(*rc.Summary))
 	}

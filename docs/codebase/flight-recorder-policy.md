@@ -34,7 +34,9 @@ REST + CLI, no MCP tool at all.)
   JWT); it accepts no tenant id in the path or body, so a cross-tenant write is
   not expressible. `require_role(TenantRole.TENANT_ADMIN)`. Body
   `TenantFlightRecorderPolicyUpdate` (all fields optional-partial,
-  `extra='forbid'`); returns the resolved `TenantFlightRecorderPolicy`.
+  `extra='forbid'`); returns the stored tenant values as a
+  `TenantFlightRecorderPolicy`. The route calls the shared service
+  `tenancy/policies.py::set_flight_recorder_policy`.
   - `flight_recorder_enabled` (F1) — Boolean, `NOT NULL`. Absent = unchanged;
     `true`/`false` flips the capture default. Explicit `null` is a 422 (no
     inherit state).
@@ -53,6 +55,12 @@ REST + CLI, no MCP tool at all.)
   handler keys off `model_fields_set` (`exclude_unset`), **not** off `None`, so
   the JSON-null-vs-absent distinction is preserved.
 
+The settings file (`GET /api/v1/settings/export`, `POST
+/api/v1/settings/import`, see [settings.md](settings.md)) also carries the
+three tenant fields and each target's `flight_recorder_capture`. The import
+writes the tenant fields through the same `set_flight_recorder_policy`, so
+the audit and cache rules below are the same.
+
 ## Null-vs-absent (the tri-state discipline)
 
 Both routes lean on Pydantic `exclude_unset`: an omitted key leaves the column
@@ -65,7 +73,7 @@ fields carry no `omitempty` and would marshal a nil to an unintended `null`.
 
 Every applied change is folded into the request's `audit_log` row via `audit_*`
 contextvars naming field / old / new (governance-relevant, never silent) —
-`update_flight_recorder_policy` for the tenant fields,
+`tenancy/policies.py::set_flight_recorder_policy` for the tenant fields,
 `_audit_flight_recorder_capture_write` for the target override. Tri-state `None`
 is bound as the `inherit` sentinel because the audit-payload builder drops
 `None` contextvars (mirroring the CA-pin audit's `""` marker). A no-op / absent
@@ -73,9 +81,10 @@ field binds nothing.
 
 ## Cache invalidation
 
-The resolver caches per-tenant policy and per-target override for 60s. Each
-route calls `invalidate_tenant_policy_cache` / `invalidate_target_override_cache`
-on a change so the flip takes effect on the **next dispatch** rather than
+The resolver caches per-tenant policy and per-target override for 60s. A
+change calls `invalidate_tenant_policy_cache` (inside
+`set_flight_recorder_policy`) or `invalidate_target_override_cache` (in the
+target route) so the flip takes effect on the **next dispatch** rather than
 waiting out the TTL or a restart (proven by the without-restart tests in
 `test_api_v1_tenants_flight_recorder.py`, `test_targets_flight_recorder_capture.py`,
 and `test_flight_recorder_config.py`).

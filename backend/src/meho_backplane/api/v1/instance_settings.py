@@ -21,7 +21,10 @@ history need ``tenant_admin`` or ``platform_admin``; every other role gets 403
 ``insufficient_role``. A ``tenant_admin`` works on their own tenant only; a
 file that names another tenant or more than one needs ``platform_admin``. The
 import (preview included) is a human-only verb: a machine principal gets 403,
-so the revision's ``actor_sub`` is always a real person.
+so the revision's ``actor_sub`` is always a real person. The all-tenant export
+and the all-tenant history belong to a ``platform_admin`` who is a person too:
+a machine principal (agent, service, runner) exports and sees its own tenant,
+also when its token carries the platform-admin claim.
 
 Operator-plane only (REST + the ``meho settings`` CLI from #4048): no MCP tool.
 """
@@ -39,7 +42,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.auth.rbac import authorize_tenant_scope, ensure_human_principal
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import Tenant
@@ -178,14 +181,17 @@ async def export(
 ) -> Response:
     """Build ``meho-settings.yaml`` from the live state.
 
-    A ``tenant_admin`` gets their own tenant. A ``platform_admin`` gets every
-    tenant, or the one named by ``tenant_id``. 409 ``settings_export_refused``
-    when stored data holds a secret; ``mistakes`` names each path.
+    A ``tenant_admin`` gets their own tenant. A ``platform_admin`` who is a
+    person gets every tenant, or the one named by ``tenant_id``. A machine
+    principal gets its own tenant, with or without the platform-admin claim
+    (the same rule as :func:`authorize_tenant_scope`). 409
+    ``settings_export_refused`` when stored data holds a secret; ``mistakes``
+    names each path.
     """
     structlog.contextvars.bind_contextvars(audit_op_id=_OP_ID_EXPORT, audit_op_class="read")
     if tenant_id is not None:
         tenant_ids = [authorize_tenant_scope(operator, tenant_id)]
-    elif operator.platform_admin:
+    elif operator.platform_admin and is_human_principal(operator):
         tenant_ids = list((await session.execute(select(Tenant.id))).scalars())
     else:
         tenant_ids = [operator.tenant_id]

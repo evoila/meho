@@ -13,16 +13,21 @@
   caller without platform admin may not use, whether that tenant exists or
   not. A platform admin keeps the lookup and its ``no tenant matches``
   message.
+* The settings export without ``tenant_id`` and the settings history cover
+  every tenant only for a platform admin who is a person. A machine login
+  gets its own tenant.
 """
 
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Iterator
 from typing import Any
 from uuid import UUID
 
 import pytest
+import yaml
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
@@ -36,7 +41,7 @@ from meho_backplane.auth.operator import (
 )
 from meho_backplane.auth.rbac import authorize_tenant_scope
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import Target, Tenant
+from meho_backplane.db.models import InstanceSettingsRevision, Target, Tenant
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import INVALID_PARAMS
@@ -288,3 +293,84 @@ async def test_list_targets_platform_admin_keeps_cross_tenant_list(
     unknown = _list_targets(mcp_client, "no-such-tenant")
     assert unknown["error"]["code"] == INVALID_PARAMS
     assert "no tenant matches" in unknown["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# REST settings export and history
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def settings_client(request: pytest.FixtureRequest) -> Iterator[TestClient]:
+    operator: Operator = request.param
+    app.dependency_overrides[verify_jwt_and_bind] = lambda: operator
+    try:
+        with TestClient(app) as client:
+            yield client
+    finally:
+        app.dependency_overrides.pop(verify_jwt_and_bind, None)
+
+
+_MACHINE_PLATFORM_ADMINS = [
+    build_operator(TenantRole.TENANT_ADMIN, platform_admin=True).model_copy(
+        update={"principal_kind": kind}
+    )
+    for kind in _MACHINE_KINDS
+]
+
+
+def _exported_tenant_ids(client: TestClient) -> list[str]:
+    response = client.get("/api/v1/settings/export")
+    assert response.status_code == 200, response.text
+    return [block["id"] for block in yaml.safe_load(response.text)["spec"]["tenants"]]
+
+
+async def _seed_revision_of_other_tenant() -> None:
+    block = {"id": str(_TENANT_C), "policies": {}, "conventions": [], "targets": []}
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(
+            InstanceSettingsRevision(
+                actor_sub="admin-person",
+                audit_id=uuid.uuid4(),
+                file_sha256="0" * 64,
+                api_version="meho.evoila.com/v1",
+                exported_from=None,
+                spec_before={"tenants": [block]},
+                spec_after={"tenants": [block]},
+                summary={},
+            )
+        )
+
+
+@pytest.mark.parametrize("settings_client", _MACHINE_PLATFORM_ADMINS, indirect=True)
+async def test_machine_login_with_platform_admin_claim_exports_its_own_tenant(
+    settings_client: TestClient,
+) -> None:
+    await _seed_tenants_and_target()
+    assert _exported_tenant_ids(settings_client) == [str(OPERATOR_TENANT_ID)]
+
+
+@pytest.mark.parametrize("settings_client", [_PERSON_PLATFORM_ADMIN], indirect=True)
+async def test_person_platform_admin_exports_every_tenant(settings_client: TestClient) -> None:
+    await _seed_tenants_and_target()
+    assert {str(OPERATOR_TENANT_ID), str(_TENANT_C)} <= set(_exported_tenant_ids(settings_client))
+
+
+@pytest.mark.parametrize("settings_client", _MACHINE_PLATFORM_ADMINS, indirect=True)
+async def test_machine_login_with_platform_admin_claim_sees_own_tenant_history(
+    settings_client: TestClient,
+) -> None:
+    await _seed_tenants_and_target()
+    await _seed_revision_of_other_tenant()
+    response = settings_client.get("/api/v1/settings/history")
+    assert response.status_code == 200, response.text
+    assert response.json() == []
+
+
+@pytest.mark.parametrize("settings_client", [_PERSON_PLATFORM_ADMIN], indirect=True)
+async def test_person_platform_admin_sees_every_revision(settings_client: TestClient) -> None:
+    await _seed_tenants_and_target()
+    await _seed_revision_of_other_tenant()
+    response = settings_client.get("/api/v1/settings/history")
+    assert response.status_code == 200, response.text
+    assert [entry["actor_sub"] for entry in response.json()] == ["admin-person"]

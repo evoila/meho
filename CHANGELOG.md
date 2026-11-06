@@ -94,6 +94,262 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.45.0] - 2026-11-06
+
+**Calls made with a token now run only `safe` operations at once.** This
+holds for MCP, the command line and REST, also with a person's own
+token, and for every agent. Every other change waits for an approval
+click. In the web interface, `caution` changes still run at once. The
+web interface and the command line show for each request whether you
+may approve it.
+
+**The chart now installs the built-in PostgreSQL, Keycloak and OpenBao
+by default, and connects MEHO to them.** An install that brings its own
+database, Keycloak or Vault must turn these parts off before it
+upgrades.
+
+MEHO 0.45.0 also brings connector kit 1.2, an export and import of the
+settings with a preview and a history, approval for every operation
+that connects to an address from the caller, and more hidden secret
+values.
+
+The upgrade runs two database migrations (`0136`, `0137`). The new head
+is `0137`. Read "Breaking changes" and "Steps after the upgrade" first.
+
+### Breaking changes
+- The chart turns on the built-in PostgreSQL, Keycloak and OpenBao by
+  default: `corePostgres.enabled`, `coreKeycloak.enabled` and
+  `coreVault.enabled` are `true`. The chart connects MEHO to them by
+  itself: the database login, the OpenBao address and login role, and
+  the key for credential writes that wait for approval (#5654). What to
+  do: an install that brings its own PostgreSQL, Keycloak or Vault sets
+  the matching key to `false` before the upgrade, for example
+  `--set corePostgres.enabled=false --set coreKeycloak.enabled=false
+  --set coreVault.enabled=false`. Without these keys, Helm stops with an
+  error that names the key. An install that already uses the built-in
+  parts removes `vault.address` and `config.vaultAddr` from its values;
+  `postgres.credentialsSecret` may stay only when it names
+  `<release>-core-postgres-meho`.
+- Every call made with a token runs only `safe` operations at once:
+  MCP, the command line and REST, also with a person's own token, and
+  every agent. `caution`, `dangerous` and `destructive` changes wait for
+  an approval click. In the web interface, `safe` and `caution` run at
+  once; `dangerous`, `destructive` and `requires_approval` wait. An
+  agent's `dangerous` or `destructive` request waits for a person's
+  approval; a `destructive` one also needs its preview first. Service
+  principals keep their standing grants. Sensors run only `safe`
+  operations (#5764). What to do: put at least one person in
+  `MEHO-SA-Operators` before the upgrade. Scripts that run `caution`
+  changes with a token get `awaiting_approval`; give fixed automation a
+  service principal with a standing grant.
+- An operation whose parameter holds an address that MEHO connects to (a
+  URL, a host name, or a host and port) runs at risk level `caution` or
+  higher and waits for a person's approval. An operator override cannot
+  turn this approval off, and a standing grant of a service principal
+  does not run such an operation (#5787). In the public image this
+  covers `pfsense.diag.ping`, `winsrv.storage.iscsi.connect` and
+  `wsfc.witness.set`. What to do: expect approvals for these operations.
+  A sensor on `pfsense.diag.ping` reads `unknown`
+  (`op_not_safe_at_dispatch`); use `net.ping` for sensors. The nine
+  built-in network checks (`net.*`) stay `safe` (#5796).
+- An ingested operation whose path names licences stays off for every
+  HTTP method, also `POST`. It answers `license_read_off`, also when it
+  was turned on by hand (#5797). What to do: use the connector's
+  hand-written licence operations. They show each key masked.
+- A change to the settings of one operation (`meho_connector_edit_op`)
+  writes an audit row of the new class `config_change` (#5794). What to
+  do: a report that finds these changes by `event_class` must look for
+  `config_change`. Older rows of such changes keep the class
+  `operation_execution`.
+
+### Steps after the upgrade
+- Back up the database first. The two migrations change no existing
+  row: `0136` adds the table `instance_settings_revision`, the history of
+  settings imports, whose rows cannot be changed or deleted. `0137` adds
+  `config_change` to the allowed audit event classes. While `0137`
+  checks the existing audit rows, writes to the audit log wait; on a
+  large audit log this takes longer. A downgrade below `0137` stops
+  while a `config_change` row exists. The new head is `0137` (#5655,
+  #5794).
+- The upgrade ends every approval request that still waits, as every
+  upgrade since 0.39.0 does (`release_changed`). Decide waiting requests
+  first, or ask the requesters to send them again.
+- Bring-your-own installs: before the upgrade, set
+  `corePostgres.enabled`, `coreKeycloak.enabled` and `coreVault.enabled`
+  to `false` for each part you bring yourself (#5654).
+- Installs with the built-in parts: remove `vault.address` and
+  `config.vaultAddr` from your values. The chart's NetworkPolicy reaches
+  the built-in PostgreSQL and OpenBao by pod, so it does not use
+  `networkPolicy.postgresCIDR` and `networkPolicy.vaultCIDR` for them
+  (#5654).
+- Before the upgrade, put at least one person in `MEHO-SA-Operators`.
+  Otherwise nobody can approve their own `dangerous` or `destructive`
+  change (#5764, #5799).
+- Tell the people who use the command line, MCP or REST that they will
+  see more waiting requests. They approve in the web interface, or with
+  `meho approvals approve` after a fresh sign-in (#5764).
+- Install the 0.45.0 CLI. It shows who may approve each request
+  (#5763), the step of a running ingest (#5789) and the agent behind an
+  audit row (#5785). The table of `meho approvals list` has the new
+  `APPROVE` column after `RUN`; a script that reads this table should
+  use `--json`.
+- Optional, OpenShift: start from
+  `deploy/values-examples/values-openshift.yaml` (#5767).
+- Optional, a Keycloak realm made with a Keycloak older than 26.4: run
+  `keycloak.authflow.ensure_passkey_code_skip`, so a passkey login skips
+  the one-time code (#5765).
+
+### Connector kit
+- Connector kit 1.2. New names:
+  - `CALLER_ADDRESS_MARKER`: the schema keyword `x-meho-caller-address`.
+    Set it to `true` on a parameter that holds an address MEHO connects
+    to. Such an operation runs at `caution` or higher and waits for
+    approval (#5787).
+  - `register_retired_operations(package, ops)` and `RetiredOp`: a
+    package lists the operations that a newer version removed. At start,
+    MEHO deletes their stored rows, but only the rows that this package
+    owns (#5792).
+- No name was removed or changed, so a package for kit 1.0 or 1.1 keeps
+  working.
+
+### Security
+- Link secrets are hidden in approvals and traces. In a link, MEHO hides
+  the user part (`user:password@`) and the values of signature,
+  credential and token query parameters, for example `X-Amz-Signature`,
+  `X-Amz-Credential`, `sig` and `X-Goog-Signature`. The host, the path
+  and the other parameters stay readable (#5795).
+- The Azure connector masks key and password fields in every
+  flight-recorder trace: ExpressRoute keys, access keys, Automation
+  parameters and content links. Names that end in `connection_string`
+  or `connectionString` are secret names for every connector (#5793).
+- `licenseKeys` and `licenceKeys` are secret names. Their values are
+  hidden in answers, stored answers, vendor error text, broadcast params
+  and approval params. Ingested licence operations stay off for every
+  HTTP method (#5797).
+- An operation that connects to an address from the caller waits for a
+  person's approval. Overrides and standing grants do not skip this
+  approval. The built-in network checks stay `safe`; the probe
+  allow-list (`MEHO_NETDIAG_PROBE_ALLOWLIST`) limits where they connect
+  (#5787, #5796).
+- Token calls and agents run only `safe` operations at once (#5764;
+  details under "Governance").
+- With the built-in OpenBao, each tenant reads and writes only its own
+  path, `secret/tenants/<tenant id>/` (#5654).
+
+### Governance
+- Who waits for approval (#5764):
+  - A call with a token (MCP, command line, REST): only `safe` runs at
+    once.
+  - The web interface: `safe` and `caution` run at once.
+  - An agent: `safe` runs at once; everything else waits for a person.
+  - A service principal: its standing grants keep working.
+  - One approval still finishes one multi-step operation. Its steps that
+    are not `destructive` and not `requires_approval` run under that
+    approval.
+  - A person may approve their own `caution` change that waited only
+    because it came with a token, with a click in the web interface. The
+    command line and REST refuse this approval and point to the web
+    interface. The waiting request says why it waits
+    (`waits_because: token_call`).
+- MEHO shows who may approve (#5763). `GET /api/v1/approvals` and
+  `GET /api/v1/approvals/{request_id}` answer `may_approve` and
+  `may_approve_reason`. The answer of a decision has `self_approved` and
+  `approval_rule`. `meho approvals list` has an `APPROVE` column, and
+  `meho approvals show` has a `May approve` line. The web interface
+  turns Approve off when the answer is no. This is only a sign: MEHO
+  checks again at the click. A self-approval by a MEHO-SA-Operator is
+  confirmed on the command line and in the web interface.
+- An operation can refuse a call before the call waits for approval,
+  for example when a secret is given as a plain value. The call answers
+  `refused_before_approval`. MEHO stores no approval request, sends
+  nothing to the vendor and writes one `denied` audit row. No operation
+  in the public image uses this check yet (#5800).
+- A refused call in an agent run says why, and who made it (#5785). The
+  audit row holds a `reason_code` (`agent_grant_denied`,
+  `role_insufficient`, `read_scope_denied`, `connector_not_allowed`,
+  `agent_reveal_refused` or `policy_denied`) and a short reason. Audit
+  answers name the agent (`actor_sub`, `actor_name`); `meho audit
+  show`, `meho audit query` and `meho audit replay` show it. In an agent
+  run, `meho_status` shows no tenant role higher than the run's own
+  role.
+
+### Added
+- Settings file (#5655). `GET /api/v1/settings/export` writes the
+  policies, conventions and targets of each tenant as one YAML file,
+  `meho-settings.yaml`. `POST /api/v1/settings/import` takes such a file
+  back. With `preview=true` it names every mistake in one sentence and
+  shows exactly what will change, and writes nothing.
+  `GET /api/v1/settings/history` lists every applied import: who, when
+  and what changed. The file never holds a secret. Only a `tenant_admin`
+  (own tenant) or a `platform_admin` may use it, and only a person may
+  import. The command line and the console do not have it yet.
+- Keycloak connector: the new operation
+  `keycloak.authflow.ensure_passkey_code_skip` (`caution`, waits for
+  approval). On a realm made with a Keycloak older than 26.4, a passkey
+  login then skips the one-time code; a password login still asks for
+  it. The operation copies the `browser` flow as `browser with
+  passkeys`, adds the step, and makes the copy the realm's browser
+  flow. To undo it, run `keycloak.realm.update` with
+  `{"browserFlow": "browser"}`. It is tested against answers built from
+  the Keycloak 26.8.1 Admin API code, not yet against a running Keycloak
+  (#5765).
+- A running ingest job shows its step: `phase` (`parse`, `register` or
+  `grouping`) and `phase_started_at`, in
+  `GET /api/v1/connectors/ingest/jobs/{job_id}` and
+  `meho_connector_ingest_status`. `meho connector ingest-status` prints
+  the step, and `meho connector ingest` prints a line each time the step
+  changes (#5789).
+- `GET /api/v1/health` and `meho_status` answer `agent_model_spend`
+  (`model`, `spend_counted`). `meho status` prints a line when the spend
+  of the default agent model is not counted (#5783).
+- `deploy/values-examples/values-openshift.yaml`: values for OpenShift
+  with its default security rule (`restricted-v2`) (#5767).
+
+### Changed
+- The default agent model is `anthropic:claude-sonnet-5-5`
+  (`AGENT_DEFAULT_MODEL`) (#5783).
+- With `global.openshift: true`, OpenShift picks the user id of every
+  pod: MEHO, Valkey, the result cache and the setup Jobs (#5767).
+- The first start may take up to 15 minutes
+  (`probes.startup.failureThreshold: 90`). On an empty database, MEHO
+  first builds the search data of every operation. Later starts take
+  about 20 seconds (#5767).
+- The chart's NetworkPolicy reaches the built-in PostgreSQL and OpenBao
+  by pod. The Linux server update removes the two pod-range keys from
+  its place file (#5654).
+- Appliance: SSH lets only `admin` in, and root's `PATH`, the cron file
+  and the log files follow the CIS rules. The build stops when a CIS
+  rule fails that is on neither the exception list nor the
+  not-applicable list (#5762). The appliance is not published yet.
+
+### Fixed
+- A person whose email is on a special-use domain, such as `.local` or
+  `.test`, can log in. MEHO drops a malformed email claim with a
+  warning, and the login stays valid (#5766).
+- The audit values that an operation sets stay on its own audit row.
+  The next call, the next step and the row around the call do not carry
+  them (#5790).
+- A refused licence read writes one `policy_decision` audit row with the
+  code `license_read_off` (#5794).
+- The spend limit per login counts runs on the Claude 5.5 models: Opus
+  5.5, Sonnet 5.5 and Haiku 5.5 have prices (#5783).
+- `azure.network.expressroute.list` shows Azure's error text in its
+  error result (#5793).
+- When MEHO refuses your approval of your own request, the web interface
+  shows the server's text (#5763).
+- Appliance first start checks the admin password against the real
+  password rules before it changes anything. The wizard and the console
+  name every rule. The console banner says when nobody can log in
+  (#5759).
+
+### Documentation
+- The approval docs match the group rules: who waits, who may approve,
+  how a person approves, and the main way for a single operator. The
+  upgrade notes for 0.45.0 are on the upgrades page (#5799).
+- The decision register records that a plan to rebuild the web
+  interface as a single-page app was withdrawn. Decisions 9 and 10 stay
+  as they are (#5768).
+
 ## [0.44.0] - 2026-11-04
 
 **This is the first release whose public image has no VMware

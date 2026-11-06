@@ -9,6 +9,38 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.45.0](https://github.com/evoila/meho/releases/tag/v0.45.0) — 2026-11-06
+
+- **Token calls run only safe operations at once.** MCP, the command
+  line, REST and agents run only `safe` operations at once. Every other
+  change waits for an approval click. In the web interface, `caution`
+  changes still run at once. Put at least one person in
+  `MEHO-SA-Operators` before you upgrade.
+- **See who may approve.** The web interface and the command line show
+  for each request whether you may approve it, and why not.
+- **The built-in parts are on by default.** The chart installs
+  PostgreSQL, Keycloak and OpenBao and connects MEHO to them. An install
+  that brings its own parts sets `corePostgres.enabled`,
+  `coreKeycloak.enabled` and `coreVault.enabled` to `false` before it
+  upgrades.
+- **Approval for operations that connect to an address you give.** Such
+  an operation waits for a person's approval. The built-in network
+  checks stay safe, so sensors can use them.
+- **More secrets stay hidden.** Link secrets are hidden in approvals and
+  traces. The Azure connector masks keys in traces. Licence operations
+  from a vendor API file stay off for every method.
+- **Connector kit 1.2.** A connector package can mark address
+  parameters, and can remove the operations that a newer version
+  dropped.
+- **Settings file.** Export the settings of a tenant as one file, and
+  import it with a preview and a history of every change.
+- **Smaller changes.** OpenShift picks every pod's user id. The first
+  start may take up to 15 minutes. A running ingest shows its step. The
+  audit log says why a call in an agent run was refused.
+- **Read first.** Two database migrations, a new chart default, and a
+  new approval rule for token calls. See "Breaking changes" and "Steps
+  after the upgrade" in the release notes.
+
 ## [v0.44.0](https://github.com/evoila/meho/releases/tag/v0.44.0) — 2026-11-04
 
 - **The first release without the VMware connectors in the public

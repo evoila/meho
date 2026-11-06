@@ -55,15 +55,22 @@ unit and `firewall_state`. In order:
 
 1. **Packages.** First every package update of the build day, because the
    base image is a fixed serial and OS fixes reach an appliance only with
-   MEHO versions (form-1 design, section 7; #5778): `apt-get upgrade
+   MEHO versions (form-1 design, section 7; #5778): `apt-get update
+   --error-on=any` (a failed download stops the build, so no old package
+   lists are used), then `apt-get upgrade
    --with-new-pkgs` with `APT::Get::Always-Include-Phased-Updates=true`
    (also the updates Ubuntu hands out to a share of the machines at a
    time) and `--force-confdef --force-confold`. Like the update in place
    (`deploy/linux-server/lib/update.sh`), it may add a package and never
-   removes one. A new kernel is installed but not started on the build VM;
-   the appliance starts it. After the packages below, `apt-get -s
+   removes one. `build.sh` already installed the updates in its step 2
+   and restarted the build VM into the newest kernel
+   ([appliance-build.md](appliance-build.md)), so here it installs only
+   what Ubuntu published since. After the packages below, `apt-get -s
    dist-upgrade` with the same package lists must name no package (no
-   `Inst` line), or the build stops and names the packages left. Then
+   `Inst` line), or the build stops and names the packages left. The
+   newest kernel in `/boot` must be the one that runs (`uname -r`), so the
+   scan checks the kernel the appliance starts; if Ubuntu published a
+   kernel during the build, the build stops. Then
    `apt-get install` of `aide`, `aide-common`,
    `openscap-scanner`, `libpam-pwquality`, `libpwquality-tools`,
    `cracklib-runtime` and `apparmor-utils`, which the cloud image does not

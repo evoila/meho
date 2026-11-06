@@ -11,7 +11,8 @@
 #
 #   1. every package update of the build day, the packages the hardening
 #      and meho-host log-server need, and ufw goes; the build stops when an
-#      update is left
+#      update is left, or when a newer kernel than the running one is
+#      installed
 #   2. the scanner files under /opt/meho/appliance/cis, where meho-host check
 #      and the update find them, and oscap-run-sce-script in /usr/local/bin,
 #      so the script checks run from the noexec /tmp
@@ -194,9 +195,11 @@ rule_names() {
 # --- Step 1 ----------------------------------------------------------------
 
 install_packages() {
-    local left
+    local left kernels newest running
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -q ||
+    # --error-on=any: without it, a failed download keeps the old package
+    # lists, and the build would miss the updates published since.
+    apt-get update -q --error-on=any ||
         fail "apt-get update failed, so the packages of the hardening cannot be installed." \
             "check that the build VM reaches the Ubuntu archive (archive.ubuntu.com and security.ubuntu.com over HTTP), then run the build again from step 3."
     # As the update in place does (deploy/linux-server/lib/update.sh): it may
@@ -217,7 +220,17 @@ install_packages() {
         fail "These packages are still older than in the Ubuntu archive, because apt would have to remove another package for them: ${left//$'\n'/, }." \
             "run 'apt-get -s dist-upgrade' on the build VM to see what apt would remove. If that is safe, purge it in install_packages of harden.sh; then run the build again from step 3."
     fi
-    ok "installed every package update of today and ${PACKAGES[*]}; ufw is removed"
+    # build.sh restarts the build VM after the updates of its step 2. A newer
+    # kernel here came out during the build; the scan must not check an
+    # older kernel than the appliance starts.
+    kernels=("$HOST_ROOT"/boot/vmlinuz-*)
+    newest=$(printf '%s\n' "${kernels[@]##*/vmlinuz-}" | sort -V | tail -n 1)
+    running=$(uname -r)
+    if [[ $newest != "$running" ]]; then
+        fail "The build VM runs the kernel $running, but the kernel $newest is installed too: Ubuntu published it during the build, and the scan would check the older kernel." \
+            "destroy the build VM and build again from step 1; step 2 restarts it into the newest kernel."
+    fi
+    ok "installed every package update of today and ${PACKAGES[*]}; ufw is removed; the newest kernel, $running, runs"
 }
 
 # --- Step 2 ----------------------------------------------------------------

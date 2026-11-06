@@ -75,6 +75,8 @@ REAL_TOOLS = (
     "ln",
     "install",
     "dirname",
+    "sort",
+    "tail",
 )
 
 PHASED = "-o APT::Get::Always-Include-Phased-Updates=true"
@@ -113,7 +115,7 @@ STUBS = {
     # apt-get -s prints an "Inst" line for each update it would still install.
     "apt-get": textwrap.dedent("""\
         case "$*" in
-          "update -q") exit "$(cat "$MEHO_FAKE/apt_update_rc")" ;;
+          "update -q --error-on=any") exit "$(cat "$MEHO_FAKE/apt_update_rc")" ;;
           *" upgrade --with-new-pkgs") exit "$(cat "$MEHO_FAKE/apt_upgrade_rc")" ;;
           "-s "*) cat "$MEHO_FAKE/apt_left" ;;
         esac
@@ -128,6 +130,7 @@ STUBS = {
         exit "$(cat "$MEHO_FAKE/scan_rc")"
         """),
     "systemctl": 'case "$1" in is-enabled) exit 0 ;; esac\n',
+    "uname": 'cat "$MEHO_FAKE/uname_r"\n',
     "mount": "",
     "sysctl": "",
     "sshd": 'exit "$(cat "$MEHO_FAKE/sshd_rc")"\n',
@@ -212,6 +215,10 @@ class FakeBuildVM:
         self.host_file("/etc/default/motd-news", MOTD_NEWS)
         self.host_file("/etc/update-manager/release-upgrades", RELEASE_UPGRADES)
         self.host_path("/run").mkdir()
+        # Two kernels, the newest runs. 85 sorts after 149 as text, not as a version.
+        self.host_file("/boot/vmlinuz-6.8.0-85-generic", "")
+        self.host_file("/boot/vmlinuz-6.8.0-149-generic", "")
+        self.answer("uname_r", "6.8.0-149-generic\n")
         self.answer("apt_update_rc", "0")
         self.answer("apt_upgrade_rc", "0")
         self.answer("apt_left", "Reading package lists...\n0 upgraded, 0 newly installed.\n")
@@ -289,7 +296,7 @@ class HardenTests(unittest.TestCase):
 
         self.assertEqual(
             [
-                "apt-get update -q",
+                "apt-get update -q --error-on=any",
                 f"apt-get -y -q {PHASED} -o Dpkg::Options::=--force-confdef "
                 "-o Dpkg::Options::=--force-confold upgrade --with-new-pkgs",
                 "apt-get install -y -q --no-install-recommends "
@@ -321,6 +328,17 @@ class HardenTests(unittest.TestCase):
         result = self.vm.run()
 
         self.assert_fails(result, "could not install the package updates")
+        self.assertEqual([], self.vm.calls("oscap"))
+
+    def test_a_newer_kernel_than_the_running_one_stops_step_1(self) -> None:
+        self.vm.host_file("/boot/vmlinuz-6.8.0-150-generic", "")
+
+        result = self.vm.run()
+
+        self.assert_fails(
+            result,
+            "runs the kernel 6.8.0-149-generic, but the kernel 6.8.0-150-generic is installed too",
+        )
         self.assertEqual([], self.vm.calls("oscap"))
 
     def test_the_scanner_files_stay_on_the_appliance(self) -> None:
@@ -544,6 +562,8 @@ class HardenTests(unittest.TestCase):
 
         self.assert_fails(result, "apt-get update failed")
         self.assertIn("Ubuntu archive", result.stderr)
+        # Nothing installs from old package lists.
+        self.assertEqual(["apt-get update -q --error-on=any"], self.vm.calls("apt-get"))
         self.assertEqual([], self.vm.calls("oscap"))
 
     def test_oscap_exit_code_2_is_a_failing_rule_and_1_an_error(self) -> None:

@@ -12,8 +12,11 @@ columns, so the write lives here once. Each function:
   :class:`~meho_backplane.audit.AuditMiddleware` folds into this request's
   ``audit_log`` row (governance config never changes silently);
 * evicts the matching resolver cache, where there is one (flight recorder,
-  announce gate), so the change governs the next dispatch without waiting out
-  the 60s TTL. The mail allowlist has no cache: it is read on every send.
+  announce gate), at once and again after the session commits
+  (:func:`~meho_backplane.db.after_commit.clear_now_and_after_commit`), so the
+  saved change governs the next dispatch without waiting out the 60s TTL. A
+  read between the write and the commit cannot keep the old policy in the
+  cache. The mail allowlist has no cache: it is read on every send.
 
 Validation (bounds, allowlist grammar) stays with the caller's input model;
 these functions trust their arguments.
@@ -24,8 +27,10 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
+from sqlalchemy.orm import object_session
 
 from meho_backplane.broadcast.announce_gate import invalidate_announce_gate_cache
+from meho_backplane.db.after_commit import clear_now_and_after_commit
 from meho_backplane.db.models import Tenant
 from meho_backplane.flight_recorder.config import invalidate_tenant_policy_cache
 
@@ -65,7 +70,7 @@ def set_flight_recorder_policy(tenant: Tenant, updates: dict[str, Any]) -> list[
 
     *updates* maps a subset of :data:`FLIGHT_RECORDER_FIELDS` to new values
     (``None`` clears a nullable field back to inherit). On any change the
-    per-tenant capture resolver cache is evicted.
+    per-tenant capture resolver cache is evicted, now and after the commit.
     """
     changed: list[str] = []
     for field, new_value in updates.items():
@@ -91,7 +96,10 @@ def set_flight_recorder_policy(tenant: Tenant, updates: dict[str, Any]) -> list[
             audit_flight_recorder_policy_changed=True,
             audit_tenant_id=str(tenant.id),
         )
-        invalidate_tenant_policy_cache(tenant.id)
+        tenant_id = tenant.id
+        clear_now_and_after_commit(
+            object_session(tenant), lambda: invalidate_tenant_policy_cache(tenant_id)
+        )
         _log.info("tenant_flight_recorder_policy_updated", tenant_id=str(tenant.id), fields=changed)
     return changed
 
@@ -133,6 +141,9 @@ def set_announce_gate_enabled(tenant: Tenant, value: bool) -> bool:
         audit_announce_gate_policy_changed=True,
         audit_tenant_id=str(tenant.id),
     )
-    invalidate_announce_gate_cache(tenant.id)
+    tenant_id = tenant.id
+    clear_now_and_after_commit(
+        object_session(tenant), lambda: invalidate_announce_gate_cache(tenant_id)
+    )
     _log.info("tenant_announce_gate_updated", tenant_id=str(tenant.id), enabled=value)
     return True

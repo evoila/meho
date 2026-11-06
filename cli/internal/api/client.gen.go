@@ -1591,6 +1591,7 @@ type ApprovalRequestView struct {
 	// A summary read off the stored result envelope. The result body and the
 	// free-text error stay on the owner-only ``/result`` read.
 	ResumeOutcome  *ApprovalResumeOutcomeView `json:"resume_outcome,omitempty"`
+	RevealSecret   *bool                      `json:"reveal_secret,omitempty"`
 	ReviewedBy     *string                    `json:"reviewed_by"`
 	ReviewedByName *string                    `json:"reviewed_by_name"`
 

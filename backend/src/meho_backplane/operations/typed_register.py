@@ -148,6 +148,7 @@ from meho_backplane.connector_packages import connector_package_of
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations._handler_resolve import import_handler
+from meho_backplane.operations.built_in_check_upgrade import restore_built_in_check_defaults
 from meho_backplane.operations.caller_address import raise_for_caller_address
 from meho_backplane.operations.catalog_release import record_catalog_release
 from meho_backplane.operations.composite_invariant import (
@@ -1732,6 +1733,15 @@ async def _register_in_session(
                 f"(handler_ref={handler_ref!r}). If this is intentional, "
                 "delete the existing endpoint_descriptor row first."
             )
+
+        # A built-in network check stored with the old caller-address values
+        # goes back to its new values before the raise-only update below.
+        restore_built_in_check_defaults(
+            existing,
+            parameter_schema=parameter_schema,
+            safety_level=safety_level,
+            requires_approval=requires_approval,
+        )
 
         existing_text = build_embedding_text(
             summary=existing.summary or "",

@@ -6,7 +6,7 @@
 Covers ``net.ping`` / ``net.trace`` / ``net.path_mtu``:
 
 * all three register under the shared synthetic ``net-probe-1.x`` identity
-  as ``caution`` typed ops that wait for approval;
+  as ``safe`` + ungated typed ops;
 * the probe allowlist gates every op **before** a socket opens (empty ⇒
   refused);
 * the **degrade-not-crash** contract: an unprivileged-ICMP-absent ping
@@ -95,8 +95,6 @@ async def _dispatch(op_id: str, params: dict[str, Any]) -> Any:
         op_id=op_id,
         target=None,
         params=params,
-        # Each net.* call waits for approval; this runs the approved call.
-        _approved=True,
     )
 
 
@@ -119,10 +117,8 @@ def _iprecverr_supported() -> bool:
 
 
 @pytest.mark.parametrize("op_id", ["net.ping", "net.trace", "net.path_mtu"])
-async def test_icmp_ops_registered_as_caution_with_approval(
-    op_id: str, _registered_icmp_ops: None
-) -> None:
-    """Each cohort op lands as a caution row with approval under the net key."""
+async def test_icmp_ops_registered_as_safe_ungated(op_id: str, _registered_icmp_ops: None) -> None:
+    """Each cohort op lands as a safe, ungated typed row under the net key."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         result = await session.execute(
@@ -135,8 +131,8 @@ async def test_icmp_ops_registered_as_caution_with_approval(
         )
         row = result.scalar_one()
     assert row.source_kind == "typed"
-    assert row.safety_level == "caution"
-    assert row.requires_approval is True
+    assert row.safety_level == "safe"
+    assert row.requires_approval is False
 
 
 def test_icmp_module_registers_no_connector_class() -> None:

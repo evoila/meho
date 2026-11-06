@@ -13,17 +13,6 @@ module-level functions the dispatcher routes to with
 `connector_instance=None` / `target=None`; the probe destination is a
 **param**, not a registered `Target`.
 
-**Every `net.*` op waits for approval.** The address field of each op
-(`host`, `url`, or the `resolver` of `net.dns_lookup`) carries the schema
-keyword `x-meho-caller-address: true`. So each op runs at risk level
-`caution` and waits until a person approves the call (the caller-address
-floor, `docs/codebase/spec-ingestion.md`, "Caller-address floor"). A
-sensor runs only `safe` operations, so a sensor cannot use a `net.*` op:
-a new one is refused, and the runner reports an existing one as `unknown`
-with the reason `op_not_safe_at_dispatch`. The sensor sections below
-describe the assertion shapes for a `net.*` answer; they apply to an
-approved call, not to a scheduled sensor.
-
 This page describes the keystone (#2406, Initiative #2405 T1):
 `net.tcp_check` plus the three foundations every sibling op reuses, and
 the sibling ops `net.tls_inspect` (#2407, T2), `net.http_probe` (#2408,
@@ -59,8 +48,17 @@ The op is registered under the natural key
 `(product="net", version="1.x", impl_id="net-probe")`, so the wire
 `connector_id` is `net-probe-1.x`, which round-trips through
 `parse_connector_id` back to `("net", "1.x", "net-probe")`.
-`safety_level="caution"` + `requires_approval=True`: each call waits for
-a person's approval.
+`safety_level="safe"` + `requires_approval=False` make it
+agent-auto-runnable and ungated.
+
+**The nine `net.*` ops need no approval.** Their address fields (`host`,
+`url`, and the `resolver` of `net.dns_lookup`) carry no
+`x-meho-caller-address` marker, so the caller-address floor
+(`docs/codebase/spec-ingestion.md`, "Caller-address floor") does not
+apply to them. The probe allowlist below is their guard. So a Sensor can
+run them. The contract check lists these fields in
+`NOT_CALLER_ADDRESSES` (`tests/_operation_contract_addresses.py`) with
+this reason.
 
 ## `net.dns_lookup` — full `dig` parity (#2409)
 
@@ -122,9 +120,9 @@ system resolver config with no chosen resolver maps to
 
 That opposite default is why the two do not share a parser: reusing the
 SSRF guard verbatim would carry its permissive-when-unset default into a
-surface where unset must mean closed. Each `net.*` call waits for a
-person's approval; this allowlist bounds where an approved call may
-connect.
+surface where unset must mean closed. The `net.*` network checks are
+`safety_level="safe"` (an agent can run them), so the allow-list limits
+where checks can connect.
 
 Matching:
 
@@ -144,9 +142,10 @@ if an operator needs one (#1177: one closed-set config, no DSL).
 #### Per-tenant bound — `MEHO_NETDIAG_PROBE_ALLOWLIST_TENANTS` (#3498)
 
 Every `net.*` op is **targetless** (the destination is a param,
-`target=None`), so the per-target tenant boundary does not apply to it:
-it is the one op family that can reach an address no target in the
-caller's tenant resolves to. Each call waits for a person's approval. The
+`target=None`) and `safety_level="safe"` + `requires_approval=False`, so
+for an **agent** principal it auto-executes with no grant and **bypasses
+the per-target tenant boundary entirely** — it is the one op family that
+can reach an address no target in the caller's tenant resolves to. The
 instance-wide `MEHO_NETDIAG_PROBE_ALLOWLIST` is a **single** knob: on a
 shared instance it cannot be narrowed for one (untrusted) tenant without
 also removing the probe scope other tenants' production sensors depend
@@ -532,9 +531,9 @@ dialed, so it fails the dispatch with `connector_probe_refused` — the same
 shape as `net.tls_inspect`. `host`/`port` in the return dict are
 audit-visible via `raw_payload`.
 
-It shares the `net-probe-1.x` identity, and is `safety_level="caution"` +
-`requires_approval=True`: a read-only handshake that offers no credential
-and sends no application data, to an address the caller gives.
+It shares the `net-probe-1.x` identity, and is `safety_level="safe"` +
+`requires_approval=False`: a read-only handshake that offers no credential
+and sends no application data; the allow-list limits where checks can connect.
 
 ## `net.tls_inspect` — full presented certificate chain (T2, #2407)
 
@@ -604,7 +603,7 @@ timed-out / DNS-failed / non-TLS endpoint returns `handshake=false` with
 a reason code — `timeout` / `refused` / `dns_failure` / `unreachable` /
 `tls_error` — and `status="ok"`; an allowlist refusal instead fails the
 dispatch), and is
-`safety_level="caution"` + `requires_approval=True`. A completed handshake
+`safety_level="safe"` + `requires_approval=False`. A completed handshake
 sends **no** application bytes.
 
 ### Cert-expiry early-warning sensor (#2772)
@@ -910,9 +909,9 @@ audit row carrying the structured envelope in `payload.error`.
   escalation path, not implemented (#2411). `net.path_mtu` reports the
   converged next-hop MTU from the kernel PMTU cache; a full per-hop MTU
   walk (tracepath's `+mtu` detail) is out of scope.
-- `safety_level="caution"` + `requires_approval=True` is the posture of
-  every `net.*` op: its address field carries the caller-address marker,
-  so MEHO raises it to this level also when the registration says less.
+- `safety_level="safe"` (agent-auto-runnable) is the chosen posture; the
+  reviewed alternative `"caution"` (operators auto-run, agents do not)
+  is a one-line change if a security review prefers it.
 - **Read-surface projection (#2496):** because `net.*` registers
   module-level `source_kind='typed'` ops with **no** backing connector
   class, `resolve_authoring_kind`'s resolver replay misses. It keys on

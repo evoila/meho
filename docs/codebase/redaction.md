@@ -81,6 +81,7 @@ All types are Pydantic v2 frozen models, defined in
 | `RedactionResult` | `engine.py` | Engine return value: `redacted` + `manifest` |
 | `SecretFinder` | `patterns.py` | A named pattern written as code: `secret_spans(text)` returns the spans to replace. `patterns.secret_spans(pattern, text)` gives the spans of any named pattern, regex or finder |
 | `BindKeySecretFinder` | `bind_secret.py` | The `bind_key_secret` finder: reads BIND comments and quoted strings the way BIND does |
+| `UrlSecretFinder` | `url_secret.py` | The `url_secret` finder: reports the user part and the secret query values of each URL in a text |
 
 `PATTERN_NAMES` (`patterns.py`) is the source of truth for the named
 catalogue; the policy schema validates `rule.pattern` against it at
@@ -136,6 +137,7 @@ production traffic cannot reach that branch.
 | `password_hash` | A crypt(3) password hash as in `/etc/shadow`: `$1$`, `$2a$`/`$2b$`/`$2x$`/`$2y$`, `$5$`, `$6$`, `$7$`, `$y$`, `$gy$`, `$sha1$`, `$argon2id$`/`$argon2i$`/`$argon2d$`. The match stops at `:`, so the other `/etc/shadow` columns stay readable |
 | `ceph_key` | A Ceph key with its label, as in a keyring file (`key = AQ...==`) and in `ceph auth ls` / `ceph auth get` output (`key: AQ...==`). The value starts with `AQ` (the fixed first bytes of a Ceph key in base64) and is at least 32 characters long, so `key = <path>` and short `key` settings do not match. The value shape decides, so the label may be quoted, as in the JSON output of `ceph auth get -f json` (`"key": "AQ...=="`), or be the end of a longer name (`CEPH_KEY=AQ...==`). The whole `key = value` pair is replaced, like `api_key` |
 | `bind_key_secret` | The value after the `secret` keyword in a BIND `key` block (`secret "<base64>";`, TSIG and rndc keys) and after `cookie-secret` in the `options` block, with or without quotes, also when BIND comments (`/* */`, `//`, `#`) sit between the keyword and the value; the keyword and the comments stay so the file stays readable. Not a regex: `bind_secret.py` first splits the text into comments, quoted strings and code the way BIND's lexer does, then reads the value only inside the same scope. So a `secret` word in a comment can never reach past that comment, a commented-out key block is still hidden, an old secret in a comment between the keyword and its value is hidden together with the value, a key *name* like `"transfer-secret"` or `"my secret"` is never the keyword, and a `#` or `//` inside a quoted string does not start a comment (#4617, #5342 review). A quoted value must be base64 or hex. A value without quotes must be followed by `;` or a comment |
+| `url_secret` | The secret parts of a URL in text, for example a signed download link. The user part before `@` (`user:password`) and the value of each query parameter whose last word is `sig`, `signature`, `credential(s)`, `token`, `secret`, `password`, `passwd`, `pwd` or `apikey`, or that ends in `api_key` (S3 `X-Amz-Signature` / `X-Amz-Credential` / `X-Amz-Security-Token`, Azure SAS `sig`, Google `X-Goog-Signature` / `X-Goog-Credential`). The name is read decoded, and `&amp;` counts as `&`. Only the values are replaced, so the host, the path and the other parameters (such as the expiry time) stay readable. A value that already is a complete `[REDACTED:...]` placeholder (a JWT hidden by the `jwt` rule) is left alone. In the default policy and in the flight recorder policy this rule runs before `api_key`: it reads a query value to its end (`&` or `#`), also past an apostrophe, where the `api_key` rule would stop and take the parameter name with it, so a `token=` value in a link gets the `url_secret` label. Not a regex: `url_secret.py` finds each URL and splits it once. A URL ends at white space, a double quote or an angle bracket. An apostrophe is part of the URL (`/it's/file`, `note=o'clock`); a link written in single quotes ends at its closing quote, the last apostrophe before the end of the URL or before the opening quote of the next link (`['https://a','https://b']` is two links). That apostrophe closes the link only when no `@ / ? & = #` follows it; otherwise it is inside the link (`'https://h/f?q=it's&sig=...` with no closing quote is one link). Each link is read once by its position in the text, so the scan time grows in step with the text length. A secret in the path of a link has no name and is not found |
 | `uuid` | RFC 4122 canonical 8-4-4-4-12 hex |
 | `ipv4` | Dotted-quad with 0-255 per-octet bounds |
 | `ipv6` | Full + compressed RFC 5952 forms |
@@ -372,7 +374,7 @@ falls through to the packaged **default-safe** policy
 The default-safe policy is the load-bearing guarantee: a connector
 landing without a registered override **still gets credentials
 stripped** (`authorization_header`, `bearer_token`, `jwt`, `api_key`,
-`pem_private_key`, `kubeconfig`, `password_hash`, `ceph_key`, `bind_key_secret`). Identifier patterns (`uuid` / `ipv4` / `ipv6` / `fqdn`)
+`pem_private_key`, `kubeconfig`, `password_hash`, `ceph_key`, `bind_key_secret`, `url_secret`). Identifier patterns (`uuid` / `ipv4` / `ipv6` / `fqdn`)
 are deliberately not in the default — most connector responses are
 mostly identifiers, and a global default that redacts them would
 blank operator-facing summaries. Operators wanting them at the global
@@ -999,7 +1001,10 @@ signed-URL/client-identity header is absent by construction:
 | `strict-transport-security`, `x-content-type-options`, `x-frame-options`, `referrer-policy`, `content-security-policy` | `forwarded`, `x-forwarded-*`, `x-real-ip` (client identity / PII) |
 
 **Query strings** (`query.py`, #3841). The vendor-call seam drops the
-query from a recorded URL. A transport that needs the query on the span
+query and the user part from a recorded URL (`_capture_util.py::safe_url`,
+for a parsed URL and for a plain string). A URL inside a recorded body
+keeps its query; the credential-shape net hides its user part and its
+secret query values (`url_secret`). A transport that needs the query on the span
 (Kubernetes: `dryRun`, `fieldManager`) passes it to `redact_query(params,
 safe_names)`. Every parameter name is kept. A value is kept only when its
 name is on the caller's safe list, and it still gets the credential-shape

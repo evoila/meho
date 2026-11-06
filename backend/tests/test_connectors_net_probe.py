@@ -116,10 +116,12 @@ def _make_operator(tenant_id: UUID = _DEFAULT_TENANT_ID) -> Operator:
 async def _dispatch_check_as(params: dict[str, Any], *, tenant_id: UUID) -> OperationResult:
     """Dispatch ``net.tcp_check`` as an operator in *tenant_id*.
 
-    Same approved targetless path as :func:`_dispatch_check`, but with a
-    chosen tenant so the per-tenant bound is exercised on the real
-    dispatch path (the bound sits in the handler, after the permission
-    verdict).
+    Same targetless auto-exec path as :func:`_dispatch_check` — the op is
+    ``safe`` + ``requires_approval=False`` so it runs with no approval
+    prompt — but with a chosen tenant so the #3498 per-tenant bound is
+    exercised on the real dispatch path (the bound catches an agent
+    principal's auto-run exactly because it sits in the handler, after the
+    permission verdict).
     """
     return await dispatch(
         operator=_make_operator(tenant_id),
@@ -127,8 +129,6 @@ async def _dispatch_check_as(params: dict[str, Any], *, tenant_id: UUID) -> Oper
         op_id=_OP_ID,
         target=None,
         params=params,
-        # Each net.* call waits for approval; this runs the approved call.
-        _approved=True,
     )
 
 
@@ -137,8 +137,8 @@ async def _dispatch_check(params: dict[str, Any]) -> OperationResult:
 
     ``target`` is ``None`` (synthetic product, no connector instance /
     registered target); the handler is module-level, so the dispatcher
-    resolves it with ``connector_instance=None``. The op waits for
-    approval, so the helper runs the approved call.
+    resolves it with ``connector_instance=None``. The op is
+    ``requires_approval=False`` so no approval-resume flag is needed.
     """
     return await dispatch(
         operator=_make_operator(),
@@ -146,8 +146,6 @@ async def _dispatch_check(params: dict[str, Any]) -> OperationResult:
         op_id=_OP_ID,
         target=None,
         params=params,
-        # Each net.* call waits for approval; this runs the approved call.
-        _approved=True,
     )
 
 
@@ -183,7 +181,7 @@ def test_net_probe_connector_id_round_trips() -> None:
     assert parse_connector_id(_CONNECTOR_ID) == ("net", "1.x", "net-probe")
 
 
-async def test_net_tcp_check_registered_as_caution_with_approval_typed_op(
+async def test_net_tcp_check_registered_as_safe_ungated_typed_op(
     _registered_net_probe_op: None,
 ) -> None:
     """The descriptor row carries the exact synthetic identity + posture."""
@@ -199,8 +197,8 @@ async def test_net_tcp_check_registered_as_caution_with_approval_typed_op(
         )
         row = result.scalar_one()
     assert row.source_kind == "typed"
-    assert row.safety_level == "caution"
-    assert row.requires_approval is True
+    assert row.safety_level == "safe"
+    assert row.requires_approval is False
 
 
 def test_net_connector_registers_no_connector_class() -> None:
@@ -559,14 +557,16 @@ async def test_agent_in_bounded_tenant_cannot_probe_instance_only_address(
     monkeypatch: pytest.MonkeyPatch,
     _registered_net_probe_op: None,
 ) -> None:
-    """The bound holds on the real dispatch path, for an approved call.
+    """The bound holds on the real auto-exec dispatch path (agent principal).
 
     A ``net.tcp_check`` from a tenant bounded to ``192.168.5.0/24`` against
     ``127.0.0.1`` — an address the instance allowlist permits but the tenant
     scope does not — fails the dispatch with ``connector_probe_refused`` and
     never opens a socket (``open_connection`` is stubbed to fail the test if
-    reached). The bound sits in the handler, after the permission verdict,
-    so it holds also for a call that a person approved.
+    reached). The op is ``safe`` + ``requires_approval=False``, so this IS
+    the auto-exec path an agent principal takes: the bound sits in the
+    handler, after the permission verdict, so no absent approval prompt can
+    bypass it.
     """
 
     async def _boom(*_a: object, **_kw: object) -> object:

@@ -713,7 +713,15 @@ target for MEHO.
 - **Sensors.** A sensor runs only `safe` operations. So a sensor cannot
   use a marked operation: a new one is refused, and the runner reports
   an existing one as `unknown` with the reason `op_not_safe_at_dispatch`.
-  This holds for the `net.*` probes and `pfsense.diag.ping`.
+  This holds for connector operations such as `pfsense.diag.ping`.
+- **Built-in network checks.** The nine `net.*` checks carry no marker.
+  The probe allowlist (`MEHO_NETDIAG_PROBE_ALLOWLIST`) bounds where they
+  connect. So they stay `safe` with no approval, and a sensor can use
+  them. See `docs/codebase/connectors-net-diagnostics.md`. A check row
+  stored earlier with the marker (`caution`, approval on) goes back to
+  `safe` with no approval at the next registration
+  (`operations/built_in_check_upgrade.py`). A disabled row, a stricter
+  level or other values set by hand stay as they are.
 - **The contract check.** Rule 13 (`caller_address`) of
   `tests/test_operation_contracts.py` fails for a parameter that looks
   like an address but has no marker. A field looks like an address by
@@ -721,11 +729,13 @@ target for MEHO.
   `_host` or `_address`) or by its schema `format`. A field that only
   looks like an address is listed with its reason in
   `NOT_CALLER_ADDRESSES` (`tests/_operation_contract_addresses.py`): MEHO
-  and the target never connect to it, or MEHO connects to it only on the
-  target's own host.
+  and the target never connect to it, MEHO connects to it only on the
+  target's own host, or it is the address of a built-in network check.
 
 Tests: `tests/test_caller_address_floor.py` (a fixture operation, no
-connector package) and `tests/test_operation_contract_rules.py`.
+connector package), `tests/test_operation_contract_rules.py`, and
+`tests/test_built_in_checks_no_approval_floor.py` (the built-in checks
+need no approval; `pfsense.diag.ping` keeps the marker).
 
 #### Ingested licence reads stay off
 

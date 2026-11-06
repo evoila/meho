@@ -3,11 +3,12 @@
 
 """Probe allowlist for the ``net.*`` network-diagnostics connector.
 
-The ``net.*`` ops give the backplane a network vantage: they
-open a socket toward an operator-named ``host``/``port``. Unbounded,
-that is a recon primitive against everything the deployment can reach.
+The ``net.*`` ops are network checks. They register
+``safety_level="safe"``, so an agent can run them too. Each one opens a
+socket toward an operator-named ``host``/``port``. Without a limit, a
+check could reach everything the deployment can reach.
 :data:`PROBE_ALLOWLIST_ENV` (``MEHO_NETDIAG_PROBE_ALLOWLIST``) is the
-instance-wide floor that scopes it.
+instance-wide allow-list that limits where checks can connect.
 
 **Inverted semantics vs. the SSRF guard.** The SSRF guard
 (``targets/ssrf_guard.py``) is *deny-non-public-minus-allowlist*: a
@@ -22,9 +23,9 @@ SSRF guard verbatim would carry its permissive-when-unset default into a
 surface where unset must mean closed.
 
 **Per-tenant bound (#3498).** ``net.*`` ops are targetless (the
-destination is a param, ``target=None``), so the per-target tenant
-boundary does not apply to them. Each call waits for a person's approval
-(the caller-address floor). The
+destination is a param, ``target=None``) and ``safe`` +
+``requires_approval=False``, so an agent principal auto-runs them with no
+grant and they bypass the per-target tenant boundary entirely. The
 instance-wide :data:`PROBE_ALLOWLIST_ENV` is a single knob: on a shared
 instance it cannot be narrowed for one (untrusted) tenant without
 removing the probe scope other tenants' sensors depend on.

@@ -238,6 +238,94 @@ async def test_finished_run_stamps_cost_and_applies_consumption(
         assert r.requests_consumed == 1
 
 
+async def test_streamed_run_stamps_cost_and_applies_consumption(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A streamed run is charged like a run that is not streamed.
+
+    The console and the REST stream route both use ``stream_events``. The
+    run's row gets its cost, and the person's three budget buckets grow by
+    the run's tokens and cost.
+    """
+    await _seed_tenant_and_definition()
+    input_tokens = 1_500
+    output_tokens = 400
+    invoker = _invoker_with(
+        _final_text_with_usage(
+            "streamed",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+    )
+
+    op = _make_operator(sub="agent-consumption-streamed")
+    run_ids = {rid async for rid, _event in invoker.stream_events(op, "consumption-reader", "go")}
+    assert len(run_ids) == 1
+    (run_id,) = run_ids
+
+    pricing = MODEL_PRICING["anthropic:claude-sonnet-5-5"]
+    expected_cost = (
+        pricing.input * Decimal(input_tokens) + pricing.output * Decimal(output_tokens)
+    ) / Decimal(1_000_000)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(select(AgentRunRow).where(AgentRunRow.id == run_id))
+        ).scalar_one()
+        rows = (
+            (
+                await session.execute(
+                    select(IdentityBudget)
+                    .where(IdentityBudget.principal_sub == op.sub)
+                    .where(IdentityBudget.tenant_id == _TENANT)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert row.status == AgentRunStatus.SUCCEEDED.value
+    assert expected_cost > 0
+    assert row.cost == expected_cost
+    assert {r.window_kind for r in rows} == {"daily", "weekly", "monthly"}
+    for r in rows:
+        assert r.tokens_consumed == Decimal(input_tokens + output_tokens)
+        assert r.cost_consumed == expected_cost
+        assert r.requests_consumed == 1
+
+
+async def test_streamed_run_that_fails_charges_nothing(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A streamed run that ends with an error gets no cost and no charge, like other runs."""
+    await _seed_tenant_and_definition(name="stream-loop-forever")
+    invoker = AgentInvoker(
+        runtime=PydanticAgentRun(
+            model_factory=lambda: FunctionModel(
+                lambda messages, info: ModelResponse(
+                    parts=[ToolCallPart("nonexistent", {})],
+                    usage=RequestUsage(input_tokens=100, output_tokens=10),
+                )
+            )
+        )
+    )
+    op = _make_operator(sub="agent-consumption-streamed-failed")
+    events = [event async for _rid, event in invoker.stream_events(op, "stream-loop-forever", "go")]
+    assert events[-1].kind.value == "error"
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(IdentityBudget).where(IdentityBudget.principal_sub == op.sub)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert rows == []
+
+
 async def test_run_with_cached_prompt_tokens_charges_each_token_once(
     stub_embedding_service: AsyncMock,
 ) -> None:

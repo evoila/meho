@@ -179,7 +179,10 @@ PyYAML (`yaml`, the C loader and dumper when libyaml is present);
 
 - Tests: `backend/tests/test_connectors_shared_api_file_secrets.py` (one
   test per trick from the code reviews), and the tests of the three reads.
-- The reads: `connectors-vcf-fleet.md`, `connectors-hcx.md`,
-  `connectors-vmware-rest.md` (the SSO Admin read), `connectors-srm.md`,
-  `connectors-vr.md`.
+- The reads:
+  - `connectors-vcf-fleet.md` (in the private connectors repository)
+  - `connectors-hcx.md` (in the private connectors repository)
+  - `connectors-vmware-rest.md` (in the private connectors repository), the SSO Admin read
+  - `connectors-srm.md` (in the private connectors repository)
+  - `connectors-vr.md` (in the private connectors repository)
 - The general redaction rules: `redaction.md`.

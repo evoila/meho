@@ -153,6 +153,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import object_session
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import ensure_human_principal, require_role
@@ -172,6 +173,7 @@ from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.connectors.schemas import AuthModel, CandidateHint, FingerprintResult
 from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
 from meho_backplane.connectors.vault.tenant_scope import is_plain_kv_path, rendered_tenant_prefix
+from meho_backplane.db.after_commit import clear_now_and_after_commit
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
@@ -718,8 +720,8 @@ def _audit_flight_recorder_capture_write(
     off *t* (``t.flight_recorder_capture``), folds the tri-state before/after
     into this request's ``audit_log`` payload (via ``audit_*`` contextvars the
     :class:`~meho_backplane.audit.AuditMiddleware` reads) + a WARN, and evicts
-    the resolver's per-target cache so the flip takes effect on the next
-    dispatch. Called by ``create_target`` (a non-inherit initial value) and
+    the resolver's per-target cache, now and after the commit, so the flip
+    takes effect on the next dispatch. Called by ``create_target`` (a non-inherit initial value) and
     ``update_target`` (the override sent AND changed).
     """
     after = t.flight_recorder_capture
@@ -738,9 +740,13 @@ def _audit_flight_recorder_capture_write(
         flight_recorder_capture_after=_fr_capture_audit_value(after),
     )
     # Evict the resolver's per-target override cache so the change is visible on
-    # the next dispatch instead of waiting out the 60s TTL. Harmless no-op on a
-    # freshly-created target id (not yet cached).
-    invalidate_target_override_cache(t.id)
+    # the next dispatch instead of waiting out the 60s TTL: now, and again after
+    # the request's session commits, so a read between the two cannot keep the
+    # old override. Harmless no-op on a freshly-created target id (not yet cached).
+    target_id = t.id
+    clear_now_and_after_commit(
+        object_session(t), lambda: invalidate_target_override_cache(target_id)
+    )
 
 
 def _registered_products() -> set[str]:

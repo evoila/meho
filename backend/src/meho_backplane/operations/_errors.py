@@ -88,6 +88,7 @@ __all__ = [
     "result_no_connector",
     "result_no_target",
     "result_object_changed_since_approval",
+    "result_park_check_refused",
     "result_preview_changed_since_approval",
     "result_rate_limited",
     "result_receipt_too_large",
@@ -1034,6 +1035,31 @@ def result_preview_binding_required(op_id: str, reason: str, duration_ms: float)
         error=f"denied: {reason}",
         duration_ms=duration_ms,
         extras={"error_code": "preview_binding_required", "reason": reason},
+    )
+
+
+def result_park_check_refused(op_id: str, reason: str, duration_ms: float) -> OperationResult:
+    """The op's check before the wait for approval refused the call.
+
+    The op needs approval, and its registered check
+    (:func:`~meho_backplane.operations._preview.run_park_check`) found a
+    param that must not be stored in an approval request, for example a
+    secret given as a plain value. MEHO stores no approval request and
+    sends nothing to the vendor; the caller fixes the call and sends it
+    again. Preview returns the same text. ``status`` is ``"denied"`` with a
+    distinct ``error_code``. *reason* comes from the check and can name an
+    exception class, so it goes through :func:`_sanitize_free_text`.
+    """
+    reason = _sanitize_free_text(reason)
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=(
+            f"denied: {reason}. MEHO does not store this call for approval; "
+            "fix the call and send it again"
+        ),
+        duration_ms=duration_ms,
+        extras={"error_code": "refused_before_approval", "reason": reason},
     )
 
 

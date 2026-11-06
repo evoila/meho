@@ -800,6 +800,7 @@ def _isolate_global_registries() -> Iterator[None]:
     ``connectors.registry._REGISTRY`` / ``_REGISTRY_V2``,
     ``operations.typed_register._TYPED_OP_REGISTRARS``,
     ``operations._preview._PREVIEW_BUILDERS`` / ``_PERMISSION_PREFLIGHTS``,
+    ``operations._park_check._PARK_CHECKS``,
     and the dispatcher's per-process caches
     ``operations._handler_resolve._HANDLER_CACHE`` /
     ``_CONNECTOR_INSTANCE_CACHE``. None had a process-wide per-test
@@ -841,6 +842,7 @@ def _isolate_global_registries() -> Iterator[None]:
     from meho_backplane.connectors import registry as conn_reg
     from meho_backplane.mcp import registry as mcp_reg
     from meho_backplane.operations import _handler_resolve as handler_resolve
+    from meho_backplane.operations import _park_check as park_check_reg
     from meho_backplane.operations import _preview as preview_reg
     from meho_backplane.operations import dispatcher, set_default_reducer
     from meho_backplane.operations import typed_register as typed_reg
@@ -866,6 +868,7 @@ def _isolate_global_registries() -> Iterator[None]:
     # + restore them with the other process-global registries.
     preview_builders = dict(preview_reg._PREVIEW_BUILDERS)
     permission_preflights = dict(preview_reg._PERMISSION_PREFLIGHTS)
+    park_checks = dict(park_check_reg._PARK_CHECKS)
     default_reducer = dispatcher._DEFAULT_REDUCER
     try:
         yield
@@ -887,6 +890,8 @@ def _isolate_global_registries() -> Iterator[None]:
         preview_reg._PREVIEW_BUILDERS.update(preview_builders)
         preview_reg._PERMISSION_PREFLIGHTS.clear()
         preview_reg._PERMISSION_PREFLIGHTS.update(permission_preflights)
+        park_check_reg._PARK_CHECKS.clear()
+        park_check_reg._PARK_CHECKS.update(park_checks)
         set_default_reducer(default_reducer)
 
 

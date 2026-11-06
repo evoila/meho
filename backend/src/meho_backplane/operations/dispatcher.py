@@ -363,6 +363,7 @@ from meho_backplane.operations._lookup import (
     parse_connector_id,
 )
 from meho_backplane.operations._op_miss import op_miss_result
+from meho_backplane.operations._park_check import park_check_refusal
 from meho_backplane.operations._preview import (
     BLAST_RADIUS_KEY,
     PreviewContext,
@@ -3195,6 +3196,10 @@ async def _audit_denied_and_return(
     when the handler returns the refusal (#4275); this row records the step's
     decision, so the step keeps its own record (#3733).
 
+    The op's own check before the wait for approval
+    (:func:`~meho_backplane.operations._park_check.park_check_refusal`)
+    uses this path too.
+
     #4669: when the row commits, the returned result carries its ``audit_id``,
     like an error result does. The parent operation's own row replaces it on
     the caller's answer for a sub-op (:func:`_audit_returned_result`).
@@ -3233,6 +3238,11 @@ async def _handle_needs_approval(
     ``"needs_approval"``. Opens its own DB session (same pattern as
     :func:`audit_safe`) so the pending row + request audit
     row commit atomically without coupling to any outer transaction.
+
+    When the op's check before the wait for approval refuses the call
+    (:func:`~meho_backplane.operations._park_check.park_check_refusal`), the
+    park is refused with ``refused_before_approval`` before anything else
+    runs, and no approval row is written.
 
     When the op's park-time permission preflight says the write will be
     denied, the park is refused with ``write_capability_denied`` and no
@@ -3286,6 +3296,31 @@ async def _handle_needs_approval(
     )
 
     run_id = current_agent_run_id_var.get()
+
+    # An op can turn on a check that runs before its call waits for
+    # approval (``_park_check.register_park_check``). It refuses a param
+    # that must not be stored in an approval request, for example a secret
+    # given as a plain value. It runs first, so nothing of the call is
+    # stored when it says no. The refusal is audited like the ones below.
+    refusal = await park_check_refusal(
+        op_id=op_id,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+        duration_ms=duration_ms,
+    )
+    if refusal is not None:
+        return await _audit_denied_and_return(
+            refusal,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
 
     # G11.7 follow-up (#1437): give an op that can compute a
     # side-effect-free preview (notably ``k8s.apply``'s server-dry-run) a

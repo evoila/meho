@@ -619,7 +619,7 @@ VMware's corrections live in `connectors/vmware_rest/ingest_corrections.py`:
 - a VI-JSON operation whose summary another operation of the same spec shares
   gets its managed object type in front.
 
-See connectors-vmware-rest.md.
+See connectors-vmware-rest.md (in the private connectors repository).
 
 #### Catalog safety overlay (#3340)
 

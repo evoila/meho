@@ -512,7 +512,8 @@ log line.
   #2833 connector read-op coverage). Vendor: `rke2 etcd-snapshot list` —
   `docs.rke2.io/datastore/backup_restore` (Name/Location/Size/Created table);
   JSON flag requested at `k3s-io/k3s#5130` (schema/availability undocumented).
-- Mold: holodeck-ssh (G3.18 #2145 / `docs/codebase/connectors-holodeck.md`),
+- Mold: holodeck-ssh (`docs/codebase/connectors-holodeck.md`, in the private
+  connectors repository),
   bind9-ssh (`docs/codebase/connectors-bind9.md`).
 - Cross-repo coordination: `docs/cross-repo/rke2-infra-coordination.md`.
 - Field case: `claude-rdc-hetzner-dc#615` (RKE2 join-token rotation).

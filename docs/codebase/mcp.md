@@ -1100,7 +1100,10 @@ registration at all.
 
 The map + remediation strings live in `mcp/human_only.py`; the
 registry-absence + wire-behaviour + static re-add guards are in
-`tests/test_mcp_human_only_surface.py`.
+`tests/test_mcp_human_only_surface.py`. The approval groups
+(MEHO-SA-Operators, MEHO-Admins, MEHO-Approvers, #3325) decide only
+*which people* may approve on REST, the command line and the web
+interface; they never open an MCP path.
 
 ### Elevation: the `mcp:admin` scope
 

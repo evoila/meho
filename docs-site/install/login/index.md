@@ -19,8 +19,8 @@ on each login client copies them into the token.
 | Group | Role in MEHO | What the person can do |
 |---|---|---|
 | `MEHO-Readers` | `read_only` | Read only. |
-| `MEHO-Operators` | `operator` | Run actions. Risky changes wait for a second person. |
-| `MEHO-SA-Operators` | `operator` | Same as Operators for now. Self-approval comes later ([#3325](https://github.com/evoila/meho/issues/3325)). |
+| `MEHO-Operators` | `operator` | Run actions. Their `dangerous` and `destructive` changes wait for a MEHO-SA-Operator or an admin. |
+| `MEHO-SA-Operators` | `operator` | Run actions, and approve their own changes on purpose ([who may approve](../../guides/approvals-and-break-glass.md#who-may-approve)). |
 | `MEHO-Admins` | `tenant_admin` | Manage the tenant. |
 | `MEHO-Approvers` | `read_only` + `approver` | Approve other people's changes. Cannot run actions. |
 

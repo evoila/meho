@@ -1162,24 +1162,22 @@ class Settings(BaseModel):
         ``AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS``.
     approval_allow_self_approval:
         Self-approval **emergency break-glass** switch (G11.7-T1 #1401).
-        Default ``False`` (fail-closed): the operator who requested a
-        parked approval may not approve their own request — requester !=
+        Default ``False`` (fail-closed): a person who is not a
+        MEHO-SA-Operator may not approve their own request — requester !=
         approver is enforced in
         :func:`~meho_backplane.operations.approval_queue.approve_request`,
         so a compromised or careless single account cannot both ask for
         and grant a privileged connector write. Set
         ``APPROVAL_ALLOW_SELF_APPROVAL=true`` only for a genuine,
-        audited break-glass; the self-approval still writes its decision
-        audit row, so the use is forensically visible. This is **not**
-        the single-operator answer — enabling it posture-wide re-opens,
-        for every op, the single-account request+grant hole #1401
-        closed. A single-operator tenant should instead park its
-        four-eyes writes under an **agent-requester** (a distinct
-        ``principal_kind=agent`` ``sub``, so requester != approver clears
-        with no flag); see the "Single-operator tenants: use an
-        agent-requester, not break-glass" section of
-        ``docs/codebase/approvals.md``. Reject is always allowed
-        regardless of this flag — an operator withdrawing their own
+        audited break-glass; it covers only ``safe`` and ``caution``
+        changes, and the self-approval still writes its decision audit
+        row, so the use is forensically visible. This is **not** the
+        single-operator answer — enabling it posture-wide re-opens, for
+        every ``safe`` and ``caution`` op, the single-account
+        request+grant hole #1401 closed. A single operator belongs in the
+        MEHO-SA-Operators group instead (#3325); see the "Single-operator
+        tenants" section of ``docs/codebase/approvals.md``. Reject is
+        always allowed regardless of this flag — an operator withdrawing their own
         pending request is never a privilege escalation.
     fresh_sign_in_max_age_seconds:
         The approval window (#5515): how old a person's sign-in may be
@@ -1717,10 +1715,8 @@ class Settings(BaseModel):
     # ``APPROVAL_ALLOW_SELF_APPROVAL=true`` only for a genuine, audited
     # break-glass; every self-approval still writes its decision audit
     # row, so the use is forensically visible. NOT the single-operator
-    # answer -- single-operator tenants park four-eyes writes under an
-    # agent-requester (distinct principal_kind=agent sub) instead; see
-    # docs/codebase/approvals.md "Single-operator tenants: use an
-    # agent-requester, not break-glass".
+    # answer -- a single operator belongs in MEHO-SA-Operators (#3325);
+    # see docs/codebase/approvals.md "Single-operator tenants".
     approval_allow_self_approval: bool = False
     # #3693 -- delegated approval decisions (an ``Instructed-by:`` block in
     # the reason, #3692) are allowed only on lab-class deployments. Default

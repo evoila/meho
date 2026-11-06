@@ -4,7 +4,7 @@ G11.2-T6 (#819) under Initiative #803 (the P3 agent identity + RBAC + approval g
 
 ## Overview
 
-A newly-registered agent starts with **no** `agent_permission` rows. Without an explicit grant, the agent operates under `safety_level`-based defaults: safe ops auto-execute, caution ops need approval, dangerous ops are denied. Admin-class ops are never auto-granted.
+A newly-registered agent starts with **no** `agent_permission` rows. Without an explicit grant, the agent operates under `safety_level`-based defaults: safe ops auto-execute; caution, dangerous and destructive ops wait for a person's approval (#3980). Agents never approve, not their own requests and not anyone else's. Admin-class ops are never auto-granted.
 
 Operators (`tenant_admin`) issue grants to extend agent access for a specific op-pattern on an optional target scope. Grants are permanent by default; supply `expires_at` to create a **time-bounded elevation** (change window) that reverts automatically: the permission resolver (T3 `auth/permissions.py`) ignores rows past their `expires_at` **immediately at expiry**, and the expiry sweeper deletes them on its periodic tick (the sweep is the durable cleanup; the resolver filter makes the revert exact).
 
@@ -112,12 +112,12 @@ AuditMiddleware writes audit_log row (audit_op_id=agent.grant.create)
 
 For time-bounded elevations: same path, plus `expires_at` set on the row. The grant-expiry sweeper (`agents/grant_expiry.py`) runs every 5 minutes (configurable) and deletes rows where `expires_at < now()`.
 
-## Default-deny model
+## Default model
 
 | Agent state | Writes | Admin-class ops |
 |---|---|---|
-| No grants (new agent) | Safety-level default | Deny (dangerous = deny default) |
-| Permanent grant on `*` | Verdict from grant row | Only if explicit auto-execute grant (dangerous ops still capped) |
+| No grants (new agent) | Safety-level default: `caution`, `dangerous` and `destructive` wait for a person's approval | Deny |
+| Permanent grant on `*` | Verdict from grant row | Only if explicit auto-execute grant (`caution`, `dangerous` and `destructive` still capped at waiting for approval) |
 | Elevation active | As granted until expiry | Only if explicit grant (same cap) |
 | Elevation expired | Reverts to baseline | Denied |
 
@@ -210,9 +210,9 @@ expected:
   explicit `tenant_admin` + human opt-in, tenant-scoped like every grant. The
   default (`agent`) rejects an unregistered sub to catch typos.
 
-Ceilings are unchanged by this matching: `deny` beats everything, `destructive`
-stays non-grantable for agents, and a granted `auto-execute` on a
-`caution` / `dangerous` op is still clamped to `needs-approval`. #3795 changes
+Ceilings are unchanged by this matching: `deny` beats everything, and a
+granted `auto-execute` on a `caution` / `dangerous` / `destructive` op is
+still clamped to `needs-approval` (a `destructive` op is never grantable). #3795 changes
 only **which rows match**, never the verdict math.
 
 To deny an agent a connector family (e.g. `vault.*`), an operator runs, for a

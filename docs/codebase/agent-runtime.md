@@ -1021,6 +1021,60 @@ its loop through a framework `Model`, so the agent seam mirrors the
 than the one-shot method. The G11 initiative shipped against Anthropic;
 G11.5-T1 layered a per-tenant resolver on top of that pattern.
 
+## How a live run picks its model (#5850)
+
+One setting picks the model server for every agent run that MEHO starts:
+hosted runs (REST, MCP, console, the event stream), scheduled runs,
+event-triggered runs, agents started by an agent, and the investigator.
+
+| `AGENT_MODEL_BACKEND` | Model server | Model name from |
+|---|---|---|
+| `anthropic` (default) | Anthropic, key `ANTHROPIC_API_KEY` | `AGENT_DEFAULT_MODEL` |
+| `openai` | An OpenAI-compatible endpoint (OpenAI, vLLM, Ollama, OpenRouter): `OPENAI_BASE_URL`, key `OPENAI_API_KEY` | `OPENAI_DEFAULT_MODEL` |
+| `bedrock` | AWS Bedrock | `BEDROCK_DEFAULT_MODEL` |
+| `vcf-paif` | VCF Private AI Foundation | `VCF_PAIF_MODEL` |
+
+An unknown value stops the start. How a run gets its model:
+
+1. **Risk level to tier.** A stored agent has a model tier: `fast`,
+   `standard` or `deep`. `AgentInvoker._to_agent_definition` maps it
+   with `agent_tier_for` (`agent/models.py`): `fast` → `triage`,
+   `standard` → `summarize`, `deep` → `investigate`. The map follows
+   cost, so the budget gate's "one tier cheaper" step (`investigate` →
+   `summarize` → `triage`) is the same as `deep` → `standard` → `fast`.
+2. **Resolver.** The live `AgentInvoker` builds its `PydanticAgentRun`
+   with `settings_model_resolver()`. It reads `AGENT_MODEL_BACKEND` on
+   each run and sends every tier of every tenant to that one backend,
+   through the settings-driven builders below. There is no fallback:
+   when the chosen backend is not set up (for example no
+   `OPENAI_API_KEY`), the run fails and sends no model request at all.
+3. **Choose before the run row.** `AgentInvoker._choose_model` calls
+   `PydanticAgentRun.choose_model`, which builds the model once. The
+   model is passed on to `start` / `stream_events`, so the run uses
+   exactly the model that its records name.
+4. **Records.** The run row (`agent_run.provider`, `agent_run.model`)
+   and the model names on every audit row of the run's tool calls
+   (`AgentRunAuditMeta`) come from the built model: `Model.system`
+   (`anthropic`, `openai`, `bedrock`) and `Model.model_name`, the name
+   sent to the server. When the model cannot be built, the row names
+   the backend and model the setting chose (`settings_model_id()`), and
+   the run fails with the builder's error. A child run started by an
+   agent records its parent's model; with one backend for every tier,
+   that is the model the child uses.
+
+**The `openai:` prefix.** The default model settings are written as
+`openai:<name>`. pydantic-ai removes that prefix only when it builds a
+model from a string (`Agent("openai:gpt-4o-mini")`). `OpenAIChatModel`
+sends its model name unchanged (pydantic-ai-slim 2.53), and an endpoint
+answers "model not found" for `openai:gpt-4o-mini`. So both
+OpenAI-compatible builders call `bare_openai_model_name` first. It
+removes only a leading `openai:`; an Ollama name such as `llama3.1:8b`
+stays whole.
+
+Tests use fake servers only (`test_agent_model_backend_setting.py`). A
+run against a real OpenAI-compatible server is a separate step of the
+same work.
+
 ## Per-tenant tier→Model resolver (G11.5-T1 #1075)
 
 The zero-arg `ModelFactory` shape was right for one-deploy → one-provider.
@@ -1410,6 +1464,13 @@ the architecture grounding it links back to.
   streamed, and that `AGENT_MAX_OUTPUT_TOKENS=8192` reaches the
   request. `test_settings.py` checks the default, an override, and that
   a value outside [1, 128000] stops the start.
+- `backend/tests/test_agent_model_backend_setting.py` (#5850) — the live
+  invoker with `AGENT_MODEL_BACKEND`: direct, scheduled and streamed
+  runs finish on a fake OpenAI-compatible server that answers "model not
+  found" for any name but the bare one, no request goes elsewhere, and
+  the run row and audit names are the endpoint's model; the default
+  setting still runs on Anthropic; a missing key fails with no request;
+  the tier map, the prefix handling and the setting check.
 - `backend/tests/test_agent_openai_compat_backend.py` (G11.5-T3) — unit
   tests for the OpenAI-compat builder, per-vendor profile dispatch
   (OpenAI / vLLM / Ollama), the air-gapped + on-prem registration path,

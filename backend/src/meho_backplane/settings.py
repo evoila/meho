@@ -78,6 +78,10 @@ _SUPPORTED_BROADCAST_URL_SCHEMES: Final[tuple[str, ...]] = (
     "unix://",
 )
 
+#: The values ``AGENT_MODEL_BACKEND`` accepts (#5850). Each names one
+#: backend of :func:`meho_backplane.agent.models.settings_model_resolver`.
+AGENT_MODEL_BACKENDS: Final[tuple[str, ...]] = ("anthropic", "openai", "bedrock", "vcf-paif")
+
 #: Truthy spellings accepted by :func:`_parse_bool`. Anything else
 #: (including the empty string and "disabled") is treated as ``False``
 #: so a misconfigured env var never silently enables a guarded surface.
@@ -1120,6 +1124,19 @@ class Settings(BaseModel):
         costs more and can make one answer take much longer; above about
         21,000 the request is sent as a stream. Set via
         ``AGENT_MAX_OUTPUT_TOKENS``.
+    agent_model_backend:
+        Which model server MEHO's own agent runs use: hosted runs,
+        scheduled runs, event-triggered runs, agents started by an
+        agent, and the investigator. ``anthropic`` (the default) uses
+        ``ANTHROPIC_API_KEY`` and :attr:`agent_default_model`.
+        ``openai`` uses an OpenAI-compatible endpoint (OpenAI, vLLM,
+        Ollama, OpenRouter) from ``OPENAI_BASE_URL``, ``OPENAI_API_KEY``
+        and :attr:`openai_default_model`. ``bedrock`` uses AWS Bedrock
+        (:attr:`bedrock_default_model`), and ``vcf-paif`` uses VCF
+        Private AI Foundation (:attr:`vcf_paif_model`). Every risk level
+        of an agent uses this one backend. A run never falls back to
+        another backend: when the chosen backend is not set up, the run
+        fails and its record says why. Set via ``AGENT_MODEL_BACKEND``.
     bedrock_region:
         AWS region the Bedrock backend builder
         (:func:`meho_backplane.agent.models.bedrock_backend_builder`)
@@ -1267,12 +1284,14 @@ class Settings(BaseModel):
         rather than the settings-driven default.
     openai_default_model:
         Pinned model id the OpenAI-compatible backend uses when an
-        ``AgentDefinition`` does not override it. Full provider-qualified
-        id (``openai:gpt-4o-mini`` for OpenAI SaaS;
-        ``openai:meta-llama/Llama-3.1-8B-Instruct`` for a vLLM-hosted
-        Llama, etc. — pydantic_ai's :class:`OpenAIChatModel` accepts the
-        bare model name and the ``openai:`` prefix is stripped when
-        present). Same posture as ``agent_default_model``: a full id,
+        ``AgentDefinition`` does not override it. Either the bare model
+        name the endpoint serves (``gpt-4o-mini``,
+        ``meta-llama/Llama-3.1-8B-Instruct``, ``llama3.1:8b``) or the
+        same name with an ``openai:`` prefix (``openai:gpt-4o-mini``).
+        MEHO removes the ``openai:`` prefix before it sends the name;
+        pydantic_ai's :class:`OpenAIChatModel` sends the name unchanged,
+        and an endpoint answers "model not found" for the prefixed form.
+        Same posture as ``agent_default_model``: a full id,
         never a moving alias, so model swaps are deliberate config
         pushes. Set via ``OPENAI_DEFAULT_MODEL``.
     agent_budget_degrade_threshold:
@@ -1316,11 +1335,11 @@ class Settings(BaseModel):
         directly rather than this single-knob default.
     vcf_paif_model:
         Pinned model id the PAIF backend uses when an
-        ``AgentDefinition`` does not override it. Full provider-qualified
-        id (``openai:meta-llama/Llama-3.1-8B-Instruct`` /
-        ``openai:mistralai/Mixtral-8x7B-Instruct``, etc. — pydantic_ai's
-        :class:`OpenAIChatModel` strips the ``openai:`` prefix). Set via
-        ``VCF_PAIF_MODEL``.
+        ``AgentDefinition`` does not override it. The bare model name
+        or the name with an ``openai:`` prefix
+        (``openai:meta-llama/Llama-3.1-8B-Instruct``). MEHO removes the
+        prefix before it sends the name, as for
+        :attr:`openai_default_model`. Set via ``VCF_PAIF_MODEL``.
     vcf_paif_oidc_token_url:
         The IdP token endpoint the bundled OIDC token provider POSTs
         the ``client_credentials`` grant against. Example (Keycloak):
@@ -1924,6 +1943,9 @@ class Settings(BaseModel):
     # (128,000 for claude-sonnet-5-5), sent as a stream, so the builders
     # always send this value. 4096 keeps requests as they were before.
     agent_max_output_tokens: int = Field(default=4096, ge=1, le=128_000)
+    # #5850 -- which backend MEHO's own agent runs use. Every risk level
+    # goes to this one backend; there is no fallback to another one.
+    agent_model_backend: str = "anthropic"
     # G11.5-T2 #1076 — AWS Bedrock backend configuration. The Bedrock
     # builder (``meho_backplane.agent.models.bedrock_backend_builder``)
     # uses pydantic_ai's :class:`BedrockConverseModel` + ``boto3`` via
@@ -2348,6 +2370,19 @@ class Settings(BaseModel):
                 f"template whose only placeholder is '{{tenant_id}}'; got: "
                 f"{value!r}"
             ) from exc
+        return value
+
+    @field_validator("agent_model_backend")
+    @classmethod
+    def _agent_model_backend_must_be_known(cls, value: str) -> str:
+        """Stop the start when ``AGENT_MODEL_BACKEND`` names no known backend.
+
+        A typo must not send agent runs to a backend the operator did not
+        pick, so an unknown value fails at startup with the allowed list.
+        """
+        if value not in AGENT_MODEL_BACKENDS:
+            allowed = ", ".join(AGENT_MODEL_BACKENDS)
+            raise ValueError(f"AGENT_MODEL_BACKEND must be one of: {allowed}. Got: {value!r}")
         return value
 
     @field_validator("result_cache_redis_url")
@@ -3062,6 +3097,7 @@ def get_settings() -> Settings:
         agent_max_output_tokens=int(
             os.environ.get("AGENT_MAX_OUTPUT_TOKENS", "4096"),
         ),
+        agent_model_backend=os.environ.get("AGENT_MODEL_BACKEND", "anthropic").strip().lower(),
         bedrock_region=os.environ.get("BEDROCK_REGION", "").strip(),
         bedrock_default_model=os.environ.get(
             "BEDROCK_DEFAULT_MODEL",

@@ -36,6 +36,7 @@ from meho_backplane.connectors.azure import (
     storage,
     storage_writes,
 )
+from meho_backplane.connectors.azure._paging import PageLimits
 from meho_backplane.connectors.azure.storage_schemas import STORAGE_DATA_ROLES
 from meho_backplane.connectors.azure.storage_writes import assignment_name
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -370,6 +371,35 @@ async def test_delete_removes_every_match_and_counts_204_as_gone(azure: AzureCon
     assert result.result["scope"] == ACCOUNT_SCOPE
 
 
+@pytest.mark.asyncio
+async def test_delete_refuses_a_cut_short_list_and_deletes_nothing(
+    azure: AzureConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page limit stops the list: an unread page may hold the principal's role."""
+    read_pages = storage_writes.list_all_pages
+
+    async def one_page(*args: Any, **kwargs: Any) -> Any:
+        return await read_pages(*args, **kwargs, limits=PageLimits(max_pages=1))
+
+    monkeypatch.setattr(storage_writes, "list_all_pages", one_page)
+    seen = _assignment("aaaaaaaa-0000-4000-8000-000000000001", PRINCIPAL)
+    next_link = (
+        f"{_list_url(ACCOUNT_SCOPE)}?api-version=2022-04-01&$filter=atScope()&$skiptoken=page2"
+    )
+    with respx.mock(assert_all_called=False) as mock:
+        _login(mock)
+        _accounts(mock)
+        mock.get(url__startswith=_list_url(ACCOUNT_SCOPE)).respond(
+            200, json={"value": [seen], "nextLink": next_link}
+        )
+        deletes = mock.delete(url__startswith=ARM_BASE).respond(200, json=seen)
+        result = await _call("azure.role.assignment.delete", DELETE)
+
+    assert result.status == "error"
+    assert not deletes.called
+    assert result.result is None or "deleted" not in result.result
+
+
 SUBSCRIPTION_SCOPE = f"/subscriptions/{SUBSCRIPTION_A}"
 EXISTS = {"error": {"code": "RoleAssignmentExists", "message": "The role assignment exists."}}
 
@@ -548,6 +578,26 @@ async def test_link_create_stores_the_link_in_vault_and_returns_only_the_ref(
     assert answer["value_fingerprint"]
     dumped = json.dumps(answer)
     assert "sig=" not in dumped and link not in dumped and KEY_VALUE not in dumped
+
+
+@pytest.mark.asyncio
+async def test_link_create_works_for_a_file_over_the_response_cap(
+    azure: AzureConnector, vault_put: AsyncMock, fixed_now: datetime
+) -> None:
+    """HEAD's Content-Length is the file's size (an ISO), not a body MEHO reads."""
+    six_gib = str(6 * 1024**3)
+    with respx.mock() as mock:
+        _login(mock)
+        _accounts(mock)
+        head = mock.head(url__startswith=FILE_URL).respond(
+            200, headers={"Content-Length": six_gib, "Content-Type": "application/octet-stream"}
+        )
+        _key(mock)
+        result = await _call("azure.storage.blob.link.create", LINK)
+
+    assert result.status == "ok", result.error
+    assert head.called
+    vault_put.assert_awaited_once()
 
 
 @pytest.mark.asyncio

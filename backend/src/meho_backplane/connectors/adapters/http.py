@@ -456,7 +456,10 @@ async def _read_capped_json_response(
         extensions=extensions,
         timeout=timeout,
     ) as resp:
-        _reject_oversize_content_length(resp)
+        # A HEAD answer has no body: its Content-Length is the size of the
+        # resource (for example a large file), not of anything read here.
+        if method.upper() != "HEAD":
+            _reject_oversize_content_length(resp)
         chunks: list[bytes] = []
         total = 0
         async for chunk in resp.aiter_raw():

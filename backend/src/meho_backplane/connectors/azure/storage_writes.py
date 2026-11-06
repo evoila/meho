@@ -171,11 +171,16 @@ async def _matching(
     scope: str,
     principal_id: str,
     role_guid: str,
+    *,
+    complete: bool = False,
 ) -> list[dict[str, Any]]:
     """The assignments made at *scope* itself that give *principal_id* the role.
 
     Azure's ``atScope()`` filter gives the assignments at or above the scope,
-    so each one's own ``scope`` is compared too.
+    so each one's own ``scope`` is compared too. With *complete*, a list that
+    a page, row or time limit cut short raises :class:`StorageReadError`
+    instead of returning the matches read so far: a delete must not report a
+    revocation while an unread page may still hold an assignment.
     """
     paged = await list_all_pages(
         connector,
@@ -185,6 +190,16 @@ async def _matching(
         api_version=AUTHORIZATION_API_VERSION,
         params={"$filter": _AT_SCOPE},
     )
+    if complete and paged.truncated:
+        raise StorageReadError(
+            f"Azure target {target.name!r}: MEHO could not read every role assignment "
+            f"at {scope} ({paged.pages} pages read before a limit stopped the list), "
+            "so it deleted nothing. An assignment on an unread page would keep the access.",
+            remediation=(
+                "Remove the principal's role at this scope in the Azure portal "
+                "(Access control (IAM)), or call again when Azure answers faster."
+            ),
+        )
     found: list[dict[str, Any]] = []
     for item in paged.rows:
         if not isinstance(item, dict):
@@ -271,7 +286,9 @@ async def role_assignment_delete_impl(
 
     Reads the assignments made at the scope itself and deletes every one of
     that principal and role, whatever its name. Azure answers 204 (or 404)
-    when an assignment is already gone; that id goes to ``not_found``.
+    when an assignment is already gone; that id goes to ``not_found``. When a
+    limit cuts the list of assignments short, nothing is deleted and the call
+    fails, so a partial read never reports a complete revocation.
     """
     role = params.get("role")
     role_guid = _role_guid(role)
@@ -279,7 +296,10 @@ async def role_assignment_delete_impl(
     scope = await _scope_of(connector, operator, target, params)
     deleted: list[str] = []
     not_found: list[str] = []
-    for item in await _matching(connector, operator, target, scope, principal_id, role_guid):
+    matches = await _matching(
+        connector, operator, target, scope, principal_id, role_guid, complete=True
+    )
+    for item in matches:
         assignment_id = str(item.get("id") or "")
         name = str(item.get("name") or "")
         if not _ASSIGNMENT_NAME.fullmatch(name):

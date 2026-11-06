@@ -316,12 +316,16 @@ so the value never transits an operator terminal or shell history.
   is wrong for an external issuer and will fail auth. Populate `token_url` in
   the Vault credential with the realm's `.../protocol/openid-connect/token`
   URL.
-- **The issuer host must be admitted by the SSRF target allowlist, and target
-  TLS verification must stay on.** The `token_url` is validated fail-closed by
-  the same `_validate_token_url` SSRF rule the profile field clears (`https`,
-  host on the outbound allowlist). Admit the realm's issuer host on that
-  allowlist; do **not** disable TLS verification on the target to work around
-  a cert problem — fix the trust chain instead.
+- **A private or cluster-internal issuer host must be on the target address
+  allowlist, and target TLS verification must stay on.** The `token_url` is
+  checked fail-closed by the same `_validate_token_url` rule the profile field
+  clears: `https`, or plaintext `http` only for a cluster-internal / private
+  host. The token
+  request then goes through the connector's pooled HTTP client, which checks
+  the issuer address at connect time against the target address allowlist.
+  Admit such an issuer host on that allowlist; do **not** disable TLS
+  verification on the target to work around a cert problem — fix the trust
+  chain instead.
 
 ## Ingest op allowlist
 
@@ -384,7 +388,12 @@ At boot the shipped row + profile clear, in order (`main.py` lifespan):
 ## References
 
 - Catalog / profile mechanism: `docs/codebase/connector-auth-coverage.md`
-  (auth catalog), the shipped `_fixture/1.0`, `vmware/9.0`, `sddc/9.0` rows.
+  (auth catalog), and the shipped `_fixture/1.0` row in
+  `operations/ingest/catalog.yaml`.
 - `oauth2_mint` external issuer: public #3571.
 - Add-on pairing contract (identity / capability / event / audit planes):
   `docs/codebase/addon-contract.md`, `docs/codebase/addon-pairing.md`.
+- Paired add-on listing (not part of this connector): `meho automation list`
+  (`cli/internal/cmd/automation/`) calls `GET /api/v1/automation`, the same
+  view as the `meho_automation_list` MCP tool. It shows the paired add-on and
+  the surface it declares; see `docs/codebase/addon-pairing.md`.

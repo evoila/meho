@@ -53,6 +53,7 @@ from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
 )
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.tenant import TenantChangedError, TenantRemovedError
 
 __all__ = [
@@ -132,7 +133,7 @@ async def _lift_operator(session_ctx: UISessionContext) -> Operator:
     """
     decrypted = await load_fresh_session(session_ctx.session_id)
     if decrypted is None:
-        _log.info("ui_agents_session_gone", session_id=str(session_ctx.session_id))
+        _log.info("ui_agents_session_gone", session_ref=session_ref(session_ctx.session_id))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="ui_session_required",
@@ -169,7 +170,7 @@ async def resolve_role_probe(
     except Exception as exc:
         _log.info(
             "ui_agents_role_probe_unavailable",
-            session_id=str(session_ctx.session_id),
+            session_ref=session_ref(session_ctx.session_id),
             reason=type(exc).__name__,
         )
         return OperatorRoleProbe(is_tenant_admin=False, is_operator=False)

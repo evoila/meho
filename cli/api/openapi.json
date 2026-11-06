@@ -22853,7 +22853,7 @@
           "ui-account"
         ],
         "summary": "Ui Account Revoke Session",
-        "description": "``POST /ui/account/sessions/revoke`` -- the id is a form field.",
+        "description": "``POST /ui/account/sessions/revoke`` -- the session ref is a form field.",
         "operationId": "ui_account_revoke_session_ui_account_sessions_revoke_post",
         "requestBody": {
           "content": {
@@ -22876,7 +22876,7 @@
             }
           },
           "404": {
-            "description": "The session_id form field is missing or malformed, the session does not exist, or it belongs to another operator / tenant. Collapsed to 404 so another operator's session id is never confirmed.",
+            "description": "The session_ref form field is missing, or it names none of the caller's own active sessions.",
             "content": {
               "text/html": {}
             }
@@ -26424,9 +26424,9 @@
       },
       "Body_ui_account_revoke_session_ui_account_sessions_revoke_post": {
         "properties": {
-          "session_id": {
+          "session_ref": {
             "type": "string",
-            "title": "Session Id",
+            "title": "Session Ref",
             "default": ""
           }
         },

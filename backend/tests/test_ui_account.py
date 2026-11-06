@@ -9,21 +9,24 @@ Initiative #1842 (G10.11), Task #1892. Acceptance criteria from #1892:
    tenant, role from the freshly-verified token, and session
    ``expires_at`` -- a lifted ``Operator`` with ``tenant_role=TENANT_ADMIN``
    renders ``tenant_admin`` (not the literal "Operator").
-2. The active-sessions list shows only the calling operator's own
-   active rows (own ``operator_sub`` + ``tenant_id``, ``revoked_at IS NULL``,
-   not expired); a second operator's / a revoked / an expired row never
-   appears. The current row carries the "This device" marker.
-3. ``POST /ui/account/sessions/revoke`` (the id in the ``session_id``
-   form field) with a foreign / cross-tenant session id returns 404 and
-   does NOT revoke it.
+2. The active-sessions list shows the calling person's own active rows
+   in every tenant (own ``operator_sub``, ``revoked_at IS NULL``, not
+   expired), each with its tenant; a second operator's / a revoked / an
+   expired row never appears. The current row carries the "This device"
+   marker.
+3. ``POST /ui/account/sessions/revoke`` (the session ref in the
+   ``session_ref`` form field) revokes the caller's own session in any
+   tenant; another operator's session ref returns 404 and revokes nothing.
 4. ``POST /ui/account/sessions/revoke-others`` revokes all of this
-   operator's *other* active sessions but leaves the current one active.
+   person's *other* active sessions, in every tenant, but leaves the
+   current one active.
 5. Revoking the current session signs the operator out (self-logout
    warning string in the modal; response redirects to login). Missing
    CSRF token on a revoke gets ``csrf_token_invalid`` 403.
-6. No URL the account page renders carries a session id: the revoke
-   posts to one fixed path and sends the id in the form body, and the
-   router has no path with a session id under ``/ui/account/sessions/``.
+6. The account page holds no session id at all: each row is named by
+   its session ref, the revoke posts to one fixed path with the ref in
+   the form body, and the router has no path parameter under
+   ``/ui/account/sessions/``.
 
 Harness mirrors :mod:`backend.tests.test_ui_connectors_view`: a minimal
 FastAPI app with the UI session + CSRF middlewares, a ``web_session``
@@ -47,6 +50,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
@@ -59,6 +63,7 @@ from meho_backplane.ui.auth.flow import (
     clear_discovery_cache,
     reset_verifier_store_for_testing,
 )
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.session_store import (
     create_session,
     reset_fernet_cache_for_testing,
@@ -270,11 +275,11 @@ def _csrf_headers(token: str) -> dict[str, str]:
 _REVOKE_PATH = "/ui/account/sessions/revoke"
 
 
-def _post_revoke(client: TestClient, csrf: str, session_id: object) -> Any:
-    """POST the single-session revoke the way the page does: id in the form body."""
+def _post_revoke(client: TestClient, csrf: str, session_id: uuid.UUID) -> Any:
+    """POST the single-session revoke the way the page does: the ref in the form body."""
     return client.post(
         _REVOKE_PATH,
-        data={"session_id": str(session_id)},
+        data={"session_ref": session_ref(session_id)},
         headers=_csrf_headers(csrf),
     )
 
@@ -352,8 +357,8 @@ def test_account_role_falls_back_when_token_unverifiable() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_account_lists_only_own_active_sessions() -> None:
-    """Only the caller's own active rows appear; foreign/revoked/expired excluded."""
+def test_account_lists_own_active_sessions_in_every_tenant() -> None:
+    """The caller's own active rows appear in every tenant; foreign/revoked/expired do not."""
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_tenant(_TENANT_B, "tenant-b")
     # Caller's current + a second own-active device.
@@ -365,7 +370,7 @@ def test_account_lists_only_own_active_sessions() -> None:
     other_device = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
     # A second operator's session (same tenant) -- must NOT appear.
     foreign_op = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_OTHER)
-    # Same operator_sub on a different tenant -- must NOT appear.
+    # Same person, session switched to another tenant -- listed with its tenant.
     cross_tenant = _seed_session_sync(tenant_id=_TENANT_B, operator_sub=_OP_SELF)
     # Own revoked + own expired rows -- must NOT appear.
     revoked = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
@@ -379,14 +384,17 @@ def test_account_lists_only_own_active_sessions() -> None:
         mock.stop()
     assert response.status_code == 200, response.text
     body = response.text
-    # Own active rows present.
-    assert f'data-session-row="{current_id}"' in body
-    assert f'data-session-row="{other_device}"' in body
-    # Foreign / cross-tenant / revoked / expired absent.
-    assert str(foreign_op) not in body
-    assert str(cross_tenant) not in body
-    assert str(revoked) not in body
-    assert str(expired) not in body
+    # Own active rows present, in both tenants, each with its tenant.
+    assert f'data-session-row="{session_ref(current_id)}"' in body
+    assert f'data-session-row="{session_ref(other_device)}"' in body
+    assert f'data-session-row="{session_ref(cross_tenant)}"' in body
+    assert "tenant Tenant tenant-b" in body
+    # Foreign / revoked / expired absent.
+    for absent in (foreign_op, revoked, expired):
+        assert session_ref(absent) not in body
+    # No session id of any kind is in the page.
+    for sid in (current_id, other_device, cross_tenant, foreign_op, revoked, expired):
+        assert str(sid) not in body
     # The current session row carries the "This device" marker.
     assert 'data-badge="this-device"' in body
 
@@ -397,24 +405,56 @@ def test_account_lists_only_own_active_sessions() -> None:
 
 
 def test_revoke_rejects_foreign_session() -> None:
-    """Revoking another operator's (or another tenant's) session 404s + no-op."""
+    """Revoking another operator's session 404s + no-op, in this and another tenant."""
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_tenant(_TENANT_B, "tenant-b")
     session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
     foreign = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_OTHER)
-    cross_tenant = _seed_session_sync(tenant_id=_TENANT_B, operator_sub=_OP_SELF)
+    foreign_b = _seed_session_sync(tenant_id=_TENANT_B, operator_sub=_OP_OTHER)
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         csrf = client.cookies[CSRF_COOKIE_NAME]
         foreign_resp = _post_revoke(client, csrf, foreign)
-        cross_resp = _post_revoke(client, csrf, cross_tenant)
+        foreign_b_resp = _post_revoke(client, csrf, foreign_b)
 
     assert foreign_resp.status_code == 404, foreign_resp.text
-    assert cross_resp.status_code == 404, cross_resp.text
-    # Neither foreign row was revoked.
+    assert foreign_b_resp.status_code == 404, foreign_b_resp.text
     assert _revoked_at(foreign) is None
-    assert _revoked_at(cross_tenant) is None
+    assert _revoked_at(foreign_b) is None
+
+
+def test_revoke_own_session_in_another_tenant() -> None:
+    """The caller's own session that switched to another tenant can be revoked by its ref."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_tenant(_TENANT_B, "tenant-b")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
+    cross_tenant = _seed_session_sync(tenant_id=_TENANT_B, operator_sub=_OP_SELF)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        csrf = client.cookies[CSRF_COOKIE_NAME]
+        response = _post_revoke(client, csrf, cross_tenant)
+
+    assert response.status_code == 200, response.text
+    assert _revoked_at(cross_tenant) is not None
+    assert _revoked_at(session_id) is None
+
+
+def test_revoke_already_revoked_own_session_returns_404() -> None:
+    """A ref of the caller's own revoked session names no active session: 404."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
+    gone = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
+    _force_session_state(gone, revoked=True)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        csrf = client.cookies[CSRF_COOKIE_NAME]
+        response = _post_revoke(client, csrf, gone)
+
+    assert response.status_code == 404, response.text
+    assert _revoked_at(session_id) is None
 
 
 def test_revoke_other_owned_session_succeeds_and_returns_fragment() -> None:
@@ -442,13 +482,17 @@ def test_revoke_other_owned_session_succeeds_and_returns_fragment() -> None:
 
 
 def test_revoke_others_spares_current() -> None:
-    """revoke-others revokes every other active own session, keeps current active."""
+    """revoke-others revokes every other own session in every tenant, keeps current active."""
     _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_tenant(_TENANT_B, "tenant-b")
     session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
     other_1 = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
     other_2 = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
-    # A different operator's session must be untouched by revoke-others.
+    # The same person's session that switched to another tenant.
+    other_tenant = _seed_session_sync(tenant_id=_TENANT_B, operator_sub=_OP_SELF)
+    # Different operators' sessions must be untouched by revoke-others.
     foreign = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_OTHER)
+    foreign_b = _seed_session_sync(tenant_id=_TENANT_B, operator_sub=_OP_OTHER)
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
@@ -458,11 +502,13 @@ def test_revoke_others_spares_current() -> None:
     assert 'id="account-sessions"' in response.text
     # Current session still active.
     assert _revoked_at(session_id) is None
-    # Both other own sessions revoked.
+    # Every other own session revoked, also the one in the other tenant.
     assert _revoked_at(other_1) is not None
     assert _revoked_at(other_2) is not None
-    # Foreign operator's session untouched.
+    assert _revoked_at(other_tenant) is not None
+    # Foreign operators' sessions untouched.
     assert _revoked_at(foreign) is None
+    assert _revoked_at(foreign_b) is None
 
 
 # ---------------------------------------------------------------------------
@@ -515,7 +561,7 @@ def test_revoke_requires_csrf() -> None:
         # No X-CSRF-Token header and the CSRF cookie removed -> rejected.
         client.cookies.delete(CSRF_COOKIE_NAME)
         response = client.post(
-            _REVOKE_PATH, data={"session_id": str(other)}, headers={"HX-Request": "true"}
+            _REVOKE_PATH, data={"session_ref": session_ref(other)}, headers={"HX-Request": "true"}
         )
     assert response.status_code == 403, response.text
     assert "csrf_token_invalid" in response.text
@@ -524,17 +570,15 @@ def test_revoke_requires_csrf() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC6 -- no session id in any URL
+# AC6 -- no session id in the page or in any URL
 # ---------------------------------------------------------------------------
 
 
-def test_account_page_urls_carry_no_session_id() -> None:
-    """The revoke buttons post to one fixed URL; the id rides in the form body.
+def test_account_page_holds_no_session_id() -> None:
+    """The page names each row by its session ref; no session id is anywhere in it.
 
-    Every ``hx-post``, ``href`` and ``action`` attribute on the rendered
-    page is checked against every session id the page lists. The ids
-    appear only in ``hx-vals`` (sent as the form body) and in element
-    ids / labels, never in a URL.
+    The revoke buttons post to one fixed URL with the ref in the form
+    body (``hx-vals``). No ``hx-post``, ``href`` or ``action`` carries a ref.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     client, mock, _csrf, sid = _authenticated_client_with_role_jwks(
@@ -552,9 +596,11 @@ def test_account_page_urls_carry_no_session_id() -> None:
     urls = re.findall(r'\b(?:hx-post|hx-get|href|action)="([^"]*)"', body)
     assert _REVOKE_PATH in urls
     for session_id in (sid, other):
-        assert f'hx-vals=\'{{"session_id": "{session_id}"}}\'' in body
+        assert str(session_id) not in body
+        ref = session_ref(session_id)
+        assert f'hx-vals=\'{{"session_ref": "{ref}"}}\'' in body
         for url in urls:
-            assert str(session_id) not in url, url
+            assert ref not in url, url
 
 
 def test_no_account_route_has_a_session_id_in_its_path() -> None:
@@ -585,9 +631,12 @@ def test_revoke_rejects_the_old_path_shape() -> None:
     assert _revoked_at(other) is None
 
 
-@pytest.mark.parametrize("payload", [{"session_id": "not-a-uuid"}, {"session_id": ""}, {}])
-def test_revoke_malformed_or_missing_session_id_returns_404(payload: dict[str, str]) -> None:
-    """A non-UUID, empty or absent ``session_id`` form field 404s (not 422, not 500)."""
+@pytest.mark.parametrize(
+    "payload",
+    [{"session_ref": "not-a-ref"}, {"session_ref": ""}, {"session_ref": "\u00fc"}, {}],
+)
+def test_revoke_unknown_or_missing_session_ref_returns_404(payload: dict[str, str]) -> None:
+    """An unknown, empty, non-ASCII or absent ``session_ref`` 404s (not 422, not 500)."""
     _seed_tenant(_TENANT_A, "tenant-a")
     session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
     with respx.mock(assert_all_called=False):
@@ -596,3 +645,40 @@ def test_revoke_malformed_or_missing_session_id_returns_404(payload: dict[str, s
         response = client.post(_REVOKE_PATH, data=payload, headers=_csrf_headers(csrf))
     assert response.status_code == 404, response.text
     assert _revoked_at(session_id) is None
+
+
+def test_revoke_by_session_id_is_not_accepted() -> None:
+    """The form takes the session ref only; a session id in the form revokes nothing."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
+    other = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        csrf = client.cookies[CSRF_COOKIE_NAME]
+        by_field = client.post(
+            _REVOKE_PATH, data={"session_id": str(other)}, headers=_csrf_headers(csrf)
+        )
+        as_ref = client.post(
+            _REVOKE_PATH, data={"session_ref": str(other)}, headers=_csrf_headers(csrf)
+        )
+    assert by_field.status_code == 404, by_field.text
+    assert as_ref.status_code == 404, as_ref.text
+    assert _revoked_at(other) is None
+
+
+def test_revoke_logs_the_session_ref_not_the_id() -> None:
+    """The revoke log line names the revoked session by its ref only."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
+    other = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_SELF)
+    with respx.mock(assert_all_called=False), capture_logs() as captured:
+        client = _authenticated_client(session_id)
+        csrf = client.cookies[CSRF_COOKIE_NAME]
+        response = _post_revoke(client, csrf, other)
+    assert response.status_code == 200, response.text
+    revoked = [e for e in captured if e["event"] == "ui_account_session_revoked"]
+    assert len(revoked) == 1
+    assert revoked[0]["revoked_session_ref"] == session_ref(other)
+    serialised = repr(captured)
+    assert str(other) not in serialised
+    assert str(session_id) not in serialised

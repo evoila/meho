@@ -141,7 +141,7 @@ clearly delimited section **between the transition snapshot and the
 ## Correlated sensors                           <- server-built: name / state / op
 ## Observed sensor evidence (target-returned)
 <<UNTRUSTED_AGENT_TEXT
-…last_value / evidence / offender sample…       <- target-returned, untrusted (S14)
+…last_value / evidence / offender sample…       <- target-returned, untrusted
 END_UNTRUSTED_AGENT_TEXT>>
 ## Operator instructions for this dashboard
 <<<OPERATOR-PROMPT
@@ -172,7 +172,7 @@ The threat model is *careless*, not adversarial: the column is writable only
 by a `tenant_admin` through the create path, which is why a fixed fence is
 sufficient and a per-briefing nonce is not warranted.
 
-## Target-returned sensor evidence (S14, #302)
+## Target-returned sensor evidence
 
 Each correlated Sensor's `last_value`, `last_evidence` and offender `sample`
 rows are **target-returned**, not operator-authored: the assertion evaluator
@@ -355,9 +355,8 @@ principal, so no execution path inherits the role.
   for LLM Applications, LLM01 Prompt Injection —
   <https://genai.owasp.org/llmrisk/llm01-prompt-injection/> ("separate and
   clearly denote untrusted content to limit its influence on user prompts").
-- Target-returned sensor evidence fence: Task #302 (security review S14, parent
-  Initiative #262). Reuses the `wrap_untrusted_text` envelope
-  (`untrusted-text-envelope.md`, Task #154) the event-matcher path already
+- Target-returned sensor evidence fence: reuses the `wrap_untrusted_text`
+  envelope (`untrusted-text-envelope.md`) the event-matcher path already
   applies to inbound event bodies.
 - Mould: `examples/r1-tiered-triage/workflow.py` (harness-persists rationale,
   briefing builder, render/persist shape), `agent.deep-tier-investigator.json`

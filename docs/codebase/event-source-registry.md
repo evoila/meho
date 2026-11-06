@@ -5,7 +5,8 @@ producers (Alertmanager, Grafana, VCF Operations, Harbor, generic JSON
 senders) authorised to publish into a tenant's event → agent-trigger
 substrate. It is Task #2880 under Initiative #2877 (inbound event
 ingestion); the inbound webhook endpoint that *consumes* the registry is
-#2881 and is out of scope for this page.
+is described in [events.md](events.md), "Inbound external
+event ingest".
 
 ## Why it exists
 
@@ -130,11 +131,13 @@ columns, keeping the schema to #2880's explicit column set.
 
 - The inbound ingest endpoint, per-source auth enforcement (HMAC / bearer
   / basic verification), rate limiting, replay windows, and payload
-  normalisers are #2881 / #2882 — not built here. This task ships the
-  registry, its migration, Vault secret custody, and the REST/CLI/UI admin
-  CRUD.
-- Soft-delete leaves the Vault secret in place (RDC owns the Vault
-  lifecycle). A re-created source re-using the slug derives the same ref
+  normalisers are not built here (see
+  [events.md](events.md)). This task ships the registry, its migration,
+  Vault secret custody, and the REST/CLI/UI admin CRUD (CLI:
+  `meho event-source`, `cli/internal/cmd/event-source/`; UI:
+  `ui/routes/event_source/`).
+- Soft-delete leaves the Vault secret in place (the Vault operator owns
+  the secret lifecycle). A re-created source re-using the slug derives the same ref
   and overwrites it on its next secret write.
 - There is no MCP admin tool for `event_source` (unlike `targets`'
   `meho_targets_register`). #2880's surface set is REST + CLI + UI; an MCP

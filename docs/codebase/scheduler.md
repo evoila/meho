@@ -39,9 +39,10 @@ DBOS rebase swaps only the loop module.
     including a cancelled one retained for audit; before 0035 the
     default `NO ACTION` made a once-scheduled definition undeletable via
     the API), `identity_sub`, `created_by_sub`.
-  - `kind` (closed enum: `cron`/`one_off`), `cron_expr` (NULL for
-    one-off), `fire_at` (one-off scheduled instant, NULL for cron),
-    `timezone` (IANA name, default `UTC`).
+  - `kind` (closed enum: `cron`/`one_off`/`event`), `cron_expr` (cron
+    only), `fire_at` (one-off scheduled instant), `event_filter` (event
+    only, see [events.md](events.md)), `timezone` (IANA name, default
+    `UTC`), `in_flight_policy`.
   - `next_fire_at` (the hot column the loop scans, populated for
     both cron and one-off), `last_fired_at`, `status` (closed enum:
     `active`/`paused`/`cancelled`/`fired`).
@@ -70,7 +71,8 @@ DBOS rebase swaps only the loop module.
     `is_valid_cron_expr()`, `InvalidCronExpressionError`,
     `InvalidTimezoneError`.
   - `scheduler.repository` — `create_cron_trigger()`,
-    `create_one_off_trigger()`, `claim_due_triggers()` (PG `SELECT ...
+    `create_one_off_trigger()`, `create_event_trigger()`,
+    `claim_due_triggers()` (PG `SELECT ...
     FOR UPDATE SKIP LOCKED`), `advance_cron_trigger()`,
     `mark_one_off_fired()`.
   - `scheduler.loop` — `run_one_tick()`, `start_scheduler()`,
@@ -139,7 +141,7 @@ pod env var only when Vault yields nothing (#1478). The lookup chain:
    UTF-8 bytes (`agent_client_id_from_identity_ref`), not a lossy
    sanitiser: two distinct principals — name-variants within a tenant
    (`agent:a-b` vs `agent:a_b`), or the same name across tenants — never
-   collapse onto one key (security S10, #298):
+   collapse onto one key:
    - **Vault (first).**
      [`read_agent_secret`](../../backend/src/meho_backplane/scheduler/vault_credentials.py)
      reads the secret from `SCHEDULER_AGENT_VAULT_PATH_PATTERN`
@@ -190,8 +192,8 @@ under the same scheduler service token, passing the **principal's**
 on the per-tenant, per-principal key
 (`secret/data/agents/<tenant.hex>_<hex(agent:ops-writer)>/credentials`)
 — write and read can never target different keys, and a name-variant or
-cross-tenant registration can no longer clobber another principal's
-secret (S10, #298). A Vault-write failure rolls back the just-created
+cross-tenant registration writes its own key, never another principal's
+secret. A Vault-write failure rolls back the just-created
 Keycloak client so registration never produces an unschedulable agent.
 
 `VAULT_SCHEDULER_TOKEN` is a static token bound to a narrow read/write
@@ -616,15 +618,16 @@ matcher landed.
 
 ### Cross-tenant admin
 
-`tenant_admin` callers may target another tenant by passing
-`tenant_id` in the create body or `tenant_filter` in the list /
-cancel query (REST) or `tenant_id` in the MCP create arguments. The
-MCP create handler rejects `tenant_id` from `operator` callers with
-`tenant_id_requires_tenant_admin` (it does *not* silently drop the
-field; review M1 on PR #1128). The REST list / cancel routes use the
-same role gate. Audit rows carry
-`audit_tenant_scope=other|self` so cross-tenant activity is
-greppable.
+Only a `platform_admin` who is a person may target another tenant, by
+passing `tenant_id` in the create body or `tenant_filter` in the list /
+cancel query (REST), or `tenant_id` in the MCP create arguments. All
+of them go through `auth/rbac.py::authorize_tenant_scope`. Anyone else
+who names a different tenant gets 403
+`cross_tenant_requires_platform_admin`. A tenant from the caller's own
+tenant list gets 403 `tenant_select_with_header`: the caller selects it
+with the `Meho-Tenant` header instead. A machine login never crosses
+tenants. Audit rows carry `audit_tenant_scope=other|self` so
+cross-tenant activity is greppable.
 
 ### Cancel idempotency + 404 / 409 contract
 

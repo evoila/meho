@@ -195,7 +195,10 @@ through):
   `_validate_authored_item` (`gateway/assignment_service.py`): only `SAFE`-tier
   ops are authorable into (and materialised from) the recurring assignment;
   `remote-write` work rides the one-shot capability-mint path, not this
-  document.
+  document. An operator sets a runner's assignment with
+  `PUT /api/v1/checks/assignment/{runner}` (`api/v1/checks.py`), which
+  needs the `tenant_admin` role; a non-`safe` item gets 422
+  `assignment_op_not_safe` and nothing is stored.
 - **Edge executor** — `_screen_item` (`runner/executor.py`): re-screens the
   delivered item independently, refusing `EXCLUDED` outright, verifying a
   `REMOTE_WRITE` item's signature (mechanism 1, below) and re-checking it

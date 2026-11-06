@@ -93,32 +93,17 @@ CSP does not allow.
 
 ## Key types
 
-- `BroadcastEvent` (`broadcast/events.py`) — every audited operation
-  publishes one. Fields: `event_id` (UUID), `ts`, `tenant_id`,
+- `BroadcastEvent` (`broadcast/events.py`) — the shape of an operation
+  event on the feed. MEHO publishes no `BroadcastEvent`: the writer side
+  above publishes only announcements. The model stays because
+  `event_matches` (`broadcast/history.py`) still accepts it next to
+  `AgentAnnouncementEvent`, and `classify_op` / `redact_payload` live in
+  the same module. Fields: `event_id` (UUID), `ts`, `tenant_id`,
   `principal_sub`, `principal_name`, `target_name`, `op_id`,
   `op_class`, `result_status`, `audit_id`, `payload`, plus the lineage
   trio `actor_sub`, `agent_session_id` (UUID), `work_ref` (all
-  `| None`). `event_kind = "audit_derived"` discriminator.
-  - **Lineage projection (T3 #2545).** The three lineage fields mirror
-    the `audit_log` columns of the same name: `actor_sub` is the
-    RFC 8693 actor (the delegated agent that acted, distinct from
-    `principal_sub` = the human/subject it acted for);
-    `agent_session_id` groups every operation one agent run produced;
-    `work_ref` ties the operation to an external change ticket. Every
-    `BroadcastEvent` construction site reads them off the publish-site
-    contextvars via `resolve_broadcast_lineage()`
-    (`operations/_audit.py`) — the same `resolve_actor_sub()` /
-    `agent_session_id_var` / `work_ref_var` the sibling audit-row writer
-    reads — so a delegated agent's work is attributable to the agent on
-    the feed instead of broadcasting under the human's `principal_sub`.
-    Server-derived and trusted: no untrusted-prose envelope applies (the
-    envelope guards agent free text on `AgentAnnouncementEvent` only).
-    Optional with `None` defaults, so pre-T3 stream entries that predate
-    the fields still validate on read. `event_matches`
-    (`broadcast/history.py`) and the `meho_broadcast_recent` /
-    `meho_broadcast_watch` `filter` object gained matching `actor_sub`
-    and `work_ref` exact-match filters ("what has this agent been
-    doing"); an announcement never qualifies for a lineage filter.
+  `| None`), which mirror the `audit_log` columns of the same name.
+  `kind = "operation"` discriminator.
 - `AgentAnnouncementEvent` (`broadcast/agent_events.py`) — agent-
   authored announcements published via `meho_broadcast_announce`.
   Fields: `event_id` (UUID, minted at publish via `default_factory=uuid4`
@@ -180,9 +165,9 @@ CSP does not allow.
   - `approval` (`approval.*` lifecycle events, G10.7-T3 #1778) — full
     detail; exists so the approvals console bell can filter the SSE
     bridge server-side.
-  - `checks` (`checks.transition`, #2720) — full detail; the checks
-    subsystem's own state-change events, published outside the audit
-    path. Matched by an **exact-membership allowlist**
+  - `checks` (`checks.transition`) — full detail. Checks publish
+    no Broadcast event; the class stays so older stream entries and
+    stored op-ids classify the same way. Matched by an **exact-membership allowlist**
     (`_CHECK_EVENT_OPS`), not by a `checks.` prefix: the
     `/api/v1/checks/*` gateway routes already own three op-ids under
     that prefix (`checks.assignment.put` / `.get`, `checks.results.post`),
@@ -286,10 +271,9 @@ CSP does not allow.
   **Tier-1 floor on the dispatch path.** Classification is
   allowlist-driven, so a secret-bearing op missing from the
   `credential_*` allowlists (newly ingested, mis-registered, added
-  without a pin) would fall through to a full-detail class. The
-  dispatch publisher (`publish_broadcast` in `operations/_audit.py`)
-  therefore runs every params dict through `scrub_broadcast_params`
-  (`broadcast/events.py`): a key-name scrub (`password` /
+  without a pin) would fall through to a full-detail class.
+  `scrub_broadcast_params` (`broadcast/events.py`) is the floor for a
+  params dict: a key-name scrub (`password` /
   `client_secret` / `sessionToken`-shaped keys — the Tier-1 engine
   alone cannot catch these because a dict leaf carries no label) plus
   a Tier-1 deterministic-redactor pass with the packaged default
@@ -304,9 +288,9 @@ CSP does not allow.
   which enumerates every registered typed/composite op and fails CI
   when an op whose parameter schema declares a secret-shaped property
   still classifies to `write` / `other` — allowlist drift now breaks
-  the build instead of broadcasting raw params. The MCP publish path
-  (`mcp/handlers.py`) still relies on classification + overrides only
-  (out of scope for the dispatch-path hardening).
+  the build instead of broadcasting raw params. MEHO publishes no
+  operation event, so no code path calls `scrub_broadcast_params`
+  today; the function and the coverage test stay in the code.
 - `Operator` (`auth/operator.py`) — the JWT-bound principal the SSE
   feed reads its `tenant_id` from. UUID.
 - `UISessionContext` (`ui/auth/middleware.py`) — the session-cookie
@@ -735,8 +719,7 @@ filter hides every row.
 there is a gap. Otherwise it waits and scans again after each wake-up
 and at the timeout. Before each scan it notes the stream's newest id
 (`XREVRANGE + - COUNT 1`), then waits with `XREAD BLOCK` from that id, so
-an announcement that commits during the scan still wakes it. Operation
-events on the same stream cause harmless extra scans. If Valkey fails,
+an announcement that commits during the scan still wakes it. If Valkey fails,
 the call scans every `WATCH_POLL_SECONDS` (5 s) instead, until the
 timeout. `next_cursor` always moves past every scanned row, also when
 the filter hides them; event ids are de-duplicated within a call, and a
@@ -767,40 +750,35 @@ instead of claiming to be complete:
 
 `gap` is `null` otherwise.
 
-**Not changed yet.** The SSE feed (`/api/v1/feed`, `meho broadcast
-watch`), the UI pane, and the `meho://tenant/{id}/feed` resource still
-read the stream, and audit-driven operation events are still published
-there. Moving those consumers is #3758.
-
 ## Dependencies
 
-- `redis.asyncio` (redis-py 7.4) — Valkey 9.x is wire-compatible with
+- `redis.asyncio` (redis-py 8.x, `backend/pyproject.toml`) — Valkey 9.x is wire-compatible with
   Redis 7.2.4; the same redis-py driver speaks both. **Two connection
   pools per process**, partitioned by read-timeout expectations
   (`broadcast/client.py`):
   - `get_broadcast_client()` — fast client, `socket_timeout=5 s`.
     Used by the readiness probe (`PING`), the publish hot path
-    (`XADD`), and the SSE backlog prelude (`XREVRANGE`). A hung
+    (the `XADD` script), the rate limits, and the archive reader's
+    newest-id read (`XREVRANGE`). A hung
     Valkey on this client raises `redis.TimeoutError` at 5 s so the
     `/ready` poll surfaces it.
   - `get_broadcast_blocking_client()` — long-poll client,
     `socket_timeout=35 s` (the 30 s `XREAD BLOCK` window + 5 s
-    buffer). Used by every blocking `XREAD` caller: the SSE feed
-    (`api/v1/feed.py`), the UI SSE bridge
-    (`ui/routes/broadcast/stream.py`), the
-    `meho_broadcast_watch` MCP tool, and the agent approval-wait
-    loop (`agent/approval_wait.py`). The longer timeout lets a quiet
+    buffer). Used by the one blocking `XREAD` caller, the archive
+    reader's wait (`broadcast/archive_reader.py`), which the
+    `meho_broadcast_watch` MCP tool and the SSE feeds
+    (`api/v1/feed.py`, `ui/routes/broadcast/stream.py`) share. The
+    longer timeout lets a quiet
     BLOCK expire naturally (`xread` returns `None`) instead of
     raising `redis.TimeoutError` from the socket layer at 5 s, which
     would otherwise produce a spurious `feed_error` frame on every
-    fresh SSE connection (RDC #789 N1 / Initiative #1353).
+    fresh SSE connection.
 - `BROADCAST_REDIS_URL` env var — production points at the Helm
   chart's `redis://{{ .Release.Name }}-broadcast:6379/0` Service.
   Dev default is `redis://localhost:6379`. Schemes other than
   `redis://` / `rediss://` / `unix://` are rejected at startup.
-- `prometheus_client.Counter` — three counters surface the publish
-  path on `/metrics`:
-  `broadcast_events_published_total{op_class,result_status}`,
+- `prometheus_client.Counter` — two counters surface the publish
+  path on `/metrics` (`broadcast/publisher.py`):
   `broadcast_publish_errors_total`,
   `broadcast_agent_announcements_total{phase}`.
 
@@ -809,7 +787,7 @@ there. Moving those consumers is #3758.
 The fixed issues below describe the stream-based SSE reader that #3758
 replaced with the archive reader; they stay as history.
 
-### `claude-rdc-hetzner-dc#789` N1 — fresh SSE connections die at ~5 s with a spurious error frame (FIXED v0.9.0, #1354)
+### Fresh SSE connections die at ~5 s with a spurious error frame (FIXED v0.9.0)
 
 **Symptom.** Every fresh `GET /api/v1/feed` (Bearer JWT) or
 `/ui/broadcast/stream` (session cookie) SSE connection on a quiet
@@ -872,7 +850,7 @@ under `TestFeedGenerator`:
   asserts the fast / blocking split, distinct pools, and the
   ≥30 s socket_timeout invariant on the blocking client.
 
-### `claude-rdc-hetzner-dc#771` Finding 14 — SSE feed delivers zero bytes (FIXED v0.9.0, #1305)
+### SSE feed delivers zero bytes (FIXED v0.9.0)
 
 **Symptom.** A fresh `GET /api/v1/feed` (Bearer JWT) or
 `/ui/broadcast/stream` (session cookie) returned zero bytes within a
@@ -937,7 +915,7 @@ The cap (`_BACKLOG_PRELUDE_COUNT = 50`) matches the MCP
 resource surface the same window of context on first connection.
 
 **Acceptance test** lives in `backend/tests/test_api_v1_feed.py`
-under `TestFeedBacklogPrelude`. The test mirrors the RDC repro:
+under `TestFeedBacklogPrelude`. The test mirrors the reported repro:
 publish via `_publish_event_into_mock` → open the SSE generator →
 assert the published events show up in the first batch of frames
 within bounded latency. A second test asserts that an explicit
@@ -951,7 +929,7 @@ the life of the connection even though the generator was yielding
 `event: broadcast` frames — the live-activity UI and
 `meho status --watch` stayed dark.
 
-**Root cause (middleware side, distinct from #1305/#771).** The
+**Root cause (middleware side, distinct from the zero-bytes fix above).** The
 chassis `AuditMiddleware` (`backend/src/meho_backplane/audit.py`) ran
 the inner app through `_run_inner_app_buffered`, which appended every
 `http.response.start` + `http.response.body` message to a list and
@@ -991,7 +969,7 @@ seam is the one that observes live forwarding.)
 
 ### Earlier issue: empty broadcast feed in v0.7.0 (#755)
 
-The v0.7.0 cycle (`claude-rdc-hetzner-dc#753`) surfaced "I see empty
+The v0.7.0 cycle surfaced "I see empty
 broadcast" without resolving the root cause; G0.15-T9 (tenant chip
 wiring, #1217) confirmed the tenant context was correctly propagated
 to the SSE endpoint, narrowing the suspect surface for v0.8.0
@@ -999,11 +977,6 @@ investigation. #1305 is the closing fix.
 
 ## References
 
-- Sources:
-  - `claude-rdc-hetzner-dc#789` N1 — fresh SSE connections die at
-    ~5 s (v0.8.1 cycle, fixed in #1354).
-  - `claude-rdc-hetzner-dc#771` Finding 14 — SSE feed delivers zero
-    bytes (v0.8.0 cycle, fixed in #1305).
 - Parent Initiatives: #1353 (G0.18 — v0.8.1 closed-loop dogfood
   hardening); #1302 (G0.16 — v0.8.0). Parent Goal: #221.
 - Related closed: #1216 (G0.15-T7 BFF audit-thread — UI session is

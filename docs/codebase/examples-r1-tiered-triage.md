@@ -121,15 +121,21 @@ on every firing.
 
 ## Why the harness exists (and why R3 has one too)
 
-The MCP memory tools (`add_to_memory` / `search_memory`,
-`backend/src/meho_backplane/mcp/tools/memory.py`) are not
-registered as in-process agent tools in v0.2 — the loop's tool
-catalog (`META_TOOL_NAMES` in `backend/src/meho_backplane/agent/toolset.py`)
-contains only `list_operation_groups` + `search_operations` +
-`call_operation` (plus `invoke_agent` when composition is wired).
-An agent definition that names `add_to_memory` in its toolset spec
-gets a logged warning and the tool is not registered; the model
-cannot call it.
+The MCP tool `add_to_memory`
+(`backend/src/meho_backplane/mcp/tools/memory.py`) is not an
+in-process agent tool. The loop's tool catalog (`META_TOOL_NAMES` in
+`backend/src/meho_backplane/agent/toolset.py`) has the three
+operation tools (`list_operation_groups`, `search_operations`,
+`call_operation`), the discovery tools (`meho_status`,
+`meho_connector_list`, `list_targets`, `preview_operation`,
+`result_query`), the broadcast tools (`broadcast_announce`,
+`broadcast_recent`, `broadcast_watch`), and the opt-in read tools
+(`query_topology`, `search_memory`, `search_knowledge`,
+`read_context_resource`), plus `invoke_agent` when composition is
+wired. An agent can read memory but cannot write it. An agent
+definition that names `add_to_memory` in its toolset spec gets a
+logged warning and the tool is not registered; the model cannot
+call it.
 
 Both R1 and R3 (`examples/kb_writeback`) work around this by
 doing the memory/kb write **in the harness**, not in the loop:

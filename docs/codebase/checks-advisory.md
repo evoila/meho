@@ -125,16 +125,17 @@ whether an agent or `meho operation call` issued it. What the **Go
 CLI's default human render** does with it is the gap:
 
 ```go
-// cli/internal/cmd/operation/call.go — printCallResult
+// cli/internal/cmd/operation/call.go — PrintCallResult
 if r.Status == "ok" {
-    ... print r.Result ...
+    ... print r.Result, the handle, the audit receipt ...
     return                      // ← returns before the extras block
 }
-...
-if len(r.Extras) > 0 && ... {   // ← non-ok path only
+dispatch.WriteErrorTrailer(w, &dispatch.CallResult{
+    ..., Extras: r.Extras, ...  // ← non-ok path only
+})
 ```
 
-`printCallResult` prints `extras` only on the **non-ok** branch, and
+`PrintCallResult` prints `extras` only on the **non-ok** branch, and
 this advisory only ever rides a *successful* dispatch. So today:
 
 | Front | Sees the fragment? |

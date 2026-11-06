@@ -37,7 +37,8 @@ models that G9.1-T1 (#448, migration `0007`) created.
   same-kind/different-endpoint auto edges; bidirectional
   `conflicts_with` for incompatible kinds over the same endpoint
   pair). Writes one audit row (`op_id="topology.annotate"`,
-  `op_class="write"`) and publishes one broadcast event.
+  `op_class="write"`). Topology writes publish no Broadcast event
+  (see [broadcast.md](broadcast.md)); the audit row is the record.
   **Precondition:** both endpoints must already exist as `graph_node`
   rows. A fresh tenant has zero nodes; seed them via
   `create_or_get_node` (manual seed) or `refresh_target_topology`
@@ -48,7 +49,7 @@ models that G9.1-T1 (#448, migration `0007`) created.
   `source='auto'` rows with `AutoEdgeDeletionError` (auto edges
   resurrect on next refresh). Clears reciprocal `superseded_by` /
   `conflicts_with` markers the deleted edge left on auto rows.
-  Writes one audit row + one broadcast event.
+  Writes one audit row.
 
 **Manual node seed — entry point (async, write half, G0.9.1-T6 #778):**
 
@@ -67,8 +68,7 @@ models that G9.1-T1 (#448, migration `0007`) created.
   curated nodes from refresh overwrites, target adoption, and
   refresh-driven soft-deletes. Writes one audit row
   (`op_id="topology.create_node"`, `op_class="write"`,
-  `method="CREATE_NODE"`) and publishes one broadcast event
-  (fail-open after commit). Closes the **empty-tenant bootstrap gap**:
+  `method="CREATE_NODE"`). Closes the **empty-tenant bootstrap gap**:
   before this verb, a fresh tenant could not reach a working topology
   state via MCP because `annotate_edge` requires both endpoints to
   already exist and the only node-creating path was the CLI verb
@@ -95,8 +95,7 @@ models that G9.1-T1 (#448, migration `0007`) created.
   `unannotate_edge` enforces. On the happy path it writes one `removed`
   `graph_node_history` tombstone (`before=snapshot` / `after=None`) +
   one audit row (`op_id="topology.delete_node"`, `op_class="write"`,
-  `method="DELETE_NODE"`), hard-deletes the row, and publishes one
-  broadcast event (fail-open after commit). The DB `ON DELETE CASCADE`
+  `method="DELETE_NODE"`) and hard-deletes the row. The DB `ON DELETE CASCADE`
   on `graph_edge` stays a backstop only (tenant purges + test cleanup):
   a bare cascade would drop referencing edges without their
   `graph_edge_history` tombstones, which is exactly why the service
@@ -105,9 +104,8 @@ models that G9.1-T1 (#448, migration `0007`) created.
   `graph_node_history.node_id` `ON DELETE SET NULL` FK, so the timeline
   facet stays renderable.
 
-Both service functions own a `session.begin()` block internally and
-publish broadcast events after commit (fail-open per the refresh
-pattern). The REST routes (T5), CLI verbs (T6), and MCP tools (T7)
+Both service functions own a `session.begin()` block internally. The
+REST routes (T5), CLI verbs (T6), and MCP tools (T7)
 funnel through these primitives.
 
 **Resolver — entry point (async, read-only, G9.2-T2 #594):**
@@ -202,8 +200,9 @@ an AGENT principal's write hits the needs-approval floor in
 `policy_gate` and parks as a durable `ApprovalRequest` (the MCP tool
 returns a `{status: awaiting_approval, approval_request_id, ...}`
 envelope; the write executes with the stored params when a human
-approves from any approvals surface), while a human tenant_admin rides
-the default-allow branch and executes immediately — same UX as before.
+approves from any approvals surface), while a human tenant_admin in
+the web interface executes at once (a call with a token waits, see
+below).
 A person with a lower role is refused: all five writes carry the
 `tenant_admin` **per-op role floor** (`operations/role_floors.py`,
 registered at import by `connectors/topology/ops.py`), which the policy
@@ -260,12 +259,12 @@ the tool boundary via the `inputSchema` `maxItems` (mirroring the REST
 list, the plan is returned inline under a hard row cap rather than a
 JSONFlux handle. `meho_topology_annotate`'s return shape gained a
 `superseded` list (#2539): the ids of the auto edges the assertion
-displaced — already stamped on the shared audit / broadcast payload, so
+displaced — already stamped on the shared audit payload, so
 surfacing them on the return is a shape change, not a new query (the
 handler reads `plan.audit_payload["superseded"]` from
 `annotate_edge_with_plan`, the plan-returning sibling of `annotate_edge`). The REST + UI
 write fronts are human-only surfaces and keep calling the service
-primitives directly. The three write ops are also discoverable /
+primitives directly. The five write ops are also discoverable /
 dispatchable through the generic agent meta-tools (`search_operations`
 / `call_operation`) with identical gating, since the gate lives in the
 dispatcher, not the front.
@@ -588,7 +587,7 @@ separately via `resolve_node`.
    class does **not** override the base no-op (`_has_populator` is
    false), the eventual `RefreshResult` is stamped with
    `no_populator_for_product` + `populated_products` (#2093); the
-   reconcile still runs on the empty snapshot — the audit/broadcast
+   reconcile still runs on the empty snapshot — the audit
    contract is unchanged and stale nodes this target adopted earlier
    still soft-delete.
 3. Open one transactional session (`sessionmaker() ... session.begin()`).
@@ -642,16 +641,13 @@ separately via `resolve_node`.
    through to the soft-delete pass. A discovered edge with no matching
    live node (a malformed connector emitting an edge without its node)
    is logged and skipped — never inserted as a dangling FK.
-6. `_write_audit_and_broadcast` adds **one `audit_log` row to the same
+6. `_write_audit` adds **one `audit_log` row to the same
    session** — `method="REFRESH"`, `path="topology.refresh"`,
    `payload={op_id, op_class:"read", target_id, <six counts>}`. Because
    the audit row is in the reconcile transaction, the spec's "no
    success without a committed audit row" invariant holds: an audit
-   failure rolls the whole refresh back.
-7. After commit, publish one `BroadcastEvent` (op_class `read`,
-   aggregate counts only — no node/edge names, so the read-class PII
-   default holds without a redactor pass). Broadcast is **fail-open**:
-   a publish exception is logged, never raised.
+   failure rolls the whole refresh back. No Broadcast event is
+   published.
 
 A failure anywhere in steps 1–6 raises out of the `session.begin()`
 block, rolling everything back: no half-applied graph, no audit row.
@@ -816,14 +812,14 @@ new `NodeNotFoundError`) and re-exported by
 `meho_backplane.topology.query` for back-compat with pre-G9.2
 importers. The ambiguity rule lives only in `resolve_node`, so the
 traversal verbs and the write paths share one answer. The not-found behavior intentionally differs between the
-two surfaces: `resolve_node` raises `NodeNotFoundError`; the
-traversal verbs keep G9.1's silent-on-miss contract (empty result,
-not an exception) — opting traversal into the stricter raise-on-miss
-contract is explicitly out of scope for G9.2-T2.
+two surfaces at G9.2-T2: `resolve_node` raised `NodeNotFoundError`
+while the traversal verbs kept G9.1's silent-on-miss contract. G0.18-T4
+moved the closure verbs to raise-on-miss (next paragraph); `find_path`
+keeps the silent `None` by default.
 
 The root is always included at depth 0, so a tracked node with no
-dependents returns the one-element `[root]`. G0.18-T4 (#1357,
-RDC #789 N2) changed the not-found contract: an anchor with no
+dependents returns the one-element `[root]`. G0.18-T4
+changed the not-found contract: an anchor with no
 matching `graph_node` row in the tenant raises
 `NodeNotFoundError` (resolved up front via
 `resolvers.resolve_node`) rather than returning `[]`. Pre-G0.18-T4
@@ -1150,11 +1146,9 @@ the full rows, snapshots included, are read through `result_query`.
    `payload={op_id, op_class:"write", edge_id, from, to, kind, note,
    evidence_url, superseded[], conflicts[]}`, `target_id` =
    from-node's `target_id` when non-null).
-7. Commit. Then publish one `BroadcastEvent` (`op_class="write"` —
-   set explicitly because the `.annotate` suffix is not in
-   `_WRITE_SUFFIXES`; §10 of #364 locks the *write* classification
-   so annotations broadcast in full per the G6.1 default classifier).
-   Publish is fail-open: a publish exception is logged, never raised.
+7. Commit. The audit row's `op_class="write"` is set explicitly
+   because the `.annotate` suffix is not in `_WRITE_SUFFIXES`; §10 of
+   the topology design locks the *write* classification.
 
 ### `unannotate_edge`
 
@@ -1177,8 +1171,7 @@ the full rows, snapshots included, are read through `result_query`.
    via G9.3).
 7. Add one `audit_log` row in the same session
    (`method="UNANNOTATE"`, `path="topology.unannotate"`,
-   `op_class="write"`). Commit. Publish one broadcast event
-   (fail-open).
+   `op_class="write"`). Commit.
 
 ## Diff-on-write history hook (write half — G9.3-T2 #857)
 
@@ -1377,10 +1370,9 @@ O(per_side_fetch) = O(limit + 1) per side, bounded by `limit ≤ 1000`.
 The REST route binds `audit_op_id="topology.timeline"` /
 `audit_op_class="audit_query"` per [decision #3](../decisions/locked-decisions.md)
 — temporal graph queries are inspections of system state, parallel
-to G8's audit-log query surface. The broadcast event carries only
-`{op_id, result_status, row_count}` so the request filter (which
-may name a sensitive target) and the row contents never leak onto
-the SSE / Slack feed.
+to G8's audit-log query surface. The `audit_query` class keeps the
+audit row aggregate-only, so the request filter (which may name a
+sensitive target) and the row contents are not copied into it.
 
 ## History query (read half — G9.3-T3 #859)
 
@@ -1472,10 +1464,9 @@ bind), and that raw SQL is gone.
 
 The REST route binds `audit_op_id="topology.history"` /
 `audit_op_class="audit_query"` — same shape as `topology.timeline`.
-The broadcast event carries only `{op_id, result_status,
-row_count}` so the response rows (which may include the snapshot
-of a sensitive resource's pre/post payload) never leak onto the
-SSE / Slack feed.
+The `audit_query` class keeps the audit row aggregate-only, so the
+response rows (which may include the snapshot of a sensitive
+resource's pre/post payload) are not copied into it.
 
 ## Manual node seed control flow (write half — G0.9.1-T6 #778)
 
@@ -1525,19 +1516,17 @@ SSE / Slack feed.
    `payload={op_id, op_class:"write", node_id, kind, name,
    was_created, note, evidence_url}`, `target_id` = the seeded
    node's own `target_id` when non-null, else `None`).
-7. Commit. Then publish one `BroadcastEvent` (`op_class="write"` —
-   set explicitly because the `.create_node` suffix is not in
-   `_WRITE_SUFFIXES`; same rationale as `.annotate` /
-   `.unannotate`). Publish is fail-open: a publish exception is
-   logged, never raised.
+7. Commit. The audit row's `op_class="write"` is set explicitly
+   because the `.create_node` suffix is not in `_WRITE_SUFFIXES`;
+   same rationale as `.annotate` / `.unannotate`.
 
 **Manual seeds are visible to `kind=history` / `kind=timeline`.**
-Before G0.18-T6 (#1359) the create_node hook wrote audit_log +
-broadcast but no `graph_node_history` row, so `query_topology
+Before G0.18-T6 the create_node hook wrote audit_log
+but no `graph_node_history` row, so `query_topology
 kind=history <manually-seeded-node>` returned empty and
 `kind=timeline` omitted the seed even though it surfaced in
 `query_audit` — an audit-vs-graph-history asymmetry first surfaced
-in RDC #789 finding F-A. The hook now emits one history row per
+in consumer dogfood feedback. The hook now emits one history row per
 meaningful call so both verbs reflect manual seeds the same way
 they reflect auto-refresh changes. The atomicity contract
 `history.py` documents holds: a failure anywhere in the
@@ -1591,7 +1580,7 @@ narrows to one resource kind (node `kind` like `vm` or edge `kind`
 like `runs-on`), applied **after** the fold so the cap fires on the
 post-filter cohort.
 
-**1000-row hard cap.** [Unreleased] enforces a strict cap at
+**1000-row hard cap.** The substrate enforces a strict cap at
 `_DIFF_HARD_CAP = 1000` -- on overflow the result returns
 `truncated=True` plus the canonical "narrow the time window"
 remediation hint. The CLI / REST / MCP fronts surface the hint
@@ -1636,7 +1625,7 @@ Surfaces:
   banner); `--json` carries the full `TopologyDiffResult`.
 * `GET /api/v1/topology/diff?ts1=...&ts2=...` -- the REST route.
   `op_class="audit_query"` per the G9 audit-query convention
-  (broadcast event carries only aggregate counts, never per-entry
+  (the audit row carries only aggregate counts, never per-entry
   payload).
 * `query_topology(kind="diff", ts1=..., ts2=...)` -- the MCP facet on
   the parametric `query_topology` meta-tool.
@@ -1678,8 +1667,8 @@ Load-bearing details:
   candidate kinds echoed in `detail` so the caller can re-issue with
   an explicit `kind`. Used by the four read verbs and by `POST /edges`
   / `GET /edges` when an endpoint name is ambiguous.
-- **Untracked anchor (closure verbs).** G0.18-T4 (#1357, RDC #789
-  N2). `find_dependents` / `find_dependencies` resolve the anchor
+- **Untracked anchor (closure verbs).** G0.18-T4.
+  `find_dependents` / `find_dependencies` resolve the anchor
   up front via `resolvers.resolve_node`; a `NodeNotFoundError`
   surfaces as HTTP **404 `node_untracked`** with the requested
   `name` (and `kind` when supplied) in `detail`. Distinct slug
@@ -1692,7 +1681,7 @@ Load-bearing details:
   generated CLI / SDK pick up both error envelopes. Pre-G0.18-T4
   the routes returned `[]` for an untracked anchor, conflating
   it with the tracked-no-deps case and feeding the
-  blast-radius-as-safe-to-delete false-negative the RDC dogfood
+  blast-radius-as-safe-to-delete false-negative a consumer dogfood
   cycle caught.
 - **Depth/hop ceilings.** The route caps `depth` at 64 and `max_hops`
   at 32 at the HTTP boundary (over the service defaults of 16 / 8) so
@@ -1701,7 +1690,7 @@ Load-bearing details:
 - **`refresh` audit.** The route binds `audit_op_id="topology.refresh"`
   / `audit_op_class="read"` for the chassis HTTP-level audit row; the
   refresh *service* additionally writes its own domain-level audit row
-  + one broadcast event with the per-target counts. The two rows are
+  with the per-target counts. The two rows are
   intentional — same shape as the operations dispatcher writing a
   domain row alongside the middleware's HTTP row.
 - **`refresh` connector-resolution failures.** #2092. The refresh
@@ -1738,8 +1727,8 @@ Load-bearing details:
 - **Curated-edge write audit class.** `POST` / `DELETE` bind
   `audit_op_class="write"` explicitly — `.annotate` / `.unannotate`
   are not in the broadcast classifier's `_WRITE_SUFFIXES` so the
-  default classifier would fall through to `op_class="other"` and the
-  broadcast event would under-emit per §10. `GET /edges` binds
+  default classifier would fall through to `op_class="other"`, which
+  §10 does not allow. `GET /edges` binds
   `op_class="read"`.
 - **`POST /edges` body shape.** The request body is
   `{"from": {"name": ..., "kind"?}, "kind": <kind-slug>,
@@ -1813,12 +1802,9 @@ shell loop.
   (apply) opens a fresh `session.begin()` block and calls
   `annotate_edge_in_txn` for each row inside it, so the whole batch
   commits or rolls back atomically — no partial apply. Dry-run skips
-  pass 2 and returns the per-row plan only. Post-commit publishes one
-  broadcast event per row via the shared fail-open `_publish` helper;
-  per-row audit rows are written inside the apply transaction by
-  `annotate_edge_in_txn`, so the audit + broadcast count matches the
-  issue criterion: one audit row per edge + one broadcast event per
-  edge.
+  pass 2 and returns the per-row plan only. Per-row audit rows are
+  written inside the apply transaction by `annotate_edge_in_txn`: one
+  audit row per edge. No Broadcast event is published.
 
 **Atomicity contract.** The whole batch lives in one transaction.
 A validation failure on any row rolls back the entire transaction —
@@ -1834,18 +1820,17 @@ atomic-only in v0.2 because:
 - Bulk import is a v0.2 stretch (Initiative #364 §7); a future
   widening to a `--continue-on-error` mode is back-compat and can ship
   in a follow-up.
-- The per-row audit + broadcast events still fire — one per applied
-  row — so a successful batch is indistinguishable from N single
-  annotates at the audit / event level.
+- The per-row audit rows still land — one per applied row — so a
+  successful batch is indistinguishable from N single annotates at the
+  audit level.
 
 **Refactor.** `annotate.py` was extracted into an in-transaction
 helper `annotate_edge_in_txn` that returns an `AnnotatePlan`; the
 single-edge `annotate_edge` is now a thin wrapper that opens
-`session.begin()`, calls the helper, then publishes one broadcast
-event after commit. `bulk_import_edges` calls the same helper N times
-inside one shared transaction. Backwards compat is preserved — every
-existing caller of `annotate_edge` sees the same shape, audit row,
-and broadcast event.
+`session.begin()` and calls the helper. `bulk_import_edges` calls the
+same helper N times inside one shared transaction. Backwards compat is
+preserved — every existing caller of `annotate_edge` sees the same
+shape and audit row.
 
 **Wire shape.** The REST body is
 `{"edges": [{"from", "kind", "to", "note"?, "evidence_url"?}, ...], "dry_run"?: bool}`.
@@ -1889,8 +1874,8 @@ each broken edge in the source file without scanning every row.
 
 ## CLI front (T6, #454)
 
-`cli/internal/cmd/topology/` is the operator front for the four
-topology routes; `cli/internal/cmd/targets/discover.go` (sibling of
+`cli/internal/cmd/topology/` is the operator front for the topology
+routes; `cli/internal/cmd/targets/discover.go` (sibling of
 `targets/list.go`) is the front for `GET /api/v1/targets/discover`.
 The split mirrors where the backend registers each route — discover
 sits under the `/api/v1/targets` prefix, so its verb sits under the
@@ -1906,6 +1891,9 @@ sits under the `/api/v1/targets` prefix, so its verb sits under the
 | `meho topology unannotate <edge-id>` (or tuple) | `DELETE /topology/edges/{id}` | `deleted edge ...` line |
 | `meho topology list-edges` | `GET /topology/edges` | `KIND / SOURCE / FROM / TO / LAST_SEEN` table |
 | `meho topology bulk-import <file>` | `POST /topology/edges/bulk` | applied/planned counts + per-row table |
+| `meho topology timeline` | `GET /topology/timeline` | see "Timeline query" |
+| `meho topology diff <ts1> <ts2>` | `GET /topology/diff` | see "Diff query" |
+| `meho topology history <name>` | `GET /topology/history/{n}` | see "History query" |
 | `meho targets discover <product>` | `GET /targets/discover?product=` | candidates + skipped tables |
 
 Load-bearing details:
@@ -2141,7 +2129,7 @@ shape.
 - Parent Initiative: G9.1 #363; prerequisites #448 / #449.
 - Write half: G9.1-T3 #450. Read half: G9.1-T4 #451.
 - Prerequisite schema: G9.1-T1 #448 (migration `0007`).
-- Audit/broadcast pattern mirrored from
+- Audit pattern mirrored from
   `backend/src/meho_backplane/operations/_audit.py`.
 - PostgreSQL recursive CTE + `CYCLE`:
   <https://www.postgresql.org/docs/17/queries-with.html> §7.8.2.2

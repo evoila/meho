@@ -303,9 +303,9 @@ state)` window:
   not retried by the next same-state crossing — the #2719
   one-attempt-per-claimed-transition contract, per window. The failure
   is warn-logged either way.
-- **Delivery only.** The memo compare-and-swap, the `checks.transition`
-  broadcast event (#2720), and the investigator's fire gate see every
-  edge, suppressed or not. Finding mail is not flap-suppressed — its
+- **Delivery only.** The memo compare-and-swap and the investigator's
+  fire gate see every edge, suppressed or not. Checks publish no
+  Broadcast event (see `checks-broadcast.md`). Finding mail is not flap-suppressed — its
   volume control is the investigator's fire gate.
 
 ## Three anti-flap layers (#2799 composition)
@@ -318,8 +318,8 @@ compose, none rediscovers another:
    commits a *sensor* state change only after consecutive confirming
    re-checks (soft/hard states, `docs/codebase/sensor.md`). An
    unconfirmed transition never reaches the projection, so the rollup
-   CAS, this notifier, the broadcaster, the investigator, and the
-   advisory are all gated for free — fewer, better edges arrive here.
+   CAS, this notifier, the investigator, and the advisory are all
+   gated for free — fewer, better edges arrive here.
    This is what suppresses the observed one-flaky-reading incident: the
    two nuisance mails were first crossings into *distinct* states,
    which the #2732 window deliberately never suppresses.
@@ -465,9 +465,10 @@ from the memo would mean re-mailing every unchanged evaluation.
   recipient is refused logs `checks_notify_no_allowed_recipients`.
 - **No delivery record.** Nothing durable says a mail was sent; the
   structlog event is the whole trace (`checks_notify_sent` /
-  `checks_finding_email_sent`). The `checks.transition` broadcast event
-  (#2720) is the queryable record of the edge itself, and the `agent_run`
-  row is the durable record of the finding.
+  `checks_finding_email_sent`). The Dashboard's
+  `check_dashboards.last_rollup_state` memo holds only the current
+  state, not the edge history; the `agent_run` row is the durable record
+  of the finding.
 - **Two mails per incident when both are configured.** A Dashboard with a
   `notify_email` and an enabled investigator mails the transition
   immediately and the finding minutes later, when the run terminates.

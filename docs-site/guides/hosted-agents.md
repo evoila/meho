@@ -265,8 +265,8 @@ no grant matches.
 |---|---|
 | `safe` (reads) | Runs without approval. |
 | `caution` | Waits until a second person approves. |
-| `dangerous` | Denied. |
-| `destructive` | Denied. |
+| `dangerous` | Waits until a person approves. |
+| `destructive` | Waits until a person approves. The agent must preview the operation first. |
 
 So a new agent can already run **every `safe` operation** on every
 connector and target, with no grant at all. To make it truly read-only
@@ -287,8 +287,8 @@ to every run of the agent:
   sub.
 
 The safety-level table above applies to both kinds of run. With no
-grant, a `caution` operation waits until a second person approves, and
-a `dangerous` operation is denied, even when you may run it yourself.
+grant, a `caution`, `dangerous` or `destructive` operation waits until a
+person approves, even when you may run it yourself.
 See [Approvals and break-glass](approvals-and-break-glass.md) for which
 calls wait for a second person.
 
@@ -325,11 +325,11 @@ When MEHO checks a call, it follows these rules:
 | `safe` | `auto-execute` (no limit) |
 | `caution` | `needs-approval` |
 | `dangerous` | `needs-approval` |
-| `destructive` | `deny`. No grant can open it for an agent. |
+| `destructive` | `needs-approval`. No grant lets it run without a person. |
 
-So a grant can always make an operation **stricter**. It can make a
-`dangerous` operation possible, but only with a second person's
-approval. A `caution` or `dangerous` operation never runs on its own.
+So a grant can always make an operation **stricter**. It can never
+let a `caution`, `dangerous` or `destructive` operation run on its own:
+these always wait for a person's approval. An agent never approves.
 
 Grants only check operations that run through `call_operation`. The
 discovery tools (`meho_connector_list`, `list_operation_groups`,

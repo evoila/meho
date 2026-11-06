@@ -335,11 +335,12 @@ That is only true for agent principals. A paired add-on that signs in as a
 
 - **Any principal may start a destructive op.** Starting it does not run it.
   The call waits for a human to approve.
-- **Agent principals** (`principal_kind=agent`) are the one exception. For
-  them the tier is DENY. The call does not wait for approval; it is refused
-  (`auth/permissions.py` `_SAFETY_DEFAULT` and `_SAFETY_CEILING` map
-  `destructive` to DENY, applied on the agent branch of
-  `operations/_validate.py::policy_gate`).
+- **Agent principals** (`principal_kind=agent`) were the one exception at
+  first: for them the tier was DENY. Since #3980 an agent's call waits for a
+  person's approval too (`auth/permissions.py` `_SAFETY_DEFAULT` and
+  `_SAFETY_CEILING` map `destructive` to NEEDS_APPROVAL, applied on the
+  agent branch of `operations/_validate.py::policy_gate`). It needs a
+  matching preview hash first, and an agent never approves.
 - **Service and user principals** always wait for approval
   (`NEEDS_APPROVAL`). They are never denied by the tier, and they never run
   without approval (`operations/_validate.py::_non_agent_verdict`, the

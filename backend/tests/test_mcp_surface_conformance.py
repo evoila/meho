@@ -55,6 +55,7 @@ from typing import Any
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
+from meho_backplane.api.v1 import approvals as approvals_api
 from meho_backplane.api.v1 import connector_tenant_settings, service_grants, service_read_scopes
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.main import app
@@ -585,6 +586,22 @@ def test_decision_reach_check_finds_a_decision_behind_a_helper() -> None:
     assert "approve_request" in _names_reached(_handler_that_reaches_a_decision)
     assert "approve_request" in _names_reached(_helper_that_approves)
     assert _names_reached(_handler_without_a_decision) & _APPROVAL_DECISION_NAMES == set()
+
+
+def test_approval_decision_names_are_real_functions() -> None:
+    """Every name in the decision list is still a real function.
+
+    The reach check matches by name. If one of these functions is renamed,
+    the old name would match nothing and the check would pass for the
+    wrong reason. This test fails first, so the list gets updated.
+    """
+    modules = (approval_queue, approvals_api)
+    missing = [
+        name
+        for name in sorted(_APPROVAL_DECISION_NAMES)
+        if not any(inspect.isfunction(getattr(module, name, None)) for module in modules)
+    ]
+    assert missing == [], f"decision names that are no longer functions: {missing}"
 
 
 # ---------------------------------------------------------------------------

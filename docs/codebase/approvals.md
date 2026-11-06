@@ -2169,8 +2169,11 @@ the failure from first-use to CI. The console modal
 (`operations/composite.py::enforce_subop_policy`) parks via its own
 `create_pending_request` call and is **not** gated here — a destructive op
 reached as a composite subop is a separate governance seam (a follow-up,
-not this task). In practice an agent cannot reach it: the destructive tier
-is `DENY` for agent principals at `resolve_verdict`.
+not this task). That path still refuses a destructive step on its own: it
+calls `_destructive_binding_refusal` with no preview hash, so the step is
+refused and no approval row is written. A person's approval of the whole
+multi-step run does not cover a destructive step
+(`_covered_by_approved_run`).
 
 ## First governed delete: `vmware.composite.vm.destroy` (#3198)
 
@@ -2234,7 +2237,8 @@ enforcement that #3196/#3197 left, plus one machinery limitation:
   at registration time — an inconsistent row can't exist. Belt-and-suspenders
   with the runtime park guarantee above.
 
-Conformance for the op — no agent path (agent verdict `DENY`), no standing
+Conformance for the op — an agent's request waits for a person like any
+other destructive request (agent verdict `NEEDS_APPROVAL`, #3980), no standing
 grant (`ServicePrincipalGrant` refuses), no self-approval even under
 break-glass, no satellite mint (`MintRefusalCode.OP_NOT_SAFE`), dispatch
 refused without a matching hash, park refused without a blast-radius block,
@@ -3515,17 +3519,17 @@ the op alone: a human must approve it. It needs no standing grant. This is
 the supported way for an add-on to do two-person deletes without a person
 typing each delete on the CLI.
 
-The rule that confuses people: the destructive tier is DENY **only for
-agent principals**. For service and user principals it waits for approval.
-The rule is recorded in
+Since #3980 the destructive tier waits for a person's approval for every
+principal kind, agents included. What differs is who may approve: an agent
+never approves. The rule is recorded in
 [`governed-delete-operations.md`](../decisions/governed-delete-operations.md)
 ("Who may propose").
 
 | Principal kind | Destructive op | Code |
 |---|---|---|
-| `agent` | Refused (DENY). Nothing is parked. | `auth/permissions.py:131` `_SAFETY_DEFAULT` + `:154` `_SAFETY_CEILING`; agent branch of `operations/_validate.py:450` `policy_gate` |
-| `service` | Waits for approval. No grant can approve it in advance. | `operations/_validate.py:362` `_non_agent_verdict` (the `destructive` branch); `operations/service_grants.py:758` `consult_and_record_grant` refuses the tier before any grant lookup |
-| `user` | Waits for approval. | `operations/_validate.py:362` `_non_agent_verdict` |
+| `agent` | Waits for a person's approval. It needs a matching preview hash first. No grant lets it run without a person: the grant limit is `needs-approval`. Agents never approve. | `auth/permissions.py:134` `_SAFETY_DEFAULT` + `:150` `_SAFETY_CEILING`; agent branch of `operations/_validate.py:825` `policy_gate` |
+| `service` | Waits for approval. No grant can approve it in advance, except a delete grant on an instance in sandbox mode (see [service-principal-grants.md](service-principal-grants.md)). | `operations/_validate.py:724` `_non_agent_verdict` (the `destructive` branch); `operations/service_grants.py:1272` `consult_and_record_grant` refuses the tier before any grant lookup |
+| `user` | Waits for approval. | `operations/_validate.py:724` `_non_agent_verdict` |
 
 ### The round trip
 

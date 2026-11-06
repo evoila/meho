@@ -497,7 +497,7 @@ it, someone else did. Treat the login as exposed and change it.
   [`backend/src/meho_backplane/connectors/_shared/vault_creds.py`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py#L104)
 - Operator identity (`raw_jwt` `repr=False`):
   [`backend/src/meho_backplane/auth/operator.py`](../../backend/src/meho_backplane/auth/operator.py#L118)
-- `dangerous` safety lattice (deny-by-default, needs-approval ceiling):
+- `dangerous` safety rule (an agent's call waits for a person's approval; no grant can let it run on its own):
   [`backend/src/meho_backplane/auth/permissions.py`](../../backend/src/meho_backplane/auth/permissions.py)
 - Dispatch policy gate + audit + redaction (why the value would otherwise
   land in an audit row):

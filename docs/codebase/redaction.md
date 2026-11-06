@@ -1060,9 +1060,12 @@ A connector can also mask a body itself before the span is recorded.
 records in place of the raw bytes, or `None` for the raw bytes (the
 default). The shared engine still runs on what it returns. This is for a
 vendor answer that carries a secret in a field the shape net cannot place
-and the op family does not exclude. The Keycloak connector runs its
+and the op family does not exclude: the HCX connector masks every
+secret-named field (`password`, `vcPassword`, `token`, ...) of every
+answer this way, so a stored pairing password never reaches the trace
+(`docs/codebase/connectors-hcx.md`, in the private connectors repository). The Keycloak connector runs its
 result scrubber (`redact_secret_fields`) on every recorded Admin REST
-answer this way (`docs/codebase/connectors-keycloak.md`). The Azure
+answer the same way (`docs/codebase/connectors-keycloak.md`). The Azure
 connector masks key and password fields (`connectors/azure/trace_mask.py`),
 and the Entra and phpIPAM connectors mask their answers the same way. The hook
 runs only while a trace is being captured.

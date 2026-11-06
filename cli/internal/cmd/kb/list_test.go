@@ -115,6 +115,15 @@ func TestRunListRejectsNegativeOffset(t *testing.T) {
 	}
 }
 
+// TestRunListRejectsUnknownOrder — --order takes only slug or newest.
+func TestRunListRejectsUnknownOrder(t *testing.T) {
+	cmd, _, _ := newRunCmd(t)
+	err := runList(cmd, listOptions{Order: "oldest"})
+	if err == nil {
+		t.Fatalf("expected error for --order oldest")
+	}
+}
+
 // TestRunListHappyPath drives runList end-to-end through the typed
 // client transport against an httptest server. The wire shape
 // (query params, Authorization header) is built by the generated
@@ -264,11 +273,11 @@ func TestRunListWiresFilterLimitOffsetOnWire(t *testing.T) {
 
 	cmd, _, stderr := newRunCmd(t)
 	if err := runList(cmd, listOptions{
-		Filter: "vcenter%", Limit: 25, Offset: 10, BackplaneOverride: srv.URL,
+		Filter: "vcenter%", Limit: 25, Offset: 10, Order: "newest", BackplaneOverride: srv.URL,
 	}); err != nil {
 		t.Fatalf("runList: %v; stderr=%s", err, stderr.String())
 	}
-	for _, want := range []string{"filter=vcenter%25", "limit=25", "offset=10"} {
+	for _, want := range []string{"filter=vcenter%25", "limit=25", "offset=10", "order=newest"} {
 		if !strings.Contains(seenQuery, want) {
 			t.Errorf("expected %q in query string; got %q", want, seenQuery)
 		}
@@ -303,7 +312,7 @@ func TestRunListOmitsZeroLimitOffsetOnWire(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("runList: %v; stderr=%s", err, stderr.String())
 	}
-	for _, forbidden := range []string{"limit=", "offset="} {
+	for _, forbidden := range []string{"limit=", "offset=", "order="} {
 		if strings.Contains(seenQuery, forbidden) {
 			t.Errorf("expected %q absent from query; got %q", forbidden, seenQuery)
 		}

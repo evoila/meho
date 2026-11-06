@@ -61,6 +61,7 @@ The ingest reads only regular files inside the folder. It skips links (to files 
 
 ```bash
 meho kb list                       # all entries, slug-sorted, 200-char preview each
+meho kb list --order newest        # most recently updated first
 meho kb search "vsphere snapshot"  # ranked hits via hybrid BM25 + cosine
 meho kb show vcenter-9.0-snapshot-revert   # full Markdown body of one entry
 ```

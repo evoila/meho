@@ -341,6 +341,7 @@ class _FailingConnector(HttpConnector):
     """Every call fails with the error :attr:`fail` builds. Has the 401 re-login hook."""
 
     product = _PRODUCT
+    accepts_ingested_operations = True
     version = _VERSION
     impl_id = "secretdemo-rest"
     supported_version_range = ">=1,<2"

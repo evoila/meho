@@ -213,6 +213,8 @@ and only the Kubernetes connector overrides it
 — so for a non-k8s pair (a virtualization-management appliance
 `runs-on` its host cluster, a workload `runs-on` a hypervisor) no probe
 ever emits `runs-on` / `mounts` / `routes-through` / `belongs-to`.
+Initiative #4124 adds more connectors that fill the map. When each one
+lands, this section and the `discover_topology` entry above name it.
 
 The policy that follows: **an auto-discoverable kind MAY be curated on
 any pair no populator covers.** Choosing the semantically-correct kind

@@ -41,6 +41,10 @@
 # the tag's chart and image. It attaches the tar, SHA256SUMS-linux and
 # SHA256SUMS-linux.cosign.bundle to the same Release.
 #
+# The `operation-catalog` job calls operation-catalog.yml. It attaches
+# operation-catalog.json and operation-catalog-changes.json, each with its
+# .cosign.bundle, to the same Release.
+#
 # Permissions design follows the same per-job least-privilege posture
 # as chart.yml + image.yml:
 #   * workflow-default = `contents: read` (just enough to checkout).
@@ -455,6 +459,21 @@ jobs:
     # and attaches, takes these two; its `build` job stays read-only.
     # GitHub does not allow `timeout-minutes` on a job that calls a
     # workflow; each job of linux-download.yml sets its own.
+    permissions:
+      contents: write
+      id-token: write
+
+  operation-catalog:
+    name: Operation catalog (operation-catalog.json)
+    # Writes the signed list of every built-in operation and the list of its
+    # changes since the previous release, and attaches both with their
+    # signature bundles to the release that the `release` job created. See
+    # .github/workflows/operation-catalog.yml.
+    needs: release
+    uses: ./.github/workflows/operation-catalog.yml
+    with:
+      tag: ${{ github.ref_name }}
+    # Same as `linux-download`: only the called `publish` job uses these.
     permissions:
       contents: write
       id-token: write

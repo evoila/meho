@@ -12,7 +12,7 @@ The `/release` skill walks these same steps interactively.
 ## What a release is
 
 A release is **a `v*` git tag**. The tag is the single source of truth
-for the version — six artefacts derive from it, all published
+for the version — seven artefacts derive from it, all published
 automatically on the tag push:
 
 | Artefact | Where | Workflow | Version source |
@@ -22,12 +22,14 @@ automatically on the tag push:
 | CLI tarballs + GitHub Release | [releases](https://github.com/evoila/meho/releases) | [`cli-release.yml`](../.github/workflows/cli-release.yml) | GoReleaser bakes `{{.Tag}}` into `version.Version` |
 | Claude Desktop `.mcpb` bundle | [releases](https://github.com/evoila/meho/releases) | [`cli-release.yml`](../.github/workflows/cli-release.yml) | `clients/claude-desktop-mcpb/build.sh` stamps the tag version |
 | Form-2 download `meho-linux-X.Y.Z-amd64.tar` (Linux server, no internet), with `SHA256SUMS-linux` and its `.cosign.bundle` | [releases](https://github.com/evoila/meho/releases) | [`linux-download.yml`](../.github/workflows/linux-download.yml), called by `cli-release.yml` | `deploy/linux-server/build-download.sh` takes the tag's chart, image and CLI, and writes `VERSION` |
+| Operation catalog `operation-catalog.json` and `operation-catalog-changes.json`, each with its `.cosign.bundle` | [releases](https://github.com/evoila/meho/releases) | [`operation-catalog.yml`](../.github/workflows/operation-catalog.yml), called by `cli-release.yml` | `backend/scripts/operation_catalog.py` writes the tag into the file |
 | Docs site version | <https://evoila.github.io/meho/> | [`docs-site.yml`](../.github/workflows/docs-site.yml) | mike publishes the tag's `MAJOR.MINOR` + moves `latest` |
 
 The Desktop `.mcpb` bundle rides `cli-release.yml`, attached to the same
 GitHub Release as the CLI tarballs. Four workflows fire on the tag
 (`image.yml`, `chart.yml`, `cli-release.yml`, `docs-site.yml`), and
-`cli-release.yml` calls the fifth, `linux-download.yml`. All
+`cli-release.yml` calls two more, `linux-download.yml` and
+`operation-catalog.yml`. All
 four fire on `tags: ['v*']` (image/chart have **no** path filter
 on tags — a tag always publishes). `cli-release.yml` is **tag-only**: a
 main push never cuts a release. Docs versions are cut **per minor** — a
@@ -39,6 +41,12 @@ The form-2 download is the sixth artefact. After its `release` job,
 image of the tag (at most 60 minutes). Then it builds the download, checks
 it, and attaches it to the same Release
 ([`docs/codebase/linux-server-download.md`](codebase/linux-server-download.md)).
+
+The operation catalog is the seventh artefact. After its `release` job,
+`cli-release.yml` also calls `operation-catalog.yml`. It writes the list of
+every built-in operation and the list of changes since the previous release
+tag, signs both and attaches them to the same Release
+([`docs/codebase/operation-catalog-file.md`](codebase/operation-catalog-file.md)).
 
 ## Supply-chain and CI baseline
 
@@ -340,7 +348,7 @@ git push origin vX.Y.Z
 
 The push fans out to `cli-release.yml`, `image.yml`, `chart.yml` and
 `docs-site.yml`. `cli-release.yml` then calls `linux-download.yml` for the
-form-2 download.
+form-2 download and `operation-catalog.yml` for the operation catalog.
 
 **Release tags are protected.** A tag ruleset refuses to create, move or delete any `v*` tag, final or rc. Only members of the evoila team `release-cutters` may push one. GitHub logs each of their pushes as a bypass in the ruleset's Rule insights.
 
@@ -380,6 +388,23 @@ form-2 download.
   If the job failed, read its `[FAIL]` line. The most likely one is the
   size limit (1.9 GiB): the design's answer is to split the download into
   two release files.
+- [ ] The operation catalog `operation-catalog.json`,
+  `operation-catalog-changes.json` and their two `.cosign.bundle` files are
+  attached (job `operation-catalog` of `cli-release.yml` green). The
+  signature names `operation-catalog.yml`. Check it:
+
+  ```bash
+  TAG=vX.Y.Z
+  BASE=https://github.com/evoila/meho/releases/download/$TAG
+  for FILE in operation-catalog.json operation-catalog-changes.json; do
+    curl -fLO "$BASE/$FILE"
+    curl -fLO "$BASE/$FILE.cosign.bundle"
+    cosign verify-blob \
+      --certificate-identity "https://github.com/evoila/meho/.github/workflows/operation-catalog.yml@refs/tags/$TAG" \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      --bundle "$FILE.cosign.bundle" "$FILE"
+  done
+  ```
 
 #### Maintainer one-time setup — GHCR package visibility
 
@@ -642,7 +667,7 @@ init container logs `migration_skipped` and the pod gets Ready:
 The road to v1.0.0 ([#2661](https://github.com/evoila/meho/issues/2661),
 milestone "v0.29 — contract freeze (rc series)") is the first time MEHO
 ships release candidates. An rc is a **real release** — the same `v*`
-tag, the same publish workflows, the same six artefacts — whose
+tag, the same publish workflows, the same seven artefacts — whose
 version carries a SemVer pre-release identifier. Everything in steps
 1–7 applies; this section carries only the deltas. No rc tag has ever
 been pushed (`git tag -l 'v*-rc.*'` is empty as of v0.45.0), so every
@@ -998,7 +1023,8 @@ follow-up task.
 [ ] 4. Tagged vX.Y.Z + pushed
 [ ] 5. GH Release notes correct (not [Unreleased] fallback); image, chart,
        CLI tarballs all published; form-2 download + SHA256SUMS-linux
-       attached, signature and checksum checked
+       attached, signature and checksum checked; operation catalog and
+       change file attached, signatures checked
 [ ] 6. Deployed to the lab cluster; smoke-green
 [ ] 6a. Post-deploy enablement — for each gate in /ready features:
         configure the env vars per the cited doc; verify gate

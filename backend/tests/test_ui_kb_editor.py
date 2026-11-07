@@ -39,6 +39,7 @@ import asyncio
 import uuid
 from collections.abc import Iterator
 from datetime import timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -53,6 +54,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import Tenant
 from meho_backplane.kb.schemas import KbEntry
+from meho_backplane.kb.service import KbService
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import (
     SESSION_COOKIE_NAME,
@@ -569,6 +571,66 @@ def test_detail_page_kb_body_class_present() -> None:
 
     assert response.status_code == 200, response.text
     assert 'class="prose prose-sm max-w-none kb-body"' in response.text
+
+
+def test_detail_page_shows_the_lesson_header_of_an_imported_note(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every lesson header field of a note from a directory import is on the page."""
+    monkeypatch.setenv("KB_INGEST_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+    (tmp_path / "snap-lesson.md").write_text(
+        "---\n"
+        "type: lesson\n"
+        "applies_to: product-and-version\n"
+        "status: candidate\n"
+        "product: vcenter\n"
+        "version: 9.0\n"
+        "source: team wiki\n"
+        "author: ops team\n"
+        "summary: Snapshots block a clone.\n"
+        "learned_at: 2026-11-01\n"
+        "confirmed_at: 2026-11-02\n"
+        "expires_at: 2027-05-01\n"
+        "tags: [vm, snapshot]\n"
+        "---\n"
+        "Body.\n"
+    )
+    _seed_tenant(_TENANT_A, "tenant-a")
+
+    async def _import() -> None:
+        with patch(
+            "meho_backplane.retrieval.indexer.get_embedding_service",
+            return_value=fake_embedding_service(),
+        ):
+            result = await KbService().ingest_directory(tmp_path, _TENANT_A)
+        assert result.inserted_count == 1
+
+    asyncio.run(_import())
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/kb/snap-lesson")
+
+    assert response.status_code == 200, response.text
+    html = response.text
+    assert 'aria-label="Lesson header"' in html
+    for name, value in [
+        ("type", "lesson"),
+        ("applies_to", "product-and-version"),
+        ("status", "candidate"),
+        ("summary", "Snapshots block a clone."),
+        ("product", "vcenter"),
+        ("version", "9.0"),
+        ("source", "team wiki"),
+        ("author", "ops team"),
+        ("learned_at", "2026-11-01T00:00:00+00:00"),
+        ("confirmed_at", "2026-11-02T00:00:00+00:00"),
+        ("expires_at", "2027-05-01T00:00:00+00:00"),
+        ("tags", "vm, snapshot"),
+    ]:
+        assert f">{name}</dt>" in html
+        assert f">{value}</dd>" in html
 
 
 # ---------------------------------------------------------------------------

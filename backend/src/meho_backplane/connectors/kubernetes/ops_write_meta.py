@@ -362,6 +362,15 @@ _APPLY_SCHEMA: dict[str, Any] = {
                 "the would-be object as a preview). 'none' persists."
             ),
         },
+        "force_conflicts": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "When true, the apply takes over fields that another tool "
+                "(kubectl apply, Helm) owns. When false, such a conflict is an "
+                "error that names the owner and the fields."
+            ),
+        },
     },
     "required": ["manifest"],
     "additionalProperties": False,
@@ -514,12 +523,19 @@ _APPLY_LLM: dict[str, Any] = {
     "parameter_hints": {
         "manifest": "YAML/JSON; multi-doc supported via '---'.",
         "dry_run": "'server' for a side-effect-free preview; 'none' to apply.",
+        "force_conflicts": (
+            "Default false. Set true only to change an object that kubectl apply or "
+            "Helm applied before: it takes the conflicting fields over. The approval "
+            "request lists each field and its current owner."
+        ),
     },
     "output_shape": (
-        "{dry_run, field_manager, applied: [{api_version, kind, name, namespace, "
-        "resource_version, uid, warnings}], total}. warnings lists the API "
-        "server's warnings for that document, such as a deprecated apiVersion; "
-        "read them before the real apply."
+        "{dry_run, force_conflicts, field_manager, applied: [{api_version, kind, name, "
+        "namespace, resource_version, uid, warnings, takes_over?}], total}. takes_over "
+        "(dry run with force_conflicts) lists {owner, field} pairs the apply takes over. "
+        "A conflict without force_conflicts is an error naming the owner and fields. "
+        "warnings lists the API server's warnings for that document, such as a "
+        "deprecated apiVersion; read them before the real apply."
     ),
 }
 _DELETE_LLM: dict[str, Any] = {

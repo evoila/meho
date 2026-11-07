@@ -1,0 +1,292 @@
+{
+  "$defs": {
+    "AuthModel": {
+      "description": "Per-target identity model per v0.1-spec L447-454.",
+      "enum": [
+        "impersonation",
+        "shared_service_account",
+        "per_user"
+      ],
+      "title": "AuthModel",
+      "type": "string"
+    },
+    "FingerprintRecord": {
+      "additionalProperties": false,
+      "description": "The detected product and version of a system.\n\nMEHO fills this in when it probes the target. A file may carry it, but\nthe import skips it with a warning and never writes it.",
+      "properties": {
+        "build": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Build"
+        },
+        "edition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edition"
+        },
+        "extras": {
+          "additionalProperties": true,
+          "title": "Extras",
+          "type": "object"
+        },
+        "probe_method": {
+          "title": "Probe Method",
+          "type": "string"
+        },
+        "probed_at": {
+          "format": "date-time",
+          "title": "Probed At",
+          "type": "string"
+        },
+        "product": {
+          "title": "Product",
+          "type": "string"
+        },
+        "reachable": {
+          "title": "Reachable",
+          "type": "boolean"
+        },
+        "vendor": {
+          "title": "Vendor",
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        }
+      },
+      "required": [
+        "vendor",
+        "product",
+        "reachable",
+        "probed_at",
+        "probe_method"
+      ],
+      "title": "FingerprintRecord",
+      "type": "object"
+    }
+  },
+  "$id": "https://github.com/evoila/meho/blob/main/docs/schemas/target-record-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "description": "One entry of the ``targets:`` list.\n\nA key that is not listed here is allowed. The import keeps it in the\ntarget's ``extras`` and prints a warning.",
+  "properties": {
+    "aliases": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Aliases",
+      "type": "array"
+    },
+    "auth_model": {
+      "$ref": "#/$defs/AuthModel",
+      "default": "shared_service_account"
+    },
+    "extras": {
+      "additionalProperties": true,
+      "title": "Extras",
+      "type": "object"
+    },
+    "fingerprint": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FingerprintRecord"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Detected product and version. The import skips it."
+    },
+    "flight_recorder_capture": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Flight Recorder Capture"
+    },
+    "fqdn": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Fqdn"
+    },
+    "host": {
+      "description": "The host or IP address.",
+      "maxLength": 512,
+      "minLength": 1,
+      "title": "Host",
+      "type": "string"
+    },
+    "name": {
+      "description": "The target's name.",
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "notes": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Notes"
+    },
+    "port": {
+      "anyOf": [
+        {
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Port"
+    },
+    "preferred_impl_id": {
+      "anyOf": [
+        {
+          "maxLength": 200,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Preferred Impl Id"
+    },
+    "product": {
+      "description": "The product token.",
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Product",
+      "type": "string"
+    },
+    "secret_field_map": {
+      "additionalProperties": {
+        "maxLength": 200,
+        "minLength": 1,
+        "type": "string"
+      },
+      "description": "Maps a connector field to the field name in your secret. Names only.",
+      "propertyNames": {
+        "maxLength": 200,
+        "minLength": 1
+      },
+      "title": "Secret Field Map",
+      "type": "object"
+    },
+    "secret_ref": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "A path in the credential store.",
+      "title": "Secret Ref"
+    },
+    "tls_ca_pin": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tls Ca Pin"
+    },
+    "tls_server_name": {
+      "anyOf": [
+        {
+          "maxLength": 512,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tls Server Name"
+    },
+    "verify_tls": {
+      "default": true,
+      "title": "Verify Tls",
+      "type": "boolean"
+    },
+    "version": {
+      "anyOf": [
+        {
+          "maxLength": 100,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "The product version you state. Write it as text, for example \"8.0\".",
+      "title": "Version"
+    },
+    "vpn_required": {
+      "default": false,
+      "title": "Vpn Required",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "name",
+    "product",
+    "host"
+  ],
+  "title": "Target record",
+  "type": "object"
+}

@@ -44,6 +44,7 @@ from meho_backplane.connectors.keycloak import (
     ops_authflow_passkey,  # noqa: F401 -- the approval card of the passkey step op
     ops_login_check,  # noqa: F401
     ops_write_preview,  # noqa: F401
+    ops_write_realm_smtp,  # noqa: F401 -- refuses an inline SMTP password before approval
 )
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector
 from meho_backplane.connectors.registry import register_connector_v2

@@ -183,7 +183,10 @@ Three properties are load-bearing for correctness and safety:
   params, the audit row (audit stores a `params_hash`, never raw params),
   or the broadcast feed (`keycloak.user.create` /
   `keycloak.user.reset_password` classify as `credential_write` →
-  aggregate-only broadcast). The CLI exposes only `--password-secret-ref`,
+  aggregate-only broadcast). A realm's mail server (SMTP) password follows
+  the same rule: `keycloak.realm.update` takes it as
+  `smtp_password_secret_ref` and refuses a password inside
+  `representation.smtpServer`. The CLI exposes only `--password-secret-ref`,
   never an inline `--password`, so the secret never lands in shell
   history or `ps` output.
 

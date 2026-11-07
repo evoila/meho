@@ -2065,11 +2065,13 @@ Each builder shows what changes and never a secret value. These nine
 got one in #4850. `k8s.secret.update` and `secret.handoff.import` came
 later, each with its own builder
 (`connectors/kubernetes/ops_secret_write_preview.py`,
-`connectors/secret/handoff_preview.py`):
+`connectors/secret/handoff_preview.py`). So did `keycloak.realm.update`
+(`connectors/keycloak/ops_write_realm_smtp.py`):
 
 | Op | Who waits for approval | The approver sees | Never shown |
 |---|---|---|---|
 | `keycloak.user.reset_password` | every call | user (`username` / `id`), realm, Vault path of the new password (`password_secret_ref`, mount, field), `temporary` | the password |
+| `keycloak.realm.update` | every call | realm, the requested realm fields (`representation`), the reference of the SMTP password (`smtp_password_secret_ref`) | any secret-named value; an SMTP password given inline is refused before the wait |
 | `vault.auth.userpass.update_password` | every call | mount, username, `sets_password` | the password |
 | `vault.auth.userpass.write` | every call | mount, username, `sets_password`, `token_policies` and whether they are replaced or kept | the password |
 | `k8s.secret.create` | every call | name, namespace, type, all key names, inline key names, the `labels` and `annotations` maps, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts | any value |

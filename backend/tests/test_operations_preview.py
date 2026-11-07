@@ -462,7 +462,7 @@ async def test_no_builder_op_echoes_params() -> None:
     from a computed ``preview``) tagged with the op's sensitivity class.
     """
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="keycloak.realm.update"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id="keycloak.client.update"),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),
@@ -489,7 +489,7 @@ async def test_no_builder_op_empty_params_yields_none() -> None:
     rather than storing an empty ``params_echo``.
     """
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="keycloak.realm.update"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id="keycloak.client.update"),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),

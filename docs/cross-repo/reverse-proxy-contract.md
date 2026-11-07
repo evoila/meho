@@ -10,9 +10,8 @@ cluster's TLS-terminating reverse proxy (typically an Ingress
 controller — `nginx-ingress`, `traefik`, or equivalent). Without this
 contract held on both sides, FastAPI's trailing-slash 307 redirects
 emit a `Location: http://...` header that downgrades the client's
-second hop and creates a MITM window — surfaced by the 2026-05-20 RDC
-in-lab dogfood as **Signal #3** and fixed in Issue
-[#730](https://github.com/evoila/meho/issues/730).
+second hop and creates a MITM window. The backplane side of this
+contract shipped with [#730](https://github.com/evoila/meho/issues/730).
 
 ## Why this exists
 
@@ -25,12 +24,12 @@ scheme into the `Location` header:
 
 ```
 $ curl -k -L -w "final=%{url_effective}\n" \
-    https://meho.evba.lab/api/v1/connectors/k8s-1.x/operations
+    https://meho.example.com/api/v1/connectors/k8s-1.x/operations
 HTTP/1.1 307 Temporary Redirect
-Location: http://meho.evba.lab/api/v1/connectors/k8s-1.x/operations/
+Location: http://meho.example.com/api/v1/connectors/k8s-1.x/operations/
                 ^^^^ HTTPS→HTTP downgrade
 {"detail":"Method Not Allowed"}
-final=http://meho.evba.lab/api/v1/connectors/k8s-1.x/operations/
+final=http://meho.example.com/api/v1/connectors/k8s-1.x/operations/
 ```
 
 `curl -k -L` shrugs through the downgrade; a malicious on-path
@@ -83,7 +82,7 @@ minimum:
 | Header | Value | Why |
 | --- | --- | --- |
 | `X-Forwarded-Proto` | `https` (when the client connected over TLS) | The backplane reflects this into the 307 `Location`. Wrong value → wrong redirect. |
-| `X-Forwarded-Host` | The hostname the client used (e.g. `meho.evba.lab`) | Logging + future use; not load-bearing for the redirect fix but the standard contract. |
+| `X-Forwarded-Host` | The hostname the client used (e.g. `meho.example.com`) | Logging + future use; not load-bearing for the redirect fix but the standard contract. |
 | `X-Forwarded-For` | The chain of client IPs ending in the immediate upstream | Audit + RFC 7239 hygiene. The backplane records this; not load-bearing for the redirect fix. |
 
 Most ingress controllers set these by default once TLS is configured:
@@ -116,7 +115,7 @@ Recommended values per ingress posture:
 | Cluster shape | Recommended value | Rationale |
 | --- | --- | --- |
 | **Production / multi-tenant** | The pod CIDR of the ingress controller's namespace (e.g. `10.42.0.0/16` for RKE2 default) — or the specific pod IPs if pinned | Restricts trust to in-cluster proxies; pod-to-pod requests from other workloads cannot spoof the scheme |
-| **Single-tenant lab / RDC dogfood** | The cluster's pod CIDR (`10.42.0.0/16` on RKE2; `10.244.0.0/16` on Kind/Calico) | Same trust restriction, broader scope acceptable when there is only one workload |
+| **Single-tenant lab** | The cluster's pod CIDR (`10.42.0.0/16` on RKE2; `10.244.0.0/16` on Kind/Calico) | Same trust restriction, broader scope acceptable when there is only one workload |
 | **Ephemeral CI cluster (`pr-smoke`)** | `"*"` — disable the allow-list | The PR-smoke cluster is single-tenant by construction; every connecting peer is the cluster's own proxy. Never use this in production |
 | **Default (no override)** | `"127.0.0.1"` (uvicorn's secure default) | Fails-closed: the Ingress controller's pod IP is never the loopback, so `X-Forwarded-*` is silently ignored and the bug persists. This is the intended behaviour — a misconfigured cluster fails visibly rather than silently downgrading |
 
@@ -134,15 +133,15 @@ correctly, not to add `--proxy-headers=*` at the container level
 After deploying with a non-default `forwardedAllowIps`:
 
 ```bash
-# Replace meho.evba.lab with your Ingress host and the path with any
+# Replace meho.example.com with your Ingress host and the path with any
 # route that 307-redirects (the prefix without trailing slash on a
 # group route is the canonical case).
 curl -k -L -w "final=%{url_effective}\n" \
-    https://meho.evba.lab/api/v1/connectors/k8s-1.x/operations \
+    https://meho.example.com/api/v1/connectors/k8s-1.x/operations \
     -H "Authorization: Bearer ${MEHO_TOKEN}"
 ```
 
-Expected: `final=https://meho.evba.lab/api/v1/connectors/k8s-1.x/operations/`.
+Expected: `final=https://meho.example.com/api/v1/connectors/k8s-1.x/operations/`.
 
 Symptom of misconfiguration: `final=http://...`. Diagnose by
 checking, in order:

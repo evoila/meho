@@ -12,6 +12,29 @@ Copyright (c) 2026 evoila Group
 > to know what to build, and the verification commands either side
 > can run to prove the handshake works.
 
+## Built-in OpenBao or your own Vault
+
+With the built-in OpenBao (`coreVault.enabled: true`, the chart default
+since 0.45.0), the chart's setup Job does surfaces 1–6 for you, and the
+chart points the backplane at them. What the Job makes is listed in
+[`docs/codebase/core-vault-init.md`](../codebase/core-vault-init.md).
+Differences from the recipe below:
+
+- The `meho-mcp` role also copies `tenant_id` and `tenant_role` from the
+  token into the login. Three groups, one per `tenant_role`, give the
+  tenant policies of
+  [`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md),
+  so each tenant reads and writes only `secret/tenants/<tenant id>/`.
+- The scheduler token is in the Secret `<release>-core-vault-scheduler`;
+  the backplane reads it as a file (`VAULT_SCHEDULER_TOKEN_FILE`).
+- Surface 7 does not apply yet: the check runner cannot log in to the
+  built-in OpenBao.
+- Surface 8 (an extra role for a teardown target) is still a manual step
+  for a Vault admin, on the `jwt` mount.
+
+The rest of this page is the recipe for a Vault you bring yourself
+(`coreVault.enabled: false`).
+
 ## Why this lives in `evoila/meho`
 
 The federation chain is wired in `backend/src/meho_backplane/auth/vault.py`
@@ -132,8 +155,8 @@ above will Just Work.
 `/api/v1/health` handler reads `secret/meho/test/federation` on
 every authenticated call to prove the federation chain works
 end-to-end (Keycloak JWT → Vault OIDC login → KV read). The
-producer-side path is hard-coded at
-[`backend/src/meho_backplane/api/v1/health.py:68`](../../backend/src/meho_backplane/api/v1/health.py#L68)
+producer-side path is hard-coded as `_FEDERATION_PROOF_PATH` in
+[`backend/src/meho_backplane/api/v1/health.py`](../../backend/src/meho_backplane/api/v1/health.py)
 and intentionally not configurable in v0.1 — per-route customisation
 of which secret to read lands with the first connector post-Goal-2.
 
@@ -369,9 +392,9 @@ reuses the landed identity); when you scope a dedicated
 self-heal can complete the read/write it re-mints for.
 
 This is the supported answer for an adopter whose scheduled dispatch has
-no durable identity — e.g. a scheduled investigator that today ties its
-JWT to an interactive user session that expires (pm-tnt/MFC.ClaudeOps#277):
-point it at the `client_credentials` runner principal instead.
+no durable identity — e.g. a scheduled investigator that ties its JWT to
+an interactive user session that expires: point it at the
+`client_credentials` runner principal instead.
 
 ### 7. Bounding the check-runner principal (#2642)
 
@@ -665,8 +688,8 @@ vault write auth/jwt-meho/role/meho-teardown \
 #    wildcard registration). The role/mount ride the target's extras.
 #    Only a platform admin may set or change `vault_role` and
 #    `vault_mount` (through REST, the UI import or `targets.register`).
-meho targets register vault-teardown \
-  --product vault --host <vault-host> \
+meho targets add vault-teardown \
+  --product vault --host <vault-host> --no-secret-ref \
   --extra vault_role=meho-teardown \
   --extra vault_mount=jwt-meho
 ```
@@ -789,7 +812,6 @@ everything it needs from Vault.
 - Producer-side handler: [`backend/src/meho_backplane/api/v1/health.py`](../../backend/src/meho_backplane/api/v1/health.py)
 - Producer-side Vault client: [`backend/src/meho_backplane/auth/vault.py`](../../backend/src/meho_backplane/auth/vault.py)
 - Backplane settings (env-var contract): [`backend/src/meho_backplane/settings.py`](../../backend/src/meho_backplane/settings.py)
-- Cross-repo handshake (cluster-side): [`./rke2-infra-coordination.md`](./rke2-infra-coordination.md)
 - Smoke leg #4 contract: [`../acceptance/smoke.md`](../acceptance/smoke.md)
 - Dedicated-jwt-mount correction: [evoila/meho#553](https://github.com/evoila/meho/issues/553)
 - Vault JWT/OIDC auth docs: <https://developer.hashicorp.com/vault/docs/auth/jwt> (note: the **JWT** method — `role_type=jwt` — is distinct from OIDC-login mode on the same backend)

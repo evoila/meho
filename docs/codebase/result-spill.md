@@ -762,7 +762,8 @@ expected value on purpose and say why in the commit.
   or failed is dropped and the response is `delivery="unavailable"`. Details
   in `docs/codebase/mcp.md`, "Response wire ceiling".
 - `duckdb>=1.5.5` / `pyarrow>=25.0.1` (`backend/pyproject.toml`; the
-  lock file sets the exact versions) — the sandboxed
+  lock file sets the exact versions; the engine works on duckdb 1.5 and
+  2.0) — the sandboxed
   `QueryEngine` the lazy compiled-query path runs inside. The reducer does
   not construct an engine for its catalog, summary, or preview.
 

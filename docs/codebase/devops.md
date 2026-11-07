@@ -2105,6 +2105,26 @@ byte-identical). No escape-hatch label (the coverage lane's
 must be *forced* onto a PR, whereas the unit lane runs on every PR by default,
 so a sharding PR self-validates through its own `pull_request` run.
 
+### Temporary files of a unit run
+
+Every unit test gets its own copy of the migrated SQLite template database
+(about 1 MB) in its `tmp_path`. The suite has about 18,000 tests, so the
+copies of one full run would add up to about 20 GB. The autouse fixture
+`_default_database_url` in `backend/tests/conftest.py` now deletes the copy
+when the test ends. So the size during a run depends on the number of
+workers, not on the number of tests: one template and one live copy per
+worker, plus the other files of the tests that are running. A sample of
+1,052 tests with 4 workers peaked at 75 MB. Pass
+`-o tmp_path_retention_policy=failed` as well: when every test passes,
+pytest then removes the whole temporary folder at the end, so nothing is
+left. The full suite was not measured this way; its peak is an estimate
+from the sample.
+
+The autouse fixture `_reset_structlog_logger_cache` clears the cached bound
+logger of every module-level structlog logger in `meho_backplane` before and
+after each test. Without it, a test that captures log lines can miss a logger
+that an earlier test in the same process used under another setup.
+
 ### Sharded integration lane (#5384)
 
 The integration tests ran as one serial job. By October 2026 its pytest

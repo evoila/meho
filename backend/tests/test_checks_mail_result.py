@@ -18,7 +18,6 @@ import pytest
 import meho_backplane.checks.notify as notify
 from meho_backplane.checks import mail_result
 from meho_backplane.checks.mail_result import ALERT_MAIL_TOTAL, record_mail_result
-from meho_backplane.checks.notify import DashboardNotice, notify_dashboard_transition
 from meho_backplane.connectors.mail.transport import MailSendResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import CheckDashboard, Tenant
@@ -82,8 +81,8 @@ async def _row(dashboard_id: UUID) -> CheckDashboard:
         return row
 
 
-def _notice(dashboard_id: UUID, email: str = "oncall@example.com") -> DashboardNotice:
-    return DashboardNotice(
+def _notice(dashboard_id: UUID, email: str = "oncall@example.com") -> notify.DashboardNotice:
+    return notify.DashboardNotice(
         tenant_id=_TENANT,
         dashboard_id=dashboard_id,
         name="prod-health",
@@ -106,7 +105,7 @@ async def test_sent_mail_is_stored_and_counted(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(notify, "send_email", _Transport())
     dashboard_id = await _seed_dashboard()
     before = _count("sent")
-    await notify_dashboard_transition(_notice(dashboard_id))
+    await notify.notify_dashboard_transition(_notice(dashboard_id))
     row = await _row(dashboard_id)
     assert row.last_mail_at is not None
     assert row.last_mail_sent is True
@@ -120,7 +119,7 @@ async def test_refused_mail_keeps_its_reason(monkeypatch: pytest.MonkeyPatch, re
     monkeypatch.setattr(notify, "send_email", _Transport(MailSendResult(sent=False, reason=reason)))
     dashboard_id = await _seed_dashboard()
     before = _count(reason)
-    await notify_dashboard_transition(_notice(dashboard_id))
+    await notify.notify_dashboard_transition(_notice(dashboard_id))
     row = await _row(dashboard_id)
     assert row.last_mail_at is not None
     assert row.last_mail_sent is False
@@ -134,7 +133,7 @@ async def test_raising_transport_is_recorded_as_unexpected_error(
 ) -> None:
     monkeypatch.setattr(notify, "send_email", _Transport(exc=RuntimeError("boom")))
     dashboard_id = await _seed_dashboard()
-    await notify_dashboard_transition(_notice(dashboard_id))
+    await notify.notify_dashboard_transition(_notice(dashboard_id))
     row = await _row(dashboard_id)
     assert (row.last_mail_sent, row.last_mail_reason) == (False, "unexpected_error")
 
@@ -143,7 +142,7 @@ async def test_raising_transport_is_recorded_as_unexpected_error(
 async def test_no_allowed_recipient_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(notify, "send_email", _Transport())
     dashboard_id = await _seed_dashboard()
-    await notify_dashboard_transition(_notice(dashboard_id, email="oncall@blocked.test"))
+    await notify.notify_dashboard_transition(_notice(dashboard_id, email="oncall@blocked.test"))
     row = await _row(dashboard_id)
     assert (row.last_mail_sent, row.last_mail_reason) == (False, "no_allowed_recipients")
 
@@ -156,9 +155,9 @@ async def test_later_success_clears_the_reason(monkeypatch: pytest.MonkeyPatch) 
         "send_email",
         _Transport(MailSendResult(sent=False, reason="smtp_connect_error")),
     )
-    await notify_dashboard_transition(_notice(dashboard_id))
+    await notify.notify_dashboard_transition(_notice(dashboard_id))
     monkeypatch.setattr(notify, "send_email", _Transport())
-    await notify_dashboard_transition(_notice(dashboard_id))
+    await notify.notify_dashboard_transition(_notice(dashboard_id))
     row = await _row(dashboard_id)
     assert (row.last_mail_sent, row.last_mail_reason) == (True, None)
 
@@ -167,8 +166,8 @@ async def test_later_success_clears_the_reason(monkeypatch: pytest.MonkeyPatch) 
 async def test_skipped_mail_is_not_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(notify, "send_email", _Transport())
     dashboard_id = await _seed_dashboard()
-    await notify_dashboard_transition(
-        DashboardNotice(
+    await notify.notify_dashboard_transition(
+        notify.DashboardNotice(
             tenant_id=_TENANT,
             dashboard_id=dashboard_id,
             name="x",

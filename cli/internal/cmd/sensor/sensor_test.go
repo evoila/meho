@@ -125,6 +125,7 @@ func TestNewRootCmd_Subcommands(t *testing.T) {
 	}
 	want := map[string]bool{
 		"list": true, "create": true, "delete <sensor_id>": true, "results <sensor_id>": true,
+		"edit <sensor_id>": true,
 	}
 	for _, sub := range cmd.Commands() {
 		if !want[sub.Use] {

@@ -337,9 +337,12 @@ From the form-2 download: `install.sh --from-disk`,
 
 ## Known issues
 
-- **Not run on a real appliance yet.** The tests use stub commands. The
-  first import by hand (#4815) checks the real path: the OVF environment
-  from vCenter, the console output and questions, `ovftool`, the boot menu.
+- **One real appliance run so far.** The tests use stub commands. The
+  first lab import ran first start on a real appliance. It showed the
+  step-3 problems that the `admin` group and the password check now fix
+  (see step 3 and `banner.sh` above). The import by hand (#4815) checks
+  the rest of the real path: the console questions, `ovftool` and the
+  boot menu.
 - **No first-start list yet.** `meho status --first-start` comes with
   #4042, inside `install.sh`. The banner shows no list until then.
 - **`meho-host ssh-key add` does not exist yet.** After a console setup

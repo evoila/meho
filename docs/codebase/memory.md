@@ -100,7 +100,7 @@ Singleton-style service: holds a `MemoryRbacResolver` and a
 `structlog` logger; opens a fresh `AsyncSession` per method. No
 shared cursor / connection state across calls. Public methods:
 `remember`, `recall`, `read_by_id`, `forget`, `list_memories`,
-`search_memories`, `promote`.
+`search_memories`, `promote`, `revisions`.
 
 ### `resolve_default_expires_at` (`memory/ttl.py`)
 
@@ -209,15 +209,32 @@ operator console persisted `expires_at = null` and the expiry sweeper
    `tenant_admin`. Any other operator can write the three user-flavoured
    scopes and `target`.
 3. Compute `source_id` via `encode_source_id`.
-4. Build merged `doc_metadata` (caller keys + service-owned
-   `scope` / `user_sub` / `target_name` / `expires_at`).
+4. Check the caller `metadata` as a lesson header
+   (`meho_backplane/lesson_header.py`, the same header as knowledge;
+   see `kb.md`, "Lesson header and shared scope"). A wrong value raises
+   `LessonHeaderError` (a `ValueError`: REST `422`, MCP invalid params).
+   The names `slug`, `provenance` and `kind` are refused; `scope` is
+   overwritten with the real scope. Then build merged `doc_metadata`
+   (caller keys + service-owned `scope` / `user_sub` / `target_name` /
+   `expires_at`).
 5. Call `meho_backplane.retrieval.indexer.index_document`, which
    upserts the row (insert-or-update on the
    `(tenant_id, source, source_id)` unique index) and computes the
    384-dim embedding inline.
-6. SELECT the row back and project to `MemoryEntry` via
-   `document_to_entry`, which pulls `created_at` / `updated_at`
-   straight from the ORM row.
+6. Store a revision (`memory/revisions.py::record_revision`): one
+   `memory_revision` row with the body and metadata, unless the newest
+   revision already has the same body and metadata. `promote` stores
+   one for the new target row too; `forget`, the expiry sweeper and a
+   moving promote delete the revisions of the entries they delete.
+7. Project the row to `MemoryEntry` via `document_to_entry`, which pulls
+   `created_at` / `updated_at` straight from the ORM row, and lifts
+   `source` out of the metadata (`MemoryEntry.source`, `None` when the
+   writer gave none).
+
+`MemoryService.revisions(operator, document_id)` returns the retained
+versions, oldest first, under the same read rules as `read_by_id`
+(`None` for a missing, foreign, other-owner or expired row). There is
+no REST or MCP route for it yet.
 
 ### Read path — direct (`recall` / `list_memories`)
 

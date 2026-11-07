@@ -96,6 +96,7 @@ import structlog
 import yaml
 
 from meho_backplane.kb.schemas import validate_slug
+from meho_backplane.lesson_header import normalise_lesson_header
 
 __all__ = [
     "KB_IGNORE_FILENAME",
@@ -382,7 +383,11 @@ def _build_record(path: Path, rel: str) -> KbFileRecord:
     except yaml.YAMLError as exc:
         raise KbFileParseError(f"front-matter parse error in {rel}: {exc}") from exc
 
-    metadata = dict(post.metadata)
+    # A wrong header value raises LessonHeaderError (a ValueError), so the
+    # file is counted as an error like any other bad file.
+    metadata = normalise_lesson_header(
+        post.metadata, allowed_reserved=frozenset({"slug", "provenance"})
+    )
     body = post.content
 
     override = metadata.get("slug")

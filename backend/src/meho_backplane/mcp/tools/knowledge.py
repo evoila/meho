@@ -71,14 +71,17 @@ from __future__ import annotations
 
 from typing import Any, Final
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.kb.schemas import (
     InvalidKbSlugError,
     KbEntryNotOwnedError,
     KbEntrySearchHit,
     KbReservedMetadataError,
+    KbSharedNotAllowedError,
+    KbSharedSlugError,
 )
 from meho_backplane.kb.service import KbService
+from meho_backplane.lesson_header import LessonHeaderError
 from meho_backplane.mcp.registry import (
     READ_ONLY,
     ToolDefinition,
@@ -235,6 +238,20 @@ def _bounded_search_response(hits: list[dict[str, Any]], max_bytes: int) -> dict
         kept -= 1
 
 
+def _may_change_any_entry(operator: Operator) -> bool:
+    """Say whether *operator* may overwrite an entry another principal owns.
+
+    A tenant admin may. A reviewer may: a person who can decide
+    approvals in this tenant (the rule of the approvals queue, one list
+    for approvals and reviews). Anyone else changes only their own entries.
+    """
+    if operator.tenant_role == TenantRole.TENANT_ADMIN:
+        return True
+    return is_human_principal(operator) and (
+        operator.tenant_role != TenantRole.READ_ONLY or operator.approver
+    )
+
+
 async def _add_to_knowledge_handler(
     operator: Operator,
     arguments: dict[str, Any],
@@ -257,8 +274,10 @@ async def _add_to_knowledge_handler(
       needs ``tenant_admin``; this tool is open to ``operator`` so an
       agent can capture knowledge, but then the service refuses to
       overwrite an entry another principal created, and refuses the
-      curation metadata key ``source_kind``. A ``tenant_admin`` keeps
-      the wiki-like behaviour: any slug, any metadata.
+      curation metadata keys ``source_kind`` and ``shared``. A
+      ``tenant_admin`` keeps the wiki-like behaviour: any slug, any
+      metadata. A reviewer (a person who can decide approvals) may
+      also overwrite any entry, but may not set those keys.
 
     The body-hash short-circuit in
     :func:`~meho_backplane.retrieval.indexer.index_document` means a
@@ -278,13 +297,19 @@ async def _add_to_knowledge_handler(
             body=body,
             metadata=metadata,
             actor_sub=operator.sub,
-            own_entries_only=operator.tenant_role != TenantRole.TENANT_ADMIN,
+            own_entries_only=not _may_change_any_entry(operator),
+            may_set_curation_keys=operator.tenant_role == TenantRole.TENANT_ADMIN,
         )
-    except InvalidKbSlugError as exc:
+    except (InvalidKbSlugError, LessonHeaderError) as exc:
         raise McpInvalidParamsError(f"add_to_knowledge: {exc}") from exc
+    except (KbSharedNotAllowedError, KbSharedSlugError) as exc:
+        raise McpPermissionDeniedError(
+            f"add_to_knowledge: {exc}",
+            data={"reason": "shared_scope"},
+        ) from exc
     except KbEntryNotOwnedError as exc:
         raise McpPermissionDeniedError(
-            f"add_to_knowledge: {exc}. Use a new slug, or ask a tenant admin to change it.",
+            f"add_to_knowledge: {exc}.",
             data={"reason": "entry_not_owned", "slug": exc.slug},
         ) from exc
     except KbReservedMetadataError as exc:

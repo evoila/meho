@@ -524,7 +524,10 @@ def _resume_outcome_view(row: ApprovalRequest) -> ApprovalResumeOutcomeView | No
 
 def _execution_outcome(dispatch_result: Any) -> str | None:
     """``uncertain`` when the run's result says MEHO does not know (#5025), else ``None``."""
-    envelope = {"status": dispatch_result.status, "extras": dispatch_result.extras}
+    envelope = {
+        "status": getattr(dispatch_result, "status", None),
+        "extras": getattr(dispatch_result, "extras", None),
+    }
     return UNCERTAIN_OUTCOME if envelope_is_uncertain(envelope) else None
 
 

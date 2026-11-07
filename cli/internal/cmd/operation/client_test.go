@@ -54,6 +54,8 @@ type fakeOperationsClient struct {
 	searchResponses      []*api.GetSearchApiV1OperationsSearchGetResponse
 	resultQueryResponses []*api.PostResultQueryApiV1OperationsResultQueryPostResponse
 	subopsResponses      []*api.GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse
+	runResponses         []*api.GetOperationRunStatusApiV1OperationsRunsHandleGetResponse
+	lastRunParams        []*api.GetOperationRunStatusApiV1OperationsRunsHandleGetParams
 
 	// Per-verb transport-error queues. Drain in the same order as
 	// the response queues so a refresh-then-transport-failure scenario
@@ -152,6 +154,21 @@ func (f *fakeOperationsClient) PostResultQueryApiV1OperationsResultQueryPost(
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       io.NopCloser(bytes.NewReader(canned.Body)),
 	}, nil
+}
+
+func (f *fakeOperationsClient) GetOperationRunStatusApiV1OperationsRunsHandleGetWithResponse(
+	_ context.Context,
+	_ openapi_types.UUID,
+	params *api.GetOperationRunStatusApiV1OperationsRunsHandleGetParams,
+	_ ...api.RequestEditorFn,
+) (*api.GetOperationRunStatusApiV1OperationsRunsHandleGetResponse, error) {
+	f.lastRunParams = append(f.lastRunParams, params)
+	if len(f.runResponses) == 0 {
+		return nil, errors.New("fakeOperationsClient: no canned run response")
+	}
+	r := f.runResponses[0]
+	f.runResponses = f.runResponses[1:]
+	return r, nil
 }
 
 func (f *fakeOperationsClient) Refresh(_ context.Context) error {

@@ -51,8 +51,11 @@ the test suite pins.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
+from meho_backplane.lesson_header import header_expires_at
 from meho_backplane.memory.schemas import MemoryScope
 from meho_backplane.settings import get_settings
 
@@ -64,6 +67,7 @@ def resolve_default_expires_at(
     *,
     expires_at_was_set: bool,
     explicit_expires_at: datetime | None,
+    metadata: Mapping[str, Any] | None = None,
 ) -> datetime | None:
     """Return the effective ``expires_at`` for a memory write.
 
@@ -80,6 +84,11 @@ def resolve_default_expires_at(
     explicit_expires_at
         The caller-supplied value when ``expires_at_was_set`` is
         ``True``; ignored otherwise.
+    metadata
+        The caller's metadata. Its lesson header ``expires_at``
+        (:func:`~meho_backplane.lesson_header.header_expires_at`) is used
+        when the caller set no ``expires_at`` / ``ttl``, so a note keeps
+        the expiry it carries when it moves from knowledge to memory.
 
     Returns
     -------
@@ -87,12 +96,16 @@ def resolve_default_expires_at(
         * ``explicit_expires_at`` verbatim when the caller set the
           field (the CLI ``--persist`` opt-out path returns ``None``
           here).
+        * The header ``expires_at`` from *metadata* when it has one.
         * ``None`` when the scope is not :attr:`MemoryScope.USER`
           (per #624's narrow gate).
         * ``now(UTC) + memory_user_default_ttl_days`` otherwise.
     """
     if expires_at_was_set:
         return explicit_expires_at
+    from_header = header_expires_at(metadata)
+    if from_header is not None:
+        return from_header
     if scope is not MemoryScope.USER:
         return None
     settings = get_settings()

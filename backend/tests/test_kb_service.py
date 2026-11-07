@@ -1275,10 +1275,12 @@ async def test_ingest_stores_header_dates_and_versions_as_text(
     result = await service.ingest_directory(tmp_path, tenant_id)
     assert (result.inserted_count, result.error_count) == (3, 0)
 
+    # learned_at and confirmed_at are lesson header dates, so they are
+    # stored in full ISO form.
     expected = {
-        "dated": {"learned_at": "2026-11-03", "version": "3.10"},
-        "stamped": {"confirmed_at": "2026-11-03T10:00:00Z"},
-        "quoted": {"learned_at": "2026-11-03", "version": "3.10"},
+        "dated": {"learned_at": "2026-11-03T00:00:00+00:00", "version": "3.10"},
+        "stamped": {"confirmed_at": "2026-11-03T10:00:00+00:00"},
+        "quoted": {"learned_at": "2026-11-03T00:00:00+00:00", "version": "3.10"},
     }
     for slug, header in expected.items():
         entry = await service.get_entry(tenant_id, slug)

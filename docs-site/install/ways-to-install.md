@@ -1,12 +1,15 @@
 # Ways to install MEHO
 
-Every way to install MEHO puts the same parts in your network: MEHO,
-PostgreSQL (the database), Keycloak (the login server) and OpenBao (the
-password safe). After the install, the steps are the same.
+Every way installs MEHO with its own PostgreSQL (the database),
+Keycloak (the login server) and OpenBao (the password safe). You do not
+need to bring any of them. Bringing your own is an expert path,
+described separately (for the Helm chart:
+[Bring your own parts](index.md#part-b-bring-your-own-parts-expert-path)).
+After the install, the steps are the same.
 
 | Way | For whom | State |
 |---|---|---|
-| **Helm chart on your Kubernetes** | Teams that run their own Kubernetes or OpenShift | **Available.** Follow the [install trail](index.md). |
+| **Helm chart on your Kubernetes** | Teams that run their own Kubernetes or OpenShift | **Available.** Follow the [standard install](index.md#part-a-standard-install). |
 | **A plain Linux server** | Hyper-V, cloud VMs, physical servers, sites with no internet | **Available, in testing.** One download with everything inside and one install script. It sets up a small built-in Kubernetes (RKE2) that you never manage yourself. See [The Linux server install](#the-linux-server-install) below. |
 | **A VMware appliance (OVA)** | VMware and VCF teams | **In progress, not released.** You import one OVA into vCenter, fill in name, address, DNS and time server, and start it. Everything is inside. No internet needed. |
 

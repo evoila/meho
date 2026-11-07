@@ -16,7 +16,7 @@ accounts (Active Directory, Entra ID, …) to the groups, follow
 [Company login](login/index.md) after this page.
 
 **Where this fits:** you arrived from
-[the install trail, Step 4](index.md#step-4-set-up-the-keycloak-realm).
+[the install trail, Set up the Keycloak realm](index.md#set-up-the-keycloak-realm).
 Work through this page top to bottom, run the verification block at
 the end, then return to the trail.
 
@@ -922,7 +922,7 @@ again.
 ## Wire it into Helm
 
 Tell the chart which client the CLI should use (already shown in
-[the install trail, Step 6](index.md#step-6-write-your-values-file)):
+[the install trail, Values file for your own parts](index.md#values-file-for-your-own-parts)):
 
 ```yaml
 config:
@@ -976,7 +976,7 @@ jq -r '.entries[].access_token' \
 ```
 
 When all four pass, return to
-[the install trail, Step 5](index.md#step-5-decide-ingress-tls-and-trust).
+[the install trail, Part A, Step 1](index.md#step-1-decide-ingress-tls-and-trust).
 
 ## If login fails
 

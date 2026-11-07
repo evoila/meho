@@ -403,7 +403,7 @@ once. A second run fails, because the objects exist already.
 ### 3. Point MEHO at your Keycloak
 
 Nothing changes in MEHO. MEHO still trusts your Keycloak, with the
-values from [the install trail, Step 6](index.md#step-6-write-your-values-file).
+values from [the install trail, Values file for your own parts](index.md#values-file-for-your-own-parts).
 
 ### 4. Check that it works
 

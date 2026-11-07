@@ -78,6 +78,7 @@ from meho_backplane.kb.schemas import (
     META_PROVENANCE,
     KbEntryRevision,
 )
+from meho_backplane.kb.shared import visible_to
 from meho_backplane.retrieval.indexer import (
     IndexItem,
     PreparedIndexBatch,
@@ -443,7 +444,8 @@ async def get_revision(
     """Return one retained revision, or ``None`` when it is not visible.
 
     The revision must belong to *entry_id*, the entry must be a kb row,
-    and both must belong to *tenant_id*. Any mismatch, a deleted entry,
+    and both must belong to *tenant_id* or be a shared entry of another
+    tenant (:mod:`meho_backplane.kb.shared`). Any mismatch, a deleted entry,
     or an unknown id gives ``None``, so the caller cannot tell which
     case it was.
     """
@@ -456,8 +458,8 @@ async def get_revision(
                 .where(
                     KbRevision.id == revision_id,
                     KbRevision.entry_id == entry_id,
-                    KbRevision.tenant_id == tenant_id,
-                    Document.tenant_id == tenant_id,
+                    Document.tenant_id == KbRevision.tenant_id,
+                    visible_to(tenant_id),
                     Document.source == KB_SOURCE,
                 )
             )

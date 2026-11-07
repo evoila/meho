@@ -88,7 +88,8 @@ is therefore unknowable without building a session registry, which #3500 did
 not do. The cheap, deterministic backstop is a per-tenant cap on **new session
 handshakes per window**: every `initialize` is one new session, so bounding
 `initialize` volume bounds session creation. `_initialize` calls
-`_enforce_mcp_session_cap` first; over the cap it raises `McpRateLimitedError`
+`_enforce_mcp_session_cap` first when the session has a current tenant (a
+session with no tenant skips the cap); over the cap it raises `McpRateLimitedError`
 (JSON-RPC `-32000`) with a `retry_after_seconds` hint.
 
 ## Settings
@@ -147,7 +148,7 @@ override maps while the other tenants keep the chart default.
 
 ## References
 
-- Task: `evoila/meho#3500`; finding: `evoila-bosnia/meho-internal#321`.
+- Task: `evoila/meho#3500`.
 - Prior art: `broadcast/rate_limit.py`, `events/ingest/rate_limit.py`.
 - Not this: `operations/budget_enforcement.py` / `identity-budget.md`
   (internal agent-run LLM spend only, not client request volume).

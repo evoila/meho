@@ -1,6 +1,6 @@
 # Who may approve a change, what waits for approval, and how a person approves (decision)
 
-**Status:** decided — product owner. This record: 2026-10-28.
+**Status:** decided — product owner. This record: 2026-10-28. Shipped: approval by group and self-approval for MEHO-SA-Operators in 0.44.0, the new waiting rules in 0.45.0. In "Today's code" below, `_NO_SELF_APPROVAL_TIERS` is now named `_HIGH_RISK_TIERS`.
 **Goal:** approvals stay a human decision (v0.1-spec §7) while a trusted person can approve their own change
 **Issue:** [#3326](https://github.com/evoila/meho/issues/3326)
 **Initiative:** [#3325](https://github.com/evoila/meho/issues/3325) — MEHO-SA-Operators approve their own changes on purpose; AI never approves

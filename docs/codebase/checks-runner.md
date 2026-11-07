@@ -32,10 +32,10 @@ watchdog deliberately has no enable flag of its own.
 - `note_tick_completed(now=None, *, lock_acquired=True)`
   (`checks/watchdog.py`) — stamps the per-process "last tick completed
   at" unconditionally and "last claim at" only when the tick held the
-  lock; when a stall was flagged, emits the recovery log + events and
+  lock; when a stall was flagged, emits the recovery log line and
   re-arms the detector. Never raises.
 - `evaluate_stall_watchdog(now=None)` — one watchdog check: quiet time
-  past the threshold trips the stall edge (log + events, once per
+  past the threshold trips the stall edge (one log line per
   continuous stall) and returns `True` while stalled. Clock-injectable.
 - `sensor_runner_liveness(now=None)` → `SensorRunnerLiveness` — the
   read-only view the health surface renders: `seconds_since_last_tick`,
@@ -99,7 +99,8 @@ The tick therefore hosts the lock on a dedicated pinned connection via
 (one `engine.connect()` checked out for the whole locked region, work
 session commits freely, unlock provably on the acquiring connection).
 The same helper backs `scheduler/loop.py`, `events/drain.py`,
-`agent/reaper.py`, and `gateway/deadman.py`; the topology scheduler
+`agent/reaper.py`, `gateway/deadman.py`, `gateway/unreported_mint.py`
+and `operations/operation_run_reaper.py`; the topology scheduler
 already had the correct dedicated-lock-session shape. Regression tests:
 `backend/tests/integration/test_advisory_lock_pg.py` (real PG,
 `pg_locks` probes, cross-connection-commit shape).
@@ -134,6 +135,19 @@ confirmation-counted identically — but the accelerated re-fire is
 runner-local (`next_fire_at` is the central runner's clock; a satellite
 re-checks at its own posting cadence, so remote confirmation is paced
 by that cadence instead of `retry_backoff_seconds`).
+
+### Safe reads only
+
+Before each dispatch, `_run_evaluation` calls `_safe_tier_floor`
+(`checks/runner.py`). It reads the operation's current descriptor again.
+The runner records `unknown` and does not dispatch when the descriptor
+is gone (`op_descriptor_missing`), has a risk level above `safe`
+(`op_not_safe_at_dispatch`), or is a `safe` write
+(`op_is_write_at_dispatch`). So a Sensor runs only `safe` reads, also
+after a re-ingest changes the risk level. The runner's synthetic
+operator has no web session, so the policy gate would also hold any
+non-`safe` operation for approval. See `sensor.md`, step 4 of
+**Create**.
 
 ## Settings
 
@@ -213,13 +227,10 @@ external prober alerts on it (`stalled == true`,
   on a monitoring-plane stall would pull the API pod out of the load
   balancer — wrong blast radius. The facet is informational; reaction
   policy belongs to the prober.
-- **Recovery events go to the tenant set captured at detection.** A
-  tenant whose first sensor was created mid-stall receives neither the
-  stalled nor the recovered event of that episode.
 - **A stall costs notification latency, not notifications.** On resume,
   the first evaluations claim their CAS transition edges normally and
-  the notifier fires; the recovery event carries the stall window for
-  forensics (#2763 scoped retro-notification out).
+  the notifier fires; the `checks_scheduler_recovered` log line carries
+  the stall length (`stalled_for_seconds`) for forensics (retro-notification is out of scope).
 
 ## References
 

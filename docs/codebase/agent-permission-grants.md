@@ -20,7 +20,7 @@ One row per per-(principal, op-pattern, target-scope) permission grant.
 | `tenant_id` | UUID FK→tenant | Cross-tenant isolation |
 | `principal_sub` | text | JWT `sub` of the principal |
 | `op_pattern` | text | fnmatch glob (`*`, `vault.kv.*`, `GET:/api/vcenter/*`) |
-| `target_scope` | text nullable | UUID string, `*`, or NULL (= any target) |
+| `target_scope` | text NOT NULL, default `*` | UUID string, or `*` (= any target). A create request with `null` stores `*`. |
 | `verdict` | text | `auto-execute` \| `needs-approval` \| `deny` |
 | `created_by_sub` | text | JWT `sub` of the issuing `tenant_admin` |
 | `expires_at` | timestamptz nullable | NULL = permanent; non-null = elevation |
@@ -97,7 +97,7 @@ operator handle only — never email, groups, or other profile fields.
 tenant_admin POST /api/v1/agents/grants
          │
          ▼
-api/v1/agent_grants.py → require_role(TENANT_ADMIN) + require_human_principal (#289)
+api/v1/agent_grants.py → require_role(TENANT_ADMIN) + require_human_principal
          │
          ▼
 AgentGrantService.grant()
@@ -138,8 +138,8 @@ Mirrors the G5.2 memory-expiry sweeper pattern verbatim.
 |---|---|---|---|
 | `GET` | `/api/v1/agents/grants` | tenant_admin | List; `?principal_sub=`, `?include_expired=` |
 | `GET` | `/api/v1/agents/grants/{id}` | tenant_admin | Show one |
-| `POST` | `/api/v1/agents/grants` | tenant_admin **+ human** | Create (permanent or elevation). Machine `principal_kind` → 403 `human_principal_required` (#289). |
-| `POST` | `/api/v1/agents/grants/elevate` | tenant_admin **+ human** | Create elevation (`expires_at` required). Machine `principal_kind` → 403 `human_principal_required` (#289). |
+| `POST` | `/api/v1/agents/grants` | tenant_admin **+ human** | Create (permanent or elevation). Machine `principal_kind` → 403 `human_principal_required`. |
+| `POST` | `/api/v1/agents/grants/elevate` | tenant_admin **+ human** | Create elevation (`expires_at` required). Machine `principal_kind` → 403 `human_principal_required`. |
 | `DELETE` | `/api/v1/agents/grants/{id}` | tenant_admin | Revoke |
 
 The two **write** verbs that mint or widen a grant — `POST /agents/grants` and
@@ -148,7 +148,7 @@ in addition to the `tenant_admin` role gate, so a machine `principal_kind`
 (`agent` / `service` / `runner`) is refused 403 `human_principal_required`
 regardless of role. This is the REST peer of the MCP human-only block below: an
 agent minted `tenant_admin` cannot mint or widen its own (or a sibling's) grant
-over REST any more than it can over MCP (meho-internal#289). `list` / `show` /
+over REST any more than it can over MCP. `list` / `show` /
 `revoke` keep the role-only gate.
 
 ## MCP surface
@@ -170,7 +170,7 @@ meho agent grant revoke <grant-id> [--confirm]
 ```
 
 All verbs require `tenant_admin`; `create` and `elevate` additionally require a
-**human** principal (machine `principal_kind` → 403, #289).
+**human** principal (machine `principal_kind` → 403).
 
 ## Console surface
 
@@ -195,7 +195,6 @@ keep the role check alone.
 ## Known issues
 
 - `expires_at` comparison uses Python-side `datetime.now(UTC)` which is close to (but not exactly) the tick start time. A row that expires mid-tick may be included or excluded depending on sub-second timing — acceptable for change-window use cases where minutes matter, not milliseconds.
-- The verdict resolver (G11.2-T3) is a parallel PR (#1052). Until it lands, `agent_permission` rows are inserted but the dispatcher still uses the default-allow `policy_gate` from v0.2.
 
 ## Enforcement identity and principal kinds (#3795)
 

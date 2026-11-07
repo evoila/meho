@@ -14,8 +14,10 @@ Most rungs exist twice: as an MCP tool (for agents) and as a CLI verb
 rather than two implementations. The rung that *dispatches* — `call` —
 runs the full path: policy gate, credential resolution, result
 reduction, audit. Preview deliberately stops short of it: it resolves
-the request and hands it back, skipping the policy gate, sending
-nothing, and writing no audit row.
+the request and hands it back, sending nothing and writing no audit row.
+It also tells you the risk level and what MEHO would do with the call
+for you — run it at once, wait for approval, or refuse it
+(`policy_verdict`, `policy_reason`).
 
 !!! note "Prerequisites"
 
@@ -83,9 +85,12 @@ before searching.
 meho operation groups k8s-1.x
 ```
 
-Typical output shape: `inventory` (nodes, namespaces, versions),
-`workload` (pods, deployments, services), `logs`, `events`, `write`
-(mutating ops), each with an operation count.
+Typical output shape: `cluster`, `inventory` (nodes, namespaces),
+`workload` (pods, deployments, services), `network`, `config`,
+`storage`, `events`, `logs`, `exec`, `custom_resources` and `access`,
+each with an operation count. There is no separate write group: a write
+sits in the group of what it changes (for example `k8s.delete` in
+`workload`).
 
 A group flagged `partial: true` is only partly enabled — an operator
 enabled specific operations rather than the whole group. Only the
@@ -162,7 +167,7 @@ plus a `total`:
     "rows": [
       {"name": "web-6f7d4b", "namespace": "demo", "status": "CrashLoopBackOff",
        "ready": "0/1", "restarts": 17, "age_seconds": 5520,
-       "node": "rke2-w1", "ip": "10.42.0.31"}
+       "node": "rke2-w1", "ip": "192.0.2.31"}
     ],
     "total": 1
   }
@@ -329,7 +334,7 @@ a one-VM drill becomes a cluster-wide incident.
 | `-32602` with `data.reason: unknown_connector` | The `connector_id` names nothing registered — usually a bare product name (`k8s`) where `<impl_id>-<version>` (`k8s-1.x`) belongs. | Use an id from `data.did_you_mean` (close ids). If it is empty, run `meho connector list` and copy the id verbatim. |
 | `-32602` with `data.reason: connector_not_ingested` | The connector is registered but its spec has not been ingested, so it has no operations yet. Recoverable: the error's `data.next_step.verb` carries the exact `meho connector ingest …` command to run. | Run the named command, then retry. |
 | `meho operation groups` returns an empty list | The connector exists but nothing is enabled yet — operations ship default-deny until reviewed/enabled. | `meho connector review <id>`, then enable groups or single ops (`meho connector enable-reads <id>` bulk-enables the read class). |
-| Search cannot find an operation you know exists | Search only indexes **enabled** operations; a disabled op is invisible by design. An unknown `--group` also silently narrows to zero hits (that is not an error). | Check enablement via `meho connector review`; drop the group filter. |
+| Search cannot find an operation you know exists | Search only indexes **enabled** operations; a disabled op is invisible by design. An unknown `--group` is not an error: the answer has `outcome: unknown_group`, and `narrowing` lists the valid group keys. | Check enablement via `meho connector review`; drop the group filter. |
 | An operation works for another tenant but not for yours | Your tenant turned this built-in operation off for itself. A tenant setting changes only that tenant; the `en` column of `meho connector review` is the install default, the `ten` column is your tenant's own setting. | `meho connector tenant-setting show <id>`; a tenant admin turns it back with `meho connector tenant-setting set <id> <op_id> --on` (or `--default`). |
 | `status: "error"` with `invalid_params` | The params failed the operation's schema. **Do not retry the same arguments verbatim.** | Read `extras.validation_errors`, fix the shape (e.g. `k8s.pod.list` requires exactly one of `namespace` / `all_namespaces: true`), re-call. |
 | `status: "error"` with a `connector_error` / credential message | Dispatch reached the connector but the target's credential failed to resolve or was rejected. | Work the [targets & secrets failure table](targets-and-secrets.md#what-can-go-wrong-here) — the error strings there map one-to-one. |

@@ -12,10 +12,9 @@ version="2022.x", impl_id="msad-ssh")` registry triple plus the `("msad", "",
 (`connectors/adapters/ssh.py`) — the same transport base as `WindowsDnsConnector`
 and `WinsrvConnector`.
 
-AD exposes **no unified REST API** for these operations; before this connector
-the c1sql1 program (evoila-bosnia/claude-rdc-hetzner-dc#2789) stood up the
-`c1sql.lab` domain and drove day-2 AD tasks through ungoverned `govc guest.run` +
-hand-run PowerShell. The connector is a structural copy of the `winsrv` **estate
+AD exposes **no unified REST API** for these operations; without this connector
+day-2 AD tasks run through raw guest commands and hand-run PowerShell, outside
+MEHO's approval and audit path. The connector is a structural copy of the `winsrv` **estate
 mold** (#3261): identity canary + per-domain op groups on the `SshConnector` base,
 the PowerShell-over-SSH transport `_shared/pwsh` (base64 UTF-16LE
 `-EncodedCommand` + stdlib `json` parse), the `{rows, total}` JSONFlux envelope
@@ -109,6 +108,11 @@ central-dial / on-site only).
 | `msad.domain.settings` | safe | no | `Get-ADDefaultDomainPasswordPolicy` + `ms-DS-MachineAccountQuota` |
 | `msad.domain.password-policy.set` | caution | **yes** | `Set-ADDefaultDomainPasswordPolicy` |
 | `msad.domain.machine-account-quota.set` | caution | **yes** | `Set-ADDomain -Replace @{'ms-DS-MachineAccountQuota' = <n>}` |
+
+A call made with a token (MCP, the command line, REST) runs only `safe` ops at
+once. A `caution` op without its own approval flag then waits for an approval
+click; in the web interface it runs at once (`_person_park_reason` in
+`operations/_validate.py`).
 
 The three `dangerous` ops (`user.delete`, `group.delete`, `computer.delete`) are
 `requires_approval=True` — a dispatch parks at `needs-approval` for a human
@@ -207,7 +211,9 @@ How the password travels:
    credential write (declared in `msad/op_classes.py`), so the
    approval input is stored encrypted and the broadcast shows no params. Its
    own preview shows the approver the account, the reference and `enable`.
-2. When the approved call runs, the handler reads the value from Vault under
+2. Before the read, MEHO checks the path against the caller's tenant
+   (`check_param_secret_ref`); a path outside the tenant's scope is refused.
+   When the approved call runs, the handler reads the value from Vault under
    the operator's identity, through `SshConnector._resolve_secret` (the one
    Vault seam of the SSH connectors). A missing path or field stops the op
    before anything runs on the server. The error names the reference, never a
@@ -309,19 +315,20 @@ carry `PasswordLastSet` and `PasswordExpires` as ISO 8601 text (see
   attributes: `product="msad"`, `version="2022.x"`, `impl_id="msad-ssh"`,
   `POWERSHELL_EXECUTABLE="powershell"`, `POWERSHELL_SCRIPT_PREFIX` (the
   `$ProgressPreference` guard), `POWERSHELL_LOG_EVENT="msad_pwsh_executed"`. Ships
-  `fingerprint`, `probe`, `about`, the 33 bound-method op shims,
+  `fingerprint`, `probe`, `about`, the 34 bound-method op shims,
   `register_operations`, and the operator-less `execute` dispatcher shim.
 - **Shared pwsh transport** (`_shared/pwsh.py`, #3260) — `pwsh_run`,
   `ps_single_quote` (the `shlex.quote` analogue), `encode_pwsh_command`,
   `strip_clixml`, `PwshRunError`.
 - **Op metadata** (`ops.py`) — `MsadOp` frozen dataclass (mirrors `WinsrvOp`),
-  `MSAD_OPS` (`about` + the five per-domain tuples), `MSAD_WHEN_TO_USE_BY_GROUP`
+  `MSAD_OPS` (`about` + the eight per-module tuples), `MSAD_WHEN_TO_USE_BY_GROUP`
   (curated per-group blurbs, registration fails closed without them),
   `normalise_json_rows`, `validate_limit`, and `ad_list_read` (the shared
   read-under-`'Stop'` helper that builds the `{rows, total}` envelope).
 - **Per-domain op modules** — `ops_domain.py`, `ops_users.py`, `ops_password.py`
-  (the password-expiry read and its date math), `ops_groups.py`, `ops_computers.py`,
-  `ops_ou.py`.
+  (the password-expiry read, its date math and `msad.user.set-password`),
+  `ops_groups.py`, `ops_computers.py`, `ops_ou.py`, `ops_ou_access.py`,
+  `ops_domain_config.py`.
 - **Registration** (`__init__.py`) — two-phase, mirroring winsrv: synchronous
   `register_connector_v2` at import time (versioned triple + wildcard row); async
   `register_msad_typed_operations` queued onto the lifespan registrar list. No v1
@@ -330,7 +337,7 @@ carry `PasswordLastSet` and `PasswordExpires` as ISO 8601 text (see
 ## Transport: PowerShell-over-SSH
 
 Every op runs `powershell -NoProfile -NonInteractive -EncodedCommand <base64>`
-over the pooled SSH connection:
+over the pooled SSH connection (one login per caller and target):
 
 - **`powershell` (Windows PowerShell 5.1), not `pwsh` (PS7).** A Windows DC ships
   5.1; PS7 is absent by default. The connector sets
@@ -405,7 +412,8 @@ always emits JSON (the `Get-ADDomain` failure is caught inside the script), so a
 Uses the base `SshConnector._auth_config` **unchanged** — a Vault secret with
 `ssh_private_key` prefers key auth, otherwise password auth runs. Credentials
 resolve via `_shared/vault_creds` from the Vault KV-v2 path in
-`target.secret_ref`. The transport prerequisite is an **OpenSSH server on the
+`target.secret_ref`. The secret also holds a `known_hosts` line for the host or
+`known_hosts_insecure: true`. The transport prerequisite is an **OpenSSH server on the
 domain controller** with `powershell` reachable, plus the `RSAT-AD-PowerShell` /
 AD DS role installed (present by default on a DC). `probe()` carries no operator,
 so its Vault read runs under the synthesised system operator and fails closed to
@@ -425,7 +433,7 @@ so its Vault read runs under the synthesised system operator and fails closed to
    `connector_id="msad-ssh-2022.x"` + the target and invokes the bound handler
    through the policy/audit path. `dangerous` + `requires_approval` ops park at
    `needs-approval` first. The CLI reaches the same path via `meho operation call
-   msad-ssh-2022.x <op_id> --params-json '{...}'`.
+   msad-ssh-2022.x <op_id> --target <name> --params '{...}'`.
 
 ## Building on the estate mold
 
@@ -461,7 +469,7 @@ this ordinary unit suite.
 
 No dedicated `meho msad` verb package (the windows_dns / winsrv / rke2 precedent
 for SSH-typed connectors). CLI parity is the generic dispatch path — `meho
-operation call msad-ssh-2022.x <op_id> --params-json '{...}'` — plus the `msad`
+operation call msad-ssh-2022.x <op_id> --target <name> --params '{...}'` — plus the `msad`
 product token added to the OpenAPI `TargetCreate.product` enum (regenerated from
 the live registry, so `meho targets create --product msad ...` validates and the
 generated Go client knows the token).
@@ -472,12 +480,13 @@ generated Go client knows the token).
   a domain controller. See the in-task decision above.
 - **OU deletion** is out of scope for this cut; it is a natural follow-up when a
   consumer needs it.
-- **Consumer proof against the live `c1sql-dc1` DC is an OPEN acceptance
-  criterion** — the c1sql1 domain-controller VM/probe path is not reachable from
-  this build; the probe + governed guarded-write (e.g. group-member add) proof is
-  deferred to the lab program (evoila-bosnia/claude-rdc-hetzner-dc#2789 / #2792).
-- Host-key checking is disabled (`known_hosts=None`) at the adapter level for
-  v0.2, shared across the whole SSH family; pinning is deferred repo-wide.
+- **No live proof against a domain controller yet.** The probe and the writes
+  (for example group-member add) are checked by the unit tests only.
+- Host-key checking is on for the whole SSH family. The target's Vault secret
+  holds a `known_hosts` pin for the host, or `known_hosts_insecure: true` to
+  turn the check off for that one target. A secret with neither stops the
+  connection before any credential is sent (`SshHostKeyUnpinnedError` in
+  `connectors/adapters/ssh.py`).
 
 ## References
 

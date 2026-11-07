@@ -163,13 +163,13 @@ dedicated job was the sole coverage producer and nothing else caught the gap.
 3. The artifact list on the CI run — a present `python-coverage` artifact rules
    out this failure mode.
 
-**The durable fix landed 2026-08-27 (#3172 / rdc-gitops#115).** The coverage
+**The durable fix landed 2026-08-27 (#3172).** The coverage
 tax is intrinsic (~12.5 GiB peak at `-n 1`) and barely moves with parallelism —
 and the "~1.2 GiB under the pod limit" this section used to claim was fiction:
 the live heavy-pool runner limit was **8Gi** (13.67 GiB was #1982's measured
 local peak, mistaken for the cap), so the sweep never fit and every main-push
 coverage run since ~2026-06-20 died as an OOM runner-loss or a memory-thrash
-wedge. rdc-gitops#115 resized the pool in place to **14Gi** (request==limit,
+wedge. The runner pool was resized in place to **14Gi** (request==limit,
 node-exclusive by memory on the 15.62-GiB-allocatable workers) — the job's
 `runs-on:` stays. Real headroom is now ~1.5 GiB; if the suite outgrows
 ~13 GiB serial, the next lever is sharding the sweep into sequential pytest
@@ -303,21 +303,23 @@ Other accepted issue-level false positives: `go:S4830`/`S5527` on
 shell script). Mark these *Accepted* / *Won't fix* in SonarCloud with the rationale
 above so the ratings reflect real risk.
 
-The 8 production CRITICAL TLS findings are **by-design and suppressed in code**
+The 5 production CRITICAL TLS findings are **by-design and suppressed in code**
 via rule-scoped `# NOSONAR(Sxxxx)` comments (rule-scoped so only the named rule is
 muted, not every issue on the line), each pointing at the module docstring that
 carries the justification:
 
 | Line | Rule | Why by-design |
 |---|---|---|
-| `connectors/net/tls.py:439` | S4423 | probe negotiates whatever the appliance offers; protocol version is *reported* output |
-| `connectors/net/tls.py:440` | S4830 | inspection-only handshake; verification-off is the operation's purpose |
-| `connectors/net/tls.py:441` | S5527 | hostname match is computed and *reported* by the handler, not enforced |
-| `connectors/adapters/http.py:125` | S5527 | per-target `verify_tls=false` opt-out (default `True`); WARN-logged + audited; `tls_ca_pin` is the secure supersession |
-| `connectors/adapters/http.py:127` | S4830 | same justification; see the module docstring's TLS-trust precedence |
-| `connectors/vmware_rest/ovf_transfer.py:271` | S4830 | pre-flight cert-fetch handshake to the device host builds an unverified context; the lease `sslThumbprint` pin (`verify_device_thumbprint`) is the identity control (module docstring #3229/#3284) |
-| `connectors/vmware_rest/ovf_transfer.py:272` | S5527 | same handshake; the device host is self-signed, so hostname match is not the control — the pin fails closed on a cert mismatch |
-| `connectors/vmware_rest/ovf_transfer.py:273` | S4830 | same handshake; `CERT_NONE` fetches the cert to hash for the pin, it is not the trust decision |
+| `connectors/net/tls.py:518` | S4423 | probe negotiates whatever the appliance offers; protocol version is *reported* output |
+| `connectors/net/tls.py:519` | S4830 | inspection-only handshake; verification-off is the operation's purpose |
+| `connectors/net/tls.py:520` | S5527 | hostname match is computed and *reported* by the handler, not enforced |
+| `connectors/adapters/http.py:177` | S5527 | per-target `verify_tls=false` opt-out (default `True`); WARN-logged + audited; `tls_ca_pin` is the secure supersession |
+| `connectors/adapters/http.py:179` | S4830 | same justification; see the module docstring's TLS-trust precedence |
+
+One more TLS comment, `# NOSONAR S4830` without brackets, is on the
+reachability probe of the Kubernetes connector
+(`connectors/kubernetes/connector.py`, `probe`): it checks `/readyz` without
+a kubeconfig, and its docstring gives the reason.
 
 These are deliberately **not** muted project-wide (no source-tree multicriteria on
 the TLS rules) so future genuinely-insecure TLS code still gets flagged.

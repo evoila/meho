@@ -93,13 +93,42 @@ What is **not** in T6 or T4 (other tasks own these):
   stays NULL in v0.2; `succeed_run` already accepts a `cost` argument so
   C3 lands without a service-signature change.
 
+## Token counts
+
+Since #5853 (migration `0138`) a succeeded run stores its token counts, summed
+over all its model requests, in four nullable `BIGINT` columns:
+
+- `input_tokens` — input the model read and did not take from its prompt
+  cache. The framework counts cached tokens inside its own input total; MEHO
+  takes them out, so each token is counted once (`TokenUsage` in
+  `operations/identity_budget.py`).
+- `output_tokens` — tokens the model wrote.
+- `cache_read_tokens`, `cache_write_tokens` — input read from or written to
+  the prompt cache. `0` when the provider reports no cache.
+
+The counts are written by `succeed_run`, in the same transaction as the cost
+and the spend-limit increments. A run that did not succeed, and every row
+written before `0138`, reads `NULL`. `GET /api/v1/agents/runs/{handle}` and
+`meho agent run-status` show the four counts. The cost of a run on a model
+MEHO has no price for can come from a price the tenant admin set: see
+`identity-budget.md`, "Prices a tenant sets".
+
+A child run (one agent starts another through `invoke_agent`) also stores
+its counts when it succeeds. They hold only the child's own model requests,
+read from the child's own model responses (`ChildRunResult.usage` in
+`agent/invoke.py`). They are not the change in the shared usage total: the
+parent can run two child runs at the same time, and both add to that total.
+A grand-child's requests are on the grand-child's row. The child row has no
+cost and adds nothing to the spend limits: the top-level run's counts and
+cost already include every child run's tokens, so they count once.
+
 ## Key types
 
 `meho_backplane.db.models`:
 
 - `AgentRun` — the table. Columns: `id` (PK, doubles as the session
-  lineage key), `agent_definition_id` (soft-FK to the G11.1-T2 table
-  landing in parallel #809), `tenant_id` (real FK to `tenant.id`),
+  lineage key), `agent_definition_id` (soft-FK to the
+  `agent_definition` table), `tenant_id` (real FK to `tenant.id`),
   `identity_sub` / `identity_act` (the RFC 8693 delegation pair —
   `sub` = principal acted for, `act` = agent acting. A direct run
   records the person in `sub` and the definition's `identity_ref` in
@@ -107,8 +136,8 @@ What is **not** in T6 or T4 (other tasks own these):
   `act` null; a child run copies the actor in force for its parent.
   The REST, MCP and CLI run views show both), `trigger`, `model_tier` (logical tier; the G11.5
   resolver maps it to a concrete pair), `provider` / `model` (resolved,
-  nullable until `start`), `status`, `turns`, `cost` (stub until C3),
-  `output`, `error`, `parent_run_id` (self-referential soft-FK for
+  nullable until `start`), `status`, `turns`, `cost`, the four token
+  counts (see "Token counts" below), `output`, `error`, `parent_run_id` (self-referential soft-FK for
   agent-invoked child runs, G11.1-T5), `work_ref` (nullable Text — the
   external change-ticket reference the run works under, work_ref I3-T2
   #1662, migration `0041`; set at create time, distinct from `id`),
@@ -216,8 +245,8 @@ one transaction):
   it) and `ended_at` on any terminal state.
 - `start_run(session, row, *, provider, model)` — records the resolved
   provider+model, then `pending`/`awaiting_approval` -> `running`.
-- `succeed_run(session, row, *, output, cost=None, turns=None)` — records
-  output (+ optional C3 cost) and the loop's model-request `turns` total
+- `succeed_run(session, row, *, output, cost=None, turns=None, usage=None)` —
+  records output, the cost, the token counts of `usage` (#5853) and the loop's model-request `turns` total
   (#2743; lifted from `AgentRunResult.request_count` and persisted at run
   finalize, written only on this succeed path so a run that failed before
   reaching the model — the #2644 model-init class — keeps `turns == 0`),
@@ -233,10 +262,12 @@ one transaction):
   Cancelling an already-terminal run surfaces as `IllegalTransitionError`
   (not a silent no-op). The function records the **durable intent**
   (`status='cancelled'` + `ended_at`); the actual interruption of the
-  in-flight async loop is the runtime's job (G11.1-T1) — the loop
-  observes the cancelled status at its next turn boundary and stops.
-  Recording the intent durably first is what makes cancellation survive
-  a process restart.
+  in-flight async loop is the runtime's job (G11.1-T1). The runtime does
+  not stop a running loop on cancel yet: the heartbeat sidecar sees the
+  lost lease and stops, and the loop's own end does not overwrite the
+  `cancelled` row (see "Known issues" in
+  [agent-runtime.md](agent-runtime.md)). Recording the intent durably
+  first is what makes cancellation survive a process restart.
 - `claim_lease(session, row, *, owner, ttl_seconds)` — stamp
   `lease_owner` + `lease_expires_at` on a run a worker is about to
   execute (T4 #825). Status untouched — composed by the caller with
@@ -336,12 +367,12 @@ Settings (all in `Settings`, all opt-out via env):
 ## Known issues / notes
 
 - The `agent_definition_id` and `parent_run_id` columns are **soft-FKs**
-  (no FK clause). `agent_definition` (G11.1-T2 / #809) lands in a sibling
-  task in parallel; a hard FK would couple the two migrations' ordering.
-  Tightening to a real FK is deferred to a future migration once both
-  tables are settled — the same soft-FK discipline `audit_log.target_id`
-  / `audit_log.parent_audit_id` follow.
-- `cost` is a stub (`Numeric(12, 6)`, NULL in v0.2) until G11.5/C3.
+  (no FK clause). Run history therefore survives the delete of its agent
+  definition (see [agent-definition.md](agent-definition.md)). This is
+  the same soft-FK discipline `audit_log.target_id` /
+  `audit_log.parent_audit_id` follow.
+- `cost` (`Numeric(12, 6)`) is set on a succeeded run; it is `0` for a
+  model with no price.
 - SQLite (the dev/test driver) returns naive datetimes from
   `timestamptz` columns; the chassis-wide "naive means UTC" convention
   applies. PG returns tz-aware values (covered by the testcontainers
@@ -354,10 +385,6 @@ Settings (all in `Settings`, all opt-out via env):
   is the agent runtime's idempotency-friendly tool calls (G11.1's
   design constraint) — T4 does not enforce idempotency at the
   substrate, it is the agent author's contract.
-- Migration `0026_add_agent_run_lease_reaper` collides numerically
-  with PR #1065 (G11.3-T2, cron + one-off triggers) which also numbers
-  its migration `0026`. Both PRs are in-flight in parallel; whichever
-  lands second rebases its migration to `0026`.
 
 ## References
 

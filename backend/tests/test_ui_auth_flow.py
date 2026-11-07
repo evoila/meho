@@ -45,12 +45,13 @@ import respx
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from structlog.testing import capture_logs
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
-from meho_backplane.db.models import WebSession
+from meho_backplane.db.models import Tenant, WebSession
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import (
     SESSION_COOKIE_NAME,
@@ -546,6 +547,73 @@ def test_callback_creates_session_and_sets_cookie(monkeypatch: pytest.MonkeyPatc
     assert len(created) == 1
     assert created[0]["session_ref"] == session_ref(session_id)
     assert cookie_value not in repr(captured)
+
+
+def _console_login(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> httpx.Response:
+    """Run login then callback with a valid token; return the callback response."""
+    access_token, jwks = _mint_access_token()
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router, jwks=jwks)
+        _patch_oauth_token_transport(
+            monkeypatch,
+            httpx2.Response(
+                200,
+                json={
+                    "access_token": access_token,
+                    "refresh_token": "refresh-token-value",
+                    "expires_in": 3600,
+                    "token_type": "Bearer",
+                },
+            ),
+        )
+        login = client.get("/ui/auth/login?return_to=/ui/sentinel")
+        state = parse_qs(urlparse(login.headers["location"]).query)["state"][0]
+        return client.get(f"/ui/auth/callback?code=test-code&state={state}")
+
+
+async def _tenant_rows() -> list[tuple[str, str]]:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = await session.execute(
+            select(Tenant.slug, Tenant.name).where(Tenant.id == uuid.UUID(DEFAULT_TENANT_ID))
+        )
+        return [(r.slug, r.name) for r in rows]
+
+
+def test_first_console_login_creates_the_tenant_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh install has no tenant row; the login creates it, so no warning."""
+    assert asyncio.run(_tenant_rows()) == []
+    client = _https_client()
+    callback = _console_login(client, monkeypatch)
+    assert callback.status_code == 302
+
+    assert asyncio.run(_tenant_rows()) == [
+        (f"tenant-{DEFAULT_TENANT_ID}", f"tenant-{DEFAULT_TENANT_ID}")
+    ]
+    with capture_logs() as captured:
+        page = client.get("/ui/sentinel")
+    assert page.status_code == 200
+    assert not [e for e in captured if e["event"] == "ui_session_tenant_row_missing"]
+
+
+def test_console_login_twice_keeps_one_tenant_row_and_its_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second login leaves exactly one row and does not rename it."""
+    client = _https_client()
+    _console_login(client, monkeypatch)
+
+    async def _rename() -> None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            row = await session.get(Tenant, uuid.UUID(DEFAULT_TENANT_ID))
+            assert row is not None
+            row.name = "Chosen Name"
+
+    asyncio.run(_rename())
+    _console_login(_https_client(), monkeypatch)
+
+    assert asyncio.run(_tenant_rows()) == [(f"tenant-{DEFAULT_TENANT_ID}", "Chosen Name")]
 
 
 # Non-HTML ``Accept`` -- a scripted probe / htmx fragment fetch. The

@@ -381,3 +381,57 @@ def test_file_path_root_raises_not_a_directory(tmp_path: Path) -> None:
     file_path.write_text("body", encoding="utf-8")
     with pytest.raises(NotADirectoryError):
         list(walk_kb_directory(file_path))
+
+
+# ---------------------------------------------------------------------------
+# Header dates and decimal numbers stay as text
+# ---------------------------------------------------------------------------
+
+
+def test_header_date_and_version_are_kept_as_text(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "dated.md",
+        "---\nlearned_at: 2026-11-03\nconfirmed_at: 2026-11-03T10:00:00Z\n"
+        "version: 3.10\nratio: 0.5\ncount: 3\nflag: true\n---\nBody.",
+    )
+    (record,) = walk_kb_directory(tmp_path)
+    assert record.metadata == {
+        "learned_at": "2026-11-03",
+        "confirmed_at": "2026-11-03T10:00:00Z",
+        "version": "3.10",
+        "ratio": "0.5",
+        "count": 3,
+        "flag": True,
+    }
+
+
+def test_quoted_header_values_are_unchanged(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "quoted.md",
+        '---\nlearned_at: "2026-11-03"\nversion: "3.10"\n---\nBody.',
+    )
+    (record,) = walk_kb_directory(tmp_path)
+    assert record.metadata == {"learned_at": "2026-11-03", "version": "3.10"}
+
+
+def test_dates_in_nested_header_values_and_keys_are_text(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "nested.md",
+        "---\nreviews:\n  - 2026-11-03\n  - when: 2026-11-04\n2026-11-05: note\n---\nBody.",
+    )
+    (record,) = walk_kb_directory(tmp_path)
+    assert record.metadata == {
+        "reviews": ["2026-11-03", {"when": "2026-11-04"}],
+        "2026-11-05": "note",
+    }
+
+
+def test_header_value_that_is_not_json_names_file_and_field(tmp_path: Path) -> None:
+    _write(tmp_path / "bin.md", "---\nok: 1\nblob: !!binary aGk=\n---\nBody.")
+    errors: list[str] = []
+    assert _slugs(tmp_path, errors=errors) == []
+    assert len(errors) == 1
+    assert errors[0].startswith("bin.md: front-matter field 'blob' in bin.md")
+    assert len(errors[0]) < 200
+    with pytest.raises(KbFileParseError, match="'blob'"):
+        list(walk_kb_directory(tmp_path))

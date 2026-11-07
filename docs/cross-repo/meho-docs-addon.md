@@ -40,21 +40,27 @@ When a tenant provisions the add-on and is entitled to a collection, its
 operators get three faces of the same surface:
 
 - the REST routes `POST /api/v1/search_docs`, `POST /api/v1/ask_docs`,
-  and `GET /api/v1/doc_collections` (+ the tenant-admin lifecycle routes
-  under `/api/v1/doc_collections/{key}/…`),
-- the MCP tools `search_docs`, `ask_docs`, and `list_doc_collections`
+  `POST /api/v1/read_docs`, and `GET /api/v1/doc_collections` (+ the
+  tenant-admin routes under `/api/v1/doc_collections` that create,
+  update, probe, enable, disable and delete a collection),
+- the MCP tools `search_docs`, `ask_docs`, `read_docs`, and
+  `list_doc_collections`
   (+ the companion resource
   `meho://docs/{collection}/{chunk_id}` for the full text of a hit;
   the older `meho://docs/{collection}/{product}/{version}/{chunk_id}`
   form still works and ignores the `product` / `version` segments), and
-- the CLI verbs `meho docs search`, `meho docs collections list`, and
-  the lifecycle verbs `meho docs collections probe|enable|disable`.
+- the CLI verbs `meho docs search`, `meho docs read`,
+  `meho docs collections list`, and the admin verbs
+  `meho docs collections create|update|probe|enable|disable|delete`.
+  The CLI has no `ask` verb: `ask_docs` runs over REST, MCP and the
+  operator console.
 
 **Federated, not ingested.** This is the key distinction from MEHO's own
 knowledge layer. A collection's queries are **not** copied into MEHO's
 Postgres+pgvector substrate. Each query is proxied through the backplane
-to the collection's backend, forwarding the operator's JWT so the backend
-authenticates and audits the call as the operator. MEHO holds the
+to the collection's backend. MEHO signs in to the backend with the
+deployment's corpus service token (`CORPUS_SERVICE_TOKEN`), never with the
+operator's JWT. MEHO's own audit row names the operator. MEHO holds the
 collection's *identity + backend binding* (the `doc_collections`
 registry) and *cached liveness* (probe-written), but never a copy of the
 corpus and no vector-store dependency on it.
@@ -66,16 +72,16 @@ hit a backend directly) buys three properties in one place:
   (`op_class=read`), so `meho audit query` / who-touched surface it. The
   op id is **uniform across all faces**: REST, CLI, and MCP audit
   `search_docs` under `meho.docs.search`, `ask_docs` under
-  `meho.docs.ask`, and `list_doc_collections` under
-  `meho.docs.collections.list`. A `meho audit query op_id=meho.docs.*`
+  `meho.docs.ask`, `read_docs` under `meho.docs.read`, and
+  `list_doc_collections` under `meho.docs.collections.list`. A `meho audit query op_id=meho.docs.*`
   filter therefore catches every query regardless of the face it came in
   on — including the MCP agent surface (see
   [Audit row visible](#audit-row-visible-who-touched)). The raw query is
   stored only as a SHA-256 hash — never in the clear. Each row also binds
   `audit_collection` (the chosen collection key), so who-touched can
   attribute a hit to the collection it came from.
-- **JWT federation handled once.** Operator-JWT forwarding lives in the
-  backplane's backend adapters, not in every consumer.
+- **Backend sign-in handled once.** The backplane's backend adapters send
+  the corpus service token, so no consumer needs a backend credential.
 - **Mandatory collection scope + per-collection entitlement enforced
   centrally.** A query without a `collection` is rejected, fail-closed, so
   no caller can run an unscoped corpus-wide query; and a tenant may only
@@ -149,7 +155,7 @@ The capability set is a **flat list of string keys**. Two kinds of key
 matter here:
 
 - **`meho-docs`** — the **add-on key**. Gates the *MCP tool surface*: a
-  tenant without it never sees `search_docs` / `ask_docs` /
+  tenant without it never sees `search_docs` / `ask_docs` / `read_docs` /
   `list_doc_collections` in `tools/list` (true absence). It does **not**
   gate the CLI: `meho docs` always appears in `--help` (#2109 removed the
   client-side CLI pre-check so the CLI and `POST /api/v1/search_docs`
@@ -191,8 +197,8 @@ change.
 Fail-closed throughout: an absent, malformed, or empty claim means **not
 provisioned**; a missing `meho-docs:<key>` means **not entitled to that
 collection** even when the add-on surface is on. The gate never grants
-access on its own — the backplane re-validates the JWT and the backend
-federation enforces the real boundary, so a forged claim can change only
+access on its own — the backplane re-validates the JWT and applies the
+entitlement gate on every request, so a forged claim can change only
 what a client *shows*, never what the server *allows*.
 
 ### 2. Register the collection + bind its backend (deploy side)
@@ -226,7 +232,7 @@ minimal create binds identity + a backend:
 The **backend** record is `{type, ref}`:
 
 - `type` selects the adapter from the backend registry. The first shipped
-  adapter is **`corpus-http`** (the JWT-forward federated corpus client;
+  adapter is **`corpus-http`** (the federated corpus client;
   the G4.5 single-corpus client re-homed). A second concrete backend type
   (e.g. a managed-RAG direct client) registers as a one-line
   `register_backend(...)` call when a collection needs it.
@@ -271,7 +277,7 @@ The **backend** record is `{type, ref}`:
     `scope` key: the values unchanged (a full release such as
     `8.0.3.00400` included), a key the agent did not give omitted. The
     backend ranks with it and labels its answer, never filters on it, and
-    normalises the values itself (evoila-bosnia/MEHO.Knowledge#512).
+    normalises the values itself.
   - `"scope_filters": true` (the JSON boolean) sends them as **hard
     filters**: `metadata_filters` on search, `filters` on the upstream
     answer call. An exact-match pre-filter, so the values must be the
@@ -282,13 +288,11 @@ The **backend** record is `{type, ref}`:
     request and, for a collection with `"answer": "upstream"`, the answer
     request (see *Answer* below). With neither gate on, both bodies are
     exactly what they were before the gates existed.
-  - **When to flip.** The backend refuses unknown request keys
-    (evoila-bosnia/MEHO.Knowledge#496), so `scope` must never reach a
-    release that does not accept it. For the shared `vmware` collection,
-    set `"scope": "soft"` only after the MEHO Knowledge release that
-    accepts `scope` (evoila-bosnia/MEHO.Knowledge#496 +
-    evoila-bosnia/MEHO.Knowledge#509 + evoila-bosnia/MEHO.Knowledge#512) is
-    deployed; `scope_filters` stays off for it. A backend update replaces
+  - **When to flip.** The backend refuses unknown request keys, so
+    `scope` must never reach a release that does not accept it. For the
+    shared `vmware` collection, set `"scope": "soft"` only after a MEHO
+    Knowledge release that accepts `scope` is deployed; `scope_filters`
+    stays off for it. A backend update replaces
     the whole record and resets the collection to `provisioning`, so
     re-pass the existing `ref` keys and run `probe` afterwards:
     `meho docs collections update vmware --backend-type corpus-http --backend-ref '{"endpoint":"<current>","scope":"soft"}'`,
@@ -300,7 +304,8 @@ The legacy global corpus settings remain as the `corpus-http` fallback
 | Setting (env var) | Default | Meaning |
 |---|---|---|
 | `corpus_url` (`CORPUS_URL`) | `""` | Fallback corpus search URL for a `corpus-http` collection without its own `backend.ref` endpoint. Empty **and** no per-collection endpoint → the backend is unconfigured: a query fails closed as `CorpusUnavailable` → 503 at the route / `-32603` at the MCP face. |
-| `corpus_audience` (`CORPUS_AUDIENCE`) | `""` | Optional RFC 8707 resource indicator (`aud`) the backend binds the forwarded token to. Empty forwards no audience. |
+| `corpus_audience` (`CORPUS_AUDIENCE`) | `""` | Optional RFC 8707 resource indicator (`aud`) the backend binds the token to. Empty sends no audience. |
+| `corpus_service_token` (`CORPUS_SERVICE_TOKEN`) | `""` | The bearer token MEHO sends to every docs backend call (search, answer, read, readiness). It belongs to the deployment, not to an operator. Empty sends no `Authorization` header, so a backend that needs a token answers 401 and the call fails with 503. Keep it in a Secret. |
 | `corpus_allowed_hosts` (`CORPUS_ALLOWED_HOSTS`) | `""` | The docs-service hosts of this deployment, beside the host of `CORPUS_URL`: a comma-separated list of host names or IP addresses, with no scheme, port or path. MEHO dials a corpus endpoint, and sends `CORPUS_SERVICE_TOKEN`, only to a host on this list or the host of `CORPUS_URL`. A collection endpoint on any other host is refused with 422 at create and update. |
 | `corpus_timeout_seconds` (`CORPUS_TIMEOUT_SECONDS`) | `10.0` | Bound on the backend HTTP request. A slow backend raises `CorpusUnavailable` rather than blocking the event loop. |
 | `corpus_answer_timeout_seconds` (`CORPUS_ANSWER_TIMEOUT_SECONDS`) | `60.0` | Bound on the **answer** request of an opted-in collection (#3911): a grounded answer runs retrieval plus model calls on the corpus side. Keep it below any proxy read timeout in front of the corpus. |
@@ -389,9 +394,9 @@ meho docs collections probe vmware
 
 ```bash
 # Hide a collection from search (-> disabled). search_docs then fails
-# typed (409, "not ready") against it rather than returning an empty
-# result -- uniform with provisioning/rebuilding, since disabled is just
-# another not-ready status on the wired search path.
+# typed (403, detail.error='collection_disabled') against it rather than
+# returning an empty result. Unlike provisioning/rebuilding (409), this
+# is terminal: a client must not retry.
 meho docs collections disable vmware
 
 # Return a disabled collection to service (-> provisioning); a follow-up
@@ -399,10 +404,25 @@ meho docs collections disable vmware
 meho docs collections enable vmware
 ```
 
-Both are **idempotent** (re-enabling a live collection or re-disabling a
-disabled one is a no-op, not an error) and **lifecycle-guarded** (a
-forbidden transition → 409). A probe never re-enables a `disabled`
-collection — an operator's explicit disable outranks a liveness signal.
+Both are **idempotent** (disabling a `disabled` collection or enabling a
+`provisioning` one is a no-op, not an error) and **lifecycle-guarded** (a
+forbidden transition → 409; `enable` only works on a `disabled`
+collection, so enabling a `ready` or `rebuilding` one is a 409). A probe
+never re-enables a `disabled` collection — an operator's explicit disable
+outranks a liveness signal.
+
+A **global** collection (no tenant) belongs to the platform: probe,
+enable, disable and update on it need `platform_admin` (403
+`global_collection_update_forbidden`, the row does not change). A tenant
+admin changes only their own tenant's collections, also a tenant copy
+that has the same key as a global row.
+
+`meho docs collections delete <key>` (REST `DELETE
+/api/v1/doc_collections/{key}`, MCP `delete_doc_collections`) removes a
+collection of your own tenant and frees its key. Disable it first: a
+collection that is not `disabled` answers 409
+(`collection_not_disabled`), and a global one answers 403
+(`global_collection`).
 
 The same three actions exist as tenant-admin-gated REST routes
 (`POST /api/v1/doc_collections/{key}/probe|enable|disable`) and are
@@ -412,8 +432,7 @@ implemented once in `docs_collections/lifecycle.py`.
 > "MEHO.Knowledge" is being renamed on the ops side. That rename is
 > **external infra** (the collections/services the ops team runs), not an
 > `evoila/meho` change — nothing in this repo was ever named
-> "MEHO.Knowledge". It is tracked on the consumer repo
-> `evoila-bosnia/claude-rdc-hetzner-dc`
+> "MEHO.Knowledge". It is tracked in the consumer's repo
 > (consumer-side reference: [#1178](https://github.com/evoila/meho/issues/1178)).
 > The in-repo names (`meho-docs` add-on key, `meho-docs:<collection>`
 > entitlement keys, `search_docs` / `list_doc_collections` surface) are
@@ -655,12 +674,12 @@ disagree, the code wins and this section is the bug.
 
 meho issues `POST <backend.ref.endpoint>` (the per-collection corpus
 search URL; the legacy global `corpus_url` for an unmigrated deploy) with
-a JSON body and a forwarded operator JWT:
+a JSON body and the deployment's corpus service token:
 
 ```http
 POST /v1/search HTTP/1.1
 Host: corpus.example
-Authorization: Bearer <operator JWT>
+Authorization: Bearer <CORPUS_SERVICE_TOKEN>
 Content-Type: application/json
 
 {
@@ -684,14 +703,15 @@ a collection with neither sends neither key.)
 | `scope` | `{product?, version?, source}` or `{product?, release?, source}` | only when the collection sets `backend.ref.scope: "soft"` (#3912) and either the agent gave `product` and/or `version`, or the agent named a `target` with a fingerprint and gave neither (#3920) | The soft scope: a ranking / labelling signal, never a filter. Values as given (normalising them is the corpus's job). `source` is `"caller"` for the agent's own values, or `"default"` for a target's detected product and version, sent as `product` and `release` (e.g. `{"product": "vcenter", "release": "8.0.3.00400", "source": "default"}`); the corpus applies a default only when the question names no version itself. Never sent together with `metadata_filters`. A corpus that refuses unknown keys must accept `scope` before a collection turns the gate on. |
 | `audience` | `str` | only when configured | RFC 8707 resource indicator, forwarded **in the request body** here (contrast readiness below). Omitted when no audience is configured. |
 
-- **Auth.** `Authorization: Bearer <operator JWT>` — the **operator's** raw
-  JWT is forwarded (not a meho service token), so the corpus authenticates
-  **and audits** the call as the operator, the same forward-the-JWT
-  contract meho uses for Vault. The corpus must accept and audit it as the
-  forwarded operator. (`corpus.py:270`.)
-- **Source:** request body `corpus.py:264-268`; JWT header `:270`;
-  per-collection endpoint/audience resolution
-  [`docs_search/backends/corpus_http.py`](../../backend/src/meho_backplane/docs_search/backends/corpus_http.py)`:105-128`.
+- **Auth.** `Authorization: Bearer <CORPUS_SERVICE_TOKEN>` — meho sends
+  the deployment's corpus service token, never the operator's JWT. With
+  `CORPUS_SERVICE_TOKEN` empty, meho sends no `Authorization` header. The
+  corpus sees every call as this one service identity; MEHO's own
+  `audit_log` row names the operator. (`_corpus_auth_headers`.)
+- **Source:** request body and header in `search_corpus`
+  (`auth/corpus.py`); per-collection endpoint/audience resolution in
+  `_resolve_endpoint_audience`
+  ([`docs_search/backends/corpus_http.py`](../../backend/src/meho_backplane/docs_search/backends/corpus_http.py)).
 
 ### Search — response
 
@@ -733,8 +753,8 @@ meho reads the top-level **`results`** envelope and per-chunk **`text`** /
 **`source_uri`** — the post-#1732 MEHO.Knowledge dialect. For backward
 compatibility it also accepts the legacy meho-side names as inbound
 aliases (#1732): the envelope under `chunks`, the chunk text under
-`content`, the citation URL under `source_url` (`AliasChoices`,
-`corpus.py:159-204`). A new corpus should speak `results` / `text` /
+`content`, the citation URL under `source_url` (`AliasChoices` on
+`CorpusChunk` / `CorpusSearchResponse`). A new corpus should speak `results` / `text` /
 `source_uri`. Extra fields meho does not name are ignored
 (`extra="ignore"`), so a corpus may add fields freely; **dropping** a
 required field (`chunk_id` / `text`) fails parse and is surfaced as
@@ -752,7 +772,7 @@ is the corpus's decision. Source: `CorpusChunk` / `CorpusSearchResponse` in
 meho reads corpus readiness with a `GET` at a **derived** URL — the
 post-#1732 MEHO.Knowledge readiness path is **`GET /readyz`** at the
 service root, and there is **no `/status` route**.
-`derive_status_url(<search endpoint>)` (`corpus.py:337-350`) computes it:
+`derive_status_url(<search endpoint>)` (`auth/corpus.py`) computes it:
 
 - The readiness URL is the search URL's **host root** plus **`/readyz`**,
   regardless of the search path:
@@ -769,7 +789,7 @@ forwarded as a query param**, not a body key (contrast search above):
 ```http
 GET /readyz?audience=https://corpus.example HTTP/1.1
 Host: corpus.example
-Authorization: Bearer <operator JWT>
+Authorization: Bearer <CORPUS_SERVICE_TOKEN>
 ```
 
 The expected `2xx` JSON body:
@@ -788,11 +808,11 @@ The expected `2xx` JSON body:
 | `doc_count` | `int` | optional | Indexed document count (operator liveness). |
 | `last_ingested_at` | `datetime` | optional | ISO-8601 timestamp of the last ingest. |
 
-`audience` is a **query param** here (`corpus.py:396`) versus a **body
-key** on `/search` (`corpus.py:267-268`) — a corpus that only reads
+`audience` is a **query param** here (`corpus_status`) versus a **body
+key** on `/search` (`search_corpus`) — a corpus that only reads
 `audience` from one of the two will mis-bind the token on the other path.
-Source: `derive_status_url` `corpus.py:337-350`; `CorpusStatusResponse`
-`:296-334`; audience-as-query-param `:396`.
+Source: `derive_status_url`, `CorpusStatusResponse` and `corpus_status`
+in `auth/corpus.py`.
 
 ### Answer — optional (`POST /ask?include=hits`, #3911)
 
@@ -905,8 +925,8 @@ ignored):
 | `next` / `up` | `str` or `null` | Opaque cursors to read on / read the enclosing part. |
 
 **Size.** The corpus caps each reply (about 40,000 characters, with a `next`
-cursor beyond it). meho passes the cap through; the delivery budgets of #3641
-will apply once they land.
+cursor beyond it). meho passes the cap through and adds no size cap of its
+own.
 
 **Errors** — the body is never echoed:
 
@@ -937,22 +957,26 @@ Every error path collapses to **one** typed `CorpusUnavailable`, which the
 — never a silent empty result. meho fails closed when the corpus is:
 
 - **unconfigured** — no `backend.ref` endpoint and an empty legacy
-  `corpus_url` (`corpus.py:254-257`, `:389-392`);
+  `corpus_url` (`search_corpus`, `corpus_status`);
+- **not an allowed destination** — the endpoint fails the corpus
+  destination screen or its host is not a docs-service host of the
+  deployment (`_screen_corpus_dial`, see
+  [Which corpus endpoints meho will dial](#which-corpus-endpoints-meho-will-dial));
 - **unreachable / timed out** — any transport error or a request exceeding
-  `corpus_timeout_seconds` (`:273-281`, `:400-405`);
+  `corpus_timeout_seconds` (`_dial_corpus`);
 - **non-2xx** — the upstream status is logged; the response **body is
-  never** echoed into the 503 (`:283-291`, `:407-412`);
-- **non-JSON** — a `2xx` whose body is not JSON (`:105-109`);
+  never** echoed into the 503 (`_raise_unless_2xx`);
+- **non-JSON** — a `2xx` whose body is not JSON (`_parse_2xx_body`);
 - **schema-drift** — a `2xx` JSON body missing a required field or with a
   wrong type, **including** an envelope naming neither `results` nor
-  `chunks` (`:111-115`, `:183-204`).
+  `chunks` (`_parse_2xx_body`, `CorpusSearchResponse`).
 
 > **The envelope must parse to a hit list (#1732, fixed).** #1732's silent
 > symptom was a `2xx` whose JSON named an envelope meho did not consume
 > parsing to an **empty** hit list rather than failing. #1745 closed it by
 > making the envelope **required** — meho's `chunks` field
 > (`validation_alias=AliasChoices("chunks", "results")`) carries **no
-> default** (`CorpusSearchResponse`, `corpus.py:183-204`) — so a `2xx`
+> default** (`CorpusSearchResponse` in `auth/corpus.py`) — so a `2xx`
 > naming **neither `results` nor `chunks`** now fails parse and is
 > surfaced as `CorpusUnavailable` → 503 (the schema-drift branch above),
 > not read back as zero hits. A populated corpus that returns an
@@ -990,9 +1014,8 @@ MCP face (an agent session against the same tenant):
 - `search_docs` appears in `tools/list`; a `tools/call` with
   `collection="vmware"` returns ranked chunks carrying `source_url` /
   `chunk_id` / `document_id`.
-- The companion resource
-  `meho://docs/vmware/{product}/{version}/{chunk_id}` returns the full
-  text of a hit.
+- The companion resource `meho://docs/vmware/{chunk_id}` returns the
+  full text of a hit (best effort, see *Search* above).
 
 ### Unprovisioned or unentitled tenant
 
@@ -1017,7 +1040,7 @@ meho docs search "anything" --collection vmware
 
 On the **MCP face**, the base `meho-docs` add-on key still gates *tool
 visibility*: a tenant without it never sees `search_docs` / `ask_docs` /
-`list_doc_collections` in `tools/list` (true absence). For a tenant
+`read_docs` / `list_doc_collections` in `tools/list` (true absence). For a tenant
 **with** the add-on but **without** `meho-docs:vmware`, the `vmware`
 collection is a **true absence** in the catalogue and the band
 (`list_doc_collections` does not list it), and a direct
@@ -1034,7 +1057,8 @@ collection bound as `audit_collection`:
 | Face | op id |
 |---|---|
 | `search_docs` (REST / CLI / MCP) | `meho.docs.search` |
-| `ask_docs` (REST / CLI / MCP) | `meho.docs.ask` |
+| `ask_docs` (REST / MCP / console) | `meho.docs.ask` |
+| `read_docs` (REST / CLI / MCP) | `meho.docs.read` |
 | `list_doc_collections` (REST / CLI / MCP) | `meho.docs.collections.list` |
 
 Because the op id is uniform, one filter catches every face — including
@@ -1104,7 +1128,6 @@ the answer.
   generalises).
 - Parent Goal: [#215](https://github.com/evoila/meho/issues/215).
 - Consumer side (external collection ingest + the MEHO.Knowledge →
-  meho-docs rename + per-collection provisioning):
-  `evoila-bosnia/claude-rdc-hetzner-dc`;
-  consumer-side corpus reference
+  meho-docs rename + per-collection provisioning): the consumer's own
+  infrastructure repo; consumer-side corpus reference
   [#1178](https://github.com/evoila/meho/issues/1178).

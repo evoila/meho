@@ -15,8 +15,6 @@ deploy, when re-running after a connector or spec revision, or when
 verifying the curation against a staging Robot Webservice account.
 
 Companion to
-`docs/cross-repo/g35-nsx-canary.md`
-(the NSX counterpart this runbook mirrors) and
 [`docs/cross-repo/connector-ingestion.md`](./connector-ingestion.md)
 (the connector-agnostic ingest runbook). The Hetzner-Robot-specific
 delta is the HTTP Basic auth flow, the single-spec ingest layout (the
@@ -56,10 +54,9 @@ End-to-end correctness of the G0.7 ingestion pipeline driven against the
    `edit_op(llm_instructions=…)`) against the staged connector to land
    the 12 core ops and their guidance blobs.
 5. **Verify.** The operator dispatches one list op through `call_operation`
-   to prove the end-to-end agent path works. The JSONFlux seam is
-   exercised via the test-only `ForceHandleReducer` pattern (see
-   acceptance tests below); real JSONFlux reduction is a v0.2.next
-   concern per Goal #214 scope.
+   to prove the end-to-end agent path works. MEHO runs the real
+   `JsonFluxReducer` on every dispatch, so a large list comes back as a
+   result handle (see [`jsonflux.md`](../architecture/jsonflux.md)).
 
 ## Prerequisites
 
@@ -78,6 +75,9 @@ End-to-end correctness of the G0.7 ingestion pipeline driven against the
   - [`backend/tests/test_connectors_hetzner_robot_core_ops.py`](../../backend/tests/test_connectors_hetzner_robot_core_ops.py)
     — curation substrate tests (12 ops enabled, non-core ops disabled,
     llm_instructions + when_to_use populated, audit rows written).
+  - [`backend/tests/test_connectors_hetzner_robot_ingest.py`](../../backend/tests/test_connectors_hetzner_robot_ingest.py)
+    — ingests the packaged spec, resolves the ops to
+    `HetznerRobotConnector`, and dispatches one read op (mocked HTTP).
 
 - **A Postgres instance with pgvector + FTS extensions.** Local
   development uses the testcontainers fixture; production uses the
@@ -262,7 +262,7 @@ meho operation search hetzner-rest-2026.04 "list dedicated servers" --limit 5
 meho operation search hetzner-rest-2026.04 "which SSH keys are registered" --limit 5
 ```
 
-The first command should return 4 enabled groups, each with the canonical
+The first command should return 3 enabled groups, each with the canonical
 `when_to_use` from `ROBOT_CORE_GROUPS`. The second should return
 `GET:/server` in the top-3. The third should return `GET:/key` in the top-3.
 
@@ -300,12 +300,11 @@ list (or an empty array for a newly-created Webservice user with no
 servers yet). HTTP Basic auth runs implicitly on the first dispatch and
 the per-target credential cache reuses the pair for subsequent calls.
 
-The JSONFlux seam (would-be handle threading for the `GET:/server` list
-response) is exercised non-interactively via the acceptance test's
-`ForceHandleReducer` pattern. Real JSONFlux reduction (set-shaped payload
-reduction, MinIO/S3 spill, `result_query` meta-tool) is **out of scope
-for v0.2** per Goal #214 — the seam test proves the dispatcher is ready
-for it once the production reducer ships.
+MEHO runs the real `JsonFluxReducer` on this response. A large server
+list comes back as a result handle; read it with `result_query`. The
+acceptance test
+[`test_g37_robot_jsonflux_force_handle.py`](../../backend/tests/acceptance/test_g37_robot_jsonflux_force_handle.py)
+forces a handle for `GET:/server` and checks it.
 
 ## Rollback
 
@@ -338,7 +337,7 @@ curated content:
 
 G3.7-T8 (#849) ships the operator-review substrate
 (`apply_robot_core_curation` helper, `edit_op(llm_instructions=…)`
-extension), the curated 10-op data (`ROBOT_CORE_OPS`), the substrate unit
+extension), the curated op data (`ROBOT_CORE_OPS`, now 12 ops), the substrate unit
 tests, and this runbook. The env-gated automated canary that drives the
 full ingest of `hetzner_robot_minimal.yaml` through `IngestionPipelineService` against
 a real LLM stub or live Anthropic adapter is a follow-up requiring the
@@ -347,9 +346,9 @@ Robot spec file reachable from CI.
 ### 2. CLI verbs for per-op `llm_instructions` editing
 
 `ReviewService.edit_op(llm_instructions=…)` is exposed at the Python
-level. The CLI verb `meho connector edit-op --llm-instructions <json>` and
-the matching REST / MCP route extensions are deferred to G3.7-T9 alongside
-the CLI verbs for Robot-specific operations.
+level only. `meho connector edit-op` exists, but it has no
+`--llm-instructions` flag, and the matching REST route does not take
+`llm_instructions` either.
 
 ### 3. Only the vSwitch membership writes are curated
 
@@ -365,7 +364,6 @@ off. Ordering and cancelling servers and add-ons stay manual by policy.
 - Parent Goal: [G3 #214](https://github.com/evoila/meho/issues/214).
 - Predecessor: [G3.7-T6 #846](https://github.com/evoila/meho/issues/846)
   — `HetznerRobotConnector` skeleton.
-- NSX counterpart: `g35-nsx-canary.md`.
 - Harbor counterpart: see Initiative #368 docs.
 - Connector-agnostic ingest runbook: [`connector-ingestion.md`](./connector-ingestion.md).
 - Substrate: [#388 G0.6](https://github.com/evoila/meho/issues/388)

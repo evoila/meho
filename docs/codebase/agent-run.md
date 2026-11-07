@@ -127,8 +127,8 @@ cost already include every child run's tokens, so they count once.
 `meho_backplane.db.models`:
 
 - `AgentRun` — the table. Columns: `id` (PK, doubles as the session
-  lineage key), `agent_definition_id` (soft-FK to the G11.1-T2 table
-  landing in parallel #809), `tenant_id` (real FK to `tenant.id`),
+  lineage key), `agent_definition_id` (soft-FK to the
+  `agent_definition` table), `tenant_id` (real FK to `tenant.id`),
   `identity_sub` / `identity_act` (the RFC 8693 delegation pair —
   `sub` = principal acted for, `act` = agent acting. A direct run
   records the person in `sub` and the definition's `identity_ref` in
@@ -262,10 +262,12 @@ one transaction):
   Cancelling an already-terminal run surfaces as `IllegalTransitionError`
   (not a silent no-op). The function records the **durable intent**
   (`status='cancelled'` + `ended_at`); the actual interruption of the
-  in-flight async loop is the runtime's job (G11.1-T1) — the loop
-  observes the cancelled status at its next turn boundary and stops.
-  Recording the intent durably first is what makes cancellation survive
-  a process restart.
+  in-flight async loop is the runtime's job (G11.1-T1). The runtime does
+  not stop a running loop on cancel yet: the heartbeat sidecar sees the
+  lost lease and stops, and the loop's own end does not overwrite the
+  `cancelled` row (see "Known issues" in
+  [agent-runtime.md](agent-runtime.md)). Recording the intent durably
+  first is what makes cancellation survive a process restart.
 - `claim_lease(session, row, *, owner, ttl_seconds)` — stamp
   `lease_owner` + `lease_expires_at` on a run a worker is about to
   execute (T4 #825). Status untouched — composed by the caller with
@@ -365,11 +367,10 @@ Settings (all in `Settings`, all opt-out via env):
 ## Known issues / notes
 
 - The `agent_definition_id` and `parent_run_id` columns are **soft-FKs**
-  (no FK clause). `agent_definition` (G11.1-T2 / #809) lands in a sibling
-  task in parallel; a hard FK would couple the two migrations' ordering.
-  Tightening to a real FK is deferred to a future migration once both
-  tables are settled — the same soft-FK discipline `audit_log.target_id`
-  / `audit_log.parent_audit_id` follow.
+  (no FK clause). Run history therefore survives the delete of its agent
+  definition (see [agent-definition.md](agent-definition.md)). This is
+  the same soft-FK discipline `audit_log.target_id` /
+  `audit_log.parent_audit_id` follow.
 - `cost` (`Numeric(12, 6)`) is set on a succeeded run; it is `0` for a
   model with no price.
 - SQLite (the dev/test driver) returns naive datetimes from
@@ -384,10 +385,6 @@ Settings (all in `Settings`, all opt-out via env):
   is the agent runtime's idempotency-friendly tool calls (G11.1's
   design constraint) — T4 does not enforce idempotency at the
   substrate, it is the agent author's contract.
-- Migration `0026_add_agent_run_lease_reaper` collides numerically
-  with PR #1065 (G11.3-T2, cron + one-off triggers) which also numbers
-  its migration `0026`. Both PRs are in-flight in parallel; whichever
-  lands second rebases its migration to `0026`.
 
 ## References
 

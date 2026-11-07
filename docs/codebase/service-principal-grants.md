@@ -36,14 +36,15 @@ Enforcement is **service-principal-only**. The branch structure:
 
 | Principal | `requires_approval` | mutating `caution` / `dangerous` | safe / read |
 |---|---|---|---|
-| `USER` (human, interactive) | park (queue) | **auto-execute** (unchanged) | auto-execute |
+| `USER` (person) | park (queue) | park; a `caution` op runs at once in the web interface (#3980) | `safe` runs at once; a token call parks a `caution` read (#3980) |
 | `SERVICE` (client-credentials) | park unless granted | **park unless granted** (#3152) | auto-execute |
 | `AGENT` | `resolve_verdict` (agent-permission model) — untouched | | |
 
-A human `USER` operator keeps the v0.2 default-allow contract (they are
-their own approver via the approval queue); `safety_level` is consulted
-**only** for a `SERVICE` principal. That is how "operator-interactive"
-is distinguished from "service principal": the `principal_kind` claim
+A person follows the web-interface and token rule of
+`_person_park_reason` (#3980; see
+[agent-permission-model.md](agent-permission-model.md#safety-levels-at-a-glance)).
+Standing grants apply **only** to a `SERVICE` principal. The
+`principal_kind` claim tells a person from a service principal
 (`user` vs `service`, `auth/jwt.py::_extract_principal_kind`). Agents are
 unaffected — they keep the `AgentPermission` verdict model.
 
@@ -71,14 +72,14 @@ the **absent-claim** case on either of two positive markers:
 
 Fail-closed for the policy path: only a positive marker *upgrades*; any
 unrecognised shape stays `user`, and an interactive human token (which
-always carries a session claim) is never upgraded, so the `user`
-default-allow is preserved. As a residual-drift signal, `_non_agent_verdict`
+always carries a session claim) is never upgraded, so a person keeps
+the person rule. As a residual-drift signal, `_non_agent_verdict`
 emits a WARN (`policy_gate_grant_holder_classified_non_service`) whenever a
 **parking** non-service principal still holds ≥1 live grant.
 
 **"Mutating" is grounded in existing descriptor fields** (no new column,
 `_is_mutating`): an ingested op is read-class iff its HTTP `method` ∈
-`{GET, HEAD}` (the `READ_HTTP_METHODS` set); a typed / composite op
+`{GET, HEAD}` (the `_READ_METHODS` set in `_validate.py`); a typed / composite op
 carries no `method`, so its curated `safety_level` stands in (`safe` =
 read, `caution` / `dangerous` / `destructive` = write). `destructive`
 parks always **and is never grant-satisfiable** (#3183); `dangerous`
@@ -543,7 +544,7 @@ What the code does:
   render fails when the host is not `ingress.host`; the notes warn.
 
 Tests: `test_sandbox_mode_boot.py`, `test_sandbox_mode_grants.py`,
-`test_sandbox_mode_calls.py`, `test_sandbox_mode_verdict_table.py` (with
+`test_sandbox_mode_verdict_table.py` (with
 the checked-in mode-off table `tests/data/sandbox_mode_verdict_table_off.json`),
 `test_sandbox_mode_audit_mark.py`, `test_sandbox_mode_display.py`,
 `test_chart_sandbox_mode.py`, `migrations/test_migration_0115_add_sandbox_mode.py`.
@@ -570,7 +571,8 @@ supported alternative:
 `connector_id` the answer carries. A vCenter write step is checked under the
 connector the target resolves to (#4991): ask with `vmware-rest-8.0` for a
 vCenter 8.0.x target and with `vmware-rest-9.0` for a 9.x target. Without
-`connector_id` the route answers for `vmware-rest-9.0`.
+`connector_id` the route answers for the connector the composite is
+registered against.
 
 Each entry carries the child `op_id`, a best-effort `safety_level`
 (descriptor-resolved; `null` for a code-shipped vim sub-op with no
@@ -662,7 +664,6 @@ on one of these routers has no matching CLI verb in that reference.
   stored display-name field, so their JWT `sub` is deliberately shown as the
   fail-open identity; concrete target UUIDs resolve to a tenant-local target
   name when available, while selector and targetless grants remain explicit.
-  / `path=approval.decision`.
 - **No agent-path change** — `resolve_verdict` and the `AgentPermission`
   model are untouched; agents keep their own grant model.
 

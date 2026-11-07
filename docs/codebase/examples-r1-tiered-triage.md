@@ -121,15 +121,21 @@ on every firing.
 
 ## Why the harness exists (and why R3 has one too)
 
-The MCP memory tools (`add_to_memory` / `search_memory`,
-`backend/src/meho_backplane/mcp/tools/memory.py`) are not
-registered as in-process agent tools in v0.2 — the loop's tool
-catalog (`META_TOOL_NAMES` in `backend/src/meho_backplane/agent/toolset.py`)
-contains only `list_operation_groups` + `search_operations` +
-`call_operation` (plus `invoke_agent` when composition is wired).
-An agent definition that names `add_to_memory` in its toolset spec
-gets a logged warning and the tool is not registered; the model
-cannot call it.
+The MCP tool `add_to_memory`
+(`backend/src/meho_backplane/mcp/tools/memory.py`) is not an
+in-process agent tool. The loop's tool catalog (`META_TOOL_NAMES` in
+`backend/src/meho_backplane/agent/toolset.py`) has the three
+operation tools (`list_operation_groups`, `search_operations`,
+`call_operation`), the discovery tools (`meho_status`,
+`meho_connector_list`, `list_targets`, `preview_operation`,
+`result_query`), the broadcast tools (`broadcast_announce`,
+`broadcast_recent`, `broadcast_watch`), and the opt-in read tools
+(`query_topology`, `search_memory`, `search_knowledge`,
+`read_context_resource`), plus `invoke_agent` when composition is
+wired. An agent can read memory but cannot write it. An agent
+definition that names `add_to_memory` in its toolset spec gets a
+logged warning and the tool is not registered; the model cannot
+call it.
 
 Both R1 and R3 (`examples/kb_writeback`) work around this by
 doing the memory/kb write **in the harness**, not in the loop:
@@ -160,9 +166,9 @@ parent's identity (the cheap tier's `Operator`). This means:
 - The deep tier's own `AgentPermission` rows (keyed on the deep
   tier's principal `sub` from `agent:r1-deep-tier-investigator`)
   layer on top of the inherited operator's role.
-- The audit row for the deep tier's child run records both
-  identities: `act_sub` = the deep tier's principal, `parent_run_id`
-  = the cheap tier's run id.
+- The deep tier's child `agent_run` row records `parent_run_id` =
+  the cheap tier's run id (`AgentRun.parent_run_id`; `audit_log` has
+  no `parent_run_id` column, and its actor column is `actor_sub`).
 
 Lineage is therefore reconstructable from the audit log: a
 forensic walker follows `parent_run_id` up to the cheap tier's
@@ -201,7 +207,8 @@ Two budgets fire on every closed-loop tick:
   for a `PolicyDecision`, but the cheaper model produces it). A
   hit on `cost_limit` raises `BudgetExceededError`; the cheap
   tier's `invoke_agent` call surfaces a `ModelRetry` ("child agent
-  failed: budget_exceeded"). The cheap tier can then decide
+  '<name>' failed: <error>. Try a different approach or answer
+  directly.", `agent/invoke.py`). The cheap tier can then decide
   whether to skip the event, defer it, or surface it to the
   operator as an unprocessable escalation.
 
@@ -243,9 +250,9 @@ than land on a multi-thousand-dollar cap by accident.
   of an in-prompt `add_to_memory` call.
 - The cheap tier's "rate baseline crossed by 3x" rule is documented
   in the system prompt as a signal source but requires the event
-  payload to carry `rate_baseline_x`. The broadcast feed does not
-  yet stamp that field; an in-flight enhancement to the broadcast
-  publisher would close that gap.
+  payload to carry `rate_baseline_x`. Broadcast carries agent
+  announcements only, and MEHO does not stamp that field. The caller
+  must add it to each event it passes in.
 - The harness builds a fresh `PydanticAgentRun` per
   `run_closed_loop` call rather than reusing the caller's
   runtime. A consumer wanting per-tick metrics on the same

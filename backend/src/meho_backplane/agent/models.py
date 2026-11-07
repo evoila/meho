@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     from pydantic_ai.models import Model
 
     from meho_backplane.auth.operator import Operator
+    from meho_backplane.settings import Settings
 
 __all__ = [
     "DEFAULT_TENANT_KEY",
@@ -105,8 +106,10 @@ __all__ = [
     "TenantModelPolicy",
     "TierMapping",
     "TokenAcquisitionError",
+    "agent_tier_for",
     "anthropic_backend_builder",
     "anthropic_capabilities",
+    "bare_openai_model_name",
     "bedrock_backend_builder",
     "bedrock_capabilities",
     "build_resolver",
@@ -119,6 +122,8 @@ __all__ = [
     "openai_chat_profile",
     "openai_compat_backend_builder",
     "openai_compat_capabilities",
+    "settings_model_id",
+    "settings_model_resolver",
     "vcf_paif_backend_builder",
     "vcf_paif_bearer_provider",
     "vcf_paif_capabilities",
@@ -881,6 +886,25 @@ openai_compat_capabilities: Final[BackendCapabilities] = BackendCapabilities(
 # ----- Backend builders --------------------------------------------------
 
 
+#: The prefix MEHO's settings put in front of an OpenAI-compatible model
+#: name (``openai:gpt-4o-mini``), in the form ``Agent("openai:...")`` takes.
+_OPENAI_MODEL_PREFIX: Final[str] = "openai:"
+
+
+def bare_openai_model_name(model_id: str) -> str:
+    """Return *model_id* without a leading ``openai:`` prefix.
+
+    pydantic_ai removes the prefix only when it builds a model from a
+    string (``Agent("openai:gpt-4o-mini")``). :class:`OpenAIChatModel`
+    sends the name it gets unchanged as ``model`` in the request
+    (pydantic-ai-slim 2.53), and an endpoint answers "model not found"
+    for ``openai:gpt-4o-mini``. So the builders call this first. Only
+    the one prefix is removed: a colon later in the name is part of it
+    (Ollama names such as ``llama3.1:8b``).
+    """
+    return model_id.removeprefix(_OPENAI_MODEL_PREFIX)
+
+
 def openai_compat_backend_builder(
     *,
     vendor: OpenAICompatVendor,
@@ -900,10 +924,13 @@ def openai_compat_backend_builder(
     Args:
         vendor: Which OpenAI-compat deployment shape to target — picks
             the bundled :class:`OpenAIModelProfile`.
-        model_id: The framework's model id. Accepts the raw model name
-            (``gpt-4o-mini``, ``meta-llama/Llama-3.1-8B-Instruct``,
-            ``llama3.1:8b``) or the ``openai:<name>`` prefix; the
-            framework strips the prefix internally so both shapes work.
+        model_id: The model name the endpoint serves (``gpt-4o-mini``,
+            ``meta-llama/Llama-3.1-8B-Instruct``, ``llama3.1:8b``), with
+            or without an ``openai:`` prefix. The builder removes the
+            prefix: :class:`OpenAIChatModel` sends its model name
+            unchanged, and an endpoint answers "model not found" for
+            ``openai:gpt-4o-mini``. Only that one prefix is removed, so
+            an Ollama name such as ``llama3.1:8b`` stays whole.
         base_url: The OpenAI Chat Completions base URL. ``None`` (the
             default) routes to OpenAI SaaS. An on-prem deploy passes
             the engine's URL (e.g. ``http://vllm.internal:8000/v1`` /
@@ -925,6 +952,7 @@ def openai_compat_backend_builder(
         resolves to it never loads the ``openai`` wheel into memory.
     """
     profile = _vendor_profile_for(vendor)
+    model_name = bare_openai_model_name(model_id)
 
     def _build() -> Model:
         # Lazy import — the ``pydantic-ai-slim[openai]`` extra pulls in
@@ -935,7 +963,7 @@ def openai_compat_backend_builder(
         from pydantic_ai.providers.openai import OpenAIProvider
 
         provider = OpenAIProvider(base_url=base_url, api_key=api_key)
-        return OpenAIChatModel(model_id, provider=provider, profile=profile)
+        return OpenAIChatModel(model_name, provider=provider, profile=profile)
 
     return _build
 
@@ -1427,10 +1455,10 @@ def vcf_paif_backend_builder(
     economy and runtime efficiency.
 
     Args:
-        model_id: The pydantic_ai model id (e.g.
-            ``openai:meta-llama/Llama-3.1-8B-Instruct``). PAIF accepts
-            the bare model name; pydantic_ai's :class:`OpenAIChatModel`
-            strips the ``openai:`` prefix when present.
+        model_id: The model name PAIF serves, with or without an
+            ``openai:`` prefix (``openai:meta-llama/Llama-3.1-8B-Instruct``).
+            PAIF accepts only the bare name, so the builder removes the
+            prefix (see :func:`bare_openai_model_name`).
         base_url: The PAIF endpoint base URL **including** the
             :data:`VCF_PAIF_OPENAI_COMPAT_BASE_PATH` sub-path —
             e.g. ``https://pais.airgap.local/api/v1/compatibility/openai/v1/``.
@@ -1452,6 +1480,7 @@ def vcf_paif_backend_builder(
         never loads the ``openai`` wheel.
     """
     profile = vcf_paif_chat_profile()
+    model_name = bare_openai_model_name(model_id)
 
     def _build() -> Model:
         # Lazy import — the ``[openai]`` extra is pinned (#1077) but the
@@ -1470,7 +1499,7 @@ def vcf_paif_backend_builder(
             api_key=bearer_token_provider,
         )
         provider = OpenAIProvider(openai_client=openai_client)
-        return OpenAIChatModel(model_id, provider=provider, profile=profile)
+        return OpenAIChatModel(model_name, provider=provider, profile=profile)
 
     return _build
 
@@ -1540,3 +1569,121 @@ def default_vcf_paif_backend_builder() -> Model:
         bearer_token_provider=provider,
     )
     return builder()
+
+
+# ---------------------------------------------------------------------------
+# The resolver every live agent run uses (#5850)
+# ---------------------------------------------------------------------------
+#
+# A stored agent names a model tier from AgentModelTier (fast / standard /
+# deep, a cost ladder). The resolver keys on AgentTier (triage / summarize /
+# investigate). The map below links the two by cost, so the budget gate's
+# one-step cheaper ladder (INVESTIGATE -> SUMMARIZE -> TRIAGE) matches
+# deep -> standard -> fast.
+
+#: Stored agent tier (``AgentModelTier`` value) -> resolver tier.
+_MODEL_TIER_TO_AGENT_TIER: Final[Mapping[str, AgentTier]] = {
+    "fast": AgentTier.TRIAGE,
+    "standard": AgentTier.SUMMARIZE,
+    "deep": AgentTier.INVESTIGATE,
+}
+
+#: ``AGENT_MODEL_BACKEND`` value -> backend id in the registry below.
+_SETTINGS_BACKEND_IDS: Final[Mapping[str, str]] = {
+    "anthropic": "anthropic",
+    "bedrock": "bedrock-anthropic",
+    "openai": "openai-compat",
+    "vcf-paif": "vcf-paif",
+}
+
+
+def agent_tier_for(model_tier: str) -> AgentTier:
+    """Map a stored agent's model tier (``fast`` / ``standard`` / ``deep``).
+
+    ``fast`` is the cheapest tier (:attr:`AgentTier.TRIAGE`), ``standard``
+    the middle one (:attr:`AgentTier.SUMMARIZE`), and ``deep`` the most
+    capable one (:attr:`AgentTier.INVESTIGATE`).
+
+    Raises:
+        ValueError: *model_tier* is not one of the three stored values.
+    """
+    try:
+        return _MODEL_TIER_TO_AGENT_TIER[model_tier]
+    except KeyError:
+        raise ValueError(f"unknown agent model tier: {model_tier!r}") from None
+
+
+def _settings_backends(
+    settings: Settings,
+) -> dict[str, tuple[BackendBuilder, BackendCapabilities, bool]]:
+    """Return the backend registry the settings resolver picks from.
+
+    Each entry uses the settings-driven builder, so each backend reads
+    its own key, address and model name from the settings when a run
+    starts. An OpenAI-compatible endpoint counts as SaaS only when
+    ``OPENAI_BASE_URL`` is empty (then the requests go to OpenAI).
+    """
+    return {
+        **default_anthropic_backends(),
+        **default_bedrock_backends(),
+        "openai-compat": (
+            default_openai_backend_builder,
+            openai_compat_capabilities,
+            not settings.openai_base_url,
+        ),
+        "vcf-paif": (default_vcf_paif_backend_builder, vcf_paif_capabilities, False),
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class _SettingsResolver:
+    """The :class:`ModelResolver` of the live agent runtime.
+
+    Reads ``AGENT_MODEL_BACKEND`` at each resolve and sends every tier
+    of every tenant to that one backend. Built per resolve, so a
+    settings reload takes effect on the next run, like the builders.
+    No other backend is tried when the chosen one fails.
+    """
+
+    def resolve(self, operator: Operator, tier: AgentTier) -> Model:
+        """Return the Model of the configured backend for *tier*."""
+        from meho_backplane.settings import get_settings
+
+        settings = get_settings()
+        backend_id = _SETTINGS_BACKEND_IDS[settings.agent_model_backend]
+        policy = TenantModelPolicy(
+            tiers={each: TierMapping(backend_id=backend_id) for each in AgentTier},
+        )
+        resolver = build_resolver(
+            policies={DEFAULT_TENANT_KEY: policy},
+            backends=_settings_backends(settings),
+        )
+        return resolver.resolve(operator, tier)
+
+
+def settings_model_resolver() -> ModelResolver:
+    """Return the resolver every live agent run uses (``AGENT_MODEL_BACKEND``)."""
+    return _SettingsResolver()
+
+
+def settings_model_id() -> str:
+    """Return ``provider:model`` for the backend ``AGENT_MODEL_BACKEND`` names.
+
+    Read from the settings without building a model. A run uses it for
+    its record only when the model cannot be built (for example a
+    missing key): the run then fails at once, and its record still names
+    the backend the settings chose. The provider part is the name the
+    built model reports (``Model.system``): ``openai`` for both
+    OpenAI-compatible backends.
+    """
+    from meho_backplane.settings import get_settings
+
+    settings = get_settings()
+    backend = settings.agent_model_backend
+    if backend == "openai":
+        return f"openai:{bare_openai_model_name(settings.openai_default_model)}"
+    if backend == "vcf-paif":
+        return f"openai:{bare_openai_model_name(settings.vcf_paif_model)}"
+    if backend == "bedrock":
+        return f"bedrock:{settings.bedrock_default_model}"
+    return settings.agent_default_model

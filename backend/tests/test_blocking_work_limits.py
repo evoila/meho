@@ -1,0 +1,318 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""Limits on work that one caller can start: probes, imports and login flows."""
+
+from __future__ import annotations
+
+import asyncio
+import socket
+import threading
+import time
+import tracemalloc
+from typing import Any, ClassVar
+
+import pytest
+import yaml
+from pydantic import ValidationError
+
+from meho_backplane.connectors.net import tls as net_tls
+from meho_backplane.connectors.net.probe_pool import PROBE_POOL_WORKERS, run_blocking_probe
+from meho_backplane.targets.extras_limits import (
+    EXTRAS_MAX_DEPTH,
+    EXTRAS_MAX_NODES,
+    check_extras_size,
+)
+from meho_backplane.targets.schemas import TargetCreate, TargetUpdate
+from meho_backplane.ui.auth import routes as auth_routes
+from meho_backplane.ui.auth.verifier_store import MAX_PENDING_FLOWS, PKCEVerifierStore
+from meho_backplane.ui.routes.connectors.import_view import ImportParseError, _parse_targets_yaml
+from meho_backplane.ui.routes.topology.batch_parse import BulkParseError, parse_bulk_rows
+from meho_backplane.ui.safe_yaml import load_yaml_no_alias
+
+_ALIAS_BOMB = """
+a: &a [x, x, x, x, x, x, x, x, x, x]
+b: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]
+c: &c [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]
+d: [*c, *c, *c, *c, *c, *c, *c, *c, *c, *c]
+"""
+
+
+# --- probe pool ------------------------------------------------------------
+
+
+async def test_waiting_probes_leave_the_default_thread_pool_free() -> None:
+    release = threading.Event()
+    running: list[int] = []
+
+    def _silent_peer() -> str:
+        running.append(1)
+        release.wait(10)
+        return "done"
+
+    probes = [
+        asyncio.create_task(run_blocking_probe(_silent_peer)) for _ in range(PROBE_POOL_WORKERS)
+    ]
+    # One more probe than the pool has threads: it waits in the probe queue.
+    queued = asyncio.create_task(run_blocking_probe(_silent_peer))
+    try:
+        for _ in range(100):
+            if len(running) == PROBE_POOL_WORKERS:
+                break
+            await asyncio.sleep(0.05)
+        assert len(running) == PROBE_POOL_WORKERS
+        begin = time.monotonic()
+        assert await asyncio.to_thread(lambda: "login ok") == "login ok"
+        assert time.monotonic() - begin < 0.1
+        assert not queued.done()
+    finally:
+        release.set()
+    assert await asyncio.gather(*probes, queued) == ["done"] * (PROBE_POOL_WORKERS + 1)
+
+
+async def test_probe_pool_returns_the_error_of_the_probe() -> None:
+    def _fail() -> None:
+        raise OSError("unreachable")
+
+    with pytest.raises(OSError, match="unreachable"):
+        await run_blocking_probe(_fail)
+
+
+# --- tls deadline ----------------------------------------------------------
+
+
+class _FakeSocket:
+    """Stand-in for ``socket.socket`` that records how it was made and used."""
+
+    made: ClassVar[list[_FakeSocket]] = []
+    connect_hook: ClassVar[Any] = None
+
+    def __init__(self, family: int, socktype: int, proto: int) -> None:
+        self.family, self.socktype, self.proto = family, socktype, proto
+        self.timeout: float | None = None
+        self.address: Any = None
+        self.closed = False
+        _FakeSocket.made.append(self)
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
+
+    def connect(self, address: Any) -> None:
+        self.address = address
+        if _FakeSocket.connect_hook is not None:
+            _FakeSocket.connect_hook(self)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture
+def fake_socket(monkeypatch: pytest.MonkeyPatch) -> type[_FakeSocket]:
+    _FakeSocket.made = []
+    _FakeSocket.connect_hook = None
+    monkeypatch.setattr(net_tls.socket, "socket", _FakeSocket)
+    return _FakeSocket
+
+
+def test_tls_connect_shares_one_deadline_across_all_addresses(
+    monkeypatch: pytest.MonkeyPatch, fake_socket: type[_FakeSocket]
+) -> None:
+    addresses = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", (f"192.0.2.{n}", 443)) for n in range(1, 9)
+    ]
+    monkeypatch.setattr(net_tls.socket, "getaddrinfo", lambda *a, **k: addresses)
+
+    def _slow_connect(sock: _FakeSocket) -> None:
+        assert sock.timeout is not None
+        time.sleep(sock.timeout)
+        raise TimeoutError("timed out")
+
+    fake_socket.connect_hook = _slow_connect
+    begin = time.monotonic()
+    with pytest.raises(TimeoutError):
+        net_tls._connect_before_deadline("host.example", 443, time.monotonic() + 0.3)
+    assert time.monotonic() - begin < 0.6
+    granted = [sock.timeout for sock in fake_socket.made if sock.timeout is not None]
+    assert len(granted) < len(addresses)
+    assert max(granted) <= 0.3
+    assert all(sock.closed for sock in fake_socket.made)
+
+
+def test_tls_connect_tries_the_next_address_after_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, fake_socket: type[_FakeSocket]
+) -> None:
+    addresses = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.1", 443)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.2", 443)),
+    ]
+    monkeypatch.setattr(net_tls.socket, "getaddrinfo", lambda *a, **k: addresses)
+
+    def _connect(sock: _FakeSocket) -> None:
+        if sock.address[0] == "192.0.2.1":
+            raise ConnectionRefusedError
+
+    fake_socket.connect_hook = _connect
+    result = net_tls._connect_before_deadline("host.example", 443, time.monotonic() + 5)
+    first, second = fake_socket.made
+    assert result is second
+    assert first.closed
+    assert not second.closed
+
+
+def test_tls_connect_tries_the_next_address_when_a_family_is_not_supported(
+    monkeypatch: pytest.MonkeyPatch, fake_socket: type[_FakeSocket]
+) -> None:
+    addresses = [
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001:db8::1", 443, 0, 0)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.1", 443)),
+    ]
+    monkeypatch.setattr(net_tls.socket, "getaddrinfo", lambda *a, **k: addresses)
+
+    def _socket(family: int, *args: Any) -> _FakeSocket:
+        if family == socket.AF_INET6:
+            raise OSError("address family not supported")
+        return _FakeSocket(family, *args)
+
+    monkeypatch.setattr(net_tls.socket, "socket", _socket)
+    result = net_tls._connect_before_deadline("host.example", 443, time.monotonic() + 5)
+    assert isinstance(result, _FakeSocket)
+    assert result.address == ("192.0.2.1", 443)
+    assert fake_socket.made == [result]
+
+
+def test_tls_connect_keeps_the_scope_of_a_link_local_ipv6_address(
+    monkeypatch: pytest.MonkeyPatch, fake_socket: type[_FakeSocket]
+) -> None:
+    sockaddr = ("fe80::1", 443, 0, 3)
+    addresses = [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", sockaddr)]
+    monkeypatch.setattr(net_tls.socket, "getaddrinfo", lambda *a, **k: addresses)
+    sock = net_tls._connect_before_deadline("fe80::1%3", 443, time.monotonic() + 5)
+    assert isinstance(sock, _FakeSocket)
+    assert sock.family == socket.AF_INET6
+    assert sock.address == sockaddr
+
+
+# --- YAML aliases ----------------------------------------------------------
+
+
+def test_loader_refuses_nested_aliases() -> None:
+    with pytest.raises(yaml.YAMLError, match="aliases"):
+        load_yaml_no_alias(_ALIAS_BOMB)
+
+
+def test_loader_refuses_an_anchor_without_alias() -> None:
+    with pytest.raises(yaml.YAMLError):
+        load_yaml_no_alias("a: &x 1\n")
+
+
+def test_loader_reads_plain_yaml_like_safe_load() -> None:
+    text = "targets:\n  - name: t1\n    port: 443\n    tags: [a, b]\n"
+    assert load_yaml_no_alias(text) == yaml.safe_load(text)
+
+
+def test_targets_import_gives_the_parse_error_for_an_alias_file() -> None:
+    text = "targets:\n  - name: t1\n    product: p\n    host: h\n    x: &e {k: v}\n    y: *e\n"
+    with pytest.raises(ImportParseError, match="parse YAML"):
+        _parse_targets_yaml(text)
+
+
+def test_topology_import_gives_the_parse_error_for_an_alias_file() -> None:
+    with pytest.raises(BulkParseError, match="could not parse"):
+        parse_bulk_rows("edges: &e []\nmore: *e\n")
+
+
+# --- extras limits ---------------------------------------------------------
+
+
+def _body(extras: Any) -> dict[str, Any]:
+    return {"name": "t1", "product": "p", "host": "93.184.216.34", "extras": extras}
+
+
+def _nested(levels: int) -> dict[str, Any]:
+    value: Any = "leaf"
+    for _ in range(levels):
+        value = {"k": value}
+    return value
+
+
+def test_extras_with_too_many_values_is_refused() -> None:
+    too_many = {f"k{n}": n for n in range(EXTRAS_MAX_NODES)}
+    with pytest.raises(ValidationError, match="at most"):
+        TargetCreate(**_body(too_many))
+    with pytest.raises(ValidationError, match="at most"):
+        TargetUpdate(extras=too_many)
+
+
+def test_extras_that_repeat_one_object_count_every_copy() -> None:
+    shared = ["x"] * 100
+    repeated = {f"k{n}": shared for n in range(40)}
+    with pytest.raises(ValidationError, match="at most"):
+        TargetCreate(**_body(repeated))
+
+
+def test_a_very_wide_list_is_refused_without_reading_its_items() -> None:
+    wide = [0] * 200_000
+    tracemalloc.start()
+    try:
+        with pytest.raises(ValueError, match="at most"):
+            check_extras_size({"items": wide})
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 100_000
+
+
+def test_extras_at_the_limit_are_accepted() -> None:
+    at_limit = [0] * (EXTRAS_MAX_NODES - 1)
+    assert check_extras_size(at_limit) is at_limit
+    with pytest.raises(ValueError, match="at most"):
+        check_extras_size([*at_limit, 0])
+
+
+def test_extras_nested_too_deep_is_refused() -> None:
+    with pytest.raises(ValidationError, match="levels deep"):
+        TargetCreate(**_body(_nested(EXTRAS_MAX_DEPTH + 2)))
+    with pytest.raises(ValidationError, match="levels deep"):
+        TargetUpdate(extras=_nested(EXTRAS_MAX_DEPTH + 2))
+
+
+def test_normal_extras_are_accepted() -> None:
+    extras = {"site": "a", "ports": [1, 2, 3], "nested": _nested(3)}
+    assert TargetCreate(**_body(extras)).extras == extras
+    assert TargetCreate(**{**_body({}), "extras": {}}).extras == {}
+    assert TargetUpdate(extras=None).extras is None
+    assert TargetUpdate(extras=extras).extras == extras
+
+
+# --- login flows -----------------------------------------------------------
+
+
+async def test_pending_login_flows_never_exceed_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("meho_backplane.ui.auth.verifier_store.MAX_PENDING_FLOWS", 5)
+    store = PKCEVerifierStore()
+    for n in range(12):
+        await store.put(f"s{n}", code_verifier="v", return_to="/ui/", browser_binding="b")
+        assert store.size() <= 5
+    assert store.size() == 5
+    oldest = await store.pop("s0")
+    newest = await store.pop("s11")
+    assert oldest is None
+    assert newest is not None
+
+
+async def test_repeated_state_does_not_grow_the_store() -> None:
+    store = PKCEVerifierStore()
+    for _ in range(3):
+        await store.put("same", code_verifier="v", return_to="/ui/", browser_binding="b")
+    assert store.size() == 1
+
+
+def test_cap_constant_is_ten_thousand() -> None:
+    assert MAX_PENDING_FLOWS == 10_000
+
+
+def test_long_return_to_becomes_the_default_path() -> None:
+    long_path = "/ui/" + "a" * 2100
+    assert auth_routes._safe_return_to(long_path) == "/ui/"
+    ok_path = "/ui/" + "a" * 100
+    assert auth_routes._safe_return_to(ok_path) == ok_path

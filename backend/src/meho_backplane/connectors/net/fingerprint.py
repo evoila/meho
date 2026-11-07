@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
+from meho_backplane.connectors.adapters.http import _insecure_ssl_context
 from meho_backplane.connectors.net.allowlist import assert_probe_allowed
 from meho_backplane.connectors.net.fingerprint_rules import (
     Evidence,
@@ -311,11 +312,13 @@ async def _check_tls(operator: Operator, host: str, timeout: float) -> dict[str,
 def _make_client(timeout: float) -> httpx.AsyncClient:
     """A fresh client: no proxy from the environment, no redirects, no certificate check.
 
-    The certificate is not checked because appliances use self-signed
-    certificates, and this op only reads what the system says about itself.
+    The certificate is not checked (the shared no-verify context of the HTTP
+    adapter) because appliances use self-signed certificates, and this op
+    only reads what the system says about itself. Nothing is sent that
+    needs a trusted peer: no login and no secret.
     """
     return httpx.AsyncClient(
-        verify=False,  # NOSONAR(S4830) — identification only; the cert is not trusted
+        verify=_insecure_ssl_context(),
         follow_redirects=False,
         trust_env=False,
         timeout=httpx.Timeout(timeout),

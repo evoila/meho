@@ -242,6 +242,44 @@ Vault path as `{"username": ..., "password": ...}`.
    reason=...)`.
 3. On success: returns `ProbeResult(ok=True)`.
 
+### Topology flow (#4132)
+
+`discover_topology(target, *, operator=None)` puts the account on the
+topology map (code: `_topology.py`). The refresh service calls it on
+`meho topology refresh <target>` and on its scheduled run.
+
+1. It makes GET calls only: `GET /server`, `GET /subnet`, `GET /vswitch`,
+   then `GET /vswitch/{id}` once per vSwitch. The vSwitch list does not
+   name the member servers, so each vSwitch is read once more.
+2. The acting operator's login reads the target's secret. Without an
+   operator, the system operator is used. It has no person's login, so a
+   secret in Vault cannot be read: the scheduled run then skips the target,
+   as it does for Kubernetes (see `topology.md`, "Scheduler").
+3. What goes on the map:
+
+   | Node | Kind | Name | Properties |
+   |---|---|---|---|
+   | The Robot account | `target` | the target name | vendor, product |
+   | Each dedicated server | `host` | `server_name`; `server-<number>` when empty; `<name> #<number>` when two servers share a name | server number, main addresses (`server_ip`, `server_ipv6_net`, `ip`), product, data center, status, cancelled, the server's own subnets |
+   | Each subnet | `network` | `<ip>/<mask>` | gateway, routed-to server, failover, locked, IP version |
+   | Each vSwitch | `network` | `vswitch-<id>` | vSwitch id, vSwitch name, VLAN, cancelled |
+
+   | Edge | Kind |
+   |---|---|
+   | server, subnet, vSwitch → account | `belongs-to` |
+   | subnet → the server it is routed to | `routes-through` |
+   | member server → vSwitch (with the member `status`) | `routes-through` |
+   | subnet on a vSwitch → vSwitch | `routes-through` |
+
+4. The refresh stores each row with `source='auto'`, `discovered_by='hetzner'`
+   and the time it saw the row (`first_seen`, `last_seen`).
+5. A failed or odd read (a 401, a 5xx, a body that is not a list of
+   objects, a vSwitch without an id) raises, so the refresh rolls back and
+   the map keeps its last good state. Only Robot's documented "none found"
+   answers count as empty: 404 `SERVER_NOT_FOUND` on `GET /server` and 404
+   `NOT_FOUND` on `GET /subnet`. A 401 stops after one request, as in the
+   rest of the connector.
+
 ## Dependencies
 
 - `httpx>=0.27` (0.28.1 resolved) — `data=` for form-encoded POSTs

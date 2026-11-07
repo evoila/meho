@@ -115,10 +115,11 @@ spec:
 The schema refuses unknown keys, so none of these can be added by hand; the
 secret check and the CI check (below) catch secret-shaped values anywhere.
 
-- The 15 settings that carry secrets: `DATABASE_URL`,
+- The 16 settings that carry secrets: `DATABASE_URL`,
   `BROADCAST_REDIS_PASSWORD`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
   `KEYCLOAK_ADMIN_CLIENT_SECRET`, `UI_KEYCLOAK_CLIENT_SECRET`,
   `UI_SESSION_ENCRYPTION_KEY`, `APPROVAL_HANDOFF_ENCRYPTION_KEY`,
+  `PARAMS_HASH_KEY`,
   `CHECK_RUNNER_CLIENT_SECRET`, `VAULT_SCHEDULER_TOKEN`,
   `SATELLITE_WRITE_SIGNING_KEY`, `VCF_PAIF_OIDC_CLIENT_SECRET`,
   `MAIL_SMTP_PASSWORD`, `METRICS_AUTH_TOKEN`, `CORPUS_SERVICE_TOKEN`.
@@ -169,6 +170,13 @@ them at once.
   sentence with its line, never a server error.
 - A YAML syntax error, or an unknown tag, gives only its line: PyYAML's own
   message can quote the input, and nothing has been checked for secrets yet.
+- YAML anchors (`&name`) and aliases (`*name`), merge keys with an alias
+  included, are refused with their line: "The file is not valid YAML on
+  line N: anchors (`&`) and aliases (`*`) are not accepted; write each value
+  out." The file is refused before any node is built, so no later check runs.
+  The anchor name is never shown back.
+- The file is parsed and checked in a worker thread, not on the event loop,
+  so a large file does not hold up other requests.
 - `!!binary`, `!!pairs`, `!!omap` and `!!set` values are refused and never
   built: each would hide its contents from the secret check and reach JSON
   as readable text. Nothing else is checked, as with a secret.
@@ -191,13 +199,19 @@ settings page (#4048) or `meho settings import`.
 | Caller | Export | Preview / import | History |
 |---|---|---|---|
 | `tenant_admin` | own tenant | a file with only their own tenant | revisions that touched only their tenant |
-| `platform_admin` | every tenant, or `?tenant_id=` | any file | every revision |
+| `platform_admin`, a person | every tenant, or `?tenant_id=` | any file | every revision |
+| `platform_admin`, a machine login | own tenant | 403 | revisions that touched only its tenant |
 | any other role | 403 | 403 | 403 |
 
 - The preview has the same rules as the apply.
 - The import is a human-only verb: a machine principal (agent, service,
   runner) gets 403 `human_principal_required`. So a revision's `actor_sub`
   is always a real person.
+- The all-tenant export and the all-tenant history belong to a
+  `platform_admin` who is a person. A machine principal stays in its own
+  tenant, also when its token carries the platform-admin claim: the same
+  rule as `authorize_tenant_scope` (`auth/rbac.py`). Tests:
+  `tests/test_tenant_scope_person_only.py`.
 - Open, decided by 2026-10-24 (#3325 rule 1): whether an import from the
   command line writes at once, as the target routes do today, or waits for
   someone to approve it in the web console. Today it writes at once.
@@ -213,7 +227,9 @@ on it: stored data that would be refused on import (a JWT in a target's
 export with 409 `settings_export_refused` and a `mistakes` list naming each
 path, never the value. Move the secret into OpenBao and export again. Tenants are sorted by id, conventions by slug, targets
 by name, and keys come in a fixed order, so the same state always gives the
-same `spec`.
+same `spec`. The export writes each value out each time it appears
+and never writes a YAML anchor or alias, so an exported file always imports
+again.
 
 ### `POST /api/v1/settings/import?preview=true`
 

@@ -87,7 +87,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.broadcast import classify_op
 from meho_backplane.db.engine import get_raw_session
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.references import resolve_audit_references
 from meho_backplane.ui.roles import is_ui_tenant_admin
 from meho_backplane.ui.routes.broadcast.aggregate_gate import (
@@ -102,7 +102,9 @@ from meho_backplane.ui.templating import get_templates
 __all__ = ["AGGREGATE_ONLY_OP_CLASSES", "build_event_router"]
 
 #: Module-level :class:`fastapi.Depends` closures -- ruff B008 guard.
-_require_ui_session_dep = Depends(require_ui_session)
+#: The ``operator`` floor of the REST broadcast and feed reads: a ``read_only``
+#: session gets ``403 operator_required`` before the handler runs.
+_require_ui_operator_dep = Depends(require_ui_operator)
 _get_raw_session_dep = Depends(get_raw_session)
 
 
@@ -124,7 +126,7 @@ def build_event_router() -> APIRouter:
             max_length=128,
             description="Broadcast (Valkey-stream) event id, for display only.",
         ),
-        session_ctx: UISessionContext = _require_ui_session_dep,
+        session_ctx: UISessionContext = _require_ui_operator_dep,
         db_session: AsyncSession = _get_raw_session_dep,
     ) -> HTMLResponse:
         """``GET /ui/broadcast/event/{audit_id}[?event_id=...]``.

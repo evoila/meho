@@ -501,11 +501,19 @@ shapes:
   shape `GET /edges` returns). The body's `kind` is a slug-patterned
   string (`KIND_SLUG_PATTERN`, 2-63 chars) so a malformed slug is
   rejected with **422** before the service runs, while a
-  novel-but-valid kind passes through. **Role:** `tenant_admin`.
+  novel-but-valid kind passes through. **Role:** a person with
+  `tenant_admin`.
 - `DELETE /api/v1/topology/edges/{edge_id}` — returns `204 No
   Content` on success; **409 `auto_edge_deletion`** on an auto row
   with the verbatim remediation message; **404** on a missing /
-  cross-tenant id. **Role:** `tenant_admin`.
+  cross-tenant id. **Role:** a person with `tenant_admin`.
+
+The REST writes (also `POST /edges/bulk` and `DELETE /nodes/{node_id}`)
+are for people. A service login gets `403 human_principal_required`,
+also with `tenant_admin`. It writes the graph with `call_operation` on
+connector `topology-graph-1.x` (`topology.annotate`,
+`topology.unannotate`, `topology.delete_node`, `topology.bulk_import`).
+MEHO checks these against the approval rules.
 - `GET /api/v1/topology/edges` — query params
   `?kind=&source=&from=&to=&conflicts=&limit=&offset=`. Returns
   `200 [TopologyEdge]` ordered `(last_seen DESC NULLS LAST, id)`.

@@ -50,9 +50,11 @@ quoted string does not count. A value with no closing quote or bracket (a
 diagnostic cut by a length cap) is replaced up to the end of the text.
 
 Numbers, booleans and ``null`` under a secret name stay (``bind_secret_id:
-true`` is a flag, not a secret). A value that an earlier step already
-masked (``[REDACTED:...]``, a trace marker, ``***``) stays, so its label is
-kept.
+true`` is a flag, not a secret). With ``hide_numbers=True`` the walk also
+replaces a number under a secret name (a PIN or a password stored as a
+number), as the normal answer does; the flight-recorder trace scrub uses it.
+A value that an earlier step already masked (``[REDACTED:...]``, a trace
+marker, ``***``) stays, so its label is kept.
 
 Used by the dispatch error path (``operations/_errors.py`` and
 ``operations/_vendor_text.py``) and by the flight-recorder trace scrub
@@ -442,15 +444,16 @@ def _is_empty(field: QuotedSecretField) -> bool:
     return field.value == ""
 
 
-def scrub_secret_fields(node: Any) -> Any:
+def scrub_secret_fields(node: Any, *, hide_numbers: bool = False) -> Any:
     """Return a copy of *node* with every secret-named value replaced.
 
     A dict entry whose key is a secret name and whose value is a string, a
     dict or a list gets :data:`SECRET_FIELD_MARKER`; so does the ``value``
     of a name/value pair whose ``name`` is a secret name
     (:func:`~meho_backplane.broadcast.events.is_secret_name_value_pair`).
-    Every other string goes through :func:`scrub_secret_fields_in_text`.
-    Other values stay as they are.
+    With *hide_numbers* a number there is replaced too; booleans and
+    ``None`` stay. Every other string goes through
+    :func:`scrub_secret_fields_in_text`. Other values stay as they are.
     """
     if isinstance(node, str):
         return scrub_secret_fields_in_text(node)
@@ -460,17 +463,19 @@ def scrub_secret_fields(node: Any) -> Any:
             key: (
                 SECRET_FIELD_MARKER
                 if (_is_secret_name(str(key)) or (hide_pair_value and key == "value"))
-                and _can_hold_secret(value)
-                else scrub_secret_fields(value)
+                and _can_hold_secret(value, hide_numbers)
+                else scrub_secret_fields(value, hide_numbers=hide_numbers)
             )
             for key, value in node.items()
         }
     if isinstance(node, Sequence) and not isinstance(node, (bytes, bytearray)):
-        return [scrub_secret_fields(item) for item in node]
+        return [scrub_secret_fields(item, hide_numbers=hide_numbers) for item in node]
     return node
 
 
-def _can_hold_secret(value: Any) -> bool:
+def _can_hold_secret(value: Any, hide_numbers: bool) -> bool:
     if isinstance(value, str):
         return not _is_placeholder(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return hide_numbers
     return isinstance(value, (Mapping, Sequence)) and not isinstance(value, (bytes, bytearray))

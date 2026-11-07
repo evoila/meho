@@ -178,6 +178,7 @@ class _VaultForbiddenConnector(HttpConnector):
     """
 
     product = "vfb"
+    accepts_ingested_operations = True
     version = "9"
     impl_id = "vfb-rest"
     supported_version_range = ">=9,<10"

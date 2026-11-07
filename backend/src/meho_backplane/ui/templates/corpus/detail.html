@@ -56,14 +56,22 @@
        re-check the role server-side via ``resolve_operator_or_403`` (403 for
        a non-admin); this hide is the UX affordance, not the security gate.
        Disable is availability-destructive -> opens a confirm modal; Enable is
-       non-destructive -> a plain confirmed button. #}
+       non-destructive -> a plain confirmed button.
+       A refused Enable (403 global row without platform admin, 409 forbidden
+       move) answers with an alert fragment that replaces the readiness card:
+       the button targets ``#collection-readiness-card`` and carries
+       ``data-collection-action`` so ``corpus-collection-actions.js`` lets
+       htmx swap the error answer in. Success is 204 + ``HX-Redirect``. #}
     {% if is_tenant_admin %}
       <div class="flex items-center gap-2">
         {% if collection.status == "disabled" %}
           <button
             type="button"
             class="btn btn-outline btn-sm"
+            data-collection-action="enable"
             hx-post="/ui/corpus/collections/{{ collection.collection_key | urlencode }}/enable"
+            hx-target="#collection-readiness-card"
+            hx-swap="outerHTML"
             hx-disabled-elt="this"
             hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
             aria-label="Enable {{ collection.collection_key }}"
@@ -172,4 +180,12 @@
     </div>
   </div>
 </section>
+{% endblock %}
+
+{# Surface JS -- lets htmx show the alert MEHO answers when it refuses a
+   probe, enable or disable (htmx does not swap an error response on its
+   own). Plain JS, no Alpine component, so it can load at the end of the
+   body. #}
+{% block scripts %}
+  <script src="/ui/static/src/app/corpus-collection-actions.js" defer></script>
 {% endblock %}

@@ -125,6 +125,16 @@ this stage it exposes:
     the Vault path guard, the audit tenant, result links) now sees the
     current tenant, with no change in those modules. Tests:
     `tests/test_auth_current_tenant.py`.
+  - The tenant in a body or a query (`tenant_id`, `tenant_filter`) goes
+    through `authorize_tenant_scope` (`auth/rbac.py`), with the same
+    rules as the header. The current tenant → allowed. Another tenant in
+    the caller's own list → `403 tenant_select_with_header: …`: the
+    caller selects it with `Meho-Tenant`, so their own role there
+    applies. Any other tenant → allowed only for a platform admin who is
+    a person; everyone else, also a machine login whose token carries
+    the platform-admin claim, gets `403
+    cross_tenant_requires_platform_admin`. Tests:
+    `tests/test_auth_rbac.py`.
   - A site with one tenant answers the same with and without the list:
     `tests/integration/test_keycloak_one_tenant_unchanged.py` checks it
     against a real Keycloak (answers, audit rows, Vault login role). The

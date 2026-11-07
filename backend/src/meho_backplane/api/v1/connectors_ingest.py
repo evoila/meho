@@ -143,6 +143,10 @@ The service-layer exceptions map to HTTP status codes uniformly:
   mapped here onto the ``product_impl_id_mismatch`` envelope via the
   shared builder so the REST 422 body and the MCP -32602 ``data``
   member can't drift.
+* :class:`~meho_backplane.operations._ingested_owner.IngestedOperationsNotAccepted`
+  → 422 Unprocessable Entity. The name belongs to a connector class
+  that runs only its own hand-written operations, so MEHO ingests no
+  API file under it. Same shared-builder parity as above.
 * :class:`PermissionError` (raised by
   :meth:`IngestionPipelineService.authorize_scope` — eagerly at the
   route on both ingest branches (#2208), and again inside the
@@ -202,6 +206,10 @@ from meho_backplane.api.v1.operations import connector_not_ingested_404
 from meho_backplane.auth.fresh_sign_in import fresh_sign_in_challenge, has_fresh_sign_in
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.operations._ingested_owner import (
+    IngestedOperationsNotAccepted,
+    build_ingested_ops_not_accepted_detail,
+)
 from meho_backplane.operations._lookup import (
     connector_class_registered,
     connector_exists,
@@ -1170,6 +1178,11 @@ async def _run_ingest_with_http_mapping(
                 tuple(body.auth_secret_fields) if body.auth_secret_fields is not None else None
             ),
         )
+    except IngestedOperationsNotAccepted as exc:
+        raise HTTPException(
+            http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            build_ingested_ops_not_accepted_detail(exc),
+        ) from exc
     except Exception as exc:
         _raise_ingest_http_error(exc, catalog_entry=catalog_entry)
 

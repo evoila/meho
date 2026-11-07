@@ -292,6 +292,7 @@ def _client_with_role(
     operator_sub: str,
     role: TenantRole,
     capabilities: list[str] | None = None,
+    platform_admin: bool | None = None,
 ) -> tuple[TestClient, respx.MockRouter, str]:
     """Return a TestClient + respx mock + csrf token for the role-gated routes."""
     keypair, jwks = _make_keypair_and_jwks()
@@ -301,6 +302,7 @@ def _client_with_role(
         tenant_id=str(tenant_id),
         tenant_role=role.value,
         capabilities=capabilities,
+        platform_admin=platform_admin,
     )
     session_id = _seed_session_sync(
         tenant_id=tenant_id,
@@ -678,3 +680,160 @@ def test_empty_state_links_register_flow_for_admin() -> None:
     assert 'href="/ui/corpus/collections"' in body
     # The old dead-end copy is gone from the unprovisioned arm.
     assert "ask an administrator to register and entitle a collection" not in body
+
+
+# ---------------------------------------------------------------------------
+# A global collection: probe / enable / disable need a platform admin
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("verb", "start_status"),
+    [("disable", "ready"), ("enable", "disabled"), ("probe", "provisioning")],
+)
+def test_global_collection_change_403_for_tenant_admin(
+    _restore_registry: None, verb: str, start_status: str
+) -> None:
+    """A tenant admin gets a 403 alert on a global row; the row does not change."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware", tenant_id=None, status_value=start_status)
+    _register_stub(readiness=BackendReadiness(reachable=True, index_built=True, doc_count=9))
+
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.post(
+            f"/ui/corpus/collections/vmware/{verb}",
+            headers=_form_headers(csrf),
+        )
+    finally:
+        mock.stop()
+
+    assert response.status_code == 403, response.text
+    assert "global_collection_update_forbidden" in response.text
+    assert "Traceback" not in response.text
+    # The answer is the alert fragment the page shows: an HTML fragment whose
+    # root carries the readiness card's id, so the control's
+    # ``hx-target="#collection-readiness-card"`` + ``hx-swap="outerHTML"``
+    # replaces the card with the alert once ``corpus-collection-actions.js``
+    # turns the swap on for the error status.
+    assert response.headers["content-type"].startswith("text/html")
+    _assert_alert_fragment_for_readiness_card(response.text)
+    row = _load_collection(None, "vmware")
+    assert row is not None
+    assert row.status == start_status
+    assert row.doc_count is None
+
+
+def test_global_collection_change_allowed_for_platform_admin(_restore_registry: None) -> None:
+    """A platform admin can disable, enable and probe a global row in the console."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware", tenant_id=None, status_value="ready")
+    _register_stub(readiness=BackendReadiness(reachable=True, index_built=True, doc_count=9))
+
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
+    try:
+        disable = client.post("/ui/corpus/collections/vmware/disable", headers=_form_headers(csrf))
+        assert disable.status_code == 204, disable.text
+        assert _load_collection(None, "vmware").status == "disabled"
+
+        enable = client.post("/ui/corpus/collections/vmware/enable", headers=_form_headers(csrf))
+        assert enable.status_code == 204, enable.text
+        assert _load_collection(None, "vmware").status == "provisioning"
+
+        probe = client.post("/ui/corpus/collections/vmware/probe", headers=_form_headers(csrf))
+        assert probe.status_code == 200, probe.text
+    finally:
+        mock.stop()
+
+    row = _load_collection(None, "vmware")
+    assert row is not None
+    assert row.status == "ready"
+    assert row.doc_count == 9
+
+
+# ---------------------------------------------------------------------------
+# The refusal alert reaches the page: controls, target and the handler script
+# ---------------------------------------------------------------------------
+
+
+def _assert_alert_fragment_for_readiness_card(body: str) -> None:
+    """The body is one alert fragment whose root replaces the readiness card."""
+    fragment = body.strip()
+    assert fragment.startswith("<article"), fragment[:120]
+    root_tag = fragment[: fragment.index(">") + 1]
+    assert 'id="collection-readiness-card"' in root_tag, root_tag
+    assert 'role="alert"' in fragment
+
+
+def _action_control(body: str, verb: str) -> str:
+    """Return the opening tag of the control carrying ``data-collection-action=verb``."""
+    marker = f'data-collection-action="{verb}"'
+    assert marker in body, f"no control for {verb!r}"
+    start = body.rindex("<", 0, body.index(marker))
+    return body[start : body.index(">", start) + 1]
+
+
+def test_detail_page_shows_refusal_alerts_in_the_readiness_card(
+    _restore_registry: None,
+) -> None:
+    """Probe, enable and disable all target the readiness card and load the handler.
+
+    Each control carries ``data-collection-action`` and targets
+    ``#collection-readiness-card`` with ``outerHTML``; the page loads
+    ``corpus-collection-actions.js`` (deferred), and the app serves it. With
+    the alert fragment carrying the same id (asserted on the 403 answers
+    above), the alert replaces the card when MEHO refuses an action.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware", tenant_id=_TENANT_A, status_value="disabled")
+    _register_stub(readiness=BackendReadiness(reachable=True, index_built=True))
+
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        detail = client.get("/ui/corpus/collections/vmware")
+        modal = client.get("/ui/corpus/collections/vmware/disable")
+        script = client.get("/ui/static/src/app/corpus-collection-actions.js")
+    finally:
+        mock.stop()
+
+    assert detail.status_code == 200, detail.text
+    page = detail.text
+    assert '<script src="/ui/static/src/app/corpus-collection-actions.js" defer></script>' in page
+    assert page.index("/ui/static/src/vendor/htmx.min.js") < page.index(
+        "/ui/static/src/app/corpus-collection-actions.js"
+    )
+    assert 'id="collection-readiness-card"' in page
+
+    probe = _action_control(page, "probe")
+    assert 'hx-post="/ui/corpus/collections/vmware/probe"' in probe
+    assert 'hx-target="#collection-readiness-card"' in probe
+    assert 'hx-swap="outerHTML"' in probe
+
+    enable = _action_control(page, "enable")
+    assert 'hx-post="/ui/corpus/collections/vmware/enable"' in enable
+    assert 'hx-target="#collection-readiness-card"' in enable
+    assert 'hx-swap="outerHTML"' in enable
+
+    assert modal.status_code == 200, modal.text
+    assert 'id="corpus-disable-modal"' in modal.text
+    disable = _action_control(modal.text, "disable")
+    assert disable.startswith("<form")
+    assert 'hx-post="/ui/corpus/collections/vmware/disable"' in disable
+    assert 'hx-target="#collection-readiness-card"' in disable
+    assert 'hx-swap="outerHTML"' in disable
+
+    assert script.status_code == 200
+    assert 'addEventListener("htmx:beforeSwap"' in script.text

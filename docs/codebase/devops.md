@@ -333,6 +333,27 @@ port (Traefik `websecure` 8443), the fixed `tcp/8200` / `tcp/443` rules do
 not match, and the operator adds an `extraEgress` rule selecting the
 ingress Pods on that port.
 
+An OpenAI-compatible model endpoint (`agent.openai`, #5851) is reached
+the same way: there is no fixed rule for it. The operator adds one
+`extraEgress` rule, either an `ipBlock` with the endpoint's address range
+and port, or, for a model server in the cluster, a `namespaceSelector` +
+`podSelector` on the model server's Pods and the container port (for
+vLLM 8000), not the Service port. Both examples are in the
+`networkPolicy.extraEgress` comment in `values.yaml` and in
+`deploy/values-examples/README.md` ("OpenAI-compatible model endpoint").
+
+The `agent.openai` block itself renders `OPENAI_API_KEY` as a
+`secretKeyRef` (to `agent.openai.secretName`, or to the
+`<release>-agent-openai` Secret that `eso.agentOpenai.enabled` makes from
+`<vault.paths.kv>/agent-openai`), and `OPENAI_BASE_URL` /
+`OPENAI_DEFAULT_MODEL` as plain values only when they are set. The schema
+has no field for the key, so a plain key is refused. `agent.modelBackend`
+renders `AGENT_MODEL_BACKEND` (which backend every agent run uses) only
+when set; the schema accepts `anthropic`, `openai`, `bedrock` and
+`vcf-paif`. Both are off by default, and
+then the render is unchanged; `backend/tests/test_chart_openai_endpoint.py`
+and a step in `.github/workflows/chart.yml` check both.
+
 The broadcast clause above is an **egress** allowance on the backplane
 side. A Pod is ingress-isolated only when *some* NetworkPolicy selects it,
 and this policy selects the backplane Pods — not the broadcast store. The
@@ -517,7 +538,7 @@ is `meho.keycloakSettings` in `_core-keycloak.tpl` (#4591).
 | --- | --- | --- |
 | `corePostgres` | `DATABASE_URL` from `<release>-core-postgres-meho`, key `url` (`migrate` init container, helm test pod; the running backplane uses `<release>-core-postgres-meho-app`, #5699); NetworkPolicy egress by pod | `postgres.credentialsSecret` (or that name), `eso.enabled` |
 | `coreVault` | `VAULT_ADDR=http://<release>-vault:<coreVault.service.port>`, `VAULT_OIDC_ROLE=meho-mcp`, `VAULT_OIDC_MOUNT_PATH=jwt`, `VAULT_SCHEDULER_TOKEN_FILE` from `<release>-core-vault-scheduler` (an optional Secret volume, so the pod starts before the setup Job made it, and the file is read at every use); NetworkPolicy egress by pod | `vault.address`, `config.vaultAddr`; `config.credentialBackend` must be `vault`; `extraEnv` must not set `VAULT_KV_TENANT_SCOPE_PREFIX` empty |
-| any part | `APPROVAL_HANDOFF_ENCRYPTION_KEY` from `<release>-core-approval-handoff` while `approvalHandoff.enabled` is unset; the Ingress certificate `<release>-core-tls` while `ingress.tls.secretName` is empty | |
+| any part | `APPROVAL_HANDOFF_ENCRYPTION_KEY` from `<release>-core-approval-handoff` while `approvalHandoff.enabled` is unset; `PARAMS_HASH_KEY` from `<release>-core-params-hash` while `paramsHashKey.secretName` is empty; the Ingress certificate `<release>-core-tls` while `ingress.tls.secretName` is empty | |
 
 **Tenant separation.** The setup Job makes one login role, `meho-mcp`, for
 every tenant: it copies the token's `tenant_id` into the login, and the

@@ -249,7 +249,8 @@ The name rule is the shared `broadcast.events.is_secret_param_name`
 `licenseKey`, `psk`, `sharedKey`, `secret_key`, ...), the one the
 broadcast scrub and the approval echo use. The full word list is in
 [connectors-shared-api-file-secrets.md](connectors-shared-api-file-secrets.md#what-counts-as-a-secret-name).
-Numbers, booleans and `null` stay. A value an earlier step already masked
+Numbers, booleans and `null` stay, except in the trace scrub: there a number
+under a secret name is hidden too, as in the normal answer. A value an earlier step already masked
 (`[REDACTED:...]`, a trace marker, `***`) stays, so its label is kept.
 
 **Where it runs.**
@@ -259,7 +260,7 @@ Numbers, booleans and `null` stay. A value an earlier step already masked
 | Error free text (`operations/_errors.py::_sanitize_free_text`) | the text step, then Tier-1, then the length cap |
 | Every error result (`dispatcher._audit_error_and_return` → `operations/_vendor_text.py::redact_error_result`) | the walk, then Tier-1 (default policy, pinned), over every string and field of `error`, `extras` and `result`; this covers the fields copied straight from the vendor (`validation_errors` of an HTTP 422, `permission_headers` of an HTTP 403), any field a connector adds, and the vendor's answer in `result` of an error a handler returns or of a multi-step operation's error envelope. If redaction fails, the result keeps only `error_code` and a fixed text: `result` and the result handle are dropped and `delivery` is `unavailable`. The audit row and the stored approval result get the cleaned copy. |
 | Multi-step error envelope (`dispatcher._reduce_and_audit_composite_error` → `redact_error_payload`) | the walk, then Tier-1 (default policy, pinned), **before** the reducer stores the full envelope behind a result handle, so the stored rows, the handle's sample rows and the inline summary are all clean. The envelope went through the operator's own policy first, and a shadow-mode policy leaves every secret in place; the cleanup of the inline result runs later and cannot reach the stored copy. The audit row's `raw_payload` gets a fingerprint for every value this cleanup hid (`_protect_secret_values`). If this cleanup fails, the envelope is withheld like a reducer failure (`delivery` is `unavailable`), nothing is stored, and `raw_payload` is one fingerprint of the whole envelope. |
-| Trace bodies and header values (`flight_recorder/_content.py::scrub_content`) | the walk, then the trace's credential-shape policy, for every recorded request and answer body |
+| Trace bodies and header values (`flight_recorder/_content.py::scrub_content`) | the walk (numbers under a secret name hidden too), then the trace's credential-shape policy, for every recorded request and answer body. That policy has the same patterns, in the same order, as the default policy of the normal answer (PEM private keys, password hashes, Ceph keys and BIND key secrets included), so a trace hides at least what the answer hides; `test_flight_recorder_trace_scrub_matches_answer.py` keeps the two lists equal |
 | Params of a waiting approval request (`approval_queue.claim_resume` / `end_run_input`) | the name rule (`scrub_secret_named_values`) over `approval_request.params`, as soon as the run claim is won or the request ends without a run; the row keeps the secret fields only while MEHO still needs them to run the approved call. See [approvals.md](approvals.md#the-params-hash-on-requests-and-audit-rows). |
 
 **The normal result path.** A secret-named field in a normal answer is
@@ -485,7 +486,11 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
   redaction of the other fields stays). It works on every operation. An
   agent principal, or a person's hosted agent run (an RFC 8693 actor is
   bound), is refused before the policy gate: `status="denied"`, a
-  synchronous `POLICY_DECISION` audit row, and no value. The people's call
+  synchronous `POLICY_DECISION` audit row, and no value. A service
+  principal's call waits for a person's approval, also when the policy
+  gate would run it at once (`dispatcher._reveal_waits_for_approval` turns
+  the `auto-execute` verdict into `needs-approval`); a person's call keeps
+  the verdict of the gate. The people's call
   sites are the `/ui` Vault console (`ui/routes/vault/routes.py`,
   reveal-on-click) and CLI `meho secret read`
   (`cli/internal/cmd/secret/read.go`).

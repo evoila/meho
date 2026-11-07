@@ -1270,11 +1270,11 @@ async def test_list_targets_own_tenant_slug_is_allowed(
     assert [t["name"] for t in payload["targets"]] == ["rdc-vcenter"]
 
 
-@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+@pytest.mark.parametrize("client_with_operator", [(TenantRole.TENANT_ADMIN, True)], indirect=True)
 async def test_list_targets_unknown_tenant_is_invalid_params(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """An unknown `tenant` surfaces as -32602, not an empty list."""
+    """A platform admin naming an unknown `tenant` gets -32602, not an empty list."""
     client, _op = client_with_operator
     await _seed_tenant(OPERATOR_TENANT_ID, "op-tenant")
 

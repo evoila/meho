@@ -205,8 +205,12 @@ async def eval_endpoint(
     # which the runner interprets as "every shipped surface".
     surfaces = None if body.surface == "all" else [body.surface]
 
+    # The caller's ``sub`` drives the per-person rule on user memories, the
+    # same as ``POST /api/v1/retrieve``: the answer lists no user memory of
+    # another person.
     result = await eval_all(
         tenant_id=operator.tenant_id,
+        principal_sub=operator.sub,
         surfaces=surfaces,
     )
 

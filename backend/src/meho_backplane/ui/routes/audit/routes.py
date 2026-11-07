@@ -119,6 +119,7 @@ from meho_backplane.ui.auth.middleware import (
     require_ui_operator,
     require_ui_session,
 )
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.references import resolve_audit_references
 from meho_backplane.ui.roles import is_ui_tenant_admin
@@ -713,7 +714,7 @@ async def _build_results_context(
     except InvalidCursorError:
         # A tampered / expired cursor is "start over": re-run from page 1
         # with no cursor rather than surfacing a 400/500 to the operator.
-        log.info("ui_audit_invalid_cursor_reset", session_id=str(session.session_id))
+        log.info("ui_audit_invalid_cursor_reset", session_ref=session_ref(session.session_id))
         filters = _build_filters(
             target=target,
             principal=principal,

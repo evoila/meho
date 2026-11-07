@@ -218,7 +218,7 @@ async def test_expiry_applies_to_all_source_retrieve_without_eligibility(
     async with get_sessionmaker()() as session:
         await session.execute(text("SET TIME ZONE 'Asia/Kolkata'"))
         assert (await session.execute(text("SHOW TimeZone"))).scalar_one() == "Asia/Kolkata"
-        hits = await retrieve(TENANT, QUERY, limit=50, session=session)
+        hits = await retrieve(TENANT, QUERY, limit=50, session=session, all_principals=True)
     assert _slugs(hits) == expected
 
 

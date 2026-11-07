@@ -3,7 +3,11 @@
 
 package approvals
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/evoila/meho/cli/internal/output"
+)
 
 // principalLabel renders a principal for a single-line CLI field:
 // "<name> (<sub>)" when the backplane resolved a display name, else the
@@ -12,9 +16,9 @@ import "fmt"
 // fails open to it when no name was recorded (name nil / empty).
 func principalLabel(sub string, name *string) string {
 	if name != nil && *name != "" {
-		return fmt.Sprintf("%s (%s)", *name, sub)
+		return output.SafeText(fmt.Sprintf("%s (%s)", *name, sub))
 	}
-	return sub
+	return output.SafeText(sub)
 }
 
 // principalScanLabel renders a principal for a width-constrained table
@@ -25,7 +29,7 @@ func principalLabel(sub string, name *string) string {
 // (#3300) -- the same name-primary posture the audit list already takes.
 func principalScanLabel(sub string, name *string) string {
 	if name != nil && *name != "" {
-		return *name
+		return output.SafeText(*name)
 	}
-	return sub
+	return output.SafeText(sub)
 }

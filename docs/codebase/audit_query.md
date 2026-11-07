@@ -25,10 +25,14 @@ class it knows. Nothing is guessed from `method` / `path`.
 |---|---|
 | `operation_execution` | Dispatch rows that ran (`ok` or `error`), the row of a multi-step operation that stopped part-way because a step waits for approval (`awaiting_approval`) or was denied (`denied`, #4275), runbook abort, gateway command mint / result, satellite effect rows, topology / ingest / add-on writes, sweepers and reapers. |
 | `policy_decision` | Dispatch rows a gate refused (`denied`, rate limit, unqualified target version), a call of an ingested licence read that MEHO keeps off (`denied`, `payload["error"]["error_code"] = license_read_off`, #5791), the `approval.request` park row, and the `denied` row of a step inside a multi-step operation. |
-| `config_change` | The `meho_connector_edit_op` row (`method = SERVICE`): an operator turned one operation on or off, or changed or removed its risk level, approval rule, description or guidance (#5791). `payload["op_id"]` names the edited operation, so a search by op id finds the edit. The operation did not run, so a filter on `operation_execution` does not return it. The other connector review rows (enable, disable, group edits) stay `operation_execution`. Edit rows written before migration `0137` keep `operation_execution`; no row is changed. |
+| `config_change` | Two settings rows (`method = SERVICE`). The `meho_connector_edit_op` row: an operator turned one operation on or off, or changed or removed its risk level, approval rule, description or guidance (#5791). The `meho_connector_tenant_setting` row: a tenant turned one built-in operation or a whole group on or off for itself, or set it back to the install default (#5864). `payload["op_id"]` names the edited operation (a group switch names `payload["group_key"]`), so a search by op id finds the edit. No operation ran, so a filter on `operation_execution` does not return these rows. The other connector review rows (enable, disable, group edits) stay `operation_execution`. Edit rows written before migration `0137` keep `operation_execution`; no row is changed. |
 | `approval_decision` | `approval.decision` rows (approve, reject, expire; an approve row's payload names the `approval_rule` that allowed it), the `approval.withdraw` row (the sender took its request back, #5717), and the standing-grant auto-approval row. |
 | `security_event` | Refresh-token replay, broken satellite effect chain, un-reported gateway mint alarm. |
 | `legacy_request` | Every row written before `0106` (server default; old rows are not reclassified), the REST and MCP request wrapper rows, and the `approval.result` read row. |
+
+A call of an ingested op on a connector class that does not accept
+ingested operations also writes a `policy_decision` row (`denied`, code
+`ingested_ops_not_accepted`).
 
 A refused call's row says why (#5773). `payload["error"]` holds the
 `error_code` the caller got, a `reason_code`, and the `reason` text. The

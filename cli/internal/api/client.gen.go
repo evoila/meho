@@ -4746,6 +4746,9 @@ type DashboardDetail struct {
 	Description        *string                         `json:"description"`
 	Id                 openapi_types.UUID              `json:"id"`
 	InvestigatorPrompt *string                         `json:"investigator_prompt"`
+	LastMailAt         *time.Time                      `json:"last_mail_at"`
+	LastMailReason     *string                         `json:"last_mail_reason"`
+	LastMailSent       *bool                           `json:"last_mail_sent"`
 	LastRollupState    *DashboardDetailLastRollupState `json:"last_rollup_state"`
 	MemberCount        int                             `json:"member_count"`
 	Members            []DashboardMemberView           `json:"members"`
@@ -4840,6 +4843,9 @@ type DashboardRead struct {
 	Description        *string                       `json:"description"`
 	Id                 openapi_types.UUID            `json:"id"`
 	InvestigatorPrompt *string                       `json:"investigator_prompt"`
+	LastMailAt         *time.Time                    `json:"last_mail_at"`
+	LastMailReason     *string                       `json:"last_mail_reason"`
+	LastMailSent       *bool                         `json:"last_mail_sent"`
 	LastRollupState    *DashboardReadLastRollupState `json:"last_rollup_state"`
 	MemberCount        int                           `json:"member_count"`
 	Name               string                        `json:"name"`

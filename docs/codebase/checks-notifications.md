@@ -419,6 +419,45 @@ Fire-and-forget in two senses:
   broken MTA cannot cost the tenant the noise-suppression policy write
   the finding mail is ordered after.
 
+## When alert mails fail: where to look
+
+A failed alert mail is not only a log line. Check these, in order:
+
+1. **`meho dashboard show <dashboard>`**. The `last_mail:` line gives the
+   time of the last mail attempt, and either `sent` or
+   `not sent (<reason>)`. The console page of the Dashboard shows the same
+   line (`Last alert mail`). No line means the Dashboard never tried to
+   send a mail.
+2. **The metric `checks_alert_mail_total{result=...}`** on `/metrics`. It
+   counts every attempt: `result="sent"`, or the reason of the failure.
+   Alert on a rising count of any other result.
+3. **The log line `checks_notify_failed`**, which carries the same reason
+   and the Dashboard id.
+
+The stored result is the last attempt only. A later success replaces a
+failure. The code is `checks/mail_result.py`; the columns are
+`check_dashboards.last_mail_at`, `last_mail_sent` and `last_mail_reason`.
+
+Reasons you can see:
+
+| Reason | What it means |
+|---|---|
+| `smtp_connect_error` | MEHO could not reach the mail server (refused, name not found, or timeout). A blocked mail port gives this. |
+| `smtp_auth_error` | The mail server refused the login. |
+| `smtp_auth_requires_tls` | A user name is set but the connection is not encrypted. |
+| `smtp_tls_error` | The mail server certificate was not accepted. |
+| `smtp_recipients_refused` | The mail server refused every recipient. |
+| `smtp_error` | Any other mail server error. |
+| `smtp_unconfigured` | The SMTP host or the sender address is not set. |
+| `not_in_recipient_allowlist` | The transport refused a recipient. |
+| `no_allowed_recipients` | Every recipient of the Dashboard is outside the allowlist, so nothing was sent. |
+| `unexpected_error` | An unexpected error in MEHO. See the log for the trace. |
+
+Only the Dashboard mail (including the "new problem" mail) is recorded.
+Mails that are skipped on purpose (no recipient, below the threshold, held
+back by the flap window) are not attempts. The finding mail is not recorded
+yet; its failure is still only a log line (`checks_finding_email_failed`).
+
 Delivery and the claim are independent: the memo advances whether or not
 the mail lands. That is deliberate — re-deriving "did anyone get told"
 from the memo would mean re-mailing every unchanged evaluation.

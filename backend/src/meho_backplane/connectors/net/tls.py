@@ -505,14 +505,22 @@ def _connect_before_deadline(host: str, port: int, deadline: float) -> socket.so
     addresses never takes longer than the deadline in total.
     """
     last_error: OSError = TimeoutError("tls connect timed out")
-    for *_head, sockaddr in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+    for family, socktype, proto, _name, sockaddr in socket.getaddrinfo(
+        host, port, type=socket.SOCK_STREAM
+    ):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("tls connect timed out")
+        sock = socket.socket(family, socktype, proto)
         try:
-            return socket.create_connection((str(sockaddr[0]), int(sockaddr[1])), timeout=remaining)
+            sock.settimeout(remaining)
+            # The full address keeps the flow info and scope id of an IPv6 address.
+            sock.connect(sockaddr)
         except OSError as exc:
+            sock.close()
             last_error = exc
+        else:
+            return sock
     raise last_error
 
 

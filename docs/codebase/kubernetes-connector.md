@@ -190,6 +190,12 @@ window:
   log into memory: at most one page plus the line being read.
   With `_preload_content=False` the SDK does not check the HTTP
   status, so `read_pod_log_window` raises `ApiException` itself.
+* The request sends `Accept: application/json`, the same header as
+  `read_namespaced_pod_log` (`WINDOW_HEADERS`). The API server checks
+  `Accept` against its JSON, YAML, protobuf and CBOR formats before it
+  sends the log. It answers `406 Not Acceptable` to `text/plain`. The
+  log body is plain text in both cases. A test checks that the window
+  read sends the same headers and query as the SDK call.
 * The API server passes `sinceTime` to the node in whole seconds.
   The handler reads the extra lines from the start of that second and
   throws them away as they arrive, however many there are. So paging

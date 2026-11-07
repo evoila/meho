@@ -145,8 +145,10 @@ Keycloak admin console (realm meho):
   password and an authenticator code:
        kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-console-admin" .Release.Name }} -o jsonpath='{.data.username}' | base64 -d
   (keys: username, password)
-  Copy the password to the clipboard the same way, with the key password, for example on macOS:
-       kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-console-admin" .Release.Name }} -o jsonpath='{.data.password}' | base64 -d | pbcopy
+  Copy the password to the clipboard (use the line for your desktop):
+       macOS:           kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-console-admin" .Release.Name }} -o jsonpath='{.data.password}' | base64 -d | pbcopy
+       Linux (X11):     kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-console-admin" .Release.Name }} -o jsonpath='{.data.password}' | base64 -d | xclip -selection clipboard
+       Linux (Wayland): kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-console-admin" .Release.Name }} -o jsonpath='{.data.password}' | base64 -d | wl-copy
   The console is https://{{ .Values.coreKeycloak.hostname }}/auth/admin/master/console/#/meho
 {{- if .Values.coreKeycloak.ingress.exposeAdmin }}
   (routed: coreKeycloak.ingress.exposeAdmin=true).

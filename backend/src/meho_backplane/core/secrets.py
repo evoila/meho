@@ -87,6 +87,7 @@ Kind = Literal[
     "ui-auth",
     "check-runner",
     "approval-handoff",
+    "params-hash",
     "broadcast-auth",
     "tls",
 ]
@@ -109,6 +110,7 @@ _KINDS: Mapping[str, _KindSpec] = {
     "ui-auth": _KindSpec(("session_encryption_key", "client_secret")),
     "check-runner": _KindSpec(("client_secret",)),
     "approval-handoff": _KindSpec(("approval_handoff_encryption_key",)),
+    "params-hash": _KindSpec(("params_hash_key",)),
     "broadcast-auth": _KindSpec(("requirepass",)),
     "tls": _KindSpec(("tls.crt", "tls.key", "ca.crt"), "kubernetes.io/tls", needs_host=True),
 }
@@ -201,6 +203,8 @@ def build_data(entry: MakeEntry) -> dict[str, str]:
             return {"session_encryption_key": _new_fernet_key(), "client_secret": new_password()}
         case "approval-handoff":
             return {"approval_handoff_encryption_key": _new_fernet_key()}
+        case "params-hash":
+            return {"params_hash_key": new_password()}
         case "broadcast-auth":
             return {"requirepass": new_password()}
         case "tls":

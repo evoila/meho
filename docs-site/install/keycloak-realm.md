@@ -24,7 +24,7 @@ the end, then return to the trail.
 
 | Object | Kind | Used by |
 |---|---|---|
-| `meho-backplane` | Confidential client | The backplane itself — the audience it validates tokens for. If your realm does not have it yet, create it first: a confidential client with ID `meho-backplane` and no login flows enabled — it exists as the resource-server identity whose client ID is the token audience (`keycloak.audience` in the chart values). |
+| `meho-backplane` | Confidential client | The backplane itself — the audience it validates tokens for. If your realm does not have it yet, create it first: a confidential client with ID `meho-backplane` and no login flows enabled — it exists as the resource-server identity whose client ID is the token audience (`config.keycloakAudience` in the chart values). |
 | `meho-cli` | **Public** client, device-code grant | `meho login` |
 | `meho-cli-approve` | **Public** client, authorization-code + PKCE on a loopback address only, with its own login flow | The fresh sign-in of `meho approvals approve`. Only its tokens can approve on the command line. |
 | `meho approval sign-in` | Login flow, bound to `meho-cli-approve` | Always asks for the password (and the one-time code, when the person has one) |
@@ -34,7 +34,7 @@ the end, then return to the trail.
 | 8 protocol mappers | On the login clients (`meho-cli-approve` without `meho-mcp-audience`) | Make issued tokens carry the claims the backplane validates |
 | 4 default client scopes | On the login clients | Including the `basic` scope that carries the mandatory `sub` claim |
 | `mcp:read`, `mcp:execute`, `mcp:admin` | Client scopes, optional on `meho-mcp` | The scopes MEHO's MCP clients ask for at login |
-| `offline_access` | Built-in client scope, optional on both public clients | The long login that renews itself |
+| `offline_access` | Built-in client scope, optional on `meho-cli` and `meho-mcp` | The long login that renews itself |
 | `MEHO-Readers`, `MEHO-Operators`, `MEHO-SA-Operators`, `MEHO-Admins`, `MEHO-Approvers` | Top-level groups with attributes | Give each person their tenant and their role |
 | `MEHO-Platform-Admins` | Top-level group with one attribute | Rights across all tenants, for the people who run MEHO |
 | A user in `MEHO-Admins` and `MEHO-Platform-Admins` | Realm user | The first admin: approves device-code logins and operates MEHO |
@@ -232,8 +232,9 @@ sign-in must still be recent: an `acr` value alone never approves.
 
 The operation `keycloak.authflow.ensure_approval_flow` adds the flow
 `meho approval sign-in` to the realm of a Keycloak target (its managed
-realm) and makes it the browser flow of `meho-cli-approve`. A second
-person must approve it.
+realm) and makes it the browser flow of `meho-cli-approve`. It waits
+for approval
+([who may approve](../guides/approvals-and-break-glass.md#who-may-approve)).
 
 ```bash
 meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_flow \
@@ -679,8 +680,9 @@ link starts a console login with `prompt=login` and `max_age=0`, so
 Keycloak asks for the password (and the code, or a passkey) also in a
 browser it remembers. The person then opens the request again and
 approves. Deny needs no new sign-in. For this check the `meho-web` client
-needs the `basic` and `acr` default scopes: the realm file and
-`meho admin keycloak bootstrap-clients` set them.
+needs the `basic` and `acr` default scopes. The realm file of the
+built-in Keycloak sets them. `meho admin keycloak bootstrap-clients` does
+not touch `meho-web`: on your own Keycloak, assign them by hand.
 
 **Why the console has no long login.** The console does not ask for
 `offline_access`:
@@ -851,7 +853,8 @@ realm. The built-in Keycloak of the chart started with a newer version, so
 its realm has the step. Without the step, a passkey replaces the password,
 but a person with a one-time code still types the code.
 
-MEHO adds the step with one operation. A second person must approve it,
+MEHO adds the step with one operation. It waits for approval
+([who may approve](../guides/approvals-and-break-glass.md#who-may-approve)),
 because it changes how every person of the realm logs in:
 
 ```bash
@@ -983,7 +986,7 @@ usually appear:
 | Symptom | Cause | Fix |
 |---|---|---|
 | `unauthorized_client` at login start | The client is confidential, or the device grant is off | Step 2 — public client, device grant **On**. |
-| `meho login` fails at once with `invalid_request` and "Missing parameter: code_challenge_method" | The login client (`meho-cli`) requires a PKCE method, and the CLI is older than 0.44.0. Those versions send no PKCE at the device login, and Keycloak checks PKCE there too. A realm made with MEHO 0.40.0, 0.41.0 or 0.42.0 (the built-in Keycloak, or `meho admin keycloak bootstrap-clients`) set `S256` on it. | Update the CLI to 0.44.0 or later. Or clear the PKCE method on the login client: in the admin console (Advanced → Proof Key for Code Exchange, set it to empty), or with the operation `keycloak.client.update` and the representation `{"attributes": {"pkce.code.challenge.method": ""}}` (an empty value removes the attribute). Step 2. |
+| `meho login` fails at once with `invalid_request` and "Missing parameter: code_challenge_method" | The login client (`meho-cli`) requires a PKCE method, and the CLI is older than 0.44.0. Those versions send no PKCE at the device login, and Keycloak checks PKCE there too. A realm made with MEHO 0.40.0, 0.41.0, 0.42.0 or 0.43.0 (the built-in Keycloak, or `meho admin keycloak bootstrap-clients`) set `S256` on it. | Update the CLI to 0.44.0 or later. Or clear the PKCE method on the login client: in the admin console (Advanced → Proof Key for Code Exchange, set it to empty), or with the operation `keycloak.client.update` and the representation `{"attributes": {"pkce.code.challenge.method": ""}}` (an empty value removes the attribute). Step 2. |
 | Token issued, every call 401s with `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` | Missing protocol mappers, or the person is in none of the five groups | Step 3 — add all the mappers; Step 5 — put the person in one group. Then log out and back in. |
 | Everyone gets the same role, whatever their group | A fixed-value (Hardcoded claim) `tenant_role` mapper is still on the client | Delete it, and add the User Attribute mapper of Step 3 in the admin console. On an existing realm, do not run `meho admin keycloak bootstrap-clients` for this: it rewrites all the mappers and clients. |
 | Token issued, every call 401s with `invalid_token` or `missing_sub`; the decoded token has no `sub` | The `basic` scope is not a default scope on the client | Step 4 — assign it, re-login (existing tokens stay broken). |
@@ -994,8 +997,8 @@ usually appear:
 | MCP login fails with `invalid_scope` ("Invalid scopes: …") and the Keycloak login page never appears | The client asked for a scope that `meho-mcp` does not offer: `offline_access`, `mcp:read`, `mcp:execute` or `mcp:admin` | Create the scope if it is missing (for example with `keycloak.client_scope.create`), then assign it as an **optional** scope on `meho-mcp` (see the MCP client table above). On a new realm, `meho admin keycloak bootstrap-clients` does both. |
 | `x509: certificate signed by unknown authority` | Workstation OS trust store missing your CA | Step 1 / [TLS and ingress](tls-ingress.md#your-workstation-os-trust-store). |
 
-A fuller, client-by-client troubleshooting page ships with the
-[Connect clients](../clients/index.md) section. Until then, the
+The client-by-client troubleshooting page is
+[Connect clients: troubleshooting](../clients/troubleshooting.md). The
 in-repo
 [auth onramp recipe](https://github.com/evoila/meho/blob/main/deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp)
 carries the deepest version of this matrix, including advanced

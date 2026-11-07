@@ -115,11 +115,12 @@ spec:
 The schema refuses unknown keys, so none of these can be added by hand; the
 secret check and the CI check (below) catch secret-shaped values anywhere.
 
-- The 16 settings that carry secrets: `DATABASE_URL`,
+- The 17 settings that carry secrets: `DATABASE_URL`,
   `BROADCAST_REDIS_PASSWORD`, `RESULT_CACHE_REDIS_PASSWORD`,
   `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
   `KEYCLOAK_ADMIN_CLIENT_SECRET`, `UI_KEYCLOAK_CLIENT_SECRET`,
   `UI_SESSION_ENCRYPTION_KEY`, `APPROVAL_HANDOFF_ENCRYPTION_KEY`,
+  `PARAMS_HASH_KEY`,
   `CHECK_RUNNER_CLIENT_SECRET`, `VAULT_SCHEDULER_TOKEN`,
   `SATELLITE_WRITE_SIGNING_KEY`, `VCF_PAIF_OIDC_CLIENT_SECRET`,
   `MAIL_SMTP_PASSWORD`, `METRICS_AUTH_TOKEN`, `CORPUS_SERVICE_TOKEN`.

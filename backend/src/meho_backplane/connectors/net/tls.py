@@ -511,13 +511,16 @@ def _connect_before_deadline(host: str, port: int, deadline: float) -> socket.so
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("tls connect timed out")
-        sock = socket.socket(family, socktype, proto)
+        sock: socket.socket | None = None
         try:
+            # A family this host cannot use fails here; the next address is tried.
+            sock = socket.socket(family, socktype, proto)
             sock.settimeout(remaining)
             # The full address keeps the flow info and scope id of an IPv6 address.
             sock.connect(sockaddr)
         except OSError as exc:
-            sock.close()
+            if sock is not None:
+                sock.close()
             last_error = exc
         else:
             return sock

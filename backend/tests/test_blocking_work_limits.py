@@ -159,6 +159,27 @@ def test_tls_connect_tries_the_next_address_after_a_refusal(
     assert not second.closed
 
 
+def test_tls_connect_tries_the_next_address_when_a_family_is_not_supported(
+    monkeypatch: pytest.MonkeyPatch, fake_socket: type[_FakeSocket]
+) -> None:
+    addresses = [
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001:db8::1", 443, 0, 0)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.1", 443)),
+    ]
+    monkeypatch.setattr(net_tls.socket, "getaddrinfo", lambda *a, **k: addresses)
+
+    def _socket(family: int, *args: Any) -> _FakeSocket:
+        if family == socket.AF_INET6:
+            raise OSError("address family not supported")
+        return _FakeSocket(family, *args)
+
+    monkeypatch.setattr(net_tls.socket, "socket", _socket)
+    result = net_tls._connect_before_deadline("host.example", 443, time.monotonic() + 5)
+    assert isinstance(result, _FakeSocket)
+    assert result.address == ("192.0.2.1", 443)
+    assert fake_socket.made == [result]
+
+
 def test_tls_connect_keeps_the_scope_of_a_link_local_ipv6_address(
     monkeypatch: pytest.MonkeyPatch, fake_socket: type[_FakeSocket]
 ) -> None:

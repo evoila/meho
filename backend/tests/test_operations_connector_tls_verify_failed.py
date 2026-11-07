@@ -656,7 +656,8 @@ async def test_dispatch_timeout_of_a_change_is_uncertain_only_after_sending(
     )
 
     result = await dispatch(
-        operator=_make_operator(),
+        # A web session runs a caution operation at once; a bare token call would wait for approval.
+        operator=_make_operator().model_copy(update={"web_session": True}),
         connector_id=f"{impl_id}-9",
         op_id="GET:/version",
         target=_FakeTarget(name="vrli-lab", host="vrli.lab.internal"),

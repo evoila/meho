@@ -61,9 +61,15 @@
     the modal opens (bell, history row, or a deep link), so the extra confirm
     cannot be skipped by the link the approver used.
 
+  Hidden values (``request.reveal_secret``)
+    When the requester asked for the hidden values of the answer, the detail
+    list says so (``data-approval-reveal-secret``), on every status, and the
+    consequence banner of a pending row says that approving returns them to
+    the requester (``data-approval-gate-reveal-secret``).
+
   Context:
     request               -- dict: id / op_id / connector_id / principal_sub /
-                             principal_act / proposed_effect / status /
+                             principal_act / proposed_effect / reveal_secret / status /
                              reviewed_by / work_ref / created_at /
                              decided_at / expires_at / chain (#3596:
                              {work_ref, step, total} or None)
@@ -345,6 +351,12 @@
         <dt class="shrink-0 text-base-content/55">Operation</dt>
         <dd class="font-mono [overflow-wrap:anywhere] text-right">{{ request.op_id }}</dd>
       </div>
+      {% if request.reveal_secret %}
+        <div class="flex items-baseline justify-between gap-4" data-approval-reveal-secret>
+          <dt class="shrink-0 text-base-content/55">Hidden values</dt>
+          <dd class="text-right font-semibold text-error">Returned to the requester</dd>
+        </div>
+      {% endif %}
       {#- Resolved subject of a path-variable op (#3353): the concrete entity
           (VM name + moid) recovered from the caller's identity params, so the
           reviewer reads ``web-01 (vm-1042)`` instead of the unresolved
@@ -672,6 +684,12 @@
           immediately &mdash; there is no un-approve. Denying is terminal; the
           requester must re-file.
         </p>
+        {% if request.reveal_secret %}
+          <p class="mt-1 text-xs font-semibold [overflow-wrap:anywhere]" data-approval-gate-reveal-secret>
+            Approving returns the hidden values to the requester: the answer
+            shows the secret values in clear text.
+          </p>
+        {% endif %}
         {% if out_of_order %}
           <p class="mt-1 text-xs font-semibold [overflow-wrap:anywhere]" data-approval-out-of-order>
             This is step {{ request.chain.step }} of {{ request.chain.total }}.

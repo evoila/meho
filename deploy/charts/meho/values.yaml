@@ -1083,6 +1083,39 @@ agent:
   # 21000 the request is sent as a stream. The default 4096 keeps requests
   # as they were before this setting existed.
   maxOutputTokens: 4096
+  # -- Which model backend every agent run uses (`AGENT_MODEL_BACKEND`):
+  # `anthropic`, `openai` (the endpoint in `agent.openai` below), `bedrock`
+  # or `vcf-paif`. Empty: the chart does not set it, and the backplane uses
+  # its own default (`anthropic`). Plain value, not a secret.
+  modelBackend: ""
+  # An OpenAI-compatible model endpoint (#5851): a server that accepts the
+  # same requests as OpenAI's API, for example vLLM, Ollama or OpenAI itself.
+  # Separate from `agent.enabled`: you can turn on this block, the Anthropic
+  # key above, or both. Off by default; then the chart sets nothing here.
+  # The network policy blocks the endpoint until you open it in
+  # `networkPolicy.extraEgress` (examples there).
+  openai:
+    # -- Whether to set `OPENAI_API_KEY`, `OPENAI_BASE_URL` and
+    # `OPENAI_DEFAULT_MODEL` in the backplane Deployment. Turn on and give
+    # the key's Secret: either `secretName` below or
+    # `eso.agentOpenai.enabled: true`.
+    enabled: false
+    # -- Base URL of the endpoint (`OPENAI_BASE_URL`), for example
+    # `https://model.example.internal/v1`. Empty: the chart does not set it,
+    # and the backplane uses OpenAI's own service.
+    baseUrl: ""
+    # -- Model id the endpoint serves (`OPENAI_DEFAULT_MODEL`), for example
+    # `openai:meta-llama/Llama-3.1-8B-Instruct`. Empty: the chart does not
+    # set it, and the backplane uses its own default.
+    defaultModel: ""
+    # -- Name of the Kubernetes Secret that holds the endpoint's API key
+    # (`OPENAI_API_KEY`). The key comes only from a Secret, never from a
+    # plain value. Leave empty when `eso.agentOpenai.enabled: true`: the
+    # chart then uses the `<release>-agent-openai` Secret it makes.
+    # A model server without a key still needs some value in the Secret.
+    secretName: ""
+    # -- Key within the Secret whose value is the API key.
+    secretKey: api_key
 
 # Keycloak Admin API credentials (G11.2 #803). The
 # `KeycloakAdminClient` (`meho_backplane.auth.keycloak_admin`) is what
@@ -1218,6 +1251,23 @@ approvalHandoff:
   # -- Your own Secret with the key. Empty = `<release>-core-approval-handoff`.
   secretName: ""
   secretKey: approval_handoff_encryption_key
+
+# The key of the params hashes and value fingerprints that audit rows and
+# approval requests carry. It is wired only by secretKeyRef, as
+# PARAMS_HASH_KEY. It is a secret of its own, so a new database password
+# keeps every hash and fingerprint as it is.
+#
+# With a built-in core part on, the install makes the key in
+# `<release>-core-params-hash` and keeps it on every upgrade. Without one,
+# store at least 32 random characters in a Kubernetes Secret and set
+# `secretName`. With no Secret, MEHO makes the key from DATABASE_URL, and a
+# new database password changes it. Steps and key rotation:
+# docs/codebase/approvals.md.
+paramsHashKey:
+  # -- Your own Secret with the key. Empty = `<release>-core-params-hash`
+  # with a built-in core part, no key without one.
+  secretName: ""
+  secretKey: params_hash_key
 
 # Built-in core (#3974): PostgreSQL, Keycloak and OpenBao, each on by
 # default, and wired to the backplane by the chart (#4591, #4047). An install
@@ -1764,6 +1814,19 @@ eso:
     # Must match `agent.secretKey` (default `api_key`) so the
     # Deployment's `secretKeyRef.key` resolves.
     remoteProperty: api_key
+  agentOpenai:
+    # -- Render an ExternalSecret for the API key of the OpenAI-compatible
+    # model endpoint (#5851). When `true`, the chart makes a
+    # `<release>-agent-openai` Secret keyed `agent.openai.secretKey` (default
+    # `api_key`) from `<eso.agentOpenai.remoteKey | default
+    # "<vault.paths.kv>/agent-openai">`. Also set `agent.openai.enabled:
+    # true` and leave `agent.openai.secretName` empty. Needs
+    # `eso.secretStore.name`; independent of `eso.enabled`.
+    enabled: false
+    # -- Vault KV path holding the API key. Empty: `<vault.paths.kv>/agent-openai`.
+    remoteKey: ""
+    # -- Property within the remote KV entry that holds the API key.
+    remoteProperty: api_key
   keycloakAdmin:
     # -- Render an ExternalSecret for the Keycloak admin client secret
     # (`KEYCLOAK_ADMIN_CLIENT_SECRET`). When `true`, the chart
@@ -1843,6 +1906,25 @@ networkPolicy:
   #               app.kubernetes.io/name: traefik
   #       ports:
   #         - port: 8443
+  #           protocol: TCP
+  # For the OpenAI-compatible model endpoint (`agent.openai`), open the
+  # endpoint's address range and port, or, for a model server in the same
+  # cluster, its Pods by namespace and label:
+  #     - to:
+  #         - ipBlock:
+  #             cidr: 198.51.100.0/28
+  #       ports:
+  #         - port: 443
+  #           protocol: TCP
+  #     - to:
+  #         - namespaceSelector:
+  #             matchLabels:
+  #               kubernetes.io/metadata.name: model-server
+  #           podSelector:
+  #             matchLabels:
+  #               app.kubernetes.io/name: vllm
+  #       ports:
+  #         - port: 8000
   #           protocol: TCP
   extraEgress: []
 

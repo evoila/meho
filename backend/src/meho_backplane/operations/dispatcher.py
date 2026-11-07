@@ -353,6 +353,12 @@ from meho_backplane.operations._handler_resolve import (
     reset_connector_instance_cache,
     reset_handler_cache,
 )
+from meho_backplane.operations._ingested_owner import (
+    INGESTED_OPS_NOT_ACCEPTED,
+    accepts_ingested_operations,
+    ingested_ops_refusal_message,
+    result_ingested_ops_not_accepted,
+)
 from meho_backplane.operations._license_refusal import (
     LICENSE_READ_OFF,
     audit_license_read_off,
@@ -650,6 +656,10 @@ async def _resolve_connector_instance(
             return None, label, exc_message
         # cls is guaranteed non-None here (label is None ⇔ cls is set).
         assert cls is not None
+        # An ingested op runs none of the checks of a hand-written class,
+        # so it runs only on a class that accepts ingested operations.
+        if not accepts_ingested_operations(cls):
+            return None, INGESTED_OPS_NOT_ACCEPTED, ingested_ops_refusal_message(cls)
         return get_or_create_connector_instance(cls), None, None
     if descriptor.source_kind in ("typed", "composite") and target is not None:
         cls, label, exc_message = resolve_connector_or_label(target)
@@ -670,6 +680,27 @@ async def _resolve_connector_instance(
     ):
         return None, "target_required", None
     return None, None, None
+
+
+async def _ingested_ops_refusal(
+    descriptor: EndpointDescriptor,
+    target: Any,
+    op_id: str,
+    duration_ms: float,
+) -> OperationResult | None:
+    """The ``ingested_ops_not_accepted`` result, or ``None``.
+
+    Refuses an ingested op whose target resolves to a class that does not
+    accept ingested operations (:mod:`~meho_backplane.operations._ingested_owner`).
+    Runs before a call waits for approval, so no approval is spent on a call
+    that cannot run. Any other resolution outcome is left to Step 5.
+    """
+    if descriptor.source_kind != "ingested" or target is None:
+        return None
+    _instance, label, message = await _resolve_connector_instance(descriptor, target)
+    if label != INGESTED_OPS_NOT_ACCEPTED:
+        return None
+    return result_ingested_ops_not_accepted(op_id, message or "", duration_ms)
 
 
 def _maybe_bind_method(
@@ -1063,6 +1094,17 @@ def _agent_acts(operator: Operator) -> bool:
     return operator.principal_kind is PrincipalKind.AGENT or resolve_actor_sub() is not None
 
 
+def _reveal_waits_for_approval(operator: Operator, reveal_secret: bool) -> bool:
+    """True when a ``reveal_secret: true`` call must wait for a person's approval.
+
+    A person gets the hidden values of an answer at once when the policy
+    gate lets the call run. A machine login (a service principal) gets them
+    only after a person approved the call, also on a read that would run at
+    once. An agent is refused before this check (:func:`_refuse_agent_reveal`).
+    """
+    return reveal_secret and operator.principal_kind is not PrincipalKind.USER
+
+
 def _requester_runs_approved_call(operator: Operator) -> bool:
     """True when the requester of an approved call runs it, not a reviewer.
 
@@ -1086,7 +1128,9 @@ async def _refuse_agent_reveal(
     """Refuse ``reveal_secret: true`` for an agent, with a synchronous audit row.
 
     Only a person or a service principal may get the hidden values of an
-    answer back. The agent gets the names without the values by calling
+    answer back; a service principal's call waits for a person's approval
+    first (:func:`_reveal_waits_for_approval`). The agent gets the names
+    without the values by calling
     again without the flag, or uses an operation that moves the secret
     without showing it.
     """
@@ -3311,6 +3355,8 @@ async def _handle_needs_approval(
         params=params,
         duration_ms=duration_ms,
     )
+    if refusal is None:
+        refusal = await _ingested_ops_refusal(descriptor, target, op_id, duration_ms)
     if refusal is not None:
         return await _audit_denied_and_return(
             refusal,
@@ -3558,7 +3604,8 @@ async def dispatch(
     # ``credential_read`` op, or an op of ``_secret_values._VALUE_HIDING_OPS``)
     # hides every value. Getting the values back needs this explicit opt-in
     # by a person or a service principal (stamped on the audit row; an agent
-    # is refused). Stripping keeps the flag off the op's
+    # is refused, and a service principal's call waits for a person's
+    # approval). Stripping keeps the flag off the op's
     # ``additionalProperties: false`` schema, out of the handler's params,
     # and out of ``params_hash`` -- so a hidden answer and its reveal share
     # one hash (the reveal choice is recorded separately on the audit row,
@@ -3793,6 +3840,11 @@ async def dispatch(
             ):
                 _log.info("composite_child_covered_by_approved_run", op_id=op_id)
                 verdict = PermissionVerdict.AUTO_EXECUTE
+            if verdict is PermissionVerdict.AUTO_EXECUTE and _reveal_waits_for_approval(
+                operator, reveal_secret
+            ):
+                _log.info("reveal_secret_waits_for_approval", op_id=op_id)
+                verdict = PermissionVerdict.NEEDS_APPROVAL
             policy_decision_var.set(verdict.value)
             if verdict == PermissionVerdict.DENY:
                 duration_ms = _elapsed_ms(started)
@@ -3927,18 +3979,26 @@ async def dispatch(
         connector_instance: Connector | None
         resolution_error: ResolutionLabel | None
         exception_message: str | None
-        if pre_resolved_connector_class is not None:
-            connector_instance, resolution_error, exception_message = (
-                get_or_create_connector_instance(pre_resolved_connector_class),
-                None,
-                None,
-            )
-        else:
+        if pre_resolved_connector_class is None:
             (
                 connector_instance,
                 resolution_error,
                 exception_message,
             ) = await _resolve_connector_instance(descriptor, target)
+        elif descriptor.source_kind == "ingested" and not accepts_ingested_operations(
+            pre_resolved_connector_class
+        ):
+            connector_instance, resolution_error, exception_message = (
+                None,
+                INGESTED_OPS_NOT_ACCEPTED,
+                ingested_ops_refusal_message(pre_resolved_connector_class),
+            )
+        else:
+            connector_instance, resolution_error, exception_message = (
+                get_or_create_connector_instance(pre_resolved_connector_class),
+                None,
+                None,
+            )
         if resolution_error == "target_required":
             # G0.20-T6 (#1506): a connector-bound (self-first) typed/composite
             # handler invoked with ``target=None``. Clean usage error before
@@ -3946,6 +4006,18 @@ async def dispatch(
             # self-guard RuntimeError (preserved for genuine instance-cache
             # faults, which only arise when a target *was* supplied).
             return result_target_required(op_id, _elapsed_ms(started))
+        if resolution_error == INGESTED_OPS_NOT_ACCEPTED:
+            # Also an approved call: nothing reaches the vendor.
+            duration_ms = _elapsed_ms(started)
+            return await _audit_denied_and_return(
+                result_ingested_ops_not_accepted(op_id, exception_message or "", duration_ms),
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                duration_ms=duration_ms,
+            )
         if resolution_error == "no_connector":
             # #2701: the resolver miss is on the TARGET's product/version,
             # not the ``connector_id`` the caller passed. That connector_id

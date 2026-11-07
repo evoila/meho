@@ -453,6 +453,30 @@ def test_list_forwards_filter_limit_offset(client: TestClient) -> None:
     assert call_kwargs["offset"] == 10
 
 
+def test_list_order_defaults_to_slug_and_forwards_newest(client: TestClient) -> None:
+    """``order`` defaults to ``slug``; ``order=newest`` reaches the substrate (#5679)."""
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+
+    fake_list = AsyncMock(return_value=[])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.kb.KbService.list_entries", fake_list),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        default_response = client.get("/api/v1/kb", headers=_authed(token))
+        default_order = fake_list.await_args.kwargs["order"]
+        newest_response = client.get("/api/v1/kb?order=newest", headers=_authed(token))
+        newest_order = fake_list.await_args.kwargs["order"]
+        bad_response = client.get("/api/v1/kb?order=oldest", headers=_authed(token))
+
+    assert default_response.status_code == 200
+    assert default_order == "slug"
+    assert newest_response.status_code == 200
+    assert newest_order == "newest"
+    assert bad_response.status_code == 422
+
+
 def test_list_canonical_q_reaches_substrate(client: TestClient) -> None:
     """The canonical ``q`` free-text filter (#1854) reaches the substrate."""
     tenant_a = uuid.uuid4()

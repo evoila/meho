@@ -25,13 +25,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
 
 from meho_backplane.checks.dashboard_service import CheckDashboardAdminService
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.routes.checks.views import project_detail
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_detail_router"]
 
-_require_session_dep = Depends(require_ui_session)
+_require_operator_dep = Depends(require_ui_operator)
 
 
 def build_detail_router() -> APIRouter:
@@ -49,7 +49,7 @@ def build_detail_router() -> APIRouter:
     async def checks_detail(
         request: Request,
         dashboard_id: uuid.UUID,
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
     ) -> HTMLResponse:
         """Render the per-Dashboard detail page (rollup badge + member table)."""
         service = CheckDashboardAdminService()

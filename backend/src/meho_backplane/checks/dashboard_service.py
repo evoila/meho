@@ -221,8 +221,7 @@ class CheckDashboardAdminService:
         de-duplicates the membership list, inserts the Dashboard + memberships
         in one transaction, and returns the freshly rolled-up detail. The
         #2719 notification config (``notify_email`` / ``notify_min_state``)
-        and the #2721 ``investigator_prompt`` ride the same create-only
-        posture as membership -- all were already validated by
+        and the #2721 ``investigator_prompt`` were already validated by
         :class:`DashboardCreate` at the boundary.
 
         Raises:

@@ -65,6 +65,7 @@ from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
 )
+from meho_backplane.ui.auth.session_ref import session_ref
 
 __all__ = ["build_read_operator", "resolve_ui_operator"]
 
@@ -83,6 +84,11 @@ def build_read_operator(session_ctx: UISessionContext) -> Operator:
     sound for ``list_memories`` / ``recall``. The chassis session
     middleware already enforced authentication; this helper avoids the
     JWT round-trip on every list refresh.
+
+    It checks no role, so it is for memory reads only: their REST floor
+    is ``read_only``. A console read whose REST twin needs the operator
+    role uses
+    :func:`~meho_backplane.ui.routes.operator_read.require_ui_read_operator`.
 
     The synthesised ``raw_jwt`` is a stable string (``"ui-session"``)
     so any consumer that introspects it for chain-of-custody logging
@@ -163,7 +169,7 @@ async def resolve_ui_operator(
         session_ctx = await require_ui_session(request)
     decrypted = await load_fresh_session(session_ctx.session_id)
     if decrypted is None:
-        _log.info("ui_memory_session_gone", session_id=str(session_ctx.session_id))
+        _log.info("ui_memory_session_gone", session_ref=session_ref(session_ctx.session_id))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="ui_session_required",

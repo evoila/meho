@@ -797,6 +797,7 @@ async def compute_retire_checklist(
     session: AsyncSession,
     surfaces: Iterable[ChecklistSurface],
     tenant_id: uuid.UUID | None,
+    principal_sub: str | None = None,
     retrieve_fn: RetrieveCallable | None = None,
     blocker_counts: Mapping[ChecklistSurface, int] | None = None,
     baseline_overrides: Mapping[ChecklistSurface, BaselineMetricsOverride] | None = None,
@@ -819,7 +820,9 @@ async def compute_retire_checklist(
        the worst-of overall verdict.
 
     *retrieve_fn* is passed through to ``eval_all`` so tests can inject
-    a stub without standing up fastembed + PG. *blocker_counts* is
+    a stub without standing up fastembed + PG. *principal_sub* (the
+    caller's OIDC ``sub``) is passed through too, so the eval ranks no
+    user memory of another person. *blocker_counts* is
     the surface→count mapping the CLI provides from
     ``gh issue list``; ``None`` (or surface absence) maps to
     criterion 5 = yellow per :func:`_evaluate_open_blockers`.
@@ -863,6 +866,7 @@ async def compute_retire_checklist(
     )
     eval_result = await eval_all(
         tenant_id=eval_tenant,
+        principal_sub=principal_sub,
         retrieve_fn=retrieve_fn,
         surfaces=eval_surfaces,
         k=k,

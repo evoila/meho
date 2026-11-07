@@ -283,6 +283,16 @@ the right place for either kind of row. When the package is removed,
 its rows are gone at the next start. The stored operations keep the
 risk level of their last ingest, as always.
 
+Ingested operations run on a hand-written class only when the class
+allows it. Set `accepts_ingested_operations = True` on each connector
+class that serves the operations ingested from its catalog. Without it,
+MEHO refuses the ingest of the API file under the class's name, and
+refuses each ingested operation whose target resolves to the class
+([spec-ingestion.md](spec-ingestion.md), "Which connector class ingested
+operations run on"). Set it only on a class whose login and checks fit
+any operation of the API file: an ingested operation runs none of the
+checks of the class's hand-written operations.
+
 A test for a package checks that the rows are there, for example that
 `safety_overlay_for(product, version)` is not empty after the folder is
 imported. `backend/tests/test_connector_package_catalog.py` does this

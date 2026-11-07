@@ -283,7 +283,7 @@ the chart's realm file, or with `meho admin keycloak bootstrap-clients`,
 already has `http://localhost:*` and `http://127.0.0.1:*`, which cover
 both paths on any port. The rest of the
 `meho-mcp` client shape (public PKCE client, eight protocol mappers,
-four default scopes, and `offline_access`, `mcp:read`, `mcp:execute` and
+six default scopes, and `offline_access`, `mcp:read`, `mcp:execute` and
 `mcp:admin` optional) is in
 [Keycloak realm setup](../install/keycloak-realm.md).
 

@@ -151,6 +151,7 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
         source: str | None = None,
         kind: str | None = None,
         limit: int = 10,
+        principal_sub: str | None = None,
     ) -> list[RetrievalHit]:
         if source == "operations":
             op_id = ops_answers.get(query)

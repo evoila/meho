@@ -24,6 +24,7 @@ import (
 //	  [--filter PATTERN]   # SQL LIKE pattern forwarded to the substrate
 //	  [--limit N]          # 1..500, default 100 (server-side)
 //	  [--offset N]         # offset-based pagination, default 0
+//	  [--order slug|newest] # slug A to Z (default) or newest update first
 //	  [--json]             # raw KbListResponse JSON instead of the table
 //	  [--backplane <url>]  # override the configured backplane URL
 //
@@ -38,6 +39,7 @@ func newListCmd() *cobra.Command {
 		filter            string
 		limit             int
 		offset            int
+		order             string
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -45,11 +47,13 @@ func newListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List kb entries in your tenant",
 		Long: "list calls GET /api/v1/kb and renders the kb entries " +
-			"registered in the operator's tenant, slug-sorted. " +
+			"registered in the operator's tenant, slug-sorted by default. " +
 			"Optional --filter narrows by a SQL LIKE pattern (the " +
 			"operator is the trust boundary for pattern shape). " +
 			"--limit caps the page size (1..500, server default 100). " +
-			"--offset advances the page window (default 0). --json " +
+			"--offset advances the page window (default 0). " +
+			"--order newest lists the most recently updated entry " +
+			"first (default: slug, A to Z). --json " +
 			"emits the raw KbListResponse envelope for jq pipelines.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
@@ -59,6 +63,7 @@ func newListCmd() *cobra.Command {
 				Filter:            filter,
 				Limit:             limit,
 				Offset:            offset,
+				Order:             order,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -69,7 +74,9 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 0,
 		"max entries per page (1..500, server default 100 when omitted)")
 	cmd.Flags().IntVar(&offset, "offset", 0,
-		"offset into the slug-sorted result set (default 0)")
+		"offset into the result set, in the chosen order (default 0)")
+	cmd.Flags().StringVar(&order, "order", "",
+		"sort order: slug (A to Z) or newest (most recently updated first) (default: slug)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit raw KbListResponse JSON instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -81,6 +88,7 @@ type listOptions struct {
 	Filter            string
 	Limit             int
 	Offset            int
+	Order             string
 	JSONOut           bool
 	BackplaneOverride string
 }
@@ -101,6 +109,13 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("--offset must be non-negative; got %d", opts.Offset)),
+			opts.JSONOut,
+		)
+	}
+	if opts.Order != "" && opts.Order != "slug" && opts.Order != "newest" {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("--order must be slug or newest; got %q", opts.Order)),
 			opts.JSONOut,
 		)
 	}
@@ -142,7 +157,7 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 // shape. Each pointer field is set only when the operator supplied
 // the flag so the backplane's own defaults apply for unset values
 // (filter omitted entirely; limit defaults to 100 server-side;
-// offset defaults to 0).
+// offset defaults to 0; order defaults to slug).
 func listQueryParams(opts listOptions) *api.ListKbApiV1KbGetParams {
 	params := &api.ListKbApiV1KbGetParams{}
 	if opts.Filter != "" {
@@ -156,6 +171,10 @@ func listQueryParams(opts listOptions) *api.ListKbApiV1KbGetParams {
 	if opts.Offset > 0 {
 		o := opts.Offset
 		params.Offset = &o
+	}
+	if opts.Order != "" {
+		o := api.ListKbApiV1KbGetParamsOrder(opts.Order)
+		params.Order = &o
 	}
 	return params
 }

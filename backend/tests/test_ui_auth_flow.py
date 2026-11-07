@@ -46,6 +46,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
@@ -78,6 +79,7 @@ from meho_backplane.ui.auth.routes import (
     login_binding_cookie_name,
     login_location,
 )
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.session_store import (
     create_session,
     load_session,
@@ -460,9 +462,10 @@ def test_callback_creates_session_and_sets_cookie(monkeypatch: pytest.MonkeyPatc
         login_location = login_response.headers["location"]
         state = parse_qs(urlparse(login_location).query)["state"][0]
         # Step 2: simulate Keycloak's redirect back to the callback.
-        callback_response = client.get(
-            f"/ui/auth/callback?code=test-code&state={state}",
-        )
+        with capture_logs() as captured:
+            callback_response = client.get(
+                f"/ui/auth/callback?code=test-code&state={state}",
+            )
 
     assert token_calls
     # Verify the token request body shape -- code, code_verifier,
@@ -537,6 +540,12 @@ def test_callback_creates_session_and_sets_cookie(monkeypatch: pytest.MonkeyPatc
     # Step 5: creating the row seeded the read-path revalidation
     # anchor, so the first reads of the new session skip the token check.
     assert session_id in _last_validated
+    # Step 6: the sign-in log names the session by its ref; no log line
+    # holds the session id (the cookie value).
+    created = [e for e in captured if e["event"] == "ui_auth_session_created"]
+    assert len(created) == 1
+    assert created[0]["session_ref"] == session_ref(session_id)
+    assert cookie_value not in repr(captured)
 
 
 # Non-HTML ``Accept`` -- a scripted probe / htmx fragment fetch. The
@@ -1301,7 +1310,6 @@ def test_read_path_revoked_grant_bounces_to_login_after_token_expiry(
     previous behaviour -- authorized renders until the 12 h absolute
     session lifetime.
     """
-    from structlog.testing import capture_logs
 
     _pin_revalidation_threshold(monkeypatch, "0")
     key = make_rsa_keypair("kid-reval-1")
@@ -1323,9 +1331,10 @@ def test_read_path_revoked_grant_bounces_to_login_after_token_expiry(
     assert len(token_calls) == 1
     failed = [e for e in captured if e["event"] == "ui_read_session_revalidation_failed"]
     assert len(failed) == 1
-    assert failed[0]["session_id"] == str(session_id)
-    # No token material in any captured event.
+    assert failed[0]["session_ref"] == session_ref(session_id)
+    # No token material and no session id in any captured event.
     assert expired not in repr(captured)
+    assert str(session_id) not in repr(captured)
 
 
 def test_read_path_expired_token_refreshes_silently_and_serves(

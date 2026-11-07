@@ -43,6 +43,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from structlog.testing import capture_logs
 
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
@@ -70,6 +71,7 @@ from meho_backplane.ui.auth.flow import (
     reset_verifier_store_for_testing,
 )
 from meho_backplane.ui.auth.revalidation import reset_read_revalidation_cache_for_testing
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.session_store import (
     create_session,
     reset_fernet_cache_for_testing,
@@ -84,6 +86,15 @@ from meho_backplane.ui.routes.kb import routes as kb_routes
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests._oidc_jwt_helpers import AUDIENCE, ISSUER, make_rsa_keypair, mint_token, public_jwks
 from tests._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
+
+from ._ui_role_helpers import allow_ui_operator_role
+
+
+@pytest.fixture(autouse=True)
+def _ui_operator_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The console pages under test sit behind the ``operator`` role check."""
+    allow_ui_operator_role(monkeypatch)
+
 
 _TENANT_A = uuid.UUID("aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa")
 _TENANT_B = uuid.UUID("bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb")
@@ -329,6 +340,25 @@ def test_switch_moves_the_session_and_writes_an_audit_row(keypair: Any) -> None:
     assert rows[0].payload["from_tenant_id"] == str(_TENANT_A)
     assert rows[0].payload["to_tenant_id"] == str(_TENANT_B)
     assert "switched from" in rows[0].payload["summary"]
+
+
+def test_switch_logs_hold_no_session_id(keypair: Any) -> None:
+    """The tenant switch logs name the session by its ref, never by its id."""
+    _seed_tenants((_TENANT_A, "team-a"), (_TENANT_B, "team-b"))
+    session_id = _seed_session(_two_tenant_token(keypair), tenant_id=_TENANT_A)
+    client = _client(session_id)
+
+    with capture_logs() as captured:
+        switched = _switch(client, session_id, str(_TENANT_B))
+        refused = _switch(client, session_id, str(uuid.uuid4()))
+
+    assert switched.status_code == 303, switched.text
+    assert refused.status_code == 403, refused.text
+    for event_name in ("ui_tenant_switched", "ui_tenant_switch_refused"):
+        events = [e for e in captured if e["event"] == event_name]
+        assert len(events) == 1, event_name
+        assert events[0]["session_ref"] == session_ref(session_id)
+    assert str(session_id) not in repr(captured)
 
 
 def test_switch_from_the_picker_after_login(keypair: Any) -> None:

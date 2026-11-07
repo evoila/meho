@@ -297,6 +297,18 @@ class _DuplicateKeyLoader(yaml.SafeLoader):  # type: ignore[misc]  # yaml has no
         self.unreadable: list[int] = []
         self.refused: list[tuple[int, str]] = []
 
+    def compose_node(self, parent: yaml.Node | None, index: Any) -> yaml.Node:
+        # Refuse anchors (``&name``) and aliases (``*name``) before any node is
+        # built: each alias would count as a full copy in every later walk.
+        event = self.peek_event()
+        if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None) is not None:
+            raise _AnchorRefusedError(problem_mark=event.start_mark)
+        return super().compose_node(parent, index)
+
+
+class _AnchorRefusedError(yaml.composer.ComposerError):  # type: ignore[misc]  # yaml has no stubs here
+    """A YAML anchor or alias: the settings file writes every value out."""
+
 
 def _construct_mapping_checked(loader: _DuplicateKeyLoader, node: yaml.MappingNode) -> Any:
     loader.flatten_mapping(node)
@@ -535,45 +547,70 @@ def _repeated_item_mistakes(model: SettingsFile) -> list[str]:
     return mistakes
 
 
-def parse_settings_file(content: bytes) -> ParsedSettings:
-    """Parse and check *content*; collect every mistake as one sentence each.
+def _missing_tenant_id_mistakes(model: SettingsFile) -> list[str]:
+    tenants = model.spec.tenants
+    if len(tenants) < 2:
+        return []
+    return [
+        f"`spec.tenants[{ti}].id` is required when the file names more than one tenant."
+        for ti, tenant in enumerate(tenants)
+        if tenant.id is None
+    ]
 
-    Order: size and encoding, YAML syntax, repeated keys, refused YAML types, ``apiVersion``,
-    secret-shaped values, the model, repeated items. All checks that can run
-    do run, so a file with an unknown key, an unknown ``apiVersion`` and a
-    target with no host yields three sentences. The one exception is a
-    secret: once one is found nothing else is checked and no model is
-    returned, so no later check (or the import) ever handles the value.
-    """
-    if len(content) > MAX_FILE_BYTES:
-        return ParsedSettings(
-            None, [f"The file is larger than {MAX_FILE_BYTES // (1024 * 1024)} MiB."]
+
+def _yaml_error_sentence(exc: yaml.MarkedYAMLError) -> str:
+    # Only the line: PyYAML's problem text can quote the input (an unknown
+    # tag, say), and nothing here has been checked for secrets yet.
+    mark = exc.problem_mark or exc.context_mark
+    where = f" on line {mark.line + 1}" if mark is not None else ""
+    if isinstance(exc, _AnchorRefusedError):
+        return (
+            f"The file is not valid YAML{where}: anchors (`&`) and aliases (`*`) "
+            "are not accepted; write each value out."
         )
+    return f"The file is not valid YAML{where}."
+
+
+def _load_yaml(content: bytes) -> tuple[Any, _DuplicateKeyLoader] | str:
+    """Size, encoding and YAML syntax: the loaded data and its loader, or one mistake."""
+    if len(content) > MAX_FILE_BYTES:
+        return f"The file is larger than {MAX_FILE_BYTES // (1024 * 1024)} MiB."
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
-        return ParsedSettings(None, ["The file is not UTF-8 text."])
+        return "The file is not UTF-8 text."
 
     try:
         loader = _DuplicateKeyLoader(text)
     except yaml.YAMLError:
         # The reader refuses control characters before parsing starts.
-        return ParsedSettings(
-            None, ["The file is not valid YAML: it holds characters YAML refuses."]
-        )
+        return "The file is not valid YAML: it holds characters YAML refuses."
     try:
-        raw = loader.get_single_data()
+        return loader.get_single_data(), loader
     except yaml.MarkedYAMLError as exc:
-        # Only the line: PyYAML's problem text can quote the input (an unknown
-        # tag, say), and nothing here has been checked for secrets yet.
-        mark = exc.problem_mark or exc.context_mark
-        where = f" on line {mark.line + 1}" if mark is not None else ""
-        return ParsedSettings(None, [f"The file is not valid YAML{where}."])
+        return _yaml_error_sentence(exc)
     except (yaml.YAMLError, ValueError, TypeError, OverflowError, RecursionError):
         # Any other value PyYAML cannot convert; never a server error.
-        return ParsedSettings(None, ["The file is not valid YAML."])
+        return "The file is not valid YAML."
     finally:
         loader.dispose()
+
+
+def parse_settings_file(content: bytes) -> ParsedSettings:
+    """Parse and check *content*; collect every mistake as one sentence each.
+
+    Order: size and encoding, YAML syntax (anchors and aliases are refused),
+    repeated keys, refused YAML types, ``apiVersion``, secret-shaped values,
+    the model, repeated items. All checks that can run do run, so a file with
+    an unknown key, an unknown ``apiVersion`` and a
+    target with no host yields three sentences. The one exception is a
+    secret: once one is found nothing else is checked and no model is
+    returned, so no later check (or the import) ever handles the value.
+    """
+    loaded = _load_yaml(content)
+    if isinstance(loaded, str):
+        return ParsedSettings(None, [loaded])
+    raw, loader = loaded
 
     mistakes = [
         f"Line {line}: the key `{render_path((key,))}` appears twice in the same block."
@@ -610,13 +647,7 @@ def parse_settings_file(content: bytes) -> ParsedSettings:
         mistakes.extend(format_validation_errors(exc))
     if model is not None:
         mistakes.extend(_repeated_item_mistakes(model))
-        if len(model.spec.tenants) > 1 and any(t.id is None for t in model.spec.tenants):
-            for ti, tenant in enumerate(model.spec.tenants):
-                if tenant.id is None:
-                    mistakes.append(
-                        f"`spec.tenants[{ti}].id` is required when the file names "
-                        f"more than one tenant."
-                    )
+        mistakes.extend(_missing_tenant_id_mistakes(model))
     if mistakes:
         return ParsedSettings(None if model is None else model, mistakes, raw)
     return ParsedSettings(model, [], raw)

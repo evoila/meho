@@ -39,9 +39,10 @@ DBOS rebase swaps only the loop module.
     including a cancelled one retained for audit; before 0035 the
     default `NO ACTION` made a once-scheduled definition undeletable via
     the API), `identity_sub`, `created_by_sub`.
-  - `kind` (closed enum: `cron`/`one_off`), `cron_expr` (NULL for
-    one-off), `fire_at` (one-off scheduled instant, NULL for cron),
-    `timezone` (IANA name, default `UTC`).
+  - `kind` (closed enum: `cron`/`one_off`/`event`), `cron_expr` (cron
+    only), `fire_at` (one-off scheduled instant), `event_filter` (event
+    only, see [events.md](events.md)), `timezone` (IANA name, default
+    `UTC`), `in_flight_policy`.
   - `next_fire_at` (the hot column the loop scans, populated for
     both cron and one-off), `last_fired_at`, `status` (closed enum:
     `active`/`paused`/`cancelled`/`fired`).
@@ -70,7 +71,8 @@ DBOS rebase swaps only the loop module.
     `is_valid_cron_expr()`, `InvalidCronExpressionError`,
     `InvalidTimezoneError`.
   - `scheduler.repository` — `create_cron_trigger()`,
-    `create_one_off_trigger()`, `claim_due_triggers()` (PG `SELECT ...
+    `create_one_off_trigger()`, `create_event_trigger()`,
+    `claim_due_triggers()` (PG `SELECT ...
     FOR UPDATE SKIP LOCKED`), `advance_cron_trigger()`,
     `mark_one_off_fired()`.
   - `scheduler.loop` — `run_one_tick()`, `start_scheduler()`,
@@ -139,7 +141,7 @@ pod env var only when Vault yields nothing (#1478). The lookup chain:
    UTF-8 bytes (`agent_client_id_from_identity_ref`), not a lossy
    sanitiser: two distinct principals — name-variants within a tenant
    (`agent:a-b` vs `agent:a_b`), or the same name across tenants — never
-   collapse onto one key (security S10, #298):
+   collapse onto one key:
    - **Vault (first).**
      [`read_agent_secret`](../../backend/src/meho_backplane/scheduler/vault_credentials.py)
      reads the secret from `SCHEDULER_AGENT_VAULT_PATH_PATTERN`
@@ -190,8 +192,8 @@ under the same scheduler service token, passing the **principal's**
 on the per-tenant, per-principal key
 (`secret/data/agents/<tenant.hex>_<hex(agent:ops-writer)>/credentials`)
 — write and read can never target different keys, and a name-variant or
-cross-tenant registration can no longer clobber another principal's
-secret (S10, #298). A Vault-write failure rolls back the just-created
+cross-tenant registration writes its own key, never another principal's
+secret. A Vault-write failure rolls back the just-created
 Keycloak client so registration never produces an unschedulable agent.
 
 `VAULT_SCHEDULER_TOKEN` is a static token bound to a narrow read/write
@@ -206,7 +208,10 @@ expires `period` after its last renewal. To keep it alive the broker
 fires a best-effort `auth/token/renew-self` after every successful
 read/write (`_maybe_renew_scheduler_token`), renewing the token at
 tick frequency so it never ages out while the pod runs; failures are
-logged and swallowed. `verify_scheduler_token` runs
+logged and swallowed. The scheduler loop also renews the token once at
+startup and then every hour (`renew_scheduler_token`,
+`_TOKEN_RENEW_INTERVAL_SECONDS` in `loop.py`), so a token stays alive
+even when no agent secret is read. `verify_scheduler_token` runs
 `auth/token/lookup-self` at scheduler startup and hourly (driven from
 `loop.py`) and logs a dead/unreachable token loudly, cutting
 time-to-notice from weeks to minutes. The token is resolved from its
@@ -221,16 +226,20 @@ under-scoped policy with the same 403, but the remediations are
 opposites — re-mint vs. widen the policy — and the pre-#2652 message
 only ever named the policy, which cost operators the diagnosis on a
 deploy whose policy, path pattern, and mount were all already correct.
-`write_agent_secret` now probes `_scheduler_token_rejected` on the
-**403** rejection arm (same hvac client, so the answer describes the
-identity that was actually denied) and stamps `token_invalid` on the raised
-`SchedulerVaultBrokerError`. All four register surfaces — the MCP tool,
+Reads and writes share one 403 handler, `_execute_with_self_heal`
+(`scheduler/vault_credentials.py`). It runs `_scheduler_token_rejected`
+on the same hvac client. If the token is live, MEHO raises
+`SchedulerVaultBrokerError` with `token_invalid=False` and does not
+retry. If the token is dead, MEHO gets a fresh Vault token with the
+runner login (`check_runner_jwt`, role `VAULT_CHECK_RUNNER_ROLE` or else
+`VAULT_OIDC_ROLE`) and runs the read or write once more.
+`token_invalid=True` is set only when this second try fails or no fresh
+token can be got. All four register surfaces — the MCP tool,
 `POST /api/v1/agent-principals`, `POST /api/v1/runner-principals`, and
 the `/ui/agents/principals` register banner — read that one flag and
 choose between `SCHEDULER_VAULT_TOKEN_INVALID_DETAIL` and
-`SCHEDULER_VAULT_WRITE_DENIED_DETAIL`. The probe is diagnosis-only and
-deliberately narrow: the write is never retried; only a 403 *from* the
-probe condemns the token (hvac maps 503 sealed / 502 / 500 / 429 onto
+`SCHEDULER_VAULT_WRITE_DENIED_DETAIL`. The probe is deliberately
+narrow: only a 403 *from* the probe condemns the token (hvac maps 503 sealed / 502 / 500 / 429 onto
 `VaultError` subclasses too, and treating those as a dead token would
 order a re-mint mid-outage — the exact wrong-remediation defect #2652
 exists to fix); a transport failure is likewise inconclusive; and the
@@ -449,10 +458,10 @@ lock — see "Known issues / limitations" (#1502).
   licensed. The only new runtime dependency this task introduces.
   Confined to `scheduler.cron`; the rest of the codebase depends on the
   module-level `next_fire_after()` / `is_valid_cron_expr()` seam.
-- **`AgentInvoker.run(..., trigger=AgentRunTrigger.SCHEDULED)`** (G11.1-T4)
-  — the invocation surface grew a `trigger` keyword alongside this task
-  so the durable `agent_run` row's provenance column reflects the
-  scheduler vs. a direct REST/MCP/CLI invocation.
+- **`AgentInvoker.run_scheduled`** — sets
+  `trigger=AgentRunTrigger.SCHEDULED` when it creates the `agent_run`
+  row (`_create_run_row`), so the run's provenance column shows the
+  scheduler instead of a direct REST/MCP/CLI call.
 - **`pg_try_advisory_lock` / `pg_advisory_unlock`** — Postgres
   session-level advisory locks, held via the shared pinned-connection
   helper `meho_backplane/db/advisory.py::advisory_lock` (#3010: lock and
@@ -510,8 +519,8 @@ interval at the cost of one extra scan query per elapsed tick.
   replay every missed cron instant. The consumer doc accepts this; an
   operator who needs "fire-every-N-runs" semantics writes that into the
   agent definition itself.
-- **`AgentRunTrigger.SCHEDULED` provenance** — passed through to
-  `AgentInvoker.run`'s new `trigger` kwarg. Audit queries that filter by
+- **`AgentRunTrigger.SCHEDULED` provenance** — set by
+  `AgentInvoker.run_scheduled` when it creates the run row. Audit queries that filter by
   trigger see scheduled runs distinctly from direct invocations.
 - **A blocking run is abandoned, not reclaimed, by this loop** (#1502) —
   `run_scheduled` bounds its wait by `AGENT_SYNC_TIMEOUT_SECONDS`
@@ -616,15 +625,16 @@ matcher landed.
 
 ### Cross-tenant admin
 
-`tenant_admin` callers may target another tenant by passing
-`tenant_id` in the create body or `tenant_filter` in the list /
-cancel query (REST) or `tenant_id` in the MCP create arguments. The
-MCP create handler rejects `tenant_id` from `operator` callers with
-`tenant_id_requires_tenant_admin` (it does *not* silently drop the
-field; review M1 on PR #1128). The REST list / cancel routes use the
-same role gate. Audit rows carry
-`audit_tenant_scope=other|self` so cross-tenant activity is
-greppable.
+Only a `platform_admin` who is a person may target another tenant, by
+passing `tenant_id` in the create body or `tenant_filter` in the list /
+cancel query (REST), or `tenant_id` in the MCP create arguments. All
+of them go through `auth/rbac.py::authorize_tenant_scope`. Anyone else
+who names a different tenant gets 403
+`cross_tenant_requires_platform_admin`. A tenant from the caller's own
+tenant list gets 403 `tenant_select_with_header`: the caller selects it
+with the `Meho-Tenant` header instead. A machine login never crosses
+tenants. Audit rows carry `audit_tenant_scope=other|self` so
+cross-tenant activity is greppable.
 
 ### Cancel idempotency + 404 / 409 contract
 
@@ -669,8 +679,8 @@ is now sourced from `cli/internal/api/client.gen.go`
 (`api.ScheduledTriggerRead`, `api.ScheduledTriggerListResponse`,
 `api.ScheduledTriggerCreate`) so a schema drift between the backend
 and the CLI surfaces at `go build` time rather than as the kind of
-#1069-class silent loss the freshness gate at
-`.github/workflows/cli-api-snapshot.yml` is designed to catch.
+silent loss the `cli-api-snapshot-freshness` job in
+`.github/workflows/ci.yml` is designed to catch.
 
 A 1 MiB response-body cap is installed at the transport layer via
 an inline `capRoundTripper` threaded through
@@ -690,9 +700,9 @@ cannot authenticate the Bearer REST routes), so the UI routes are
 `require_ui_session` + CSRF-gated and call `SchedulerAdminService`
 **in-process** — the same `list_` / `get` / `create` / `cancel` the REST
 / MCP / CLI surfaces share. The in-process call keeps the
-synchronous-audit binding (each handler binds `audit_op_id` =
-`scheduler.list` / `scheduler.create` / `scheduler.cancel` so the chassis
-audit + broadcast hooks classify the row, mirroring the REST route).
+synchronous-audit binding (the create and cancel handlers bind
+`audit_op_id` = `scheduler.create` / `scheduler.cancel` so the chassis
+audit hook classifies the row, mirroring the REST route).
 
 Surface map:
 

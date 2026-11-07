@@ -107,15 +107,15 @@ See `docs/codebase/audit_query.md` § *Loose rows: the standing check*.
    connector row when it has one, otherwise the built-in row). No descriptor ⇒ 422 `sensor_operation_not_found`.
 4. **Safe-only guard**: `descriptor.safety_level != "safe"` ⇒ 422
    `sensor_requires_safe_operation`. This is the create-time half of a
-   two-point enforcement. The dispatch-time policy gate
-   (`operations/dispatcher.dispatch`) does **not** re-consult
-   `safety_level` for the runner's synthetic `USER` operator (it parks
-   only the `destructive` / `requires_approval` tiers), so the runner
-   itself re-asserts the safe floor at dispatch (#303, `checks/runner.py`
-   `_run_evaluation`, "Dispatch identity"): a descriptor re-ingested
-   above `safe` after create records `unknown`
-   (`reason: op_not_safe_at_dispatch`) instead of auto-executing on
-   schedule. A `safe` operation that its connector marks as a safe write
+   two-point enforcement. The runner dispatches as a synthetic `USER`
+   operator with no web session, so the policy gate
+   (`operations/_validate.policy_gate`) follows the token rule: only a
+   `safe` op runs at once, anything else would wait for approval. The
+   runner does not leave it to that gate. It checks the safe floor
+   itself before it dispatches (`checks/runner.py` `_safe_tier_floor`,
+   "Dispatch identity"): a descriptor re-ingested above `safe` after
+   create records `unknown` (`reason: op_not_safe_at_dispatch`) and the
+   op does not run. A `safe` operation that its connector marks as a safe write
    (`declare_safe_writes` / `is_safe_write` in `meho_backplane.op_classes`, for example the
    GitHub ticket writes, which need no approval) is refused the same way:
    422 `sensor_requires_safe_operation` at create
@@ -447,7 +447,7 @@ change.
   settings run on the first tick after that evaluation ends.
 - The safe-only guard's descriptor read and the insert are in separate
   sessions (a TOCTOU window); acceptable because the runner re-asserts the
-  safe-tier floor at dispatch (#303), so a race that lands a non-safe
+  safe-tier floor at dispatch, so a race that lands a non-safe
   descriptor records `unknown` rather than executing.
 - **The `identity_sub` ownership guard (#2699) is create-time only.** The
   edit route cannot change `identity_sub`, so it covers every new row, but

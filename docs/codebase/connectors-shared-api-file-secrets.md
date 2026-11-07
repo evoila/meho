@@ -17,11 +17,11 @@ hides and however it is written. A text scan was tried first (#4690,
 a YAML alias, an escaped key, a quoted `>` inside an HTML attribute. The
 parser sees the structure, so those tricks do not exist for it.
 
-Every API file read uses this helper (#4780): `fleet.api_file.get`,
-`hcx.api_file.get` and `vcenter.sso_admin.api_file.get` on main, and the
-reads of #4690 (VCF Operations) and #4731 (Aria Automation 8) after it.
-New API file reads use it from the start; `srm.api_file.get` and
-`vr.api_file.get` do. Those reads also give the helper MEHO's general redaction rules as a text rule
+Every API file read uses this helper. No connector in this repo has
+an API file read now: the VMware connectors that had them
+(`fleet.api_file.get`, `hcx.api_file.get`, `vcenter.sso_admin.api_file.get`,
+`srm.api_file.get`, `vr.api_file.get` and others) are not in this repo. A
+connector that adds such a read uses this helper from the start. Those reads also give the helper MEHO's general redaction rules as a text rule
 (`text_redactor` in `connectors/_shared/api_file_read.py`), so text they
 match comes back as a placeholder instead of stopping the read. The rule
 runs on each parsed text value before the copy is written back, so the
@@ -45,8 +45,9 @@ copy keeps its format and every value keeps its type.
 - `scrub_query_string(path) -> (path, count)` — the same check for the
   query of a redirect path. The names are decoded first, so
   `license%4Bey` reads as `licenseKey`.
-- `REDACTED` — the placeholder, the same one the governed Vault read
-  returns for a secret-named value.
+- `REDACTED` — the placeholder `[REDACTED:param_name]`, the same one MEHO
+  puts on a secret-named field in any answer. (A Vault secret read hides
+  every value with `[REDACTED:secret_value]` instead.)
 - `ApiFileFormatError` (a `ValueError`) — the message names the reason
   (format, line, column), never the text.
 
@@ -66,7 +67,8 @@ the name; the pairs `api_key`, `access_key`, `private_key`,
 `licence_keys` (a list of licence keys), `product_key` (the
 Windows key of a vSphere guest customization spec), `secret_id`,
 `secret_value`, `secret_data` anywhere in the name; and the pairs
-`secret_key`, `shared_key`, `preshared_key` only at the end of the name
+`secret_key`, `shared_key`, `preshared_key`, `connection_string`,
+`connection_strings` only at the end of the name
 (`secret_key` is an authentication secret, `secret_key_ref` is the name
 of a Kubernetes Secret and stays plain). Names are read in snake, camel and kebab
 case. #4780 added the licence key.
@@ -137,7 +139,9 @@ Each read runs the helper on the whole file before it cuts the text into
 parts, so a part boundary cannot hide a secret. The answer carries
 `secrets_replaced`; `size` and `sha256` describe the checked copy, and
 joining the parts gives the copy. A redirect path goes through
-`scrub_query_string`, and its count is added.
+`scrub_query_string`, and its count is added. The flight recorder gets the
+checked copy too, never the raw answer (`FetchedApiFile.record` in
+`connectors/_shared/api_file_read.py`).
 
 The size limit stays as before: a file too big for one stored result is
 refused with its size, before parsing. The last check stays too: the

@@ -333,6 +333,27 @@ port (Traefik `websecure` 8443), the fixed `tcp/8200` / `tcp/443` rules do
 not match, and the operator adds an `extraEgress` rule selecting the
 ingress Pods on that port.
 
+An OpenAI-compatible model endpoint (`agent.openai`, #5851) is reached
+the same way: there is no fixed rule for it. The operator adds one
+`extraEgress` rule, either an `ipBlock` with the endpoint's address range
+and port, or, for a model server in the cluster, a `namespaceSelector` +
+`podSelector` on the model server's Pods and the container port (for
+vLLM 8000), not the Service port. Both examples are in the
+`networkPolicy.extraEgress` comment in `values.yaml` and in
+`deploy/values-examples/README.md` ("OpenAI-compatible model endpoint").
+
+The `agent.openai` block itself renders `OPENAI_API_KEY` as a
+`secretKeyRef` (to `agent.openai.secretName`, or to the
+`<release>-agent-openai` Secret that `eso.agentOpenai.enabled` makes from
+`<vault.paths.kv>/agent-openai`), and `OPENAI_BASE_URL` /
+`OPENAI_DEFAULT_MODEL` as plain values only when they are set. The schema
+has no field for the key, so a plain key is refused. `agent.modelBackend`
+renders `AGENT_MODEL_BACKEND` (which backend every agent run uses) only
+when set; the schema accepts `anthropic`, `openai`, `bedrock` and
+`vcf-paif`. Both are off by default, and
+then the render is unchanged; `backend/tests/test_chart_openai_endpoint.py`
+and a step in `.github/workflows/chart.yml` check both.
+
 The broadcast clause above is an **egress** allowance on the backplane
 side. A Pod is ingress-isolated only when *some* NetworkPolicy selects it,
 and this policy selects the backplane Pods — not the broadcast store. The

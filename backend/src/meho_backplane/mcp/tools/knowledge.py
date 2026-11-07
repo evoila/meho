@@ -82,6 +82,7 @@ from meho_backplane.kb.schemas import (
 )
 from meho_backplane.kb.service import KbService
 from meho_backplane.lesson_header import LessonHeaderError
+from meho_backplane.lessons.retrievals import record_kb_retrievals
 from meho_backplane.mcp.registry import (
     READ_ONLY,
     ToolDefinition,
@@ -176,7 +177,9 @@ async def _search_knowledge_handler(
     """
     slug = arguments.get("slug")
     if slug is not None:
-        return {"entry": await read_kb_entry(operator, slug)}
+        entry = await read_kb_entry(operator, slug)
+        await record_kb_retrievals(operator.tenant_id, [slug])
+        return {"entry": entry}
     query = arguments.get("query")
     if query is None:
         raise McpInvalidParamsError(
@@ -192,10 +195,13 @@ async def _search_knowledge_handler(
         filters=filters,
         limit=limit,
     )
-    return _bounded_search_response(
+    response = _bounded_search_response(
         [_hit_payload(hit) for hit in hits],
         get_settings().result_complete_response_wire_max_bytes,
     )
+    delivered = hits[: len(response["hits"])]
+    await record_kb_retrievals(operator.tenant_id, [hit.slug for hit in delivered])
+    return response
 
 
 def _hit_payload(hit: KbEntrySearchHit) -> dict[str, Any]:
@@ -288,6 +294,17 @@ async def _add_to_knowledge_handler(
     slug: str = arguments["slug"]
     body: str = arguments["body"]
     metadata = arguments.get("metadata")
+    if (
+        isinstance(metadata, dict)
+        and metadata.get("status") == "confirmed"
+        and not _may_change_any_entry(operator)
+    ):
+        raise McpPermissionDeniedError(
+            "add_to_knowledge: only a reviewer (a person who can decide approvals in this "
+            "tenant) or a tenant admin may set status confirmed. Save the entry as a "
+            "candidate; the weekly upkeep report lists used candidates for a reviewer.",
+            data={"reason": "confirm_needs_reviewer", "slug": slug},
+        )
 
     service = KbService()
     try:

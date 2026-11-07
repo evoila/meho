@@ -426,6 +426,18 @@ only with a lowered limit or very long slugs or target names. There is
 no Memory-specific store, handle, or query grammar: the next step after
 a hit is always the selected read on its `locator`.
 
+### Retrievals and the weekly upkeep
+
+`search_memory` records each hit it delivers to a session in the
+`lesson_retrieval` table (`lessons/retrievals.py`; see
+[reflex-adoption.md](reflex-adoption.md#learning-numbers)). The weekly
+knowledge upkeep (`lessons/upkeep.py`, see
+[kb.md](kb.md#weekly-upkeep-lessonsupkeeppy)) sets `confirmed_at` again on a
+memory entry with `status: confirmed` that a session used. That write
+adds a revision with `written_by_sub = system:knowledge-upkeep`. The
+upkeep does not merge or retire memory entries: the expiry sweeper above
+already deletes expired ones.
+
 ### Promote path
 
 Widening of a row's scope along two ladders: `user → user-tenant →

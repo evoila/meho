@@ -404,12 +404,63 @@ override it always was.
 stored one, else now) and, when it names no `expires_at`, an
 `expires_at` six months after `learned_at`. A re-write or re-import of
 the same note keeps these dates. A confirmed entry gets no expiry.
-Nothing deletes or hides an expired entry yet: the date is recorded and
-returned on every read surface. The console entry page shows every
-header field the entry has in a "Lesson header" list
-(`lesson_header.py::header_rows`).
+Nothing deletes or hides an expired entry: the weekly upkeep job (below)
+sets its `status` to `retired`, and the entry stays readable. The
+console entry page shows every header field the entry has in a "Lesson
+header" list (`lesson_header.py::header_rows`).
 
 **Owner.** The owner is `created_by_sub` (see above).
+
+**Who confirms.** Only a reviewer (a person who can decide approvals in
+the tenant, see the owner rule above) or a tenant admin may write
+`status: confirmed`. The MCP `add_to_knowledge` tool refuses it for any
+other caller, also for the owner of the entry, with a permission
+refusal, `reason: confirm_needs_reviewer`, and nothing is written. REST
+`POST /api/v1/kb` and the directory import are tenant admin only, so an
+import carries the status a reviewer set in the team wiki. The upkeep
+job never confirms a candidate.
+
+### Weekly upkeep (`lessons/upkeep.py`)
+
+A background job keeps the store clean. It runs once per
+`KNOWLEDGE_UPKEEP_INTERVAL_SECONDS` (one week by default), counted from
+its last recorded run, and can be turned off with
+`KNOWLEDGE_UPKEEP_ENABLED=false`. On PostgreSQL an advisory lock lets
+one replica at a time run it. Each run:
+
+1. **Merges duplicates.** Entries of one tenant with the same body
+   (spaces and case do not count) are one entry. The job keeps a
+   `confirmed` copy first, else the oldest, and gives each other copy
+   `status: replaced` and `replaced_by: <slug of the kept entry>`.
+2. **Retires expired entries.** An entry whose `expires_at` has passed
+   gets `status: retired`.
+3. **Refreshes used confirmed entries.** A `confirmed` knowledge or
+   memory entry that a session used in the last interval gets
+   `confirmed_at` set to the time of that use. "Used" is defined in
+   [reflex-adoption.md](reflex-adoption.md#learning-numbers): a search
+   gave the entry to a session, and the session then ran an operation
+   that succeeded.
+4. **Lists used candidates for a reviewer**, with the number of
+   different sessions and different targets that used each one. Copies
+   of one story are not independent proof, so two searches in one
+   session count once.
+5. **Measures** the four learning numbers for the interval.
+
+The job changes only metadata, through `kb/revisions.py::update_head_metadata`
+(head and passages, under the row lock; no new revision, as for any
+write with an unchanged body). It deletes no entry. It deletes recorded
+retrievals older than 180 days.
+
+**The report.** One `INTERNAL` audit row per tenant, with
+`operator_sub = system:knowledge-upkeep` and `path = knowledge.upkeep`.
+The payload lists what was merged (`merged`: slug and `into`), retired
+(`retired`), refreshed (`refreshed`) and what waits for a reviewer
+(`for_review`), each list at most 100 items with full counts
+(`merged_count` and so on), plus the four numbers (`numbers`). Read it
+with `meho audit query` and the principal `system:knowledge-upkeep`. A
+row with the totals goes to the system tenant
+`00000000-0000-0000-0000-000000005733`; the schedule reads it as the
+last run.
 
 **Shared scope.** An entry with `shared: true` in its metadata is
 readable from every tenant on the instance, if its owner tenant is

@@ -20,6 +20,13 @@ seam rather than a parallel mechanism.
 Surface: `GET /api/v1/audit/reflex` (operator role min; `tenant_filter`
 gated behind `platform_admin`) and `meho audit reflex`.
 
+The report also has a `learning` block with four numbers that show
+whether stored lessons help: the repeat-mistake rate, the hit rate, the
+precision of retrieved entries, and the time to the first correct
+action on a known system. See "Learning numbers" below. The weekly
+knowledge upkeep report carries the same four numbers per tenant
+([kb.md](kb.md#weekly-upkeep-lessonsupkeeppy)).
+
 Since #3734, `compute_reflex_report` also takes `source="request_usage"`.
 Then the meta-tool calls come from privacy-bounded request usage events
 (see [request-usage.md](request-usage.md)) instead of the MCP envelope
@@ -53,7 +60,22 @@ Frozen Pydantic models. `ReflexReport.surfaces` is always ordered
 `[agent, cli_rest]`. Each `SurfaceMetrics` carries the three ratios
 plus their raw numerator + denominator; a ratio is `None` (N/A) when
 its denominator is 0, so a zero-activity surface never reads as a
-misleading `0.0`.
+misleading `0.0`. `ReflexReport.learning` is a `LearningMetrics`
+(`meho_backplane.lessons.metrics`): the four learning numbers, each with
+its count and base, `None` when the base is 0. They are not split by
+surface: each one is about agent sessions.
+
+### `LessonRetrieval` (`lesson_retrieval` table, migration `0142`)
+
+One row for each knowledge or memory entry that `search_knowledge` (a
+search, or a read by `slug`) or `search_memory` gave to a session
+(`meho_backplane.lessons.retrievals`). It keeps the reading tenant, the
+store (`kb` or `memory`), the entry id and its owner tenant, the
+session id, the time, and the entry's header `status` and whether it had
+expired at that moment. A call without a session id is not recorded.
+Recording never fails the search. The entry id has no foreign key, so a
+row stays when its entry is deleted. The upkeep job deletes rows older
+than 180 days.
 
 ## Metric definitions (v1)
 
@@ -92,6 +114,42 @@ signal that a surface has no client-side reflex lever.
    `add_to_memory` calls per 100 `call_operation` calls on the surface.
    `None` when there are 0 `call_operation` calls.
 
+## Learning numbers
+
+Defined in `meho_backplane.lessons.metrics`. Let an operation be a
+`DISPATCH` audit row with a session id. It *failed* when its status is
+400 or more, other than 429 (a rate limit is not a mistake), and it
+*succeeded* when its status is 200. A retrieved entry was **used** when
+the same session ran an operation that succeeded at or after the
+retrieval. The audit row carries the checked result of the operation,
+so this is the feedback MEHO already has.
+
+4. **repeat-mistake rate** (`repeat_mistake_pct`) — of the failed
+   operations in the window, the share where the same operation
+   (`op_id`) on the same target (or both without a target) already
+   failed in another, earlier session of the same tenant. The look-back
+   reaches 90 days before the window. A failure in the same session
+   again is not a repeat.
+5. **hit rate** (`hit_rate_pct`) — of the retrievals in the window, the
+   share that were used.
+6. **precision** (`precision_pct`) — of the retrievals in the window
+   whose entry still exists, the share that were right. An entry was
+   wrong when its `status` was `disputed` at the search or is `disputed`
+   now. It was stale when it had expired, or had `status: replaced` or
+   `retired`, at the search. A deleted entry cannot be judged and is left
+   out (`precision_judged` is the base).
+7. **time to the first correct action on a known system**
+   (`first_correct_action_median_seconds`) — for each session whose first
+   successful operation in the window ran on a known target, the seconds
+   from the session's start to that operation; the number is the median
+   over those sessions (`first_correct_action_sessions`). A target is
+   known when an operation on it succeeded in another, earlier session
+   of the same tenant. The session starts at its first audit row, usage
+   event or retrieval.
+
+`meho audit reflex` prints them in a `[learning]` block after the
+surfaces.
+
 ## Control flow
 
 ### API surface (`GET /api/v1/audit/reflex`)
@@ -125,6 +183,17 @@ a per-surface table (or `--json` for the raw envelope). Nil ratios read
 - `retrieval.usage.parse_since` — the shared `--since` grammar (#444).
 
 ## Known issues
+
+- **"Used" is a broad signal.** Any operation that succeeds later in
+  the same session uses every entry the session retrieved before it,
+  even when the operation had nothing to do with the entry. So the hit
+  rate is an upper bound. Reads through the `meho://kb/...` and
+  `meho://memory/...` resources are not recorded; only the two search
+  tools are. When recall before an operation ships, its entries can be
+  recorded with the same `record_*_retrievals` helpers.
+- **Precision needs a person or the upkeep job to mark entries.** It
+  counts only what the header says: `disputed`, `replaced`, `retired`
+  and the expiry. An entry nobody marked counts as right.
 
 - **A direct MCP call without an `Mcp-Session-Id` header is attributed
   to `cli_rest`.** Since #4672 a write op dispatched over MCP gets the
@@ -165,6 +234,7 @@ from different signals and answer different questions.
 - #444 — the `audit_log` aggregation + REST + CLI precedent reused here
   (`docs/codebase/retrieval.md`, `meho_backplane.retrieval.usage`).
 - #2544 — the `AgentAnnouncement` structured announce-claim store.
+- #5733 — the learning numbers and the weekly knowledge upkeep.
 - `docs/codebase/audit_query.md` — the sibling G8 audit-trail surface
   whose tenant-scoping posture this route mirrors.
 - Decision #3 (`docs/decisions/locked-decisions.md`) — the

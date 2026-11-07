@@ -6853,6 +6853,25 @@ type KbProvenanceState string
 // boundary with a 422 rather than silently filtering nothing.
 type KindFilterValue string
 
+// LearningMetrics The four numbers that show whether stored lessons help.
+//
+// For one tenant and window. Each ratio comes with its count and its
+// base, and is “null“ when the base is 0. The median time is in
+// seconds.
+type LearningMetrics struct {
+	FirstCorrectActionMedianSeconds *float32 `json:"first_correct_action_median_seconds"`
+	FirstCorrectActionSessions      int      `json:"first_correct_action_sessions"`
+	HitRatePct                      *float32 `json:"hit_rate_pct"`
+	HitRateRetrievals               int      `json:"hit_rate_retrievals"`
+	HitRateUsed                     int      `json:"hit_rate_used"`
+	PrecisionJudged                 int      `json:"precision_judged"`
+	PrecisionPct                    *float32 `json:"precision_pct"`
+	PrecisionRight                  int      `json:"precision_right"`
+	RepeatMistakeFailures           int      `json:"repeat_mistake_failures"`
+	RepeatMistakePct                *float32 `json:"repeat_mistake_pct"`
+	RepeatMistakeRepeats            int      `json:"repeat_mistake_repeats"`
+}
+
 // LivenessResponse “GET /api/v1/health/live“ response body.
 //
 // The cheap, low-privilege liveness surface: operator identity (from
@@ -8076,7 +8095,16 @@ type ReassignRunResponse struct {
 // empty window (both surfaces present with zero-valued / “None“
 // metrics). “tenant_id“ is the scope the report was computed for
 // (the operator's own tenant, or a “platform_admin“ filter).
+// “learning“ holds the four numbers that show whether stored lessons
+// help (:mod:`meho_backplane.lessons.metrics`); they are not split by
+// surface, because each one is about agent sessions.
 type ReflexReport struct {
+	// Learning The four numbers that show whether stored lessons help.
+	//
+	// For one tenant and window. Each ratio comes with its count and its
+	// base, and is ``null`` when the base is 0. The median time is in
+	// seconds.
+	Learning LearningMetrics     `json:"learning"`
 	Since    time.Time           `json:"since"`
 	Surfaces []SurfaceMetrics    `json:"surfaces"`
 	TenantId *openapi_types.UUID `json:"tenant_id"`

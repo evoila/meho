@@ -177,6 +177,7 @@ from meho_backplane.gateway.unreported_mint import (
 )
 from meho_backplane.health import register_probe
 from meho_backplane.health import router as health_router
+from meho_backplane.lessons.upkeep import start_knowledge_upkeep, stop_knowledge_upkeep
 from meho_backplane.logging import configure_logging
 from meho_backplane.mcp import eager_import_mcp_modules
 from meho_backplane.mcp import router as mcp_router
@@ -576,6 +577,7 @@ class _BackgroundTasks:
 
     topology_scheduler: asyncio.Task[None]
     memory_expiry: asyncio.Task[None] | None
+    knowledge_upkeep: asyncio.Task[None] | None
     topology_history: asyncio.Task[None] | None
     announcement_retention: asyncio.Task[None] | None
     evidence_retention: asyncio.Task[None] | None
@@ -632,6 +634,11 @@ def _start_background_tasks(started: list[asyncio.Task[None]]) -> _BackgroundTas
     memory_expiry: asyncio.Task[None] | None = None
     if settings.memory_expiry_enabled:
         memory_expiry = start(start_memory_expiry_sweeper)
+    # Weekly knowledge upkeep and report (lessons/upkeep.py); gated on
+    # KNOWLEDGE_UPKEEP_ENABLED.
+    knowledge_upkeep: asyncio.Task[None] | None = None
+    if settings.knowledge_upkeep_enabled:
+        knowledge_upkeep = start(start_knowledge_upkeep)
     # G9.3-T6 #858 — gated on TOPOLOGY_HISTORY_PRUNE_ENABLED.
     # ``RETENTION_DAYS=0`` keeps the loop running but every tick is a
     # no-op (heartbeat-only); ``PRUNE_ENABLED=false`` skips starting
@@ -746,6 +753,7 @@ def _start_background_tasks(started: list[asyncio.Task[None]]) -> _BackgroundTas
     return _BackgroundTasks(
         topology_scheduler=topology_scheduler,
         memory_expiry=memory_expiry,
+        knowledge_upkeep=knowledge_upkeep,
         topology_history=topology_history,
         announcement_retention=announcement_retention,
         evidence_retention=evidence_retention,
@@ -823,6 +831,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_announcement_retention_sweeper(tasks.announcement_retention)
     if tasks.topology_history is not None:
         await stop_topology_history_retention_sweeper(tasks.topology_history)
+    if tasks.knowledge_upkeep is not None:
+        await stop_knowledge_upkeep(tasks.knowledge_upkeep)
     if tasks.memory_expiry is not None:
         await stop_memory_expiry_sweeper(tasks.memory_expiry)
     await stop_topology_refresh_scheduler(tasks.topology_scheduler)

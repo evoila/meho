@@ -111,6 +111,7 @@ from typing import Any, Final
 import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.lessons.retrievals import record_memory_retrievals
 from meho_backplane.mcp.registry import (
     READ_ONLY,
     ToolDefinition,
@@ -302,7 +303,10 @@ async def _search_memory_handler(
         scope=scope,
         limit=limit,
     )
-    return bounded_search_response([hit_payload(hit) for hit in hits])
+    response = bounded_search_response([hit_payload(hit) for hit in hits])
+    delivered = hits[: len(response["hits"])]
+    await record_memory_retrievals(operator.tenant_id, [hit.id for hit in delivered])
+    return response
 
 
 def _resolve_body_with_content_shim(arguments: dict[str, Any]) -> str:

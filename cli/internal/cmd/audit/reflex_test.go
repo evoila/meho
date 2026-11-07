@@ -83,6 +83,17 @@ func TestRunReflexRendersSurfaceTable(t *testing.T) {
 					WriteBackPer100CallOps:    nil,
 				},
 			},
+			Learning: api.LearningMetrics{
+				RepeatMistakePct:                f32(25.0),
+				RepeatMistakeRepeats:            1,
+				RepeatMistakeFailures:           4,
+				HitRatePct:                      f32(75.0),
+				HitRateUsed:                     3,
+				HitRateRetrievals:               4,
+				PrecisionPct:                    nil,
+				FirstCorrectActionMedianSeconds: f32(42.0),
+				FirstCorrectActionSessions:      2,
+			},
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -98,6 +109,8 @@ func TestRunReflexRendersSurfaceTable(t *testing.T) {
 	for _, want := range []string{
 		"agent", "cli_rest", "read-before-act", "announce-coverage", "write-back rate",
 		"50.00%", "n/a",
+		"[learning]", "repeat-mistake rate", "25.00%", "hit rate", "75.00%",
+		"precision", "first correct action", "42.00 s", "2 sessions on known systems",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout missing %q in:\n%s", want, out)

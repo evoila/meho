@@ -32592,6 +32592,74 @@
         "title": "KindFilterValue",
         "description": "Closed enum of the trigger ``kind`` values exposed in the filter URL.\n\nMirrors the wire-level :data:`~meho_backplane.scheduler.schemas.KindFilter`\nliteral (``cron`` / ``one_off`` / ``event``). The ``str`` mixin keeps\nthe template's ``{{ kind_filter }}`` rendering + ``selected`` matching\nstable, and an out-of-enum value fails Pydantic validation at the HTTP\nboundary with a 422 rather than silently filtering nothing."
       },
+      "LearningMetrics": {
+        "properties": {
+          "repeat_mistake_pct": {
+            "type": "number",
+            "nullable": true,
+            "title": "Repeat Mistake Pct"
+          },
+          "repeat_mistake_failures": {
+            "type": "integer",
+            "title": "Repeat Mistake Failures"
+          },
+          "repeat_mistake_repeats": {
+            "type": "integer",
+            "title": "Repeat Mistake Repeats"
+          },
+          "hit_rate_pct": {
+            "type": "number",
+            "nullable": true,
+            "title": "Hit Rate Pct"
+          },
+          "hit_rate_retrievals": {
+            "type": "integer",
+            "title": "Hit Rate Retrievals"
+          },
+          "hit_rate_used": {
+            "type": "integer",
+            "title": "Hit Rate Used"
+          },
+          "precision_pct": {
+            "type": "number",
+            "nullable": true,
+            "title": "Precision Pct"
+          },
+          "precision_judged": {
+            "type": "integer",
+            "title": "Precision Judged"
+          },
+          "precision_right": {
+            "type": "integer",
+            "title": "Precision Right"
+          },
+          "first_correct_action_median_seconds": {
+            "type": "number",
+            "nullable": true,
+            "title": "First Correct Action Median Seconds"
+          },
+          "first_correct_action_sessions": {
+            "type": "integer",
+            "title": "First Correct Action Sessions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "repeat_mistake_pct",
+          "repeat_mistake_failures",
+          "repeat_mistake_repeats",
+          "hit_rate_pct",
+          "hit_rate_retrievals",
+          "hit_rate_used",
+          "precision_pct",
+          "precision_judged",
+          "precision_right",
+          "first_correct_action_median_seconds",
+          "first_correct_action_sessions"
+        ],
+        "title": "LearningMetrics",
+        "description": "The four numbers that show whether stored lessons help.\n\nFor one tenant and window. Each ratio comes with its count and its\nbase, and is ``null`` when the base is 0. The median time is in\nseconds."
+      },
       "LivenessResponse": {
         "properties": {
           "operator": {
@@ -34441,6 +34509,9 @@
             },
             "type": "array",
             "title": "Surfaces"
+          },
+          "learning": {
+            "$ref": "#/components/schemas/LearningMetrics"
           }
         },
         "type": "object",
@@ -34448,10 +34519,11 @@
           "since",
           "until",
           "tenant_id",
-          "surfaces"
+          "surfaces",
+          "learning"
         ],
         "title": "ReflexReport",
-        "description": "Top-level shape returned by :func:`compute_reflex_report` + the route.\n\n``surfaces`` is always ordered ``[agent, cli_rest]`` so table\nrenderers and ``--json`` consumers see a stable shape even for an\nempty window (both surfaces present with zero-valued / ``None``\nmetrics). ``tenant_id`` is the scope the report was computed for\n(the operator's own tenant, or a ``platform_admin`` filter)."
+        "description": "Top-level shape returned by :func:`compute_reflex_report` + the route.\n\n``surfaces`` is always ordered ``[agent, cli_rest]`` so table\nrenderers and ``--json`` consumers see a stable shape even for an\nempty window (both surfaces present with zero-valued / ``None``\nmetrics). ``tenant_id`` is the scope the report was computed for\n(the operator's own tenant, or a ``platform_admin`` filter).\n``learning`` holds the four numbers that show whether stored lessons\nhelp (:mod:`meho_backplane.lessons.metrics`); they are not split by\nsurface, because each one is about agent sessions."
       },
       "RefreshResult": {
         "properties": {

@@ -21,6 +21,9 @@
   count of a cancelled run ends with its charge, or after the lease time.
 * ``test_cancel_during_finalization_still_charges_once`` -- the final
   charge is saved once, also when the loop task is cancelled meanwhile.
+* ``test_failed_final_charge_reaches_the_waiting_caller`` -- when saving the
+  final charge fails, a caller that waits on the run (REST and the
+  scheduler) gets the error, not a ``running`` outcome.
 """
 
 from __future__ import annotations
@@ -451,3 +454,43 @@ async def test_cancel_during_finalization_still_charges_once(
     rows = await _budget_rows(op.sub)
     assert [r.requests_consumed for r in rows] == [1, 1, 1]
     assert [r.tokens_consumed for r in rows] == [55, 55, 55]
+
+
+class _ChargeFailedError(Exception):
+    pass
+
+
+@pytest.mark.parametrize("scheduled", [False, True], ids=["rest", "scheduler"])
+async def test_failed_final_charge_reaches_the_waiting_caller(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch, scheduled: bool
+) -> None:
+    await _seed()
+
+    async def _failing_apply(*args: object, **kwargs: object) -> None:
+        raise _ChargeFailedError
+
+    monkeypatch.setattr(identity_budget, "apply_consumption", _failing_apply)
+
+    async def _answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[TextPart("done")],
+            usage=RequestUsage(input_tokens=50, output_tokens=5),
+        )
+
+    invoker = AgentInvoker(runtime=PydanticAgentRun(model_factory=lambda: FunctionModel(_answer)))
+    op = _operator(f"cap-charge-fails-{scheduled}")
+
+    async def _authenticate(name: str, **_kwargs: object) -> tuple[Operator, object]:
+        return op, await invoker._load_definition(op, name)
+
+    monkeypatch.setattr(invoker, "_authenticate_scheduled_agent", _authenticate)
+    with pytest.raises(_ChargeFailedError):
+        if scheduled:
+            await invoker.run_scheduled(
+                _AGENT,
+                "go",
+                agent_client_id=f"agent:{_AGENT}",
+                agent_client_secret=SecretStr("unused"),
+            )
+        else:
+            await invoker.run(op, _AGENT, "go")

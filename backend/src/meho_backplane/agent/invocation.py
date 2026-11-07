@@ -1184,7 +1184,8 @@ class AgentInvoker:
         """
         # asyncio.wait neither cancels the task on timeout nor raises when the
         # task itself was cancelled (an operator cancel): then the stored
-        # cancelled outcome is returned. A cancel of this caller still raises.
+        # cancelled outcome is returned. A cancel of this caller still raises,
+        # and any other task failure is raised by task.result() below.
         done, _pending = await asyncio.wait({task}, timeout=timeout_seconds)
         if not done:
             _log.info(
@@ -1197,6 +1198,8 @@ class AgentInvoker:
                 status=AgentRunStatus.RUNNING,
                 converted_to_async=True,
             )
+        if not task.cancelled():
+            task.result()
 
         view = await self.poll(operator, run_id)
         return AgentRunOutcome(

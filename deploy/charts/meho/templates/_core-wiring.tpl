@@ -105,3 +105,20 @@ enabled: {{ $enabled }}
 secretName: {{ $name | quote }}
 secretKey: {{ .Values.approvalHandoff.secretKey | quote }}
 {{- end }}
+
+{{/*
+The Secret with the params hash key as YAML. `paramsHashKey.secretName`
+names your own Secret. Empty means `<release>-core-params-hash`, which the
+secrets Job makes with a built-in part. An empty `secretName` with every
+built-in part off renders no Secret: MEHO then makes the key from
+DATABASE_URL.
+Usage: {{- $hashKey := include "meho.paramsHashKey" . | fromYaml }}
+*/}}
+{{- define "meho.paramsHashKey" -}}
+{{- $name := .Values.paramsHashKey.secretName -}}
+{{- if and (not $name) (include "meho.core.enabled" .) -}}
+{{- $name = printf "%s-core-params-hash" .Release.Name -}}
+{{- end -}}
+secretName: {{ $name | quote }}
+secretKey: {{ .Values.paramsHashKey.secretKey | quote }}
+{{- end }}

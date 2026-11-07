@@ -4,7 +4,7 @@ MEHO deploys as **one Kubernetes application** (a Helm release). By
 default the chart also brings its own PostgreSQL, Keycloak and OpenBao
 (an open-source fork of Vault). This is the normal way. You can connect
 your own PostgreSQL or secret store instead
-([two ways to install](install/index.md#two-ways-to-install)). This page names every box in the picture, what it
+([bring your own parts](install/index.md#part-b-bring-your-own-parts-expert-path)). This page names every box in the picture, what it
 does, and — the part that matters when you plan an install — which
 boxes MEHO ships and which ones you can bring.
 
@@ -50,7 +50,7 @@ flowchart LR
 |---|---|---|
 | Backplane (container image) | **MEHO** — `ghcr.io/evoila/meho` | One Deployment, rendered by the Helm chart. |
 | Valkey (activity feed) | **MEHO** — bundled subchart | Installed by the same Helm release; no separate setup. |
-| PostgreSQL + pgvector | **MEHO** by default, or **you** | The chart's built-in PostgreSQL, with pgvector on. Turn it off (`corePostgres.enabled: false`) to use any reachable PostgreSQL with the `vector` extension available — see [the install trail](install/index.md#step-1-pre-create-the-pgvector-extension) for the one privilege nuance. |
+| PostgreSQL + pgvector | **MEHO** by default, or **you** | The chart's built-in PostgreSQL, with pgvector on. Turn it off (`corePostgres.enabled: false`) to use any reachable PostgreSQL with the `vector` extension available — see [the install trail](install/index.md#pre-create-the-pgvector-extension) for the one privilege nuance. |
 | Keycloak | **MEHO** | MEHO's built-in Keycloak makes the realm `meho`. Connect your [company login](install/login/index.md) in front of it (AD/LDAP, Entra ID, authentik, your own Keycloak). Replacing it with your own Keycloak is an expert path: it needs realm admin rights to make MEHO's realm, clients and groups — see [Keycloak realm setup](install/keycloak-realm.md). |
 | Credential backend | **MEHO** by default, or **you** | The chart's built-in OpenBao (an open-source fork of Vault). Turn it off (`coreVault.enabled: false`) to use your own HashiCorp Vault **or** Google Secret Manager — see [Credential backends](install/credential-backends.md). |
 | AI agent / MCP client | **You** | MEHO governs agents; it does not run a model. Bring Claude, Cursor, or any MCP client. |
@@ -124,7 +124,7 @@ state, and the knowledge/memory store. The
 [pgvector](https://github.com/pgvector/pgvector) extension provides the
 vector similarity search behind semantic operation discovery and
 knowledge retrieval — it is the reason the install trail has a
-[one-time extension step](install/index.md#step-1-pre-create-the-pgvector-extension).
+[one-time extension step](install/index.md#pre-create-the-pgvector-extension).
 
 The chart brings its own PostgreSQL by default. If your platform team
 must own the audit data (backup, retention), turn the built-in

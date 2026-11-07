@@ -39,6 +39,7 @@ from meho_backplane.operations.operation_run_service import (
     get_operation_run_service,
     run_result_visible_to,
 )
+from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME
 from meho_backplane.settings import get_settings
 
 __all__ = ["poll_call", "submit_async_call"]
@@ -192,6 +193,18 @@ async def poll_call(
     # of its work, so the caller must check the audit log before a retry.
     extras["error_code"] = f"run_{row.status}"
     reason = row.error or f"the run was {row.status}"
+    if row.status == OperationRunStatus.UNCERTAIN:
+        # #5025: the worker died while a change was running. Say it in the
+        # words of the other views, and never invite a second start.
+        extras["execution_outcome"] = UNCERTAIN_OUTCOME
+        extras["retry"] = False
+        return _envelope(
+            op_id,
+            status="error",
+            duration_ms=elapsed_ms,
+            extras=extras,
+            error=f"run_uncertain: {reason}",
+        )
     return _envelope(
         op_id,
         status="error",

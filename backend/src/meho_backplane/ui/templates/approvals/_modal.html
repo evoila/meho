@@ -228,6 +228,10 @@
         {#- Approved, but the run failed (#3543): not a success banner. -#}
         {% set decision_alert = "alert-error" %}
         {% set decision_verb = "Approved" %}
+      {% elif request.status == "approved" and request.result_state == "uncertain" %}
+        {#- Approved, but MEHO does not know if the change happened (#5025). -#}
+        {% set decision_alert = "alert-warning" %}
+        {% set decision_verb = "Approved" %}
       {% elif request.status == "approved" %}
         {% set decision_alert = "alert-success" %}
         {% set decision_verb = "Approved" %}
@@ -284,6 +288,8 @@
             <p class="text-sm font-semibold" data-testid="approval-run-refused" data-error-code="{{ request.outcome.error_code }}">{{ request.outcome.refused_message }}</p>
           {% elif request.result_state == "failed" %}
             <p class="text-sm font-semibold">The approved operation ran, but it did not succeed. Open the audit row to see why.</p>
+          {% elif request.result_state == "uncertain" %}
+            <p class="text-sm font-semibold" data-testid="approval-run-uncertain">MEHO does not know if the approved change happened. Do not run it again. Check the target first.</p>
           {% endif %}
           {% if request.result_state %}
             {% set run_label, run_class = result_state_pill.get(request.result_state, (request.result_state, "badge-ghost")) %}

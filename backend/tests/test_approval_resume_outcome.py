@@ -33,6 +33,7 @@ from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.main import app
 from meho_backplane.mcp.tools.approvals import _row_to_dict
 from meho_backplane.operations._errors import (
+    result_audit_commit_failed,
     result_composite_terminal_error,
     result_connector_error,
 )
@@ -219,7 +220,14 @@ async def test_failed_resume_shows_on_show_and_list(monkeypatch: pytest.MonkeyPa
     assert outcome["audit_id"] == str(_AUDIT_ID)
     assert outcome["resumed_at"] is not None
     # Only the summary leaves the envelope: no result body, no free-text error.
-    assert set(outcome) == {"resumed_at", "result_status", "error_code", "audit_id", "guidance"}
+    assert set(outcome) == {
+        "resumed_at",
+        "result_status",
+        "error_code",
+        "audit_id",
+        "guidance",
+        "execution_outcome",
+    }
     assert outcome["guidance"] is None
     assert "permission denied" not in str(shown)
 
@@ -234,6 +242,37 @@ async def test_failed_resume_shows_on_show_and_list(monkeypatch: pytest.MonkeyPa
     mcp_row = _row_to_dict(stored)
     assert mcp_row["result_state"] == "failed"
     assert mcp_row["resume_outcome"] == outcome
+
+
+@pytest.mark.asyncio
+async def test_uncertain_resume_shows_uncertain_on_rest_list_and_mcp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run whose audit write failed reads ``uncertain`` in every view, not ``failed`` (#5025)."""
+    request_id = await _park_approved()
+
+    async def _fake_dispatch(**_kwargs: object) -> OperationResult:
+        return result_audit_commit_failed(_OP_ID, 7.0)
+
+    monkeypatch.setattr(dispatcher_module, "dispatch", _fake_dispatch)
+    async with get_sessionmaker()() as s:
+        row = await get_request(s, tenant_id=_TENANT_ID, request_id=request_id)
+    await resume_dispatch_after_approval(operator=_operator(_APPROVER_SUB), request=row)
+
+    shown = await _get_json(f"/api/v1/approvals/{request_id}")
+    assert shown["result_state"] == "uncertain"
+    assert shown["resume_outcome"]["error_code"] == "audit_commit_failed"
+    assert shown["resume_outcome"]["execution_outcome"] == "uncertain"
+
+    listed = await _get_json("/api/v1/approvals?status=approved")
+    (row_view,) = [v for v in listed if v["id"] == str(request_id)]
+    assert row_view["result_state"] == "uncertain"
+
+    async with get_sessionmaker()() as s:
+        stored = await get_request(s, tenant_id=_TENANT_ID, request_id=request_id)
+    mcp_row = _row_to_dict(stored)
+    assert mcp_row["result_state"] == "uncertain"
+    assert mcp_row["resume_outcome"]["execution_outcome"] == "uncertain"
 
 
 @pytest.mark.asyncio

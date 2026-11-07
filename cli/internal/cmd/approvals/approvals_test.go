@@ -1344,6 +1344,34 @@ func TestPrintListTableRendersRunState(t *testing.T) {
 	}
 }
 
+// TestPrintDetailAndListRenderUncertainRun: when MEHO does not know if the
+// change happened, show and list say UNCERTAIN and the advice, never FAILED
+// (#5025).
+func TestPrintDetailAndListRenderUncertainRun(t *testing.T) {
+	d := failedRunView(t)
+	uncertain := api.ApprovalResultStateUncertain
+	d.ResultState = &uncertain
+
+	var buf bytes.Buffer
+	printDecision(&buf, stubID, &d, nil)
+	out := buf.String()
+	for _, want := range []string{"Run:          UNCERTAIN", "Do not run it again. Check the target first."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printDecision render missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "FAILED") {
+		t.Errorf("printDecision says FAILED for an uncertain run:\n%s", out)
+	}
+
+	var list bytes.Buffer
+	printListTable(&list, []api.ApprovalRequestView{d}, "", "", 0)
+	fields := strings.Fields(strings.Split(list.String(), "\n")[1])
+	if len(fields) < 3 || fields[2] != "UNCERTAIN" {
+		t.Errorf("list RUN = %v, want UNCERTAIN", fields)
+	}
+}
+
 // guidanceRunView is an approved request whose run ended result_unknown
 // while the VM waits on a question (#5377): the run summary carries the
 // next step MEHO names.

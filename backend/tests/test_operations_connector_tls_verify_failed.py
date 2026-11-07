@@ -326,6 +326,7 @@ async def _insert_ingested_descriptor(
     embedding: list[float],
     method: str = "GET",
     path: str = "/version",
+    safety_level: str = "safe",
 ) -> None:
     """Seed one enabled ``source_kind='ingested'`` descriptor row."""
     descriptor = EndpointDescriptor(
@@ -345,7 +346,7 @@ async def _insert_ingested_descriptor(
         parameter_schema={"type": "object", "properties": {}},
         response_schema=None,
         llm_instructions=None,
-        safety_level="safe",
+        safety_level=safety_level,
         requires_approval=False,
         is_enabled=True,
         embedding=embedding,
@@ -620,3 +621,54 @@ def test_substring_fallback_classifies_when_cause_chain_empty() -> None:
         isinstance(refused.__cause__, ssl.SSLCertVerificationError)
         or ("CERTIFICATE_VERIFY_FAILED" in str(refused))
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("connector_cls", "impl_id", "safety_level", "uncertain"),
+    [
+        # A change: the request may have reached the vendor, so MEHO does not know (#5025).
+        (_ReadTimeoutConnector, "vcfops-rest-read-timeout", "caution", True),
+        # A change, but nothing was sent: a plain error.
+        (_ConnectTimeoutConnector, "vcfops-rest-connect-timeout", "caution", False),
+        # A read: a plain error.
+        (_ReadTimeoutConnector, "vcfops-rest-read-timeout", "safe", False),
+    ],
+)
+async def test_dispatch_timeout_of_a_change_is_uncertain_only_after_sending(
+    connector_cls: type[_TransportFailConnector],
+    impl_id: str,
+    safety_level: str,
+    uncertain: bool,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """A read timeout on a change says "uncertain" and "do not retry"; the rest stay errors."""
+    register_connector_v2(product="vcfops", version="9", impl_id=impl_id, cls=connector_cls)
+    await _insert_ingested_descriptor(
+        session=session,
+        product="vcfops",
+        version="9",
+        impl_id=impl_id,
+        op_id="GET:/version",
+        embedding=stub_embedding_service.encode_one.return_value,
+        safety_level=safety_level,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=f"{impl_id}-9",
+        op_id="GET:/version",
+        target=_FakeTarget(name="vrli-lab", host="vrli.lab.internal"),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_timeout"
+    if uncertain:
+        assert result.extras["execution_outcome"] == "uncertain"
+        assert result.extras["retry"] is False
+        assert "Do not run it again" in (result.error or "")
+    else:
+        assert "execution_outcome" not in result.extras
+        assert "retry" not in result.extras

@@ -223,6 +223,10 @@ func (r *inOrderRunner) runStep(ctx context.Context, item *api.ApprovalRequestVi
 		if item.ResultState != nil && *item.ResultState == api.ApprovalResultStateStarted {
 			return &stepStop{detail: "approved earlier; " + fmt.Sprintf(stepNotEnded, step.ID)}
 		}
+		if item.ResultState != nil && *item.ResultState == api.ApprovalResultStateUncertain {
+			return &stepStop{detail: "approved earlier, but MEHO does not know if the change happened. " +
+				"Do not run it again. Check the target first"}
+		}
 		return &stepStop{detail: fmt.Sprintf(
 			"approved earlier, but its run did not end OK (run: %s). An approval is used once, "+
 				"so this step cannot run again from here. Ask the requester to send it again",
@@ -307,6 +311,9 @@ func (r *inOrderRunner) waitForStoredResult(ctx context.Context, id uuid.UUID, s
 				step.Outcome = stepApproved
 				step.Detail = "the waiting requester ran it; ran OK"
 				return nil
+			case api.ApprovalResultStateUncertain:
+				return &stepStop{detail: "approved, but MEHO does not know if the change happened. " +
+					"Do not run it again. Check the target first"}
 			case api.ApprovalResultStateFailed:
 				return &stepStop{detail: "approved, but the run by the waiting requester failed. An approval " +
 					"is used once, so this step cannot run again from here. Ask the requester to send it again"}

@@ -441,6 +441,7 @@ from meho_backplane.operations.shutdown_drain import (
     shutting_down_result,
     track_operation,
 )
+from meho_backplane.operations.uncertain_outcome import changes_target
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
     apply_connector_boundary_redaction,
@@ -1771,7 +1772,12 @@ async def _run_branch_with_error_handling(
     except httpx.TimeoutException as timeout_exc:
         duration_ms = _elapsed_ms(started)
         return await _audit_error_and_return(
-            result_connector_timeout(op_id, timeout_exc, duration_ms),
+            result_connector_timeout(
+                op_id,
+                timeout_exc,
+                duration_ms,
+                changes_target=changes_target(descriptor.safety_level),
+            ),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
@@ -1783,7 +1789,12 @@ async def _run_branch_with_error_handling(
     except httpx.TransportError as transport_exc:
         duration_ms = _elapsed_ms(started)
         return await _audit_error_and_return(
-            result_connector_timeout(op_id, transport_exc, duration_ms),
+            result_connector_timeout(
+                op_id,
+                transport_exc,
+                duration_ms,
+                changes_target=changes_target(descriptor.safety_level),
+            ),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,

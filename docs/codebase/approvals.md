@@ -1365,7 +1365,7 @@ There is no MCP tool for it; the agent working surface is unchanged.
 | Rule | Refusal |
 |---|---|
 | The caller made the request (`sub == principal_sub`). | 403 `not_request_owner` |
-| `result_state` is `failed`. Not `executed`, not `started` (still running), not a request that is not `approved`. | 409 `approval_rerun_not_allowed` |
+| `result_state` is `failed`. Not `executed`, not `uncertain` (MEHO does not know if the change happened, so it never runs it again), not `started` (still running), not a request that is not `approved`. | 409 `approval_rerun_not_allowed` |
 | MEHO has params to run with: the caller sent them, or the request stored them. | 422 `approval_rerun_params_required` |
 | The `expires_at` deadline has not passed. | 409 `approval_rerun_needs_new_approval` (`deadline_passed`) |
 | MEHO was not updated since the request was made (same check as `refuse_resume_if_release_changed`). | same (`release_changed`) |
@@ -1682,7 +1682,8 @@ not stored):
 | `not_started` | Approved. No resumer has claimed the run yet (`resumed_at IS NULL`). |
 | `started` | A resumer claimed the run (`resumed_at` is set), but no result is stored yet. The op may still be running. |
 | `executed` | The stored result (`resume_result`) has `status == "ok"`. |
-| `failed` | A result is stored and its `status` is not `ok`. |
+| `failed` | A result is stored, its `status` is not `ok`, and it does not say the outcome is unknown. |
+| `uncertain` | A result is stored, its `status` is not `ok`, and `extras.execution_outcome` is `uncertain` (#5025). MEHO does not know if the change happened. |
 
 So a client that lists or shows requests can tell "approved, not run yet"
 from "approved and run" without polling the owner-only `/result` read. The
@@ -1692,10 +1693,60 @@ the payload.
 Both resume paths store the result (`persist_resume_result`): the operator
 surface (`resume_dispatch_after_approval`) and the in-process agent waiter
 (`_resume_approved_or_already_resumed` in `agent/approval_wait.py`). So a
-request the agent resumed also reaches `executed` or `failed`. Limits of
-`started`: the result write is best-effort, and a re-dispatch that raised
-instead of returning an envelope stores nothing. In those cases the row
-stays `started`.
+request the agent resumed also reaches `executed`, `failed` or `uncertain`.
+Limits of `started`: the result write is best-effort, and a re-dispatch that
+raised instead of returning an envelope stores nothing. In those cases the
+row stays `started` until the next start of MEHO, when the restart recovery
+below ends it as `uncertain`.
+
+#### `uncertain`: MEHO does not know if the change happened (#5025)
+
+One rule for every view: `result_state_of_envelope` in
+`operations/approval_queue.py`. REST, MCP, the CLI (`UNCERTAIN`) and the
+console all read it. Every view gives the same advice: do not run it again,
+check the target first. No view says "failed" or "did not succeed" for it.
+
+Four cases end as `uncertain`:
+
+| Case | Where | Stored result |
+|---|---|---|
+| The audit record could not be saved after the change ran. | `result_audit_commit_failed` | `error_code` `audit_commit_failed` |
+| A change was sent and the answer was lost: a read timeout, a write timeout, or a dropped connection after the request was written. | `result_connector_timeout(..., changes_target=True)` | `error_code` `connector_timeout`, `retry: false` |
+| MEHO stopped in the middle of an approved run. | `recover_interrupted_approvals` | `error_code` `interrupted_by_restart`, `retry: false` |
+| An async run of a change lost its worker. | `operation_run_reaper` | the run row is `uncertain` (see `async-governed-dispatch.md`) |
+
+A connect timeout, a pool timeout and a refused connection stay plain errors,
+because nothing was sent. A timeout of a read operation (`safety_level`
+`safe`) stays a plain error. Any other level counts as a change
+(`changes_target`).
+
+MEHO never runs an uncertain change again. `retry` is `false`, an approved
+request starts only once (`resumed_at`), and the re-run (#5417) refuses a
+request whose state is not `failed`, so it refuses `uncertain` too.
+
+**Restart recovery.** At start-up (`main.py`, after the release check),
+`recover_interrupted_approvals` gives every `approved` request that has
+`resumed_at` set and no result a stored `uncertain` result and one audit row
+(`path` `approval.recovery`). It runs nothing. It is safe on a one-machine
+install because the old pod is stopped first and its running work drained,
+so a request that is `started` with no result cannot still be running. An
+install with several pods needs a lease (a time-limited claim that shows a
+run is alive) before it may use this step.
+
+**What the approver can check.** The approver gets the request itself (the
+operation, the target and the params the approval named), the audit row of
+a recovery, and the advice to check the target. MEHO keeps no vendor id
+(for example a job id) from a lost or unauditable answer: the vendor answer
+is dropped on purpose when no audit record can be written, and nothing may
+leave MEHO without one. A timeout has no vendor answer at all.
+
+**Paths that start a change.** The approved path has a lasting record before
+the vendor call (the `resumed_at` claim). An async run has a lasting
+`operation_run` row. A change that runs at once with no approval (a standing
+grant for a service principal, or a safe or auto-approved call) has no
+record before the vendor call: its first record is the audit row written
+after the call. That gap is open. A restart in the middle of such a call
+leaves no trace, and the caller sees the dropped connection.
 
 ### 4. Approved, but the run failed: `resume_outcome` (#3543)
 
@@ -1711,6 +1762,7 @@ example a Vault write that Vault refused). `result_state` already tells
 | `result_status` | `status` of the stored result: `ok`, `error`, `denied`, ... `null` while no result is stored. |
 | `error_code` | `extras.error_code` of a failed run, for example `connector_error`. |
 | `audit_id` | The audit row the dispatcher wrote for the run. |
+| `execution_outcome` | `uncertain` when MEHO does not know if the change happened (#5025). `null` for any other run. |
 | `guidance` | The next step a failed multi-step operation names (#5377), for example "The VM waits on question _vmx1: show it to the user and answer it with vmware.vm.question.answer." `null` for any other run. |
 
 `resume_outcome` is `null` for a request that is not approved, and before
@@ -1767,7 +1819,10 @@ Where it shows:
   request again after the decision, so it prints the same summary as
   `show`.
 - **Console** `/ui/approvals`: a run badge next to the `approved` pill in
-  the history list (`ran OK`, `run failed`, ...). The detail modal of a
+  the history list (`ran OK`, `run failed`, `outcome unknown`, ...). The
+  detail modal of an uncertain run shows a warning banner with the advice
+  "Do not run it again. Check the target first.", and its card after an
+  approve says "Approved, but the outcome is unknown". The detail modal of a
   failed run shows a red banner with the error code and a link to the audit
   row (`/ui/audit?audit_id=<id>`). The card after an approve says "Approved,
   but the run failed" when the run returned an error. Both show a "Next
@@ -1794,8 +1849,9 @@ poll `/result` to learn whether the run ended.
 shape, odd envelopes, a resume that errors shows on REST show, list and
 MCP, the `guidance` stamp rules, a credential operation with no vendor
 text, and a result stored before the stamp that shows no guidance),
-`tests/test_ui_approvals.py` (run badge, failed-run modal, failed approve
-card, the "Next step" line, and no "Next step" for an older stored result),
+`tests/test_uncertain_outcome.py` (the shared rule, the timeout rule and the
+restart recovery), `tests/test_ui_approvals.py` (run badge, failed-run modal,
+uncertain-run badge, modal and card, failed approve card, the "Next step" line, and no "Next step" for an older stored result),
 `tests/test_connectors_vmware_rest_typed_vm_question.py` (a CD-ROM change
 that times out on a VM question names the question id in the summary) and
 `cli/internal/cmd/approvals/approvals_test.go`.

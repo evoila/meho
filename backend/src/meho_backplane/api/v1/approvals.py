@@ -274,6 +274,10 @@ class ApprovalResumeOutcomeView(BaseModel):
     #: (#5377), for example "The VM waits on question _vmx1: ...". ``None``
     #: for any other run, and always for an operation in a secret class.
     guidance: str | None
+    #: ``uncertain`` when MEHO does not know if the change happened (#5025):
+    #: do not run it again, check the target first. ``None`` for any other
+    #: run. Additive.
+    execution_outcome: str | None = None
 
 
 class ApprovalRequestView(BaseModel):
@@ -306,7 +310,8 @@ class ApprovalRequestView(BaseModel):
     reveal_secret: bool = False
     status: ApprovalRequestStatus
     #: Run phase of an approved request (#3486): ``not_started`` /
-    #: ``started`` / ``executed`` / ``failed``. ``None`` unless ``status`` is
+    #: ``started`` / ``executed`` / ``failed`` / ``uncertain`` (#5025, MEHO
+    #: does not know if the change happened). ``None`` unless ``status`` is
     #: ``approved``. Read off the row; ``status`` keeps its four values.
     #: Additive; a client that ignores it is unaffected.
     result_state: ApprovalResultState | None = None
@@ -512,6 +517,7 @@ def _resume_outcome_view(row: ApprovalRequest) -> ApprovalResumeOutcomeView | No
         error_code=outcome.error_code,
         audit_id=outcome.audit_id,
         guidance=outcome.guidance,
+        execution_outcome=outcome.execution_outcome,
     )
 
 

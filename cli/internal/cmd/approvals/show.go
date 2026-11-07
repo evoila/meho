@@ -246,6 +246,10 @@ func printRunOutcome(w io.Writer, d *api.ApprovalRequestView) {
 	if o.Guidance != nil && *o.Guidance != "" {
 		fmt.Fprintf(w, "Next step:    %s\n", output.SafeText(*o.Guidance))
 	}
+	// MEHO does not know if the change happened (#5025). Say what to do.
+	if d.ResultState != nil && *d.ResultState == api.ApprovalResultStateUncertain {
+		fmt.Fprintln(w, "Warning:      MEHO does not know if the change happened. Do not run it again. Check the target first.")
+	}
 	if o.AuditId != nil {
 		fmt.Fprintf(w, "Run audit:    %s (meho audit show %s)\n", o.AuditId.String(), o.AuditId.String())
 	}
@@ -258,7 +262,7 @@ func printResultHint(w io.Writer, d *api.ApprovalRequestView) {
 		return
 	}
 	switch *d.ResultState {
-	case api.ApprovalResultStateExecuted, api.ApprovalResultStateFailed:
+	case api.ApprovalResultStateExecuted, api.ApprovalResultStateFailed, api.ApprovalResultStateUncertain:
 		fmt.Fprintf(w, "Run output:   meho approvals result %s (only the sender can read it)\n", d.Id.String())
 	}
 }
@@ -280,6 +284,8 @@ func runStateLabel(s *api.ApprovalResultState) string {
 		return "ok"
 	case api.ApprovalResultStateFailed:
 		return "FAILED"
+	case api.ApprovalResultStateUncertain:
+		return "UNCERTAIN"
 	default:
 		return string(*s)
 	}

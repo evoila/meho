@@ -66,6 +66,7 @@ const (
 	ApprovalResultStateFailed     ApprovalResultState = "failed"
 	ApprovalResultStateNotStarted ApprovalResultState = "not_started"
 	ApprovalResultStateStarted    ApprovalResultState = "started"
+	ApprovalResultStateUncertain  ApprovalResultState = "uncertain"
 )
 
 // Defines values for AuditEventClass.
@@ -476,6 +477,7 @@ const (
 	OperationRunStatusPending   OperationRunStatus = "pending"
 	OperationRunStatusRunning   OperationRunStatus = "running"
 	OperationRunStatusSucceeded OperationRunStatus = "succeeded"
+	OperationRunStatusUncertain OperationRunStatus = "uncertain"
 )
 
 // Defines values for OrderByDirection.
@@ -1584,6 +1586,12 @@ type ApprovalRequestView struct {
 	//   agent waiter) store the envelope they get back.
 	// * :attr:`EXECUTED` -- the stored result has ``status == "ok"``.
 	// * :attr:`FAILED` -- a result is stored and its ``status`` is not ``ok``.
+	// * :attr:`UNCERTAIN` -- a result is stored, its ``status`` is not ``ok``,
+	//   and it says MEHO does not know if the change happened
+	//   (``extras.execution_outcome == "uncertain"``). This covers a lost
+	//   vendor answer after the request was sent, a failed audit write, and an
+	//   approved run that MEHO lost in a restart. MEHO never runs it again, and
+	//   every view says: do not run it again, check the target first.
 	ResultState *ApprovalResultState `json:"result_state,omitempty"`
 
 	// ResumeOutcome What happened when an approved request ran (#3543).
@@ -1663,6 +1671,12 @@ type ApprovalRequestView struct {
 //     agent waiter) store the envelope they get back.
 //   - :attr:`EXECUTED` -- the stored result has “status == "ok"“.
 //   - :attr:`FAILED` -- a result is stored and its “status“ is not “ok“.
+//   - :attr:`UNCERTAIN` -- a result is stored, its “status“ is not “ok“,
+//     and it says MEHO does not know if the change happened
+//     (“extras.execution_outcome == "uncertain"“). This covers a lost
+//     vendor answer after the request was sent, a failed audit write, and an
+//     approved run that MEHO lost in a restart. MEHO never runs it again, and
+//     every view says: do not run it again, check the target first.
 type ApprovalResultState string
 
 // ApprovalResultView Principal-scoped view of an approved dispatch's result (#3209).
@@ -1721,11 +1735,12 @@ type ApprovalResultView struct {
 // A summary read off the stored result envelope. The result body and the
 // free-text error stay on the owner-only “/result“ read.
 type ApprovalResumeOutcomeView struct {
-	AuditId      *openapi_types.UUID `json:"audit_id"`
-	ErrorCode    *string             `json:"error_code"`
-	Guidance     *string             `json:"guidance"`
-	ResultStatus *string             `json:"result_status"`
-	ResumedAt    *string             `json:"resumed_at"`
+	AuditId          *openapi_types.UUID `json:"audit_id"`
+	ErrorCode        *string             `json:"error_code"`
+	ExecutionOutcome *string             `json:"execution_outcome"`
+	Guidance         *string             `json:"guidance"`
+	ResultStatus     *string             `json:"result_status"`
+	ResumedAt        *string             `json:"resumed_at"`
 }
 
 // ApprovalsStatus The approval settings in force (#4830).
@@ -7358,6 +7373,9 @@ type OperationOverrideRowScope string
 //     from a persisted error envelope on a “succeeded“ run.
 //   - :attr:`CANCELLED` -- an authorized operator cancelled a non-terminal
 //     run (terminal).
+//   - :attr:`UNCERTAIN` -- the worker of a run that changes something died
+//     mid-flight (reaped), so MEHO does not know if the change happened
+//     (terminal, #5025). A dead run of a read operation is “failed“.
 //
 // There is deliberately no “awaiting_approval“ state (unlike
 // :class:`AgentRunStatus`): a governed dispatch runs to a terminal
@@ -7417,6 +7435,9 @@ type OperationRunStatusResponse struct {
 	//   from a persisted error envelope on a ``succeeded`` run.
 	// * :attr:`CANCELLED` -- an authorized operator cancelled a non-terminal
 	//   run (terminal).
+	// * :attr:`UNCERTAIN` -- the worker of a run that changes something died
+	//   mid-flight (reaped), so MEHO does not know if the change happened
+	//   (terminal, #5025). A dead run of a read operation is ``failed``.
 	//
 	// There is deliberately no ``awaiting_approval`` state (unlike
 	// :class:`AgentRunStatus`): a governed dispatch runs to a terminal
@@ -7473,6 +7494,9 @@ type OperationRunSummaryResponse struct {
 	//   from a persisted error envelope on a ``succeeded`` run.
 	// * :attr:`CANCELLED` -- an authorized operator cancelled a non-terminal
 	//   run (terminal).
+	// * :attr:`UNCERTAIN` -- the worker of a run that changes something died
+	//   mid-flight (reaped), so MEHO does not know if the change happened
+	//   (terminal, #5025). A dead run of a read operation is ``failed``.
 	//
 	// There is deliberately no ``awaiting_approval`` state (unlike
 	// :class:`AgentRunStatus`): a governed dispatch runs to a terminal
@@ -12018,7 +12042,7 @@ type PostResultQueryApiV1OperationsResultQueryPostParams struct {
 
 // ListOperationRunsApiV1OperationsRunsGetParams defines parameters for ListOperationRunsApiV1OperationsRunsGet.
 type ListOperationRunsApiV1OperationsRunsGetParams struct {
-	// Status Filter by lifecycle status (pending / running / succeeded / failed / cancelled). Omit for every state.
+	// Status Filter by lifecycle status (pending / running / succeeded / failed / cancelled / uncertain). Omit for every state.
 	Status *OperationRunStatus `form:"status,omitempty" json:"status,omitempty"`
 
 	// Limit Max runs per page (1..500).

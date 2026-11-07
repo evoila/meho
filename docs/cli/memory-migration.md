@@ -62,8 +62,9 @@ are **always skipped** in `--non-interactive` mode, even when
 `--include-machine-local` is set. The rationale: machine-local content must be
 reviewed interactively before leaving the laptop.
 
-To mark a file as machine-local yourself, add this HTML comment anywhere in
-the file:
+To mark a file as machine-local yourself, add this HTML comment to the body of
+the file. When the file starts with front-matter, put the comment after the
+closing `---`. MEHO does not look for it inside the front-matter:
 
 ```markdown
 <!-- meho:machine-local -->
@@ -122,7 +123,7 @@ server-side upsert contract.
 | `--dry-run` | `false` | Print one JSON request body per entry that would be migrated; make no network call. |
 | `--non-interactive` | `false` | Skip the picker; migrate `user` and `feedback` entries at their suggested scope. All other entries (`project`, `reference`, or no `type`) are refused: the CLI names each one and exits with an error after it sends the rest. Machine-local entries are always skipped. |
 | `--include-machine-local` | `false` | Include machine-local entries in the dry-run preview and in the interactive picker (changes the default action from *Skip* to *Migrate*). Has no effect in `--non-interactive` mode. |
-| `--mark-migrated` | `false` | Write the migration-complete marker when the run ends without an error and sent its entries (silences the post-login nudge). It is not written when you cancel, choose no entries, or an entry is refused. |
+| `--mark-migrated` | `false` | Write the migration-complete marker when the run ends without an error (silences the post-login nudge). It is not written when you cancel the picker, choose no entries, an entry is refused, or an entry still fails after its retries. It is still written when you choose *Skip* or *Abort* at a submission error prompt, and when a `--non-interactive` run skips every entry because all of them are machine-local. |
 | `--backplane <url>` | from `meho login` config | Override the backplane URL. |
 
 ---
@@ -140,7 +141,8 @@ The nudge is non-fatal and never blocks or delays login.
 
 The marker is the file `$XDG_CONFIG_HOME/meho/migrated-from/<dir>`
 (`~/.config/meho/migrated-from/<dir>` when `XDG_CONFIG_HOME` is not set).
-`<dir>` is the memory directory path with `/` and `:` replaced by `_`.
+`<dir>` is the memory directory path with `/` and `:` replaced by `_`, and
+with the leading `_` characters removed.
 `--mark-migrated` writes it. Delete the file to see the nudge again.
 
 ---

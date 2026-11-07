@@ -150,6 +150,7 @@ from meho_backplane.operations.approval_resume_checks import (
 )
 from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.operations.role_floors import role_floor_denial
+from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_result
 from meho_backplane.version import running_release_id
 
 __all__ = [
@@ -2339,6 +2340,10 @@ async def resume_dispatch_after_approval(
     (:func:`refuse_resume_if_preview_changed`). Either change refuses the
     run, and the requester asks again.
     """
+    # #5024: a stopping pod starts no new run. The claim stays free, so
+    # nothing is used up and nothing was sent.
+    if is_draining():
+        return shutting_down_result(request.op_id)
     # The requester's reveal choice is on the request row, outside the
     # params and the hash (``create_pending_request``). It goes on the
     # params of the run only.
@@ -2363,6 +2368,12 @@ async def resume_dispatch_after_approval(
     # that read the same approved row, or a racing operator
     # surface), so no-op with a benign already_resumed result rather than
     # double-dispatching the approved write.
+    #
+    # #5024, checked again: the stop may have come during the lookups
+    # above. The claim is the last step before the run, so this is the
+    # last point at which nothing is used up yet.
+    if is_draining():
+        return shutting_down_result(request.op_id)
     if not await claim_resume(request.id):
         _log().info(
             "approval_resume_already_claimed",

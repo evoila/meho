@@ -6,15 +6,18 @@
 ## Overview
 
 The knowledge-base (`kb`) service is the persistent, tenant-scoped
-durable-team-knowledge layer. It backs three transports:
+durable-team-knowledge layer. It has four callers:
 
 - **REST** under `/api/v1/kb/...` (G4.1-T2).
 - **MCP** via the `search_knowledge` + `add_to_knowledge` meta-tools
   in [`mcp/tools/knowledge.py`](../../backend/src/meho_backplane/mcp/tools/knowledge.py)
   (G4.1-T3).
-- **CLI** through the `meho kb` verb (G4.1-T4).
+- **Console** under `/ui/kb` (`ui/routes/kb/routes.py`).
+- **CLI** through the `meho kb` verb (G4.1-T4). The Go CLI calls the
+  REST routes; `meho kb search` calls `POST /api/v1/retrieve` with
+  `source="kb"`.
 
-All three transports funnel through one
+REST, MCP and the console call one
 [`KbService`](../../backend/src/meho_backplane/kb/service.py)
 instance. Rows live in the shared `documents` table under
 `source = 'kb'` — the same table that backs `memory` and any future
@@ -128,8 +131,9 @@ read as `state="legacy"` with every other field `None`.
 ### `InvalidKbSlugError` (`kb/schemas.py`)
 
 Subclass of `ValueError` raised by `validate_slug` when a slug fails
-the `SLUG_PATTERN` shape rule (lowercase letter start, kebab-case,
-ends with letter or digit). The route layer (T2) catches it and
+the `SLUG_PATTERN` shape rule: it starts with a lowercase letter, ends
+with a lowercase letter or digit, and uses only lowercase letters,
+digits, hyphens and dots. The route layer (T2) catches it and
 translates to HTTP 422; the MCP tool (T3) catches it and re-raises
 as `McpInvalidParamsError` (JSON-RPC `-32602`); the CLI (T4) catches
 it and exits non-zero.
@@ -142,12 +146,12 @@ before returning. Seven verbs:
 
 | Verb | What it does | Throws |
 |---|---|---|
-| `create_entry(tenant_id, slug, body, metadata=None, *, actor_sub=None)` | Insert or replace one entry (explicit last-write-wins); returns `(entry, created)`. Validates slug, stamps attribution and `direct` provenance, delegates to `index_document`. | `InvalidKbSlugError` on bad slug |
+| `create_entry(tenant_id, slug, body, metadata=None, *, actor_sub=None, own_entries_only=False)` | Insert or replace one entry (explicit last-write-wins); returns `(entry, created)`. Validates slug, stamps attribution and `direct` provenance, runs `kb/revisions.py::write_entry`. | `InvalidKbSlugError` on bad slug |
 | `get_entry(tenant_id, slug)` | Natural-key SELECT; returns the latest `KbEntry` (with its current `revision_id`) or `None`. | – |
 | `get_revision(tenant_id, entry_id, revision_id)` | Exact retained read. Returns `KbEntryRevision` only when the revision belongs to the entry and both belong to the tenant; otherwise `None`, without saying why. | – |
 | `list_entries(tenant_id, filter_pattern=None, limit=100, offset=0, order="slug")` | List entries; slug-sorted by default, `order="newest"` sorts by `updated_at`, newest first; SQL `LIKE` pattern forwarded verbatim. | `ValueError` on negative `limit`/`offset` |
 | `delete_entry(tenant_id, slug)` | Delete the head and all its revisions in one transaction; returns whether a row existed. | Database errors propagate; nothing is removed |
-| `search_entries(tenant_id, query, filters=None, limit=10)` | Hybrid BM25 + cosine retrieval with `source=KB_SOURCE` pinned. | – |
+| `search_entries(tenant_id, query, *, filters=None, limit=10)` | Hybrid BM25 + cosine retrieval with `source=KB_SOURCE` pinned. | `ValueError` on negative `limit` |
 | `ingest_directory(directory, tenant_id, dry_run=False)` | Read every `.md` file in sorted order, report slug conflicts without writing them, ingest the rest; idempotent. Per-file failures counted, run continues. | `KbIngestRootError` outside `KB_INGEST_ROOT` |
 
 ### `walk_kb_directory` (`kb/file_walker.py`)
@@ -156,7 +160,7 @@ The directory-walking helper `ingest_directory` calls. Reads
 Markdown front-matter via `python-frontmatter` and yields a
 `KbFileRecord(path, relative_path, slug, body, metadata)` for each
 valid file, sorted by POSIX relative path (`os.walk` order depends
-on the filesystem, so the walker sorts). `path` is only used to read
+on the filesystem, so the walker sorts). `path` serves only to read
 the file; `relative_path` is what gets stored and reported.
 Per-file errors (binary file, unreadable bytes, invalid slug,
 malformed front-matter) are caught inside the walker and appended
@@ -217,8 +221,8 @@ the folder:
    entry moved between read and publish (another write committed, or
    its metadata changed; on SQLite, which has no row lock, this is
    also caught by the read-back after the writes), or the next
-   `revision_number` is already taken, the write rolls back and runs
-   again from the start, up to three times. Each rerun reads the
+   `revision_number` is already taken, the write rolls back and starts
+   again. It tries at most three times in total. Each rerun reads the
    entry again and runs the metadata function again, so the
    ownership check always decides against the entry the publish step
    then verifies. Two operators that both see a new slug as unused
@@ -284,7 +288,7 @@ from request JSON: `merge_attribution` strips any caller-supplied
 `created_by_sub` / `last_updated_by_sub` from the create-body
 `metadata` before stamping, so an operator cannot forge authorship.
 An unattended re-index that passes `actor_sub=None` leaves attribution
-untouched (it does not erase a previously-attributed row's keys).
+untouched (it keeps the attribution keys a row already has).
 
 The two keys surface on **every** kb read surface:
 `POST /api/v1/kb`, `GET /api/v1/kb/{slug}`, the `GET /api/v1/kb` list
@@ -435,7 +439,9 @@ Transports that call into this service:
 
 - `meho_backplane.api.v1.kb` (REST, G4.1-T2).
 - `meho_backplane.mcp.tools.knowledge` (MCP, G4.1-T3).
-- `meho_backplane.cli.kb` (CLI, G4.1-T4).
+- `meho_backplane.ui.routes.kb.routes` (console).
+- The Go CLI in `cli/internal/cmd/kb/` calls the REST routes, not this
+  service.
 
 ## Known issues
 
@@ -450,10 +456,8 @@ Transports that call into this service:
   until then search returns its whole-body head. Running
   `meho kb ingest` again (or re-adding the entry) builds them.
 
-Otherwise none outstanding. The kb-shaped vocabulary is stable; the substrate's
-metadata-filter surface is reserved for future v0.2.next work — a
-caller passing extra keys to `filters` today silently has them
-ignored (substrate cap, not a kb-package decision).
+Otherwise none outstanding. Every `filters` key other than `kind` is
+passed to `retrieve` as a metadata containment filter.
 
 ## References
 
@@ -467,5 +471,5 @@ ignored (substrate cap, not a kb-package decision).
   different scope encoding + RBAC.
 - [`untrusted-text-envelope.md`](./untrusted-text-envelope.md) — the
   `meho://kb/{slug}` resource serves `body` inside the
-  `<<UNTRUSTED_AGENT_TEXT` guard envelope (stored prompt-injection
-  hardening at the LLM-facing read boundary).
+  `<<UNTRUSTED_AGENT_TEXT` guard envelope, so the model reads stored
+  text as data, not as instructions.

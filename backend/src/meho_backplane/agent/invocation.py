@@ -80,13 +80,18 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import structlog
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.agent.invoke import current_agent_run_id_var
+from meho_backplane.agent.models import (
+    agent_tier_for,
+    settings_model_id,
+    settings_model_resolver,
+)
 from meho_backplane.agent.run import (
     AgentDefinition,
     AgentRun,
@@ -132,6 +137,9 @@ from meho_backplane.operations.budget_enforcement import (
 )
 from meho_backplane.operations.identity_budget import TokenUsage
 from meho_backplane.settings import Settings, get_settings
+
+if TYPE_CHECKING:
+    from pydantic_ai.models import Model
 
 __all__ = [
     "RUN_INPUT_MAX_CHARS",
@@ -587,12 +595,14 @@ class AgentInvoker:
         # child-run recorder, so a run started here can invoke another agent. The
         # finalizer (G11.1-T8 #1087) closes each recorded child row to its
         # terminal state, so an invoked child reaches ``succeeded`` / ``failed``
-        # rather than staying stuck ``running``. An injected runtime (tests)
-        # controls its own wiring.
+        # rather than staying stuck ``running``. The model resolver (#5850)
+        # sends every run to the backend AGENT_MODEL_BACKEND names. An
+        # injected runtime (tests) controls its own wiring.
         self._runtime: AgentRun = (
             runtime
             if runtime is not None
             else PydanticAgentRun(
+                model_resolver=settings_model_resolver(),
                 child_agent_resolver=_resolve_child_definition,
                 child_run_recorder=_record_child_run,
                 child_run_finalizer=_finalize_child_run,
@@ -720,37 +730,41 @@ class AgentInvoker:
         toolset spec passes through verbatim — the T3 resolver intersects it
         with the operator's permissions at run time.
 
-        ``tier`` is deliberately *not* threaded from ``entry.model_tier``
-        in G11.5-T1 (#1075): the persisted
-        :class:`~meho_backplane.agents.schemas.AgentModelTier`
-        vocabulary (``standard`` / ``fast`` / ``deep``) and the resolver's
-        :class:`~meho_backplane.agent.models.AgentTier` vocabulary
-        (``triage`` / ``investigate`` / ``summarize``) are orthogonal:
-        the first is a cost/capability ladder, the second is a workflow
-        role. A naive equate-by-position mapping would be semantically
-        wrong, and the API-surface
-        :class:`~meho_backplane.agents.schemas.AgentDefinitionCreate.model_tier`
-        is a public contract a rename would break. The reconciliation
-        (single enum / explicit mapping table + Alembic retag of stored
-        values) is queued behind the concrete-backend tasks
-        (#1076 / #1077 / #1078), which exercise the resolver via direct
-        programmatic construction in v0.2; once a concrete non-Anthropic
-        backend ships the persisted vocabulary needs to grow, and that
-        is the right moment to unify. Until then, every persisted
-        definition resolves through :data:`ModelFactory` (the legacy
-        single-tenant path) and the resolver branch in
-        :meth:`~meho_backplane.agent.run.PydanticAgentRun._resolve_model`
-        is reachable only via direct programmatic construction.
+        ``tier`` comes from ``entry.model_tier`` through
+        :func:`~meho_backplane.agent.models.agent_tier_for` (#5850):
+        ``fast`` -> ``triage``, ``standard`` -> ``summarize``, ``deep`` ->
+        ``investigate``. With a tier set, the live runtime builds the
+        model through its resolver, and the budget gate can step the
+        tier down.
         """
-        # TODO(G11.5-T2 — follow up to #1075): map entry.model_tier ->
-        # definition.tier once AgentModelTier (standard/fast/deep) and
-        # AgentTier (triage/investigate/summarize) are reconciled.
         return AgentDefinition(
             name=entry.name,
             system_prompt=entry.system_prompt,
             request_limit=entry.turn_budget,
             toolset=entry.toolset,
+            tier=agent_tier_for(entry.model_tier),
         )
+
+    def _choose_model(
+        self,
+        definition: AgentDefinition,
+        operator: Operator,
+    ) -> tuple[Model | None, str, str]:
+        """Return ``(model, provider, model name)`` for one run (#5850).
+
+        The names go on the run row and on the audit rows of the run's
+        tool calls, so they name the model that answers. When no model
+        can be built (for example a missing key), the model is ``None``
+        and the names come from ``AGENT_MODEL_BACKEND``. The run then
+        tries to build the model again when it starts, fails with the
+        same error, and its row records that error.
+        """
+        try:
+            choice = self._runtime.choose_model(definition, operator)
+        except AgentRunError:
+            provider, model_name = _split_model_id(settings_model_id())
+            return None, provider, model_name
+        return choice.model, choice.provider, choice.name
 
     # -- run creation -----------------------------------------------------
 
@@ -986,6 +1000,7 @@ class AgentInvoker:
         *,
         meta: AgentRunAuditMeta,
         lease_owner: str,
+        model: Model | None = None,
     ) -> None:
         """Background coroutine: run the loop and record its terminal state.
 
@@ -1032,7 +1047,9 @@ class AgentInvoker:
         handle: AgentRunHandle | None = None
         try:
             try:
-                handle = self._runtime.start(definition, operator, inputs, run_id=run_id)
+                handle = self._runtime.start(
+                    definition, operator, inputs, run_id=run_id, model=model
+                )
                 result = await self._runtime.result(handle)
             except asyncio.CancelledError:
                 # cancel_run wrote the terminal row; only charge the finished calls.
@@ -1105,7 +1122,7 @@ class AgentInvoker:
         # backend via its normal resolver path.
         definition = await self._enforce_pre_run_budget(operator, definition)
         settings = get_settings()
-        provider, model = _split_model_id(settings.agent_default_model)
+        chosen, provider, model = self._choose_model(definition, operator)
         # Resource-server delegation (G11.2-T2 #816): a human triggered this
         # run, so bind the acting agent's principal as the RFC 8693 actor
         # while the loop task is created. ``asyncio.create_task`` snapshots
@@ -1140,6 +1157,7 @@ class AgentInvoker:
                 inputs,
                 meta=AgentRunAuditMeta(model=model, provider=provider),
                 lease_owner=lease_owner,
+                model=chosen,
             )
 
         _log.info(
@@ -1454,7 +1472,7 @@ class AgentInvoker:
         # critical here even when the operator is a service account
         # rather than a human.
         definition = await self._enforce_pre_run_budget(operator, definition)
-        provider, model = _split_model_id(settings.agent_default_model)
+        chosen, provider, model = self._choose_model(definition, operator)
         run_id, lease_owner = await self._create_run_row(
             operator,
             entry,
@@ -1485,6 +1503,7 @@ class AgentInvoker:
             inputs,
             meta=AgentRunAuditMeta(model=model, provider=provider),
             lease_owner=lease_owner,
+            model=chosen,
         )
         _log.info(
             "agent_scheduled_started",
@@ -1513,6 +1532,7 @@ class AgentInvoker:
         *,
         meta: AgentRunAuditMeta,
         lease_owner: str,
+        model: Model | None = None,
     ) -> asyncio.Task[None]:
         """Launch the loop as a background task anchored in the run store.
 
@@ -1527,7 +1547,8 @@ class AgentInvoker:
         :data:`~meho_backplane.operations._audit.agent_run_audit_meta_var`
         in :meth:`_run_loop_to_completion`. *lease_owner* is the
         per-process stamp :meth:`_create_run_row` wrote with the lease;
-        the loop's heartbeat sidecar reuses it (#1501).
+        the loop's heartbeat sidecar reuses it (#1501). *model* is the
+        model :meth:`_choose_model` built, named by *meta*.
         """
         task = asyncio.create_task(
             self._run_loop_to_completion(
@@ -1537,6 +1558,7 @@ class AgentInvoker:
                 inputs,
                 meta=meta,
                 lease_owner=lease_owner,
+                model=model,
             ),
             name=f"agent-invoke-{run_id}",
         )
@@ -1738,8 +1760,7 @@ class AgentInvoker:
         # immediately emits a terminal ERROR event (which an
         # ``EventSource`` client would auto-reconnect into).
         definition = await self._enforce_pre_run_budget(operator, definition)
-        settings = get_settings()
-        provider, model = _split_model_id(settings.agent_default_model)
+        chosen, provider, model = self._choose_model(definition, operator)
         run_id, lease_owner = await self._create_run_row(
             operator, entry, provider=provider, model=model, identity_act=entry.identity_ref
         )
@@ -1795,7 +1816,12 @@ class AgentInvoker:
         usage_sink: list[TokenUsage] = []
         try:
             async for event in self._runtime.stream_events(
-                definition, delegated_operator(operator), inputs, run_id, usage_sink=usage_sink
+                definition,
+                delegated_operator(operator),
+                inputs,
+                run_id,
+                usage_sink=usage_sink,
+                model=chosen,
             ):
                 if event.kind is AgentRunEventKind.FINAL:
                     terminal_output = _project_output(event.data.get("output"))
@@ -1892,7 +1918,14 @@ async def _record_child_run(
     if entry is None:
         raise AgentRunError(f"agent definition {definition.name!r} no longer exists")
     settings = get_settings()
-    provider, model = _split_model_id(settings.agent_default_model)
+    # The child runs on the same runtime as its parent, and the live
+    # resolver sends every tier to one backend, so the parent's model
+    # (bound for the parent's tool calls) is the child's model too (#5850).
+    parent_meta = agent_run_audit_meta_var.get()
+    if parent_meta is not None and parent_meta.provider and parent_meta.model:
+        provider, model = parent_meta.provider, parent_meta.model
+    else:
+        provider, model = _split_model_id(settings_model_id())
     owner = _lease_owner()
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:

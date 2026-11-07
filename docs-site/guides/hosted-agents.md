@@ -171,9 +171,19 @@ These are the names you can put in `meta_tools`:
 | `search_memory` | Search the tenant's Memory store. | no — you must name it |
 | `search_knowledge` | Search the tenant's knowledge base. | no — you must name it |
 | `read_context_resource` | Read one Memory, knowledge base, or convention entry that a search returned. | no — you must name it |
+| `add_to_memory` | Save a note to the Memory store. | no — you must name it |
+| `add_to_knowledge` | Add or update an entry in the knowledge base. | no — you must name it |
+| `list_doc_collections` | List the vendor document collections the agent may search. Needs the docs add-on. | no — you must name it |
+| `search_docs` | Search vendor documents. Needs the docs add-on. | no — you must name it |
+| `read_docs` | Read more around a vendor document hit. Needs the docs add-on. | no — you must name it |
 
-The last four return text that people in your tenant stored. That is
-why the agent only gets them when you name them.
+The search and read tools return text that people in your tenant stored,
+or text from vendor documents. The two `add_to_` tools write to your
+tenant. That is why the agent only gets these tools when you name them.
+
+The two `add_to_` tools write with the agent's limits, not yours. The
+agent may change only its own knowledge base entries. It cannot save a
+Memory note for the whole team, even when a tenant admin starts the run.
 
 !!! note "One more tool: `invoke_agent`"
 
@@ -187,9 +197,12 @@ why the agent only gets them when you name them.
 Some tools exist for MCP clients but not for hosted agents. Putting
 these names in `meta_tools` does nothing:
 
-- no runbook tools (`meho_runbook_*`);
+- no runbook tools (`meho_runbook_*`). A person must confirm each
+  runbook step;
+- no `ask_docs`. It calls a model of its own, outside the run's model
+  setting. The agent uses `search_docs` and `read_docs` and writes the
+  answer itself;
 - no approval tools. An agent can never approve anything;
-- no tools that write to Memory or the knowledge base;
 - no admin tools.
 
 ### A read-only toolset

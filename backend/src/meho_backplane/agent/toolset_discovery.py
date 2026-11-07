@@ -59,6 +59,28 @@ definition names them in its ``meta_tools`` list. The two search tools' MCP
 descriptions say to read a hit's ``locator`` or ``uri`` with
 ``resources/read``; a hosted run has no ``resources/read``, so their hosted
 description adds one sentence that points at ``read_context_resource``.
+
+Write and docs tools (#5852)
+============================
+
+Two more groups come from the MCP working surface through the same bridge.
+Both are opt-in, like the retrieval tools:
+
+* :func:`build_write_meta_tools` — ``add_to_memory`` and ``add_to_knowledge``.
+  The MCP handler runs with the run's operator, so Memory RBAC (only a
+  ``tenant_admin`` writes ``tenant`` scope) and the knowledge owner check
+  (an ``operator`` changes only its own entries) are the same code as on MCP.
+  A direct run narrows a ``tenant_admin`` caller to ``operator``, so these
+  writes get the agent's limits.
+* :func:`build_docs_meta_tools` — ``list_doc_collections``, ``search_docs``
+  and ``read_docs``. They keep the MCP ``meho-docs`` capability: a tenant
+  without the docs add-on does not get them. A docs backend that is down or a
+  collection that is not ready goes back to the model as a failed tool
+  result; it does not end the run.
+
+``ask_docs`` is not bridged: it makes its own model call outside the run.
+``docs/codebase/agent-runtime.md`` lists every working-surface tool a hosted
+run does not get, with the reason.
 """
 
 from __future__ import annotations
@@ -67,10 +89,12 @@ import copy
 from typing import Any
 
 import jsonschema
-from pydantic_ai import ModelRetry
+from pydantic_ai import ModelRetry, ToolFailed
 
 from meho_backplane.agent.meta_tool import MetaToolSpec, _MetaToolHandler
+from meho_backplane.auth.corpus import CorpusUnavailable
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.docs_search import CollectionNotReadyError
 from meho_backplane.mcp.registry import (
     ToolDefinition,
     ToolSurface,
@@ -84,6 +108,8 @@ from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 # ``register_mcp_tool`` call for one of the bridged tools, so :func:`get_tool`
 # can resolve its (definition, handler) pair below. ``connector_admin`` also
 # gives the not-yet-reduced connector rows (#4121).
+from meho_backplane.mcp.tools import doc_collections as _doc_collection_tools  # noqa: F401
+from meho_backplane.mcp.tools import docs as _docs_tools  # noqa: F401
 from meho_backplane.mcp.tools import knowledge as _knowledge_tools  # noqa: F401
 from meho_backplane.mcp.tools import memory as _memory_tools  # noqa: F401
 from meho_backplane.mcp.tools import operations as _operations_tools  # noqa: F401
@@ -94,9 +120,13 @@ from meho_backplane.mcp.tools.connector_admin import list_connector_rows
 __all__ = [
     "CONNECTOR_LIST",
     "DISCOVERY_META_TOOL_NAMES",
+    "DOCS_META_TOOL_NAMES",
     "RETRIEVAL_META_TOOL_NAMES",
+    "WRITE_META_TOOL_NAMES",
     "build_discovery_meta_tools",
+    "build_docs_meta_tools",
     "build_retrieval_meta_tools",
+    "build_write_meta_tools",
     "keep_allowed_connectors",
 ]
 
@@ -129,6 +159,34 @@ RETRIEVAL_META_TOOL_NAMES: tuple[str, ...] = (
     _SEARCH_MEMORY,
     _SEARCH_KNOWLEDGE,
 )
+
+#: The bridged write tools (#5852), in advertised order. Opt-in.
+WRITE_META_TOOL_NAMES: tuple[str, ...] = ("add_to_memory", "add_to_knowledge")
+
+_SEARCH_DOCS = "search_docs"
+
+#: The bridged docs tools (#5852), in advertised order. Opt-in, and only for
+#: a tenant with the ``meho-docs`` capability.
+DOCS_META_TOOL_NAMES: tuple[str, ...] = ("list_doc_collections", _SEARCH_DOCS, "read_docs")
+
+#: Added to the MCP ``add_to_knowledge`` description: the MCP text says to
+#: read an entry through ``resources/read``.
+_HOSTED_KB_READ_NOTE = (
+    " In this hosted run, read an existing entry with `read_context_resource` "
+    "when you have that tool."
+)
+
+#: Added to the MCP ``search_docs`` description: the MCP text says to read a
+#: hit through ``resources/read``.
+_HOSTED_DOCS_READ_NOTE = (
+    " In this hosted run there is no `resources/read`: read more with "
+    "`read_docs` and the hit's `read_handle` when you have that tool, "
+    "otherwise work from the chunk text."
+)
+
+#: What the model sees when the docs backend cannot answer. Fixed text: the
+#: error itself may name the backend.
+_DOCS_UNAVAILABLE = "The docs backend is not available right now. Go on without docs."
 
 #: Added to the MCP description of a bridged retrieval tool. The MCP text
 #: names ``resources/read``, which a hosted run does not have.
@@ -264,8 +322,9 @@ def _bridge(
     The schema is the MCP **wire** schema (``to_wire()``), deep-copied, for
     the same reason the broadcast bridge uses it (#2644): it strips the
     top-level combinators the Anthropic Messages API rejects. The role floor
-    is the MCP tool's own ``required_role``. *handler* replaces the MCP
-    handler; the MCP gates still run in front of it.
+    is the MCP tool's own ``required_role``, and the capability its own
+    ``required_capability``. *handler* replaces the MCP handler; the MCP
+    gates still run in front of it.
     """
     definition, mcp_handler = _mcp_tool(name)
     return MetaToolSpec(
@@ -274,6 +333,7 @@ def _bridge(
         description=description if description is not None else definition.description,
         parameter_schema=copy.deepcopy(definition.to_wire()["inputSchema"]),
         required_role=definition.required_role,
+        required_capability=definition.required_capability,
     )
 
 
@@ -317,3 +377,53 @@ def build_retrieval_meta_tools() -> tuple[MetaToolSpec, ...]:
         for name in (_SEARCH_MEMORY, _SEARCH_KNOWLEDGE)
     )
     return (_bridge(_QUERY_TOPOLOGY), *search_tools)
+
+
+def build_write_meta_tools() -> tuple[MetaToolSpec, ...]:
+    """Build the two governed write meta-tools (#5852).
+
+    The MCP handler, input schema and role floor, unchanged, so Memory RBAC
+    and the knowledge owner check run as on MCP.
+    """
+    memory, knowledge = WRITE_META_TOOL_NAMES
+    return (
+        _bridge(memory),
+        _bridge(knowledge, description=_mcp_tool(knowledge)[0].description + _HOSTED_KB_READ_NOTE),
+    )
+
+
+def _docs_errors_reach_model(handler: _MetaToolHandler) -> _MetaToolHandler:
+    """Turn a docs backend outage into a failed tool result.
+
+    On MCP these errors are a retryable internal error. In a hosted run any
+    other exception ends the run, so the model gets a failed tool result and
+    can go on without docs. A ``ToolFailed`` does not use the retry budget.
+    """
+
+    async def _wrapped(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await handler(operator, arguments)
+        except CorpusUnavailable as exc:
+            raise ToolFailed(_DOCS_UNAVAILABLE) from exc
+        except CollectionNotReadyError as exc:
+            raise ToolFailed(f"{exc}. Try again later, or go on without docs.") from exc
+
+    return _wrapped
+
+
+def build_docs_meta_tools() -> tuple[MetaToolSpec, ...]:
+    """Build the three governed docs meta-tools (#5852).
+
+    Each keeps the MCP ``meho-docs`` capability, so the toolset registers it
+    only for a tenant that has the docs add-on.
+    """
+    specs: list[MetaToolSpec] = []
+    for name in DOCS_META_TOOL_NAMES:
+        definition, mcp_handler = _mcp_tool(name)
+        description = definition.description
+        if name == _SEARCH_DOCS:
+            description += _HOSTED_DOCS_READ_NOTE
+        specs.append(
+            _bridge(name, description=description, handler=_docs_errors_reach_model(mcp_handler))
+        )
+    return tuple(specs)

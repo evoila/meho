@@ -150,6 +150,7 @@ __all__ = [
     "AgentRunResult",
     "AgentRunStatus",
     "BudgetExceededError",
+    "ModelChoice",
     "ModelFactory",
     "PydanticAgentRun",
     "ScheduledRunNoInputError",
@@ -794,6 +795,21 @@ class AgentRunHandle:
     request_usages: list[TokenUsage] = field(default_factory=list)
 
 
+@dataclass(frozen=True, slots=True)
+class ModelChoice:
+    """The model one run uses, and the names its records show (#5850).
+
+    ``provider`` and ``name`` go on the ``agent_run`` row and on every
+    audit row of the run's tool calls. A model from the resolver reports
+    them itself (``Model.system`` and ``Model.model_name``), so the
+    records name the model that answers, not a default setting.
+    """
+
+    model: Model
+    provider: str
+    name: str
+
+
 @runtime_checkable
 class AgentRun(Protocol):
     """The narrow seam every consumer depends on instead of the framework.
@@ -807,6 +823,14 @@ class AgentRun(Protocol):
     adapter supplies the implementation.
     """
 
+    def choose_model(self, definition: AgentDefinition, operator: Operator) -> ModelChoice:
+        """Build the model a run of *definition* uses, with its record names.
+
+        Raises :class:`AgentRunError` when no model can be built (for
+        example a missing API key, or no backend for the tier).
+        """
+        ...
+
     def start(
         self,
         definition: AgentDefinition,
@@ -814,12 +838,14 @@ class AgentRun(Protocol):
         inputs: str,
         *,
         run_id: UUID | None = None,
+        model: Model | None = None,
     ) -> AgentRunHandle:
         """Begin a bounded run; return immediately with a live handle.
 
         *run_id* is the id the caller already gave out (the durable
         ``agent_run`` row id). The handle and every error then use it, so the
-        caller can match them. ``None`` makes a fresh id.
+        caller can match them. ``None`` makes a fresh id. *model* is the
+        model from :meth:`choose_model`; ``None`` builds it here.
         """
         ...
 
@@ -845,6 +871,8 @@ class AgentRun(Protocol):
         inputs: str,
         run_id: UUID,
         usage_sink: list[TokenUsage] | None = None,
+        *,
+        model: Model | None = None,
     ) -> AsyncIterator[AgentRunEvent]:
         """Run the loop and yield structured progress events as they happen.
 
@@ -856,7 +884,7 @@ class AgentRun(Protocol):
         its own pace — the right shape for an SSE response whose lifetime
         is the run's lifetime. ``run_id`` is supplied by the caller (the
         T6 ``agent_run`` row id) so the streamed events share the run's
-        lineage key.
+        lineage key. *model* works as in :meth:`start`.
 
         *usage_sink*, when given, is kept current with the usage of every
         model request the loop has finished, so the caller can charge a run
@@ -1109,6 +1137,7 @@ class PydanticAgentRun:
         operator: Operator,
         run_id: UUID | None = None,
         receipts: list[HostedContextReceipt] | None = None,
+        model: Model | None = None,
     ) -> Agent[Operator, Any]:
         """Construct the framework agent for *definition* under *operator*.
 
@@ -1143,9 +1172,11 @@ class PydanticAgentRun:
         *and* ``definition.tier`` is set, the model comes from the resolver
         — picked from the tenant's policy + egress constraint + capability
         flags. Otherwise the legacy :attr:`model_factory` is called (the
-        zero-arg path tests rely on and the pre-G11.5 default).
+        zero-arg path tests rely on and the pre-G11.5 default). A *model*
+        the caller already chose (:meth:`choose_model`) is used as is.
         """
-        model = self._resolve_model(definition, operator)
+        if model is None:
+            model = self._resolve_model(definition, operator)
         invoke_tool = self._maybe_build_invoke_tool()
         if definition.toolset is not None:
             resolution = resolve_agent_toolset(definition.toolset, operator)
@@ -1196,6 +1227,26 @@ class PydanticAgentRun:
         )
         _register_default_meta_tools(agent)
         return agent
+
+    def choose_model(self, definition: AgentDefinition, operator: Operator) -> ModelChoice:
+        """Build the model for one run and name it for the run's records (#5850).
+
+        A model from :attr:`model_resolver` names itself: the provider is
+        ``Model.system`` and the name is ``Model.model_name``, the name
+        sent to the endpoint. The legacy :attr:`model_factory` path keeps
+        the names of ``AGENT_DEFAULT_MODEL``, the model
+        :func:`default_model_factory` builds.
+
+        Raises:
+            AgentRunError: no model can be built for this run.
+        """
+        model = self._resolve_model(definition, operator)
+        if self.model_resolver is not None and definition.tier is not None:
+            return ModelChoice(model=model, provider=model.system, name=model.model_name)
+        from .invocation import _split_model_id
+
+        provider, name = _split_model_id(get_settings().agent_default_model)
+        return ModelChoice(model=model, provider=provider, name=name)
 
     def _resolve_model(
         self,
@@ -1392,10 +1443,12 @@ class PydanticAgentRun:
         inputs: str,
         *,
         run_id: UUID | None = None,
+        model: Model | None = None,
     ) -> AgentRunHandle:
         """Begin a bounded run; return immediately with a live handle.
 
-        *run_id* is the caller's run id (the durable ``agent_run`` row id).
+        *model* is the model from :meth:`choose_model`; ``None`` builds it
+        here. *run_id* is the caller's run id (the durable ``agent_run`` row id).
         The handle, the logs, and a failure message all use it, so they match
         what ``meho agent run`` and ``run-status`` show (#4232). ``None``
         makes a fresh id for callers with no durable row.
@@ -1418,7 +1471,7 @@ class PydanticAgentRun:
         receipts: list[HostedContextReceipt] = []
         if run_id is None:
             run_id = uuid4()
-        agent = self._build_agent(definition, operator, run_id, receipts)
+        agent = self._build_agent(definition, operator, run_id, receipts, model)
         request_usages: list[TokenUsage] = []
         task = asyncio.create_task(
             self._run_loop(agent, definition, operator, inputs, run_id, receipts, request_usages),
@@ -1489,8 +1542,13 @@ class PydanticAgentRun:
         inputs: str,
         run_id: UUID,
         usage_sink: list[TokenUsage] | None = None,
+        *,
+        model: Model | None = None,
     ) -> AsyncIterator[AgentRunEvent]:
         """Drive the loop inline and yield structured progress events.
+
+        *model* is the model from :meth:`choose_model`; ``None`` builds it
+        here.
 
         Uses the framework's node graph (:meth:`~pydantic_ai.Agent.iter`)
         to surface the loop's progress — one :class:`AgentRunEvent` per
@@ -1524,7 +1582,7 @@ class PydanticAgentRun:
         sink = usage_sink if usage_sink is not None else []
         usages_token = _run_request_usages_var.set(request_usages)
         try:
-            agent = self._build_agent(definition, operator, run_id)
+            agent = self._build_agent(definition, operator, run_id, model=model)
             limits = UsageLimits(request_limit=definition.request_limit)
             async with agent.iter(inputs, deps=operator, usage_limits=limits) as run:
                 try:

@@ -170,6 +170,18 @@ refused.
   credentialled target reached without an authenticated operator (the
   operator-less `execute` shim / `probe`) fails closed inside the loader.
 
+### Address check at connect time
+
+`connect_read_only` hands the dial to `connect_checked`
+(`connectors/_shared/dial_guard.py`). It checks the target address again
+with the same rules and allowlist as when the target is saved. A host name
+is looked up once, and asyncpg dials only the checked addresses, one after
+the other until one connects. A host name that does not resolve is refused,
+unless the exact name is on the allowlist. The refusal is a `ValueError`,
+so it shows as a normal connector error. `fingerprint()` and `probe()`
+report it as `auth_failed`, because both map every `ValueError` to that
+reason.
+
 ### Fingerprint / probe
 
 `fingerprint()` connects to the default maintenance database and reads
@@ -193,6 +205,8 @@ operator-less probe path resolves here), `tcp_unreachable` (`OSError`), and
   directly by a connector for the first time here) — the wire client.
 - `_shared/vault_creds.py` — `load_basic_credentials` for the optional
   operator-context credential read.
+- `_shared/dial_guard.py` — `connect_checked` for the connect-time address
+  check.
 - `operations/typed_register.py` — `register_typed_operation` and the registrar
   queue.
 - `operations.dispatch` — the `execute` shim delegates to it.

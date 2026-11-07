@@ -176,7 +176,7 @@ kubectl create secret generic meho-postgres -n meho \
   --from-literal=url='postgresql+asyncpg://<user>:<password>@<host>:5432/meho'
 ```
 
-Two things bite here if missed:
+Three things bite here if missed:
 
 - The prefix must be `postgresql+asyncpg://`. A bare `postgresql://`
   DSN selects the synchronous driver and fails at connect time.
@@ -245,13 +245,15 @@ realm needs:
 3. a **public `meho-mcp`** client with authorization-code + PKCE —
    what browser-capable MCP clients use;
 4. a **confidential `meho-web`** client for the web UI;
-5. seven **protocol mappers** and four **default client scopes** on the
+5. a **public `meho-cli-approve`** client with authorization-code +
+   PKCE — what `meho approvals approve` uses for its fresh sign-in;
+6. eight **protocol mappers** and four **default client scopes** on the
    login clients, so issued tokens carry the claims MEHO validates;
-6. five **groups** (`MEHO-Readers`, `MEHO-Operators`,
+7. five **groups** (`MEHO-Readers`, `MEHO-Operators`,
    `MEHO-SA-Operators`, `MEHO-Admins`, `MEHO-Approvers`) that give each
    person their tenant and role. The groups are the only source: no
    login client carries a fixed tenant or role;
-7. a first **user** in `MEHO-Admins` and `MEHO-Platform-Admins`, and a
+8. a first **user** in `MEHO-Admins` and `MEHO-Platform-Admins`, and a
    second one in `MEHO-SA-Operators` who can approve the first one's
    changes.
 
@@ -617,7 +619,8 @@ kill "$PF"
 # From outside the cluster, through the Ingress:
 curl -fsS https://meho.example.com/healthz
 curl -fsS https://meho.example.com/api/v1/auth-config
-# → {"keycloak_issuer": "...", "audience": "meho-backplane", "cli_client_id": "meho-cli"}
+# → {"keycloak_issuer": "...", "audience": "meho-backplane", "cli_client_id": "meho-cli",
+#    "cli_approve_client_id": "meho-cli-approve"}
 ```
 
 If `/healthz` is green but `/ready` returns 503 with its `keycloak`

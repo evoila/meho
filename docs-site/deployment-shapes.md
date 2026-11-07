@@ -205,7 +205,7 @@ flowchart TB
     tb["Targets"]
   end
   subgraph enclave["Enclave C: no inbound path from central"]
-    runner["Satellite gateway (read-only executor)"]
+    runner["Satellite gateway (read-only by default)"]
     tc["Targets"]
   end
   agent --> bp
@@ -217,7 +217,7 @@ flowchart TB
   bp -->|"governed operations"| ta
   bp -->|"governed operations"| tb
   runner -->|"outbound-only poll and report"| bp
-  runner -->|"read-only operations"| tc
+  runner -->|"safe operations, approved caution changes"| tc
 ```
 
 **Pick this shape when:**
@@ -229,21 +229,26 @@ flowchart TB
   no-inbound network — will never accept a connection from the central
   cluster.
 
-**Satellite gateways are read-only by design — and that is a planning
+**Satellite gateways are read-only by default — and that is a planning
 constraint, not a limitation to work around.** A gateway is a dumb
 executor of centrally authorised work. It runs the same container image
 in a different mode, holds no local database, broadcast bus, console, or
 MCP endpoint, and **dials outbound only** — it polls the central
-instance for its assignment, executes read-only operations locally
-against the same connector surface, and reports results back. All
-authorisation, approval, and audit stay central; a gateway never
-self-authorises.
+instance for its assignment, executes its work locally against the same
+connector surface, and reports results back. All authorisation,
+approval, and audit stay central; a gateway never self-authorises.
 
 The consequence is worth stating plainly to whoever is planning the
 rollout: **an enclave served only by a satellite gateway gets
-observation, not change automation.** Write workflows require the
-central backplane to reach the target itself. Design the segment map
-around that before anyone promises otherwise. Implementation detail:
+observation and, at most, small approved changes.** A tenant admin can
+turn on a write tier for one runner. Then `caution` operations on that
+runner's allowlist run there, each after a person approves it.
+`dangerous` and `destructive` operations never run on a satellite: they
+need the central backplane to reach the target itself. Design the
+segment map around that before anyone promises otherwise. How the write
+tier works:
+[Writes through a satellite](guides/satellite-gateway.md#writes-through-a-satellite).
+Implementation detail:
 [`docs/codebase/satellite-runner.md`](https://github.com/evoila/meho/blob/main/docs/codebase/satellite-runner.md).
 The satellite gateway is a **Beta** feature — see the
 [feature maturity index](reference/maturity.md).
@@ -516,8 +521,8 @@ repository:
   (`values-kind.yaml`, explicitly *not* a functional federation
   deploy).
 - [`docs/codebase/satellite-runner.md`](https://github.com/evoila/meho/blob/main/docs/codebase/satellite-runner.md)
-  — the satellite gateway's outbound-only, read-only, no-local-state
-  design.
+  — the satellite gateway's outbound-only, read-only-by-default,
+  no-local-state design.
 - [Repository README](https://github.com/evoila/meho#verify-image--chart--cli-signatures)
   — cosign keyless verification for the image, chart, and CLI.
 - [Feature maturity index](reference/maturity.md) — the shipped tier of

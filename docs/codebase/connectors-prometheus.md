@@ -152,9 +152,9 @@ Limits:
 
 In-cluster Prometheus is typically reached via port-forward and is
 unauthenticated. `secret_ref = None` is therefore a first-class state:
-`auth_headers` returns `{}` — **no credential load is attempted**. This
-is net-new; every other connector's execute path fails closed on an unset
-`secret_ref` (`_resolve_secret_ref` in `_shared/vault_creds.py`). The
+`auth_headers` returns `{}` — **no credential load is attempted**. The
+loki and tempo connectors use the same rule. Other connectors fail closed on
+an unset `secret_ref` (`_require_secret_ref` in `_shared/vault_creds.py`). The
 only prior unauthenticated precedent was fingerprint/probe (argocd's
 `_get_version_unauthenticated`), not execute.
 
@@ -170,12 +170,14 @@ App-vs-PAT selection; a secret carrying neither shape raises
 
 ## Scheme and path prefix (per-target `extras`)
 
-The base `HttpConnector._base_url` hardcodes `https`. A port-forwarded
-Prometheus is plain `http` on `:9090`, and Mimir mounts the API under a
-`/prometheus` prefix. Both are read from `target.extras` so no new Target
-column is needed:
+A port-forwarded Prometheus is plain `http` on `:9090`, and Mimir mounts
+the API under a `/prometheus` prefix. Both are read from `target.extras`
+so no new Target column is needed. `PrometheusConnector` has its own
+`_scheme` / `_base_url`:
 
-- `extras["scheme"]` ∈ `{http, https}` (default `https`).
+- `extras["scheme"]` ∈ `{http, https}` (default `https`). Any other value
+  falls back to `https`. (The base `HttpConnector` refuses such a value
+  with a `ValueError` instead.)
 - `extras["path_prefix"]` (default none; Mimir → `/prometheus`).
 
 The prefix is applied to the **wire path** (`_wire_path`), not folded

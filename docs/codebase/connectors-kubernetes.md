@@ -1120,7 +1120,7 @@ and MEHO applies the floor for such an address
 | Parameter   | Meaning |
 | ----------- | ------- |
 | `namespace` | Required. The namespace of the install. |
-| `release`   | Optional, default `meho`. The Helm release name, and the name of the Deployment and of the `HelmChart` object. |
+| `release`   | Optional, default `meho`. The Helm release name: the value of the `app.kubernetes.io/instance` label the chart puts on every object, and the name of the `HelmChart` object. |
 | `host`      | Optional. A host name or IP address, with an optional `:port`, of this MEHO install. MEHO calls `https://<host>/version` and `/ready` through the address-pinning transport, so the same address check as for a target applies. |
 
 The result has one part for each source. Each part has a `state`:
@@ -1128,13 +1128,32 @@ The result has one part for each source. Each part has a `state`:
 
 | Part            | Source | Content |
 | --------------- | ------ | ------- |
-| `deployment`    | `AppsV1Api.read_namespaced_deployment` | image, tag, digest, replicas. With a tag-only image the digest is the `imageID` of a running pod. |
-| `helm_chart`    | `HelmChart` object `helm.cattle.io/v1` (RKE2 installs), same namespace | chart, chart version, `values_hash` (sha256 of `valuesContent` and `set`). |
+| `deployment`    | `AppsV1Api.list_namespaced_deployment` with `app.kubernetes.io/instance=<release>`; the one with a container named `backplane` | name, image, tag, digest, replicas. With a tag-only image the digest is the `imageID` of the `backplane` container of the running pods. |
+| `helm_chart`    | `HelmChart` object `helm.cattle.io/v1` (RKE2 installs) named `<release>`: in the install namespace, else the cluster's chart whose `spec.targetNamespace` is the install namespace | `chart_namespace`, chart, chart version, `values_hash` (sha256 of `valuesContent` and `set`). |
 | `helm_releases` | `CoreV1Api.list_namespaced_secret`, labels `owner=helm,name=<release>` | revision, status, Secret name, `modified_at`; `incomplete` is true when the page cap (10 pages of 200) was reached. |
 | `meho`          | only with `host` | `version`: the `/version` fields; `ready`: `ready`, `status`, `http_status`, `db_ahead`, and name and `ok` of each check. |
 
 How it behaves:
 
+- The Deployment is never read by name. The chart names it after the
+  release (`meho.fullname` in `deploy/charts/meho/templates/_helpers.tpl`:
+  `meho` for release `meho`, `demo-meho` for release `demo`, or
+  `fullnameOverride`). The op lists the Deployments with the release's
+  instance label and takes the one with a `backplane` container; the
+  subcharts (Keycloak, PostgreSQL, ...) carry the same label but not that
+  container. No match is `not present`. Two or more matches are `unknown`
+  with the `candidates` names.
+- The digest from the pods uses only the `backplane` container, never a
+  sidecar, and only pods that run the same image as the Deployment (a pod
+  of the previous rollout runs another tag and is skipped). When the pods
+  run two builds of the same tag, `digest` stays null and `pod_digests`
+  lists both. When the pods cannot be read, `digest` is null and
+  `digest_error` says why.
+- The `HelmChart` is looked up in the install namespace first. RKE2 can
+  keep it in `kube-system` and install into another namespace through
+  `spec.targetNamespace`; then the op lists the cluster's HelmCharts and
+  takes the one named `<release>` that targets the install namespace.
+  A list the target does not allow is `unknown`, not `not present`.
 - A 404 is `not present`. Any other failed read (no right, server error,
   timeout, host not reachable or refused by the address check) is
   `unknown` with a short `error`, never `not present`. A 401 is raised, so
@@ -1146,8 +1165,10 @@ How it behaves:
 - Secrets: only the names and labels of the Helm release Secrets are read.
   Their `data` is never copied. The values text of the `HelmChart` is never
   returned, only the hash. A userinfo part in the chart URL is removed.
-  The flight recorder masks Secret data before it stores a trace
-  (`_wire_span.py`).
+  The flight recorder masks Secret data and `HelmChart` values before it
+  stores a trace (`redaction.py`, `_wire_span.py`), so the recorded API
+  answers hold no values text either
+  (`test_trace_capture_records_no_values_text_and_no_secret_data`).
 
 ### Read-side Secret redaction (#3501, `redaction.py`)
 
@@ -1164,6 +1185,13 @@ and replaces every `data` / `stringData` value with a fixed placeholder
 carrying a `sha256:` digest — key names kept — regardless of whether the
 value matches a pattern. It is the k8s sibling of the keycloak / rabbitmq
 per-connector redactors (see [`redaction.md`](redaction.md)).
+
+The same walk masks the Helm values of a `kind: HelmChart` object (the
+k3s / RKE2 `helm.cattle.io/v1` resource) and of the kind-less items of a
+`HelmChartList`: `spec.valuesContent` becomes one placeholder, and every
+value of `spec.set` becomes one (keys kept). Chart values often hold
+passwords. `k8s.meho.release.info` reads such objects, and the flight
+recorder (next paragraph) records the answer only in this masked form.
 
 The redactor is wired into `custom_resource_row`
 (`ops_customresource.py`), the projection both `k8s.cr.list` and
@@ -1334,7 +1362,9 @@ a "200 but nothing happened" apply can be explained from the trace.
   key names stay. This covers a `k8s.apply` of a Secret
   manifest, a `k8s.cr.info` read of one, and the items of a
   `SecretList` (which carry no `kind` of their own). The normal body
-  redaction then runs over the masked body.
+  redaction then runs over the masked body. The same walk masks the
+  values of a `kind: HelmChart` object and of the items of a
+  `HelmChartList` (`spec.valuesContent`, every `spec.set` value).
 - Non-2xx (`ApiException`) and transport errors are recorded
   (`status` = HTTP code or `error:<ExceptionClass>`) and re-raised
   unchanged. With `_preload_content=False` the wrapper reads the body

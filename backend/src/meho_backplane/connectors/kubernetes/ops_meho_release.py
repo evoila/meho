@@ -6,11 +6,22 @@
 A read-only op. It answers "which MEHO runs here, which chart, which
 revisions, is it ready?" in one call, and changes nothing. The parts:
 
-* ``deployment``: the image, tag and digest of the ``<release>`` Deployment
-  (``AppsV1Api.read_namespaced_deployment``). When the image has no digest,
-  the digest of a running pod (its ``imageID``) is used.
+* ``deployment``: the image, tag and digest of the backplane Deployment. The
+  chart names it after the release (``demo-meho`` for release ``demo``,
+  ``meho`` for release ``meho``, or ``fullnameOverride``), so the op does
+  not use the name. It lists the Deployments with the label
+  ``app.kubernetes.io/instance=<release>`` and takes the one with a
+  container named ``backplane`` (``deploy/charts/meho/templates``). When
+  the image has no digest, the digest comes from the running pods: only the
+  ``backplane`` container, and only pods that run the same image as the
+  Deployment. Pods of two builds at once give no ``digest`` but a
+  ``pod_digests`` list.
 * ``helm_chart``: the ``HelmChart`` object ``helm.cattle.io/v1`` named
-  ``<release>`` (RKE2 installs): chart version and a hash of its values.
+  ``<release>`` (RKE2 installs): chart version and a hash of its values. It
+  is read in the install namespace first. When it is not there, the op
+  lists the HelmCharts of the cluster and takes the one named
+  ``<release>`` whose ``spec.targetNamespace`` is the install namespace
+  (the RKE2 layout with the chart in ``kube-system``).
 * ``helm_releases``: the revisions of the Helm release, read from the
   labels of the Helm release Secrets (``owner=helm,name=<release>``).
 * ``meho``: only when ``host`` is given. The answers of ``GET /version`` and
@@ -25,7 +36,8 @@ error, timeout) is ``unknown`` with a short ``error``: it never looks like
 Secrets: the op reads only the names and labels of the Helm release
 Secrets. It never copies their ``data`` (which holds the values text) and
 never returns the values of the ``HelmChart``, only a hash. The flight
-recorder masks Secret data before it stores a trace.
+recorder masks Secret data and ``HelmChart`` values before it stores a
+trace (``redaction.py``, ``_wire_span.py``).
 
 ``host`` is an address the caller gives. It carries
 ``x-meho-caller-address: true``, so MEHO runs the op at risk level
@@ -39,8 +51,10 @@ References
 * Helm stores a release in a Secret ``sh.helm.release.v1.<name>.v<N>`` with
   the labels ``owner=helm``, ``name``, ``status``, ``version``:
   https://helm.sh/docs/topics/advanced/#storage-backends
-* k3s / RKE2 ``HelmChart`` custom resource:
-  https://docs.rke2.io/helm
+* k3s / RKE2 ``HelmChart`` custom resource (``spec.targetNamespace``,
+  ``spec.valuesContent``, ``spec.set``; the release name is the object name):
+  https://docs.rke2.io/helm and
+  https://github.com/k3s-io/helm-controller/blob/master/pkg/apis/helm.cattle.io/v1/types.go
 """
 
 from __future__ import annotations
@@ -48,6 +62,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -82,9 +97,16 @@ _HELM_CHART_GROUP = "helm.cattle.io"
 _HELM_CHART_VERSION = "v1"
 _HELM_CHART_PLURAL = "helmcharts"
 
-#: Secrets per page and the most pages read. A reached cap sets ``incomplete``.
-_SECRET_PAGE_SIZE = 200
-_SECRET_MAX_PAGES = 10
+#: The chart's labels and container name (``deploy/charts/meho/templates``).
+#: Every object of the release carries the instance label; only the
+#: backplane Deployment has a container with this name.
+_INSTANCE_LABEL = "app.kubernetes.io/instance"
+_BACKPLANE_CONTAINER = "backplane"
+
+#: Objects per page and the most pages read per list. A reached cap sets
+#: ``incomplete``.
+_PAGE_SIZE = 200
+_MAX_PAGES = 10
 
 _HTTP_TIMEOUT_SECONDS = 10.0
 _HOST_PATTERN = re.compile(
@@ -127,32 +149,105 @@ def _not_found_or_unknown(exc: Exception) -> dict[str, Any]:
     return _unknown(exc)
 
 
-async def _pod_digest(
-    core: client.CoreV1Api, namespace: str, selector: dict[str, str]
-) -> str | None:
-    """Digest of the image a pod of the Deployment runs, from its ``imageID``."""
-    label_selector = ",".join(f"{k}={v}" for k, v in sorted(selector.items()))
-    pods = await core.list_namespaced_pod(namespace, label_selector=label_selector, limit=10)
-    for pod in pods.items or []:
-        for status in (pod.status.container_statuses if pod.status else None) or []:
+def _items_and_token(resp: Any) -> tuple[list[Any], str | None]:
+    """Items and continue token of one list page: a model or a plain dict."""
+    if isinstance(resp, dict):
+        metadata = resp.get("metadata") or {}
+        return list(resp.get("items") or []), metadata.get("continue") or None
+    return list(resp.items or []), resp.metadata._continue if resp.metadata else None
+
+
+async def _list_all(
+    call: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any
+) -> tuple[list[Any], bool]:
+    """Follow every page of a list call, up to the cap. Returns (items, cap reached)."""
+    rows: list[Any] = []
+    token: str | None = None
+    for _page in range(_MAX_PAGES):
+        page_kwargs: dict[str, Any] = {**kwargs, "limit": _PAGE_SIZE}
+        if token:
+            page_kwargs["_continue"] = token
+        items, token = _items_and_token(await call(*args, **page_kwargs))
+        rows.extend(items)
+        if not token:
+            return rows, False
+    return rows, True
+
+
+def _backplane_container(deployment: Any) -> Any | None:
+    template = deployment.spec.template if deployment.spec else None
+    containers = (template.spec.containers if template and template.spec else None) or []
+    return next((c for c in containers if c.name == _BACKPLANE_CONTAINER), None)
+
+
+def _container_digest(pod: Any, image: str) -> str | None:
+    """Digest of the backplane container of *pod*, when it runs *image*.
+
+    A pod of an older rollout runs another image and gives nothing. A
+    sidecar is never used: only the status of the backplane container counts.
+    """
+    containers = (pod.spec.containers if pod.spec else None) or []
+    if not any(c.name == _BACKPLANE_CONTAINER and c.image == image for c in containers):
+        return None
+    for status in (pod.status.container_statuses if pod.status else None) or []:
+        if status.name == _BACKPLANE_CONTAINER:
             _, _, digest = (status.image_id or "").partition("@")
-            if digest.startswith("sha256:"):
-                return digest
+            return digest if digest.startswith("sha256:") else None
     return None
+
+
+async def _pod_digests(
+    core: client.CoreV1Api, namespace: str, selector: dict[str, str], image: str
+) -> set[str]:
+    """Digests the backplane pods of the Deployment run, from their ``imageID``."""
+    label_selector = ",".join(f"{k}={v}" for k, v in sorted(selector.items()))
+    pods, _ = await _list_all(core.list_namespaced_pod, namespace, label_selector=label_selector)
+    found = (_container_digest(pod, image) for pod in pods)
+    return {digest for digest in found if digest}
+
+
+async def _add_pod_digest(
+    api_client: client.ApiClient, namespace: str, deployment: Any, part: dict[str, Any]
+) -> None:
+    """Fill ``digest`` from the pods; two builds at once give ``pod_digests``."""
+    selector = (deployment.spec.selector.match_labels or {}) if deployment.spec.selector else {}
+    if not selector:
+        return
+    try:
+        digests = await _pod_digests(
+            client.CoreV1Api(api_client), namespace, selector, part["image"]
+        )
+    except Exception as exc:
+        if isinstance(exc, ApiException) and exc.status == 401:
+            raise
+        part["digest_error"] = _unknown(exc)["error"]
+        return
+    if len(digests) == 1:
+        part["digest"] = digests.pop()
+    elif digests:
+        part["pod_digests"] = sorted(digests)
 
 
 async def _deployment_part(
     api_client: client.ApiClient, namespace: str, release: str
 ) -> dict[str, Any]:
     try:
-        deployment = await client.AppsV1Api(api_client).read_namespaced_deployment(
-            release, namespace
+        deployments, _ = await _list_all(
+            client.AppsV1Api(api_client).list_namespaced_deployment,
+            namespace,
+            label_selector=f"{_INSTANCE_LABEL}={release}",
         )
     except Exception as exc:
         return _not_found_or_unknown(exc)
-    containers = deployment.spec.template.spec.containers or []
-    main = next((c for c in containers if c.name == release), containers[0] if containers else None)
-    part: dict[str, Any] = {"state": _PRESENT, "name": release}
+    matches = [d for d in deployments if _backplane_container(d) is not None]
+    if not matches:
+        return {"state": _NOT_PRESENT}
+    if len(matches) > 1:
+        names = sorted(d.metadata.name for d in matches if d.metadata)
+        return {"state": _UNKNOWN, "error": "several Deployments match", "candidates": names}
+    deployment = matches[0]
+    main = _backplane_container(deployment)
+    part: dict[str, Any] = {"state": _PRESENT, "name": deployment.metadata.name}
     status = deployment.status
     part["replicas"] = status.replicas if status else None
     part["ready_replicas"] = status.ready_replicas if status else None
@@ -162,25 +257,29 @@ async def _deployment_part(
         image=main.image, **{k: v for k, v in parse_image(main.image).items() if k != "repository"}
     )
     if part["digest"] is None:
-        selector = (deployment.spec.selector.match_labels or {}) if deployment.spec.selector else {}
-        try:
-            if selector:
-                part["digest"] = await _pod_digest(
-                    client.CoreV1Api(api_client), namespace, selector
-                )
-        except ApiException as exc:
-            if exc.status == 401:
-                raise
-        except Exception:
-            pass
+        await _add_pod_digest(api_client, namespace, deployment, part)
     return part
 
 
-async def _helm_chart_part(
-    api_client: client.ApiClient, namespace: str, release: str
+def _chart_targets(obj: Any, namespace: str, release: str) -> bool:
+    """``True`` when the ``HelmChart`` *obj* is the release in *namespace*."""
+    if not isinstance(obj, dict):
+        return False
+    metadata = obj.get("metadata") or {}
+    spec = obj.get("spec") or {}
+    target = spec.get("targetNamespace") or metadata.get("namespace")
+    return metadata.get("name") == release and target == namespace
+
+
+async def _find_helm_chart(
+    custom: client.CustomObjectsApi, namespace: str, release: str
 ) -> dict[str, Any]:
+    """The chart in the install namespace, else the cluster's chart that targets it.
+
+    Returns ``{"object": <chart>}``, or a ``not present`` / ``unknown`` part.
+    """
     try:
-        obj = await client.CustomObjectsApi(api_client).get_namespaced_custom_object(
+        obj = await custom.get_namespaced_custom_object(
             group=_HELM_CHART_GROUP,
             version=_HELM_CHART_VERSION,
             namespace=namespace,
@@ -188,12 +287,40 @@ async def _helm_chart_part(
             name=release,
         )
     except Exception as exc:
+        local = _not_found_or_unknown(exc)
+        if local["state"] != _NOT_PRESENT:
+            return local
+    else:
+        if _chart_targets(obj, namespace, release):
+            return {"object": obj}
+    try:
+        charts, incomplete = await _list_all(
+            custom.list_cluster_custom_object,
+            _HELM_CHART_GROUP,
+            _HELM_CHART_VERSION,
+            _HELM_CHART_PLURAL,
+        )
+    except Exception as exc:
         return _not_found_or_unknown(exc)
+    match = next((c for c in charts if _chart_targets(c, namespace, release)), None)
+    if match is None:
+        return {"state": _NOT_PRESENT, "incomplete": incomplete}
+    return {"object": match}
+
+
+async def _helm_chart_part(
+    api_client: client.ApiClient, namespace: str, release: str
+) -> dict[str, Any]:
+    found = await _find_helm_chart(client.CustomObjectsApi(api_client), namespace, release)
+    if "object" not in found:
+        return found
+    obj = found["object"]
     spec = obj.get("spec") or {}
     chart = spec.get("chart")
     return {
         "state": _PRESENT,
         "name": release,
+        "chart_namespace": (obj.get("metadata") or {}).get("namespace"),
         "chart": _USERINFO_PATTERN.sub("//", chart) if isinstance(chart, str) else None,
         "version": spec.get("version"),
         "values_hash": values_hash(spec),
@@ -214,26 +341,17 @@ def _revision_row(secret: Any) -> dict[str, Any]:
 async def _helm_releases_part(
     api_client: client.ApiClient, namespace: str, release: str
 ) -> dict[str, Any]:
-    core = client.CoreV1Api(api_client)
-    selector = f"owner=helm,name={release}"
-    rows: list[dict[str, Any]] = []
-    token: str | None = None
-    incomplete = False
     try:
-        for page in range(_SECRET_MAX_PAGES):
-            kwargs: dict[str, Any] = {"label_selector": selector, "limit": _SECRET_PAGE_SIZE}
-            if token:
-                kwargs["_continue"] = token
-            resp = await core.list_namespaced_secret(namespace, **kwargs)
-            rows.extend(_revision_row(s) for s in resp.items or [])
-            token = resp.metadata._continue if resp.metadata else None
-            if not token:
-                break
-            incomplete = page == _SECRET_MAX_PAGES - 1
+        secrets, incomplete = await _list_all(
+            client.CoreV1Api(api_client).list_namespaced_secret,
+            namespace,
+            label_selector=f"owner=helm,name={release}",
+        )
     except Exception as exc:
         if isinstance(exc, ApiException) and exc.status == 401:
             raise
         return _unknown(exc)
+    rows = [_revision_row(s) for s in secrets]
     if not rows:
         return {"state": _NOT_PRESENT}
     rows.sort(key=lambda r: (r["revision"] is None, r["revision"] or 0))
@@ -336,8 +454,8 @@ K8S_MEHO_RELEASE_INFO_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Helm release name. It is also the name of the Deployment and of the "
-                "HelmChart object. Default: meho."
+                "Helm release name: the value of the app.kubernetes.io/instance label "
+                "and the name of the HelmChart object. Default: meho."
             ),
         },
         "host": {
@@ -376,9 +494,16 @@ K8S_MEHO_RELEASE_INFO_RESPONSE_SCHEMA: dict[str, Any] = {
         "release": {"type": "string"},
         "deployment": {
             **_PART,
-            "description": "name, image, tag, digest, replicas, ready_replicas.",
+            "description": (
+                "name, image, tag, digest, replicas, ready_replicas. pod_digests when the "
+                "pods run two builds of the image; digest_error when the pods could not be "
+                "read; candidates when several Deployments match."
+            ),
         },
-        "helm_chart": {**_PART, "description": "name, chart, version, values_hash."},
+        "helm_chart": {
+            **_PART,
+            "description": "name, chart_namespace, chart, version, values_hash.",
+        },
         "helm_releases": {
             **_PART,
             "description": "revisions (revision, status, secret_name, modified_at), incomplete.",
@@ -406,14 +531,18 @@ K8S_MEHO_RELEASE_INFO_LLM_INSTRUCTIONS: dict[str, Any] = {
     ),
     "parameter_hints": {
         "namespace": "Required.",
-        "release": "Optional. Default 'meho'.",
+        "release": (
+            "Optional. Default 'meho'. The Deployment is found by its "
+            "app.kubernetes.io/instance label, not by its name."
+        ),
         "host": "Optional, for example '<meho-host>' or '<meho-host>:8443'.",
     },
     "output_shape": (
         "{namespace, release, deployment, helm_chart, helm_releases, meho?}. Each part "
         "has state 'present', 'not present' or 'unknown' (with error). 'not present' "
         "is normal: helm_chart exists only on RKE2 installs, helm_releases only on "
-        "installs made with 'helm install'. meho.ready.db_ahead true means the "
+        "installs made with 'helm install'. deployment.digest is null with "
+        "pod_digests when the pods run two builds at once. meho.ready.db_ahead true means the "
         "database is newer than the running image: the older chart still runs, and a "
         "database restore is not needed to go back. Never contains Secret data or "
         "values text, only names, revision numbers, status and a values hash."
@@ -430,9 +559,10 @@ MEHO_RELEASE_OPS: tuple[KubernetesOp, ...] = (
         handler_attr="k8s_meho_release_info",
         summary="Show what a MEHO install runs: image, chart, Helm revisions, /version and /ready.",
         description=(
-            "Changes nothing. Reads the MEHO Deployment (image tag and digest), the HelmChart "
-            "object (chart version, values hash), the Helm release Secret labels (revision, "
-            "status) and, for a given host, /version and /ready. Missing is 'not present'."
+            "Changes nothing. Reads the MEHO Deployment (image tag and digest; found by its "
+            "release label), the HelmChart object (chart version, values hash; also in "
+            "another namespace), the Helm release Secret labels (revision, status) and, "
+            "for a given host, /version and /ready. Missing is 'not present'."
         ),
         parameter_schema=K8S_MEHO_RELEASE_INFO_PARAMETER_SCHEMA,
         response_schema=K8S_MEHO_RELEASE_INFO_RESPONSE_SCHEMA,

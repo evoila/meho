@@ -368,3 +368,81 @@ async def test_cr_list_of_secrets_returns_no_bytes_in_envelope() -> None:
     # No base64 value survives anywhere in the rows/total envelope.
     assert _TLS_KEY_B64 not in str(result)
     assert _APP_TOKEN_B64 not in str(result)
+
+
+# ---------------------------------------------------------------------------
+# HelmChart values (k3s / RKE2 ``helm.cattle.io/v1``)
+# ---------------------------------------------------------------------------
+
+_CHART_VALUES_TEXT = "adminPassword: made-up-chart-values-4471"
+_CHART_SET_VALUE = "made-up-set-value-8832"
+
+
+def _make_helm_chart(*, with_kind: bool = True) -> dict[str, Any]:
+    chart: dict[str, Any] = {
+        "apiVersion": "helm.cattle.io/v1",
+        "metadata": {"name": "meho", "namespace": "kube-system"},
+        "spec": {
+            "chart": "https://charts.example/meho-1.4.0.tgz",
+            "version": "1.4.0",
+            "targetNamespace": "meho",
+            "valuesContent": _CHART_VALUES_TEXT,
+            "set": {"image.tag": "1.4.0", "adminPassword": _CHART_SET_VALUE},
+        },
+    }
+    if with_kind:
+        chart["kind"] = "HelmChart"
+    return chart
+
+
+def test_helm_chart_values_are_redacted_and_the_rest_kept() -> None:
+    out = redact_kubernetes_payload(_make_helm_chart())
+    spec = out["spec"]
+    assert spec["valuesContent"] == redact_secret_value(_CHART_VALUES_TEXT)
+    assert set(spec["set"]) == {"image.tag", "adminPassword"}
+    assert spec["set"]["adminPassword"] == redact_secret_value(_CHART_SET_VALUE)
+    assert spec["set"]["image.tag"].startswith(REDACTED_PREFIX)
+    assert spec["chart"] == "https://charts.example/meho-1.4.0.tgz"
+    assert spec["version"] == "1.4.0"
+    assert spec["targetNamespace"] == "meho"
+    assert out["metadata"] == {"name": "meho", "namespace": "kube-system"}
+    blob = str(out)
+    assert _CHART_VALUES_TEXT not in blob
+    assert _CHART_SET_VALUE not in blob
+
+
+def test_helm_chart_list_items_without_kind_are_redacted() -> None:
+    envelope = {
+        "kind": "HelmChartList",
+        "apiVersion": "helm.cattle.io/v1",
+        "metadata": {"continue": ""},
+        "items": [_make_helm_chart(with_kind=False), _make_helm_chart()],
+    }
+    out = redact_kubernetes_payload(envelope)
+    for item in out["items"]:
+        assert item["spec"]["valuesContent"].startswith(REDACTED_PREFIX)
+        assert item["spec"]["set"]["adminPassword"].startswith(REDACTED_PREFIX)
+    assert _CHART_VALUES_TEXT not in str(out)
+
+
+def test_helm_chart_without_values_is_unchanged() -> None:
+    chart = _make_helm_chart()
+    del chart["spec"]["valuesContent"]
+    del chart["spec"]["set"]
+    assert redact_kubernetes_payload(chart) == chart
+
+
+def test_values_fields_on_another_kind_are_untouched() -> None:
+    """Only a ``HelmChart`` has Helm values; the same field names elsewhere stay."""
+    other = {
+        "kind": "Workflow",
+        "spec": {"valuesContent": "not: a-chart", "set": {"x": "1"}},
+    }
+    assert redact_kubernetes_payload(other) == other
+
+
+def test_helm_chart_input_is_not_mutated() -> None:
+    original = _make_helm_chart()
+    redact_kubernetes_payload(original)
+    assert original["spec"]["valuesContent"] == _CHART_VALUES_TEXT
+    assert original["spec"]["set"]["adminPassword"] == _CHART_SET_VALUE

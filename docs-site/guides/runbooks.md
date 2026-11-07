@@ -70,32 +70,39 @@ title: Rotate the ingress certificate
 description: Rotate the TLS certificate of the ingress controller.
 target_kind: k8s
 steps:
-  - id: snapshot-secret
+  - id: check-secret
     type: operation_call
-    title: Snapshot the current secret
-    body: Capture the live cert so the run has a rollback point.
+    title: Check the current secret
+    body: Confirm the secret exists and note its key names and sizes.
     op_id: k8s.secret.info
     params: {namespace: ingress, name: tls-cert}
     verify:
       type: confirm
-      prompt: Confirm the snapshot was captured before proceeding.
+      prompt: Confirm the secret holds tls.crt and tls.key before proceeding.
   - id: stage-cert
     type: manual
     title: Stage the renewed certificate
-    body: Place the renewed PEM at the target's secret path.
+    body: Write the renewed PEM to the Vault copy, then update the secret on the cluster.
     verify:
       type: operation_call
-      op_id: vault.kv.versions
-      params: {path: tenants/acme/ingress-cert}
-      expect: {status: ok}
+      op_id: k8s.secret.compare_to_ref
+      params:
+        namespace: ingress
+        name: tls-cert
+        key: tls.crt
+        ref: {path: ingress/tls-cert, key: tls.crt}
+      expect: {same: true}
 ```
 
 A `verify` is `type: confirm` (MEHO shows the `prompt` and the operator
-confirms) or `type: operation_call` (MEHO dispatches an op and matches
-the result against `expect`). The template needs a `title` and a
-`description`. Every step needs an `id` (lower-case letters, digits and
-`-`, starting with a letter). Draft, then publish the version that
-`draft-template` printed:
+confirms) or `type: operation_call` (MEHO runs the op against the run's
+target and checks that every key in `expect` is in the op's result with
+the same value). `k8s.secret.info` returns only key names and sizes,
+never a value. `k8s.secret.compare_to_ref` answers `same: true` when the
+secret's key and its Vault copy hold the same value. The template needs
+a `title` and a `description`. Every step needs an `id` (lower-case
+letters, digits and `-`, starting with a letter). Draft, then publish
+the version that `draft-template` printed:
 
 ```bash
 meho runbook draft-template ingress-cert-rotate --from ./ingress-cert-rotate.yaml

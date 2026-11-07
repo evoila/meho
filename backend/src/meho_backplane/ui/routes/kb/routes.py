@@ -651,7 +651,7 @@ def build_kb_router() -> APIRouter:
             metadata["tags"] = tag_list
 
         error_message: str | None = None
-        existing_url: str | None = None
+        existing_slug: str | None = None
         entry: KbEntry | None = None
         try:
             entry, _created = await kb.create_entry(
@@ -665,7 +665,7 @@ def build_kb_router() -> APIRouter:
             error_message = str(exc)
         except KbStaleRevisionError as exc:
             error_message = exists_message(exc)
-            existing_url = f"/ui/kb/{exc.detail.slug}"
+            existing_slug = exc.detail.slug
         except Exception:
             log.exception("kb_editor_save_unexpected_error", slug=slug)
             error_message = "Unexpected error saving entry. Please try again."
@@ -686,7 +686,7 @@ def build_kb_router() -> APIRouter:
         csrf_token = mint_csrf_token(str(session.session_id))
         context = {
             "error_message": error_message,
-            "existing_url": existing_url,
+            "existing_slug": existing_slug,
             "slug": slug,
             "body": body,
             "tags": tags,
@@ -889,7 +889,7 @@ def build_kb_router() -> APIRouter:
                         "slug": effective_slug,
                         "status": "error",
                         "message": exists_message(exc),
-                        "existing_url": f"/ui/kb/{exc.detail.slug}",
+                        "existing_slug": exc.detail.slug,
                         "entry": None,
                     }
                 )

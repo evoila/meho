@@ -71,14 +71,14 @@ keys surface on every read surface that already returns `metadata`.
 ### `KbRevision` (`db/models.py`) and `KbEntryRevision` (`kb/schemas.py`)
 
 `KbRevision` is the ORM row in `kb_revision` (migration `0110`; migration
-`0138` adds `entry_metadata`):
+`0139` adds `entry_metadata`):
 `id` (revision UUID), `tenant_id`, `entry_id` (the `documents.id`,
 `ON DELETE CASCADE`), `revision_number` (1, 2, 3, ... per entry; unique
 per entry; the highest is current), `body`, `body_hash`, `provenance`
 (the write's provenance block, or `NULL`), `origin`, `embedding_model`,
 `chunker_version` (`kb-md-heading-v1` for revisions written since
 #3761), `entry_metadata` (the entry's metadata as of this revision;
-`NULL` on a row stored before `0138`) and `created_at`.
+`NULL` on a row stored before `0139`) and `created_at`.
 
 `origin` is `write` for a row stored by a kb write, or
 `backfill-current` for the one row migration `0110` copied from each

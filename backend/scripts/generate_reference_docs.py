@@ -477,6 +477,25 @@ def _tool_table(rows: list[tuple[str, str, str, str]]) -> list[str]:
     return lines
 
 
+#: Reads "<place>, or the CLI: `<command> <args>`" out of a human-only
+#: remediation text, so the page names the same place and CLI verb as the
+#: answer an agent gets.
+_HUMAN_ONLY_WHERE = re.compile(r"via the (?P<place>[^,]+), or the CLI: `(?P<cli>[^`]+)`")
+
+
+def _human_only_where(name: str) -> str:
+    """Name where a person makes a human-only decision: console place and CLI verb."""
+    match = _HUMAN_ONLY_WHERE.search(HUMAN_ONLY_MCP_TOOLS[name])
+    if match is None:
+        raise ValueError(f"human-only remediation of {name!r} names no console place and CLI verb")
+    verb = []
+    for word in match["cli"].split():
+        if word.startswith(("<", "-")):
+            break
+        verb.append(word)
+    return f"{match['place']}, or `{' '.join(verb)}`"
+
+
 def render_mcp_tool_index() -> str:
     """Render the MCP tool-surface page from the in-process tool registry."""
     eager_import_mcp_modules()
@@ -563,7 +582,7 @@ def render_mcp_tool_index() -> str:
         "| --- | --- |",
     ]
     for name in sorted(HUMAN_ONLY_MCP_TOOLS):
-        lines.append(f"| `{name}` | operator console approvals queue, or the `meho` CLI |")
+        lines.append(f"| `{name}` | {_human_only_where(name)} |")
     lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 

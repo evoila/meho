@@ -127,7 +127,7 @@ meho admin keycloak bootstrap-clients [flags]
 
 ## `meho agent`
 
-Manage agent definitions (list / show / create / edit / delete)
+Manage agent definitions, runs and grants (list / show / create / edit / delete / run / grant)
 
 ```
 meho agent
@@ -1052,7 +1052,7 @@ meho bind9 zone read <zone> [flags]
 
 ## `meho broadcast`
 
-Manage broadcast-detail overrides (overrides list / set / remove)
+Read, announce and watch agent announcements, and manage broadcast-detail overrides (recent / announce / watch / overrides)
 
 ```
 meho broadcast
@@ -1160,7 +1160,7 @@ meho broadcast watch [flags]
 
 ## `meho connector`
 
-spec-ingestion + review workflow (ingest / list / catalog / review / edit / enable / enable-reads / disable / delete)
+Ingest vendor specs and review connectors (ingest / ingest-status / list / catalog / review / edit-group / edit-op / enable / enable-reads / disable / delete / overrides / remove-override / tenant-setting)
 
 ```
 meho connector
@@ -4569,7 +4569,7 @@ meho secret read <mount> <path> [flags]
 
 ## `meho sensor`
 
-Manage deterministic-check sensors (list / create / edit / delete)
+Manage deterministic-check sensors (list / create / edit / delete / results)
 
 ```
 meho sensor
@@ -4968,12 +4968,12 @@ Update the tenant flight-recorder capture policy (tenant_admin)
 meho tenants flight-recorder-policy set [flags]
 ```
 
-- `--agent-readable` — agent-read override (F5): true | false | inherit (inherit clears to the capture default)
+- `--agent-readable` — agent-read override: true | false | inherit (inherit clears to the capture default)
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
 - `--clear-retention` — clear the retention override back to the global default
-- `--enabled` — per-tenant capture default (F1); send true or false
+- `--enabled` — per-tenant capture default; send true or false
 - `--json` — emit the resolved policy as JSON instead of the human summary
-- `--retention-days` — per-tenant trace retention window in days (F4; 1..365)
+- `--retention-days` — per-tenant trace retention window in days (1..365)
 
 #### `meho tenants flight-recorder-policy show`
 
@@ -5020,7 +5020,7 @@ meho tenants use [<name|id>] [flags]
 
 ## `meho topology`
 
-Query and refresh the MEHO topology graph (refresh / dependents / dependencies / path / timeline / diff / history / annotate / unannotate / list-edges)
+Query and refresh the MEHO topology graph (refresh / dependents / dependencies / path / timeline / diff / history / annotate / unannotate / bulk-import / list-edges)
 
 ```
 meho topology

@@ -77,9 +77,13 @@ Header values are stored as the text the author wrote for dates and
 decimal numbers. Plain YAML would turn ``learned_at: 2026-11-03`` into a
 date object, which the JSON column cannot store, and ``version: 3.10``
 into the number 3.1. The walker reads the header with a loader that keeps
-both as text (``"2026-11-03"``, ``"3.10"``). A header value that still
-cannot be written as JSON fails the file with one short error that names
-the file and the field, in the dry run and in the real run alike.
+both as text (``"2026-11-03"``, ``"3.10"``). That loader is used only
+when the file starts with a YAML header (``---`` on the first line). A
+JSON header and a file without a header are read as before: a ``---``
+line later in a plain note is body text, not a header. A header value
+that still cannot be written as JSON fails the file with one short error
+that names the file and the field, in the dry run and in the real run
+alike.
 
 Out of scope (deferred)
 -----------------------
@@ -415,8 +419,13 @@ def _build_record(path: Path, rel: str) -> KbFileRecord:
         # catch PermissionError and friends.
         raise type(exc)(f"could not read {rel}: {exc.strerror or type(exc).__name__}") from exc
 
+    # Passing a handler skips the library's format detection. Keep the
+    # detection: use the text-keeping YAML handler only when the file
+    # starts with a YAML header, else let the library pick (a JSON
+    # header, or no header at all).
+    handler = _HEADER_HANDLER if _HEADER_HANDLER.detect(raw.strip()) else None
     try:
-        post = frontmatter.loads(raw, handler=_HEADER_HANDLER)
+        post = frontmatter.loads(raw, handler=handler)
     except yaml.YAMLError as exc:
         raise KbFileParseError(f"front-matter parse error in {rel}: {exc}") from exc
 

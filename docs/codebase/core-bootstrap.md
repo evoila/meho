@@ -38,7 +38,8 @@ What is true after the Job ran:
   browser. Keycloak asks for a new password first. The token then carries
   the first tenant's id, the role `tenant_admin` and `platform_admin`.
 - The second person is in `MEHO-SA-Operators`. That group gives the role
-  `operator` (self-approval comes later with #3325). A change that waits
+  `operator`, and its members may also approve their own changes
+  (`RoleGroup.SA_OPERATORS` in `auth/operator.py`). A change that waits
   for a second person can be approved by any operator other than the
   person who asked, or by a member of `MEHO-Approvers`. So the second
   person can approve the first admin's changes. The first admin cannot

@@ -19,8 +19,8 @@ after the form-2 install and the appliance pieces, before the clean
   neither list stops the build.
 
 The design is the internal design note `form-1-appliance.md`, section 1,
-step 3, "What the build sets beyond the image's defaults" and "The CIS
-decisions of Damir Topic".
+step 3, "What the build sets beyond the image's defaults" and the CIS
+decisions.
 
 ## Key files
 
@@ -30,7 +30,7 @@ decisions of Damir Topic".
 | `cis/tailoring.xml` | Two profiles: `appliance` (the scan) and `appliance_remediate` (the fixes). |
 | `cis/not-applicable.md` | Each rule the scan leaves out, with its reason; also the manual rules that do not apply. |
 | `cis/oscap-run-sce-script` | OpenSCAP's runner for script checks it cannot execute, as from the `noexec` `/tmp`. |
-| `cis/exceptions.md` | Each rule that applies but fails on the build or on an appliance after first start, with where it fails and one sentence on why. Damir Topic approves the list once per release (`docs/RELEASING.md`, pre-flight). |
+| `cis/exceptions.md` | Each rule that applies but fails on the build or on an appliance after first start, with where it fails and one sentence on why. The list is approved once per release (`docs/RELEASING.md`, pre-flight). |
 | `tests/test_harden.py` | `harden.sh` against a fake build VM. |
 | `tests/test_cis_lists.py` | The tailoring and the two lists agree. |
 

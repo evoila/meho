@@ -85,7 +85,7 @@ documented third-party carve-out inside the otherwise-Apache-2.0 repo.
   `docs/architecture/jsonflux.md` runbook (T5) must document the carve-out so
   future contributors don't "fix" the headers to Apache-2.0.
 - **Signoff:** the worst of the three. The MEHO.X tree is AGPL and some of the
-  22 commits are authored by `@kr3s0` / `@ddzafic` / `@zdamir`, not only
+  22 commits are authored by three other team members, not only
   @ikaric. Shipping their AGPL-relicensed contributions back out under MIT
   requires a **per-commit author-chain audit and per-author consent**, because
   MIT-out is not something @ikaric alone can grant for code others wrote.

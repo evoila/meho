@@ -1774,7 +1774,7 @@ and no check covers it (see below).
 
 **When the latest run started.** The first run starts at `resumed_at`. A
 re-run (#5417) clears the stored result and sets `rerun_started_at` in the
-same claim (migration `0141`). So the minutes count from
+same claim (migration `0142`). So the minutes count from
 `rerun_started_at`, or from `resumed_at` when there was no re-run. A re-run
 that just started is not listed, even when the first run was long ago.
 
@@ -1831,7 +1831,7 @@ or the form in the console modal (`POST /ui/approvals/{id}/outcome-check`).
   `outcome_already_checked`).
 - sets six columns on the request (`outcome_checked_at`,
   `outcome_checked_by`, `outcome_checked_by_name`, `outcome_check_verdict`,
-  `outcome_check_note`, `outcome_check_reason`, migration `0141`). A new
+  `outcome_check_note`, `outcome_check_reason`, migration `0142`). A new
   check replaces an older one that no longer covers the request; the audit
   row of the older check stays. It writes one audit row: `path`
   `approval.outcome_check`, class `approval_decision`, status 200, with

@@ -7195,7 +7195,7 @@ class ApprovalRequest(Base):
     # ``resumed_at``. The re-run claim sets it
     # in the same UPDATE that adds one to ``rerun_count``. The "outcome
     # unknown" list counts its minutes from the start of the latest run.
-    # Added by migration ``0141``.
+    # Added by migration ``0142``.
     rerun_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
@@ -7215,7 +7215,7 @@ class ApprovalRequest(Base):
     # ``started_no_result``). A check covers only that reason and the run that
     # was the latest at that time, so a later re-run or a later ``uncertain``
     # result puts the request back on the list. The stored result is never
-    # changed, and nothing runs. Added by migration ``0141``.
+    # changed, and nothing runs. Added by migration ``0142``.
     outcome_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )

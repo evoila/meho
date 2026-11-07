@@ -3,8 +3,8 @@
 
 """Let an operator mark an approved run with an unknown outcome as checked (#5026).
 
-Revision ID: 0141
-Revises: 0140
+Revision ID: 0142
+Revises: 0141
 Create Date: 2026-11-07
 
 Six nullable columns on ``approval_request`` hold what an operator found
@@ -37,8 +37,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0141"
-down_revision: str | None = "0140"
+revision: str = "0142"
+down_revision: str | None = "0141"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

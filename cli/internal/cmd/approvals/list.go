@@ -55,9 +55,10 @@ func newListCmd() *cobra.Command {
 			"JSON array for jq pipelines.\n\n" +
 			"--outcome-unknown lists the approved changes whose outcome " +
 			"MEHO does not know and that nobody marked as checked: the run " +
-			"ended uncertain, or it started more than 15 minutes ago (the " +
-			"server setting APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES) and " +
-			"stored no result. Do not run these again: check the target, " +
+			"ended uncertain, or its latest run started more than the set " +
+			"minutes ago and stored no result. The server setting " +
+			"APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES sets the minutes (15 by " +
+			"default). Do not run these again: check the target, " +
 			"then record what you found with `meho approvals mark-checked`. " +
 			"It cannot be combined with --status.\n\n" +
 			"The APPROVE column says whether you may approve each " +

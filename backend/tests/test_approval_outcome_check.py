@@ -28,7 +28,7 @@ import httpx
 import pytest
 import respx
 from httpx import ASGITransport
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -58,6 +58,7 @@ from meho_backplane.operations.approval_queue import (
     NonHumanApprovalError,
     UnauthorizedApprovalError,
 )
+from meho_backplane.operations.approval_rerun import _claim_rerun
 from meho_backplane.operations.uncertain_outcome import (
     UNCERTAIN_ADVICE,
     result_interrupted_by_restart,
@@ -119,6 +120,7 @@ async def _seed(
     resumed_at: datetime | None = None,
     resume_result: dict[str, Any] | None = None,
     created_at: datetime | None = None,
+    **columns: Any,
 ) -> uuid.UUID:
     request_id = uuid.uuid4()
     # Leave the column unset for "no result".
@@ -145,6 +147,7 @@ async def _seed(
                 created_at=created_at or datetime.now(UTC),
                 expires_at=datetime.now(UTC) + timedelta(days=1),
                 **result_kwargs,
+                **columns,
             )
         )
     return request_id
@@ -256,6 +259,108 @@ async def test_the_setting_moves_the_line(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert await _listed_ids() == set()
     assert outcome_unknown(await _load(started)) is None
+
+
+# ---------------------------------------------------------------------------
+# Re-runs (#5417) and later results
+# ---------------------------------------------------------------------------
+
+
+async def _set(request_id: uuid.UUID, **values: Any) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        await session.execute(
+            update(ApprovalRequest).where(ApprovalRequest.id == request_id).values(**values)
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_minutes_count_from_the_start_of_the_latest_rerun() -> None:
+    fresh_rerun = await _seed(resumed_at=_ago(60), rerun_count=1, rerun_started_at=_ago(5))
+    old_rerun = await _seed(resumed_at=_ago(60), rerun_count=1, rerun_started_at=_ago(20))
+
+    assert await _listed_ids() == {old_rerun}
+    assert outcome_unknown(await _load(fresh_rerun)) is None
+    reason = outcome_unknown(await _load(old_rerun))
+    assert reason is not None
+    assert reason.reason is OutcomeUnknownReason.STARTED_NO_RESULT
+
+
+@pytest.mark.asyncio
+async def test_the_rerun_claim_sets_the_start_of_the_latest_run() -> None:
+    request_id = await _seed(resumed_at=_ago(60), resume_result=_FAILED)
+    before = datetime.now(UTC)
+
+    attempt = await _claim_rerun(_operator(sub="agent:requester"), await _load(request_id))
+
+    assert attempt == 2
+    row = await _load(request_id)
+    assert row.resume_result is None
+    assert row.rerun_started_at is not None
+    assert row.rerun_started_at.replace(tzinfo=UTC) >= before - timedelta(seconds=1)
+    # A re-run that just started is not on the list.
+    assert await _listed_ids() == set()
+    assert outcome_unknown(row) is None
+
+
+@pytest.mark.asyncio
+async def test_a_check_of_an_earlier_run_does_not_hide_a_later_rerun() -> None:
+    request_id = await _seed(
+        resumed_at=_ago(60),
+        rerun_count=1,
+        rerun_started_at=_ago(20),
+        outcome_checked_at=_ago(40),
+        outcome_checked_by=_CHECKER,
+        outcome_check_verdict="did_not_happen",
+        outcome_check_note="the first run did not reach the host",
+        outcome_check_reason="started_no_result",
+    )
+
+    assert await _listed_ids() == {request_id}
+    await _mark(request_id, note="the re-run did not reach the host either")
+    assert await _listed_ids() == set()
+    row = await _load(request_id)
+    assert row.outcome_check_note == "the re-run did not reach the host either"
+    (audit,) = await _check_audit_rows(request_id)
+    assert audit.payload["rerun_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_check_of_the_latest_run_keeps_it_off_the_list() -> None:
+    request_id = await _seed(
+        resumed_at=_ago(60),
+        rerun_count=1,
+        rerun_started_at=_ago(30),
+        outcome_checked_at=_ago(10),
+        outcome_checked_by=_CHECKER,
+        outcome_check_verdict="happened",
+        outcome_check_note="the re-run made the VM",
+        outcome_check_reason="started_no_result",
+    )
+    assert await _listed_ids() == set()
+    assert outcome_unknown(await _load(request_id)) is None
+    with pytest.raises(OutcomeAlreadyCheckedError):
+        await _mark(request_id)
+
+
+@pytest.mark.asyncio
+async def test_a_check_while_the_run_had_no_result_does_not_hide_a_later_uncertain_result() -> None:
+    request_id = await _seed(resumed_at=_ago(20))
+    await _mark(request_id, verdict=OutcomeCheckVerdict.DID_NOT_HAPPEN)
+    assert await _listed_ids() == set()
+
+    # The run comes back later, and MEHO does not know if the change happened.
+    await _set(request_id, resume_result=_UNCERTAIN)
+
+    assert await _listed_ids() == {request_id}
+    reason = outcome_unknown(await _load(request_id))
+    assert reason is not None
+    assert reason.reason is OutcomeUnknownReason.UNCERTAIN
+    await _mark(request_id, note="the VM exists after all")
+    assert await _listed_ids() == set()
+    reasons = [r.payload["outcome_unknown_reason"] for r in await _check_audit_rows(request_id)]
+    assert sorted(reasons) == ["started_no_result", "uncertain"]
+    with pytest.raises(OutcomeAlreadyCheckedError):
+        await _mark(request_id)
 
 
 @pytest.mark.asyncio

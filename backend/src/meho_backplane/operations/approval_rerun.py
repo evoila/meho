@@ -26,7 +26,9 @@ The rules, checked in this order:
    result is a failure and ``rerun_count`` is still the value the caller
    read. Two re-runs sent at the same time: one wins, the other is refused,
    also when the first one already ran and failed again before the second
-   claims. ``resumed_at`` stays the one-way latch of the first run.
+   claims. ``resumed_at`` stays the one-way latch of the first run. The
+   same ``UPDATE`` sets ``rerun_started_at``, the start of the latest run,
+   which the "outcome unknown" list counts its minutes from (#5026).
 
 Every re-run writes an ``approval.rerun`` audit row that names the request
 and the attempt, in the same transaction as the claim. A refused re-run
@@ -288,7 +290,11 @@ async def _claim_rerun(operator: Operator, request: ApprovalRequest) -> int | No
                 ApprovalRequest.resume_result.is_not(None),
                 func.coalesce(result_status, "") != "ok",
             )
-            .values(resume_result=null(), rerun_count=ApprovalRequest.rerun_count + 1)
+            .values(
+                resume_result=null(),
+                rerun_count=ApprovalRequest.rerun_count + 1,
+                rerun_started_at=_now(),
+            )
             .returning(ApprovalRequest.rerun_count)
             .execution_options(synchronize_session=False)
         )

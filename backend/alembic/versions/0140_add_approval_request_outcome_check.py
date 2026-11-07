@@ -7,22 +7,27 @@ Revision ID: 0140
 Revises: 0139
 Create Date: 2026-11-07
 
-Five nullable columns on ``approval_request`` hold what an operator found
+Six nullable columns on ``approval_request`` hold what an operator found
 when they checked the target of an approved run whose outcome MEHO does not
 know: ``outcome_checked_at``, ``outcome_checked_by``,
-``outcome_checked_by_name``, ``outcome_check_verdict`` and
-``outcome_check_note``. Every existing row reads NULL ("not checked").
+``outcome_checked_by_name``, ``outcome_check_verdict``,
+``outcome_check_note`` and ``outcome_check_reason`` (why the request was on
+the list when it was checked). One more nullable column,
+``rerun_started_at``, holds when the latest re-run started, so the list
+counts its minutes from the start of the latest run. Every existing row
+reads NULL ("not checked", "no re-run start recorded").
 
-A CHECK ``ck_approval_request_outcome_check_verdict`` allows only
-``happened`` and ``did_not_happen`` (NULL passes). The columns and the
-CHECK are added inside ``batch_alter_table``, so SQLite rebuilds the table
-and PostgreSQL runs plain ``ALTER TABLE``. Same pattern as migration
-``0119``.
+Two CHECKs allow only known values (NULL passes):
+``ck_approval_request_outcome_check_verdict`` (``happened``,
+``did_not_happen``) and ``ck_approval_request_outcome_check_reason``
+(``uncertain``, ``started_no_result``). The columns and the CHECKs are
+added inside ``batch_alter_table``, so SQLite rebuilds the table and
+PostgreSQL runs plain ``ALTER TABLE``. Same pattern as migration ``0119``.
 
-``downgrade()`` drops the CHECK and the five columns. That loses the
+``downgrade()`` drops the CHECKs and the seven columns. That loses the
 recorded checks; the audit rows of the checks stay.
 
-The value tuple is written out here, not imported from the models, so the
+The value tuples are written out here, not imported from the models, so the
 migration keeps working when the models change later.
 """
 
@@ -51,14 +56,22 @@ __all__ = [
 
 _TABLE = "approval_request"
 _CONSTRAINT = "ck_approval_request_outcome_check_verdict"
+_REASON_CONSTRAINT = "ck_approval_request_outcome_check_reason"
 
 #: The verdicts an operator can record.
 _VERDICTS: tuple[str, ...] = ("happened", "did_not_happen")
 
+#: Why a checked request was on the list.
+_REASONS: tuple[str, ...] = ("uncertain", "started_no_result")
+
+
+def _in(column: str, values: tuple[str, ...]) -> str:
+    quoted = ", ".join(f"'{v}'" for v in values)
+    return f"{column} IN ({quoted})"
+
 
 def upgrade() -> None:
-    """Add the five check columns and the verdict CHECK."""
-    quoted = ", ".join(f"'{v}'" for v in _VERDICTS)
+    """Add the check columns, the re-run start column and the two CHECKs."""
     with op.batch_alter_table(_TABLE) as batch_op:
         batch_op.add_column(
             sa.Column("outcome_checked_at", sa.DateTime(timezone=True), nullable=True)
@@ -67,13 +80,21 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column("outcome_checked_by_name", sa.Text(), nullable=True))
         batch_op.add_column(sa.Column("outcome_check_verdict", sa.Text(), nullable=True))
         batch_op.add_column(sa.Column("outcome_check_note", sa.Text(), nullable=True))
-        batch_op.create_check_constraint(_CONSTRAINT, f"outcome_check_verdict IN ({quoted})")
+        batch_op.add_column(sa.Column("outcome_check_reason", sa.Text(), nullable=True))
+        batch_op.add_column(
+            sa.Column("rerun_started_at", sa.DateTime(timezone=True), nullable=True)
+        )
+        batch_op.create_check_constraint(_CONSTRAINT, _in("outcome_check_verdict", _VERDICTS))
+        batch_op.create_check_constraint(_REASON_CONSTRAINT, _in("outcome_check_reason", _REASONS))
 
 
 def downgrade() -> None:
-    """Drop the verdict CHECK and the five check columns."""
+    """Drop the two CHECKs, the re-run start column and the check columns."""
     with op.batch_alter_table(_TABLE) as batch_op:
+        batch_op.drop_constraint(_REASON_CONSTRAINT, type_="check")
         batch_op.drop_constraint(_CONSTRAINT, type_="check")
+        batch_op.drop_column("rerun_started_at")
+        batch_op.drop_column("outcome_check_reason")
         batch_op.drop_column("outcome_check_note")
         batch_op.drop_column("outcome_check_verdict")
         batch_op.drop_column("outcome_checked_by_name")

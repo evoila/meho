@@ -880,7 +880,7 @@ async def list_approvals(
         description=(
             "List only approved requests whose outcome MEHO does not know and "
             "that nobody marked as checked: the result says 'uncertain', or the "
-            "run started more than APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES "
+            "latest run started more than APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES "
             "(default 15) ago and stored no result. When true, 'status' is "
             "ignored. Defaults to false."
         ),
@@ -1397,9 +1397,10 @@ async def mark_approval_outcome_checked(
     * 200 — recorded.
     * 403 — not a person, or a role that may not decide approvals.
     * 404 — request not found (or belongs to another tenant).
-    * 409 — ``outcome_already_checked``, or ``outcome_not_unknown`` when the
-      request is not on the list (not approved, not run, a known result,
-      or a run that started less than the set minutes ago).
+    * 409 — ``outcome_already_checked`` when a check already covers the
+      request, or ``outcome_not_unknown`` when its outcome is known or not
+      yet due (not approved, not run, a known result, or a latest run that
+      started less than the set minutes ago).
     * 422 — an unknown verdict, or an empty or too long note.
     """
     structlog.contextvars.bind_contextvars(

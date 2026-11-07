@@ -6693,6 +6693,10 @@ _APPROVAL_REQUEST_STATUSES: tuple[str, ...] = tuple(s.value for s in ApprovalReq
 #: ``OutcomeCheckVerdict`` in ``operations/approval_outcome_check.py``.
 _APPROVAL_OUTCOME_CHECK_VERDICTS: tuple[str, ...] = ("happened", "did_not_happen")
 
+#: Why a checked request was on the "outcome unknown" list (#5026). Kept
+#: equal to ``OutcomeUnknownReason`` in ``operations/approval_outcome_check.py``.
+_APPROVAL_OUTCOME_CHECK_REASONS: tuple[str, ...] = ("uncertain", "started_no_result")
+
 
 class ApprovalRequest(Base):
     """One pending (or decided) approval request for a ``requires_approval`` op.
@@ -7135,6 +7139,14 @@ class ApprovalRequest(Base):
     rerun_count: Mapped[int] = mapped_column(
         sa.Integer(), nullable=False, default=0, server_default=sa.text("0")
     )
+    # When the latest re-run started (#5026). NULL until the first re-run;
+    # then the latest run started at ``resumed_at``. The re-run claim sets it
+    # in the same UPDATE that adds one to ``rerun_count``. The "outcome
+    # unknown" list counts its minutes from the start of the latest run.
+    # Added by migration ``0140``.
+    rerun_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
     # The target's connection settings when the request was made. See the
     # class docstring. Added by migration ``0130``.
     target_hash: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
@@ -7146,7 +7158,11 @@ class ApprovalRequest(Base):
     # An operator checked the target of an approved run whose outcome MEHO
     # does not know, and wrote down what they found (#5026): the verdict
     # (``happened`` / ``did_not_happen``), a note, who and when. NULL until
-    # someone marks the request as checked. The stored result is never
+    # someone marks the request as checked. ``outcome_check_reason`` is why
+    # the request was on the list at that time (``uncertain`` /
+    # ``started_no_result``). A check covers only that reason and the run that
+    # was the latest at that time, so a later re-run or a later ``uncertain``
+    # result puts the request back on the list. The stored result is never
     # changed, and nothing runs. Added by migration ``0140``.
     outcome_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
@@ -7155,6 +7171,7 @@ class ApprovalRequest(Base):
     outcome_checked_by_name: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     outcome_check_verdict: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     outcome_check_note: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    outcome_check_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     __table_args__ = (
         Index(
@@ -7201,6 +7218,10 @@ class ApprovalRequest(Base):
         sa.CheckConstraint(
             _ck_in("outcome_check_verdict", _APPROVAL_OUTCOME_CHECK_VERDICTS),
             name="ck_approval_request_outcome_check_verdict",
+        ),
+        sa.CheckConstraint(
+            _ck_in("outcome_check_reason", _APPROVAL_OUTCOME_CHECK_REASONS),
+            name="ck_approval_request_outcome_check_reason",
         ),
     )
 

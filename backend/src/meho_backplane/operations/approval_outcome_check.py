@@ -3,14 +3,17 @@
 
 """Approved runs whose outcome MEHO does not know, for operators to check (#5026).
 
-An approved request runs once. MEHO sets ``resumed_at`` before it calls the
-vendor and stores the result when the call returns. Two kinds of approved
-request leave MEHO without a known outcome:
+MEHO sets ``resumed_at`` before it calls the vendor for the first run and
+stores the result when the call returns. A re-run after a failed run
+(#5417) clears the stored result and sets ``rerun_started_at``. So the
+latest run started at ``rerun_started_at``, or at ``resumed_at`` when there
+was no re-run. Two kinds of approved request leave MEHO without a known
+outcome:
 
 * ``uncertain`` -- the stored result says MEHO does not know if the change
   happened (#5025): a lost answer, a failed audit write, a restart in the
   middle of the run.
-* ``started_no_result`` -- the run started more than
+* ``started_no_result`` -- the latest run started more than
   ``APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES`` minutes ago (default 15) and
   stored no result yet.
 
@@ -20,7 +23,11 @@ rows. A person checks the target and records what they found with
 :func:`mark_outcome_checked`: "it happened" or "it did not happen", with a
 note. That writes one audit row and fills the ``outcome_check*`` columns.
 The stored result stays as it was, and nothing runs. A checked request
-leaves the list.
+leaves the list. A check covers only the reason the request had when it
+was checked, and only the latest run at that time. So the request comes
+back on the list when a later re-run has no result after the set minutes,
+or when the run that was checked as ``started_no_result`` later stores an
+``uncertain`` result.
 """
 
 from __future__ import annotations
@@ -31,7 +38,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Final
 
-from sqlalchemy import Text, and_, cast, func, or_, select
+from sqlalchemy import Text, and_, cast, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
@@ -135,6 +142,39 @@ def _as_utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
+def _run_started_at(request: ApprovalRequest) -> datetime | None:
+    """When the latest run started: the latest re-run, else the first run."""
+    started = request.rerun_started_at or request.resumed_at
+    return _as_utc(started) if started is not None else None
+
+
+def _unknown_reason(
+    request: ApprovalRequest, *, now: datetime | None, after: timedelta | None
+) -> OutcomeUnknownReason | None:
+    """Why the outcome of *request* is unknown, ignoring any check."""
+    if request.status != ApprovalRequestStatus.APPROVED.value:
+        return None
+    if request.resume_result is not None:
+        if envelope_is_uncertain(request.resume_result):
+            return OutcomeUnknownReason.UNCERTAIN
+        return None
+    started = _run_started_at(request)
+    if started is None:
+        return None
+    cutoff = (now or datetime.now(UTC)) - (after if after is not None else outcome_unknown_after())
+    if started > cutoff:
+        return None
+    return OutcomeUnknownReason.STARTED_NO_RESULT
+
+
+def _check_covers(request: ApprovalRequest, reason: OutcomeUnknownReason) -> bool:
+    """True when a check recorded *reason* during the latest run."""
+    if request.outcome_checked_at is None or request.outcome_check_reason != reason.value:
+        return False
+    started = _run_started_at(request)
+    return started is None or _as_utc(request.outcome_checked_at) >= started
+
+
 def outcome_unknown(
     request: ApprovalRequest,
     *,
@@ -145,20 +185,12 @@ def outcome_unknown(
 
     The Python twin of :func:`_outcome_unknown_clause`, for one row.
     """
-    if request.status != ApprovalRequestStatus.APPROVED.value:
+    reason = _unknown_reason(request, now=now, after=after)
+    if reason is None or _check_covers(request, reason):
         return None
-    if request.outcome_checked_at is not None:
-        return None
-    if request.resume_result is not None:
-        if envelope_is_uncertain(request.resume_result):
-            return OutcomeUnknown(OutcomeUnknownReason.UNCERTAIN, UNCERTAIN_ADVICE)
-        return None
-    if request.resumed_at is None:
-        return None
-    cutoff = (now or datetime.now(UTC)) - (after if after is not None else outcome_unknown_after())
-    if _as_utc(request.resumed_at) > cutoff:
-        return None
-    return OutcomeUnknown(OutcomeUnknownReason.STARTED_NO_RESULT, STARTED_NO_RESULT_ADVICE)
+    if reason is OutcomeUnknownReason.UNCERTAIN:
+        return OutcomeUnknown(reason, UNCERTAIN_ADVICE)
+    return OutcomeUnknown(reason, STARTED_NO_RESULT_ADVICE)
 
 
 def _outcome_unknown_clause(cutoff: datetime) -> Any:
@@ -166,7 +198,7 @@ def _outcome_unknown_clause(cutoff: datetime) -> Any:
 
     The same rule as :func:`envelope_is_uncertain`: a stored result whose
     ``status`` is not ``ok`` and whose ``extras.execution_outcome`` is
-    ``uncertain``.
+    ``uncertain``. The same check rule as :func:`_check_covers`.
     """
     result = ApprovalRequest.resume_result
     result_status = func.coalesce(result["status"].as_string(), "")
@@ -178,15 +210,29 @@ def _outcome_unknown_clause(cutoff: datetime) -> Any:
     # "No result" is SQL NULL, or a JSON ``null`` (a row written with an
     # explicit ``None``); both load as ``None`` in Python.
     no_result = or_(result.is_(None), cast(result, Text) == "null")
+    run_started_at = func.coalesce(ApprovalRequest.rerun_started_at, ApprovalRequest.resumed_at)
     started_no_result = and_(
         no_result,
-        ApprovalRequest.resumed_at.is_not(None),
-        ApprovalRequest.resumed_at <= cutoff,
+        run_started_at.is_not(None),
+        run_started_at <= cutoff,
     )
+
+    def covered(reason: OutcomeUnknownReason) -> Any:
+        return and_(
+            ApprovalRequest.outcome_checked_at.is_not(None),
+            func.coalesce(ApprovalRequest.outcome_check_reason, "") == reason.value,
+            or_(
+                run_started_at.is_(None),
+                ApprovalRequest.outcome_checked_at >= run_started_at,
+            ),
+        )
+
     return and_(
         ApprovalRequest.status == ApprovalRequestStatus.APPROVED.value,
-        ApprovalRequest.outcome_checked_at.is_(None),
-        or_(uncertain, started_no_result),
+        or_(
+            and_(uncertain, not_(covered(OutcomeUnknownReason.UNCERTAIN))),
+            and_(started_no_result, not_(covered(OutcomeUnknownReason.STARTED_NO_RESULT))),
+        ),
     )
 
 
@@ -248,9 +294,10 @@ async def mark_outcome_checked(
 
     Only a person who may decide approvals may record a check (the same rule
     as approve and reject). The request must be on the "outcome unknown"
-    list right now. The row is locked, the five ``outcome_check*`` columns
-    are set, and one ``approval.outcome_check`` audit row is written. The
-    stored result (``resume_result``) is not changed, and nothing runs.
+    list right now. The row is locked, the ``outcome_check*`` columns are
+    set (an older check of an earlier run or another reason is replaced),
+    and one ``approval.outcome_check`` audit row is written. The stored
+    result (``resume_result``) is not changed, and nothing runs.
 
     Args:
         session: Open session; flushed, not committed.
@@ -264,7 +311,8 @@ async def mark_outcome_checked(
         UnauthorizedApprovalError: The caller may not decide approvals.
         ValueError: *note* is empty.
         ApprovalNotFoundError: No such request in this tenant.
-        OutcomeAlreadyCheckedError: Someone already checked it.
+        OutcomeAlreadyCheckedError: Someone already checked it for its
+            current reason and its latest run.
         OutcomeNotUnknownError: The request is not on the list.
     """
     _check_reviewer_role(operator)
@@ -272,11 +320,11 @@ async def mark_outcome_checked(
     if not note:
         raise ValueError("note must not be empty")
     request = await _load_for_tenant(session, request_id, operator.tenant_id, for_update=True)
-    if request.outcome_checked_at is not None:
-        raise OutcomeAlreadyCheckedError(request_id)
-    unknown = outcome_unknown(request)
-    if unknown is None:
+    reason = _unknown_reason(request, now=None, after=None)
+    if reason is None:
         raise OutcomeNotUnknownError(request_id)
+    if _check_covers(request, reason):
+        raise OutcomeAlreadyCheckedError(request_id)
 
     checked_at = datetime.now(UTC)
     request.outcome_checked_at = checked_at
@@ -284,8 +332,10 @@ async def mark_outcome_checked(
     request.outcome_checked_by_name = operator.name or None
     request.outcome_check_verdict = verdict.value
     request.outcome_check_note = note
+    request.outcome_check_reason = reason.value
     await session.flush()
 
+    started = _run_started_at(request)
     audit_id = uuid.uuid4()
     await _write_audit_row(
         session,
@@ -299,8 +349,10 @@ async def mark_outcome_checked(
         extra_payload={
             "verdict": verdict.value,
             "note": note,
-            "outcome_unknown_reason": unknown.reason.value,
+            "outcome_unknown_reason": reason.value,
             "resumed_at": _as_utc(request.resumed_at).isoformat() if request.resumed_at else None,
+            "rerun_count": request.rerun_count,
+            "run_started_at": started.isoformat() if started else None,
         },
     )
     request._audit_id = audit_id  # type: ignore[attr-defined]

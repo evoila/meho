@@ -1762,21 +1762,37 @@ Someone must look at an approved change whose outcome MEHO does not know.
 The "outcome unknown" list shows these changes, and a person records what
 they found on the target. Code: `operations/approval_outcome_check.py`.
 
-**Who is on the list.** An `approved` request that nobody marked as
-checked, and either:
+**Who is on the list.** An `approved` request where either:
 
 - its stored result is `uncertain` (`reason` `uncertain`), or
-- its run started (`resumed_at`) more than
+- its latest run started more than
   `APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES` minutes ago (default 15, from 1
   to 1440) and stored no result (`reason` `started_no_result`). A run that
   started less than that ago is not listed: it may still be running.
 
+and no check covers it (see below).
+
+**When the latest run started.** The first run starts at `resumed_at`. A
+re-run (#5417) clears the stored result and sets `rerun_started_at` in the
+same claim (migration `0140`). So the minutes count from
+`rerun_started_at`, or from `resumed_at` when there was no re-run. A re-run
+that just started is not listed, even when the first run was long ago.
+
 A request that never ran, a run with a known result (`executed` or
 `failed`), a request that is not `approved`, and a request of another
 tenant are never listed. A long operation that is still running after the
-set minutes is listed too. So is a re-run (#5417) that is still running
-after that time, because the time counts from the first run (`resumed_at`).
-Marking such a run does not stop it.
+set minutes is listed too. Marking such a run does not stop it.
+
+**What a check covers.** A check records why the request was on the list
+(`outcome_check_reason`) and when (`outcome_checked_at`). It keeps the
+request off the list only while both are still true: the reason is the
+same, and the check is not older than the start of the latest run. So the
+request comes back on the list when:
+
+- a person checked a run with no result, and that run later stores an
+  `uncertain` result, or
+- a person checked a run, that run later failed, and a re-run then has no
+  result after the set minutes (or ends `uncertain`).
 
 `list_outcome_unknown` is the one list rule (one SQL clause, with
 `outcome_unknown` as its Python twin for one row). Every surface reads it,
@@ -1808,14 +1824,17 @@ or the form in the console modal (`POST /ui/approvals/{id}/outcome-check`).
   reject: `_check_reviewer_role`, and the REST route is human-only). No
   fresh sign-in is needed: nothing runs.
 - needs a note (1 to 2000 characters, not only spaces).
-- locks the row and refuses a request that is not on the list right now
-  (409 `outcome_not_unknown`) or is already checked (409
+- locks the row and refuses a request whose outcome is known (409
+  `outcome_not_unknown`) or that a check already covers (409
   `outcome_already_checked`).
-- sets five columns on the request (`outcome_checked_at`,
+- sets six columns on the request (`outcome_checked_at`,
   `outcome_checked_by`, `outcome_checked_by_name`, `outcome_check_verdict`,
-  `outcome_check_note`, migration `0140`) and writes one audit row:
-  `path` `approval.outcome_check`, class `approval_decision`, status 200,
-  with `verdict`, `note` and `outcome_unknown_reason` in the payload.
+  `outcome_check_note`, `outcome_check_reason`, migration `0140`). A new
+  check replaces an older one that no longer covers the request; the audit
+  row of the older check stays. It writes one audit row: `path`
+  `approval.outcome_check`, class `approval_decision`, status 200, with
+  `verdict`, `note`, `outcome_unknown_reason`, `resumed_at`, `rerun_count`
+  and `run_started_at` in the payload.
 - keeps the stored result (`resume_result`) and `result_state` as they
   were, and never runs anything. An approved request starts only once, so
   the check cannot start it again.
@@ -1824,7 +1843,8 @@ REST and MCP show the check as `outcome_check: {verdict, note, checked_by,
 checked_by_name, checked_at}`. `meho approvals show` prints `Checked:`,
 `Check note:`, `Checked by:` and `Checked at:`. The console shows a
 "checked: it happened" or "checked: it did not happen" badge in the list
-and the check in the modal. A checked request leaves the list.
+and the check in the modal. A checked request leaves the list until the
+check no longer covers it (see "What a check covers").
 
 ### 4. Approved, but the run failed: `resume_outcome` (#3543)
 

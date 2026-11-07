@@ -11617,7 +11617,7 @@ type ListApprovalsApiV1ApprovalsGetParams struct {
 	// Order Sort by creation time. 'newest' (default) lists the newest request first; 'oldest' lists the oldest first, which is the order a chain of requests under one change ticket was sent in.
 	Order *ListApprovalsApiV1ApprovalsGetParamsOrder `form:"order,omitempty" json:"order,omitempty"`
 
-	// OutcomeUnknown List only approved requests whose outcome MEHO does not know and that nobody marked as checked: the result says 'uncertain', or the run started more than APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES (default 15) ago and stored no result. When true, 'status' is ignored. Defaults to false.
+	// OutcomeUnknown List only approved requests whose outcome MEHO does not know and that nobody marked as checked: the result says 'uncertain', or the latest run started more than APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES (default 15) ago and stored no result. When true, 'status' is ignored. Defaults to false.
 	OutcomeUnknown *bool   `form:"outcome_unknown,omitempty" json:"outcome_unknown,omitempty"`
 	Authorization  *string `json:"authorization,omitempty"`
 }

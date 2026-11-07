@@ -10989,11 +10989,11 @@
             "required": false,
             "schema": {
               "type": "boolean",
-              "description": "List only approved requests whose outcome MEHO does not know and that nobody marked as checked: the result says 'uncertain', or the run started more than APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES (default 15) ago and stored no result. When true, 'status' is ignored. Defaults to false.",
+              "description": "List only approved requests whose outcome MEHO does not know and that nobody marked as checked: the result says 'uncertain', or the latest run started more than APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES (default 15) ago and stored no result. When true, 'status' is ignored. Defaults to false.",
               "default": false,
               "title": "Outcome Unknown"
             },
-            "description": "List only approved requests whose outcome MEHO does not know and that nobody marked as checked: the result says 'uncertain', or the run started more than APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES (default 15) ago and stored no result. When true, 'status' is ignored. Defaults to false."
+            "description": "List only approved requests whose outcome MEHO does not know and that nobody marked as checked: the result says 'uncertain', or the latest run started more than APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES (default 15) ago and stored no result. When true, 'status' is ignored. Defaults to false."
           },
           {
             "name": "authorization",
@@ -11340,7 +11340,7 @@
           "approvals"
         ],
         "summary": "Mark Approval Outcome Checked",
-        "description": "Record what you found on the target of a run with an unknown outcome (#5026).\n\nFor an approved request on the \"outcome unknown\" list. A person who may\ndecide approvals records \"it happened\" or \"it did not happen\" with a\nnote. MEHO writes one ``approval.outcome_check`` audit row and the\nrequest leaves the list. The stored result stays as it was, and nothing\nruns.\n\nHTTP status codes:\n\n* 200 \u2014 recorded.\n* 403 \u2014 not a person, or a role that may not decide approvals.\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 ``outcome_already_checked``, or ``outcome_not_unknown`` when the\n  request is not on the list (not approved, not run, a known result,\n  or a run that started less than the set minutes ago).\n* 422 \u2014 an unknown verdict, or an empty or too long note.",
+        "description": "Record what you found on the target of a run with an unknown outcome (#5026).\n\nFor an approved request on the \"outcome unknown\" list. A person who may\ndecide approvals records \"it happened\" or \"it did not happen\" with a\nnote. MEHO writes one ``approval.outcome_check`` audit row and the\nrequest leaves the list. The stored result stays as it was, and nothing\nruns.\n\nHTTP status codes:\n\n* 200 \u2014 recorded.\n* 403 \u2014 not a person, or a role that may not decide approvals.\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 ``outcome_already_checked`` when a check already covers the\n  request, or ``outcome_not_unknown`` when its outcome is known or not\n  yet due (not approved, not run, a known result, or a latest run that\n  started less than the set minutes ago).\n* 422 \u2014 an unknown verdict, or an empty or too long note.",
         "operationId": "mark_approval_outcome_checked_api_v1_approvals__request_id__outcome_check_post",
         "parameters": [
           {

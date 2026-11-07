@@ -341,7 +341,7 @@ register_mcp_tool(
                     "description": (
                         "List only approved requests whose outcome MEHO does "
                         "not know and that nobody marked as checked: the "
-                        "result says 'uncertain', or the run started more "
+                        "result says 'uncertain', or the latest run started more "
                         "than APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES (default "
                         "15) ago and stored no result. Do not run these "
                         "again; a person checks the target. When true, "

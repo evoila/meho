@@ -517,8 +517,10 @@ Walk the gates in the order an operator hits them:
   GitHub App (preferred) or fine-grained PAT (fallback) per
   [`docs/cross-repo/github-app-credential.md`](cross-repo/github-app-credential.md),
   write `app_id` + `installation_id` + `private_key` (App) or `token`
-  (PAT) to `secret/<tenant>/<target>/github-app`, and register the target
-  row with `product: gh`, `secret_ref: <vault-path>`,
+  (PAT) to `secret/tenants/<tenant_id>/<target>/github-app`, and
+  register the target row with `product: gh`,
+  `secret_ref: tenants/<tenant_id>/<target>/github-app` (the path
+  without the `secret/` mount, inside the tenant scope),
   `auth_model: shared_service_account`. MEHO picks App or PAT by the
   fields it finds in the secret. Without these, `meho targets probe
   <gh-target>` answers `reachable: false` with the reason in

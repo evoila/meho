@@ -263,22 +263,139 @@ def _response_warnings(response: Any) -> list[str]:
     return warnings
 
 
+#: ``conflict with "<owner>" using <apiVersion>: <field path>`` -- one cause
+#: of a field-ownership conflict (HTTP 409) in a server-side apply. The
+#: ``using ...: <field path>`` part is optional: the API server can send
+#: only ``conflict with "<owner>"`` and put the path in the cause's ``field``.
+_CONFLICT_CAUSE_RE: re.Pattern[str] = re.compile(
+    r'conflict with "(?P<owner>[^"]*)"(?:[^:]*:\s*(?P<field>.*))?'
+)
+
+#: Most owner/field pairs named in a conflict message.
+_CONFLICT_MAX_NAMED = 20
+
+
+def _field_conflicts(body: str) -> list[dict[str, str]]:
+    """Return the ``{owner, field}`` pairs of a field-ownership conflict ``Status`` body.
+
+    Reads ``details.causes`` (reason ``FieldManagerConflict``). Returns an
+    empty list when the body is not such a ``Status`` body.
+    """
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return []
+    details = parsed.get("details") if isinstance(parsed, dict) else None
+    causes = details.get("causes") if isinstance(details, dict) else None
+    conflicts: list[dict[str, str]] = []
+    for cause in causes if isinstance(causes, list) else []:
+        if not isinstance(cause, dict) or cause.get("reason") != "FieldManagerConflict":
+            continue
+        match = _CONFLICT_CAUSE_RE.match(str(cause.get("message") or ""))
+        field = str(cause.get("field") or (match["field"] if match else None) or "").strip()
+        owner = match["owner"] if match else ""
+        if owner or field:
+            conflicts.append({"owner": owner, "field": field})
+    return conflicts
+
+
+def _describe_conflicts(conflicts: list[dict[str, str]]) -> str:
+    """Plain text for conflicts: which owner holds which fields."""
+    by_owner: dict[str, list[str]] = {}
+    for conflict in conflicts[:_CONFLICT_MAX_NAMED]:
+        by_owner.setdefault(conflict["owner"] or "another tool", []).append(conflict["field"])
+    named = "; ".join(f"{owner} owns {', '.join(fields)}" for owner, fields in by_owner.items())
+    if len(conflicts) > _CONFLICT_MAX_NAMED:
+        named += f" (and {len(conflicts) - _CONFLICT_MAX_NAMED} more)"
+    return named
+
+
+async def _send_apply(
+    dyn: DynamicClient,
+    resource: Any,
+    doc: dict[str, Any],
+    *,
+    dry_run: bool,
+    force_conflicts: bool,
+) -> tuple[Any, str]:
+    """Send one server-side apply request; return the raw response and its text."""
+    metadata = doc.get("metadata") or {}
+    kwargs: dict[str, Any] = {"field_manager": FIELD_MANAGER}
+    if dry_run:
+        # The K8s API spells server dry-run ``dryRun=All``; the
+        # operator-facing param is ``dry_run="server"`` (mapped by the
+        # caller).
+        kwargs["dry_run"] = "All"
+    if force_conflicts:
+        kwargs["force_conflicts"] = True
+    # ``serialize=False`` returns the raw aiohttp response. The default
+    # path would parse a rejection (a ``Status`` body) as if it were the
+    # applied object, because the library skips its non-2xx check here.
+    response = await dyn.server_side_apply(
+        resource,
+        body=doc,
+        name=metadata.get("name"),
+        namespace=metadata.get("namespace"),
+        serialize=False,
+        **kwargs,
+    )
+    return response, await response.text()
+
+
+def _reject(response: Any, body: str, subject: str, *, force_conflicts: bool) -> ApplyRejectedError:
+    """The error for a non-2xx apply answer; a conflict names the owners and the fix."""
+    message = _status_message(body)
+    conflicts = _field_conflicts(body) if response.status == 409 else []
+    if conflicts:
+        hint = (
+            ""
+            if force_conflicts
+            else " Set force_conflicts: true to take these fields over from the other owner."
+        )
+        message = f"another tool owns fields of {subject}: {_describe_conflicts(conflicts)}.{hint}"
+    status_line = " ".join(str(part) for part in (response.status, response.reason) if part)
+    detail = f": {message}" if message else ""
+    return ApplyRejectedError(
+        f"the API server rejected the server-side apply of {subject} (HTTP {status_line}){detail}",
+        http_status=response.status,
+        upstream_message=message,
+    )
+
+
+async def _preview_takeover(
+    dyn: DynamicClient, resource: Any, doc: dict[str, Any], subject: str
+) -> list[dict[str, str]]:
+    """Dry-run without force to learn which fields a forced apply takes over."""
+    response, body = await _send_apply(dyn, resource, doc, dry_run=True, force_conflicts=False)
+    if 200 <= response.status <= 299:
+        return []
+    conflicts = _field_conflicts(body) if response.status == 409 else []
+    if not conflicts:
+        raise _reject(response, body, subject, force_conflicts=False)
+    return conflicts
+
+
 async def _apply_one(
     dyn: DynamicClient,
     doc: dict[str, Any],
     *,
     dry_run: bool,
+    force_conflicts: bool = False,
 ) -> dict[str, Any]:
     """Server-side-apply one manifest document, returning a flat summary.
 
     Resolves the GVK against the cluster's discovery doc, then calls
     ``server_side_apply`` with ``field_manager="meho"`` and, when
     *dry_run* is set, the API's ``dry_run="All"`` so nothing is
-    persisted. The returned summary echoes the applied object's identity
-    + the observed ``resourceVersion`` so a multi-doc apply reports
-    per-document outcomes the reviewer can read. ``warnings`` holds the
-    texts of the API server's ``Warning`` headers (for example a
-    deprecated ``apiVersion``), so the caller and the reviewer see them.
+    persisted. With *force_conflicts* the apply takes over fields that
+    another tool owns; a dry-run then also lists them in ``takes_over``
+    (one ``{owner, field}`` per field). Without it a field-ownership
+    conflict is an error that names the owner and the fields. The
+    returned summary echoes the applied object's identity + the observed
+    ``resourceVersion`` so a multi-doc apply reports per-document
+    outcomes the reviewer can read. ``warnings`` holds the texts of the
+    API server's ``Warning`` headers (for example a deprecated
+    ``apiVersion``), so the caller and the reviewer see them.
     """
     api_version = doc["apiVersion"]
     kind = doc["kind"]
@@ -287,36 +404,15 @@ async def _apply_one(
     namespace = metadata.get("namespace")
 
     resource = await dyn.resources.get(api_version=api_version, kind=kind)
-    kwargs: dict[str, Any] = {"field_manager": FIELD_MANAGER}
-    if dry_run:
-        # The K8s API spells server dry-run ``dryRun=All``; the
-        # operator-facing param is ``dry_run="server"`` (mapped by the
-        # caller). force_conflicts is left unset -- a dry-run that hits
-        # a field-ownership conflict is signal the reviewer wants.
-        kwargs["dry_run"] = "All"
-    # ``serialize=False`` returns the raw aiohttp response. The default
-    # path would parse a rejection (a ``Status`` body) as if it were the
-    # applied object, because the library skips its non-2xx check here.
-    response = await dyn.server_side_apply(
-        resource,
-        body=doc,
-        name=name,
-        namespace=namespace,
-        serialize=False,
-        **kwargs,
-    )
-    body = await response.text()
     subject = f"{api_version}/{kind} {namespace + '/' if namespace else ''}{name}"
+    takes_over: list[dict[str, str]] = []
+    if dry_run and force_conflicts:
+        takes_over = await _preview_takeover(dyn, resource, doc, subject)
+    response, body = await _send_apply(
+        dyn, resource, doc, dry_run=dry_run, force_conflicts=force_conflicts
+    )
     if not 200 <= response.status <= 299:
-        message = _status_message(body)
-        status_line = " ".join(str(part) for part in (response.status, response.reason) if part)
-        detail = f": {message}" if message else ""
-        raise ApplyRejectedError(
-            f"the API server rejected the server-side apply of {subject} "
-            f"(HTTP {status_line}){detail}",
-            http_status=response.status,
-            upstream_message=message,
-        )
+        raise _reject(response, body, subject, force_conflicts=force_conflicts)
     applied = json.loads(body) if body.strip() else {}
     applied_meta = (applied.get("metadata") if isinstance(applied, dict) else None) or {}
     resource_version = applied_meta.get("resourceVersion")
@@ -345,6 +441,7 @@ async def _apply_one(
         "resource_version": resource_version,
         "uid": uid,
         "warnings": _response_warnings(response),
+        **({"takes_over": takes_over} if force_conflicts and dry_run else {}),
     }
 
 
@@ -367,17 +464,26 @@ async def k8s_apply(
     every principal kind, so a dry-run preview and the real apply are
     both reviewed -- the dry-run path is the cheap, side-effect-free
     rehearsal an agent or reviewer runs first.
+
+    ``force_conflicts: true`` takes over fields that another tool
+    (``kubectl apply``, Helm) owns. Without it such a conflict is an
+    error that names the owner and the fields.
     """
     manifest: str = params["manifest"]
     dry_run_mode: str = params.get("dry_run", "none")
     is_dry_run = dry_run_mode == "server"
+    force_conflicts = params.get("force_conflicts") is True
     docs = _parse_manifest(manifest)
 
     api_client = await connector._get_api_client(target, operator)
     dyn = await DynamicClient(api_client)
-    results = [await _apply_one(dyn, doc, dry_run=is_dry_run) for doc in docs]
+    results = [
+        await _apply_one(dyn, doc, dry_run=is_dry_run, force_conflicts=force_conflicts)
+        for doc in docs
+    ]
     return {
         "dry_run": is_dry_run,
+        "force_conflicts": force_conflicts,
         "field_manager": FIELD_MANAGER,
         "applied": results,
         "total": len(results),

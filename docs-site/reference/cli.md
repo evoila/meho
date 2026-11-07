@@ -3679,7 +3679,7 @@ meho nsx transport-zone list [flags]
 
 ## `meho operation`
 
-operation meta-tool surface (groups / search / call / preview / result-query / subops)
+operation meta-tool surface (groups / search / call / run-status / preview / result-query / subops)
 
 ```
 meho operation
@@ -3693,6 +3693,7 @@ Invoke an operation through the dispatcher
 meho operation call <connector_id> <op_id> [flags]
 ```
 
+- `--async` — start the operation in the background and return at once with a run id; read it with `meho operation run-status`
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON instead of the human render
 - `--params` — operation params as inline JSON or @<file>; omitted means no params
@@ -3743,6 +3744,18 @@ meho operation result-query <handle_id> [flags]
 - `--query-limit` — query: max output rows (clamps to 500); the result flags truncation when more matched
 - `--select` — query: projection column to return (repeatable; omit for all columns)
 - `--where` — query: WHERE predicate "<field> <op> [value]" (repeatable; op = != < <= > >= IN 'IS NULL')
+
+### `meho operation run-status`
+
+Show the state and result of a background operation run
+
+```
+meho operation run-status <run_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit the server's answer as JSON instead of the human render
+- `--wait` — check every few seconds until the run ends, then print the result
 
 ### `meho operation search`
 

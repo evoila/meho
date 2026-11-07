@@ -25,6 +25,13 @@
         Created by {{ dashboard.created_by_sub }}
         {% if dashboard.created_at %}&middot; {{ dashboard.created_at.strftime("%Y-%m-%d %H:%M UTC") }}{% endif %}
       </p>
+      {% if dashboard.last_mail_at %}
+        <p class="text-xs {% if dashboard.last_mail_sent %}opacity-50{% else %}text-error{% endif %}">
+          Last alert mail: {{ dashboard.last_mail_at.strftime("%Y-%m-%d %H:%M UTC") }}
+          &middot;
+          {% if dashboard.last_mail_sent %}sent{% else %}not sent ({{ dashboard.last_mail_reason or "unknown reason" }}){% endif %}
+        </p>
+      {% endif %}
     </div>
     <div class="text-right">
       <div class="text-xs uppercase opacity-50">Rollup</div>

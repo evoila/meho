@@ -319,6 +319,45 @@ def test_detail_renders_member_table() -> None:
     assert "degraded" in body  # the member + rollup badge
 
 
+def _set_mail_result(dash_id: uuid.UUID, *, sent: bool, reason: str | None) -> None:
+    from meho_backplane.checks.mail_result import record_mail_result
+
+    asyncio.run(
+        record_mail_result(tenant_id=_TENANT_A, dashboard_id=dash_id, sent=sent, reason=reason)
+    )
+
+
+def test_detail_shows_failed_alert_mail() -> None:
+    """A failed alert mail shows its reason on the detail page."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    dash_id = _seed_dashboard(tenant_id=_TENANT_A, name="mail-fail", sensor_ids=[])
+    _set_mail_result(dash_id, sent=False, reason="smtp_connect_error")
+    client, mock = _client_with_role(tenant_id=_TENANT_A)
+    try:
+        response = client.get(f"/ui/checks/{dash_id}")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert "Last alert mail" in response.text
+    assert "not sent (smtp_connect_error)" in response.text
+
+
+def test_detail_shows_sent_alert_mail_and_hides_it_before_first_attempt() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    fresh = _seed_dashboard(tenant_id=_TENANT_A, name="mail-fresh", sensor_ids=[])
+    sent = _seed_dashboard(tenant_id=_TENANT_A, name="mail-ok", sensor_ids=[])
+    _set_mail_result(sent, sent=True, reason=None)
+    client, mock = _client_with_role(tenant_id=_TENANT_A)
+    try:
+        fresh_body = client.get(f"/ui/checks/{fresh}").text
+        sent_body = client.get(f"/ui/checks/{sent}").text
+    finally:
+        mock.stop()
+    assert "Last alert mail" not in fresh_body
+    assert "Last alert mail" in sent_body
+    assert "not sent" not in sent_body
+
+
 def test_detail_cross_tenant_is_404() -> None:
     """A dashboard id belonging to another tenant is 404 (no existence leak)."""
     _seed_tenant(_TENANT_A, "tenant-a")

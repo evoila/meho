@@ -125,7 +125,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    # Pinned 2026-10-29 with the kind job below (ubuntu-latest is now 26.04, whose Docker breaks kind image load); revisit when kind/docker support it.
+    # Pinned 2026-10-29 with the kind job below (ubuntu-latest is now 26.04,
+    # whose Docker breaks kind image load); revisit when kind/docker support it.
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -180,8 +181,8 @@ jobs:
         # linux-amd64 tarball of v0.6.7.
         #
         # Install target is `$HOME/.local/bin` — a runner-owned directory —
-        # rather than `/usr/local/bin`, because the self-hosted `meho-runners-ci`
-        # pool runs as a non-root user that cannot write to system paths
+        # rather than `/usr/local/bin`, because a runner user may not be able to
+        # write to system paths
         # (writing /usr/local/bin returned `Permission denied` in CI run
         # 25644668781). Appending the directory to `$GITHUB_PATH` is the
         # documented GitHub Actions mechanism for surfacing the binary to

@@ -147,6 +147,41 @@ class BuildWithoutVmInfoTest(unittest.TestCase):
         self.assertEqual(f"{hashlib.sha256(ova.read_bytes()).hexdigest()}  {VM}.ova\n", sums)
         self.assertEqual(f"vm.destroy {VM}", self.govc_calls()[-1])
 
+    def test_step_2_installs_the_updates_and_restarts_before_the_install(self) -> None:
+        boot = self.root / "boot-id"
+        boot.write_text("first-boot\n")
+        self.env["BOOT_ID"] = str(boot)
+        # The restart drops the SSH session and gives a new boot id; the
+        # form-2 install then stops the build, so step 3 never runs.
+        ssh = self.root / "bin" / "ssh"
+        ssh.write_text(
+            "#!/bin/sh\n"
+            'printf "%s\\n" "$*" >>"$SSH_LOG"\n'
+            'case "$*" in\n'
+            '  *boot_id*) cat "$BOOT_ID" ;;\n'
+            '  *"systemctl reboot"*) echo second-boot >"$BOOT_ID"; exit 255 ;;\n'
+            "  *install.sh*) exit 1 ;;\n"
+            "esac\n"
+        )
+
+        result = self.run_build("--from-step", "2")
+
+        self.assertEqual(1, result.returncode, result.stderr)
+        log = self.ssh_log.read_text().splitlines()
+
+        def first(fragment: str, start: int = 0) -> int:
+            found = [i for i in range(start, len(log)) if fragment in log[i]]
+            self.assertTrue(found, f"no '{fragment}' after line {start}: {log}")
+            return found[0]
+
+        # In this order: the updates, the restart, the new boot, the install.
+        update = first("apt-get update -q --error-on=any")
+        upgrade = first("upgrade --with-new-pkgs", update)
+        restart = first("sudo systemctl reboot", upgrade)
+        first("install.sh --hostname", first("boot_id", restart))
+        self.assertIn("the build VM restarted into the kernel", result.stdout)
+        self.assertFalse(any("firststart" in line for line in log), log)
+
     def test_the_banner_gets_the_commit_of_the_scripts_not_the_download_version(self) -> None:
         commit = subprocess.run(
             ["git", "-C", str(APPLIANCE), "rev-parse", "HEAD"],

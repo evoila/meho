@@ -106,7 +106,7 @@ from meho_backplane.docs_collections import (
     project_doc_collection_create_response,
 )
 from meho_backplane.docs_collections.schemas import DocCollectionBackend
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.connectors.operator import (
     OperatorRoleProbe,
@@ -141,7 +141,7 @@ _BACKEND_REF_MAX = 16384
 #: Module-level :class:`Depends` closures -- ruff B008 idiom matching the
 #: chassis dashboard / topology / connectors routes (no function calls in
 #: default argument positions).
-_require_session_dep = Depends(require_ui_session)
+_require_operator_dep = Depends(require_ui_operator)
 _require_admin_dep = Depends(resolve_operator_or_403)
 _role_probe_dep = Depends(resolve_role_probe)
 _get_session_dep = Depends(get_session)
@@ -451,7 +451,7 @@ async def _submit_register(
 
 async def _table_handler(
     request: Request,
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     role_probe: OperatorRoleProbe = _role_probe_dep,
 ) -> HTMLResponse:
     """``GET /ui/corpus/collections`` -- the lifecycle table (page or fragment)."""
@@ -464,7 +464,7 @@ async def _table_handler(
 
 async def _register_modal_handler(
     request: Request,
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
     """``GET /ui/corpus/collections/register`` -- HTMX-loaded register modal."""
@@ -486,7 +486,7 @@ async def _register_submit_handler(
     when_to_use: str | None = Form(default=None, max_length=_WHEN_TO_USE_MAX),
     backend_type: str = Form(default="", max_length=_BACKEND_TYPE_MAX),
     backend_ref: str | None = Form(default=None, max_length=_BACKEND_REF_MAX),
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_admin_dep,
     db_session: AsyncSession = _get_session_dep,
 ) -> HTMLResponse:

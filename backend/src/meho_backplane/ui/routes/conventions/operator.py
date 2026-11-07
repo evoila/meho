@@ -14,17 +14,14 @@ read page at ``/ui/conventions`` needs two things off the BFF session:
   author / edit / delete affordances only to operators who can use
   them (the write routes T2 adds remain the server-side authority).
 
-The read surface is OPERATOR-tier (mirrors the REST
+The read surface needs the ``operator`` role, like the REST
 ``GET /api/v1/conventions`` ``require_role(OPERATOR)`` gate and the
-runbooks read/write split). Rather than re-derive the BFF auth seams,
-this module composes the two existing lifts:
+runbooks read/write split. This module composes two existing seams:
 
-* :func:`meho_backplane.ui.routes.memory.operator.build_read_operator`
-  synthesises an OPERATOR-tier :class:`Operator` from the
-  :class:`~meho_backplane.ui.auth.middleware.UISessionContext` -- enough
-  for the tenant-scoped ``ConventionsService`` reads, and avoids a JWT
-  round-trip on every list refresh (the conventions read path is
-  tenant-scoped and not role-gated below operator).
+* :func:`meho_backplane.ui.routes.operator_read.require_ui_read_operator`
+  checks the operator role in the session's access token (``403
+  operator_required`` for a ``read_only`` session) and returns the
+  tenant-scoped :class:`Operator` the ``ConventionsService`` reads take.
 * :func:`meho_backplane.ui.routes.connectors.operator.resolve_role_probe`
   is the **soft** role probe: any JWT-validation hiccup (session row
   gone, JWKS endpoint unreachable, token swapped) projects to
@@ -38,7 +35,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from fastapi import Request
+from fastapi import Depends, Request
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
@@ -46,7 +43,7 @@ from meho_backplane.ui.routes.connectors.operator import (
     resolve_operator_or_403,
     resolve_role_probe,
 )
-from meho_backplane.ui.routes.memory.operator import build_read_operator
+from meho_backplane.ui.routes.operator_read import require_ui_read_operator
 
 __all__ = [
     "ConventionsReadContext",
@@ -60,9 +57,9 @@ __all__ = [
 class ConventionsReadContext:
     """The operator + admin-hint + session-id triple the read routes thread.
 
-    ``operator`` is a synthesised OPERATOR-tier
-    :class:`~meho_backplane.auth.operator.Operator` -- enough for the
-    tenant-scoped ``ConventionsService`` reads. ``is_tenant_admin`` is
+    ``operator`` is the tenant-scoped reader from
+    :func:`~meho_backplane.ui.routes.operator_read.require_ui_read_operator`
+    -- enough for the tenant-scoped ``ConventionsService`` reads. ``is_tenant_admin`` is
     a soft UX hint that gates the T2 author / edit / delete affordances
     in the template; the write routes re-check role server-side.
     ``session_id`` is carried so the T2 modal renders (loaded via the
@@ -92,14 +89,20 @@ class ConventionsWriteContext:
     session_id: uuid.UUID
 
 
+_read_operator_dep = Depends(require_ui_read_operator)
+_require_session_dep = Depends(require_ui_session)
+
+
 async def resolve_read_context(
     request: Request,
-    session_ctx: UISessionContext | None = None,
+    operator: Operator = _read_operator_dep,
+    session_ctx: UISessionContext = _require_session_dep,
 ) -> ConventionsReadContext:
-    """FastAPI dependency: lift the read operator + the admin UX hint."""
-    if session_ctx is None:
-        session_ctx = await require_ui_session(request)
-    operator = build_read_operator(session_ctx)
+    """FastAPI dependency: check the operator role, then lift the reader + the admin UX hint.
+
+    A ``read_only`` session gets ``403 operator_required`` before the
+    handler runs.
+    """
     probe = await resolve_role_probe(request, session_ctx)
     return ConventionsReadContext(
         operator=operator,

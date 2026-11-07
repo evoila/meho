@@ -52,7 +52,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.routes.connectors.operator import (
     OperatorRoleProbe,
     resolve_operator_or_403,
@@ -73,7 +73,7 @@ __all__ = ["build_review_router"]
 _CUSTOM_DESCRIPTION_MAX = 4096
 
 #: Module-level :class:`fastapi.Depends` closures -- ruff B008 idiom.
-_require_session_dep = Depends(require_ui_session)
+_require_operator_dep = Depends(require_ui_operator)
 _role_probe_dep = Depends(resolve_role_probe)
 _require_admin_dep = Depends(resolve_operator_or_403)
 
@@ -81,7 +81,7 @@ _require_admin_dep = Depends(resolve_operator_or_403)
 async def _drawer_handler(
     request: Request,
     connector_id: str,
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     role_probe: OperatorRoleProbe = _role_probe_dep,
 ) -> HTMLResponse:
     """``GET .../{connector_id}/review`` -- the drawer shell (lazy accordion)."""
@@ -99,7 +99,7 @@ async def _group_body_handler(
     request: Request,
     connector_id: str,
     group_key: str,
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     role_probe: OperatorRoleProbe = _role_probe_dep,
 ) -> HTMLResponse:
     """``GET .../{connector_id}/review/groups/{group_key}`` -- one group's ops."""
@@ -134,7 +134,7 @@ async def _edit_handler(
     is_enabled: str | None = Form(default=None),
     # #4711: the reason a platform admin gives for turning approval off.
     reason: str | None = Form(default=None, max_length=1024),
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
     """``PATCH .../{connector_id}/operations/{op_id:path}`` -- one per-op edit."""

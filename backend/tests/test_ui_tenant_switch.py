@@ -87,6 +87,15 @@ from meho_backplane.ui.templating import reset_templating_for_testing
 from tests._oidc_jwt_helpers import AUDIENCE, ISSUER, make_rsa_keypair, mint_token, public_jwks
 from tests._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 
+from ._ui_role_helpers import allow_ui_operator_role
+
+
+@pytest.fixture(autouse=True)
+def _ui_operator_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The console pages under test sit behind the ``operator`` role check."""
+    allow_ui_operator_role(monkeypatch)
+
+
 _TENANT_A = uuid.UUID("aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa")
 _TENANT_B = uuid.UUID("bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb")
 _TENANT_C = uuid.UUID("cccccccc-3333-3333-3333-cccccccccccc")

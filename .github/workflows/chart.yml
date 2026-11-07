@@ -152,17 +152,16 @@ jobs:
 
   validate:
     name: Lint + template + kubeconform (PR build gate)
-    # Fork-PR guard: never execute chart logic from a fork on the self-hosted
-    # runner pool. Mirrors image.yml's stance — `runs-on` is internal infra,
-    # so fork PRs are skipped entirely. push events (main, v*) short-circuit
-    # the OR. The trailing `needs.changes.outputs.chart` clause skips this job
+    # Fork-PR guard: fork PRs are skipped entirely (mirrors image.yml).
+    # The job runs on a GitHub-hosted runner: helm and kubeconform come from
+    # public releases. push events (main, v*) short-circuit the OR. The trailing `needs.changes.outputs.chart` clause skips this job
     # (→ reported Success) on PRs that don't touch the chart.
     needs: changes
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.chart == 'true')
-    runs-on: meho-runners-ci
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Checkout

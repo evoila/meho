@@ -758,6 +758,7 @@ class AgentInvoker:
         usage: TokenUsage | None = None,
         turns: int | None = None,
         request_usages: tuple[TokenUsage, ...] = (),
+        charge: bool = True,
     ) -> None:
         """Record a run's terminal state on its durable row, committed.
 
@@ -804,6 +805,10 @@ class AgentInvoker:
         both land or neither does. A failure path (``error is not None``)
         skips consumption entirely -- a failed run has no cost stamp by
         the v0.2 contract.
+
+        *charge* ``False`` (a child run, #5853) stores the token counts of
+        *usage* and skips steps 1-3 and 5: no cost and no spend-limit
+        increment, because the parent run already pays for these tokens.
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
@@ -815,7 +820,7 @@ class AgentInvoker:
                     await run_lifecycle.fail_run(session, row, error=error)
                 else:
                     cost: Decimal | None = None
-                    if usage is not None:
+                    if usage is not None and charge:
                         model_id = _full_model_id(row.provider, row.model)
                         tenant_price = await tenant_model_prices.price_for_model(
                             session, row.tenant_id, row.provider, row.model
@@ -1779,6 +1784,7 @@ async def _finalize_child_run(
     *,
     output: object,
     error: str | None,
+    usage: TokenUsage | None = None,
 ) -> None:
     """Close a recorded child ``agent_run`` row to its terminal state.
 
@@ -1794,11 +1800,17 @@ async def _finalize_child_run(
     :class:`~meho_backplane.operations.agent_run.IllegalTransitionError` when a
     terminal state already landed (e.g. an operator cancelled the child
     mid-flight -- the cancel already wrote the terminal row).
+
+    On success the row also stores the child's own token counts (*usage*,
+    #5853), with no cost and no spend-limit increment: the child's tokens are
+    already in the parent run's total, and the parent run pays for them.
     """
     await AgentInvoker._finalize_run(
         run_id,
         output=None if error is not None else _project_output(output),
         error=error,
+        usage=usage,
+        charge=False,
     )
 
 

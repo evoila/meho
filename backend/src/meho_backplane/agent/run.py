@@ -115,6 +115,7 @@ from meho_backplane.agent.invoke import (
     ChildAgentResolver,
     ChildRunFinalizer,
     ChildRunRecorder,
+    ChildRunResult,
     current_agent_run_id_var,
     make_invoke_agent_tool,
 )
@@ -689,6 +690,19 @@ def _request_usages(messages: Iterable[ModelMessage]) -> list[TokenUsage]:
         for message in messages
         if isinstance(message, ModelResponse)
     ]
+
+
+def _sum_usages(usages: Iterable[TokenUsage]) -> TokenUsage:
+    """Add up the four token streams of several model requests."""
+    total = TokenUsage(input_tokens=0, output_tokens=0)
+    for usage in usages:
+        total = TokenUsage(
+            input_tokens=total.input_tokens + usage.input_tokens,
+            output_tokens=total.output_tokens + usage.output_tokens,
+            cache_read_tokens=total.cache_read_tokens + usage.cache_read_tokens,
+            cache_write_tokens=total.cache_write_tokens + usage.cache_write_tokens,
+        )
+    return total
 
 
 def _capability_omissions(resolution: ToolsetResolution) -> tuple[ContextOmission, ...]:
@@ -1297,7 +1311,7 @@ class PydanticAgentRun:
         operator: Operator,
         inputs: str,
         usage: RunUsage,
-    ) -> Any:
+    ) -> ChildRunResult:
         """Drive one child loop budget-aware, sharing the parent's usage.
 
         The :class:`~meho_backplane.agent.invoke.ChildRunner` the
@@ -1317,7 +1331,9 @@ class PydanticAgentRun:
         the parent loop's ``invoke_agent`` tool call, on the parent's event
         loop) and returns the child's output directly rather than a handle: the
         parent tool needs the child's answer to continue, and the child's
-        lifecycle is bounded by the parent tool call.
+        lifecycle is bounded by the parent tool call. The result also carries
+        the child's own token counts (#5853), summed over the child's own model
+        responses, so the child's run row can store them.
 
         The child's receipt log line (#3763) names the run id the
         ``invoke_agent`` tool bound before calling here: the child's own
@@ -1326,6 +1342,7 @@ class PydanticAgentRun:
         child = self._build_agent(definition, operator)
         limits = UsageLimits(request_limit=definition.request_limit)
         parent_request_usages = _run_request_usages_var.get()
+        child_usages: list[TokenUsage] = []
         try:
             async with child.iter(
                 inputs, deps=operator, usage=usage, usage_limits=limits
@@ -1338,8 +1355,9 @@ class PydanticAgentRun:
                     # before that spent tokens, and those tokens are in the
                     # parent's shared total, so the parent's cost must
                     # include them.
+                    child_usages = _request_usages(child_run.new_messages())
                     if parent_request_usages is not None:
-                        parent_request_usages.extend(_request_usages(child_run.new_messages()))
+                        parent_request_usages.extend(child_usages)
         except UsageLimitExceeded as exc:
             _log.warning(
                 "agent_child_run_budget_exhausted",
@@ -1352,7 +1370,7 @@ class PydanticAgentRun:
         run_result = child_run.result
         if run_result is None:
             raise AgentRunError(f"child agent {definition.name!r} ended without a result")
-        return run_result.output
+        return ChildRunResult(output=run_result.output, usage=_sum_usages(child_usages))
 
     def start(
         self,

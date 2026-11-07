@@ -113,6 +113,15 @@ written before `0138`, reads `NULL`. `GET /api/v1/agents/runs/{handle}` and
 MEHO has no price for can come from a price the tenant admin set: see
 `identity-budget.md`, "Prices a tenant sets".
 
+A child run (one agent starts another through `invoke_agent`) also stores
+its counts when it succeeds. They hold only the child's own model requests,
+read from the child's own model responses (`ChildRunResult.usage` in
+`agent/invoke.py`). They are not the change in the shared usage total: the
+parent can run two child runs at the same time, and both add to that total.
+A grand-child's requests are on the grand-child's row. The child row has no
+cost and adds nothing to the spend limits: the top-level run's counts and
+cost already include every child run's tokens, so they count once.
+
 ## Key types
 
 `meho_backplane.db.models`:

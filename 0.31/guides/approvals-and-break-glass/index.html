@@ -1,0 +1,2115 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Governance backplane for AI agents acting on infrastructure — policy-gated, audit-grade, MCP-native.">
+      
+      
+      
+        <link rel="canonical" href="https://evoila.github.io/meho/0.31/guides/approvals-and-break-glass/">
+      
+      
+        <link rel="prev" href="../sensors-quickstart/">
+      
+      
+        <link rel="next" href="../topology/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Approvals and break-glass - MEHO</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#approvals-and-break-glass" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="MEHO" class="md-header__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MEHO
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Approvals and break-glass
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../.." class="md-tabs__link">
+          
+  
+  
+  Start here
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../install/" class="md-tabs__link">
+          
+  
+  
+  Install & operate
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../clients/" class="md-tabs__link">
+          
+  
+  
+  Connect clients
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Do real work
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../project/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Project
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="MEHO" class="md-nav__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    MEHO
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment-shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment shapes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install & operate
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Install & operate
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The install trail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/credential-backends/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credential backends
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/keycloak-realm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Keycloak realm setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/tls-ingress/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS and ingress
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/upgrades/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrades
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/kind-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local kind quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Connect clients
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The meho CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/claude-desktop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Desktop
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/claude-code/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/mcp-remote-shim/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Other MCP clients (mcp-remote shim)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting auth walls
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Do real work
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../targets-and-secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Register targets and secrets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../first-operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run your first operations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sensors-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Watch your estate with sensors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Approvals and break-glass
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Approvals and break-glass
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-you-see-when-a-write-parks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What you see when a write parks
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-rule-requester-and-approver-must-differ" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The rule: requester and approver must differ
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#option-1-the-agent-requester-pattern-recommended" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Option 1 — the agent-requester pattern (recommended)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#option-2-the-audited-break-glass-flag-emergencies" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Option 2 — the audited break-glass flag (emergencies)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#proving-which-posture-a-deploy-is-running" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Proving which posture a deploy is running
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#which-one-should-i-use" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which one should I use?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Troubleshooting
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../topology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Topology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../broadcast/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Broadcast
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memory-and-knowledge/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory and knowledge
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audit-forensics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audit forensics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../runbooks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Runbooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../satellite-gateway/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Satellite gateway
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/maturity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Maturity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../project/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-you-see-when-a-write-parks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What you see when a write parks
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-rule-requester-and-approver-must-differ" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The rule: requester and approver must differ
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#option-1-the-agent-requester-pattern-recommended" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Option 1 — the agent-requester pattern (recommended)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#option-2-the-audited-break-glass-flag-emergencies" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Option 2 — the audited break-glass flag (emergencies)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#proving-which-posture-a-deploy-is-running" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Proving which posture a deploy is running
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#which-one-should-i-use" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which one should I use?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Troubleshooting
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/evoila/meho/edit/main/docs-site/guides/approvals-and-break-glass.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="approvals-and-break-glass">Approvals and break-glass<a class="headerlink" href="#approvals-and-break-glass" title="Permanent link">&para;</a></h1>
+<p>Some operations change infrastructure. MEHO does not let those run
+silently: an operation the connector marks <code>requires_approval</code> — every
+<code>dangerous</code> write, and any <code>caution</code> write a policy elevates — does not
+execute when you call it. It <strong>parks</strong> in an approval queue and returns
+<code>awaiting_approval</code>, and a second person has to approve it before it
+runs. That is the four-eyes rule, and it is on by default.</p>
+<p>This guide is about the case the rule does not obviously cover: <strong>you
+are the only operator.</strong> A solo deploy still has to be able to make
+gated writes, so MEHO ships two ways for one person to clear the queue
+— one you should reach for every day, and one reserved for emergencies.
+This page covers both, and how to tell an auditor which one your deploy
+is running.</p>
+<div class="admonition note">
+<p class="admonition-title">Prerequisites</p>
+<ul>
+<li>A running backplane and a connected client —
+  <a href="../../install/">the install trail</a> and
+  <a href="../../clients/">Connect clients</a>.</li>
+<li>A registered target you can dispatch a write against —
+  <a href="../targets-and-secrets/">Register targets and secrets</a>.</li>
+<li>An <strong>operator</strong>-role (or <code>tenant_admin</code>) session. Approving is an
+  operator action; <code>read_only</code> sessions cannot decide.</li>
+</ul>
+</div>
+<h2 id="what-you-see-when-a-write-parks">What you see when a write parks<a class="headerlink" href="#what-you-see-when-a-write-parks" title="Permanent link">&para;</a></h2>
+<p>Call a gated operation — from the CLI, an agent, or the operator
+console — and instead of a result you get a parked request:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"> </span>vault-1.x<span class="w"> </span>vault.kv.put<span class="w"> </span>--target<span class="w"> </span>rdc-vault<span class="w"> </span>--params<span class="w"> </span><span class="s1">&#39;{...}&#39;</span>
+<span class="c1"># → status: awaiting_approval</span>
+<span class="c1">#   approval_request_id: 4b1c…</span>
+</code></pre></div>
+<p>The parked request is side-effect-free: nothing was written to the
+target. It is now waiting in the queue, which you can list and inspect:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>approvals<span class="w"> </span>list<span class="w">                 </span><span class="c1"># pending requests</span>
+meho<span class="w"> </span>approvals<span class="w"> </span>show<span class="w"> </span>&lt;id&gt;<span class="w">            </span><span class="c1"># the parked operation + its proposed effect</span>
+</code></pre></div>
+<p>To act on it you <strong>approve</strong> or <strong>reject</strong> it — on any surface, and they
+all share one backplane path (same policy, same audit row):</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>&lt;id&gt;<span class="w">         </span><span class="c1"># runs the parked write now</span>
+meho<span class="w"> </span>approvals<span class="w"> </span>reject<span class="w"> </span>&lt;id&gt;<span class="w">          </span><span class="c1"># terminal; the requester must re-file</span>
+</code></pre></div>
+<p>The operator console exposes the same queue at <strong><code>/ui/approvals</code></strong>: a
+bell with the live pending count, a request-detail modal with the
+proposed effect, and Approve / Deny buttons.</p>
+<h2 id="the-rule-requester-and-approver-must-differ">The rule: requester and approver must differ<a class="headerlink" href="#the-rule-requester-and-approver-must-differ" title="Permanent link">&para;</a></h2>
+<p>Approval keys on your <strong>subject</strong> — the stable <code>sub</code> claim on your
+token, not your display name or your role. The guard is simple: the
+identity that <em>requested</em> a parked write may not be the identity that
+<em>approves</em> it. Try to approve your own request and every surface refuses
+with the same error:</p>
+<div class="highlight"><pre><span></span><code>self_approval_forbidden: operator &#39;&lt;your-sub&gt;&#39; may not approve approval_request
+&lt;id&gt;: requester and approver must differ
+(set APPROVAL_ALLOW_SELF_APPROVAL=true for audited single-operator break-glass)
+</code></pre></div>
+<p>That is a REST <code>403</code>, an MCP invalid-params error, and a disabled
+<strong>Approve</strong> button in the console — all naming the same flag. Rejecting
+your <em>own</em> request is always allowed: withdrawing a write you asked for
+is not a privilege escalation.</p>
+<p>On a team this is invisible: your colleague approves your write. On a
+<strong>one-operator</strong> deploy it looks like a dead end — you are both the
+requester and the only identity that could approve. It is not a dead
+end. Pick one of the two paths below.</p>
+<h2 id="option-1-the-agent-requester-pattern-recommended">Option 1 — the agent-requester pattern (recommended)<a class="headerlink" href="#option-1-the-agent-requester-pattern-recommended" title="Permanent link">&para;</a></h2>
+<p>The everyday answer is to make sure the write is <strong>not requested under
+your own subject</strong> in the first place. Park it under an <strong>agent
+principal</strong> instead — a first-class non-human identity with its own
+stable <code>sub</code>. Then, when you approve as yourself, requester and approver
+are already different subjects, the gate clears, and you never touch the
+break-glass flag. The full audit lineage stays intact: the request row
+records the agent as requester, the decision row records you as
+approver.</p>
+<p>An agent principal is a Keycloak <code>client_credentials</code> client that
+carries <code>principal_kind=agent</code>. You create one, attach it to an agent
+definition, and drive the gated write through a <strong>scheduled</strong> run of
+that definition. Four steps:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 1. Register the agent principal (mints its client_credentials client;</span>
+<span class="c1">#    the output includes the client id you pass to --identity-ref below).</span>
+meho<span class="w"> </span>agent-principal<span class="w"> </span>register<span class="w"> </span>nightly-writer
+
+<span class="c1"># 2. Author an agent definition bound to that principal. Its toolset and</span>
+<span class="c1">#    prompt are what perform the gated write when the definition runs.</span>
+meho<span class="w"> </span>agent<span class="w"> </span>create<span class="w"> </span>nightly-writer<span class="w"> </span>--identity-ref<span class="w"> </span>&lt;client-id-from-step-1&gt;
+
+<span class="c1"># 3. Schedule the definition. The autonomous run parks the write under the</span>
+<span class="c1">#    agent&#39;s sub (principal_sub=&lt;agent-sub&gt;). Use --kind one_off with</span>
+<span class="c1">#    --fire-at &lt;ISO8601&gt; instead for a single run rather than a cron.</span>
+meho<span class="w"> </span>scheduler<span class="w"> </span>create<span class="w"> </span>--kind<span class="w"> </span>cron<span class="w"> </span>--agent-definition<span class="w"> </span>nightly-writer<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cron-expr<span class="w"> </span><span class="s2">&quot;0 2 * * *&quot;</span>
+
+<span class="c1"># 4. The write is now parked under the agent. Approve as yourself — your</span>
+<span class="c1">#    sub differs from the agent&#39;s, so the gate clears and it dispatches.</span>
+meho<span class="w"> </span>approvals<span class="w"> </span>list
+meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>&lt;id&gt;
+</code></pre></div>
+<div class="admonition warning">
+<p class="admonition-title">It must be an <em>autonomous</em> run, not a <em>delegated</em> one</p>
+<p>Only an <strong>autonomous / scheduled</strong> agent run parks the request under
+the agent's own subject. A run you launch <em>interactively</em> binds the
+agent as your delegate (RFC 8693 token exchange): you stay the
+<em>subject</em>, the agent is only the <em>actor</em>, and the parked request
+still carries <strong>your</strong> <code>sub</code> — so you still cannot approve it.
+Routing a solo write through an interactive agent run does <strong>not</strong>
+break the deadlock. The scheduled trigger is what makes the agent
+the requester.</p>
+</div>
+<p>Which identity ends up on the request — and therefore whether you can
+approve it — comes down to how the write was dispatched:</p>
+<table>
+<thead>
+<tr>
+<th>How the write was dispatched</th>
+<th>Requester <code>sub</code></th>
+<th>You can approve it?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>You call it directly (human operator)</td>
+<td>your <code>sub</code></td>
+<td><strong>No</strong> — requester == approver</td>
+</tr>
+<tr>
+<td>You launch an agent interactively; it makes the write</td>
+<td>your <code>sub</code> (agent is only the actor)</td>
+<td><strong>No</strong> — you are still the subject</td>
+</tr>
+<tr>
+<td>A <strong>scheduled / autonomous</strong> agent run makes the write</td>
+<td>the <strong>agent's</strong> <code>sub</code></td>
+<td><strong>Yes</strong> — distinct subject, no flag needed</td>
+</tr>
+</tbody>
+</table>
+<p>This is the endorsed posture for a single-operator tenant: it keeps the
+four-eyes invariant genuinely intact (two distinct subjects really do
+touch every write) instead of switching it off.</p>
+<h2 id="option-2-the-audited-break-glass-flag-emergencies">Option 2 — the audited break-glass flag (emergencies)<a class="headerlink" href="#option-2-the-audited-break-glass-flag-emergencies" title="Permanent link">&para;</a></h2>
+<p>When you genuinely cannot stage an agent-requester — an incident, a
+first bring-up, a write you must make in the next five minutes — a
+deployment admin can enable <strong>self-approval</strong> posture-wide:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Helm values overlay</span>
+<span class="nt">config</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">approvalAllowSelfApproval</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;true&quot;</span><span class="w">   </span><span class="c1"># renders APPROVAL_ALLOW_SELF_APPROVAL=true</span>
+</code></pre></div>
+<p>With the flag on, the requester == approver guard is lifted and you can
+approve your own parked writes. Understand exactly what you traded away:</p>
+<ul>
+<li><strong>It is posture-wide, not per-write.</strong> The flag re-opens the
+  single-account <em>request-and-grant</em> hole for <strong>every</strong> operation, not
+  just the one you are trying to clear. There is no scoping.</li>
+<li><strong>It is emergency-grade, not the solo default.</strong> Reach for Option 1
+  first. Leaving this on turns four-eyes into no-eyes for the whole
+  tenant.</li>
+<li><strong>It is still audited.</strong> Self-approval is not silent (see below). A
+  reject never needs the flag.</li>
+</ul>
+<div class="admonition danger">
+<p class="admonition-title">Break-glass is a lever an admin holds, not a per-write toggle</p>
+<p>Prefer the agent-requester pattern for anything you do more than
+once. Set <code>APPROVAL_ALLOW_SELF_APPROVAL=true</code> for a real emergency,
+make the write, and turn it back off.</p>
+</div>
+<h2 id="proving-which-posture-a-deploy-is-running">Proving which posture a deploy is running<a class="headerlink" href="#proving-which-posture-a-deploy-is-running" title="Permanent link">&para;</a></h2>
+<p>Break-glass leaves a trail, so an auditor never has to trust a claim
+about the values file.</p>
+<p><strong>Is self-approval even enabled?</strong> Read it off the health surface — no
+cluster access to the chart needed:</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>https://&lt;your-backplane&gt;/ready<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.features.approval_queue.effective_posture
+<span class="c1"># &quot;four_eyes_enforced&quot;            → the default; self-approval is OFF</span>
+<span class="c1"># &quot;single_operator_break_glass&quot;   → APPROVAL_ALLOW_SELF_APPROVAL=true is set</span>
+</code></pre></div>
+<p><strong>Did a specific write self-approve?</strong> Two signals:</p>
+<ul>
+<li>A structured <strong><code>approval_self_approval_break_glass</code></strong> log event
+  (WARNING) is emitted every time a self-approval goes through, carrying
+  the <code>approval_request_id</code>, <code>op_id</code>, <code>operator_sub</code>, and <code>tenant_id</code>.</li>
+<li>On the audit ledger, a self-approval is the <code>approval.decision</code> row
+  where the <strong>requester equals the approver</strong> — <code>principal_sub ==
+  reviewed_by</code>. There is no separate <code>self_approved</code> field to filter on;
+  the equality <em>is</em> the marker.</li>
+</ul>
+<p>So a break-glass self-approval is visible three ways — the live posture
+on <code>/ready</code>, a WARNING log at the moment it happens, and the
+requester-equals-approver decision row on the permanent ledger.</p>
+<h2 id="which-one-should-i-use">Which one should I use?<a class="headerlink" href="#which-one-should-i-use" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Situation</th>
+<th>Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Solo deploy, recurring or planned gated writes</td>
+<td><strong>Agent-requester</strong> (Option 1) — no flag, four-eyes stays real</td>
+</tr>
+<tr>
+<td>Solo deploy, one-off write you can schedule</td>
+<td><strong>Agent-requester</strong> (Option 1)</td>
+</tr>
+<tr>
+<td>Genuine emergency, no time to stage an agent</td>
+<td><strong>Break-glass</strong> (Option 2), then turn it back off</td>
+</tr>
+<tr>
+<td>More than one operator</td>
+<td>Neither — a second operator approves the first's request</td>
+</tr>
+</tbody>
+</table>
+<h2 id="troubleshooting">Troubleshooting<a class="headerlink" href="#troubleshooting" title="Permanent link">&para;</a></h2>
+<p><strong><code>approve</code> returns <code>self_approval_forbidden</code> and I am the only
+operator.</strong> The write was parked under <em>your</em> subject — a direct human
+call, or an <em>interactive</em> agent run (where you stay the subject).
+Re-park it under an agent-requester: wire it as a <strong>scheduled</strong> trigger
+under an agent definition (Option 1) so the autonomous run parks it with
+the agent's <code>sub</code>, then approve as yourself. Reserve
+<code>APPROVAL_ALLOW_SELF_APPROVAL</code> for genuine emergencies — it re-opens the
+single-account hole for every operation.</p>
+<p><strong>The Approve button is greyed out in the console.</strong> Same cause: you are
+the requester. The modal names both options inline and links back here.
+Deny stays enabled — you can always withdraw your own request.</p>
+<p><strong>I set the flag but <code>/ready</code> still says <code>four_eyes_enforced</code>.</strong> The
+backplane reads <code>APPROVAL_ALLOW_SELF_APPROVAL</code> at startup. Confirm the
+value reached the pod (<code>config.approvalAllowSelfApproval: "true"</code> in
+your overlay renders the <code>APPROVAL_ALLOW_SELF_APPROVAL</code> env var) and
+that the pod restarted onto the new ConfigMap.</p>
+<div class="admonition tip">
+<p class="admonition-title">When a guide and your deploy disagree</p>
+<p>These guides are written against the product version this site
+version documents (see the version selector). If a command or error
+message differs on your deploy, check that your CLI and backplane
+versions match the docs version you are reading — then
+<a href="https://github.com/evoila/meho/issues">file a docs issue</a>: a guide
+a fresh user cannot execute verbatim is a bug.</p>
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../sensors-quickstart/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Watch your estate with sensors">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Watch your estate with sensors
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../topology/" class="md-footer__link md-footer__link--next" aria-label="Next: Topology">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Topology
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 evoila Group — Apache 2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,3241 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Governance backplane for AI agents acting on infrastructure — policy-gated, audit-grade, MCP-native.">
+      
+      
+      
+        <link rel="canonical" href="https://evoila.github.io/meho/0.39/guides/hosted-agents/">
+      
+      
+        <link rel="prev" href="../runbooks/">
+      
+      
+        <link rel="next" href="../scheduler/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Hosted agents - MEHO</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#hosted-agents" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="MEHO" class="md-header__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MEHO
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Hosted agents
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../.." class="md-tabs__link">
+          
+  
+  
+  Start here
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../install/" class="md-tabs__link">
+          
+  
+  
+  Install & operate
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../clients/" class="md-tabs__link">
+          
+  
+  
+  Connect clients
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Do real work
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../project/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Project
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="MEHO" class="md-nav__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    MEHO
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment-shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment shapes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install & operate
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Install & operate
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The install trail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/credential-backends/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credential backends
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/keycloak-realm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Keycloak realm setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/openbao-unseal-key/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenBao unseal key: who keeps what
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/tls-ingress/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS and ingress
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/upgrades/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrades
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/kind-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local kind quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Connect clients
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/mcp-surface-and-scopes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP surface and scopes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The meho CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/claude-desktop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Desktop
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/claude-code/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/mcp-remote-shim/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Other MCP clients (mcp-remote shim)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting auth walls
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Do real work
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../targets-and-secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Register targets and secrets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../first-operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run your first operations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sensors-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Watch your estate with sensors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../approvals-and-break-glass/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Approvals and break-glass
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tenant-bootstrap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add a tenant
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../topology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Topology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../broadcast/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Broadcast
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memory-and-knowledge/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory and knowledge
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audit-forensics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audit forensics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../flight-recorder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Flight recorder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../runbooks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Runbooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hosted agents
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hosted agents
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-a-hosted-agent-is" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What a hosted agent is
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-1-register-the-agents-identity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 1 — Register the agent's identity
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-2-write-the-prompts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 2 — Write the prompts
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-3-choose-the-tools-the-toolset" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 3 — Choose the tools (the toolset)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Step 3 — Choose the tools (the toolset)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-fields" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The fields
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-tool-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The tool names
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tools-a-hosted-agent-does-not-have" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tools a hosted agent does not have
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-read-only-toolset" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A read-only toolset
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-4-create-the-definition" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 4 — Create the definition
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-5-set-permissions-grants" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 5 — Set permissions (grants)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Step 5 — Set permissions (grants)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-the-agent-may-do-with-no-grants" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What the agent may do with no grants
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#who-the-grants-apply-to" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Who the grants apply to
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#how-a-grant-works" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How a grant works
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#recipe-a-read-only-agent-for-one-operation-on-one-target" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Recipe: a read-only agent for one operation on one target
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-6-run-the-agent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 6 — Run the agent
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Step 6 — Run the agent">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-run-by-hand-on-your-behalf" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A run by hand, on your behalf
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-run-as-the-agent-with-its-grants" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A run as the agent, with its grants
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-7-check-what-the-agent-did" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 7 — Check what the agent did
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-can-go-wrong-here" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What can go wrong here
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../event-ingestion/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Event ingestion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../satellite-gateway/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Satellite gateway
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../windows-and-guest-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Windows estate and in-guest execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../add-ons/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add-ons
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/whats-new/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    What's new
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/connectors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connectors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/mcp-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP tools
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/maturity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Maturity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../project/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-a-hosted-agent-is" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What a hosted agent is
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-1-register-the-agents-identity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 1 — Register the agent's identity
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-2-write-the-prompts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 2 — Write the prompts
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-3-choose-the-tools-the-toolset" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 3 — Choose the tools (the toolset)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Step 3 — Choose the tools (the toolset)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-fields" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The fields
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-tool-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The tool names
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tools-a-hosted-agent-does-not-have" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tools a hosted agent does not have
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-read-only-toolset" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A read-only toolset
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-4-create-the-definition" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 4 — Create the definition
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-5-set-permissions-grants" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 5 — Set permissions (grants)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Step 5 — Set permissions (grants)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-the-agent-may-do-with-no-grants" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What the agent may do with no grants
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#who-the-grants-apply-to" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Who the grants apply to
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#how-a-grant-works" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How a grant works
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#recipe-a-read-only-agent-for-one-operation-on-one-target" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Recipe: a read-only agent for one operation on one target
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-6-run-the-agent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 6 — Run the agent
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Step 6 — Run the agent">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-run-by-hand-on-your-behalf" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A run by hand, on your behalf
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-run-as-the-agent-with-its-grants" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A run as the agent, with its grants
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-7-check-what-the-agent-did" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 7 — Check what the agent did
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-can-go-wrong-here" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What can go wrong here
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/evoila/meho/edit/main/docs-site/guides/hosted-agents.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="hosted-agents">Hosted agents<a class="headerlink" href="#hosted-agents" title="Permanent link">&para;</a></h1>
+<p>A <strong>hosted agent</strong> is an AI agent that MEHO runs for you on the
+backplane server. This guide shows you how to set one up and run it,
+from start to end, with commands you can copy.</p>
+<p>When you finish, you will have:</p>
+<ul>
+<li>an agent with its own identity;</li>
+<li>an agent definition: its prompt, its tools, and its limits;</li>
+<li>permission grants that make the agent read-only, in every run;</li>
+<li>one finished run, and the audit rows that show what the agent did.</li>
+</ul>
+<div class="admonition note">
+<p class="admonition-title">Prerequisites, roles, and maturity</p>
+<ul>
+<li>The <code>meho</code> CLI, logged in to your backplane
+  (<a href="../../clients/cli/">The meho CLI</a>).</li>
+<li>At least one registered target and a connector that can reach it
+  (<a href="../targets-and-secrets/">Register targets and secrets</a>). It helps
+  to have run one operation by hand first
+  (<a href="../first-operations/">Run your first operations</a>).</li>
+<li><strong>Setup needs the <code>tenant_admin</code> role.</strong> This covers the identity,
+  the definition, and the grants.</li>
+<li><strong>Running an agent needs the <code>operator</code> role</strong> (or <code>tenant_admin</code>).
+  The <code>read_only</code> role cannot start a run.</li>
+<li>Hosted agents are <strong>Experimental</strong>. See the
+  <a href="../../reference/maturity/#agent_runtime">feature-maturity index</a>.</li>
+</ul>
+</div>
+<h2 id="what-a-hosted-agent-is">What a hosted agent is<a class="headerlink" href="#what-a-hosted-agent-is" title="Permanent link">&para;</a></h2>
+<ul>
+<li>MEHO runs the agent <strong>on the server</strong>. The model calls and the tool
+  calls happen inside MEHO, not on your laptop.</li>
+<li>It is <strong>not</strong> your desktop Claude. Claude Desktop or Claude Code talk
+  to MEHO over MCP as you. A hosted agent is a separate thing that MEHO
+  starts itself.</li>
+<li>Every tool call the agent makes goes through the same checks as yours:
+  permissions, approvals, and audit.</li>
+</ul>
+<p>A hosted agent has three parts. You create them in this order:</p>
+<table>
+<thead>
+<tr>
+<th>Part</th>
+<th>What it is</th>
+<th>Command</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Agent principal</strong></td>
+<td>The agent's own login identity. MEHO creates it in Keycloak (the login server).</td>
+<td><code>meho agent-principal register</code></td>
+</tr>
+<tr>
+<td><strong>Agent definition</strong></td>
+<td>What the agent is: its prompt, its tools, its model tier, and its turn limit.</td>
+<td><code>meho agent create</code></td>
+</tr>
+<tr>
+<td><strong>Grants</strong></td>
+<td>Rules that say which operations the agent may run, and on which targets.</td>
+<td><code>meho agent grant create</code></td>
+</tr>
+</tbody>
+</table>
+<p>In this guide the agent is called <code>pod-reader</code>. It reads pods on one
+Kubernetes target called <code>cluster-a</code>, through the connector <code>k8s-1.x</code>.
+Use your own names.</p>
+<h2 id="step-1-register-the-agents-identity">Step 1 — Register the agent's identity<a class="headerlink" href="#step-1-register-the-agents-identity" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent-principal<span class="w"> </span>register<span class="w"> </span>pod-reader
+</code></pre></div>
+<p>The output looks like this:</p>
+<div class="highlight"><pre><span></span><code>registered agent principal "pod-reader"
+  id:                  3f2b7c1e-...
+  keycloak_client_id:  agent:pod-reader
+  owner_sub:           &lt;your sub&gt;
+  revoked:             false
+  created_at:          2026-10-18T09:00:00Z
+</code></pre></div>
+<p>Two values matter:</p>
+<ul>
+<li><strong><code>keycloak_client_id</code></strong> — the agent's <strong>client id</strong>. It is always
+  <code>agent:&lt;name&gt;</code>, here <code>agent:pod-reader</code>. You use this value in every
+  later step: in <code>--identity-ref</code> and in <code>--principal</code>.</li>
+<li><strong><code>owner_sub</code></strong> — the person who can switch the agent off. By default
+  this is you.</li>
+</ul>
+<p>The agent also has a <strong>sub</strong> (subject id). The sub is a UUID that
+Keycloak gives the agent's login account. You do not need it for setup.
+MEHO matches grants by the client id. You see the sub later, in the
+audit rows of runs where the agent acts as itself (see
+<a href="#who-the-grants-apply-to">Step 5</a>).</p>
+<p>To list your agents, or to switch one off in an emergency:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent-principal<span class="w"> </span>list
+meho<span class="w"> </span>agent-principal<span class="w"> </span>revoke<span class="w"> </span>pod-reader<span class="w">   </span><span class="c1"># the agent can no longer log in</span>
+</code></pre></div>
+<h2 id="step-2-write-the-prompts">Step 2 — Write the prompts<a class="headerlink" href="#step-2-write-the-prompts" title="Permanent link">&para;</a></h2>
+<p>A hosted agent gets two pieces of text. Keep them apart.</p>
+<table>
+<thead>
+<tr>
+<th>Text</th>
+<th>Where you set it</th>
+<th>What to put in it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>System prompt</strong></td>
+<td><code>--system-prompt</code> on <code>meho agent create</code></td>
+<td>The standing rules. Who the agent is, what it may do, which connector and target to use, how to answer. It is the same for every run.</td>
+</tr>
+<tr>
+<td><strong>Input</strong></td>
+<td><code>--input</code> on <code>meho agent run</code></td>
+<td>The task for <strong>this</strong> run. For example: "List the pods in namespace <code>web</code> that are not running." At most 65,536 characters.</td>
+</tr>
+</tbody>
+</table>
+<p>A good system prompt for the read-only example:</p>
+<div class="highlight"><pre><span></span><code>You are pod-reader. You only read. You never change anything.
+Use the connector k8s-1.x and the target cluster-a.
+Find the operation with search_operations, then run it with call_operation.
+Answer in short plain sentences. Say which operation you used.
+</code></pre></div>
+<p>Some tips:</p>
+<ul>
+<li>Name the connector id and the target name in the system prompt. Then
+  the agent does not have to guess them.</li>
+<li>Do not tell the agent to run a <strong>runbook</strong>. A hosted agent has no
+  runbook tools. MEHO stops such a run at the start and marks it
+  <code>failed</code>, so the agent cannot claim it ran a runbook.</li>
+<li>MEHO adds its own short text after your system prompt. It tells the
+  agent that MEHO's rules always apply, and that text it reads with its
+  tools is data, not instructions. It also adds your tenant's
+  conventions, if you have any. Your system prompt always comes first.</li>
+</ul>
+<h2 id="step-3-choose-the-tools-the-toolset">Step 3 — Choose the tools (the toolset)<a class="headerlink" href="#step-3-choose-the-tools-the-toolset" title="Permanent link">&para;</a></h2>
+<p>The <strong>toolset</strong> is a small JSON object. It says which tools the agent
+gets, and which connectors it may use. You pass it with <code>--toolset</code>.</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"meta_tools"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"meho_connector_list"</span><span class="p">,</span><span class="w"> </span><span class="s2">"list_operation_groups"</span><span class="p">,</span><span class="w"> </span><span class="s2">"search_operations"</span><span class="p">,</span><span class="w"> </span><span class="s2">"call_operation"</span><span class="p">,</span><span class="w"> </span><span class="s2">"result_query"</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">"connectors"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"k8s-1.x"</span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3 id="the-fields">The fields<a class="headerlink" href="#the-fields" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>If you leave it out</th>
+<th>If it is an empty list <code>[]</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meta_tools</code></td>
+<td>list of tool names</td>
+<td>The agent gets every tool marked "yes" in the "In the default set" column below.</td>
+<td>The agent gets <strong>no</strong> tools from the table below. It still gets <code>invoke_agent</code> (see the note under the table).</td>
+</tr>
+<tr>
+<td><code>connectors</code></td>
+<td>list of connector ids, for example <code>k8s-1.x</code></td>
+<td>No connector limit. The agent may use any connector in your tenant. Grants and approvals still apply.</td>
+<td>The agent may use <strong>no</strong> connector. Every <code>call_operation</code> is refused.</td>
+</tr>
+</tbody>
+</table>
+<p>More rules:</p>
+<ul>
+<li><code>{}</code> (an empty object) is the default. It means "leave both fields
+  out".</li>
+<li>A tool name that MEHO does not know is ignored. It is not an error,
+  so check your spelling.</li>
+<li>Any other key in the object is ignored.</li>
+<li><code>meta_tools</code> and <code>connectors</code> must be lists of strings. Anything else
+  (for example a single string) makes the run fail.</li>
+<li>The <code>connectors</code> list limits <code>call_operation</code> and
+  <code>preview_operation</code>. When the agent asks for a connector that is not in
+  the list, MEHO refuses the call and tells the agent which connectors it
+  may use.</li>
+</ul>
+<h3 id="the-tool-names">The tool names<a class="headerlink" href="#the-tool-names" title="Permanent link">&para;</a></h3>
+<p>These are the names you can put in <code>meta_tools</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>What the agent can do with it</th>
+<th>In the default set</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>list_operation_groups</code></td>
+<td>List the operation groups of one connector.</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>search_operations</code></td>
+<td>Search a connector's operations by meaning and by words.</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>call_operation</code></td>
+<td>Run one operation. This is the only tool that changes or reads your systems.</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>meho_connector_list</code></td>
+<td>List the connectors your tenant can use.</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>list_targets</code></td>
+<td>List the targets in your tenant.</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>preview_operation</code></td>
+<td>Show the request <code>call_operation</code> would send, without sending it.</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>result_query</code></td>
+<td>Read rows from a large result. MEHO returns big results as a link to the stored result, not as raw data.</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>broadcast_announce</code></td>
+<td>Post a short note to the team's activity feed.</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>broadcast_recent</code></td>
+<td>Read recent notes from agents on the activity feed.</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>broadcast_watch</code></td>
+<td>Wait up to 30 seconds for new notes on the activity feed.</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>query_topology</code></td>
+<td>Look up how resources depend on each other.</td>
+<td>no — you must name it</td>
+</tr>
+<tr>
+<td><code>search_memory</code></td>
+<td>Search the tenant's Memory store.</td>
+<td>no — you must name it</td>
+</tr>
+<tr>
+<td><code>search_knowledge</code></td>
+<td>Search the tenant's knowledge base.</td>
+<td>no — you must name it</td>
+</tr>
+<tr>
+<td><code>read_context_resource</code></td>
+<td>Read one Memory, knowledge base, or convention entry that a search returned.</td>
+<td>no — you must name it</td>
+</tr>
+</tbody>
+</table>
+<p>The last four return text that people in your tenant stored. That is
+why the agent only gets them when you name them.</p>
+<div class="admonition note">
+<p class="admonition-title">One more tool: <code>invoke_agent</code></p>
+<p>Every hosted run also gets the <code>invoke_agent</code> tool. With it, the
+agent can start another agent definition in your tenant. The
+toolset does not turn this tool on or off, so it is not in the table
+above. Putting <code>invoke_agent</code> in <code>meta_tools</code> does nothing.</p>
+</div>
+<h3 id="tools-a-hosted-agent-does-not-have">Tools a hosted agent does not have<a class="headerlink" href="#tools-a-hosted-agent-does-not-have" title="Permanent link">&para;</a></h3>
+<p>Some tools exist for MCP clients but not for hosted agents. Putting
+these names in <code>meta_tools</code> does nothing:</p>
+<ul>
+<li>no health or status tool (<code>meho_status</code>);</li>
+<li>no runbook tools (<code>meho_runbook_*</code>);</li>
+<li>no approval tools. An agent can never approve anything;</li>
+<li>no tools that write to Memory or the knowledge base;</li>
+<li>no admin tools.</li>
+</ul>
+<h3 id="a-read-only-toolset">A read-only toolset<a class="headerlink" href="#a-read-only-toolset" title="Permanent link">&para;</a></h3>
+<p>For <code>pod-reader</code>, save this as <code>pod-reader-toolset.json</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"meta_tools"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"meho_connector_list"</span><span class="p">,</span><span class="w"> </span><span class="s2">"list_operation_groups"</span><span class="p">,</span><span class="w"> </span><span class="s2">"search_operations"</span><span class="p">,</span><span class="w"> </span><span class="s2">"call_operation"</span><span class="p">,</span><span class="w"> </span><span class="s2">"result_query"</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">"connectors"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"k8s-1.x"</span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The toolset limits <strong>which tools and connectors</strong> the agent can reach.
+It does not decide which <strong>operations</strong> may run. That is the job of
+grants, in Step 5.</p>
+<div class="admonition note">
+<p class="admonition-title">Definitions from older versions</p>
+<p>A definition stored with <strong>no</strong> toolset at all (not even <code>{}</code>) gets
+only two tools: <code>list_operation_groups_tool</code> and <code>call_operation_tool</code>. New
+definitions always get <code>{}</code> by default. To move an old definition to
+the full set, run <code>meho agent edit &lt;name&gt; --toolset '{}'</code>.</p>
+</div>
+<h2 id="step-4-create-the-definition">Step 4 — Create the definition<a class="headerlink" href="#step-4-create-the-definition" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>create<span class="w"> </span>pod-reader<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--identity-ref<span class="w"> </span>agent:pod-reader<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model-tier<span class="w"> </span>standard<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--turn-budget<span class="w"> </span><span class="m">20</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--system-prompt<span class="w"> </span><span class="s2">"You are pod-reader. You only read. You never change anything. Use the connector k8s-1.x and the target cluster-a. Find the operation with search_operations, then run it with call_operation. Answer in short plain sentences. Say which operation you used."</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--toolset<span class="w"> </span>@pod-reader-toolset.json
+</code></pre></div>
+<p>The flags:</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Required</th>
+<th>What it means</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>&lt;name&gt;</code></td>
+<td>yes</td>
+<td>The definition name. You use it to run the agent.</td>
+</tr>
+<tr>
+<td><code>--identity-ref</code></td>
+<td>yes</td>
+<td>The client id from Step 1, <code>agent:&lt;name&gt;</code>. MEHO checks that this agent principal exists and is not revoked.</td>
+</tr>
+<tr>
+<td><code>--model-tier</code></td>
+<td>yes</td>
+<td><code>standard</code>, <code>fast</code>, or <code>deep</code>. Use <code>standard</code> if you are not sure. In this version MEHO stores the tier with the definition and with each run, but every run uses the model your deployment sets as its default.</td>
+</tr>
+<tr>
+<td><code>--turn-budget</code></td>
+<td>yes</td>
+<td>The most model turns one run may take, from 1 to 1000. One turn is one request to the model. When a run reaches the limit, it stops and fails with <code>turn budget exhausted</code>.</td>
+</tr>
+<tr>
+<td><code>--system-prompt</code></td>
+<td>yes</td>
+<td>The standing rules from Step 2.</td>
+</tr>
+<tr>
+<td><code>--toolset</code></td>
+<td>no</td>
+<td>The JSON from Step 3. Write it inline, as <code>@&lt;file&gt;</code>, or as <code>@-</code> to read it from stdin (for example from a pipe). Default: <code>{}</code>.</td>
+</tr>
+<tr>
+<td><code>--disabled</code></td>
+<td>no</td>
+<td>Create the definition switched off. Nobody can run it until you switch it on.</td>
+</tr>
+</tbody>
+</table>
+<p>Check the result:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>show<span class="w"> </span>pod-reader
+</code></pre></div>
+<p>To change a definition later, use <code>meho agent edit</code>. Only the flags you
+pass change:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>edit<span class="w"> </span>pod-reader<span class="w"> </span>--turn-budget<span class="w"> </span><span class="m">30</span>
+meho<span class="w"> </span>agent<span class="w"> </span>edit<span class="w"> </span>pod-reader<span class="w"> </span>--toolset<span class="w"> </span>@pod-reader-toolset.json
+meho<span class="w"> </span>agent<span class="w"> </span>edit<span class="w"> </span>pod-reader<span class="w"> </span>--disabled<span class="w">   </span><span class="c1"># switch it off</span>
+meho<span class="w"> </span>agent<span class="w"> </span>edit<span class="w"> </span>pod-reader<span class="w"> </span>--enabled<span class="w">    </span><span class="c1"># switch it on again</span>
+</code></pre></div>
+<h2 id="step-5-set-permissions-grants">Step 5 — Set permissions (grants)<a class="headerlink" href="#step-5-set-permissions-grants" title="Permanent link">&para;</a></h2>
+<p>Every operation has a <strong>safety level</strong>: <code>safe</code>, <code>caution</code>, <code>dangerous</code>,
+or <code>destructive</code>. You see it as <code>safety_level</code> in the
+<code>search_operations</code> results. The safety level sets what happens when
+no grant matches.</p>
+<h3 id="what-the-agent-may-do-with-no-grants">What the agent may do with no grants<a class="headerlink" href="#what-the-agent-may-do-with-no-grants" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Safety level</th>
+<th>With no grant</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>safe</code> (reads)</td>
+<td>Runs without approval.</td>
+</tr>
+<tr>
+<td><code>caution</code></td>
+<td>Waits until a second person approves.</td>
+</tr>
+<tr>
+<td><code>dangerous</code></td>
+<td>Denied.</td>
+</tr>
+<tr>
+<td><code>destructive</code></td>
+<td>Denied.</td>
+</tr>
+</tbody>
+</table>
+<p>So a new agent can already run <strong>every <code>safe</code> operation</strong> on every
+connector and target, with no grant at all. To make it truly read-only
+on one thing, you add grants. See the recipe below.</p>
+<h3 id="who-the-grants-apply-to">Who the grants apply to<a class="headerlink" href="#who-the-grants-apply-to" title="Permanent link">&para;</a></h3>
+<p>Grants belong to the agent principal (<code>agent:pod-reader</code>). They apply
+to every run of the agent:</p>
+<ul>
+<li><strong>A run started by the <a href="../scheduler/">scheduler</a></strong>, or by an
+  <a href="../event-ingestion/">event trigger</a>. The agent logs in with its own
+  identity. Its grants apply. The audit rows show the agent's sub.</li>
+<li><strong>A run you start by hand</strong> with <code>meho agent run</code>. The run acts on
+  your behalf. MEHO checks each call against your permissions and
+  against the agent's grants. The stricter answer wins. So the run may
+  do only what both you and the agent may do. The audit rows show your
+  sub.</li>
+</ul>
+<p>The safety-level table above applies to both kinds of run. With no
+grant, a <code>caution</code> operation waits until a second person approves, and
+a <code>dangerous</code> operation is denied, even when you may run it yourself.
+See <a href="../approvals-and-break-glass/">Approvals and break-glass</a> for which
+calls wait for a second person.</p>
+<p>So the read-only recipe below works for both ways to start a run.
+Step 6 shows both ways.</p>
+<h3 id="how-a-grant-works">How a grant works<a class="headerlink" href="#how-a-grant-works" title="Permanent link">&para;</a></h3>
+<p>A grant has four parts:</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>What it means</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--principal</code></td>
+<td>The agent's client id, <code>agent:&lt;name&gt;</code>.</td>
+</tr>
+<tr>
+<td><code>--op</code></td>
+<td>Which operations. A pattern: <code>*</code> matches anything, <code>?</code> matches one character. Examples: <code>*</code>, <code>k8s.*</code>, <code>k8s.pod.list</code>.</td>
+</tr>
+<tr>
+<td><code>--target</code></td>
+<td>Which target, by its UUID. Leave it out, or use <code>*</code>, for any target.</td>
+</tr>
+<tr>
+<td><code>--verdict</code></td>
+<td><code>auto-execute</code> (run without approval), <code>needs-approval</code> (wait for a second person), or <code>deny</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>When MEHO checks a call, it follows these rules:</p>
+<ol>
+<li>It keeps only the grants whose <code>--op</code> pattern matches the operation
+   and whose <code>--target</code> matches the target.</li>
+<li><strong>The most specific pattern wins.</strong> MEHO counts the characters before
+   the first <code>*</code>, <code>?</code>, or <code>[</code>. More characters means more specific. So
+   <code>k8s.pod.list</code> beats <code>k8s.*</code>, and <code>k8s.*</code> beats <code>*</code>.</li>
+<li>If two matching grants are equally specific, the stricter verdict
+   wins.</li>
+<li>If no grant matches, the safety-level default from the table above
+   applies.</li>
+<li>Last, MEHO applies a <strong>ceiling</strong>. A grant can never make an operation
+   more open than this:</li>
+</ol>
+<table>
+<thead>
+<tr>
+<th>Safety level</th>
+<th>The most open verdict a grant can give</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>safe</code></td>
+<td><code>auto-execute</code> (no limit)</td>
+</tr>
+<tr>
+<td><code>caution</code></td>
+<td><code>needs-approval</code></td>
+</tr>
+<tr>
+<td><code>dangerous</code></td>
+<td><code>needs-approval</code></td>
+</tr>
+<tr>
+<td><code>destructive</code></td>
+<td><code>deny</code>. No grant can open it for an agent.</td>
+</tr>
+</tbody>
+</table>
+<p>So a grant can always make an operation <strong>stricter</strong>. It can make a
+<code>dangerous</code> operation possible, but only with a second person's
+approval. A <code>caution</code> or <code>dangerous</code> operation never runs on its own.</p>
+<p>Grants only check operations that run through <code>call_operation</code>. The
+discovery tools (<code>meho_connector_list</code>, <code>list_operation_groups</code>,
+<code>search_operations</code>, <code>list_targets</code>) are not affected by grants.</p>
+<h3 id="recipe-a-read-only-agent-for-one-operation-on-one-target">Recipe: a read-only agent for one operation on one target<a class="headerlink" href="#recipe-a-read-only-agent-for-one-operation-on-one-target" title="Permanent link">&para;</a></h3>
+<p>Goal: <code>pod-reader</code> may run <code>k8s.pod.list</code> on <code>cluster-a</code>, without
+approval. Everything else is denied.</p>
+<p>First, find the target's UUID. It is the <code>id:</code> line:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>describe<span class="w"> </span>cluster-a
+</code></pre></div>
+<p>Then add two grants:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 1. Deny every operation on every target.</span>
+meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> </span>create<span class="w"> </span>--principal<span class="w"> </span>agent:pod-reader<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--op<span class="w"> </span><span class="s1">'*'</span><span class="w"> </span>--verdict<span class="w"> </span>deny
+
+<span class="c1"># 2. Allow one read operation on one target, without approval.</span>
+meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> </span>create<span class="w"> </span>--principal<span class="w"> </span>agent:pod-reader<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--op<span class="w"> </span>k8s.pod.list<span class="w"> </span>--target<span class="w"> </span>&lt;cluster-a-uuid&gt;<span class="w"> </span>--verdict<span class="w"> </span>auto-execute
+</code></pre></div>
+<p>Why this works:</p>
+<ul>
+<li>On <code>cluster-a</code>, both grants match <code>k8s.pod.list</code>. The pattern
+  <code>k8s.pod.list</code> is more specific than <code>*</code>, so <code>auto-execute</code> wins.</li>
+<li>On any other target, only the <code>*</code> grant matches. The verdict is
+  <code>deny</code>.</li>
+<li>Every other operation matches only <code>*</code>. The verdict is <code>deny</code>, even
+  for <code>safe</code> reads.</li>
+</ul>
+<p>Check the grants:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> </span>list<span class="w"> </span>--principal<span class="w"> </span>agent:pod-reader
+</code></pre></div>
+<p>To remove a grant, use its id from the list:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> </span>revoke<span class="w"> </span>&lt;grant-id&gt;
+</code></pre></div>
+<p>For a grant that should end by itself, add <code>--expires</code> with a UTC time,
+or use <code>meho agent grant elevate</code>. When the time passes, the grant
+stops working.</p>
+<h2 id="step-6-run-the-agent">Step 6 — Run the agent<a class="headerlink" href="#step-6-run-the-agent" title="Permanent link">&para;</a></h2>
+<p>There are two ways to start a run. The grants from Step 5 apply to both.</p>
+<table>
+<thead>
+<tr>
+<th>How you start the run</th>
+<th>Whose permissions apply</th>
+<th>Whose sub is in the audit rows</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>By hand, with <code>meho agent run</code></td>
+<td><strong>Yours and the agent's.</strong> The grants from Step 5 apply. The stricter answer wins.</td>
+<td>Yours</td>
+</tr>
+<tr>
+<td>Through the scheduler, with <code>meho scheduler create</code></td>
+<td><strong>The agent's.</strong> The grants from Step 5 apply.</td>
+<td>The agent's</td>
+</tr>
+</tbody>
+</table>
+<h3 id="a-run-by-hand-on-your-behalf">A run by hand, on your behalf<a class="headerlink" href="#a-run-by-hand-on-your-behalf" title="Permanent link">&para;</a></h3>
+<p>Any user with the <code>operator</code> or <code>tenant_admin</code> role can run a
+definition in their tenant.</p>
+<div class="admonition note">
+<p class="admonition-title">A run by hand is limited by you and by the agent</p>
+<p>This run acts on your behalf. Each call must be allowed for you and
+by the agent's grants from Step 5. The stricter answer wins. So
+<code>pod-reader</code> can only run <code>k8s.pod.list</code> on <code>cluster-a</code>, even when
+you may run more. <code>meho agent run-status &lt;run-id&gt;</code> shows both, for
+example <code>identity: agent:pod-reader for &lt;your sub&gt;</code>.</p>
+</div>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>run<span class="w"> </span>pod-reader<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--input<span class="w"> </span><span class="s2">"List the pods in namespace web on cluster-a that are not running."</span>
+</code></pre></div>
+<p>The CLI waits for the answer. A short run prints its <code>run_id</code>, its
+<code>status</code>, and its <code>output</code>. If the run takes longer than the server's
+wait limit (30 seconds by default), MEHO keeps the run going and gives
+you its run id instead.</p>
+<p>For a long task, do not wait. Start the run in the background:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>run<span class="w"> </span>pod-reader<span class="w"> </span>--async<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--input<span class="w"> </span><span class="s2">"List the pods in namespace web on cluster-a that are not running."</span>
+</code></pre></div>
+<p>Then check it with the run id:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>run-status<span class="w"> </span>&lt;run-id&gt;
+</code></pre></div>
+<p><code>run-status</code> shows the <code>status</code>, the number of <code>turns</code> used, and,
+when the run is done, the <code>output</code> or the <code>error</code>. The status is one
+of: <code>pending</code>, <code>running</code>, <code>succeeded</code>, <code>failed</code>, <code>cancelled</code>.</p>
+<p>Sometimes the agent calls an operation that needs a second person's
+approval. The run then waits, and <code>run-status</code> still shows <code>running</code>.
+If a run seems to stop moving, check <code>meho approvals list</code>. Approve or
+reject the request with <code>meho approvals approve &lt;id&gt;</code> (see
+<a href="../approvals-and-break-glass/">Approvals and break-glass</a>). After about
+30 minutes with no decision, the agent is told that no decision came.</p>
+<p>More run commands:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>run-list<span class="w"> </span>--agent-name<span class="w"> </span>pod-reader<span class="w">   </span><span class="c1"># the runs of this agent</span>
+meho<span class="w"> </span>agent<span class="w"> </span>run-list<span class="w"> </span>--status<span class="w"> </span>running<span class="w">          </span><span class="c1"># runs that are still going</span>
+meho<span class="w"> </span>agent<span class="w"> </span>run-cancel<span class="w"> </span>&lt;run-id&gt;<span class="w">                </span><span class="c1"># stop a run</span>
+meho<span class="w"> </span>agent<span class="w"> </span>run-events<span class="w"> </span>pod-reader<span class="w"> </span>--input<span class="w"> </span><span class="s2">"..."</span><span class="w"> </span><span class="c1"># start a run and watch each step live</span>
+</code></pre></div>
+<h3 id="a-run-as-the-agent-with-its-grants">A run as the agent, with its grants<a class="headerlink" href="#a-run-as-the-agent-with-its-grants" title="Permanent link">&para;</a></h3>
+<p>The <a href="../scheduler/">scheduler</a> starts runs with the agent's own
+identity. In such a run the grants from Step 5 apply, so <code>pod-reader</code>
+can only run <code>k8s.pod.list</code> on <code>cluster-a</code>. Use it for runs that start
+without a person.</p>
+<p>The scheduler takes the definition's id, not its name. Look the id up
+first:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>show<span class="w"> </span>pod-reader
+</code></pre></div>
+<p>Copy the value of the <code>id:</code> line. It is a UUID, for example
+<code>3f2a9c6e-1b4d-4e8f-9a7c-2d5e6f7a8b9c</code>. With <code>--json</code>, the same value
+is the <code>id</code> field.</p>
+<p>A one-off trigger fires once, at a UTC time you give. Pick a time a few
+minutes from now, and pass the id you copied:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>scheduler<span class="w"> </span>create<span class="w"> </span>--kind<span class="w"> </span>one_off<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--agent-definition<span class="w"> </span>3f2a9c6e-1b4d-4e8f-9a7c-2d5e6f7a8b9c<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--fire-at<span class="w"> </span><span class="m">2026</span>-10-20T02:00:00Z<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--inputs<span class="w"> </span><span class="s1">'{"task": "List the pods in namespace web on cluster-a that are not running."}'</span>
+</code></pre></div>
+<p><code>--agent-definition</code> must be the UUID. The CLI rejects a name before it
+creates the trigger. <code>--inputs</code> is a JSON object. MEHO puts it into the
+agent's prompt when the trigger fires. Creating a trigger needs
+<code>tenant_admin</code>.</p>
+<p>Before the first scheduled run, two things must be in place:</p>
+<ul>
+<li>The scheduler needs the agent's login secret. The
+  <a href="../scheduler/">scheduler guide</a> explains where to store it. Without
+  it, the scheduler skips the fire and shows
+  <code>last_skip_reason=credentials_unresolved</code>.</li>
+<li>The grants from Step 5 must exist. Otherwise the agent runs with the
+  safety-level defaults, which allow every <code>safe</code> operation.</li>
+</ul>
+<p>After the time passes, find the run and check it:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>scheduler<span class="w"> </span>list
+meho<span class="w"> </span>agent<span class="w"> </span>run-list<span class="w"> </span>--agent-name<span class="w"> </span>pod-reader
+meho<span class="w"> </span>agent<span class="w"> </span>run-status<span class="w"> </span>&lt;run-id&gt;
+</code></pre></div>
+<p>For a run that repeats, use <code>--kind cron</code> with <code>--cron-expr</code> and
+<code>--timezone</code>. The scheduler guide shows the full set of flags.</p>
+<h2 id="step-7-check-what-the-agent-did">Step 7 — Check what the agent did<a class="headerlink" href="#step-7-check-what-the-agent-did" title="Permanent link">&para;</a></h2>
+<p>Each operation the agent runs through <code>call_operation</code> writes an audit
+row. The row carries the run id in the <code>agent_session_id</code> field. So the
+run id is all you need to find the operations of one run.</p>
+<p>Not every tool call writes a row. In a hosted run, the discovery tools
+(<code>meho_connector_list</code>, <code>list_operation_groups</code>, <code>search_operations</code>,
+<code>list_targets</code>), <code>preview_operation</code>, and <code>result_query</code> do not write
+audit rows. So the audit shows <strong>which operations the agent ran</strong>, not
+every tool it touched. The run itself, with its status, its turns, and
+its output, is in <code>meho agent run-status &lt;run-id&gt;</code>.</p>
+<p>List every row of the run:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>audit<span class="w"> </span>query<span class="w"> </span>--session-id<span class="w"> </span>&lt;run-id&gt;
+</code></pre></div>
+<p>Or show the run as a tree, with each step under the step that caused
+it:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>audit<span class="w"> </span>replay<span class="w"> </span>&lt;run-id&gt;
+</code></pre></div>
+<p>In each row, check:</p>
+<ul>
+<li><code>op_id</code> — which operation the agent ran;</li>
+<li><code>target_name</code> — on which target;</li>
+<li><code>policy_decision</code> — <code>auto-execute</code>, <code>needs-approval</code>, or <code>deny</code>;</li>
+<li><code>result_status</code> — <code>ok</code>, <code>error</code>, or <code>denied</code>;</li>
+<li><code>principal_sub</code> — who acted: the agent's sub for a scheduled run, your
+  sub for a run you started by hand.</li>
+</ul>
+<p><code>meho audit query</code> needs the <code>operator</code> role. <code>meho audit replay</code> needs
+<code>tenant_admin</code>. The
+<a href="../audit-forensics/">audit forensics guide</a> explains all filters.</p>
+<h2 id="what-can-go-wrong-here">What can go wrong here<a class="headerlink" href="#what-can-go-wrong-here" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>What you see</th>
+<th>Why</th>
+<th>What to do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>403</code> with <code>insufficient_role</code> on <code>agent create</code>, <code>agent edit</code>, or <code>agent grant create</code></td>
+<td>Setup needs <code>tenant_admin</code>.</td>
+<td>Ask a tenant admin, or log in with a <code>tenant_admin</code> account.</td>
+</tr>
+<tr>
+<td><code>agent create</code> rejects <code>--identity-ref</code></td>
+<td>The agent principal does not exist, is revoked, or the value is not <code>agent:&lt;name&gt;</code>.</td>
+<td>Run Step 1 first. Copy <code>keycloak_client_id</code> exactly.</td>
+</tr>
+<tr>
+<td><code>agent grant create</code> says the principal "does not name a registered, non-revoked agent principal"</td>
+<td><code>--principal</code> is not the client id.</td>
+<td>Use <code>agent:&lt;name&gt;</code>, not a UUID.</td>
+</tr>
+<tr>
+<td>The agent says it has no tool for something</td>
+<td>The tool is not in <code>meta_tools</code>, the name is misspelled, or hosted agents do not have that tool.</td>
+<td>Check the tool table in Step 3.</td>
+</tr>
+<tr>
+<td>The agent says a connector is not allowed</td>
+<td>The connector is not in the <code>connectors</code> list.</td>
+<td>Add the connector id to <code>connectors</code>, or remove the list.</td>
+</tr>
+<tr>
+<td>A call is <code>denied</code></td>
+<td>A grant or the safety level denies it.</td>
+<td>Check <code>meho agent grant list --principal agent:&lt;name&gt;</code> and the operation's <code>safety_level</code>.</td>
+</tr>
+<tr>
+<td>A run you started by hand is denied an operation that you may run</td>
+<td>The agent's grants deny it. In a run by hand, the stricter answer wins.</td>
+<td>Add a grant with <code>meho agent grant create --principal agent:&lt;name&gt;</code>, or run the operation yourself.</td>
+</tr>
+<tr>
+<td>The run fails with <code>turn budget exhausted</code></td>
+<td>The agent used all its turns.</td>
+<td>Raise <code>--turn-budget</code> with <code>meho agent edit</code>, or make the task smaller.</td>
+</tr>
+<tr>
+<td>The run fails right away and the error names a runbook</td>
+<td>The prompt or input tells the agent to run a runbook. Hosted agents cannot run runbooks.</td>
+<td>Remove that instruction.</td>
+</tr>
+<tr>
+<td><code>agent run</code> gives back a run id but no output</td>
+<td>The run took longer than the wait limit, so it went on in the background.</td>
+<td>Run <code>meho agent run-status &lt;run-id&gt;</code>.</td>
+</tr>
+<tr>
+<td><code>409</code> on <code>agent run</code></td>
+<td>The definition is switched off.</td>
+<td>Run <code>meho agent edit &lt;name&gt; --enabled</code>.</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../runbooks/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Runbooks">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Runbooks
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../scheduler/" class="md-footer__link md-footer__link--next" aria-label="Next: Scheduler">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Scheduler
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 evoila Group — Apache 2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

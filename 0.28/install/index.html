@@ -1,0 +1,2300 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Governance backplane for AI agents acting on infrastructure — policy-gated, audit-grade, MCP-native.">
+      
+      
+      
+        <link rel="canonical" href="https://evoila.github.io/meho/0.28/install/">
+      
+      
+        <link rel="prev" href="../deployment-shapes/">
+      
+      
+        <link rel="next" href="credential-backends/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>The install trail - MEHO</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#the-install-trail" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="MEHO" class="md-header__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MEHO
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              The install trail
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href=".." class="md-tabs__link">
+          
+  
+  
+  Start here
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="./" class="md-tabs__link">
+          
+  
+  
+  Install & operate
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../clients/" class="md-tabs__link">
+          
+  
+  
+  Connect clients
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../guides/" class="md-tabs__link">
+          
+  
+  
+  Do real work
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../reference/" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../project/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Project
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="MEHO" class="md-nav__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    MEHO
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deployment-shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment shapes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install & operate
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Install & operate
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The install trail
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The install trail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-you-need" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What you need
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-1-pre-create-the-pgvector-extension" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 1 — Pre-create the pgvector extension
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-2-choose-your-credential-backend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 2 — Choose your credential backend
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-3-provision-the-database-credentials-secret" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 3 — Provision the database credentials Secret
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-4-set-up-the-keycloak-realm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 4 — Set up the Keycloak realm
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-5-decide-ingress-tls-and-trust" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 5 — Decide ingress, TLS, and trust
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-6-write-your-values-file" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 6 — Write your values file
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-7-install-the-chart" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 7 — Install the chart
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-8-verify-the-backplane" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 8 — Verify the backplane
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-9-install-the-cli-and-log-in" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 9 — Install the CLI and log in
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#where-next" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Where next
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="credential-backends/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credential backends
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="keycloak-realm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Keycloak realm setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="tls-ingress/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS and ingress
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="upgrades/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrades
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="kind-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local kind quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Connect clients
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../clients/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The meho CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../clients/claude-desktop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Desktop
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../clients/claude-code/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../clients/mcp-remote-shim/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Other MCP clients (mcp-remote shim)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../clients/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting auth walls
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Do real work
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/targets-and-secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Register targets and secrets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/first-operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run your first operations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/sensors-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Watch your estate with sensors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/approvals-and-break-glass/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Approvals and break-glass
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/topology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Topology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/broadcast/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Broadcast
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/memory-and-knowledge/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory and knowledge
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/audit-forensics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audit forensics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/runbooks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Runbooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/satellite-gateway/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Satellite gateway
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/maturity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Maturity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../project/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-you-need" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What you need
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-1-pre-create-the-pgvector-extension" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 1 — Pre-create the pgvector extension
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-2-choose-your-credential-backend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 2 — Choose your credential backend
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-3-provision-the-database-credentials-secret" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 3 — Provision the database credentials Secret
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-4-set-up-the-keycloak-realm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 4 — Set up the Keycloak realm
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-5-decide-ingress-tls-and-trust" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 5 — Decide ingress, TLS, and trust
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-6-write-your-values-file" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 6 — Write your values file
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-7-install-the-chart" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 7 — Install the chart
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-8-verify-the-backplane" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 8 — Verify the backplane
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-9-install-the-cli-and-log-in" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 9 — Install the CLI and log in
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#where-next" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Where next
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/evoila/meho/edit/main/docs-site/install/index.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="the-install-trail">The install trail<a class="headerlink" href="#the-install-trail" title="Permanent link">&para;</a></h1>
+<p>This page is one continuous path from a bare Kubernetes cluster to a
+running MEHO backplane and a successful <code>meho login</code>. Follow it top to
+bottom; every side quest (choosing a credential backend, configuring
+the Keycloak realm, TLS trust) is linked at the exact step where you
+need it, and each of those pages sends you back here.</p>
+<div class="admonition tip">
+<p class="admonition-title">Just exploring?</p>
+<p>If you only want to see the backplane come up on your workstation —
+without a real Keycloak, Vault, or login — take the
+<a href="kind-quickstart/">local kind quickstart</a> instead. It is faster,
+and it is honest about what it fakes.</p>
+</div>
+<h2 id="what-you-need">What you need<a class="headerlink" href="#what-you-need" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>You bring</th>
+<th>Requirements</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Kubernetes cluster</strong></td>
+<td>Any conformant cluster with an ingress controller (the examples assume ingress-nginx). <a href="https://helm.sh/">Helm</a> 3.8+ on your workstation; Helm 4 recommended — the <a href="upgrades/">upgrades</a> page's server-side-apply guidance assumes it.</td>
+</tr>
+<tr>
+<td><strong>PostgreSQL</strong></td>
+<td>A reachable PostgreSQL server with the <a href="https://github.com/pgvector/pgvector">pgvector</a> extension <em>available</em> (installed as a server package — Step 1 covers enabling it). MEHO does not bundle a database.</td>
+</tr>
+<tr>
+<td><strong>Keycloak</strong></td>
+<td>A <a href="https://www.keycloak.org/">Keycloak</a> you administer, with a realm for MEHO (an existing realm works). Step 4 covers the realm configuration.</td>
+</tr>
+<tr>
+<td><strong>Credential backend</strong></td>
+<td>HashiCorp Vault <strong>or</strong> access to Google Secret Manager. Step 2 helps you choose.</td>
+</tr>
+<tr>
+<td><strong>A DNS name + TLS story</strong></td>
+<td>A hostname for the backplane (e.g. <code>meho.example.com</code>) and a certificate for it — public CA or internal CA both work; <a href="tls-ingress/">TLS and ingress</a> covers the differences.</td>
+</tr>
+</tbody>
+</table>
+<p>Everything else — the activity-feed store (Valkey), database
+migrations, the operations catalog — ships inside the Helm release.</p>
+<h2 id="step-1-pre-create-the-pgvector-extension">Step 1 — Pre-create the pgvector extension<a class="headerlink" href="#step-1-pre-create-the-pgvector-extension" title="Permanent link">&para;</a></h2>
+<p>MEHO's semantic search runs on pgvector, and the chart's pre-install
+migration Job executes <code>CREATE EXTENSION IF NOT EXISTS vector</code> on
+first boot. In stock PostgreSQL, <code>CREATE EXTENSION</code> requires a
+<strong>superuser</strong> — and the database role you give MEHO should <em>not</em> be
+one. So a cold install against a least-privilege role fails with:</p>
+<div class="highlight"><pre><span></span><code>permission denied to create extension &quot;vector&quot;
+HINT:  Must be superuser to create this extension.
+</code></pre></div>
+<p>The fix is a one-time, idempotent command run <strong>as a superuser</strong>
+against MEHO's database, before the first install:</p>
+<div class="highlight"><pre><span></span><code>psql<span class="w"> </span>-d<span class="w"> </span>meho<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;CREATE EXTENSION IF NOT EXISTS vector;&quot;</span>
+</code></pre></div>
+<p>On <a href="https://cloudnative-pg.io/">CloudNativePG</a>, exec into the primary
+Pod (its <code>postgres</code> container runs as the bootstrap superuser):</p>
+<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>&lt;cluster&gt;-1<span class="w"> </span>-n<span class="w"> </span>&lt;namespace&gt;<span class="w"> </span>-c<span class="w"> </span>postgres<span class="w"> </span>--<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>psql<span class="w"> </span>-d<span class="w"> </span>meho<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;CREATE EXTENSION IF NOT EXISTS vector;&quot;</span>
+</code></pre></div>
+<p>or declare it at cluster-bootstrap time so it survives re-provisioning:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">spec</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">bootstrap</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">initdb</span><span class="p">:</span>
+<span class="w">      </span><span class="c1"># postInitApplicationSQL, not postInitSQL: the latter runs against</span>
+<span class="w">      </span><span class="c1"># the `postgres` database, so the extension would land in the wrong</span>
+<span class="w">      </span><span class="c1"># one. This runs inside the application database MEHO uses.</span>
+<span class="w">      </span><span class="nt">postInitApplicationSQL</span><span class="p">:</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;CREATE</span><span class="nv"> </span><span class="s">EXTENSION</span><span class="nv"> </span><span class="s">IF</span><span class="nv"> </span><span class="s">NOT</span><span class="nv"> </span><span class="s">EXISTS</span><span class="nv"> </span><span class="s">vector;&quot;</span>
+</code></pre></div>
+<p>If the extension is already present (many managed PostgreSQL services
+pre-enable it, and some run migrations as a privileged role), this
+step is a no-op — run it anyway; it is safe.</p>
+<div class="admonition note">
+<p class="admonition-title">Why doesn't the chart automate this?</p>
+<p>Deliberately. Automating it would require shipping a superuser
+credential to the migration Job, which is a worse trade than a
+one-time operator command. The full rationale is recorded in
+<a href="https://github.com/evoila/meho/blob/main/docs/decisions/pgvector-superuser-prerequisite.md"><code>docs/decisions/pgvector-superuser-prerequisite.md</code></a>.</p>
+</div>
+<p>Verify:</p>
+<div class="highlight"><pre><span></span><code>psql<span class="w"> </span>-d<span class="w"> </span>meho<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;SELECT extname FROM pg_extension WHERE extname=&#39;vector&#39;;&quot;</span>
+</code></pre></div>
+<h2 id="step-2-choose-your-credential-backend">Step 2 — Choose your credential backend<a class="headerlink" href="#step-2-choose-your-credential-backend" title="Permanent link">&para;</a></h2>
+<p>MEHO fetches target credentials (the vCenter password, the appliance
+API key) from a secret store at operation time — that store is the
+<strong>credential backend</strong>, and the chart supports two: HashiCorp
+<strong>Vault</strong> (the default) and <strong>Google Secret Manager</strong>.</p>
+<p><strong>Read the <a href="credential-backends/">credential backends</a> decision page
+now</strong> — it states what each backend requires and an honest support
+matrix of what works on each today. Come back with a decision; Step 6
+shows the values for both.</p>
+<h2 id="step-3-provision-the-database-credentials-secret">Step 3 — Provision the database credentials Secret<a class="headerlink" href="#step-3-provision-the-database-credentials-secret" title="Permanent link">&para;</a></h2>
+<p>The chart never embeds credentials in values. It references a
+Kubernetes Secret <strong>by name</strong>; the Secret must hold the full database
+DSN at the key <code>url</code>, using the <strong>async</strong> driver prefix:</p>
+<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>create<span class="w"> </span>namespace<span class="w"> </span>meho
+kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>meho-postgres<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--from-literal<span class="o">=</span><span class="nv">url</span><span class="o">=</span><span class="s1">&#39;postgresql+asyncpg://&lt;user&gt;:&lt;password&gt;@&lt;host&gt;:5432/meho&#39;</span>
+</code></pre></div>
+<p>Two things bite here if missed:</p>
+<ul>
+<li>The prefix must be <code>postgresql+asyncpg://</code>. A bare <code>postgresql://</code>
+  DSN selects the synchronous driver and fails at connect time.</li>
+<li>The DSN is a URI, so reserved characters in the user or password
+  (<code>@ : / ? # [ ] %</code> and friends) must be <strong>percent-encoded</strong>. Shell
+  quoting protects them from the shell, not from the URI parser; an
+  unencoded <code>@</code> in a password silently truncates the host.</li>
+<li>The key must be <code>url</code> — the Deployment reads <code>DATABASE_URL</code> from
+  exactly that key.</li>
+</ul>
+<p>In production you will usually not <code>kubectl create</code> this by hand:
+the recommended pattern is syncing it from your secret store with
+<a href="https://external-secrets.io/">External Secrets Operator</a>. The
+manifests and the chart's optional ESO integration are documented in
+the <a href="https://github.com/evoila/meho/blob/main/deploy/values-examples/README.md">values-examples deep-dive</a>
+— the trail continues the same either way, as long as the Secret
+exists before you install.</p>
+<h2 id="step-4-set-up-the-keycloak-realm">Step 4 — Set up the Keycloak realm<a class="headerlink" href="#step-4-set-up-the-keycloak-realm" title="Permanent link">&para;</a></h2>
+<p>MEHO authenticates every caller against your Keycloak. Before the
+backplane can be logged into, the realm needs:</p>
+<ol>
+<li>the <strong>confidential <code>meho-backplane</code> client</strong> — the resource-server
+   identity MEHO validates tokens against;</li>
+<li>a <strong>public <code>meho-cli</code> client</strong> with the device-code grant — what
+   <code>meho login</code> uses;</li>
+<li>a <strong>public <code>meho-mcp</code></strong> client with authorization-code + PKCE —
+   what browser-capable MCP clients use;</li>
+<li>five <strong>protocol mappers</strong> and four <strong>default client scopes</strong> on the
+   public clients, so issued tokens carry the claims MEHO validates;</li>
+<li>at least one <strong>user</strong> in the <code>meho-admins</code> group.</li>
+</ol>
+<p><strong>Follow <a href="keycloak-realm/">Keycloak realm setup</a> now</strong> — it is the
+step-by-step recipe, including the non-obvious Keycloak 25+ <code>basic</code>
+scope gotcha that otherwise costs hours. Come back when the realm
+verification block at the end of that page passes.</p>
+<h2 id="step-5-decide-ingress-tls-and-trust">Step 5 — Decide ingress, TLS, and trust<a class="headerlink" href="#step-5-decide-ingress-tls-and-trust" title="Permanent link">&para;</a></h2>
+<p>The backplane serves one hostname (set as <code>ingress.host</code>), and that
+hostname does double duty: the chart <strong>derives the MCP audience</strong> —
+the identifier every agent token must be issued for — from it. Getting
+TLS trust right matters in three distinct places (the browser, the
+backplane's own outbound connections, and your workstation).</p>
+<p><strong>Read <a href="tls-ingress/">TLS and ingress</a></strong> — especially if your
+Keycloak, Vault, or PostgreSQL present certificates from an internal
+CA. If everything in your environment uses publicly-trusted
+certificates, the defaults in Step 6 are all you need.</p>
+<h2 id="step-6-write-your-values-file">Step 6 — Write your values file<a class="headerlink" href="#step-6-write-your-values-file" title="Permanent link">&para;</a></h2>
+<p>Create <code>values.yaml</code>. The chart ships a typed schema: every field the
+backplane cannot start without is blank by default and <strong>rejected at
+install time</strong> with the exact failing field path — so a misconfigured
+release fails at <code>helm install</code>, not as a crash-looping Pod at 2 a.m.</p>
+<p>A minimal Vault-backed file:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">image</span><span class="p">:</span>
+<span class="w">  </span><span class="c1"># Pin an immutable tag: v&lt;x.y.z&gt; for a release (see</span>
+<span class="w">  </span><span class="c1"># https://github.com/evoila/meho/releases), or sha-&lt;git-sha&gt; from CI.</span>
+<span class="w">  </span><span class="c1"># :latest is never published; :main is a dev-only moving alias.</span>
+<span class="w">  </span><span class="nt">tag</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&lt;REPLACE:</span><span class="nv"> </span><span class="s">v0.25.0</span><span class="nv"> </span><span class="s">or</span><span class="nv"> </span><span class="s">later&gt;&quot;</span>
+
+<span class="nt">ingress</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">className</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nginx</span>
+<span class="w">  </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">meho.example.com</span><span class="w">          </span><span class="c1"># drives the MCP audience — see Step 5</span>
+<span class="w">  </span><span class="nt">tls</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">secretName</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">meho-tls</span>
+
+<span class="nt">config</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">keycloakIssuerUrl</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://keycloak.example.com/realms/&lt;realm&gt;&quot;</span>
+<span class="w">  </span><span class="nt">keycloakAudience</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">meho-backplane</span>
+<span class="w">  </span><span class="nt">keycloakCliClientId</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">meho-cli</span><span class="w">   </span><span class="c1"># the public client from Step 4</span>
+<span class="w">  </span><span class="nt">vaultAddr</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://vault.example.com</span>
+
+<span class="nt">postgres</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">postgres.example.com</span>
+<span class="w">  </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5432</span>
+<span class="w">  </span><span class="nt">database</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">meho</span>
+<span class="w">  </span><span class="nt">credentialsSecret</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">meho-postgres</span><span class="w">   </span><span class="c1"># the Secret from Step 3</span>
+
+<span class="nt">vault</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">address</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://vault.example.com</span>
+<span class="w">  </span><span class="nt">authMethod</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">oidc</span>
+<span class="w">  </span><span class="nt">role</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">meho-mcp</span><span class="w">                  </span><span class="c1"># Vault JWT role bound to the realm above</span>
+<span class="w">  </span><span class="nt">paths</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">kv</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">secret/meho</span>
+
+<span class="nt">keycloak</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">issuer</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://keycloak.example.com/realms/&lt;realm&gt;&quot;</span>
+<span class="w">  </span><span class="nt">audience</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">meho-backplane</span>
+
+<span class="nt">networkPolicy</span><span class="p">:</span>
+<span class="w">  </span><span class="c1"># Staged deliberately: off for the first install, on once the backplane</span>
+<span class="w">  </span><span class="c1"># is green. The CIDRs below are placeholders, and if they do not match</span>
+<span class="w">  </span><span class="c1"># where your dependencies actually resolve, the Pod cannot reach them</span>
+<span class="w">  </span><span class="c1"># and /ready stays red — a failure that looks exactly like a credential</span>
+<span class="w">  </span><span class="c1"># or TLS problem. To turn it on afterwards: replace all three CIDRs</span>
+<span class="w">  </span><span class="c1"># with the real addresses, set enabled: true, and re-run the same</span>
+<span class="w">  </span><span class="c1"># `helm upgrade` from Step 7.</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">  </span><span class="nt">ingressControllerNamespace</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ingress-nginx</span>
+<span class="w">  </span><span class="c1"># Egress allow-list: the CIDRs your Postgres / Vault / Keycloak</span>
+<span class="w">  </span><span class="c1"># actually resolve to. For in-cluster Services, recover them with:</span>
+<span class="w">  </span><span class="c1">#   kubectl get endpoints &lt;svc&gt; -n &lt;ns&gt; -o jsonpath=&#39;{.subsets[].addresses[].ip}&#39;</span>
+<span class="w">  </span><span class="c1"># For anything outside the cluster, use the address your DNS name</span>
+<span class="w">  </span><span class="c1"># resolves to.</span>
+<span class="w">  </span><span class="nt">postgresCIDR</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;10.0.1.0/24&quot;</span><span class="w">   </span><span class="c1"># REPLACE</span>
+<span class="w">  </span><span class="nt">vaultCIDR</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;10.0.2.0/24&quot;</span><span class="w">      </span><span class="c1"># REPLACE</span>
+<span class="w">  </span><span class="nt">keycloakCIDR</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;10.0.3.0/24&quot;</span><span class="w">   </span><span class="c1"># REPLACE</span>
+</code></pre></div>
+<p>For a <strong>Google Secret Manager</strong> deploy, replace the <code>vault</code> block and
+<code>config.vaultAddr</code> with the GSM fields — the exact delta is on the
+<a href="credential-backends/#helm-values-per-backend">credential backends</a>
+page.</p>
+<p>Notes:</p>
+<ul>
+<li><code>config.keycloakIssuerUrl</code> / <code>config.vaultAddr</code> mirror
+  <code>keycloak.issuer</code> / <code>vault.address</code> — the config block is what the
+  backplane process reads; the two must agree.</li>
+<li>If your Vault, Keycloak, or PostgreSQL use internal-CA certificates,
+  add the trust-bundle <code>extraVolumes</code> / <code>extraEnv</code> block from
+  <a href="tls-ingress/#the-backplanes-own-trust-internal-ca-bundle">TLS and ingress</a>.</li>
+<li>The full annotated values reference lives in the
+  <a href="https://github.com/evoila/meho/tree/main/deploy/values-examples">example values files</a>
+  and the chart's own
+  <a href="https://github.com/evoila/meho/blob/main/deploy/charts/meho/values.yaml"><code>values.yaml</code></a>.</li>
+</ul>
+<h2 id="step-7-install-the-chart">Step 7 — Install the chart<a class="headerlink" href="#step-7-install-the-chart" title="Permanent link">&para;</a></h2>
+<p>The chart is published as an OCI artefact. Install:</p>
+<div class="highlight"><pre><span></span><code>helm<span class="w"> </span>upgrade<span class="w"> </span>--install<span class="w"> </span>meho<span class="w"> </span>oci://ghcr.io/evoila/meho-chart<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--namespace<span class="w"> </span>meho<span class="w"> </span>--create-namespace<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span>values.yaml
+</code></pre></div>
+<p>Pin <code>--version &lt;chart-version&gt;</code> in production (discover versions with
+<code>helm show chart oci://ghcr.io/evoila/meho-chart</code>); without it Helm
+uses the latest published chart.</p>
+<p>What happens, in order:</p>
+<ol>
+<li>A <strong>pre-install migration Job</strong> runs all database migrations before
+   any application Pod exists. If a migration fails, the release fails
+   — an unmigrated Pod never takes traffic. Failed Jobs stick around
+   for ten minutes, so <code>kubectl logs job/&lt;name&gt; -n meho</code> shows why.
+   This is where Step 1's pgvector prerequisite is enforced.</li>
+<li>The Deployment rolls out. First boot registers the full operations
+   catalog and loads the embedding model <strong>before</strong> the app starts
+   listening — the chart's startup probe budgets <strong>300 seconds</strong> for
+   this, so a Pod that is <code>Running</code> but not <code>Ready</code> for a couple of
+   minutes on first boot is normal.</li>
+</ol>
+<h2 id="step-8-verify-the-backplane">Step 8 — Verify the backplane<a class="headerlink" href="#step-8-verify-the-backplane" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># Rollout completes inside the startup budget.</span>
+kubectl<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span>rollout<span class="w"> </span>status<span class="w"> </span>deploy/meho<span class="w"> </span>--timeout<span class="o">=</span>360s
+
+<span class="c1"># The runtime image is python:3.14-slim — it ships neither curl nor</span>
+<span class="c1"># wget — so reach the Pod with a port-forward instead of `kubectl exec`.</span>
+kubectl<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span>port-forward<span class="w"> </span>deploy/meho<span class="w"> </span><span class="m">8000</span>:8000<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="p">&amp;</span>
+<span class="nv">PF</span><span class="o">=</span><span class="nv">$!</span>
+
+<span class="c1"># kubectl binds the local port only after it has dialled the API server,</span>
+<span class="c1"># so wait for the forward rather than racing it. Any HTTP answer counts,</span>
+<span class="c1"># including the 503 that /ready returns while dependencies are still red.</span>
+<span class="k">for</span><span class="w"> </span>_<span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="k">$(</span>seq<span class="w"> </span><span class="m">30</span><span class="k">)</span><span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="w">  </span>curl<span class="w"> </span>-s<span class="w"> </span>-o<span class="w"> </span>/dev/null<span class="w"> </span>http://localhost:8000/healthz<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="k">break</span>
+<span class="w">  </span>sleep<span class="w"> </span><span class="m">1</span>
+<span class="k">done</span>
+
+<span class="c1"># Liveness endpoint answers.</span>
+curl<span class="w"> </span>-fsS<span class="w"> </span>http://localhost:8000/healthz
+
+<span class="c1"># Readiness includes live checks against Postgres, Keycloak, and the</span>
+<span class="c1"># credential backend — all must be green. It answers 503 until they are,</span>
+<span class="c1"># so read the body rather than failing on the status code.</span>
+curl<span class="w"> </span>-sS<span class="w"> </span>http://localhost:8000/ready<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.
+
+<span class="nb">kill</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$PF</span><span class="s2">&quot;</span>
+
+<span class="c1"># From outside the cluster, through the Ingress:</span>
+curl<span class="w"> </span>-fsS<span class="w"> </span>https://meho.example.com/healthz
+curl<span class="w"> </span>-fsS<span class="w"> </span>https://meho.example.com/api/v1/auth-config
+<span class="c1"># → {&quot;keycloak_issuer&quot;: &quot;...&quot;, &quot;audience&quot;: &quot;meho-backplane&quot;, &quot;cli_client_id&quot;: &quot;meho-cli&quot;}</span>
+</code></pre></div>
+<p>If <code>/healthz</code> is green but <code>/ready</code> returns 503 with its <code>keycloak</code>
+check reading <code>jwks_fetch_failed: ConnectError</code> (or the credential
+backend's check reading <code>unreachable: SSLError</code>), the backplane
+does not trust the certificate that dependency presented — go back to
+<a href="tls-ingress/#the-backplanes-own-trust-internal-ca-bundle">TLS and ingress</a>.</p>
+<h2 id="step-9-install-the-cli-and-log-in">Step 9 — Install the CLI and log in<a class="headerlink" href="#step-9-install-the-cli-and-log-in" title="Permanent link">&para;</a></h2>
+<p>Download the <code>meho</code> CLI for your platform from the
+<a href="https://github.com/evoila/meho/releases">releases page</a> — a static
+binary in a tarball, with checksums and signatures:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">TAG</span><span class="o">=</span>&lt;the<span class="w"> </span>release<span class="w"> </span>tag<span class="w"> </span>matching<span class="w"> </span>your<span class="w"> </span>backplane,<span class="w"> </span>e.g.<span class="w"> </span>v0.25.0&gt;
+<span class="nv">TARBALL</span><span class="o">=</span>meho_<span class="si">${</span><span class="nv">TAG</span><span class="p">#v</span><span class="si">}</span>_linux_amd64.tar.gz<span class="w">   </span><span class="c1"># or darwin_arm64, etc.</span>
+curl<span class="w"> </span>-LO<span class="w"> </span>https://github.com/evoila/meho/releases/download/<span class="si">${</span><span class="nv">TAG</span><span class="si">}</span>/<span class="si">${</span><span class="nv">TARBALL</span><span class="si">}</span>
+curl<span class="w"> </span>-LO<span class="w"> </span>https://github.com/evoila/meho/releases/download/<span class="si">${</span><span class="nv">TAG</span><span class="si">}</span>/SHA256SUMS
+sha256sum<span class="w"> </span>-c<span class="w"> </span>SHA256SUMS<span class="w"> </span>--ignore-missing
+tar<span class="w"> </span>xzf<span class="w"> </span><span class="si">${</span><span class="nv">TARBALL</span><span class="si">}</span>
+sudo<span class="w"> </span>install<span class="w"> </span>-m<span class="w"> </span><span class="m">0755</span><span class="w"> </span>meho<span class="w"> </span>/usr/local/bin/meho
+</code></pre></div>
+<p>(Signature verification with cosign, and the full client-side setup
+story including MCP clients, live in
+<a href="../clients/">Connect clients</a>.)</p>
+<p>If your deployment's certificate chain comes from an internal CA,
+install that CA into your workstation's <strong>OS trust store</strong> first — the
+CLI verifies TLS against it, and on macOS it ignores the
+<code>SSL_CERT_FILE</code> environment variable entirely. Details:
+<a href="tls-ingress/#your-workstation-os-trust-store">TLS and ingress</a>.</p>
+<p>Then log in:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>login<span class="w"> </span>https://meho.example.com
+</code></pre></div>
+<p>This runs the OAuth device-code flow: the CLI prints a verification
+URL and code, you approve it in a browser as the user created in
+Step 4, and the CLI stores the resulting token in your OS keyring.
+Prove the whole chain end to end:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>status
+</code></pre></div>
+<p><code>meho status</code> calls <code>/api/v1/health</code> with the stored bearer token, so a
+clean result proves the whole chain — CLI, token, ingress, backplane.</p>
+<p>If login fails, the symptom almost always maps to a known
+misconfiguration in the realm —
+<a href="keycloak-realm/#if-login-fails">Keycloak realm setup § If login fails</a>
+has the symptom-to-fix table.</p>
+<p><strong>You now have a running, governed backplane and an authenticated
+operator.</strong></p>
+<h2 id="where-next">Where next<a class="headerlink" href="#where-next" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong><a href="../clients/">Connect clients</a></strong> — wire up MCP clients
+  (Claude Desktop, Claude Code) and the rest of the CLI story.</li>
+<li><strong><a href="../guides/">Do real work</a></strong> — register targets and
+  secrets, run first operations.</li>
+<li><strong><a href="upgrades/">Upgrades</a></strong> — how <code>helm upgrade</code> behaves, the Helm 4
+  field-ownership caveat, and per-version upgrade notes. Backup/restore
+  and observability guides land with MEHO's disaster-recovery work.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../deployment-shapes/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Deployment shapes">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Deployment shapes
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="credential-backends/" class="md-footer__link md-footer__link--next" aria-label="Next: Credential backends">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Credential backends
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 evoila Group — Apache 2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

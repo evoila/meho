@@ -1,0 +1,2763 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Governance backplane for AI agents acting on infrastructure — policy-gated, audit-grade, MCP-native.">
+      
+      
+      
+        <link rel="canonical" href="https://evoila.github.io/meho/0.41/clients/claude-desktop/">
+      
+      
+        <link rel="prev" href="../cli/">
+      
+      
+        <link rel="next" href="../claude-code/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Claude Desktop - MEHO</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#claude-desktop" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="MEHO" class="md-header__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MEHO
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Claude Desktop
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../.." class="md-tabs__link">
+          
+  
+  
+  Start here
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../install/" class="md-tabs__link">
+          
+  
+  
+  Install & operate
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Connect clients
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/" class="md-tabs__link">
+          
+  
+  
+  Do real work
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../project/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Project
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="MEHO" class="md-nav__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    MEHO
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment-shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment shapes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install & operate
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Install & operate
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The install trail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/credential-backends/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credential backends
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/keycloak-realm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Keycloak realm setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/company-login-authentik/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Company login with authentik
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/openbao-unseal-key/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenBao unseal key: who keeps what
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/tls-ingress/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS and ingress
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/upgrades/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrades
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/kind-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local kind quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Connect clients
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp-surface-and-scopes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP surface and scopes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The meho CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Desktop
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Desktop
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#before-you-start-trust-your-deployments-ca" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Before you start: trust your deployment's CA
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Before you start: trust your deployment&#39;s CA">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-check-if-you-need-this-step" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Check if you need this step
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-get-the-root-ca-file" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Get the root CA file
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-trust-the-root-ca" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Trust the root CA
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-one-command-path-the-mcpb-bundle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The one-command path: the .mcpb bundle
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The one-command path: the .mcpb bundle">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#when-the-login-expires-or-is-not-finished" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When the login expires or is not finished
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#trusting-an-internal-ca" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Trusting an internal CA
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prerequisites" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prerequisites
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#one-time-realm-redirect-uris" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One-time realm redirect URIs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configure-claude_desktop_configjson" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configure claude_desktop_config.json
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-actually-works-and-the-sharp-edges" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What actually works — and the sharp edges
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="What actually works — and the sharp edges">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#pin-a-build-with-underscore-tool-names-and-structured-results" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pin a build with underscore tool names and structured results
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-resources-are-not-discoverable-through-the-shim" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho:// resources are not discoverable through the shim
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verify" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verify
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../claude-code/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp-remote-shim/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Other MCP clients (mcp-remote shim)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting auth walls
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Do real work
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/targets-and-secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Register targets and secrets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/first-operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run your first operations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sensors-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Watch your estate with sensors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/approvals-and-break-glass/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Approvals and break-glass
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/tenant-bootstrap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add a tenant
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/topology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Topology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/broadcast/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Broadcast
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/memory-and-knowledge/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory and knowledge
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/audit-forensics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audit forensics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/flight-recorder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Flight recorder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/runbooks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Runbooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/hosted-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hosted agents
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/event-ingestion/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Event ingestion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/satellite-gateway/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Satellite gateway
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/windows-and-guest-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Windows estate and in-guest execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/add-ons/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add-ons
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/whats-new/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    What's new
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/connectors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connectors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/mcp-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP tools
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/maturity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Maturity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../project/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#before-you-start-trust-your-deployments-ca" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Before you start: trust your deployment's CA
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Before you start: trust your deployment&#39;s CA">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-check-if-you-need-this-step" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Check if you need this step
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-get-the-root-ca-file" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Get the root CA file
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-trust-the-root-ca" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Trust the root CA
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-one-command-path-the-mcpb-bundle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The one-command path: the .mcpb bundle
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The one-command path: the .mcpb bundle">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#when-the-login-expires-or-is-not-finished" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When the login expires or is not finished
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#trusting-an-internal-ca" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Trusting an internal CA
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prerequisites" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prerequisites
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#one-time-realm-redirect-uris" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One-time realm redirect URIs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configure-claude_desktop_configjson" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configure claude_desktop_config.json
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-actually-works-and-the-sharp-edges" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What actually works — and the sharp edges
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="What actually works — and the sharp edges">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#pin-a-build-with-underscore-tool-names-and-structured-results" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pin a build with underscore tool names and structured results
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-resources-are-not-discoverable-through-the-shim" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho:// resources are not discoverable through the shim
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verify" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verify
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/evoila/meho/edit/main/docs-site/clients/claude-desktop.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="claude-desktop">Claude Desktop<a class="headerlink" href="#claude-desktop" title="Permanent link">&para;</a></h1>
+<p>Claude Desktop reaches an internal MEHO backplane through a <strong>local
+<a href="https://github.com/geelen/mcp-remote"><code>mcp-remote</code></a> stdio→HTTP shim</strong>
+that runs on your own VPN-connected machine. The shim runs the OAuth
+2.1 + PKCE flow against your internal Keycloak and forwards
+Streamable-HTTP calls to <code>/mcp</code>. This shim is the <strong>only</strong> Desktop
+transport for an internal-only backplane — but you have two ways to set
+it up:</p>
+<ul>
+<li><strong>The one-click <code>.mcpb</code> bundle (recommended)</strong> — install by opening a
+  file; a dialog asks for your backplane URL and an optional internal-CA
+  bundle, and no JSON editing is involved. Start here.</li>
+<li><strong>A manual <code>claude_desktop_config.json</code></strong> — wire the same shim
+  yourself. Use it if you cannot install the bundle, or want to see
+  exactly what it runs.</li>
+</ul>
+<p>Either way, everything runs on your own VPN-connected machine and
+nothing is exposed to the internet.</p>
+<div class="admonition danger">
+<p class="admonition-title">The remote Custom Connector is not applicable</p>
+<p>Claude Desktop's remote <em>Custom Connector</em> (Settings → Connectors →
+add a <code>/mcp</code> URL) is brokered through Anthropic's cloud and requires
+the backplane to be <strong>publicly reachable</strong>. MEHO is internal-only
+and must never be publicly exposed, so that path does not apply — it
+is not a TLS problem you can solve with a public certificate. Use
+the shim below. See the
+<a href="../#remote-custom-connector-not-applicable">Connect clients overview</a>
+for the full rationale.</p>
+</div>
+<p>The configuration and findings on this page are the <strong>empirically
+observed</strong> result of the smoke test run against a standing internal
+deploy over VPN (issue
+<a href="https://github.com/evoila/meho/issues/2666">#2666</a>) — not a
+design sketch.</p>
+<h2 id="before-you-start-trust-your-deployments-ca">Before you start: trust your deployment's CA<a class="headerlink" href="#before-you-start-trust-your-deployments-ca" title="Permanent link">&para;</a></h2>
+<p>Do this step first. It takes a few minutes.</p>
+<p>A CA (certificate authority) is the certificate that signs the server
+certificates of your MEHO deployment. Many deployments use their own
+internal CA. Your machine does not trust an internal CA yet, so every
+login fails until you add it.</p>
+<h3 id="1-check-if-you-need-this-step">1. Check if you need this step<a class="headerlink" href="#1-check-if-you-need-this-step" title="Permanent link">&para;</a></h3>
+<p>Run the command for your shell. Use your backplane host in place of
+<code>meho.example.com</code>.</p>
+<ul>
+<li>
+<p><strong>macOS and Linux</strong> (bash or zsh):</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-sS<span class="w"> </span>-o<span class="w"> </span>/dev/null<span class="w"> </span>https://meho.example.com/healthz<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span>trusted
+</code></pre></div>
+</li>
+<li>
+<p><strong>Windows</strong> (PowerShell; type <code>curl.exe</code>, because plain <code>curl</code> is a
+  PowerShell alias for a different command):</p>
+<div class="highlight"><pre><span></span><code><span class="n">curl</span><span class="p">.</span><span class="n">exe</span> <span class="n">-sS</span> <span class="n">-o</span> <span class="n">NUL</span> <span class="n">https</span><span class="p">://</span><span class="n">meho</span><span class="p">.</span><span class="n">example</span><span class="p">.</span><span class="n">com</span><span class="p">/</span><span class="n">healthz</span><span class="p">;</span> <span class="k">if</span> <span class="p">(</span><span class="nv">$LASTEXITCODE</span> <span class="o">-eq</span> <span class="n">0</span><span class="p">)</span> <span class="p">{</span> <span class="s2">"trusted"</span> <span class="p">}</span>
+</code></pre></div>
+</li>
+<li>
+<p>It prints <code>trusted</code>: your machine already trusts the deployment. Skip
+  to the <a href="#the-one-command-path-the-mcpb-bundle">next section</a>.</p>
+</li>
+<li>It fails with <code>SSL certificate problem</code> (for example <code>unable to get
+  local issuer certificate</code>): the deployment uses an internal CA. Go on.</li>
+</ul>
+<h3 id="2-get-the-root-ca-file">2. Get the root CA file<a class="headerlink" href="#2-get-the-root-ca-file" title="Permanent link">&para;</a></h3>
+<p>The MEHO servers send only their own certificate, not the root CA. So
+you cannot copy the root CA from the server. The person or team that
+deployed MEHO (your deployer) publishes it in a place you can open
+before you trust it, for example:</p>
+<ul>
+<li>an internal docs page,</li>
+<li>an item in your team's password manager,</li>
+<li>a plain-HTTP link, such as <code>http://ca.example.internal/root.pem</code>.</li>
+</ul>
+<p>Ask your deployer where it is. You do not need access to the secrets
+store or to the cluster. Save the file as <code>internal-ca.pem</code>. For a
+plain-HTTP link:</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-fsS<span class="w"> </span>-o<span class="w"> </span>internal-ca.pem<span class="w"> </span>http://ca.example.internal/root.pem
+</code></pre></div>
+<p>Then check that it is the right file before you trust it. You need the
+expected fingerprint from a place you already trust, such as your
+team's password manager or an internal docs page you log in to. Do not
+take it from the same plain-HTTP page as the file: someone who can swap
+the file can also swap a fingerprint shown next to it. If you have no
+trusted source for the fingerprint, stop and ask your deployer.</p>
+<p>Print the file's SHA-256 fingerprint and compare it with the expected
+one (on Windows, run this in Git Bash, which includes <code>openssl</code>):</p>
+<div class="highlight"><pre><span></span><code>openssl<span class="w"> </span>x509<span class="w"> </span>-in<span class="w"> </span>internal-ca.pem<span class="w"> </span>-noout<span class="w"> </span>-subject<span class="w"> </span>-fingerprint<span class="w"> </span>-sha256
+</code></pre></div>
+<p>If the fingerprints do not match, stop and ask your deployer. Do not go
+on to step 3 until they match.</p>
+<h3 id="3-trust-the-root-ca">3. Trust the root CA<a class="headerlink" href="#3-trust-the-root-ca" title="Permanent link">&para;</a></h3>
+<p>Run the one command for your system, then open a new terminal.</p>
+<ul>
+<li>
+<p><strong>macOS</strong> (asks for your password):</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>security<span class="w"> </span>add-trusted-cert<span class="w"> </span>-d<span class="w"> </span>-r<span class="w"> </span>trustRoot<span class="w"> </span>-k<span class="w"> </span>/Library/Keychains/System.keychain<span class="w"> </span>internal-ca.pem
+</code></pre></div>
+</li>
+<li>
+<p><strong>Windows</strong> (in a terminal you started as administrator):</p>
+<div class="highlight"><pre><span></span><code>certutil -addstore -f Root internal-ca.pem
+</code></pre></div>
+</li>
+</ul>
+<p>The <code>meho</code> CLI reads this trust store, and so does current Claude
+Desktop (details in <a href="#trusting-an-internal-ca">Trusting an internal CA</a>).
+No admin rights on macOS? The login keychain command there is enough
+for Claude Desktop.</p>
+<p>Run the check from step 1 again. It now prints <code>trusted</code>. Keep
+<code>internal-ca.pem</code>: you can also pick it in the bundle's CA field.</p>
+<p>Deployers: the
+<a href="https://github.com/evoila/meho/blob/main/deploy/values-examples/README.md#publish-the-root-ca-for-operators">deployer guide</a>
+says how to publish the root CA so that operators can do this step.</p>
+<h2 id="the-one-command-path-the-mcpb-bundle">The one-command path: the <code>.mcpb</code> bundle<a class="headerlink" href="#the-one-command-path-the-mcpb-bundle" title="Permanent link">&para;</a></h2>
+<p>MEHO ships a Claude Desktop bundle in the MCPB format, distributed as an
+asset on each <a href="https://github.com/evoila/meho/releases">GitHub Release</a>.</p>
+<div class="admonition tip">
+<p class="admonition-title">Check the download before you install it</p>
+<p>Each Release also has a checksum file for the bundle,
+<code>SHA256SUMS-mcpb</code>. Download it into the same folder as the <code>.mcpb</code>
+file and run (macOS or Linux):</p>
+<div class="highlight"><pre><span></span><code>shasum<span class="w"> </span>-a<span class="w"> </span><span class="m">256</span><span class="w"> </span>-c<span class="w"> </span>SHA256SUMS-mcpb
+</code></pre></div>
+<p>It must print <code>meho-claude-desktop-&lt;version&gt;.mcpb: OK</code>. On Linux,
+<code>sha256sum -c SHA256SUMS-mcpb</code> works too.</p>
+<p>The checksum file is signed with cosign, like the CLI checksums. To
+check the signature as well, also download
+<code>SHA256SUMS-mcpb.cosign.bundle</code> and run:</p>
+<div class="highlight"><pre><span></span><code>cosign<span class="w"> </span>verify-blob<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--certificate-identity-regexp<span class="w"> </span><span class="s1">'^https://github\.com/evoila/meho/\.github/workflows/cli-release\.yml@refs/tags/v.+$'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--certificate-oidc-issuer<span class="w"> </span><span class="s1">'https://token.actions.githubusercontent.com'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--bundle<span class="w"> </span>SHA256SUMS-mcpb.cosign.bundle<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>SHA256SUMS-mcpb
+</code></pre></div>
+</div>
+<p>Install it by <strong>opening the <code>.mcpb</code> file</strong> in Claude Desktop: it wires
+the same <code>mcp-remote</code> shim and asks, in a dialog, for the two things
+that differ per deployment —</p>
+<ul>
+<li><strong>MEHO MCP endpoint</strong> — your backplane's <code>/mcp</code> URL (reachable over
+  your VPN).</li>
+<li><strong>Internal CA bundle</strong> <em>(optional)</em> — the PEM for the CA that signs
+  the backplane's TLS certificate; the extension adds it to its own trust
+  store. Leave it empty on a public-CA deploy, or when you trust the root
+  CA in your OS trust store instead — see
+  <a href="#trusting-an-internal-ca">Trusting an internal CA</a>.</li>
+</ul>
+<p>Two advanced fields default to the working setup and rarely need
+changing: the OAuth <strong>client id</strong> (default <code>meho-mcp</code>) and the OAuth
+<strong>scopes</strong> (default <code>mcp:read mcp:execute offline_access</code>). To opt the
+session into the operator planes, add <code>mcp:admin</code> to the scopes field — see
+<a href="../mcp-surface-and-scopes/#how-a-client-requests-elevation">MCP surface and scopes</a>.</p>
+<p>The optional <strong>Tenant</strong> field names the MEHO tenant the extension works
+in (a tenant name or ID). Leave it empty if your login has one tenant. If
+your login has several, set it: without it MEHO allows only
+<code>meho_status</code>, which lists your tenants. To work in another tenant, change
+the field and turn the extension off and on again. See
+<a href="../mcp-surface-and-scopes/#which-tenant-a-session-works-in">MCP surface and scopes</a>.</p>
+<p><code>offline_access</code> keeps the login alive between uses. The login lasts until
+you have not used MEHO for the <code>meho-mcp</code> client's offline idle limit: 48
+hours with the
+<a href="../../install/keycloak-realm/#how-long-an-mcp-login-lasts">recommended realm setting</a>.
+Without it, the login ends at the realm's SSO idle limit (30 minutes by
+default). If you change the scopes field, keep <code>offline_access</code> in it.</p>
+<h3 id="when-the-login-expires-or-is-not-finished">When the login expires or is not finished<a class="headerlink" href="#when-the-login-expires-or-is-not-finished" title="Permanent link">&para;</a></h3>
+<p>The bundle makes sure a MEHO call never hangs because of a login:</p>
+<ul>
+<li><strong>The login expired.</strong> The next MEHO call fails at once with "Your MEHO
+  login has expired. Turn the MEHO extension off and on again in Claude
+  Desktop (Settings &gt; Extensions) to log in again." Then the extension
+  stops. Turn it off and on in <strong>Settings &gt; Extensions</strong>, and finish the
+  browser login that opens.</li>
+<li><strong>Nobody finished the browser login.</strong> The extension stops after 5
+  minutes, so the local login port is free again. Finish any open MEHO
+  login in your browser, then turn the extension off and on.</li>
+</ul>
+<p>After you update to a bundle with this fix, the first use opens <strong>one new
+browser login</strong>. The bundle's newer <code>mcp-remote</code> keeps saved logins in a
+new folder, <code>~/.mcp-auth/mcp-remote-0.1.38/</code>.</p>
+<p>The bundle still expects the realm's public <code>meho-mcp</code> client with the
+shim's loopback redirect URIs registered (below), and — on an
+internal-CA deploy — one of the two CA trust routes below. If you cannot
+install the bundle, wire the shim by hand with the rest of this page.</p>
+<h2 id="trusting-an-internal-ca">Trusting an internal CA<a class="headerlink" href="#trusting-an-internal-ca" title="Permanent link">&para;</a></h2>
+<p>On an internal-CA deploy the shim must trust the CA that signs the
+backplane's and Keycloak's certificates. Either route is enough; a
+public-CA deploy needs neither.</p>
+<ul>
+<li><strong>The bundle's CA field.</strong> Pick the CA's PEM file in the install
+  dialog with the file picker. If you type the path instead, it must be
+  absolute or start with <code>~/</code>. The bundle's launcher adds its
+  certificates to Node's trust store in-process before the shim starts,
+  keeping the trust it already has. A path it cannot read, or a file
+  without a PEM certificate, stops the extension with an error naming
+  the file.</li>
+<li>
+<p><strong>Your OS trust store.</strong> Leave the CA field empty and trust the root CA
+  in the OS trust store. On macOS that is the login keychain:</p>
+<div class="highlight"><pre><span></span><code>security<span class="w"> </span>add-trusted-cert<span class="w"> </span>-k<span class="w"> </span>~/Library/Keychains/login.keychain-db<span class="w"> </span>internal-ca.pem
+</code></pre></div>
+<p>Then toggle the extension off and on. Current Claude Desktop runs
+its built-in Node with <code>NODE_USE_SYSTEM_CA=1</code>, so Node reads the OS
+store with nothing to configure in the bundle (verified on macOS;
+Windows is not yet field-tested).</p>
+</li>
+</ul>
+<div class="admonition note">
+<p class="admonition-title">Why the CA is not passed as <code>NODE_EXTRA_CA_CERTS</code></p>
+<p>Claude Desktop 1.3109.0 strips <code>NODE_EXTRA_CA_CERTS</code> from an
+extension's environment, so a CA delivered that way never reaches
+Node: the shim fails with <code>UNABLE_TO_VERIFY_LEAF_SIGNATURE</code> and
+Desktop reports an <code>initialize</code> timeout
+(<a href="https://github.com/evoila/meho/issues/3143">#3143</a>). The bundle
+therefore passes the CA path as an argument and injects it
+in-process.</p>
+</div>
+<h2 id="prerequisites">Prerequisites<a class="headerlink" href="#prerequisites" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Claude Desktop on a machine <strong>on the internal network / VPN</strong>.</li>
+<li><a href="https://nodejs.org/">Node.js</a> (for <code>npx</code>), which spawns the shim.</li>
+<li>The <code>meho</code> CLI installed and <code>meho login</code> working from the same
+  machine (<a href="../cli/">The meho CLI</a>) — it proves TLS trust and the realm
+  before you add the shim's moving parts.</li>
+<li>On an internal-CA deploy, the deployment's CA in your OS trust store
+  (the <code>meho</code> CLI reads it; see
+  <a href="#before-you-start-trust-your-deployments-ca">Before you start</a>), plus a way for the shim's Node to trust it —
+  Node ignores the OS store unless told otherwise: a PEM file for
+  <code>NODE_EXTRA_CA_CERTS</code>, or <code>NODE_USE_SYSTEM_CA=1</code> (below).</li>
+<li>The realm's public <strong><code>meho-mcp</code></strong> OAuth client, with the shim's
+  loopback redirect URIs registered (next section).</li>
+</ul>
+<h2 id="one-time-realm-redirect-uris">One-time realm redirect URIs<a class="headerlink" href="#one-time-realm-redirect-uris" title="Permanent link">&para;</a></h2>
+<p><code>mcp-remote</code>'s OAuth callback path is <strong><code>/oauth/callback</code></strong> — not the
+<code>/callback</code> that Claude Code and the bootstrap script use. On a fixed
+local port (below, <code>8456</code>), the <code>meho-mcp</code> client therefore needs
+<strong>both</strong> loopback forms as valid redirect URIs:</p>
+<div class="highlight"><pre><span></span><code>http://localhost:8456/oauth/callback
+http://127.0.0.1:8456/oauth/callback
+</code></pre></div>
+<p><code>mcp-remote</code> tries <code>localhost</code> and its <code>127.0.0.1</code> twin, so register
+both. The port must match the one in the config below. The rest of the
+<code>meho-mcp</code> client shape (public PKCE client, five protocol mappers,
+four default scopes, and <code>offline_access</code>, <code>mcp:read</code>, <code>mcp:execute</code> and
+<code>mcp:admin</code> optional) is in
+<a href="../../install/keycloak-realm/">Keycloak realm setup</a>.</p>
+<h2 id="configure-claude_desktop_configjson">Configure <code>claude_desktop_config.json</code><a class="headerlink" href="#configure-claude_desktop_configjson" title="Permanent link">&para;</a></h2>
+<p>Add a <strong>local stdio server</strong> that runs the shim. This is the exact
+shape proven in the smoke test (<code>mcp-remote@0.1.38</code>):</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"mcpServers"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">"meho"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">"command"</span><span class="p">:</span><span class="w"> </span><span class="s2">"npx"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"args"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="s2">"-y"</span><span class="p">,</span><span class="w"> </span><span class="s2">"mcp-remote@0.1.38"</span><span class="p">,</span>
+<span class="w">        </span><span class="s2">"https://meho.example.com/mcp"</span><span class="p">,</span>
+<span class="w">        </span><span class="s2">"8456"</span><span class="p">,</span>
+<span class="w">        </span><span class="s2">"--static-oauth-client-info"</span><span class="p">,</span><span class="w"> </span><span class="s2">"{\"client_id\": \"meho-mcp\"}"</span><span class="p">,</span>
+<span class="w">        </span><span class="s2">"--static-oauth-client-metadata"</span><span class="p">,</span><span class="w"> </span><span class="s2">"{\"scope\": \"mcp:read mcp:execute offline_access\"}"</span>
+<span class="w">      </span><span class="p">],</span>
+<span class="w">      </span><span class="nt">"env"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"NODE_EXTRA_CA_CERTS"</span><span class="p">:</span><span class="w"> </span><span class="s2">"/path/to/internal-ca.pem"</span><span class="w"> </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li><code>8456</code> is the positional local callback port — it must match the
+  registered redirect URIs above.</li>
+<li><code>--static-oauth-client-info</code> pins the pre-registered public
+  <code>meho-mcp</code> client so the shim skips Dynamic Client Registration
+  (which Keycloak's Trusted Hosts policy blocks anyway).</li>
+<li><code>offline_access</code> in the scope makes the login last between uses (see
+  above). The <code>meho-mcp</code> client must offer it as an optional scope.</li>
+<li><code>NODE_EXTRA_CA_CERTS</code> is only needed on an internal-CA deploy; drop it
+  if your backplane and Keycloak present publicly-trusted certificates.
+  The alternative is the OS route: with the root CA trusted in the OS
+  store, use <code>"env": { "NODE_USE_SYSTEM_CA": "1" }</code> instead (Node 22.19+
+  / 24.6+). Switch to it if the shim fails with
+  <code>UNABLE_TO_VERIFY_LEAF_SIGNATURE</code> although <code>NODE_EXTRA_CA_CERTS</code> is set
+  — current Desktop strips that variable from the bundle's environment,
+  and this manual shape has not been re-tested on current Desktop.</li>
+</ul>
+<p>Restart Claude Desktop. On first use the shim opens a browser, you
+complete OAuth 2.1 + PKCE against the internal Keycloak (a static
+client, so no DCR wall), and tokens land in <code>~/.mcp-auth</code>, which the
+shim auto-refreshes.</p>
+<h2 id="what-actually-works-and-the-sharp-edges">What actually works — and the sharp edges<a class="headerlink" href="#what-actually-works-and-the-sharp-edges" title="Permanent link">&para;</a></h2>
+<p>The smoke test proved the transport end-to-end and surfaced three
+findings. <strong>Two are build-gated</strong> — fixed on a current backplane, but
+they dictate which build you must pin (below). <strong>The third — resource
+discovery — is a standing limitation</strong> with no fix yet.</p>
+<h3 id="pin-a-build-with-underscore-tool-names-and-structured-results">Pin a build with underscore tool names and structured results<a class="headerlink" href="#pin-a-build-with-underscore-tool-names-and-structured-results" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Tool names must be underscores.</strong> Claude's frontend validates every
+  remote-MCP tool name against <code>^[a-zA-Z0-9_-]{1,64}$</code> and rejects the
+  whole toolset if any name fails — the older dotted names (<code>meho.status</code>)
+  failed <em>all-or-nothing</em>, so a conversation saw <strong>zero</strong> MEHO tools
+  even though Settings → Connectors listed them. The rename to
+  underscores (<code>meho_status</code>, <code>list_targets</code>, …) shipped in <strong>v0.27.0</strong>;
+  pin that release or later.</li>
+<li><strong><code>outputSchema</code>-declaring tools need conforming <code>structuredContent</code>.</strong>
+  MCP 2025-06-18 makes structured results mandatory for a tool that
+  declares an <code>outputSchema</code>, and Claude's frontend enforces it. On a
+  build without the fix, the ~17 declaring tools (including the
+  narrow-waist <code>list_targets</code>, <code>query_topology</code>, <code>query_audit</code>) hard-fail
+  client-side with "Tool execution failed" while the server logs a clean
+  <code>200</code> and writes its audit row. <code>meho_status</code> — which declares no
+  schema — is unaffected. Pin a build carrying the fix (merged after
+  v0.27.0); on it, <code>list_targets</code> returns and renders in a conversation.</li>
+</ul>
+<h3 id="meho-resources-are-not-discoverable-through-the-shim"><code>meho://</code> resources are not discoverable through the shim<a class="headerlink" href="#meho-resources-are-not-discoverable-through-the-shim" title="Permanent link">&para;</a></h3>
+<p><code>resources/list</code> returns <strong>zero</strong> concrete resources over the shim, so a
+discovery-driven client (Claude Desktop asks at the handshake) sees
+nothing to offer. The resource <em>templates</em> are published
+(<code>resources/templates/list</code> carries the docs-chunk template) and the
+read handler works — a raw <code>resources/read meho://tenant/&lt;uuid&gt;/info</code>
+returns the tenant bundle — but <strong>unlisted-but-readable is not usable by
+a discovery-driven client</strong>. Do not expect to browse <code>meho://</code> resources
+from a Desktop conversation; drive everything through the tools.</p>
+<h2 id="verify">Verify<a class="headerlink" href="#verify" title="Permanent link">&para;</a></h2>
+<p>From a Claude Desktop conversation, once the toolset attaches by its
+underscore names:</p>
+<ul>
+<li>Ask it to run <strong><code>meho_status</code></strong> — it returns your operator identity
+  (sub / name / email), the Vault KV read result, DB migration state,
+  and the negotiated MCP protocol version.</li>
+<li>Ask it to run <strong><code>list_targets</code></strong> — on a build with the
+  <code>structuredContent</code> fix, it returns your registered targets, rendered
+  in the conversation.</li>
+</ul>
+<p>If the tools do not attach, or a call fails, walk the
+<a href="../troubleshooting/">troubleshooting page</a> — a rejected token, a name
+that failed validation, and a schema-conformance failure each present
+differently.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../cli/" class="md-footer__link md-footer__link--prev" aria-label="Previous: The meho CLI">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                The meho CLI
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../claude-code/" class="md-footer__link md-footer__link--next" aria-label="Next: Claude Code">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Claude Code
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 evoila Group — Apache 2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,2598 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Governance backplane for AI agents acting on infrastructure — policy-gated, audit-grade, MCP-native.">
+      
+      
+      
+        <link rel="canonical" href="https://evoila.github.io/meho/0.33/guides/windows-and-guest-execution/">
+      
+      
+        <link rel="prev" href="../satellite-gateway/">
+      
+      
+        <link rel="next" href="../add-ons/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Windows estate and in-guest execution - MEHO</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#govern-the-windows-estate-and-run-programs-in-a-guest" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="MEHO" class="md-header__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MEHO
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Windows estate and in-guest execution
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../.." class="md-tabs__link">
+          
+  
+  
+  Start here
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../install/" class="md-tabs__link">
+          
+  
+  
+  Install & operate
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../clients/" class="md-tabs__link">
+          
+  
+  
+  Connect clients
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Do real work
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../project/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Project
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="MEHO" class="md-nav__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    MEHO
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment-shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment shapes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install & operate
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Install & operate
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The install trail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/credential-backends/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credential backends
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/keycloak-realm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Keycloak realm setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/tls-ingress/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS and ingress
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/upgrades/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrades
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/kind-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local kind quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Connect clients
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/mcp-surface-and-scopes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP surface and scopes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The meho CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/claude-desktop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Desktop
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/claude-code/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/mcp-remote-shim/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Other MCP clients (mcp-remote shim)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting auth walls
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Do real work
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../targets-and-secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Register targets and secrets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../first-operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run your first operations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sensors-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Watch your estate with sensors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../approvals-and-break-glass/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Approvals and break-glass
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../topology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Topology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../broadcast/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Broadcast
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memory-and-knowledge/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory and knowledge
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audit-forensics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audit forensics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../flight-recorder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Flight recorder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../runbooks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Runbooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../event-ingestion/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Event ingestion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../satellite-gateway/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Satellite gateway
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Windows estate and in-guest execution
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Windows estate and in-guest execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-each-connector-governs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What each connector governs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#register-a-windows-target" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Register a Windows target
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Register a Windows target">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-powershell-over-ssh-connectors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The PowerShell-over-SSH connectors
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#sql-server-over-tds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SQL Server over TDS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#in-guest-execution-the-vms-own-target" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        In-guest execution: the VM's own target
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-transport-powershell-51-over-ssh-secret-free" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The transport: PowerShell 5.1 over SSH, secret-free
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#safety-tiers-of-the-write-operations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Safety tiers of the write operations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#run-a-program-inside-a-guest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run a program inside a guest
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Run a program inside a guest">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-makes-it-governed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What makes it governed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#honest-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Honest limits
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../add-ons/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add-ons
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/whats-new/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    What's new
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/connectors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connectors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/mcp-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP tools
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/maturity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Maturity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../project/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-each-connector-governs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What each connector governs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#register-a-windows-target" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Register a Windows target
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Register a Windows target">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-powershell-over-ssh-connectors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The PowerShell-over-SSH connectors
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#sql-server-over-tds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SQL Server over TDS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#in-guest-execution-the-vms-own-target" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        In-guest execution: the VM's own target
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-transport-powershell-51-over-ssh-secret-free" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The transport: PowerShell 5.1 over SSH, secret-free
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#safety-tiers-of-the-write-operations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Safety tiers of the write operations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#run-a-program-inside-a-guest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run a program inside a guest
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Run a program inside a guest">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-makes-it-governed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What makes it governed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#honest-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Honest limits
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/evoila/meho/edit/main/docs-site/guides/windows-and-guest-execution.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="govern-the-windows-estate-and-run-programs-in-a-guest">Govern the Windows estate and run programs in a guest<a class="headerlink" href="#govern-the-windows-estate-and-run-programs-in-a-guest" title="Permanent link">&para;</a></h1>
+<p>MEHO governs the Windows half of a datacenter — Windows Server, Active
+Directory, DNS, failover clustering, SQL Server, and Hyper-V — through
+the same <strong>discover → list groups → search → preview → call</strong> ladder you
+learned in <a href="../first-operations/">Run your first operations</a>. It also
+governs a harder thing: running a program <em>inside</em> a virtual machine's
+guest OS, with a human approving the risky ones. This guide covers both.</p>
+<p>These connectors are recent additions. The honest status is <strong>shipped</strong>:
+each one is registered, has a live operation surface, and rides the full
+policy, approval, and audit path. Read them as new capability, not as
+long-hardened plumbing — where a connector defers something, this guide
+says so plainly under <a href="#honest-limits">Honest limits</a>.</p>
+<div class="admonition note">
+<p class="admonition-title">Prerequisites</p>
+<ul>
+<li>A registered, probe-green target —
+  <a href="../targets-and-secrets/">Register targets and secrets</a>. The Windows
+  connectors add a small server-side prerequisite (an OpenSSH server
+  on the host); see <a href="#register-a-windows-target">Register a Windows target</a>.</li>
+<li>The ladder from <a href="../first-operations/">Run your first operations</a>.
+  Every operation here is reached the same way; nothing below is a
+  new tool.</li>
+<li>An <strong>operator</strong>-role session for reads and recoverable writes.
+  The destructive operations park for a human — approval is decided
+  on the operator surfaces, never from an agent
+  (<a href="../approvals-and-break-glass/">Approvals and break-glass</a>).</li>
+</ul>
+</div>
+<h2 id="what-each-connector-governs">What each connector governs<a class="headerlink" href="#what-each-connector-governs" title="Permanent link">&para;</a></h2>
+<p>Each is a typed connector: a curated, individually safety-tiered set of
+operations, not a raw shell or an open SQL prompt. You address every one
+by its <code>connector_id</code>, exactly as in the first-operations ladder.</p>
+<table>
+<thead>
+<tr>
+<th><code>connector_id</code></th>
+<th>Governs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>winsrv-ssh-2022.x</code></td>
+<td>Windows Server core</td>
+</tr>
+<tr>
+<td><code>msad-ssh-2022.x</code></td>
+<td>Active Directory</td>
+</tr>
+<tr>
+<td><code>windns-ssh-2016.x</code></td>
+<td>Windows AD-integrated DNS records</td>
+</tr>
+<tr>
+<td><code>wsfc-ssh-2022.x</code></td>
+<td>Windows Server Failover Clustering</td>
+</tr>
+<tr>
+<td><code>mssql-tds-2022.x</code></td>
+<td>Microsoft SQL Server</td>
+</tr>
+<tr>
+<td><code>hyperv-ssh-2022.x</code></td>
+<td>Hyper-V (migration-source reads)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Windows Server (<code>winsrv</code>).</strong> System facts, service start/stop/restart,
+Windows feature install and removal, reboot and shutdown, local users,
+and disk / iSCSI-initiator storage. The reboot, shutdown, feature-removal,
+and local-user-delete operations park for a human; everything else is a
+read or a recoverable write.</p>
+<p><strong>Active Directory (<code>msad</code>).</strong> Domain, forest, and DC topology reads, AD
+replication metadata, plus guarded day-2 writes over users, groups,
+computers, and organizational units. The SSH target <em>is</em> the domain
+controller — the AD cmdlets contact the local directory. Object deletes
+(<code>user.delete</code>, <code>group.delete</code>, <code>computer.delete</code>) park; a computer
+"unjoin" is a recoverable disable, not a delete.</p>
+<p><strong>Windows DNS (<code>windns</code>).</strong> Read the zones on an AD-integrated DNS server,
+read records, add A and CNAME records, and remove a record set. The
+record removal runs on the governed-delete tier: it previews the exact
+set that would be removed, parks for a human, and is bound to that
+preview before it executes.</p>
+<p><strong>Failover Clustering (<code>wsfc</code>).</strong> Cluster, node, clustered-role, resource,
+and quorum state, plus cluster validation and guarded role moves. The
+target is any single cluster node — the cluster service is cluster-wide,
+so one node is a sufficient control point. A planned role <em>move</em> between
+nodes is a recoverable rebalance (<code>caution</code>); taking a role offline,
+forcing one online, or evicting a node parks for a human, on every role,
+because MEHO tiers by operation, not by whether you call a role
+"production".</p>
+<p><strong>SQL Server (<code>mssql</code>).</strong> Instance, database, availability-group / FCI,
+and backup reads, plus governed backup, restore, and database create /
+drop. It connects directly over TDS (port 1433), so it works against any
+reachable instance. The availability-group and FCI reads are the
+migration-validation surface: confirm every database is synchronized and
+healthy before a cutover or planned failover.</p>
+<p><strong>Hyper-V (<code>hyperv</code>).</strong> The source-side reach for a migration onto VMware.
+It reads a Hyper-V host's inventory, VM configuration (including the
+firmware generation and secure-boot state a target needs), virtual-disk
+format and differencing chains, and checkpoints — the inputs a migration
+plan is built from — plus a guarded <code>Export-VM</code> that seeds the migration.
+It manages the <em>source</em> estate so you can plan and stage the move; it does
+not build new VMs on Hyper-V. Cluster-wide views of a Hyper-V cluster's
+nodes are the <code>wsfc</code> connector's job on the same hosts, not duplicated
+here.</p>
+<h2 id="register-a-windows-target">Register a Windows target<a class="headerlink" href="#register-a-windows-target" title="Permanent link">&para;</a></h2>
+<p>Registration follows <a href="../targets-and-secrets/">Register targets and secrets</a>
+unchanged — a <code>targets.yaml</code> entry with a <code>product</code> token, a green probe,
+and a <code>secret_ref</code> into your credential store. The estate-specific parts
+are the transport prerequisite and the credential shape.</p>
+<h3 id="the-powershell-over-ssh-connectors">The PowerShell-over-SSH connectors<a class="headerlink" href="#the-powershell-over-ssh-connectors" title="Permanent link">&para;</a></h3>
+<p><code>winsrv</code>, <code>msad</code>, <code>windns</code>, <code>wsfc</code>, and <code>hyperv</code> all reach the host the
+same way: over SSH, driving the built-in <strong>Windows PowerShell 5.1</strong>
+cmdlets. The one server-side prerequisite is an OpenSSH server on the
+Windows host, with PowerShell reachable as its shell:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">Add-WindowsCapability</span> <span class="n">-Online</span> <span class="n">-Name</span> <span class="n">OpenSSH</span><span class="p">.</span><span class="n">Server</span><span class="p">~~~~</span><span class="n">0</span><span class="p">.</span><span class="n">0</span><span class="p">.</span><span class="n">1</span><span class="p">.</span><span class="n">0</span>
+<span class="nb">Start-Service</span> <span class="n">sshd</span><span class="p">;</span> <span class="nb">Set-Service</span> <span class="n">-Name</span> <span class="n">sshd</span> <span class="n">-StartupType</span> <span class="n">Automatic</span>
+</code></pre></div>
+<p>The credential is an ordinary SSH secret in your store: a <code>username</code> with
+either a <code>password</code> or an <code>ssh_private_key</code> field (key auth is preferred
+when the key is present). Nothing else is needed — the connector reads the
+one SSH secret and constructs each command locally.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">targets</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">win-fs01</span>
+<span class="w">    </span><span class="nt">product</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">winsrv</span><span class="w">                 </span><span class="c1"># winsrv | msad | windns | wsfc | hyperv</span>
+<span class="w">    </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">win-fs01.example.internal</span>
+<span class="w">    </span><span class="nt">notes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">File server, Windows Server 2022.</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>import<span class="w"> </span>targets.yaml
+meho<span class="w"> </span>targets<span class="w"> </span>probe<span class="w"> </span>win-fs01
+</code></pre></div>
+<p>A green probe reports <code>vendor: microsoft</code> and the product it observed
+(for example <code>windows-server</code>, <code>active-directory</code>, or <code>hyper-v</code>), which
+is how the resolver later matches the target to its connector.</p>
+<h3 id="sql-server-over-tds">SQL Server over TDS<a class="headerlink" href="#sql-server-over-tds" title="Permanent link">&para;</a></h3>
+<p><code>mssql</code> is different: it speaks the SQL Server wire protocol directly on
+port 1433, so there is no SSH server to stand up. It also carries <strong>two
+credentials in one secret</strong> — a SQL login stored as <code>sql_username</code> and
+<code>sql_password</code> rather than the usual <code>username</code> / <code>password</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">targets</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sql-node-a</span>
+<span class="w">    </span><span class="nt">product</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">mssql</span>
+<span class="w">    </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sql-node-a.example.internal</span>
+<span class="w">    </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1433</span>
+</code></pre></div>
+<p>Stage <code>sql_username</code> and <code>sql_password</code> at the target's <code>secret_ref</code> the
+same way <a href="../targets-and-secrets/#stage-the-secret">Register targets and secrets</a>
+describes for every other credential.</p>
+<h3 id="in-guest-execution-the-vms-own-target">In-guest execution: the VM's own target<a class="headerlink" href="#in-guest-execution-the-vms-own-target" title="Permanent link">&para;</a></h3>
+<p>Running a program inside a guest (below) does not need a new target. It
+runs against the <strong>VMware target</strong> the VM lives on, through the
+<code>vmware-rest-9.0</code> connector, and reads the guest-OS login from that
+target's secret as <code>guest_username</code> / <code>guest_password</code>. The guest
+credential is resolved at dispatch time and never travels in an operation
+parameter.</p>
+<h2 id="the-transport-powershell-51-over-ssh-secret-free">The transport: PowerShell 5.1 over SSH, secret-free<a class="headerlink" href="#the-transport-powershell-51-over-ssh-secret-free" title="Permanent link">&para;</a></h2>
+<p>Every PowerShell-over-SSH operation is built the same disciplined way, and
+the discipline is what makes it safe to hand to an agent:</p>
+<ul>
+<li><strong>The command is constructed locally and encoded, never assembled by a
+  shell.</strong> The script is UTF-16LE-encoded and sent as a single
+  <code>-EncodedCommand</code>, so there is no shell-quoting layer to trick — only
+  the PowerShell parser ever sees it.</li>
+<li><strong>Operator input rides inside single-quoted literals.</strong> Every name,
+  identity, or path an operator supplies is escaped and placed inside a
+  single-quoted PowerShell string; numbers and toggles are validated to
+  their type first. A value that tries to break out of the string cannot.</li>
+<li><strong>No credential material is ever in the script.</strong> The encoded command
+  is visible to a privileged observer on the remote host, so the transport
+  forbids any secret in the script body. The SSH login is the only secret,
+  and it stays in the transport, never in a command.</li>
+</ul>
+<p>That last rule has one honest consequence: operations that would need a
+secret <em>in</em> the command are deliberately absent. <code>winsrv</code> creates a local
+user without a password (set it out of band afterwards); <code>msad</code> creates a
+disabled, passwordless account you enable once a password is set out of
+band. There is no password-reset operation on the estate.</p>
+<p>Windows Server ships PowerShell 5.1, not PowerShell 7, so these connectors
+target 5.1 explicitly — the cmdlet surface is stable across Windows Server
+2016 through 2025.</p>
+<div class="admonition note">
+<p class="admonition-title">How preview behaves for these operations</p>
+<p><code>preview_operation</code> returns the literal request a spec-ingested
+operation would send. These connectors are typed, so their <code>safe</code>
+reads and <code>caution</code> writes have no single such request, and preview
+answers <code>status: "unavailable"</code> — the expected result, not a failure.</p>
+<p>The governed tiers <em>are</em> previewable. A <code>dangerous</code>-with-approval or
+<code>destructive</code> operation returns a synthetic preview carrying the same
+redacted proposed-effect the approval park shows the approver —
+resolved with nothing sent, no park, and no audit row — so you can
+read the would-be effect of, say, <code>msad.user.delete</code> or
+<code>guest.file.write</code> before you submit it. A destructive delete such as
+<code>windns.record.remove</code> is previewable too; the exact record set it
+would remove is enumerated when it parks for approval.</p>
+<p>One operation here stays <code>unavailable</code> on purpose: <code>guest.program.run</code>.
+Because its <code>arguments</code> and <code>env</code> can carry a secret, it is treated as
+a credential-class write and does not synthesize a preview — the
+approver sees its redacted summary (program path, argument size,
+env-var names) at approval time instead.</p>
+</div>
+<h2 id="safety-tiers-of-the-write-operations">Safety tiers of the write operations<a class="headerlink" href="#safety-tiers-of-the-write-operations" title="Permanent link">&para;</a></h2>
+<p>Every operation carries a <code>safety_level</code>, set when the connector is
+registered and enforced server-side. The Windows estate uses the full
+ladder:</p>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Behavior</th>
+<th>Estate examples</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>safe</code></td>
+<td>Read-class; executes under default-allow.</td>
+<td><code>winsrv.service.list</code>, <code>msad.user.get</code>, <code>wsfc.cluster.get</code>, <code>mssql.databases.list</code>, <code>hyperv.vms.list</code></td>
+</tr>
+<tr>
+<td><code>caution</code></td>
+<td>Recoverable write; subject to policy.</td>
+<td><code>winsrv.service.restart</code>, <code>msad.group.add-member</code>, <code>wsfc.groups.move</code>, <code>mssql.backup.database</code>, <code>hyperv.export.vm</code></td>
+</tr>
+<tr>
+<td><code>dangerous</code> + approval</td>
+<td>Disruptive or destructive; <strong>parks for a human</strong> before it runs.</td>
+<td><code>winsrv.power.reboot</code>, <code>winsrv.feature.remove</code>, <code>msad.user.delete</code>, <code>wsfc.nodes.evict</code>, <code>wsfc.groups.offline</code>, <code>mssql.databases.drop</code>, <code>mssql.backup.restore</code>, <code>hyperv.checkpoints.revert</code></td>
+</tr>
+<tr>
+<td><code>destructive</code> + approval</td>
+<td>Permanent delete; previews the exact blast radius, parks, and binds the approval to that preview.</td>
+<td><code>windns.record.remove</code></td>
+</tr>
+</tbody>
+</table>
+<p>When you call a parked operation, it does <strong>not</strong> execute. The dispatcher
+durably parks it and returns <code>awaiting_approval</code> with an
+<code>approval_request_id</code>. A human resolves it on the operator surfaces:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>approvals<span class="w"> </span>show<span class="w"> </span>&lt;approval_request_id&gt;
+meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>&lt;approval_request_id&gt;<span class="w"> </span>--reason<span class="w"> </span><span class="s2">"verified blast radius"</span>
+meho<span class="w"> </span>approvals<span class="w"> </span>reject<span class="w">  </span>&lt;approval_request_id&gt;<span class="w"> </span>--reason<span class="w"> </span><span class="s2">"wrong target"</span>
+</code></pre></div>
+<p>The park stores a redaction-safe summary of what the operation would do —
+the target and parameters for a <code>dangerous</code> operation, and for a
+<code>destructive</code> one the exact record set that would be removed. Approval is
+a human decision: there is no path for an agent to approve its own parked
+call. The full mechanics — the four-eyes rule and the audited single-
+operator break-glass — are the
+<a href="../approvals-and-break-glass/">approvals and break-glass guide</a>.</p>
+<h2 id="run-a-program-inside-a-guest">Run a program inside a guest<a class="headerlink" href="#run-a-program-inside-a-guest" title="Permanent link">&para;</a></h2>
+<p>Sometimes the governed operation you need is "run this program inside that
+VM" — promote a domain controller, form a cluster, verify a service on a
+first-boot appliance that has no network route back to MEHO. MEHO governs
+this through <code>vmware.composite.vm.guest.program.run</code> on the
+<code>vmware-rest-9.0</code> connector, so it replaces the out-of-band
+<code>govc guest.run</code> / SSH-into-the-guest habit with something audited.</p>
+<p>It rides <strong>VMware Tools guest operations</strong> — vCenter to ESXi to the Tools
+agent inside the guest — so it needs no new network path to the guest and
+works even for a VM with no route back to MEHO. There is a read family
+alongside it, all on the same connector:</p>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>What it does</th>
+<th>Tier</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>vmware.composite.vm.guest.process.list</code></td>
+<td>List running guest processes</td>
+<td><code>safe</code></td>
+</tr>
+<tr>
+<td><code>vmware.composite.vm.guest.file.read</code></td>
+<td>Read a guest file (content capped)</td>
+<td><code>safe</code></td>
+</tr>
+<tr>
+<td><code>vmware.composite.vm.guest.env.read</code></td>
+<td>Read a guest environment variable</td>
+<td><code>safe</code></td>
+</tr>
+<tr>
+<td><code>vmware.composite.vm.guest.net.show</code></td>
+<td>Guest NIC / IP state (Tools-reported, no guest login)</td>
+<td><code>safe</code></td>
+</tr>
+<tr>
+<td><code>vmware.composite.vm.guest.file.write</code></td>
+<td>Write a guest file</td>
+<td><code>dangerous</code> + approval</td>
+</tr>
+<tr>
+<td><code>vmware.composite.vm.guest.program.run</code></td>
+<td>Run a program in the guest</td>
+<td><code>dangerous</code> + approval</td>
+</tr>
+</tbody>
+</table>
+<p><code>program.run</code> runs against the VM's VMware target. It takes an explicit
+<code>program_path</code>, optional <code>arguments</code> and <code>env</code>, and a <code>wait</code> flag; with
+<code>wait: true</code> it polls for the exit code and start/end times instead of
+returning the moment the process starts.</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"> </span>vmware-rest-9.0<span class="w"> </span>vmware.composite.vm.guest.program.run<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--target<span class="w"> </span>lab-vcenter<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--params<span class="w"> </span><span class="s1">'{"vm": "&lt;vm-name-or-id&gt;", "program_path": "C:\\Windows\\System32\\cmd.exe",</span>
+<span class="s1">             "arguments": "/c ipconfig /all", "wait": true}'</span>
+</code></pre></div>
+<h3 id="what-makes-it-governed">What makes it governed<a class="headerlink" href="#what-makes-it-governed" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>It parks for a human.</strong> The operation is <code>dangerous</code> +
+  <code>requires_approval</code>. Calling it stores a durable approval request and
+  returns <code>awaiting_approval</code>; a human approves or rejects on the console
+  or CLI, never from an agent. The policy gate runs <em>first</em> — a parked or
+  denied call resolves no guest credential and starts nothing.</li>
+<li><strong>The guest login never travels in a parameter.</strong> It is read from the
+  VM target's secret at dispatch time and lives only in the request to
+  the Tools agent — never in a parameter, a result, an audit row, or a log.</li>
+<li><strong>The decision surfaces are kept clean.</strong> The approval park preview
+  shows the VM, the program path, the working directory, the <code>wait</code> flag,
+  the <em>byte size</em> of <code>arguments</code>, and the <em>names</em> of <code>env</code> variables —
+  never their values. The policy gate, the operation result, and the
+  broadcast feed are the same: values are held back so a reviewer's
+  decision is made on structure, not secrets.</li>
+<li><strong>The whole call is audited synchronously.</strong> The operation does not
+  return success until an append-only audit row commits, naming the
+  operation, the VM, and the outcome. Raw parameters are stored as a hash,
+  never in the clear.</li>
+</ul>
+<div class="admonition warning">
+<p class="admonition-title">Do not put a bare secret in <code>arguments</code> or <code>env</code></p>
+<p>Two surfaces must keep the <em>full</em> parameters to work: the durable
+approval request re-dispatches the exact call after a human approves,
+and — when a capture policy is on — the
+<a href="../flight-recorder/">flight recorder</a> records the underlying vendor
+request. So a password typed straight into <code>arguments</code> or <code>env</code> is
+retained on those surfaces. Where a program needs a secret, pass the
+<em>name</em> of an environment variable and stage the value guest-side (a
+file the guest user reads, a templated env file), the same way the
+guest login itself is resolved from the secret store rather than a
+parameter.</p>
+</div>
+<p>Capturing a program's output is a two-step compose, by design:
+<code>program.run</code> cannot capture stdout on its own, so redirect the output to
+a file in <code>arguments</code>, then read it back with <code>guest.file.read</code>. Keeping
+capture out of the single operation keeps its blast radius and audited
+surface small.</p>
+<h2 id="honest-limits">Honest limits<a class="headerlink" href="#honest-limits" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>No freeform SQL.</strong> <code>mssql</code> is a curated operation table, not a query
+  prompt — there is deliberately no raw-T-SQL operation. A read-only,
+  guarded-SELECT operation could be added later if a concrete need
+  appears; it is not shipped.</li>
+<li><strong>No password provisioning over the estate transport.</strong> Local and
+  domain accounts are created passwordless (and, in AD, disabled); set the
+  password out of band. There is no password-reset operation. This falls
+  out of the "no secret in the command" rule and is intentional.</li>
+<li><strong>SQL encryption is default-posture today.</strong> <code>mssql</code> connects to a
+  standard instance cleanly; certificate-validated TLS for an instance
+  that <em>forces</em> encryption is a named future extension, not yet built.</li>
+<li><strong>A few secret-bearing knobs are deferred</strong> for the same reason a
+  credential cannot ride the command: iSCSI CHAP on <code>winsrv</code> and the cloud
+  witness on <code>wsfc</code> are out of scope for now.</li>
+<li><strong>Hyper-V is source-side and reads-first.</strong> It reads an existing estate
+  to plan and seed a migration onto VMware; it does not create or delete
+  VMs on Hyper-V, and <code>Export-VM</code> is a guarded, long-running seed, not a
+  routine verb.</li>
+<li><strong>In-guest execution needs VMware Tools.</strong> A guest without Tools has no
+  guest-operations channel at all; reaching one would be separate future
+  work.</li>
+<li><strong>Live-hardware validation is still landing.</strong> These connectors are
+  built and shipped, but the end-to-end proof against real Windows and SQL
+  hardware is tracked openly in the repository rather than claimed here.
+  Treat them as new, governed capability — not as GA.</li>
+</ul>
+<p><strong>Next:</strong> <a href="../approvals-and-break-glass/">Approvals and break-glass</a> — the
+mechanics behind every parked write above.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../satellite-gateway/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Satellite gateway">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Satellite gateway
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../add-ons/" class="md-footer__link md-footer__link--next" aria-label="Next: Add-ons">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Add-ons
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 evoila Group — Apache 2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

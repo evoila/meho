@@ -1,12 +1,11 @@
 # Vendor vCenter spec-shelf in CI — licensing record + provisioning runbook (decision)
 
-**Superseded in part by:** [own connectors leave the public tree](2026-10-28-own-connectors-leave-the-public-tree.md). The five vCenter lanes, `_vcenter_spec.py` and the VMware extension sections below left this repository in 0.44.0, with the VMware connectors. The secret, the shelf checkout and the non-VMware extensions stay here. The shelf folders CI fetches are listed in `ci/spec-shelf/`. The shelf resolver is `backend/tests/_spec_shelf.py`.
-
 **Status:** **signed off** (see "Signoff of record" below, completed
 2026-08-17). The CI wiring shipped **disarmed**: nothing is fetched until a
 repository admin provisions the `SPEC_SHELF_TOKEN` secret. With this signoff
 and the "Known findings" fix merged on `main` (#2970 / PR #2974,
 `6938222c`), provisioning is unblocked per the runbook below.
+**Superseded in part by:** [own connectors leave the public tree](2026-10-28-own-connectors-leave-the-public-tree.md). The five vCenter lanes, `_vcenter_spec.py` and the VMware extension sections below left this repository in 0.44.0, with the VMware connectors. The secret, the shelf checkout and the non-VMware extensions stay here. The shelf folders CI fetches are listed in `ci/spec-shelf/`. The shelf resolver is `backend/tests/_spec_shelf.py`.
 **Date:** 2026-08-17
 **Task:** [#2949](https://github.com/evoila/meho/issues/2949) (split out of
 [#2944](https://github.com/evoila/meho/issues/2944) precisely because this is a

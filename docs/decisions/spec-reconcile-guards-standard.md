@@ -109,7 +109,8 @@ Two cost classes of shelf-backed test, two CI homes:
   lane): parse the pinned spec, set-compare op_ids. No DB, no
   embeddings, no containers — **seconds** when armed. They live in the
   required unit sweep (the `python-unit-shard` jobs behind the
-  `Python (ruff + mypy + pytest)` check) like any unit test, and
+  `Python (ruff + mypy + pytest)` check; one job named
+  `python-lint-test` when this was decided) like any unit test, and
   need **no gating of any kind**.
 - **Full-ingest canaries** (today: the G0.7 vSphere canary,
   `tests/acceptance/test_g07_vsphere_canary.py`): drive the whole

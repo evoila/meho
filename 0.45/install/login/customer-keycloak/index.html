@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -251,7 +251,7 @@
     
     
       <li class="md-tabs__item md-tabs__item--active">
-        <a href="../../" class="md-tabs__link">
+        <a href="../../ways-to-install/" class="md-tabs__link">
           
   
   
@@ -610,6 +610,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../" class="md-nav__link">
         
   
@@ -763,10 +791,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" checked>
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" checked>
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -784,8 +812,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="true">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1765,6 +1793,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../../guides/settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../../guides/flight-recorder/" class="md-nav__link">
         
   
@@ -2448,7 +2504,10 @@
 Keycloak stays in front: it checks who the person is. MEHO's built-in
 Keycloak sends people to yours, gets back their groups, and puts each
 person into the matching MEHO group.</p>
-<p>MEHO always ships its own Keycloak. You do not replace it with yours.</p>
+<p>In this recipe, MEHO keeps its built-in Keycloak, and yours stays in
+front of it. To use your Keycloak in place of the built-in one
+(<code>coreKeycloak.enabled: false</code>), follow
+<a href="../../keycloak-realm/">Keycloak realm setup</a> instead.</p>
 <p><strong>What stays where:</strong></p>
 <table>
 <thead>
@@ -2472,8 +2531,8 @@ person into the matching MEHO group.</p>
 </tr>
 </tbody>
 </table>
-<p>MEHO accepts only tokens from its own Keycloak. A token from your
-Keycloak does not work at MEHO directly.</p>
+<p>In this setup, MEHO accepts only tokens from its built-in Keycloak. A
+token from your Keycloak does not work at MEHO directly.</p>
 <p>On MEHO's side you set this up with Helm values
 (<code>coreKeycloak.companyLogin</code>), not by hand in the Keycloak admin
 console. The install sets it up again at every <code>helm upgrade</code>. The
@@ -2688,9 +2747,11 @@ yours.</p>
   Keycloak reads your groups only at that login: a session the person
   already has with MEHO's Keycloak keeps its group until it ends. To
   cut access at once, also end their sessions in MEHO's Keycloak
-  (<strong>Users → the person → Sessions → Sign out</strong>).</li>
-<li><strong>MEHO accepts only tokens from its own Keycloak.</strong> A token issued by
-  your Keycloak is refused.</li>
+  (<strong>Users → the person → Sessions → Sign out</strong>), and revoke any session
+  of type <strong>Offline</strong>. An offline login, for example of Claude Code,
+  lasts up to 48 hours without use.</li>
+<li><strong>MEHO accepts only tokens from its built-in Keycloak.</strong> A token
+  issued by your Keycloak is refused.</li>
 </ul>
 <h2 id="lab-test">Lab test<a class="headerlink" href="#lab-test" title="Permanent link">&para;</a></h2>
 <p>Use a test person from your Keycloak who is not an admin.</p>
@@ -2812,10 +2873,10 @@ result.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

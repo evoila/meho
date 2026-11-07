@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -249,7 +249,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../install/" class="md-tabs__link">
+        <a href="../../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -605,6 +605,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../install/" class="md-nav__link">
         
   
@@ -756,10 +784,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -777,8 +805,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1791,6 +1819,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guides/settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guides/flight-recorder/" class="md-nav__link">
         
   
@@ -2503,10 +2559,10 @@ for connecting to a backplane. It runs on a VPN-connected workstation,
 verifies TLS against your operating system's trust store, and
 authenticates with the OAuth 2.0 device-code flow — so it works on
 private networks with no browser redirect back to the client.</p>
-<p>Install it and log in before wiring any MCP client: registering targets
-and secrets happens only through the CLI (and the operator console /
-REST), never through MCP tools, so a useful agent session depends on
-this step having happened first.</p>
+<p>Install it and log in before wiring any MCP client. You register
+targets and secrets with the CLI, the operator console or REST. The
+default agent surface has no tool for this, so a useful agent session
+depends on this step having happened first.</p>
 <h2 id="install-the-signed-binary">Install the signed binary<a class="headerlink" href="#install-the-signed-binary" title="Permanent link">&para;</a></h2>
 <p>Releases ship as four platform tarballs plus a <code>SHA256SUMS</code> file at the
 <a href="https://github.com/evoila/meho/releases">releases page</a>. Each artefact
@@ -2628,8 +2684,13 @@ after 7 days at most. Then run <code>meho login</code> again.</p>
 </code></pre></div>
 <p><code>meho status</code> calls <code>/api/v1/health</code> with the stored token, so a clean
 result confirms CLI, token, ingress, and backplane all agree.</p>
+<p>If your login has several tenants, choose the one you work in with
+<code>meho tenants use &lt;name&gt;</code>. Without a name, <code>meho tenants use</code> lists your
+tenants. See <a href="../../reference/cli/#current-tenant">Current tenant</a>.</p>
 <h2 id="known-walls">Known walls<a class="headerlink" href="#known-walls" title="Permanent link">&para;</a></h2>
-<p>Two workstation-side issues account for most first-login failures:</p>
+<p><code>meho doctor</code> checks this machine and names the layer that fails. See
+<a href="../troubleshooting/#start-with-meho-doctor">Start with <code>meho doctor</code></a>.</p>
+<p>These issues account for most first-login failures:</p>
 <ul>
 <li><strong>Internal-CA trust.</strong> <code>meho login</code> dying at its discovery probe with
   <code>x509: certificate signed by unknown authority</code> means the
@@ -2641,7 +2702,18 @@ result confirms CLI, token, ingress, and backplane all agree.</p>
   during a VPN-idle DNS flap) can blackhole the first lookup. Confirm
   the host resolves to its internal address from the machine you are
   logging in from; a temporary <code>/etc/hosts</code> pin to the internal VIP is
-  a reliable workaround while you sort DNS out.</li>
+  a reliable workaround while you sort DNS out. When only the Keycloak
+  host does not resolve, <code>meho login --resolve &lt;host&gt;:&lt;port&gt;:&lt;ip&gt;</code> pins
+  it for the login alone. TLS still checks the real host name.</li>
+<li><strong>Identity provider address.</strong> <code>meho login</code> uses the identity
+  provider only over <code>https://</code> (plain <code>http://</code> only on <code>localhost</code>).
+  This also holds when the identity provider answers with a redirect:
+  the CLI follows it only to an <code>https://</code> address. The <code>issuer</code> in
+  its discovery document must be the realm address
+  MEHO gave, for example <code>https://&lt;keycloak-host&gt;/realms/&lt;realm&gt;</code>. If
+  <code>meho login</code> says the issuer is not the realm, set
+  <code>KEYCLOAK_ISSUER_URL</code> (or <code>config.keycloakIssuerUrl</code> in the chart)
+  to the exact <code>issuer</code> value of the realm.</li>
 </ul>
 <p>For realm-side login failures (<code>unauthorized_client</code>,
 <code>invalid_audience</code>, the <code>missing_sub</code> / <code>basic</code>-scope trap), the
@@ -2650,11 +2722,17 @@ symptom-to-fix table is
 and the deeper cross-wall walk is the
 <a href="../troubleshooting/">troubleshooting page</a>.</p>
 <h2 id="reading-the-raw-token">Reading the raw token<a class="headerlink" href="#reading-the-raw-token" title="Permanent link">&para;</a></h2>
-<p>There is <strong>no <code>meho ... --print-token</code> verb</strong> — the CLI never prints
-the bearer token to stdout. When you genuinely need the raw JWT (to
-decode its claims, or to bake it into a shim — see
-<a href="../mcp-remote-shim/">Other MCP clients</a>), force the file backend and
-read it from <code>credentials.json</code>:</p>
+<p><code>meho status</code> never prints the bearer token. When you need the raw JWT
+(to decode its claims, or to give it to a shim — see
+<a href="../mcp-remote-shim/">Other MCP clients</a>), log in with <code>--print-token</code>.
+The CLI then writes only the access token to standard output, and every
+other line to standard error:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">TOKEN</span><span class="o">=</span><span class="k">$(</span>meho<span class="w"> </span>login<span class="w"> </span>--print-token<span class="w"> </span>https://meho.example.com<span class="k">)</span>
+</code></pre></div>
+<p>The value is a live bearer token. Never log it or paste it into a shared
+channel.</p>
+<p>To read the token of an existing login without a new login, force the
+file backend at login and read the token from <code>credentials.json</code>:</p>
 <div class="highlight"><pre><span></span><code><span class="nv">MEHO_KEYRING_DISABLE</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>meho<span class="w"> </span>login<span class="w"> </span>https://meho.example.com
 
 <span class="c1"># The file holds one entry per backplane; select the one you logged</span>
@@ -2771,10 +2849,10 @@ jq<span class="w"> </span>-r<span class="w"> </span>--arg<span class="w"> </span
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

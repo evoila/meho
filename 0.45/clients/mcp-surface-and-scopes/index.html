@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -249,7 +249,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../install/" class="md-tabs__link">
+        <a href="../../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -605,6 +605,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../install/" class="md-nav__link">
         
   
@@ -756,10 +784,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -777,8 +805,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1797,6 +1825,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guides/settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guides/flight-recorder/" class="md-nav__link">
         
   
@@ -2579,6 +2635,9 @@ families:</p>
 <code>search_docs</code>, <code>read_docs</code>, and <code>list_doc_collections</code> — appear only when the tenant
 has provisioned the <code>meho-docs</code> capability. A session without that
 capability lists the other 22.</p>
+<p>One more working-surface tool, <code>meho_automation_list</code>, is listed only
+while an automation add-on is paired with MEHO and healthy. It is not
+one of the 26.</p>
 <p>The working surface is the same across every connector. An agent picks a
 connector, lists its operation groups, searches for the operation it
 needs, previews it, and calls it — the vendor's own identifiers stay in
@@ -2601,7 +2660,7 @@ the operation id, never in a tool name.</p>
 agents / principals / grants, scheduler, sensors, broadcast overrides,
 runbook <strong>template authoring</strong>, topology <strong>mutations</strong>, target
 registration, doc-collection create/delete, memory promotion, approvals
-<strong>read</strong>, and audit query — form a second tier of <strong>53 operator-plane
+<strong>read</strong>, and audit query — form a second tier of <strong>54 operator-plane
 tools</strong>. They are absent from a default session's tool list and refused
 at call time, and they appear <strong>only</strong> for a session that explicitly
 requested the <code>mcp:admin</code> OAuth scope.</p>
@@ -2697,9 +2756,9 @@ right saves a round of <code>-32602</code> errors:</p>
 <h2 id="the-full-tool-inventory">The full tool inventory<a class="headerlink" href="#the-full-tool-inventory" title="Permanent link">&para;</a></h2>
 <p>This page describes the tiering, not every row. The complete per-tool
 inventory — each tool, its surface tier, and the claim that gates it —
-is published as a generated MCP tool reference in the
-<a href="../../reference/">Reference</a> section, generated from the live
-<code>tools/list</code> snapshot so it cannot drift from the product.</p>
+is the generated <a href="../../reference/mcp-tools/">MCP tool reference</a>. It is
+generated from the backplane's tool registry, and a CI check fails when
+the page and the registry disagree.</p>
 
 
 
@@ -2799,10 +2858,10 @@ is published as a generated MCP tool reference in the
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

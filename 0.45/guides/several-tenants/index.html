@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -249,7 +249,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../install/" class="md-tabs__link">
+        <a href="../../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -605,6 +605,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../install/" class="md-nav__link">
         
   
@@ -756,10 +784,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -777,8 +805,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1846,6 +1874,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../flight-recorder/" class="md-nav__link">
         
   
@@ -2659,8 +2715,8 @@ level (decision record:
   adds them from v0.39.0 on. To add them to an older realm, run the
   setup again (see <a href="../../install/upgrades/#version-specific-notes">Upgrades</a>).</li>
 <li>MEHO v0.40.0 or later. In v0.40.0 to v0.43.0 the web interface answers
-  <code>tenant_not_chosen</code> to a person in several tenants. The tenant picker
-  of the web interface comes in the release after v0.43.0. The CLI and
+  <code>tenant_not_chosen</code> to a person in several tenants. The web interface
+  has the tenant picker from v0.44.0 on. The CLI and
   MCP work from v0.40.0 on.</li>
 <li>A MEHO-SA-Operator who approves their own changes, a second person
   who can approve, or the agent setup from
@@ -2953,8 +3009,10 @@ also in at least one role group.</p>
   the tenants of the person's own groups.</li>
 <li>act there as <code>tenant_admin</code>. When the person has a role group in that
   tenant, the role of that group applies instead.</li>
-<li>keep the cross-tenant actions of before, for example <code>--tenant</code> on the
-  commands that have it.</li>
+<li>use the cross-tenant options, for example <code>--tenant</code> on the commands
+  that have it. For a tenant where the person has a role group, MEHO
+  answers <code>403 tenant_select_with_header</code>: pick that tenant with
+  <code>MEHO_TENANT</code> or <code>meho tenants use</code>, so the role of that group applies.</li>
 </ul>
 <p>A platform admin <strong>may not</strong>:</p>
 <ul>
@@ -2965,7 +3023,8 @@ also in at least one role group.</p>
 <li>pick a tenant that does not exist. MEHO answers
   <code>403 tenant_not_found</code> and never makes a tenant from a typo.</li>
 <li>move a machine login. Agent, service and runner logins always stay in
-  their own tenant.</li>
+  their own tenant, also with <code>--tenant</code> and also when their token
+  carries the platform admin claim.</li>
 </ul>
 <p>Every audit row of a request where the role came from the platform admin
 group carries <code>tenant_role_source: platform_admin</code>.</p>
@@ -3128,10 +3187,10 @@ group carries <code>tenant_role_source: platform_admin</code>.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

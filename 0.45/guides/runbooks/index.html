@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -249,7 +249,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../install/" class="md-tabs__link">
+        <a href="../../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -605,6 +605,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../install/" class="md-nav__link">
         
   
@@ -756,10 +784,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -777,8 +805,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1650,6 +1678,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../flight-recorder/" class="md-nav__link">
         
   
@@ -2447,16 +2503,17 @@ draft → publish lifecycle, and executing a run start-to-finish.</p>
 <strong>ordered list of steps</strong>. Each step is one of two kinds, and each
 carries a <strong><code>verify</code></strong> gate that must pass before the run advances:</p>
 <ul>
-<li><strong><code>operation_call</code></strong> — dispatches an <code>op_id</code> with <code>params</code>, exactly
-  like <code>call_operation</code>. This is the automated half.</li>
+<li><strong><code>operation_call</code></strong> — names an <code>op_id</code> with <code>params</code>. The operator
+  or agent runs it with <code>call_operation</code>, then calls <code>next</code>. This is
+  the automated half.</li>
 <li><strong><code>manual</code></strong> — instructions for a human to carry out something MEHO
   can't (rack a disk, get a sign-off). The operator does it, then
   reports the step done.</li>
 </ul>
 <p>The runbook itself carries <strong>no <code>safety_level</code></strong>. Its safety is the
-safety of the operations it dispatches: when an <code>operation_call</code> step
-runs a <code>requires_approval</code> op, that step <strong>parks in the approval queue</strong>
-exactly as a direct call would — the gate lives in the dispatch layer,
+safety of the operations it names: the step's operation runs through
+<code>call_operation</code>, so a <code>requires_approval</code> op <strong>waits for approval</strong>
+exactly as any direct call does — the gate lives in the dispatch layer,
 not the runbook. A runbook is therefore not a way to bypass approvals;
 it is a governed sequence of the same governed calls.</p>
 <h2 id="the-surface-at-a-glance">The surface at a glance<a class="headerlink" href="#the-surface-at-a-glance" title="Permanent link">&para;</a></h2>
@@ -2470,7 +2527,7 @@ it is a governed sequence of the same governed calls.</p>
 </thead>
 <tbody>
 <tr>
-<td><strong>Author</strong> (tenant_admin)</td>
+<td><strong>Author</strong> (tenant_admin; on MCP these four tools need the <code>mcp:admin</code> scope)</td>
 <td></td>
 <td></td>
 </tr>
@@ -2487,12 +2544,12 @@ it is a governed sequence of the same governed calls.</p>
 <tr>
 <td>Publish a draft</td>
 <td><code>meho_runbook_publish_template</code></td>
-<td><code>meho runbook publish-template &lt;slug&gt;</code></td>
+<td><code>meho runbook publish-template &lt;slug&gt; --version &lt;n&gt;</code></td>
 </tr>
 <tr>
 <td>Deprecate a version</td>
 <td><code>meho_runbook_deprecate_template</code></td>
-<td><code>meho runbook deprecate-template &lt;slug&gt;</code></td>
+<td><code>meho runbook deprecate-template &lt;slug&gt; --version &lt;n&gt;</code></td>
 </tr>
 <tr>
 <td><strong>Discover</strong> (operator)</td>
@@ -2540,36 +2597,54 @@ it is a governed sequence of the same governed calls.</p>
 <p>Write the body as a YAML (or JSON) file and draft it. A minimal,
 two-step template:</p>
 <div class="highlight"><pre><span></span><code><span class="nt">title</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Rotate the ingress certificate</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Rotate the TLS certificate of the ingress controller.</span>
 <span class="nt">target_kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">k8s</span>
 <span class="nt">steps</span><span class="p">:</span>
-<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">operation_call</span>
-<span class="w">    </span><span class="nt">title</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Snapshot the current secret</span>
-<span class="w">    </span><span class="nt">body</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Capture the live cert so the run has a rollback point.</span>
-<span class="w">    </span><span class="nt">op_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">k8s.secret.get</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">check-secret</span>
+<span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">operation_call</span>
+<span class="w">    </span><span class="nt">title</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Check the current secret</span>
+<span class="w">    </span><span class="nt">body</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Confirm the secret exists and note its key names and sizes.</span>
+<span class="w">    </span><span class="nt">op_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">k8s.secret.info</span>
 <span class="w">    </span><span class="nt">params</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">namespace</span><span class="p">:</span><span class="w"> </span><span class="nv">ingress</span><span class="p p-Indicator">,</span><span class="nt"> name</span><span class="p">:</span><span class="w"> </span><span class="nv">tls-cert</span><span class="p p-Indicator">}</span>
 <span class="w">    </span><span class="nt">verify</span><span class="p">:</span>
 <span class="w">      </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">confirm</span>
-<span class="w">      </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Confirm the snapshot was captured before proceeding.</span>
-<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">manual</span>
+<span class="w">      </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Confirm the secret holds tls.crt and tls.key before proceeding.</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">stage-cert</span>
+<span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">manual</span>
 <span class="w">    </span><span class="nt">title</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Stage the renewed certificate</span>
-<span class="w">    </span><span class="nt">body</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Place the renewed PEM at the target's secret path.</span>
+<span class="w">    </span><span class="nt">body</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Write the renewed PEM to the Vault copy, then update the secret on the cluster.</span>
 <span class="w">    </span><span class="nt">verify</span><span class="p">:</span>
 <span class="w">      </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">operation_call</span>
-<span class="w">      </span><span class="nt">op_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vault.kv.versions</span>
-<span class="w">      </span><span class="nt">params</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">path</span><span class="p">:</span><span class="w"> </span><span class="nv">tenants/acme/ingress-cert</span><span class="p p-Indicator">}</span>
-<span class="w">      </span><span class="nt">expect</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">status</span><span class="p">:</span><span class="w"> </span><span class="nv">ok</span><span class="p p-Indicator">}</span>
+<span class="w">      </span><span class="nt">op_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">k8s.secret.compare_to_ref</span>
+<span class="w">      </span><span class="nt">params</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">namespace</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ingress</span>
+<span class="w">        </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">tls-cert</span>
+<span class="w">        </span><span class="nt">key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">tls.crt</span>
+<span class="w">        </span><span class="nt">ref</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">path</span><span class="p">:</span><span class="w"> </span><span class="nv">tenants/&lt;tenant-id&gt;/ingress/tls-cert</span><span class="p p-Indicator">,</span><span class="nt"> key</span><span class="p">:</span><span class="w"> </span><span class="nv">tls.crt</span><span class="p p-Indicator">}</span>
+<span class="w">      </span><span class="nt">expect</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">same</span><span class="p">:</span><span class="w"> </span><span class="nv">true</span><span class="p p-Indicator">}</span>
 </code></pre></div>
 <p>A <code>verify</code> is <code>type: confirm</code> (MEHO shows the <code>prompt</code> and the operator
-confirms) or <code>type: operation_call</code> (MEHO dispatches an op and matches
-the result against <code>expect</code>). Draft, then publish:</p>
+confirms) or <code>type: operation_call</code> (MEHO runs the op against the run's
+target and checks that every key in <code>expect</code> is in the op's result with
+the same value). <code>k8s.secret.info</code> returns only key names and sizes,
+never a value. <code>k8s.secret.compare_to_ref</code> answers <code>same: true</code> when the
+secret's key and its Vault copy hold the same value. MEHO reads the Vault
+copy with the caller's own tenant guard, so <code>ref.path</code> must lie under
+the caller's tenant subtree, <code>tenants/&lt;tenant-id&gt;/…</code>. Replace
+<code>&lt;tenant-id&gt;</code> with your tenant UUID before you draft the template. A
+path outside that subtree answers <code>same: false</code> with the Vault copy
+marked <code>forbidden</code>. The template needs
+a <code>title</code> and a <code>description</code>. Every step needs an <code>id</code> (lower-case
+letters, digits and <code>-</code>, starting with a letter). Draft, then publish
+the version that <code>draft-template</code> printed:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>runbook<span class="w"> </span>draft-template<span class="w"> </span>ingress-cert-rotate<span class="w"> </span>--from<span class="w"> </span>./ingress-cert-rotate.yaml
-meho<span class="w"> </span>runbook<span class="w"> </span>publish-template<span class="w"> </span>ingress-cert-rotate
+meho<span class="w"> </span>runbook<span class="w"> </span>publish-template<span class="w"> </span>ingress-cert-rotate<span class="w"> </span>--version<span class="w"> </span><span class="m">1</span>
 </code></pre></div>
 <p>Templates are <strong>versioned and immutable once published</strong>: editing a
 published template forks a new draft version; a run pins the exact
 version it started against, so republishing never changes a run already
 in flight. Retire an old version with
-<code>meho runbook deprecate-template &lt;slug&gt;</code> — existing runs finish, new
+<code>meho runbook deprecate-template &lt;slug&gt; --version &lt;n&gt;</code> — existing runs finish, new
 runs pick the current published version.</p>
 <h2 id="running-a-template">Running a template<a class="headerlink" href="#running-a-template" title="Permanent link">&para;</a></h2>
 <p>Start a run against a concrete target; pass any parameters the steps
@@ -2588,10 +2663,15 @@ advance:</p>
 <p><code>next</code> runs the step's <code>verify</code> — the <strong>substrate is the oracle</strong>. A
 <code>confirm</code> verify asks you to confirm; an <code>operation_call</code> verify
 dispatches its op and checks the result against <code>expect</code>. The run only
-advances when verify passes; a failing verify holds the run on the
-current step. Over MCP the same call is
-<code>meho_runbook_next {"run_id": "…", "last_verified": true}</code> — but
-<code>last_verified</code> is informational only; the server re-verifies regardless.</p>
+advances when verify passes. A failing verify marks the step <code>failed</code>.
+A failed step cannot be retried: abort the run, fix the cause, and
+start a new run. Over MCP the same call is
+<code>meho_runbook_next {"run_id": "…", "last_verified": true}</code>. For a
+<code>confirm</code> step, also send
+<code>"verify_response": {"type": "confirm", "answer": "yes"}</code>; any other
+allowed answer fails the step. On the CLI, pass <code>--verify-response yes</code>
+or answer the question. <code>last_verified</code> is informational only; the server
+re-verifies regardless.</p>
 <p>When every step verifies, the run completes. To stop early:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>runbook<span class="w"> </span>abort<span class="w"> </span>7c2a…<span class="w"> </span>--reason<span class="w"> </span><span class="s2">"upstream CA delayed the renewal"</span>
 </code></pre></div>
@@ -2608,17 +2688,17 @@ state (run-level only — never step contents) with <code>meho runbook runs</cod
 </thead>
 <tbody>
 <tr>
-<td><code>next</code> won't advance — the run stays on the current step</td>
-<td>The step's <code>verify</code> did not pass (a <code>confirm</code> you declined, or an <code>operation_call</code> whose result didn't match <code>expect</code>).</td>
-<td>Fix the underlying condition and call <code>next</code> again; the substrate re-verifies.</td>
+<td><code>next</code> refuses: "previous step … is in 'failed' state; abort the run"</td>
+<td>The step's <code>verify</code> did not pass (a <code>confirm</code> you did not answer <code>yes</code>, or an <code>operation_call</code> whose result didn't match <code>expect</code>). A failed step cannot be retried.</td>
+<td>Abort the run, fix the underlying condition, and start a new run.</td>
 </tr>
 <tr>
-<td>A step returns <code>awaiting_approval</code> instead of running</td>
-<td>That <code>operation_call</code> step dispatched a <code>requires_approval</code> op — the runbook does not bypass the gate.</td>
+<td>The step's operation returns <code>awaiting_approval</code> instead of running</td>
+<td>You ran a <code>requires_approval</code> op with <code>call_operation</code> — a runbook step waits for approval like any other call.</td>
 <td>Clear it on the approvals surface (<a href="../approvals-and-break-glass/">Approvals and break-glass</a>), then continue.</td>
 </tr>
 <tr>
-<td><code>show-template</code> / <code>list-runs</code> returns <code>-32603</code> / 500 with <code>template_body_validation_failed</code></td>
+<td><code>show-template</code> returns <code>-32603</code> / 500 with <code>template_body_validation_failed</code></td>
 <td>A stored template predates a schema tightening (e.g. an empty step body from before the non-empty-body rule) and fails read-time re-validation.</td>
 <td>A tenant_admin re-edits the offending step; on-prem deploys apply the backfill migration named in the error.</td>
 </tr>
@@ -2639,7 +2719,7 @@ state (run-level only — never step contents) with <code>meho runbook runs</cod
 </tr>
 </tbody>
 </table>
-<p><strong>Next:</strong> <a href="../scheduler/">Scheduler</a>.</p>
+<p><strong>Next:</strong> <a href="../hosted-agents/">Hosted agents</a>.</p>
 
 
 
@@ -2739,10 +2819,10 @@ state (run-level only — never step contents) with <code>meho runbook runs</cod
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

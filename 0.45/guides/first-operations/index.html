@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -249,7 +249,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../install/" class="md-tabs__link">
+        <a href="../../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -605,6 +605,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../install/" class="md-nav__link">
         
   
@@ -756,10 +784,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -777,8 +805,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1807,6 +1835,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../flight-recorder/" class="md-nav__link">
         
   
@@ -2543,8 +2599,10 @@ including ones ingested from an OpenAPI spec.</p>
 rather than two implementations. The rung that <em>dispatches</em> — <code>call</code> —
 runs the full path: policy gate, credential resolution, result
 reduction, audit. Preview deliberately stops short of it: it resolves
-the request and hands it back, skipping the policy gate, sending
-nothing, and writing no audit row.</p>
+the request and hands it back, sending nothing and writing no audit row.
+It also tells you the risk level and what MEHO would do with the call
+for you — run it at once, wait for approval, or refuse it
+(<code>policy_verdict</code>, <code>policy_reason</code>).</p>
 <div class="admonition note">
 <p class="admonition-title">Prerequisites</p>
 <ul>
@@ -2635,9 +2693,12 @@ onboarding.</p>
 before searching.</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>operation<span class="w"> </span>groups<span class="w"> </span>k8s-1.x
 </code></pre></div>
-<p>Typical output shape: <code>inventory</code> (nodes, namespaces, versions),
-<code>workload</code> (pods, deployments, services), <code>logs</code>, <code>events</code>, <code>write</code>
-(mutating ops), each with an operation count.</p>
+<p>Typical output shape: <code>cluster</code>, <code>inventory</code> (nodes, namespaces),
+<code>workload</code> (pods, deployments, services), <code>network</code>, <code>config</code>,
+<code>storage</code>, <code>events</code>, <code>logs</code>, <code>exec</code>, <code>custom_resources</code> and <code>access</code>,
+each with an operation count. There is no separate write group: a write
+sits in the group of what it changes (for example <code>k8s.delete</code> in
+<code>workload</code>).</p>
 <p>A group flagged <code>partial: true</code> is only partly enabled — an operator
 enabled specific operations rather than the whole group. Only the
 <code>enabled_op_count</code> operations in it are live; search will find exactly
@@ -2699,7 +2760,7 @@ plus a <code>total</code>:</p>
 <span class="w">    </span><span class="nt">"rows"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
 <span class="w">      </span><span class="p">{</span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"web-6f7d4b"</span><span class="p">,</span><span class="w"> </span><span class="nt">"namespace"</span><span class="p">:</span><span class="w"> </span><span class="s2">"demo"</span><span class="p">,</span><span class="w"> </span><span class="nt">"status"</span><span class="p">:</span><span class="w"> </span><span class="s2">"CrashLoopBackOff"</span><span class="p">,</span>
 <span class="w">       </span><span class="nt">"ready"</span><span class="p">:</span><span class="w"> </span><span class="s2">"0/1"</span><span class="p">,</span><span class="w"> </span><span class="nt">"restarts"</span><span class="p">:</span><span class="w"> </span><span class="mi">17</span><span class="p">,</span><span class="w"> </span><span class="nt">"age_seconds"</span><span class="p">:</span><span class="w"> </span><span class="mi">5520</span><span class="p">,</span>
-<span class="w">       </span><span class="nt">"node"</span><span class="p">:</span><span class="w"> </span><span class="s2">"rke2-w1"</span><span class="p">,</span><span class="w"> </span><span class="nt">"ip"</span><span class="p">:</span><span class="w"> </span><span class="s2">"10.42.0.31"</span><span class="p">}</span>
+<span class="w">       </span><span class="nt">"node"</span><span class="p">:</span><span class="w"> </span><span class="s2">"rke2-w1"</span><span class="p">,</span><span class="w"> </span><span class="nt">"ip"</span><span class="p">:</span><span class="w"> </span><span class="s2">"192.0.2.31"</span><span class="p">}</span>
 <span class="w">    </span><span class="p">],</span>
 <span class="w">    </span><span class="nt">"total"</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
 <span class="w">  </span><span class="p">}</span>
@@ -2862,7 +2923,7 @@ a one-VM drill becomes a cluster-wide incident.</p>
 </tr>
 <tr>
 <td>Search cannot find an operation you know exists</td>
-<td>Search only indexes <strong>enabled</strong> operations; a disabled op is invisible by design. An unknown <code>--group</code> also silently narrows to zero hits (that is not an error).</td>
+<td>Search only indexes <strong>enabled</strong> operations; a disabled op is invisible by design. An unknown <code>--group</code> is not an error: the answer has <code>outcome: unknown_group</code>, and <code>narrowing</code> lists the valid group keys.</td>
 <td>Check enablement via <code>meho connector review</code>; drop the group filter.</td>
 </tr>
 <tr>
@@ -2998,10 +3059,10 @@ a one-VM drill becomes a cluster-wide incident.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -249,7 +249,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../install/" class="md-tabs__link">
+        <a href="../../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -605,6 +605,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../install/" class="md-nav__link">
         
   
@@ -756,10 +784,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -777,8 +805,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1857,6 +1885,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../flight-recorder/" class="md-nav__link">
         
   
@@ -2649,7 +2705,9 @@ call arrives:</p>
   pipeline) keep their own rule. A standing grant (a person's approval,
   given in advance) lets their <code>caution</code> and <code>dangerous</code> changes run.
   Without one, they wait. Their <code>destructive</code> changes always wait for a
-  person.</li>
+  person. Only a person makes a standing grant. For an operation that
+  needs the <strong>tenant_admin</strong> role (registering a target, changing the
+  topology), that person needs the <strong>tenant_admin</strong> role too.</li>
 </ul>
 <p>Who may approve depends on the person's login group (see
 <a href="#who-may-approve">Who may approve</a>). The web interface is the normal
@@ -2830,7 +2888,10 @@ an admin or an approver to approve it.
 <p>That is a REST <code>403</code> (the command line prints it), and a disabled
 <strong>Approve</strong> button in the console. For a <code>dangerous</code> or <code>destructive</code>
 change the text asks for a MEHO-SA-Operator or a MEHO-Admin and does not
-name the switch, because the switch never reaches these levels. Another
+name the switch, because the switch never reaches these levels. For your
+own <code>caution</code> change that waits only because you sent it with a token,
+the text says instead that you may approve it yourself with a click in
+the web interface. Another
 person's <code>dangerous</code> or <code>destructive</code> change, approved by someone who is
 neither, gets <code>403 approval_group_required</code>.</p>
 <p>To take back your <em>own</em> pending request, withdraw it:
@@ -2883,13 +2944,18 @@ meho<span class="w"> </span>agent-principal<span class="w"> </span>register<span
 
 <span class="c1"># 2. Author an agent definition bound to that principal. Its toolset and</span>
 <span class="c1">#    prompt are what perform the write when the definition runs.</span>
-meho<span class="w"> </span>agent<span class="w"> </span>create<span class="w"> </span>nightly-writer<span class="w"> </span>--identity-ref<span class="w"> </span>&lt;client-id-from-step-1&gt;
+<span class="c1">#    All four flags are required.</span>
+meho<span class="w"> </span>agent<span class="w"> </span>create<span class="w"> </span>nightly-writer<span class="w"> </span>--identity-ref<span class="w"> </span>agent:nightly-writer<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model-tier<span class="w"> </span>standard<span class="w"> </span>--turn-budget<span class="w"> </span><span class="m">20</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--system-prompt<span class="w"> </span><span class="s2">"&lt;what the agent does&gt;"</span>
 
-<span class="c1"># 3. Schedule the definition. The autonomous run parks the write under the</span>
+<span class="c1"># 3. Schedule the definition. --agent-definition takes its UUID: copy</span>
+<span class="c1">#    the id: line of `meho agent show nightly-writer`. --inputs is the</span>
+<span class="c1">#    task of each run. The autonomous run parks the write under the</span>
 <span class="c1">#    agent's sub (principal_sub=&lt;agent-sub&gt;). Use --kind one_off with</span>
 <span class="c1">#    --fire-at &lt;ISO8601&gt; instead for a single run rather than a cron.</span>
-meho<span class="w"> </span>scheduler<span class="w"> </span>create<span class="w"> </span>--kind<span class="w"> </span>cron<span class="w"> </span>--agent-definition<span class="w"> </span>nightly-writer<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--cron-expr<span class="w"> </span><span class="s2">"0 2 * * *"</span>
+meho<span class="w"> </span>scheduler<span class="w"> </span>create<span class="w"> </span>--kind<span class="w"> </span>cron<span class="w"> </span>--agent-definition<span class="w"> </span>&lt;definition-uuid&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cron-expr<span class="w"> </span><span class="s2">"0 2 * * *"</span><span class="w"> </span>--inputs<span class="w"> </span><span class="s1">'{"prompt": "&lt;the nightly task&gt;"}'</span>
 
 <span class="c1"># 4. The write now waits under the agent. Approve as yourself — your</span>
 <span class="c1">#    sub differs from the agent's, so it runs.</span>
@@ -2949,16 +3015,16 @@ change. Understand exactly what you traded away:</p>
 <ul>
 <li><strong>It covers the whole deploy, not one write.</strong> The flag re-opens the
   single-account <em>request-and-grant</em> hole for every <strong>lower-risk</strong>
-  operation across the whole tenant, not just the one you are trying to
-  clear. There is no scoping to a single write.</li>
+  operation in every tenant of this deploy, not just the one you are
+  trying to clear. There is no scoping to a single write.</li>
 <li><strong>It never reaches a <code>dangerous</code> or <code>destructive</code> operation.</strong>
   Break-glass self-approval applies only to the <code>safe</code> and <code>caution</code>
   risk levels. For <code>dangerous</code> and <code>destructive</code> changes only the group
   rules count: a MEHO-SA-Operator may approve their own, everyone else
   needs a MEHO-SA-Operator or a MEHO-Admin.</li>
 <li><strong>It is for emergencies, not the solo default.</strong> Reach for Option 1
-  first. Leaving this on lets every person approve their own lower-risk
-  changes across the whole tenant.</li>
+  first. Leaving this on lets every person in every tenant approve their
+  own lower-risk changes.</li>
 <li><strong>It is still audited.</strong> Self-approval is not silent (see below). A
   reject never needs the flag.</li>
 </ul>
@@ -3037,7 +3103,9 @@ deleted after it. On such an instance a tenant admin may give a service
 principal a standing grant that also covers deletes, a <strong>delete grant</strong>.
 So an automated test run can build, change and delete its own test
 systems with no wait for a person. Every other instance keeps the rules
-above; it shows <code>"sandbox_mode": "off"</code> on <code>/ready</code> and in <code>meho status</code>.</p>
+above; it shows <code>"sandbox_mode": "off"</code> on <code>/ready</code> and in
+<code>meho status --json</code>. The normal <code>meho status</code> output shows a line only
+when sandbox mode is on.</p>
 <p>What stays the same on a sandbox:</p>
 <ul>
 <li>A person's delete still waits for approval under the group rules. An
@@ -3329,10 +3397,10 @@ a fresh user cannot execute verbatim is a bug.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

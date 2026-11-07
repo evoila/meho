@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -251,7 +251,7 @@
     
     
       <li class="md-tabs__item md-tabs__item--active">
-        <a href="../" class="md-tabs__link">
+        <a href="../ways-to-install/" class="md-tabs__link">
           
   
   
@@ -602,6 +602,34 @@
 
           </label>
           <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
             
               
                 
@@ -1041,10 +1069,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -1062,8 +1090,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1910,6 +1938,34 @@
     
   
     Audit forensics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
   
 
     
@@ -2852,7 +2908,7 @@ ADFS) work the same way. Only the clicks in Part 1 differ.</p>
 <tr>
 <td><code>MEHO-SA-Operators</code></td>
 <td><code>operator</code></td>
-<td>Same as Operators for now.</td>
+<td>Run actions, and approve their own risky changes on purpose. Also approve other people's <code>dangerous</code> and <code>destructive</code> changes.</td>
 </tr>
 <tr>
 <td><code>MEHO-Admins</code></td>
@@ -2871,8 +2927,9 @@ ADFS) work the same way. Only the clicks in Part 1 differ.</p>
 <li>A person in no group gets no tenant. MEHO refuses them with
   <code>401 missing_tenant_claim</code>.</li>
 <li>A person in two groups is refused with <code>401 multiple_role_groups</code>.</li>
-<li>Operators and admins can already approve other people's changes, so
-  nobody needs two groups.</li>
+<li>Each group already carries its approval rights, so nobody needs two
+  groups. Who may approve what is in
+  <a href="../../guides/approvals-and-break-glass/#who-may-approve">Approvals and break-glass</a>.</li>
 </ul>
 <p>The easiest setup is to give the authentik groups the same five names.
 You can also use groups you already have and map them (see <code>groupMap</code>
@@ -3222,11 +3279,14 @@ Keycloak admin console. With the built-in Keycloak:</p>
 <ul>
 <li>The console is not on the ingress by default. Set
   <code>coreKeycloak.ingress.exposeAdmin: true</code> to reach it at
-  <code>https://&lt;host&gt;/auth/admin/</code>.</li>
-<li>The install makes no admin account for people. Make one with
-  Keycloak's
-  <a href="https://www.keycloak.org/server/bootstrap-admin-recovery">bootstrap admin recovery</a>
-  command, and remove it when you are done.</li>
+  <code>https://&lt;host&gt;/auth/admin/master/console/#/meho</code>.</li>
+<li>Log in as the console admin that the first install made. The Secret
+  <code>&lt;release&gt;-core-console-admin</code> holds its user name and temporary
+  password (keys <code>username</code> and <code>password</code>). See
+  <a href="../keycloak-realm/#the-console-admin">The console admin</a>.</li>
+<li>On an install older than the console admin, that Secret is missing.
+  Then follow
+  <a href="../keycloak-realm/#console-admin-on-an-older-install">Console admin on an older install</a>.</li>
 </ul>
 <h2 id="if-something-fails">If something fails<a class="headerlink" href="#if-something-fails" title="Permanent link">&para;</a></h2>
 <table>
@@ -3379,10 +3439,10 @@ Keycloak admin console. With the built-in Keycloak:</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -251,7 +251,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../install/" class="md-tabs__link">
+        <a href="../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -778,6 +778,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../install/" class="md-nav__link">
         
   
@@ -929,10 +957,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -950,8 +978,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1818,6 +1846,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../guides/settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../guides/flight-recorder/" class="md-nav__link">
         
   
@@ -2552,10 +2608,13 @@
 
 
 <h1 id="reference-architecture">Reference architecture<a class="headerlink" href="#reference-architecture" title="Permanent link">&para;</a></h1>
-<p>MEHO deploys as <strong>one Kubernetes application</strong> (a Helm release)
-surrounded by services you already run. This page names every box in
-the picture, what it does, and — the part that matters when you plan an
-install — which boxes MEHO ships and which ones you bring.</p>
+<p>MEHO deploys as <strong>one Kubernetes application</strong> (a Helm release). By
+default the chart also brings its own PostgreSQL, Keycloak and OpenBao
+(an open-source fork of Vault). This is the normal way. You can connect
+your own PostgreSQL or secret store instead
+(<a href="../install/#two-ways-to-install">two ways to install</a>). This page names every box in the picture, what it
+does, and — the part that matters when you plan an install — which
+boxes MEHO ships and which ones you can bring.</p>
 <pre class="mermaid"><code>flowchart LR
     subgraph callers["Callers"]
         AG["AI agents&lt;br/&gt;(any MCP client)"]
@@ -2611,18 +2670,18 @@ install — which boxes MEHO ships and which ones you bring.</p>
 </tr>
 <tr>
 <td>PostgreSQL + pgvector</td>
-<td><strong>You</strong></td>
-<td>Any reachable PostgreSQL with the <code>vector</code> extension available. Not bundled — see <a href="../install/#step-1-pre-create-the-pgvector-extension">the install trail</a> for the one privilege nuance.</td>
+<td><strong>MEHO</strong> by default, or <strong>you</strong></td>
+<td>The chart's built-in PostgreSQL, with pgvector on. Turn it off (<code>corePostgres.enabled: false</code>) to use any reachable PostgreSQL with the <code>vector</code> extension available — see <a href="../install/#step-1-pre-create-the-pgvector-extension">the install trail</a> for the one privilege nuance.</td>
 </tr>
 <tr>
 <td>Keycloak</td>
-<td><strong>You</strong></td>
-<td>An existing realm; MEHO needs a handful of clients configured in it — see <a href="../install/keycloak-realm/">Keycloak realm setup</a>.</td>
+<td><strong>MEHO</strong></td>
+<td>MEHO's built-in Keycloak makes the realm <code>meho</code>. Connect your <a href="../install/login/">company login</a> in front of it (AD/LDAP, Entra ID, authentik, your own Keycloak). Replacing it with your own Keycloak is an expert path: it needs realm admin rights to make MEHO's realm, clients and groups — see <a href="../install/keycloak-realm/">Keycloak realm setup</a>.</td>
 </tr>
 <tr>
 <td>Credential backend</td>
-<td><strong>You</strong></td>
-<td>HashiCorp Vault <strong>or</strong> Google Secret Manager — see <a href="../install/credential-backends/">Credential backends</a>.</td>
+<td><strong>MEHO</strong> by default, or <strong>you</strong></td>
+<td>The chart's built-in OpenBao (an open-source fork of Vault). Turn it off (<code>coreVault.enabled: false</code>) to use your own HashiCorp Vault <strong>or</strong> Google Secret Manager — see <a href="../install/credential-backends/">Credential backends</a>.</td>
 </tr>
 <tr>
 <td>AI agent / MCP client</td>
@@ -2638,7 +2697,8 @@ front doors and one governed pipeline behind both:</p>
 <li><strong><code>/mcp</code></strong> — an MCP server. AI agents authenticate with OAuth 2.1
   authorization-code + PKCE (the flow the MCP specification mandates)
   and see a catalog of tools: search operations, preview them, call
-  them, query results, read the audit trail.</li>
+  them, query results. A session that asks for the <code>mcp:admin</code> scope
+  also gets the operator tools, for example to read the audit trail.</li>
 <li><strong><code>/api</code></strong> — a REST API. The <code>meho</code> CLI drives it after a device-code
   login; anything that can send a Bearer token can use it directly.</li>
 </ul>
@@ -2651,12 +2711,14 @@ reduced, audited, and broadcast identically.</p>
    Keycloak. The backplane validates issuer, audience, and the tenant
    claims that scope everything downstream.</li>
 <li><strong>Policy gate</strong> — the operation is checked against the caller's role
-   and per-target grants. Operations flagged as dangerous can require
-   an explicit approval from a human before they run.</li>
+   and per-target grants. A call made with a token (MCP, the CLI or
+   REST) runs only <code>safe</code> operations at once. Every other change waits
+   until a person approves it. Service principals keep their standing
+   grants.</li>
 <li><strong>Connector dispatch</strong> — the operation executes through a
-   <em>connector</em>: a typed implementation that knows how to talk to a
-   class of infrastructure (vCenter, NSX, Kubernetes, cloud APIs,
-   network appliances). Connectors encode operational sequences — for
+   <em>connector</em>: the code that knows how to talk to a class of
+   infrastructure (vCenter, NSX, Kubernetes, cloud APIs, network
+   appliances). Connectors encode operational sequences — for
    example, evacuating a hypervisor host as one governed operation —
    not just raw API passthrough.</li>
 <li><strong>Just-in-time credentials</strong> — if the target needs a credential, the
@@ -2692,9 +2754,9 @@ state, and the knowledge/memory store. The
 vector similarity search behind semantic operation discovery and
 knowledge retrieval — it is the reason the install trail has a
 <a href="../install/#step-1-pre-create-the-pgvector-extension">one-time extension step</a>.</p>
-<p>The database is deliberately <strong>not</strong> bundled in the Helm chart: audit
-data has retention and backup requirements that belong with your
-platform's PostgreSQL practice, not inside an application chart.</p>
+<p>The chart brings its own PostgreSQL by default. If your platform team
+must own the audit data (backup, retention), turn the built-in
+PostgreSQL off and use theirs.</p>
 <h2 id="activity-feed-valkey">Activity feed: Valkey<a class="headerlink" href="#activity-feed-valkey" title="Permanent link">&para;</a></h2>
 <p>Every governed action emits a broadcast event to
 <a href="https://valkey.io/">Valkey</a> (the open-source Redis fork), giving
@@ -2706,7 +2768,9 @@ operator action is needed beyond installing the release.</p>
 appliance API key) live in a secret store MEHO reads <em>per operation</em>,
 scoped to the calling tenant — never cached in the agent, never
 embedded in MEHO's own configuration. Two backends are supported:
-HashiCorp <strong>Vault</strong> (the default) and <strong>Google Secret Manager</strong>. The
+HashiCorp <strong>Vault</strong> and <strong>Google Secret Manager</strong>. By default the chart
+brings OpenBao, an open-source fork of Vault, and MEHO uses it like
+Vault. The
 choice shapes the install, so it has its own
 <a href="../install/credential-backends/">decision page</a> with an honest support
 matrix per backend.</p>
@@ -2716,21 +2780,29 @@ an NSX manager, a Kubernetes cluster, a cloud project, a firewall. Each
 target carries its address, how to authenticate to it (a reference into
 the credential backend — never the secret itself), and TLS trust
 settings.</p>
-<p>A <strong>connector</strong> is the code that operates a class of targets. Each
+<p>A <strong>connector</strong> is the code that operates a class of targets. MEHO has
+two kinds, and an agent uses both the same way. A <strong>generic</strong> connector
+is made from a vendor's API file (for example an OpenAPI file). A
+<strong>typed</strong> connector is written by hand against a vendor SDK or
+protocol, where no usable API file exists. Each
 connector publishes a catalog of operations with descriptions, safety
 levels, and approval requirements — that catalog is what agents search
-and call. The connector surface today is deepest for the VMware/VCF
-estate (vCenter, NSX, SDDC Manager, VCF Operations/Fleet/Logs/
-Automation), alongside Kubernetes, cloud, and network-appliance
-connectors.</p>
+and call. The public image carries connectors for Kubernetes, the
+Microsoft estate, Linux hosts, Vault, Keycloak, cloud and network
+systems (<a href="../reference/connectors/">connector inventory</a>). evoila's
+enterprise pack adds the VMware and VCF estate (vCenter, NSX, SDDC
+Manager, VCF Operations, Fleet, Logs and Automation).</p>
 <h2 id="operators-cli-and-browser-console">Operators: CLI and browser console<a class="headerlink" href="#operators-cli-and-browser-console" title="Permanent link">&para;</a></h2>
 <p>The <strong><code>meho</code> CLI</strong> is a static Go binary (Linux/macOS, amd64/arm64),
 released with signed checksums on every release. It logs in with the
 device-code flow — which works from private networks and
 jump hosts, because only the operator's browser needs to reach
-Keycloak's login page. Registering targets and secrets is CLI (or REST)
-work by design: those write paths are deliberately not exposed as MCP
-tools.</p>
+Keycloak's login page. Registering targets and storing secrets is
+operator work, done with the CLI, the console or REST. On MCP, the
+default tools only read targets (<code>list_targets</code>). Target registration
+is an operator tool: it lists only for a session with the <code>mcp:admin</code>
+scope and needs the <code>tenant_admin</code> role. MEHO has no MCP tool to store
+a secret.</p>
 <p>The <strong>browser console</strong> (<code>/ui</code>) is an optional, read-heavy operator
 surface: dashboards for sensors, approvals, audit, and the activity
 feed. It is off by default and enabled all-or-nothing via chart values.</p>
@@ -2740,15 +2812,21 @@ behind NAT, in a private control plane, on an isolated management
 network. The <strong>satellite gateway</strong> is a second deploy mode of the same
 backplane image that runs <em>inside</em> such a network and dials <strong>out</strong> to
 the central instance — never the reverse. It polls for authorised work,
-executes read-only operations locally against the same connector
-surface, and reports results back. Authorisation, approval, and audit
-all stay central: a satellite cannot self-authorise anything.</p>
+executes it locally against the same connector surface, and reports
+results back. By default a satellite runs only <code>safe</code> operations. A
+tenant admin can turn on a write tier per runner: then <code>caution</code> changes on
+an allowlist also run there, each after a person approves it.
+<code>dangerous</code> and <code>destructive</code> operations never run on a satellite.
+Authorisation, approval, and audit all stay central: a satellite cannot
+self-authorise anything.</p>
 <p>The satellite gateway is a <strong>Beta</strong> feature — see its entry in the
 <a href="../reference/maturity/">feature maturity index</a>.</p>
 <h2 id="what-meho-is-not">What MEHO is not<a class="headerlink" href="#what-meho-is-not" title="Permanent link">&para;</a></h2>
 <ul>
-<li><strong>Not an agent runtime.</strong> MEHO does not run a model and does not
-  schedule prompts. It governs what any MCP client is allowed to do.</li>
+<li><strong>Not an agent runtime first.</strong> MEHO governs what any MCP client is
+  allowed to do. It can also run agents on the backplane
+  (<a href="../guides/hosted-agents/">hosted agents</a>, experimental), under the
+  same rules.</li>
 <li><strong>Not a session broker.</strong> Tools like Teleport or StrongDM broker
   <em>human</em> sessions (SSH, database, kubectl). MEHO authorises and audits
   <em>individual agent actions</em>, per call, with infrastructure-aware
@@ -2857,10 +2935,10 @@ all stay central: a satellite cannot self-authorise anything.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

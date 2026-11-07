@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -251,7 +251,7 @@
     
     
       <li class="md-tabs__item md-tabs__item--active">
-        <a href="../" class="md-tabs__link">
+        <a href="../ways-to-install/" class="md-tabs__link">
           
   
   
@@ -602,6 +602,34 @@
 
           </label>
           <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
             
               
                 
@@ -1130,10 +1158,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -1151,8 +1179,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1999,6 +2027,34 @@
     
   
     Audit forensics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
   
 
     
@@ -2983,7 +3039,7 @@ the end, then return to the trail.</p>
 <tr>
 <td><code>meho-backplane</code></td>
 <td>Confidential client</td>
-<td>The backplane itself — the audience it validates tokens for. If your realm does not have it yet, create it first: a confidential client with ID <code>meho-backplane</code> and no login flows enabled — it exists as the resource-server identity whose client ID is the token audience (<code>keycloak.audience</code> in the chart values).</td>
+<td>The backplane itself — the audience it validates tokens for. If your realm does not have it yet, create it first: a confidential client with ID <code>meho-backplane</code> and no login flows enabled — it exists as the resource-server identity whose client ID is the token audience (<code>config.keycloakAudience</code> in the chart values).</td>
 </tr>
 <tr>
 <td><code>meho-cli</code></td>
@@ -3032,7 +3088,7 @@ the end, then return to the trail.</p>
 </tr>
 <tr>
 <td><code>offline_access</code></td>
-<td>Built-in client scope, optional on both public clients</td>
+<td>Built-in client scope, optional on <code>meho-cli</code> and <code>meho-mcp</code></td>
 <td>The long login that renews itself</td>
 </tr>
 <tr>
@@ -3365,8 +3421,9 @@ sign-in must still be recent: an <code>acr</code> value alone never approves.</p
 <h4 id="add-the-approval-flow-to-a-running-realm-through-meho">Add the approval flow to a running realm through MEHO<a class="headerlink" href="#add-the-approval-flow-to-a-running-realm-through-meho" title="Permanent link">&para;</a></h4>
 <p>The operation <code>keycloak.authflow.ensure_approval_flow</code> adds the flow
 <code>meho approval sign-in</code> to the realm of a Keycloak target (its managed
-realm) and makes it the browser flow of <code>meho-cli-approve</code>. A second
-person must approve it.</p>
+realm) and makes it the browser flow of <code>meho-cli-approve</code>. It waits
+for approval
+(<a href="../../guides/approvals-and-break-glass/#who-may-approve">who may approve</a>).</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"> </span>keycloak-admin-26.x<span class="w"> </span>keycloak.authflow.ensure_approval_flow<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--target<span class="w"> </span>&lt;keycloak-target&gt;
 </code></pre></div>
@@ -3950,8 +4007,9 @@ link starts a console login with <code>prompt=login</code> and <code>max_age=0</
 Keycloak asks for the password (and the code, or a passkey) also in a
 browser it remembers. The person then opens the request again and
 approves. Deny needs no new sign-in. For this check the <code>meho-web</code> client
-needs the <code>basic</code> and <code>acr</code> default scopes: the realm file and
-<code>meho admin keycloak bootstrap-clients</code> set them.</p>
+needs the <code>basic</code> and <code>acr</code> default scopes. The realm file of the
+built-in Keycloak sets them. <code>meho admin keycloak bootstrap-clients</code> does
+not touch <code>meho-web</code>: on your own Keycloak, assign them by hand.</p>
 <p><strong>Why the console has no long login.</strong> The console does not ask for
 <code>offline_access</code>:</p>
 <ul>
@@ -4137,7 +4195,8 @@ one-time code after a passkey login. An upgrade does not add it to an older
 realm. The built-in Keycloak of the chart started with a newer version, so
 its realm has the step. Without the step, a passkey replaces the password,
 but a person with a one-time code still types the code.</p>
-<p>MEHO adds the step with one operation. A second person must approve it,
+<p>MEHO adds the step with one operation. It waits for approval
+(<a href="../../guides/approvals-and-break-glass/#who-may-approve">who may approve</a>),
 because it changes how every person of the realm logs in:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"> </span>keycloak-admin-26.x<span class="w"> </span>keycloak.authflow.ensure_passkey_code_skip<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--target<span class="w"> </span>&lt;keycloak-target&gt;
@@ -4264,7 +4323,7 @@ usually appear:</p>
 </tr>
 <tr>
 <td><code>meho login</code> fails at once with <code>invalid_request</code> and "Missing parameter: code_challenge_method"</td>
-<td>The login client (<code>meho-cli</code>) requires a PKCE method, and the CLI is older than 0.44.0. Those versions send no PKCE at the device login, and Keycloak checks PKCE there too. A realm made with MEHO 0.40.0, 0.41.0 or 0.42.0 (the built-in Keycloak, or <code>meho admin keycloak bootstrap-clients</code>) set <code>S256</code> on it.</td>
+<td>The login client (<code>meho-cli</code>) requires a PKCE method, and the CLI is older than 0.44.0. Those versions send no PKCE at the device login, and Keycloak checks PKCE there too. A realm made with MEHO 0.40.0, 0.41.0, 0.42.0 or 0.43.0 (the built-in Keycloak, or <code>meho admin keycloak bootstrap-clients</code>) set <code>S256</code> on it.</td>
 <td>Update the CLI to 0.44.0 or later. Or clear the PKCE method on the login client: in the admin console (Advanced → Proof Key for Code Exchange, set it to empty), or with the operation <code>keycloak.client.update</code> and the representation <code>{"attributes": {"pkce.code.challenge.method": ""}}</code> (an empty value removes the attribute). Step 2.</td>
 </tr>
 <tr>
@@ -4314,8 +4373,8 @@ usually appear:</p>
 </tr>
 </tbody>
 </table>
-<p>A fuller, client-by-client troubleshooting page ships with the
-<a href="../../clients/">Connect clients</a> section. Until then, the
+<p>The client-by-client troubleshooting page is
+<a href="../../clients/troubleshooting/">Connect clients: troubleshooting</a>. The
 in-repo
 <a href="https://github.com/evoila/meho/blob/main/deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp">auth onramp recipe</a>
 carries the deepest version of this matrix, including advanced
@@ -4420,10 +4479,10 @@ clients).</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

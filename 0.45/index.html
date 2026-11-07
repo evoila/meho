@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -29,10 +29,10 @@
       
     
     
-      <link rel="stylesheet" href="assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -249,7 +249,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="install/" class="md-tabs__link">
+        <a href="install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -710,6 +710,34 @@
   
   
     <li class="md-nav__item">
+      <a href="install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="install/" class="md-nav__link">
         
   
@@ -861,10 +889,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -882,8 +910,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1750,6 +1778,34 @@
   
   
     <li class="md-nav__item">
+      <a href="guides/settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="guides/flight-recorder/" class="md-nav__link">
         
   
@@ -2429,9 +2485,13 @@ backend credential is fetched just in time, the result is reduced to
 what the caller needs, and an immutable audit row records who did what,
 where, and when.</p>
 <p>MEHO is open source (Apache 2.0) and runs entirely on infrastructure
-you control. There is no hosted service and no phone-home: you deploy
-the backplane into your own Kubernetes cluster, next to your own
-PostgreSQL, Keycloak, and secret store.</p>
+you control. There is no hosted service and no phone-home. You install
+it with one Helm chart into your own Kubernetes cluster. The chart
+brings its own PostgreSQL, Keycloak and OpenBao (an open-source fork of
+Vault), or connects to the ones you already run. Two more ways to
+install are coming: the install on a plain Linux server is available
+and in testing, and a VMware appliance is in progress. See
+<a href="install/ways-to-install/">Ways to install MEHO</a>.</p>
 <h2 id="the-problem-it-solves">The problem it solves<a class="headerlink" href="#the-problem-it-solves" title="Permanent link">&para;</a></h2>
 <p>AI agents are getting good enough to <em>do</em> infrastructure work — roll a
 credential, drain a node, restart a service — not just describe it. But
@@ -2447,8 +2507,9 @@ and keeps the receipts.</p>
 <h2 id="what-every-operation-gets">What every operation gets<a class="headerlink" href="#what-every-operation-gets" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>Policy-gated</strong> — operations are authorised against the caller's
-  role and per-target grants before they execute; destructive
-  operations can require explicit human approval.</li>
+  role and per-target grants before they execute. A call made with a
+  token (MCP, the CLI or REST) runs only <code>safe</code> operations at once;
+  every other change waits until a person approves it.</li>
 <li><strong>Credential-federated</strong> — the agent never holds a backend
   credential. A short-lived identity token is exchanged with your
   secret store (<a href="install/credential-backends/">Vault or Google Secret
@@ -2489,7 +2550,7 @@ same ones the product itself displays.</p>
 <tbody>
 <tr>
 <td><strong>Start here</strong></td>
-<td>This page, plus the <a href="architecture/">reference architecture</a>.</td>
+<td>This page, plus the <a href="architecture/">reference architecture</a> and the <a href="deployment-shapes/">deployment shapes</a>.</td>
 </tr>
 <tr>
 <td><strong><a href="install/">Install &amp; operate</a></strong></td>
@@ -2504,8 +2565,12 @@ same ones the product itself displays.</p>
 <td>Task guides: register targets and secrets, run first operations, watch your estate.</td>
 </tr>
 <tr>
+<td><strong><a href="extend/connector-kit/">Extend MEHO</a></strong></td>
+<td>Write your own connector package against the connector kit.</td>
+</tr>
+<tr>
 <td><strong><a href="reference/">Reference</a></strong></td>
-<td>Generated reference material, starting with the <a href="reference/maturity/">feature maturity index</a>.</td>
+<td><a href="reference/whats-new/">What's new</a> in each release, plus generated reference material, such as the <a href="reference/maturity/">feature maturity index</a>.</td>
 </tr>
 <tr>
 <td><strong><a href="project/">Project</a></strong></td>
@@ -2515,10 +2580,11 @@ same ones the product itself displays.</p>
 </table>
 <h2 id="where-to-start">Where to start<a class="headerlink" href="#where-to-start" title="Permanent link">&para;</a></h2>
 <ul>
-<li><strong>Deploying MEHO for your team?</strong> Follow the
-  <a href="install/">install trail</a>. It assumes a Kubernetes cluster, a
-  PostgreSQL database, and a Keycloak — and takes you from there to a
-  running backplane and a working <code>meho login</code>.</li>
+<li><strong>Deploying MEHO for your team?</strong> Read
+  <a href="install/ways-to-install/">Ways to install MEHO</a>, then follow the
+  <a href="install/">install trail</a>. You need a Kubernetes cluster, a
+  DNS name and a certificate. The chart brings the database, the login
+  server and the password safe.</li>
 <li><strong>Just want to see it run?</strong> The
   <a href="install/kind-quickstart/">local kind quickstart</a> brings the
   backplane up on your workstation in minutes — with placeholder
@@ -2613,10 +2679,10 @@ same ones the product itself displays.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": ".", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": ".", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

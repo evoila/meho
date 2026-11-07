@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -249,7 +249,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../install/" class="md-tabs__link">
+        <a href="../../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -605,6 +605,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../install/" class="md-nav__link">
         
   
@@ -756,10 +784,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -777,8 +805,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1630,6 +1658,34 @@
     
   
     Audit forensics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
   
 
     
@@ -2680,8 +2736,9 @@ every key and value the filter names. The filter is a <em>subset</em> test, and
 the direction is fixed: a filter is matched against the payload, not the
 other way round.</p>
 <div class="highlight"><pre><span></span><code><span class="c1"># Fire the incident-triage agent on any critical, firing alert.</span>
+<span class="c1"># --agent-definition takes the definition's UUID (`meho agent show incident-triage`).</span>
 meho<span class="w"> </span>scheduler<span class="w"> </span>create<span class="w"> </span>--kind<span class="w"> </span>event<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--agent-definition<span class="w"> </span>incident-triage<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--agent-definition<span class="w"> </span>&lt;definition-uuid&gt;<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--event-filter<span class="w"> </span><span class="s1">'{"status": "firing", "labels": {"severity": "critical"}}'</span>
 </code></pre></div>
 <p>Author filters against the lifted top-level fields:</p>
@@ -2773,7 +2830,12 @@ dispatch, on the audit ledger.</p>
 <td>Confirm the slug and that the source is active with a secret set, then re-check the sender's secret and signature header against the source's <code>auth_strategy</code>. The server log names the reason.</td>
 </tr>
 <tr>
-<td>Ingest returns <code>200</code> but no agent run fires</td>
+<td>Deliveries return <code>503 secret_unavailable</code></td>
+<td>MEHO could not read the source's secret from Vault. Intake reads it with the check-runner identity, so that role's policy must cover <code>secret/data/tenants/+/event-sources/*</code>.</td>
+<td>Give the check-runner Vault role read access to the event-source secrets (<a href="https://github.com/evoila/meho/blob/main/docs/cross-repo/vault-provisioning.md"><code>docs/cross-repo/vault-provisioning.md</code></a>).</td>
+</tr>
+<tr>
+<td>Ingest returns <code>202</code> (or <code>200</code> for a repeat of the same delivery) but no agent run fires</td>
 <td>The event was accepted but no <code>event</code> trigger's filter matched it.</td>
 <td>Compare the trigger's <code>--event-filter</code> against the lifted top-level fields; test with a broader filter first.</td>
 </tr>
@@ -2889,10 +2951,10 @@ dispatch, on the audit ledger.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

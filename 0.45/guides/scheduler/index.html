@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -249,7 +249,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../install/" class="md-tabs__link">
+        <a href="../../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -605,6 +605,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../install/" class="md-nav__link">
         
   
@@ -756,10 +784,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -777,8 +805,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1650,6 +1678,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../flight-recorder/" class="md-nav__link">
         
   
@@ -2440,10 +2496,7 @@ that keeps them firing.</p>
 <li>Creating and cancelling triggers needs <strong>tenant_admin</strong>; listing
   needs <strong>operator</strong>.</li>
 <li>The scheduler is <strong>Beta</strong> — see the
-  <a href="../../reference/maturity/#scheduler">feature-maturity index</a>. Its
-  road to GA is tracked in
-  <a href="https://github.com/evoila/meho/issues/2668">#2668</a>, the same
-  issue that hardened the durable-credential behavior below.</li>
+  <a href="../../reference/maturity/#scheduler">feature-maturity index</a>.</li>
 </ul>
 </div>
 <h2 id="the-surface-at-a-glance">The surface at a glance<a class="headerlink" href="#the-surface-at-a-glance" title="Permanent link">&para;</a></h2>
@@ -2474,25 +2527,30 @@ that keeps them firing.</p>
 </tbody>
 </table>
 <h2 id="create-a-trigger">Create a trigger<a class="headerlink" href="#create-a-trigger" title="Permanent link">&para;</a></h2>
-<p>Every trigger binds one <code>--agent-definition</code> and one <code>--kind</code>. A
+<p>Every trigger binds one <code>--agent-definition</code> and one <code>--kind</code>.
+<code>--agent-definition</code> takes the UUID of the agent definition, not its
+name. Find it on the <code>id:</code> line of <code>meho agent show &lt;name&gt;</code>. A
 <strong>cron</strong> trigger fires repeatedly on a 5-field expression evaluated in
 its persisted <code>--timezone</code>:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>scheduler<span class="w"> </span>create<span class="w"> </span>--kind<span class="w"> </span>cron<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--agent-definition<span class="w"> </span>nightly-reconcile<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--agent-definition<span class="w"> </span>&lt;definition-uuid&gt;<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--cron-expr<span class="w"> </span><span class="s2">"0 2 * * *"</span><span class="w"> </span>--timezone<span class="w"> </span>Europe/Vienna<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--inputs<span class="w"> </span><span class="s1">'{"scope": "prod"}'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--inputs<span class="w"> </span><span class="s1">'{"prompt": "Reconcile the prod scope."}'</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--work-ref<span class="w"> </span>gh:evoila/meho#520
 </code></pre></div>
 <p>A <strong>one-off</strong> trigger fires once at a stored instant, then transitions
 to a terminal state:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>scheduler<span class="w"> </span>create<span class="w"> </span>--kind<span class="w"> </span>one_off<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--agent-definition<span class="w"> </span>drain-and-patch<span class="w"> </span>--fire-at<span class="w"> </span><span class="m">2026</span>-08-10T22:00:00Z
+<span class="w">  </span>--agent-definition<span class="w"> </span>&lt;definition-uuid&gt;<span class="w"> </span>--fire-at<span class="w"> </span><span class="m">2026</span>-08-10T22:00:00Z<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--inputs<span class="w"> </span><span class="s1">'{"prompt": "Drain and patch esx-3."}'</span>
 </code></pre></div>
 <p>A third kind, <strong>event</strong>, fires an agent run in response to a backplane
 event (<code>--event-filter</code>) rather than a clock. The knobs worth knowing:</p>
 <ul>
 <li><code>--inputs</code> — a JSON object rendered into the agent's prompt at fire
-  time.</li>
+  time. A <code>cron</code> or <code>one_off</code> trigger needs it, and it must make a
+  non-empty prompt (for example <code>{"prompt": "…"}</code>). MEHO refuses an
+  empty <code>{}</code> with 422. An <code>event</code> trigger may leave it out.</li>
 <li><code>--identity-sub</code> — the identity the scheduler impersonates at fire
   time (default <code>__scheduler__</code>); an override you rarely set. What makes
   the agent, not you, the requester of a scheduled write is the <strong>bound
@@ -2522,15 +2580,13 @@ JWT to forward to Vault's OIDC auth method. The scheduler instead sources
 the agent's <code>client_credentials</code> secret <strong>Vault-first</strong>, under its own
 static service token (<code>VAULT_SCHEDULER_TOKEN</code>), from
 <code>SCHEDULER_AGENT_VAULT_PATH_PATTERN</code> (default
-<code>secret/data/agents/{client_id}/credentials</code>), falling back to a pod env
+<code>secret/data/agents/{tenant_id}_{client_id}/credentials</code>), falling back to a pod env
 var only when Vault yields nothing.</p>
 <p>That static token is the failure point unattended operation used to hit:
 a periodic Vault token <strong>dies in the field</strong> — it ages out, or an
 operator forgets to re-mint it — and every credential read then <code>403</code>s,
 so the scheduler <strong>silently skips its fires</strong>. A job that ran for weeks
-just stops, quietly. The hardening shipped with the
-<a href="https://github.com/evoila/meho/issues/2668">#2668</a> line closes that
-hole three ways:</p>
+just stops, quietly. MEHO closes that hole three ways:</p>
 <ul>
 <li><strong>Self-heal instead of skip.</strong> On a <code>lookup-self</code>-confirmed dead
   token, the scheduler mints a <strong>fresh</strong> Vault token by <code>jwt_login</code> as
@@ -2551,8 +2607,11 @@ hole three ways:</p>
 provisioned), the loop does the honest thing: it logs
 <code>scheduler_credentials_unresolved</code>, <strong>skips</strong> the fire, and records
 <code>last_skip_reason='credentials_unresolved'</code> with an incremented
-<code>skip_count</code> on the trigger row — so <code>meho scheduler list</code> shows you
-exactly why a job isn't running, instead of leaving you to guess.</p>
+<code>skip_count</code> on the trigger row. <code>meho scheduler list</code> shows the count
+in the <code>SKIPS</code> column; <code>meho scheduler list --json</code> also shows
+<code>last_skip_reason</code>. After 10 skips in a row, MEHO sets the trigger to
+<code>paused</code> and stops trying. Fix the cause, cancel the trigger, and create
+it again.</p>
 <div class="admonition note">
 <p class="admonition-title">Provisioning the headless mint</p>
 <p>The headless <code>client_credentials</code> → runner-JWT → Vault <code>jwt_login</code>
@@ -2582,9 +2641,9 @@ this page is its agent-run twin.</p>
 </thead>
 <tbody>
 <tr>
-<td>A trigger shows <code>last_skip_reason=credentials_unresolved</code> and a rising <code>skip_count</code></td>
+<td>A trigger shows <code>last_skip_reason=credentials_unresolved</code> and a rising <code>skip_count</code>, or is <code>paused</code> after 10 skips</td>
 <td>The scheduler could not resolve the agent's credentials and skipped the fire (loudly, not silently).</td>
-<td>Stage the agent's <code>client_credentials</code> secret at <code>secret/data/agents/{client_id}/credentials</code>, or provision the self-heal mint (<code>vault-provisioning.md</code>).</td>
+<td>Stage the agent's <code>client_credentials</code> secret at <code>secret/data/agents/{tenant_id}_{client_id}/credentials</code>, or provision the self-heal mint (<code>vault-provisioning.md</code>). Create a <code>paused</code> trigger again.</td>
 </tr>
 <tr>
 <td>Startup logs <code>scheduler_vault_token_will_expire</code> (ERROR)</td>
@@ -2597,9 +2656,9 @@ this page is its agent-run twin.</p>
 <td>Use a tenant_admin session to author triggers.</td>
 </tr>
 <tr>
-<td>A cron trigger never fires</td>
-<td>The <code>--cron-expr</code> didn't parse, or <code>--timezone</code> is wrong, so <code>next_fire_at</code> was never set to a reachable instant.</td>
-<td>Check <code>meho scheduler list</code> for <code>next_fire_at</code>; fix the 5-field expression / IANA timezone and recreate.</td>
+<td><code>scheduler create</code> answers 422</td>
+<td>MEHO checks the trigger when you create it: a cron expression that does not parse, an unknown <code>--timezone</code>, or missing <code>--inputs</code> on a <code>cron</code> / <code>one_off</code> trigger. No trigger is made.</td>
+<td>Fix the 5-field expression, the IANA timezone or the inputs, and create it again.</td>
 </tr>
 <tr>
 <td>A scheduled write is stuck <code>awaiting_approval</code></td>
@@ -2613,7 +2672,7 @@ this page is its agent-run twin.</p>
 </tr>
 </tbody>
 </table>
-<p><strong>Next:</strong> <a href="../satellite-gateway/">Satellite gateway</a>.</p>
+<p><strong>Next:</strong> <a href="../event-ingestion/">Event ingestion</a>.</p>
 
 
 
@@ -2713,10 +2772,10 @@ this page is its agent-run twin.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

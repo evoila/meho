@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -249,7 +249,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../install/" class="md-tabs__link">
+        <a href="../../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -605,6 +605,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../install/" class="md-nav__link">
         
   
@@ -756,10 +784,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -777,8 +805,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1645,6 +1673,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guides/settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guides/flight-recorder/" class="md-nav__link">
         
   
@@ -2132,6 +2188,28 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#open-source-connectors-public-image" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Open source connectors (public image)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#evoilas-enterprise-pack" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        evoila's enterprise pack
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#versions-and-how-a-connector-is-chosen" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2307,6 +2385,28 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#open-source-connectors-public-image" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Open source connectors (public image)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#evoilas-enterprise-pack" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        evoila's enterprise pack
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#versions-and-how-a-connector-is-chosen" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2360,196 +2460,405 @@
 -->
 
 <h1 id="connector-inventory">Connector inventory<a class="headerlink" href="#connector-inventory" title="Permanent link">&para;</a></h1>
-<p>Every connector MEHO can resolve a target to, generated from the in-process connector registry. Each row is one registered implementation: agents and operators drive them all through the same governed surface — pick a connector, list its operation groups, search operations, then call — so the vendor never leaks into the tool names.</p>
+<p>This page lists every MEHO connector in two tables. The first table lists the open source connectors of the public image. The second table lists the connectors of evoila's enterprise pack, a commercial add-on with the VMware and VCF connectors. Agents and operators drive all of them through the same governed surface — pick a connector, list its operation groups, search operations, then call — so no tool name carries a vendor name.</p>
+<p>You can add your own connectors the same way as the enterprise pack: see <a href="../../extend/connector-kit/">Write a connector package</a>.</p>
+<h2 id="open-source-connectors-public-image">Open source connectors (public image)<a class="headerlink" href="#open-source-connectors-public-image" title="Permanent link">&para;</a></h2>
+<p>These connectors are in the public image, generated from the in-process connector registry. Each row is one registered implementation. The <strong>Docs</strong> column links to the connector's page in the source repository.</p>
 <p>MEHO has two kinds of connector, both first-class and indistinguishable to an agent. <strong>Generic</strong> connectors are built by ingesting a vendor's protocol spec (OpenAPI, GraphQL, WSDL, proto); <strong>typed</strong> connectors are hand-coded against a vendor SDK or transport where no usable spec exists. The <strong>Kind</strong> column is populated only where MEHO's published connector-spec catalog states it, and is blank otherwise — it is a property of how a connector's operations are sourced, not something this table infers.</p>
 <table>
 <thead>
 <tr>
 <th>Connector</th>
 <th>Product</th>
+<th>What it does</th>
 <th>Supported versions</th>
 <th>Kind</th>
+<th>Docs</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><code>argocd-api-3.x</code></td>
 <td><code>argocd</code></td>
+<td>—</td>
 <td>&gt;=2.0,&lt;4.0</td>
 <td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-argocd.md">docs</a></td>
 </tr>
 <tr>
 <td><code>azure-arm-2026.10</code></td>
 <td><code>azure</code></td>
+<td>Reads Azure subscriptions (VMs, Kubernetes clusters, networks, storage, costs, security and policy), changes tags and starts patch checks.</td>
 <td>—</td>
 <td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-azure.md">docs</a></td>
 </tr>
 <tr>
 <td><code>bind9-ssh-9.x</code></td>
 <td><code>bind9</code></td>
 <td>—</td>
+<td>—</td>
 <td>typed</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-bind9.md">docs</a></td>
 </tr>
 <tr>
 <td><code>entra-graph-1.0</code></td>
 <td><code>entra</code></td>
+<td>Reads Microsoft Entra ID users, groups, app registrations, service principals and role assignments.</td>
 <td>—</td>
 <td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-entra.md">docs</a></td>
 </tr>
 <tr>
 <td><code>freeipa-jsonrpc-4.x</code></td>
 <td><code>freeipa</code></td>
+<td>Reads FreeIPA users, groups, hosts and access rules; creates host groups and rules, deletes hosts and host groups, and sets the password policy.</td>
 <td>&gt;=4.9,&lt;5.0</td>
 <td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-freeipa.md">docs</a></td>
 </tr>
 <tr>
 <td><code>gcloud-rest-1.0</code></td>
 <td><code>gcloud</code></td>
 <td>—</td>
 <td>—</td>
+<td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-gcloud.md">docs</a></td>
 </tr>
 <tr>
 <td><code>gh-rest-3</code></td>
 <td><code>gh</code></td>
+<td>Reads GitHub repositories, issues, pull requests and projects, and creates issues, comments, repositories and commits.</td>
 <td>—</td>
 <td>generic</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-github.md">docs</a></td>
 </tr>
 <tr>
 <td><code>harbor-rest-2.x</code></td>
 <td><code>harbor</code></td>
+<td>—</td>
 <td>&gt;=2.0,&lt;3.0</td>
 <td>generic</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-harbor.md">docs</a></td>
 </tr>
 <tr>
 <td><code>hetzner-rest-2026.04</code></td>
 <td><code>hetzner</code></td>
 <td>—</td>
 <td>—</td>
+<td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-hetzner-robot.md">docs</a></td>
 </tr>
 <tr>
 <td><code>hyperv-ssh-2022.x</code></td>
 <td><code>hyperv</code></td>
 <td>—</td>
 <td>—</td>
+<td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-hyperv.md">docs</a></td>
 </tr>
 <tr>
 <td><code>k8s-1.x</code></td>
 <td><code>k8s</code></td>
 <td>—</td>
+<td>—</td>
 <td>typed</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-kubernetes.md">docs</a></td>
 </tr>
 <tr>
 <td><code>keycloak-admin-26.x</code></td>
 <td><code>keycloak</code></td>
+<td>—</td>
 <td>&gt;=26.0,&lt;27.0</td>
 <td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-keycloak.md">docs</a></td>
 </tr>
 <tr>
 <td><code>linux-ssh-1.x</code></td>
 <td><code>linux</code></td>
 <td>—</td>
 <td>—</td>
+<td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-linux.md">docs</a></td>
 </tr>
 <tr>
 <td><code>loki-api-3.x</code></td>
 <td><code>loki</code></td>
+<td>—</td>
 <td>&gt;=2.9,&lt;4.0</td>
 <td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-loki.md">docs</a></td>
 </tr>
 <tr>
 <td><code>mongodb-wire-7</code></td>
 <td><code>mongodb</code></td>
+<td>—</td>
 <td>&gt;=5,&lt;9</td>
 <td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-mongodb.md">docs</a></td>
 </tr>
 <tr>
 <td><code>msad-ssh-2022.x</code></td>
 <td><code>msad</code></td>
 <td>—</td>
 <td>—</td>
+<td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-msad.md">docs</a></td>
 </tr>
 <tr>
 <td><code>mssql-tds-2022.x</code></td>
 <td><code>mssql</code></td>
+<td>—</td>
 <td>&gt;=13,&lt;17</td>
 <td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-mssql.md">docs</a></td>
 </tr>
 <tr>
 <td><code>pfsense-ssh-2.7</code></td>
 <td><code>pfsense</code></td>
 <td>—</td>
 <td>—</td>
+<td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-pfsense.md">docs</a></td>
 </tr>
 <tr>
 <td><code>phpipam-rest-1.x</code></td>
 <td><code>phpipam</code></td>
+<td>Lists phpIPAM subnets and free addresses, and reserves or releases an IP address.</td>
 <td>—</td>
 <td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-phpipam.md">docs</a></td>
 </tr>
 <tr>
 <td><code>postgres-wire-16</code></td>
 <td><code>postgres</code></td>
+<td>—</td>
 <td>&gt;=13,&lt;18</td>
 <td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-postgres.md">docs</a></td>
 </tr>
 <tr>
 <td><code>prometheus-api-2.x</code></td>
 <td><code>prometheus</code></td>
 <td>—</td>
 <td>—</td>
+<td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-prometheus.md">docs</a></td>
 </tr>
 <tr>
 <td><code>proxmox-api-8.x</code></td>
 <td><code>proxmox</code></td>
+<td>—</td>
 <td>&gt;=7.0,&lt;9.0</td>
 <td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-proxmox.md">docs</a></td>
 </tr>
 <tr>
 <td><code>rabbitmq-management-3.x</code></td>
 <td><code>rabbitmq</code></td>
+<td>—</td>
 <td>&gt;=3.8,&lt;5.0</td>
 <td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-rabbitmq.md">docs</a></td>
 </tr>
 <tr>
 <td><code>rke2-ssh-1.x</code></td>
 <td><code>rke2</code></td>
 <td>—</td>
 <td>—</td>
+<td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-rke2.md">docs</a></td>
 </tr>
 <tr>
 <td><code>tempo-api-2.x</code></td>
 <td><code>tempo</code></td>
+<td>—</td>
 <td>&gt;=2.0,&lt;3.0</td>
 <td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-tempo.md">docs</a></td>
 </tr>
 <tr>
 <td><code>vault-1.x</code></td>
 <td><code>vault</code></td>
 <td>—</td>
+<td>—</td>
 <td>typed</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-vault.md">docs</a></td>
 </tr>
 <tr>
 <td><code>windns-ssh-2016.x</code></td>
 <td><code>windns</code></td>
 <td>—</td>
 <td>—</td>
+<td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-windows-dns.md">docs</a></td>
 </tr>
 <tr>
 <td><code>winsrv-ssh-2022.x</code></td>
 <td><code>winsrv</code></td>
 <td>—</td>
 <td>—</td>
+<td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-winsrv.md">docs</a></td>
 </tr>
 <tr>
 <td><code>wsfc-ssh-2022.x</code></td>
 <td><code>wsfc</code></td>
 <td>—</td>
 <td>—</td>
+<td>—</td>
+<td><a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-wsfc.md">docs</a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="evoilas-enterprise-pack">evoila's enterprise pack<a class="headerlink" href="#evoilas-enterprise-pack" title="Permanent link">&para;</a></h2>
+<p>evoila's enterprise pack is a commercial add-on. It adds the VMware and VCF connectors, and connectors for Fortinet and CrowdStrike products, as a signed package on top of the public image. Their setup guides and operation lists come with the pack. To get the pack, contact evoila.</p>
+<table>
+<thead>
+<tr>
+<th>Product</th>
+<th>Connectors</th>
+<th>Product versions</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>VMware vCenter and vSphere</td>
+<td><code>vmware-rest-9.0</code>, <code>vmware-rest-8.0</code></td>
+<td>8.0, 9.x</td>
+<td>Reads and manages virtual machines, hosts, clusters, storage and networks.</td>
+</tr>
+<tr>
+<td>VMware NSX</td>
+<td><code>nsx-rest-9.0</code>, <code>nsx-rest-4.2</code></td>
+<td>4.x, 9.x</td>
+<td>Reads and changes segments, gateways, firewall rules, load balancers and VPNs.</td>
+</tr>
+<tr>
+<td>VCF SDDC Manager</td>
+<td><code>sddc-rest-9.0</code>, <code>sddc-vcf5-5.0</code></td>
+<td>5.x, 9.x</td>
+<td>Reads workload domains, clusters and hosts, and runs VCF lifecycle tasks.</td>
+</tr>
+<tr>
+<td>VCF Installer and Cloud Builder</td>
+<td><code>installer-rest-9.1</code>, <code>installer-cb-5.0</code></td>
+<td>5.x, 9.x</td>
+<td>Checks a deployment plan and deploys a new VCF instance.</td>
+</tr>
+<tr>
+<td>VCF fleet management and Aria Suite Lifecycle</td>
+<td><code>fleet-lcm-9.0</code>, <code>fleet-rest-9.0</code></td>
+<td>8.x, 9.x</td>
+<td>Installs, updates and scales the VCF management components.</td>
+</tr>
+<tr>
+<td>VCF Automation and Aria Automation</td>
+<td><code>vcfa-rest-9.0</code>, <code>vcfa-vra8-8.0</code></td>
+<td>8.x, 9.x</td>
+<td>Reads and manages projects, catalog items, templates and deployments.</td>
+</tr>
+<tr>
+<td>VCF Operations and Aria Operations</td>
+<td><code>vrops-rest-9.0</code>, <code>vrops-vrops8-8.0</code></td>
+<td>8.x, 9.x</td>
+<td>Reads resources, alerts, metrics and health.</td>
+</tr>
+<tr>
+<td>VCF Operations for logs and Aria Operations for Logs</td>
+<td><code>vrli-rest-9.0</code>, <code>vrli-vrli8-8.0</code></td>
+<td>8.x, 9.x</td>
+<td>Searches logs and reads log alerts.</td>
+</tr>
+<tr>
+<td>VCF Operations orchestrator</td>
+<td><code>vro-rest-9.0</code></td>
+<td>8.x, 9.x</td>
+<td>Reads workflows and their runs, and starts or cancels a workflow run.</td>
+</tr>
+<tr>
+<td>VCF Identity Broker and Workspace ONE Access</td>
+<td><code>idb-rest-9.0</code>, <code>idb-wsa-3.3</code></td>
+<td>3.3, 9.x</td>
+<td>Reads users, groups and identity settings.</td>
+</tr>
+<tr>
+<td>VMware Cloud Director</td>
+<td><code>vcd-rest-10.6</code></td>
+<td>10.x</td>
+<td>Reads and manages tenants, vApps, virtual machines, networks and edge gateways.</td>
+</tr>
+<tr>
+<td>VMware HCX</td>
+<td><code>hcx-rest-9.0</code></td>
+<td>4.7 to 9.x</td>
+<td>Reads site pairings, service meshes and migrations, and changes service meshes.</td>
+</tr>
+<tr>
+<td>VMware Site Recovery Manager</td>
+<td><code>srm-rest-9.1</code></td>
+<td>8.8 to 9.x</td>
+<td>Reads protection groups and recovery plans, and runs recovery tasks.</td>
+</tr>
+<tr>
+<td>VMware vSphere Replication</td>
+<td><code>vr-rest-9.1</code></td>
+<td>8.8 to 9.x</td>
+<td>Reads and manages the replication of virtual machines.</td>
+</tr>
+<tr>
+<td>VMware Aria Automation Config (Salt)</td>
+<td><code>salt-raas-8.18</code></td>
+<td>8.x, 9.x</td>
+<td>Reads minions and jobs, accepts minion keys and starts jobs.</td>
+</tr>
+<tr>
+<td>VMware Holodeck</td>
+<td><code>holodeck-ssh-9.0</code></td>
+<td>9.0</td>
+<td>Builds and manages nested VCF lab environments.</td>
+</tr>
+<tr>
+<td>Fortinet FortiGate</td>
+<td><code>fortigate-rest-7.x</code></td>
+<td>7.2 to 7.x</td>
+<td>Reads firewalls and changes interfaces, routes, addresses, policies and IPsec VPNs.</td>
+</tr>
+<tr>
+<td>Fortinet FortiManager</td>
+<td><code>fortimanager-jsonrpc-7.x</code></td>
+<td>7.2 to 7.x</td>
+<td>Changes addresses, groups and policies, then installs the policy package to devices.</td>
+</tr>
+<tr>
+<td>Fortinet FortiAnalyzer</td>
+<td><code>fortianalyzer-jsonrpc-7.x</code></td>
+<td>7.2 to 7.x</td>
+<td>Searches the logs and events that FortiAnalyzer keeps for many devices.</td>
+</tr>
+<tr>
+<td>Fortinet FortiMail</td>
+<td><code>fortimail-rest-7.x</code></td>
+<td>7.2 to 7.x</td>
+<td>Reads status, quarantine and mail queues, and changes block lists, safe lists and policies.</td>
+</tr>
+<tr>
+<td>Fortinet FortiSIEM</td>
+<td><code>fortisiem-rest-7.5</code>, <code>fortisiem-rest-7.4</code></td>
+<td>7.4 to 7.x</td>
+<td>Reads the health of the FortiSIEM nodes and the organizations.</td>
+</tr>
+<tr>
+<td>CrowdStrike Falcon</td>
+<td><code>falcon-rest-2026.11</code></td>
+<td>cloud service</td>
+<td>Reads hosts and detections, and cuts a host off the network or gives it back.</td>
 </tr>
 </tbody>
 </table>
 <h2 id="versions-and-how-a-connector-is-chosen">Versions and how a connector is chosen<a class="headerlink" href="#versions-and-how-a-connector-is-chosen" title="Permanent link">&para;</a></h2>
-<p><strong>Supported versions</strong> is the product-version range an implementation advertises. Where a product has more than one implementation — a modern and a legacy one, say — both are registered and MEHO resolves the right one per target from the target's fingerprint, so one estate spanning old and new versions just works.</p>
+<p><strong>Supported versions</strong> is the product-version range an implementation advertises. Where a product has more than one implementation — a modern and a legacy one, say — both are registered and MEHO resolves the right one per target from the target's fingerprint, so one estate spanning old and new versions just works. A connector can also state the target versions its operations work on. MEHO checks this range each time an operation runs (at dispatch time), also when the call names the connector itself. Outside the range, MEHO refuses the call with <code>unqualified_target_version</code>, and a Sensor on that connector can read <code>unknown</code>. So pick the connector whose version matches the target, for example <code>vmware-rest-8.0</code> for vCenter 8.0.x and <code>vmware-rest-9.0</code> for vCenter 9.0.x.</p>
 <h2 id="maturity-and-readiness">Maturity and readiness<a class="headerlink" href="#maturity-and-readiness" title="Permanent link">&para;</a></h2>
 <p>This inventory lists what is <em>registered</em>; it does not restate a ship-state. Feature-level maturity — GA, beta, or experimental — is published in the <a href="../maturity/">feature maturity index</a>. Per-release, per-connector ship-state (dispatch + catalog, loader-wired, or production-ready) is stated in the <a href="https://github.com/evoila/meho/blob/main/CHANGELOG.md">changelog</a> under the connector release-notes convention. The two-connector model is described in the <a href="../../architecture/">architecture overview</a>.</p>
 
@@ -2651,10 +2960,10 @@
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

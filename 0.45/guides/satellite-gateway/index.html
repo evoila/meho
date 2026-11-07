@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -249,7 +249,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../install/" class="md-tabs__link">
+        <a href="../../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -605,6 +605,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../install/" class="md-nav__link">
         
   
@@ -756,10 +784,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -777,8 +805,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1630,6 +1658,34 @@
     
   
     Audit forensics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
   
 
     
@@ -2544,16 +2600,20 @@ on it.</p>
 as opt-in and validate it in your own environment before you rely on it.</p>
 <h2 id="enroll-and-deploy-a-satellite">Enroll and deploy a satellite<a class="headerlink" href="#enroll-and-deploy-a-satellite" title="Permanent link">&para;</a></h2>
 <p><strong>1. Register a runner principal</strong> on central. This mints the
-satellite's identity (a Keycloak client tagged <code>kind=runner</code>) and its
-credentials:</p>
+satellite's identity (a Keycloak client <code>runner:&lt;name&gt;</code>, tagged
+<code>kind=runner</code>):</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>runner-principal<span class="w"> </span>register<span class="w"> </span>edge-dc-a
-<span class="c1"># → runner_id + token (deploy these to the satellite as MEHO_RUNNER_ID / MEHO_RUNNER_TOKEN)</span>
+<span class="c1"># → the principal: id, Keycloak client runner:edge-dc-a, owner</span>
 </code></pre></div>
+<p>Register prints no token. MEHO stores the client's secret in Vault
+(under the same path pattern as agent secrets). Set <code>MEHO_RUNNER_ID</code> to
+the runner name (<code>edge-dc-a</code>). <code>MEHO_RUNNER_TOKEN</code> is a bearer token of
+that Keycloak client.</p>
 <p><strong>2. Deploy the runner</strong> inside the isolated network — the same image,
 started in runner mode, configured entirely through <code>MEHO_RUNNER_*</code> env:</p>
 <div class="highlight"><pre><span></span><code><span class="nv">MEHO_RUNNER_CENTRAL_URL</span><span class="o">=</span>https://meho.example.com<span class="w"> </span><span class="se">\</span>
 <span class="nv">MEHO_RUNNER_ID</span><span class="o">=</span>edge-dc-a<span class="w"> </span><span class="se">\</span>
-<span class="nv">MEHO_RUNNER_TOKEN</span><span class="o">=</span>&lt;token-from-step-1&gt;<span class="w"> </span><span class="se">\</span>
+<span class="nv">MEHO_RUNNER_TOKEN</span><span class="o">=</span>&lt;token-of-runner:edge-dc-a&gt;<span class="w"> </span><span class="se">\</span>
 python<span class="w"> </span>-m<span class="w"> </span>meho_backplane.runner
 </code></pre></div>
 <p>Optional knobs: <code>MEHO_RUNNER_TICK_INTERVAL_SECONDS</code> (poll cadence),
@@ -2563,10 +2623,12 @@ spool bounds).</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>runner-principal<span class="w"> </span>list
 meho<span class="w"> </span>runner-principal<span class="w"> </span>show<span class="w"> </span>edge-dc-a
 </code></pre></div>
-<p>Once the satellite is polling, central assigns it the checks whose
-targets live in its network, and their results flow into the same
-dashboards and sensor state as every locally-run check — the satellite
-is invisible to the consumer of the data.</p>
+<p><strong>4. Assign its checks.</strong> A tenant_admin sets the checks of each runner
+with <code>PUT /api/v1/checks/assignment/{runner}</code>. Each check names a
+target, a <code>safe</code> operation, its params and a cadence in seconds. There
+is no CLI verb for it. The satellite picks up its list on its next
+poll. MEHO stores the results per runner; they do not feed sensors or
+dashboards.</p>
 <h2 id="liveness-and-the-kill-switch">Liveness and the kill switch<a class="headerlink" href="#liveness-and-the-kill-switch" title="Permanent link">&para;</a></h2>
 <p>A satellite that dies or loses its uplink must not leave its checks
 silently reporting last-known-good forever. Liveness is enforced on the
@@ -2579,8 +2641,8 @@ silently reporting last-known-good forever. Liveness is enforced on the
   wedged work loop cannot masquerade as alive.</li>
 <li><strong>Dead-man staleness.</strong> When a runner's <code>last_seen_at</code> falls behind
   the cutoff, central flips its assignment rows to stale and writes an
-  internal audit row (<code>gateway.runner.stale</code>) — the affected checks
-  surface as <code>unknown</code>, not a stale green.</li>
+  internal audit row (<code>gateway.runner.stale</code>) — the runner shows as
+  <code>unknown</code> on the console page <code>/ui/runners</code>, not a stale green.</li>
 </ul>
 <p>To decommission or contain a satellite, revoke its principal — the kill
 switch:</p>
@@ -2588,14 +2650,12 @@ switch:</p>
 </code></pre></div>
 <h2 id="satellite-vs-the-in-process-check-runner">Satellite vs. the in-process check runner<a class="headerlink" href="#satellite-vs-the-in-process-check-runner" title="Permanent link">&para;</a></h2>
 <p>Do not confuse the satellite with the <strong>in-process check runner</strong> that
-evaluates <a href="../sensors-quickstart/">sensors</a> inside the central pod. They
-run the same safe check evaluations; the difference is <em>where</em>. The
-in-process runner handles targets central can reach directly (and its
-background-credential story is in
-<a href="../sensors-quickstart/#sensors-and-your-credential-backend">Sensors and your credential backend</a>);
-the satellite handles the targets it cannot. A sensor's author does not
-choose — central routes each check to whichever runner can reach its
-target.</p>
+evaluates <a href="../sensors-quickstart/">sensors</a> inside the central pod.
+Sensors always run in the central pod, on targets central can reach
+directly (the background-credential story is in
+<a href="../sensors-quickstart/#sensors-and-your-credential-backend">Sensors and your credential backend</a>).
+Satellite checks are a separate list that a tenant_admin writes for each
+runner (step 4 above), for the targets central cannot reach.</p>
 <h2 id="what-can-go-wrong-here">What can go wrong here<a class="headerlink" href="#what-can-go-wrong-here" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -2612,7 +2672,7 @@ target.</p>
 <td>Set all three; the error names the offender.</td>
 </tr>
 <tr>
-<td>Checks on a satellite's targets go <code>unknown</code> after the satellite stops</td>
+<td>The runner shows <code>unknown</code> on <code>/ui/runners</code> after the satellite stops</td>
 <td>The dead-man sweep flipped its assignments stale because <code>last_seen_at</code> fell behind — working as designed, not a false green.</td>
 <td>Bring the satellite back; restart it or check its outbound path to <code>MEHO_RUNNER_CENTRAL_URL</code>.</td>
 </tr>
@@ -2735,10 +2795,10 @@ Beta across the surfaces these guides cover.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

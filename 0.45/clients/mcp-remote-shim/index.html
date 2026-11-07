@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -249,7 +249,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../install/" class="md-tabs__link">
+        <a href="../../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -605,6 +605,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../install/" class="md-nav__link">
         
   
@@ -756,10 +784,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -777,8 +805,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1741,6 +1769,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guides/settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guides/flight-recorder/" class="md-nav__link">
         
   
@@ -2422,14 +2478,14 @@ client supports neither.</p>
 <p>Runs here, as everywhere in this section, from a machine <strong>on the
 internal network / VPN</strong>.</p>
 <h2 id="mint-a-token">Mint a token<a class="headerlink" href="#mint-a-token" title="Permanent link">&para;</a></h2>
-<p>There is no <code>--print-token</code> verb. Force the CLI's file token backend and
-read the access token out of <code>credentials.json</code>:</p>
-<div class="highlight"><pre><span></span><code><span class="nv">MEHO_KEYRING_DISABLE</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>meho<span class="w"> </span>login<span class="w"> </span>https://meho.example.com
-
-<span class="nb">export</span><span class="w"> </span><span class="nv">MEHO_TOKEN</span><span class="o">=</span><span class="s2">"Bearer </span><span class="k">$(</span>jq<span class="w"> </span>-r<span class="w"> </span>--arg<span class="w"> </span>url<span class="w"> </span>https://meho.example.com<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span><span class="s1">'.entries[] | select(.backplane_url == $url) | .access_token'</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span><span class="s2">"</span><span class="si">${</span><span class="nv">XDG_CONFIG_HOME</span><span class="k">:-</span><span class="nv">$HOME</span><span class="p">/.config</span><span class="si">}</span><span class="s2">/meho/credentials.json"</span><span class="k">)</span><span class="s2">"</span>
+<p>Log in with <code>--print-token</code>. The CLI then writes only the access token to
+standard output. The login prompt and all other lines go to standard
+error:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">MEHO_TOKEN</span><span class="o">=</span><span class="s2">"Bearer </span><span class="k">$(</span>meho<span class="w"> </span>login<span class="w"> </span>--print-token<span class="w"> </span>https://meho.example.com<span class="k">)</span><span class="s2">"</span>
 </code></pre></div>
+<p>To use the token of an existing login without a new login, read it from
+the CLI's credentials file instead; see
+<a href="../cli/#reading-the-raw-token">Reading the raw token</a>.</p>
 <p>Keep the <code>Bearer</code> prefix (and its trailing space) inside the variable:
 <code>mcp-remote</code> splits <code>--header</code> on the first colon into name and value,
 and its README documents stashing a space-containing value in the
@@ -2572,10 +2628,10 @@ feature — treat it as a preview.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

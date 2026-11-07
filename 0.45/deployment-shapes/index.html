@@ -16,14 +16,14 @@
         <link rel="prev" href="../architecture/">
       
       
-        <link rel="next" href="../install/">
+        <link rel="next" href="../install/ways-to-install/">
       
       
         
       
       
       <link rel="icon" href="../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -251,7 +251,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../install/" class="md-tabs__link">
+        <a href="../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -817,6 +817,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../install/" class="md-nav__link">
         
   
@@ -968,10 +996,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -989,8 +1017,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1857,6 +1885,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../guides/settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../guides/flight-recorder/" class="md-nav__link">
         
   
@@ -2630,8 +2686,15 @@
 
 
 <h1 id="deployment-shapes">Deployment shapes<a class="headerlink" href="#deployment-shapes" title="Permanent link">&para;</a></h1>
-<p>MEHO ships as <strong>one Helm chart</strong>. The five shapes below are not five
-products and not five installs — they are the five ways real estates
+<p>MEHO ships as <strong>one Helm chart</strong>. By default the chart also brings its
+own PostgreSQL, Keycloak and OpenBao (an open-source fork of Vault).
+This is the normal way. You can connect your own PostgreSQL or secret
+store instead; the
+<a href="../install/#two-ways-to-install">install trail</a> says how. The
+Helm chart is the install form available today. A Linux-server install
+and a VMware appliance are in progress; every shape below applies to
+them too.</p>
+<p>The five shapes below are not five products and not five installs — they are the five ways real estates
 differ: network topology, credential backend, and tenancy. Every shape
 runs the same chart with the same components; what changes is which
 network the backplane can dial, where credentials live, and how many
@@ -2692,13 +2755,13 @@ cloud-native install rather than replacing it.</p>
 </tr>
 <tr>
 <td>Keycloak realm</td>
-<td>You</td>
-<td>The OIDC issuer. The backplane needs a confidential client plus the public <code>meho-cli</code> device-code client with audience mappers.</td>
+<td>MEHO</td>
+<td>The login server MEHO trusts. MEHO's built-in Keycloak makes the realm <code>meho</code>. Connect your <a href="../install/login/">company login</a> in front of it (AD/LDAP, Entra ID, authentik, your own Keycloak). Replacing it with your own Keycloak is an expert path: it needs realm admin rights to make MEHO's realm, clients and groups — see <a href="../install/keycloak-realm/">Keycloak realm setup</a>.</td>
 </tr>
 <tr>
 <td>PostgreSQL + pgvector</td>
-<td>You</td>
-<td>Operator-managed; the <code>vector</code> extension is pre-created once by a superuser, and the chart expects an <code>asyncpg</code> DSN.</td>
+<td>MEHO by default, or you</td>
+<td>The chart's built-in PostgreSQL, with pgvector on. With your own (<code>corePostgres.enabled: false</code>), the <code>vector</code> extension is pre-created once by a superuser, and the chart expects an <code>asyncpg</code> DSN.</td>
 </tr>
 <tr>
 <td>Valkey broadcast</td>
@@ -2707,8 +2770,8 @@ cloud-native install rather than replacing it.</p>
 </tr>
 <tr>
 <td>Credential backend</td>
-<td>You</td>
-<td>HashiCorp Vault KV-v2 (the default) <strong>or</strong> Google Secret Manager, selected with <code>config.credentialBackend</code>.</td>
+<td>MEHO by default, or you</td>
+<td>The chart's built-in OpenBao (an open-source fork of Vault). With <code>coreVault.enabled: false</code>: your own HashiCorp Vault KV-v2 <strong>or</strong> Google Secret Manager, selected with <code>config.credentialBackend</code>.</td>
 </tr>
 <tr>
 <td>Targets</td>
@@ -2779,7 +2842,7 @@ control is load-bearing or where the setting differs.</p>
 <tbody>
 <tr>
 <td><strong>Network isolation</strong></td>
-<td><code>networkPolicy.enabled: true</code> (default-deny ingress + egress) is the baseline for any multi-tenant or production install. Enabling it makes the schema <em>require</em> the three egress CIDRs, so it refuses to ship a wide subnet by accident. Staging it off is a first-install convenience only, and a documented downgrade for anything past bring-up.</td>
+<td><code>networkPolicy.enabled: true</code> (default-deny ingress + egress) is the baseline for any multi-tenant or production install. Enabling it makes the schema <em>require</em> an egress CIDR for each part you bring yourself (PostgreSQL, Vault, Keycloak), so it refuses to ship a wide subnet by accident; the built-in parts need none. Staging it off is a first-install convenience only, and a documented downgrade for anything past bring-up.</td>
 <td><a href="../install/#step-6-write-your-values-file"><code>install/index.md</code> § Step 6</a> <code>networkPolicy</code> block</td>
 </tr>
 <tr>
@@ -2863,16 +2926,17 @@ allowlist.</p>
 <ul>
 <li>Your targets sit in one network segment that the cluster can already
   reach.</li>
-<li>You already run a Keycloak realm and either a Vault or Google Secret
-  Manager.</li>
+<li>You use the chart's built-in PostgreSQL, Keycloak and OpenBao, or you
+  already run your own.</li>
 <li>One team, one tenant, a handful of targets, interactive operators
   only.</li>
 </ul>
 <p><strong>What it still costs you.</strong> "Flat" is a network statement, not an
-install shortcut. Every cold-install prerequisite applies unchanged: the
-pgvector extension step, the <code>asyncpg</code> DSN, the Keycloak clients and
-mappers, an internal-CA trust bundle where your services use private
-certificates, and a pinned immutable image tag. A flat LAN is still
+install shortcut. Every cold-install prerequisite applies unchanged: a
+pinned immutable image tag, and with your own parts also the pgvector
+extension step, the <code>asyncpg</code> DSN, the Keycloak clients and mappers,
+and an internal-CA trust bundle where your services use private
+certificates. A flat LAN is still
 private address space, so the allowlist entry above is mandatory —
 there is no shape in which it is optional.</p>
 <h2 id="segmented-network-with-satellite-gateways">Segmented network with satellite gateways<a class="headerlink" href="#segmented-network-with-satellite-gateways" title="Permanent link">&para;</a></h2>
@@ -2896,7 +2960,7 @@ a <strong>satellite gateway</strong> inside each enclave it cannot.</p>
     tb["Targets"]
   end
   subgraph enclave["Enclave C: no inbound path from central"]
-    runner["Satellite gateway (read-only executor)"]
+    runner["Satellite gateway (read-only by default)"]
     tc["Targets"]
   end
   agent --&gt; bp
@@ -2908,7 +2972,7 @@ a <strong>satellite gateway</strong> inside each enclave it cannot.</p>
   bp --&gt;|"governed operations"| ta
   bp --&gt;|"governed operations"| tb
   runner --&gt;|"outbound-only poll and report"| bp
-  runner --&gt;|"read-only operations"| tc</code></pre>
+  runner --&gt;|"safe operations, approved caution changes"| tc</code></pre>
 <p><strong>Pick this shape when:</strong></p>
 <ul>
 <li>Two or more network segments sit between the cluster and the targets.</li>
@@ -2918,20 +2982,25 @@ a <strong>satellite gateway</strong> inside each enclave it cannot.</p>
   no-inbound network — will never accept a connection from the central
   cluster.</li>
 </ul>
-<p><strong>Satellite gateways are read-only by design — and that is a planning
+<p><strong>Satellite gateways are read-only by default — and that is a planning
 constraint, not a limitation to work around.</strong> A gateway is a dumb
 executor of centrally authorised work. It runs the same container image
 in a different mode, holds no local database, broadcast bus, console, or
 MCP endpoint, and <strong>dials outbound only</strong> — it polls the central
-instance for its assignment, executes read-only operations locally
-against the same connector surface, and reports results back. All
-authorisation, approval, and audit stay central; a gateway never
-self-authorises.</p>
+instance for its assignment, executes its work locally against the same
+connector surface, and reports results back. All authorisation,
+approval, and audit stay central; a gateway never self-authorises.</p>
 <p>The consequence is worth stating plainly to whoever is planning the
 rollout: <strong>an enclave served only by a satellite gateway gets
-observation, not change automation.</strong> Write workflows require the
-central backplane to reach the target itself. Design the segment map
-around that before anyone promises otherwise. Implementation detail:
+observation and, at most, small approved changes.</strong> A tenant admin can
+turn on a write tier for one runner. Then <code>caution</code> operations on that
+runner's allowlist run there, each after a person approves it.
+<code>dangerous</code> and <code>destructive</code> operations never run on a satellite: they
+need the central backplane to reach the target itself. Design the
+segment map around that before anyone promises otherwise. How the write
+tier works:
+<a href="../guides/satellite-gateway/#writes-through-a-satellite">Writes through a satellite</a>.
+Implementation detail:
 <a href="https://github.com/evoila/meho/blob/main/docs/codebase/satellite-runner.md"><code>docs/codebase/satellite-runner.md</code></a>.
 The satellite gateway is a <strong>Beta</strong> feature — see the
 <a href="../reference/maturity/">feature maturity index</a>.</p>
@@ -3038,7 +3107,9 @@ GKE or GCP-adjacent, and you would rather not couple "read a credential"
 to "be on a particular network" — a managed secret store removes that
 coupling, since where the store lives becomes a cloud decision instead
 of a network one.</p>
-<p><strong>Setting it up.</strong> <code>config.credentialBackend: gsm</code> selects the backend;
+<p><strong>Setting it up.</strong> Set <code>coreVault.enabled: false</code> first: the chart
+refuses Google Secret Manager while the built-in OpenBao is on. Then
+<code>config.credentialBackend: gsm</code> selects the backend;
 <code>vault.address</code> stays blank, because the chart schema requires it only
 for the Vault backend. The health check's federation proof then reads
 through Secret Manager instead of Vault. Worked example:
@@ -3171,8 +3242,8 @@ repository:</p>
   (<code>values-kind.yaml</code>, explicitly <em>not</em> a functional federation
   deploy).</li>
 <li><a href="https://github.com/evoila/meho/blob/main/docs/codebase/satellite-runner.md"><code>docs/codebase/satellite-runner.md</code></a>
-  — the satellite gateway's outbound-only, read-only, no-local-state
-  design.</li>
+  — the satellite gateway's outbound-only, read-only-by-default,
+  no-local-state design.</li>
 <li><a href="https://github.com/evoila/meho#verify-image--chart--cli-signatures">Repository README</a>
   — cosign keyless verification for the image, chart, and CLI.</li>
 <li><a href="../reference/maturity/">Feature maturity index</a> — the shipped tier of
@@ -3231,13 +3302,13 @@ repository:</p>
         
         
           
-          <a href="../install/" class="md-footer__link md-footer__link--next" aria-label="Next: The install trail">
+          <a href="../install/ways-to-install/" class="md-footer__link md-footer__link--next" aria-label="Next: Ways to install MEHO">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                The install trail
+                Ways to install MEHO
               </div>
             </div>
             <div class="md-footer__button md-icon">
@@ -3278,10 +3349,10 @@ repository:</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

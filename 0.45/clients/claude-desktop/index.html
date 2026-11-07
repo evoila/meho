@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -249,7 +249,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../install/" class="md-tabs__link">
+        <a href="../../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -605,6 +605,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../install/" class="md-nav__link">
         
   
@@ -756,10 +784,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -777,8 +805,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1869,6 +1897,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guides/settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guides/flight-recorder/" class="md-nav__link">
         
   
@@ -2885,16 +2941,19 @@ in-process.</p>
 </ul>
 <h2 id="one-time-realm-redirect-uris">One-time realm redirect URIs<a class="headerlink" href="#one-time-realm-redirect-uris" title="Permanent link">&para;</a></h2>
 <p><code>mcp-remote</code>'s OAuth callback path is <strong><code>/oauth/callback</code></strong> — not the
-<code>/callback</code> that Claude Code and the bootstrap script use. On a fixed
+<code>/callback</code> that Claude Code uses. On a fixed
 local port (below, <code>8456</code>), the <code>meho-mcp</code> client therefore needs
 <strong>both</strong> loopback forms as valid redirect URIs:</p>
 <div class="highlight"><pre><span></span><code>http://localhost:8456/oauth/callback
 http://127.0.0.1:8456/oauth/callback
 </code></pre></div>
 <p><code>mcp-remote</code> tries <code>localhost</code> and its <code>127.0.0.1</code> twin, so register
-both. The port must match the one in the config below. The rest of the
-<code>meho-mcp</code> client shape (public PKCE client, five protocol mappers,
-four default scopes, and <code>offline_access</code>, <code>mcp:read</code>, <code>mcp:execute</code> and
+both. The port must match the one in the config below. A realm made from
+the chart's realm file, or with <code>meho admin keycloak bootstrap-clients</code>,
+already has <code>http://localhost:*</code> and <code>http://127.0.0.1:*</code>, which cover
+both paths on any port. The rest of the
+<code>meho-mcp</code> client shape (public PKCE client, eight protocol mappers,
+six default scopes, and <code>offline_access</code>, <code>mcp:read</code>, <code>mcp:execute</code> and
 <code>mcp:admin</code> optional) is in
 <a href="../../install/keycloak-realm/">Keycloak realm setup</a>.</p>
 <h2 id="configure-claude_desktop_configjson">Configure <code>claude_desktop_config.json</code><a class="headerlink" href="#configure-claude_desktop_configjson" title="Permanent link">&para;</a></h2>
@@ -3084,10 +3143,10 @@ differently.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

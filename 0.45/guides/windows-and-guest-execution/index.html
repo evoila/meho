@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -249,7 +249,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../install/" class="md-tabs__link">
+        <a href="../../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -605,6 +605,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../install/" class="md-nav__link">
         
   
@@ -756,10 +784,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -777,8 +805,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1630,6 +1658,34 @@
     
   
     Audit forensics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
   
 
     
@@ -2590,8 +2646,9 @@ by its <code>connector_id</code>, exactly as in the first-operations ladder.</p>
 <p><strong>Windows Server (<code>winsrv</code>).</strong> System facts, service start/stop/restart,
 Windows feature install and removal, reboot and shutdown, local users,
 disk / iSCSI-initiator storage, and the server's NTP time source. The
-reboot, shutdown, feature-removal, local-user-delete and time-source
-operations wait for a person to approve them; everything else is a read or
+reboot, shutdown, feature-removal, local-user-delete, time-source and
+iSCSI-connect (<code>winsrv.storage.iscsi.connect</code>) operations wait for a
+person to approve them; everything else is a read or
 a recoverable write.</p>
 <p><strong>Active Directory (<code>msad</code>).</strong> Domain, forest, and DC topology reads, AD
 replication metadata, plus guarded day-2 writes over users, groups,
@@ -2601,7 +2658,11 @@ controller — the AD cmdlets contact the local directory. Object deletes
 "unjoin" is a recoverable disable, not a delete. For building a new domain
 there are a read of the password rules and the join limit, and changes that
 wait for a person to approve them: create a group, set the password rules,
-set the join limit, and let a group create computers in an OU (and undo it).</p>
+set the join limit, and let a group create computers in an OU (and undo it).
+For passwords there is a read of when an account's password was last set
+and when it expires (<code>msad.user.password-expiry</code>), and
+<code>msad.user.set-password</code>, which sets a user's password from the secret
+store and enables the account. It waits for a person to approve it.</p>
 <p><strong>Windows DNS (<code>windns</code>).</strong> Read the zones on an AD-integrated DNS server,
 read records, add A and CNAME records, and remove a record set. The
 record removal is a permanent delete. You preview it first to get a
@@ -2628,7 +2689,10 @@ healthy before a cutover or planned failover.</p>
 It reads a Hyper-V host's inventory, VM configuration (including the
 firmware generation and secure-boot state a target needs), virtual-disk
 format and differencing chains, and checkpoints — the inputs a migration
-plan is built from — plus a guarded <code>Export-VM</code> that seeds the migration.
+plan is built from. It can also create a checkpoint, start or stop a VM,
+and run <code>Export-VM</code> to seed the migration (all <code>caution</code>). Reverting or
+deleting a checkpoint is <code>dangerous</code> and waits for a person to approve
+it.
 It manages the <em>source</em> estate so you can plan and stage the move; it does
 not build new VMs on Hyper-V. Cluster-wide views of a Hyper-V cluster's
 nodes are the <code>wsfc</code> connector's job on the same hosts, not duplicated
@@ -2648,8 +2712,12 @@ Windows host, with PowerShell reachable as its shell:</p>
 </code></pre></div>
 <p>The credential is an ordinary SSH secret in your store: a <code>username</code> with
 either a <code>password</code> or an <code>ssh_private_key</code> field (key auth is preferred
-when the key is present). Nothing else is needed — the connector reads the
-one SSH secret and constructs each command locally.</p>
+when the key is present). The secret must also pin the host key: add a
+<code>known_hosts</code> field with OpenSSH <code>known_hosts</code> lines for the host. You can
+set <code>known_hosts_insecure: true</code> instead, but MEHO then logs a warning on
+every connect. A secret with neither field fails before MEHO connects.
+The connector reads the one SSH secret and constructs each command
+locally.</p>
 <div class="highlight"><pre><span></span><code><span class="nt">targets</span><span class="p">:</span>
 <span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">win-fs01</span>
 <span class="w">    </span><span class="nt">product</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">winsrv</span><span class="w">                 </span><span class="c1"># winsrv | msad | windns | wsfc | hyperv</span>
@@ -2659,9 +2727,10 @@ one SSH secret and constructs each command locally.</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>import<span class="w"> </span>targets.yaml
 meho<span class="w"> </span>targets<span class="w"> </span>probe<span class="w"> </span>win-fs01
 </code></pre></div>
-<p>A green probe reports <code>vendor: microsoft</code> and the product it observed
-(for example <code>windows-server</code>, <code>active-directory</code>, or <code>hyper-v</code>), which
-is how the resolver later matches the target to its connector.</p>
+<p>A green probe reports <code>vendor: microsoft</code>, the product it observed (for
+example <code>windows-server</code>, <code>active-directory</code>, or <code>hyper-v</code>) and the
+version. The resolver picks the connector from the target's <code>product</code>
+token (<code>winsrv</code>, <code>msad</code>, …) and the probed version.</p>
 <h3 id="sql-server-over-tds">SQL Server over TDS<a class="headerlink" href="#sql-server-over-tds" title="Permanent link">&para;</a></h3>
 <p><code>mssql</code> is different: it speaks the SQL Server wire protocol directly on
 port 1433, so there is no SSH server to stand up. It also carries <strong>two
@@ -2697,24 +2766,27 @@ the discipline is what makes it safe to hand to an agent:</p>
   their type first. A value that tries to break out of the string cannot.</li>
 <li><strong>No credential material is ever in the script.</strong> The encoded command
   is visible to a privileged observer on the remote host, so the transport
-  forbids any secret in the script body. The SSH login is the only secret,
-  and it stays in the transport, never in a command.</li>
+  forbids any secret in the script body. The SSH login stays in the
+  transport. A value an operation reads from the secret store
+  (<code>msad.user.set-password</code>) goes to PowerShell on standard input, never
+  into the script.</li>
 </ul>
-<p>That last rule has one honest consequence: operations that would need a
-secret <em>in</em> the command are deliberately absent. <code>winsrv</code> creates a local
-user without a password (set it out of band afterwards); <code>msad</code> creates a
-disabled, passwordless account you enable once a password is set out of
-band. There is no password-reset operation on the estate.</p>
+<p>That last rule has one honest consequence: <code>winsrv</code> creates a local user
+without a password (set it out of band afterwards). <code>msad</code> creates a
+disabled, passwordless account. Set its password with
+<code>msad.user.set-password</code>: you pass <code>password_ref</code>, a reference into the
+secret store, never the password itself.</p>
 <p>Windows Server ships PowerShell 5.1, not PowerShell 7, so these connectors
 target 5.1 explicitly — the cmdlet surface is stable across Windows Server
 2016 through 2025.</p>
 <div class="admonition note">
 <p class="admonition-title">How preview behaves for these operations</p>
 <p><code>preview_operation</code> returns the literal request a spec-ingested
-operation would send. These connectors are typed, so their <code>safe</code>
-reads and <code>caution</code> writes have no single such request, and preview
+operation would send. These connectors are typed, so an operation
+that runs without approval has no single such request, and preview
 answers <code>status: "unavailable"</code> — the expected result, not a failure.</p>
-<p>The governed tiers <em>are</em> previewable. A <code>dangerous</code>-with-approval or
+<p>The governed tiers <em>are</em> previewable. Every operation that waits for
+approval (also a <code>caution</code> one such as <code>winsrv.time.set</code>) and every
 <code>destructive</code> operation returns a synthetic preview carrying the same
 redacted proposed-effect the approval park shows the approver —
 resolved with nothing sent, no park, and no audit row — so you can
@@ -2722,7 +2794,8 @@ read the would-be effect of, say, <code>msad.user.delete</code> or
 <code>guest.file.write</code> before you submit it. A destructive delete such as
 <code>windns.record.remove</code> is previewable too; the exact record set it
 would remove is enumerated when it parks for approval.</p>
-<p>One operation here stays <code>unavailable</code> on purpose: <code>guest.program.run</code>.
+<p>A credential operation such as <code>msad.user.set-password</code> stays
+<code>unavailable</code>. So does <code>guest.program.run</code>.
 Because its <code>arguments</code> and <code>env</code> can carry a secret, it is treated as
 a credential-class write and does not synthesize a preview — the
 approver sees its redacted summary (program path, argument size,
@@ -2815,10 +2888,11 @@ pack's documentation. The public image answers an in-guest call with
   prompt — there is deliberately no raw-T-SQL operation. A read-only,
   guarded-SELECT operation could be added later if a concrete need
   appears; it is not shipped.</li>
-<li><strong>No password provisioning over the estate transport.</strong> Local and
-  domain accounts are created passwordless (and, in AD, disabled); set the
-  password out of band. There is no password-reset operation. This falls
-  out of the "no secret in the command" rule and is intentional.</li>
+<li><strong>Passwords come from the secret store, never the command.</strong> Local and
+  domain accounts are created passwordless (and, in AD, disabled). Set an
+  AD user's password with <code>msad.user.set-password</code> (from the secret
+  store, after approval); set a local user's password out of band. This
+  follows from the "no secret in the command" rule.</li>
 <li><strong>SQL encryption is default-posture today.</strong> <code>mssql</code> connects to a
   standard instance cleanly; certificate-validated TLS for an instance
   that <em>forces</em> encryption is a named future extension, not yet built.</li>
@@ -2939,10 +3013,10 @@ mechanics behind every parked write above.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

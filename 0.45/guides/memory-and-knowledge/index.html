@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -249,7 +249,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../install/" class="md-tabs__link">
+        <a href="../../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -605,6 +605,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../install/" class="md-nav__link">
         
   
@@ -756,10 +784,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -777,8 +805,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1785,6 +1813,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../flight-recorder/" class="md-nav__link">
         
   
@@ -2502,9 +2558,13 @@ fragmenting.</p>
 <ul>
 <li>A running backplane and a connected client
   (<a href="../../clients/">Connect clients</a>).</li>
-<li>Reading and personal writes need the <strong>operator</strong> role. Writing
-  to a <strong>tenant-shared</strong> scope (memory <code>tenant</code>, or any kb entry)
-  needs <strong>tenant_admin</strong>.</li>
+<li>Personal writes need the <strong>operator</strong> role. On MCP, reading
+  needs <strong>operator</strong> too. On REST and the CLI, a <code>read_only</code> login
+  can read memory.</li>
+<li>Writing memory in the <code>tenant</code> scope needs <strong>tenant_admin</strong>.</li>
+<li><code>meho kb add</code> and <code>POST /api/v1/kb</code> need <strong>tenant_admin</strong>. Over
+  MCP, <code>add_to_knowledge</code> is open to an <strong>operator</strong>, who can add
+  kb entries and change only the ones they created.</li>
 <li>Memory and knowledge are <strong>GA</strong> — the 1.0 stability promise
   applies (see the
   <a href="../../reference/maturity/#ga-features">feature-maturity index</a>).</li>
@@ -2592,7 +2652,7 @@ narrowest scope that captures intent:</p>
 </tr>
 <tr>
 <td><code>target</code></td>
-<td>everyone touching that target</td>
+<td>everyone in the tenant (tied to one target)</td>
 <td><code>target_name</code></td>
 </tr>
 </tbody>
@@ -2612,8 +2672,9 @@ narrowest scope that captures intent:</p>
 <span class="w"> </span><span class="nt">"metadata"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"tags"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"ops"</span><span class="p">]},</span><span class="w"> </span><span class="nt">"expires_at"</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nt">"created_at"</span><span class="p">:</span><span class="w"> </span><span class="s2">"…"</span><span class="p">}</span>
 </code></pre></div>
 <h2 id="memory-ttl">Memory: TTL<a class="headerlink" href="#memory-ttl" title="Permanent link">&para;</a></h2>
-<p>Memory can <strong>expire</strong> — the difference from the durable kb. TTL is an
-ISO-8601 duration (<code>P7D</code> = 7 days, <code>PT1H</code> = 1 hour):</p>
+<p>Memory can <strong>expire</strong> — the difference from the durable kb. On MCP,
+<code>ttl</code> is an ISO-8601 duration (<code>P7D</code> = 7 days, <code>PT1H</code> = 1 hour). On the
+CLI, <code>--ttl</code> takes a short form such as <code>30m</code>, <code>24h</code> or <code>7d</code>:</p>
 <ul>
 <li>A <code>user</code>-scope write with <strong>no</strong> <code>ttl</code> picks up the backend default
   (7 days, <code>MEMORY_USER_DEFAULT_TTL_DAYS</code>) — a personal note self-cleans.</li>
@@ -2621,13 +2682,13 @@ ISO-8601 duration (<code>P7D</code> = 7 days, <code>PT1H</code> = 1 hour):</p>
 <li><code>tenant</code>- and <code>target</code>-scope writes default to <strong>no expiry</strong> — shared
   conventions are meant to last.</li>
 </ul>
-<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>remember<span class="w"> </span><span class="s2">"debugging the flaky RKE2 upgrade"</span><span class="w"> </span>--scope<span class="w"> </span>user<span class="w"> </span>--ttl<span class="w"> </span>PT2H
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>remember<span class="w"> </span><span class="s2">"debugging the flaky RKE2 upgrade"</span><span class="w"> </span>--scope<span class="w"> </span>user<span class="w"> </span>--ttl<span class="w"> </span>2h
 meho<span class="w"> </span>remember<span class="w"> </span><span class="s2">"team convention: always --dry-run first"</span><span class="w"> </span>--scope<span class="w"> </span>tenant<span class="w"> </span>--persist
 </code></pre></div>
 <h2 id="search-either-store">Search either store<a class="headerlink" href="#search-either-store" title="Permanent link">&para;</a></h2>
 <p>Retrieval fuses BM25 (lexical) and cosine (semantic) ranks. Search
 memory scoped or unscoped:</p>
-<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>recall<span class="w"> </span>--query<span class="w"> </span><span class="s2">"DRS automation"</span><span class="w"> </span>--scope<span class="w"> </span>target<span class="w"> </span>--target<span class="w"> </span>prod-vc-1
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>recall<span class="w"> </span>--query<span class="w"> </span><span class="s2">"DRS automation"</span><span class="w"> </span>--scope<span class="w"> </span>target
 </code></pre></div>
 <div class="highlight"><pre><span></span><code><span class="c1">// search_memory {"query": "DRS automation", "scope": "target"}</span>
 <span class="p">{</span><span class="nt">"hits"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
@@ -2662,7 +2723,7 @@ Omitting <code>scope</code> on <code>search_memory</code> searches every scope y
 <code>search_knowledge</code> takes an optional <code>filters</code> object (e.g.
 <code>{"kind": "kb-entry"}</code>) that narrows by metadata containment.</p>
 <h2 id="write-knowledge">Write knowledge<a class="headerlink" href="#write-knowledge" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>kb<span class="w"> </span>add<span class="w"> </span>vcenter-session-auth<span class="w"> </span>--body-file<span class="w"> </span>./vcenter-session-auth.md
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>kb<span class="w"> </span>add<span class="w"> </span>vcenter-session-auth<span class="w"> </span>--body<span class="w"> </span>@./vcenter-session-auth.md
 </code></pre></div>
 <div class="highlight"><pre><span></span><code><span class="c1">// add_to_knowledge {"slug": "vcenter-session-auth", "body": "# vCenter session auth\n…"}</span>
 <span class="p">{</span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"…"</span><span class="p">,</span><span class="w"> </span><span class="nt">"slug"</span><span class="p">:</span><span class="w"> </span><span class="s2">"vcenter-session-auth"</span><span class="p">,</span><span class="w"> </span><span class="nt">"body"</span><span class="p">:</span><span class="w"> </span><span class="s2">"# vCenter session auth\n…"</span><span class="p">,</span>
@@ -2882,10 +2943,10 @@ than stored.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -249,7 +249,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../install/" class="md-tabs__link">
+        <a href="../../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -605,6 +605,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../install/" class="md-nav__link">
         
   
@@ -756,10 +784,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -777,8 +805,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1453,6 +1481,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#the-record-schema" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The record schema
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#use-a-secret-with-different-field-names" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1799,6 +1838,34 @@
     
   
     Audit forensics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
   
 
     
@@ -2430,6 +2497,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#the-record-schema" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The record schema
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#use-a-secret-with-different-field-names" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2601,17 +2679,24 @@ which is why this is the first guide.</p>
 <tr>
 <td><strong>REST — <code>POST /api/v1/targets</code></strong></td>
 <td>The API the other two paths call.</td>
-<td>Automation that already speaks REST.</td>
+<td>Scripts that a person runs with their own login.</td>
 </tr>
 </tbody>
 </table>
-<p><strong>There are no MCP tools for registering targets or staging secrets —
-deliberately.</strong> Registration is an operator-trust decision, so it
-lives on the operator surfaces above; agents get the read-only
-<code>list_targets</code> tool and consume whatever you registered. This is also
-why the CLI is worth installing before your first agent session. If
-that boundary ever moves, the change will be tracked on the
-<a href="../../reference/maturity/">feature-maturity index</a>.</p>
+<p>Create, edit and delete on REST are for people only. A service login
+gets <code>403 human_principal_required</code>, also with the <strong>tenant_admin</strong>
+role. It registers a target with the <code>targets.register</code> operation and
+removes one with <code>targets.remove</code> (connector <code>targets-registry-1.x</code>).
+MEHO checks both against the approval rules.</p>
+<p><strong>Register targets on the operator surfaces above.</strong> Registration is an
+operator-trust decision. For agents, the default MCP tools only read
+targets (<code>list_targets</code>). A session that asked for the <code>mcp:admin</code>
+scope also has <code>meho_targets_register</code> (tenant_admin only). Through
+<code>call_operation</code>, the connector <code>targets-registry-1.x</code> offers
+<code>targets.register</code>, <code>targets.remove</code> and <code>targets.probe</code>; an agent's
+register waits for a person's approval, and <code>targets.remove</code> always
+waits for one. MEHO has no MCP tool to stage a secret. This is also why
+the CLI is worth installing before your first agent session.</p>
 <h2 id="write-a-targetsyaml">Write a <code>targets.yaml</code><a class="headerlink" href="#write-a-targetsyaml" title="Permanent link">&para;</a></h2>
 <p>The file is a <code>targets:</code> list. A minimal, realistic pair — a
 Kubernetes cluster and a VMware appliance that is reached by IP:</p>
@@ -2625,7 +2710,7 @@ Kubernetes cluster and a VMware appliance that is reached by IP:</p>
 
 <span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">lab-vcenter</span>
 <span class="w">    </span><span class="nt">product</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vmware</span>
-<span class="w">    </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10.20.0.15</span><span class="w">                </span><span class="c1"># reached by IP...</span>
+<span class="w">    </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">192.0.2.15</span><span class="w">                </span><span class="c1"># reached by IP...</span>
 <span class="w">    </span><span class="nt">tls_server_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vc01.lab.example.com</span><span class="w">   </span><span class="c1"># ...but the cert's SAN is the FQDN</span>
 <span class="w">    </span><span class="nt">tls_ca_pin</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
 <span class="w">      </span><span class="no">-----BEGIN CERTIFICATE-----</span>
@@ -2633,17 +2718,22 @@ Kubernetes cluster and a VMware appliance that is reached by IP:</p>
 <span class="w">      </span><span class="no">-----END CERTIFICATE-----</span>
 <span class="w">    </span><span class="nt">notes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vCenter reached by IP; SNI + cert verification pinned to the SAN name.</span>
 </code></pre></div>
+<p>The <code>vmware</code> entry needs a VMware connector package. Without one, MEHO
+refuses <code>product: vmware</code> with 422 <code>unknown_product</code>.</p>
 <p>Mapping rules the importer applies:</p>
 <ul>
 <li><strong>Recognised top-level keys</strong> map 1:1 to real columns: <code>name</code>,
   <code>aliases</code>, <code>product</code>, <code>host</code>, <code>port</code>, <code>fqdn</code>, <code>secret_ref</code>,
   <code>auth_model</code>, <code>vpn_required</code>, <code>notes</code>, <code>preferred_impl_id</code>,
   <code>verify_tls</code>, <code>tls_ca_pin</code>, <code>tls_server_name</code>, <code>secret_field_map</code>,
-  <code>extras</code>.</li>
+  <code>version</code> (a quoted string, for example <code>version: "9.0"</code>),
+  <code>flight_recorder_capture</code>, <code>extras</code>.</li>
 <li><strong><code>name</code>, <code>product</code>, and <code>host</code> are required</strong> and validated
   locally before any HTTP request.</li>
 <li><strong>Unknown keys are not errors</strong> — they spill into the target's
-  <code>extras</code> JSON column, so you can carry your own annotations.</li>
+  <code>extras</code> JSON column, and the importer prints a warning for each one.
+  To carry your own annotations without the warning, put them under an
+  <code>extras:</code> block.</li>
 <li><strong><code>fingerprint</code> is server-managed</strong> and dropped with a warning; the
   probe verb is its only writer.</li>
 <li><code>verify_tls: false</code> and <code>tls_ca_pin</code> are mutually exclusive (422):
@@ -2655,6 +2745,22 @@ Kubernetes cluster and a VMware appliance that is reached by IP:</p>
   <code>extras.exception_message</code>.</li>
 </ul>
 <p>You can leave <code>secret_ref</code> out entirely — see the next section.</p>
+<h3 id="the-record-schema">The record schema<a class="headerlink" href="#the-record-schema" title="Permanent link">&para;</a></h3>
+<p>One entry of the <code>targets:</code> list has a published JSON Schema:
+<a href="https://github.com/evoila/meho/blob/main/docs/schemas/target-record-v1.schema.json"><code>docs/schemas/target-record-v1.schema.json</code></a>.
+The toolkit repos and MEHO use the same description, so a file that
+passes the schema imports without edits. The fields are the keys listed
+above, plus <code>fingerprint</code>: the detected product and version (<code>vendor</code>,
+<code>product</code>, <code>version</code>, <code>build</code>, <code>edition</code>, <code>reachable</code>, <code>probed_at</code>,
+<code>probe_method</code> and <code>extras</code>). A file may carry <code>fingerprint</code>. The import
+skips it with a warning, because only a probe writes it.</p>
+<p>The schema allows keys it does not list. The import keeps them in
+<code>extras</code> and warns. The CLI import and the console import map the same
+keys.</p>
+<p>The schema has the same limits as the API. A name or alias has no
+spaces, line breaks or <code>/</code>. <code>secret_field_map</code> holds at most 50
+entries. A CA pin (<code>tls_ca_pin</code>) does not go together with
+<code>verify_tls: false</code>. <code>version</code> is text, for example <code>"8.0"</code>, or <code>null</code>.</p>
 <h3 id="use-a-secret-with-different-field-names">Use a secret with different field names<a class="headerlink" href="#use-a-secret-with-different-field-names" title="Permanent link">&para;</a></h3>
 <p>A connector reads fixed field names from the secret. For example, SSH
 reads <code>ssh_private_key</code> and <code>username</code>. If your secret already holds the
@@ -2901,9 +3007,9 @@ meho<span class="w"> </span>targets<span class="w"> </span>discover<span class="
 <td>Known limitation — documented in <a href="https://github.com/evoila/meho/blob/main/docs/deploying.md"><code>docs/deploying.md</code></a>; verify credentialed dispatch with a real operation call instead.</td>
 </tr>
 <tr>
-<td>Registration accepted, but <em>every</em> dispatch fails with a <code>no_connector</code> error naming the wrong thing</td>
-<td>A <code>product</code> no connector implementation actually serves can slip through registration in some cases; the dispatch-time error then misattributes the cause.</td>
-<td>Known issue, tracked in <a href="https://github.com/evoila/meho/issues/2701">evoila/meho#2701</a>. Re-check the target's <code>product</code> against the connector catalog.</td>
+<td>Dispatch fails with <code>no_connector: no implementation for product='…' version='…'</code></td>
+<td>No connector implementation matches the target's product and version.</td>
+<td>Check the target's <code>product</code> and <code>version</code> against the connector catalog. Probe the target, or set its <code>version</code>.</td>
 </tr>
 </tbody>
 </table>
@@ -3020,10 +3126,10 @@ copy, never a value or a hash.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

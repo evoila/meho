@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -249,7 +249,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../install/" class="md-tabs__link">
+        <a href="../../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -605,6 +605,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../install/" class="md-nav__link">
         
   
@@ -756,10 +784,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -777,8 +805,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1630,6 +1658,34 @@
     
   
     Audit forensics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
   
 
     
@@ -2943,7 +2999,8 @@ gets, and which connectors it may use. You pass it with <code>--toolset</code>.<
 <li><code>meta_tools</code> and <code>connectors</code> must be lists of strings. Anything else
   (for example a single string) makes the run fail.</li>
 <li>The <code>connectors</code> list limits <code>call_operation</code> and
-  <code>preview_operation</code>. When the agent asks for a connector that is not in
+  <code>preview_operation</code>, and <code>meho_connector_list</code> shows only the
+  connectors in the list. When the agent asks for a connector that is not in
   the list, MEHO refuses the call and tells the agent which connectors it
   may use.</li>
 </ul>
@@ -2971,6 +3028,11 @@ gets, and which connectors it may use. You pass it with <code>--toolset</code>.<
 <tr>
 <td><code>call_operation</code></td>
 <td>Run one operation. This is the only tool that changes or reads your systems.</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>meho_status</code></td>
+<td>Check whether MEHO itself is healthy.</td>
 <td>yes</td>
 </tr>
 <tr>
@@ -3028,10 +3090,39 @@ gets, and which connectors it may use. You pass it with <code>--toolset</code>.<
 <td>Read one Memory, knowledge base, or convention entry that a search returned.</td>
 <td>no — you must name it</td>
 </tr>
+<tr>
+<td><code>add_to_memory</code></td>
+<td>Save a note to the Memory store.</td>
+<td>no — you must name it</td>
+</tr>
+<tr>
+<td><code>add_to_knowledge</code></td>
+<td>Add or update an entry in the knowledge base.</td>
+<td>no — you must name it</td>
+</tr>
+<tr>
+<td><code>list_doc_collections</code></td>
+<td>List the vendor document collections the agent may search. Needs the docs add-on.</td>
+<td>no — you must name it</td>
+</tr>
+<tr>
+<td><code>search_docs</code></td>
+<td>Search vendor documents. Needs the docs add-on.</td>
+<td>no — you must name it</td>
+</tr>
+<tr>
+<td><code>read_docs</code></td>
+<td>Read more around a vendor document hit. Needs the docs add-on.</td>
+<td>no — you must name it</td>
+</tr>
 </tbody>
 </table>
-<p>The last four return text that people in your tenant stored. That is
-why the agent only gets them when you name them.</p>
+<p>The search and read tools return text that people in your tenant stored,
+or text from vendor documents. The two <code>add_to_</code> tools write to your
+tenant. That is why the agent only gets these tools when you name them.</p>
+<p>The two <code>add_to_</code> tools write with the agent's limits, not yours. The
+agent may change only its own knowledge base entries. It cannot save a
+Memory note for the whole team, even when a tenant admin starts the run.</p>
 <div class="admonition note">
 <p class="admonition-title">One more tool: <code>invoke_agent</code></p>
 <p>Every hosted run also gets the <code>invoke_agent</code> tool. With it, the
@@ -3043,10 +3134,12 @@ above. Putting <code>invoke_agent</code> in <code>meta_tools</code> does nothing
 <p>Some tools exist for MCP clients but not for hosted agents. Putting
 these names in <code>meta_tools</code> does nothing:</p>
 <ul>
-<li>no health or status tool (<code>meho_status</code>);</li>
-<li>no runbook tools (<code>meho_runbook_*</code>);</li>
+<li>no runbook tools (<code>meho_runbook_*</code>). A person must confirm each
+  runbook step;</li>
+<li>no <code>ask_docs</code>. It calls a model of its own, outside the run's model
+  setting. The agent uses <code>search_docs</code> and <code>read_docs</code> and writes the
+  answer itself;</li>
 <li>no approval tools. An agent can never approve anything;</li>
-<li>no tools that write to Memory or the knowledge base;</li>
 <li>no admin tools.</li>
 </ul>
 <h3 id="a-read-only-toolset">A read-only toolset<a class="headerlink" href="#a-read-only-toolset" title="Permanent link">&para;</a></h3>
@@ -3399,14 +3492,13 @@ meho<span class="w"> </span>agent<span class="w"> </span>run-status<span class="
 <p>For a run that repeats, use <code>--kind cron</code> with <code>--cron-expr</code> and
 <code>--timezone</code>. The scheduler guide shows the full set of flags.</p>
 <h2 id="step-7-check-what-the-agent-did">Step 7 — Check what the agent did<a class="headerlink" href="#step-7-check-what-the-agent-did" title="Permanent link">&para;</a></h2>
-<p>Each operation the agent runs through <code>call_operation</code> writes an audit
-row. The row carries the run id in the <code>agent_session_id</code> field. So the
-run id is all you need to find the operations of one run.</p>
-<p>Not every tool call writes a row. In a hosted run, the discovery tools
-(<code>meho_connector_list</code>, <code>list_operation_groups</code>, <code>search_operations</code>,
-<code>list_targets</code>), <code>preview_operation</code>, and <code>result_query</code> do not write
-audit rows. So the audit shows <strong>which operations the agent ran</strong>, not
-every tool it touched. The run itself, with its status, its turns, and
+<p>Every tool call of a hosted run writes one audit row. The row carries
+the run id in the <code>agent_session_id</code> field. So the run id is all you
+need to find what one run did.</p>
+<p>That includes the discovery tools, <code>preview_operation</code>, <code>result_query</code>,
+the broadcast tools, <code>invoke_agent</code>, refused calls, and calls to a tool
+name the run does not have. A <code>call_operation</code> dispatch writes its own
+row and gets no second one. The run itself, with its status, its turns, and
 its output, is in <code>meho agent run-status &lt;run-id&gt;</code>.</p>
 <p>List every row of the run:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>audit<span class="w"> </span>query<span class="w"> </span>--session-id<span class="w"> </span>&lt;run-id&gt;
@@ -3420,7 +3512,8 @@ it:</p>
 <li><code>op_id</code> — which operation the agent ran;</li>
 <li><code>target_name</code> — on which target;</li>
 <li><code>policy_decision</code> — <code>auto-execute</code>, <code>needs-approval</code>, or <code>deny</code>;</li>
-<li><code>result_status</code> — <code>ok</code>, <code>error</code>, or <code>denied</code>;</li>
+<li><code>result_status</code> — <code>ok</code>, <code>pending</code> (the call waited for approval),
+  <code>error</code>, <code>denied</code>, or <code>withdrawn</code>;</li>
 <li><code>principal_sub</code> — who acted: the agent's sub for a scheduled run, your
   sub for a run you started by hand.</li>
 </ul>
@@ -3593,10 +3686,10 @@ it:</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -249,7 +249,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../install/" class="md-tabs__link">
+        <a href="../../install/ways-to-install/" class="md-tabs__link">
           
   
   
@@ -605,6 +605,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../install/ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../install/" class="md-nav__link">
         
   
@@ -756,10 +784,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_6" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_7" >
         
           
-          <label class="md-nav__link" for="__nav_2_6" id="__nav_2_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2_7" id="__nav_2_7_label" tabindex="0">
             
   
   
@@ -777,8 +805,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_2_6">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1785,6 +1813,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../flight-recorder/" class="md-nav__link">
         
   
@@ -2504,8 +2560,8 @@ graph in the first place.</p>
   (<a href="../../clients/">Connect clients</a>).</li>
 <li>Reads (<code>dependents</code>, <code>dependencies</code>, <code>path</code>, <code>list-edges</code>,
   <code>timeline</code>, <code>diff</code>, <code>history</code>) need the <strong>operator</strong> role.
-  Curated writes (<code>annotate</code>, <code>unannotate</code>, <code>bulk-import</code>,
-  <code>create-node</code>) need <strong>tenant_admin</strong>.</li>
+  Curated writes (<code>annotate</code>, <code>unannotate</code>, <code>bulk-import</code>, and the
+  MCP tool <code>meho_topology_create_node</code>) need <strong>tenant_admin</strong>.</li>
 <li>Topology is <strong>Beta</strong> — see the
   <a href="../../reference/maturity/#topology">feature-maturity index</a> for
   the road to GA. The load-bearing gap today: <strong>automatic
@@ -2675,9 +2731,12 @@ is a <strong>valid answer, not an error</strong>:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>topology<span class="w"> </span>path<span class="w"> </span>ingress-web<span class="w"> </span>datastore-cold-99
 <span class="c1"># no path from "ingress-web" to "datastore-cold-99" within the hop budget</span>
 </code></pre></div>
-<p>Over MCP the same result is <code>{kind: "path", path: &lt;TopologyPath&gt;|null}</code>
-— <code>null</code> is the unreachable answer. A <code>TopologyPath</code> carries <code>nodes</code>
-(ordered <code>from</code> → <code>to</code>) and <code>total_hops</code>.</p>
+<p>Over MCP the answer carries a <code>status</code>: <code>found</code> (with the path),
+<code>no_route</code> (both ends exist, but no route within <code>max_hops</code>) or
+<code>node_untracked</code> (an end is not in your tenant's graph). The CLI and
+REST answer <code>null</code> / "no path" for both of the last two. A
+<code>TopologyPath</code> carries <code>nodes</code> (ordered <code>from</code> → <code>to</code>) and
+<code>total_hops</code>.</p>
 <h2 id="surveying-and-change-history">Surveying and change history<a class="headerlink" href="#surveying-and-change-history" title="Permanent link">&para;</a></h2>
 <p><code>list-edges</code> is the flat inventory of relationships — filterable by
 <code>--kind</code>, <code>--source curated|auto</code>, endpoints (<code>--from</code> / <code>--to</code>), and
@@ -2717,9 +2776,10 @@ says so, listing which products do have populators.</p>
    service <code>depends-on</code> — a tenant_admin asserts the edge by hand:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>topology<span class="w"> </span>annotate<span class="w"> </span>app-1<span class="w"> </span>depends-on<span class="w"> </span>vault-role-app
 </code></pre></div>
-<p>On an empty tenant, seed the endpoints first with
-<code>meho topology create-node</code> (annotate requires both endpoints to
-exist). Curated edges are idempotent and survive every refresh.</p>
+<p>On an empty tenant, seed the endpoints first with the MCP tool
+<code>meho_topology_create_node</code> (annotate requires both endpoints to
+exist). It is an operator-plane tool: the MCP session needs the
+<code>mcp:admin</code> scope. The CLI has no verb for it. Curated edges are idempotent and survive every refresh.</p>
 </li>
 </ol>
 <p>This is why a sensor's investigator correlation, or a blast-radius
@@ -2760,8 +2820,8 @@ the gate lives in the dispatcher, not the front. See
 <td>This is your green light for a destructive op.</td>
 </tr>
 <tr>
-<td><code>path</code> returns <code>null</code> / "no path"</td>
-<td>Unreachable within <code>--max-hops</code>, a missing endpoint, or a cross-tenant endpoint — all the same answer by design.</td>
+<td><code>path</code> returns <code>null</code> / "no path" (CLI, REST)</td>
+<td>Unreachable within <code>--max-hops</code>, a missing endpoint, or a cross-tenant endpoint — all the same answer on the CLI and REST. Over MCP, <code>status</code> tells <code>no_route</code> from <code>node_untracked</code>.</td>
 <td>Raise <code>--max-hops</code>, or check the endpoint names exist (<code>meho topology list-edges</code>).</td>
 </tr>
 <tr>
@@ -2876,10 +2936,10 @@ the gate lives in the dispatcher, not the front. See
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

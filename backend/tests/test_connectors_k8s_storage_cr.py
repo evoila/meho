@@ -314,6 +314,7 @@ async def test_ls_forwards_persistentvolumeclaims_to_new_op() -> None:
     """``k8s.ls /<ns>/persistentvolumeclaims`` resolves to the new op, not unknown_op."""
     connector = _make_connector()
     forwarded = MagicMock()
+    forwarded.status = "ok"
     forwarded.model_dump.return_value = {"status": "ok"}
     connector.execute = AsyncMock(return_value=forwarded)  # type: ignore[method-assign]
 

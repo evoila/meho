@@ -75,6 +75,7 @@ import structlog
 from sqlalchemy import select
 
 from meho_backplane.broadcast.events import resolve_op_class
+from meho_backplane.db.change_counter import ChangeCounter
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import BroadcastOverride
 
@@ -101,6 +102,10 @@ _CACHE_TTL_SECONDS: Final[float] = 60.0
 #: Reading is a thread-cheap (and asyncio-cheap) pure dict lookup; only
 #: the cache-miss DB pull awaits.
 _TENANT_CACHE: dict[UUID, tuple[list[BroadcastOverride], float]] = {}
+
+#: Change counts per tenant. A load that overlaps a clear of its tenant does
+#: not fill the cache (see :mod:`meho_backplane.db.change_counter`).
+_TENANT_CHANGES = ChangeCounter()
 
 
 #: Op classes that aggregate-only by default per decision #3 in
@@ -251,6 +256,7 @@ async def _load_tenant_rules(tenant_id: UUID) -> list[BroadcastOverride]:
         # leaves it empty (no degraded read cached), forcing the
         # default branch on subsequent calls until the DB recovers.
         del _TENANT_CACHE[tenant_id]
+    seen = _TENANT_CHANGES.current(tenant_id)
     try:
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
@@ -267,7 +273,8 @@ async def _load_tenant_rules(tenant_id: UUID) -> list[BroadcastOverride]:
             exc_info=True,
         )
         return []
-    _TENANT_CACHE[tenant_id] = (fresh_rules, now + _CACHE_TTL_SECONDS)
+    if _TENANT_CHANGES.unchanged_since(tenant_id, seen):
+        _TENANT_CACHE[tenant_id] = (fresh_rules, now + _CACHE_TTL_SECONDS)
     return fresh_rules
 
 
@@ -287,7 +294,10 @@ def invalidate_tenant_cache(tenant_id: UUID) -> None:
     "Out of scope": "Cross-tenant cache coherence (none needed -- the
     cache is per-tenant by design)" -- which excludes the harder
     per-tenant cross-worker case for the same reason: TTL is enough).
+
+    A load for the tenant that is still running does not fill the cache.
     """
+    _TENANT_CHANGES.bump(tenant_id)
     _TENANT_CACHE.pop(tenant_id, None)
 
 
@@ -299,6 +309,7 @@ def reset_overrides_cache_for_testing() -> None:
     an autouse fixture so cache state cannot leak between cases.
     """
     _TENANT_CACHE.clear()
+    _TENANT_CHANGES.reset_for_testing()
 
 
 async def compute_effective_broadcast_detail(

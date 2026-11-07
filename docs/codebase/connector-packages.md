@@ -128,7 +128,8 @@ and runs the overlay wheel checks on its wheel. It runs on every pull
 request that is not docs-only, so a kit change that breaks the sample fails
 in the same pull request.
 
-The folder's `__init__.py` does three things when MEHO imports it:
+The folder's `__init__.py` can do five things when MEHO imports it. The
+first two are always needed:
 
 1. **Register the connector class** with `register_connector_v2` from the
    connector kit (`meho_connector_kit`). The class is a subclass of the
@@ -226,6 +227,12 @@ Rules the code checks at start:
 - Keep every handler inside the package's own folder. MEHO records the
   package of an operation from the place of its handler (see "When a
   package is removed").
+- Mark every input that holds an address MEHO connects to (a URL, a host
+  name, a host and port) with the kit's `CALLER_ADDRESS_MARKER`
+  (`x-meho-caller-address: true`) in its parameter schema. MEHO then runs
+  the operation at `caution` or higher, and it waits for a person's
+  approval. The operation contract check fails when an input looks like
+  an address and has no marker.
 
 MEHO does the rest for every operation: policy, approvals, audit, removal
 of secrets from results, and a result handle (a link to the stored result)
@@ -613,6 +620,18 @@ allowlist file only once, at start. `installed_connector_packages()` in
 Each entry has the name, version, wheel digest and folders, as in the
 allowlist file. For the plain public image the list is empty, and the CLI
 and the console say "none".
+
+The package list also counts in two other places:
+
+- **Approvals.** A waiting approval stores the running release, and that
+  release includes a short digest of the installed connector packages. A
+  new, updated or removed package ends waiting requests with reason
+  `release_changed`. See [approvals.md](approvals.md).
+- **Satellite runners.** A runner sends the digest of its own package set.
+  MEHO gives a runner only the work items of a package it has with the same
+  digest, and the runner refuses an item whose package set differs. See
+  [satellite-runner.md](satellite-runner.md), "Connector package set
+  check".
 ## When a package is removed
 
 Each operation row records the package that wrote it, in the column
@@ -877,9 +896,10 @@ answer".
 - Plain modules (single `.py` files) directly in `connectors/` are not
   imported by the walk, so the check does not look at them.
 - The check does not stop public code from importing a connector folder
-  that will leave this repository in a package. A separate test does:
-  `backend/tests/test_split_ready_imports.py` reads every public module
-  and fails when one imports such a folder.
+  that left this repository in a package. A separate test does:
+  `backend/tests/test_split_ready_imports.py` reads every public module.
+  It fails when a module imports one of those folders, or when such a
+  folder comes back.
 - MEHO must be installed, as a wheel or as an editable install of the same
   checkout. A bare source tree on `PYTHONPATH` that borrows another
   checkout's install has no file list and is outside that checkout, so

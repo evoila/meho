@@ -145,7 +145,8 @@ More rules:
 - `meta_tools` and `connectors` must be lists of strings. Anything else
   (for example a single string) makes the run fail.
 - The `connectors` list limits `call_operation` and
-  `preview_operation`. When the agent asks for a connector that is not in
+  `preview_operation`, and `meho_connector_list` shows only the
+  connectors in the list. When the agent asks for a connector that is not in
   the list, MEHO refuses the call and tells the agent which connectors it
   may use.
 
@@ -155,10 +156,10 @@ These are the names you can put in `meta_tools`:
 
 | Tool | What the agent can do with it | In the default set |
 |---|---|---|
-| `meho_status` | Check whether MEHO itself is healthy. | yes |
 | `list_operation_groups` | List the operation groups of one connector. | yes |
 | `search_operations` | Search a connector's operations by meaning and by words. | yes |
 | `call_operation` | Run one operation. This is the only tool that changes or reads your systems. | yes |
+| `meho_status` | Check whether MEHO itself is healthy. | yes |
 | `meho_connector_list` | List the connectors your tenant can use. | yes |
 | `list_targets` | List the targets in your tenant. | yes |
 | `preview_operation` | Show the request `call_operation` would send, without sending it. | yes |
@@ -520,15 +521,14 @@ For a run that repeats, use `--kind cron` with `--cron-expr` and
 
 ## Step 7 — Check what the agent did
 
-Each operation the agent runs through `call_operation` writes an audit
-row. The row carries the run id in the `agent_session_id` field. So the
-run id is all you need to find the operations of one run.
+Every tool call of a hosted run writes one audit row. The row carries
+the run id in the `agent_session_id` field. So the run id is all you
+need to find what one run did.
 
-Not every tool call writes a row. In a hosted run, the discovery tools
-(`meho_connector_list`, `list_operation_groups`, `search_operations`,
-`list_targets`), `preview_operation`, and `result_query` do not write
-audit rows. So the audit shows **which operations the agent ran**, not
-every tool it touched. The run itself, with its status, its turns, and
+That includes the discovery tools, `preview_operation`, `result_query`,
+the broadcast tools, `invoke_agent`, refused calls, and calls to a tool
+name the run does not have. A `call_operation` dispatch writes its own
+row and gets no second one. The run itself, with its status, its turns, and
 its output, is in `meho agent run-status <run-id>`.
 
 List every row of the run:
@@ -549,7 +549,8 @@ In each row, check:
 - `op_id` — which operation the agent ran;
 - `target_name` — on which target;
 - `policy_decision` — `auto-execute`, `needs-approval`, or `deny`;
-- `result_status` — `ok`, `error`, or `denied`;
+- `result_status` — `ok`, `pending` (the call waited for approval),
+  `error`, `denied`, or `withdrawn`;
 - `principal_sub` — who acted: the agent's sub for a scheduled run, your
   sub for a run you started by hand.
 

@@ -436,6 +436,11 @@ from meho_backplane.operations.reducer import (
 from meho_backplane.operations.result_document import json_text_bytes
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.secondary_target_policy import approved_requester_sub
+from meho_backplane.operations.shutdown_drain import (
+    is_draining,
+    shutting_down_result,
+    track_operation,
+)
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
     apply_connector_boundary_redaction,
@@ -1094,6 +1099,17 @@ def _agent_acts(operator: Operator) -> bool:
     return operator.principal_kind is PrincipalKind.AGENT or resolve_actor_sub() is not None
 
 
+def _reveal_waits_for_approval(operator: Operator, reveal_secret: bool) -> bool:
+    """True when a ``reveal_secret: true`` call must wait for a person's approval.
+
+    A person gets the hidden values of an answer at once when the policy
+    gate lets the call run. A machine login (a service principal) gets them
+    only after a person approved the call, also on a read that would run at
+    once. An agent is refused before this check (:func:`_refuse_agent_reveal`).
+    """
+    return reveal_secret and operator.principal_kind is not PrincipalKind.USER
+
+
 def _requester_runs_approved_call(operator: Operator) -> bool:
     """True when the requester of an approved call runs it, not a reviewer.
 
@@ -1117,7 +1133,9 @@ async def _refuse_agent_reveal(
     """Refuse ``reveal_secret: true`` for an agent, with a synchronous audit row.
 
     Only a person or a service principal may get the hidden values of an
-    answer back. The agent gets the names without the values by calling
+    answer back; a service principal's call waits for a person's approval
+    first (:func:`_reveal_waits_for_approval`). The agent gets the names
+    without the values by calling
     again without the flag, or uses an operation that moves the secret
     without showing it.
     """
@@ -3583,7 +3601,59 @@ async def dispatch(
     floor), so the approved op would loop back into the queue and never
     execute. It is not part of the public agent/MCP/CLI surface; the
     gate is the only authorization path for an ordinary dispatch.
+
+    While the pod stops (#5024, :mod:`.shutdown_drain`), a new top-level
+    call is refused with ``meho_shutting_down`` before anything is sent.
+    A step of a running multi-step operation and an approved run whose
+    claim was already taken are not new work and go on. Every top-level
+    call is kept in the list of running calls, so the stopping pod can wait
+    for it and record it when it does not finish.
     """
+    if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
+        return await _dispatch_now(
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            target=target,
+            params=params,
+            _approved=_approved,
+            preview_hash=preview_hash,
+            idempotency_key=idempotency_key,
+        )
+    if is_draining() and not _approved:
+        _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
+        return shutting_down_result(op_id)
+    async with track_operation(
+        op_id=op_id,
+        connector_id=connector_id,
+        operator_sub=operator.sub,
+        tenant_id=operator.tenant_id,
+        approved_run=_approved,
+    ):
+        return await _dispatch_now(
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            target=target,
+            params=params,
+            _approved=_approved,
+            preview_hash=preview_hash,
+            idempotency_key=idempotency_key,
+        )
+
+
+async def _dispatch_now(
+    *,
+    operator: Operator,
+    connector_id: str,
+    op_id: str,
+    target: Any,
+    params: dict[str, Any],
+    _approved: bool = False,
+    preview_hash: str | None = None,
+    idempotency_key: str | None = None,
+) -> OperationResult:
+    """Run one operation call: the body of :func:`dispatch`."""
     started = time.monotonic()
     # ``reveal_secret`` is a MEHO dispatch control, not a connector op param.
     # Strip it before hashing / schema validation / handler forwarding: every
@@ -3591,7 +3661,8 @@ async def dispatch(
     # ``credential_read`` op, or an op of ``_secret_values._VALUE_HIDING_OPS``)
     # hides every value. Getting the values back needs this explicit opt-in
     # by a person or a service principal (stamped on the audit row; an agent
-    # is refused). Stripping keeps the flag off the op's
+    # is refused, and a service principal's call waits for a person's
+    # approval). Stripping keeps the flag off the op's
     # ``additionalProperties: false`` schema, out of the handler's params,
     # and out of ``params_hash`` -- so a hidden answer and its reveal share
     # one hash (the reveal choice is recorded separately on the audit row,
@@ -3826,6 +3897,11 @@ async def dispatch(
             ):
                 _log.info("composite_child_covered_by_approved_run", op_id=op_id)
                 verdict = PermissionVerdict.AUTO_EXECUTE
+            if verdict is PermissionVerdict.AUTO_EXECUTE and _reveal_waits_for_approval(
+                operator, reveal_secret
+            ):
+                _log.info("reveal_secret_waits_for_approval", op_id=op_id)
+                verdict = PermissionVerdict.NEEDS_APPROVAL
             policy_decision_var.set(verdict.value)
             if verdict == PermissionVerdict.DENY:
                 duration_ms = _elapsed_ms(started)

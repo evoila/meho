@@ -19,8 +19,8 @@ graph in the first place.
       ([Connect clients](../clients/index.md)).
     - Reads (`dependents`, `dependencies`, `path`, `list-edges`,
       `timeline`, `diff`, `history`) need the **operator** role.
-      Curated writes (`annotate`, `unannotate`, `bulk-import`,
-      `create-node`) need **tenant_admin**.
+      Curated writes (`annotate`, `unannotate`, `bulk-import`, and the
+      MCP tool `meho_topology_create_node`) need **tenant_admin**.
     - Topology is **Beta** — see the
       [feature-maturity index](../reference/maturity.md#topology) for
       the road to GA. The load-bearing gap today: **automatic
@@ -161,9 +161,12 @@ meho topology path ingress-web datastore-cold-99
 # no path from "ingress-web" to "datastore-cold-99" within the hop budget
 ```
 
-Over MCP the same result is `{kind: "path", path: <TopologyPath>|null}`
-— `null` is the unreachable answer. A `TopologyPath` carries `nodes`
-(ordered `from` → `to`) and `total_hops`.
+Over MCP the answer carries a `status`: `found` (with the path),
+`no_route` (both ends exist, but no route within `max_hops`) or
+`node_untracked` (an end is not in your tenant's graph). The CLI and
+REST answer `null` / "no path" for both of the last two. A
+`TopologyPath` carries `nodes` (ordered `from` → `to`) and
+`total_hops`.
 
 ## Surveying and change history
 
@@ -217,9 +220,10 @@ Two ways it gets there:
     meho topology annotate app-1 depends-on vault-role-app
     ```
 
-    On an empty tenant, seed the endpoints first with
-    `meho topology create-node` (annotate requires both endpoints to
-    exist). Curated edges are idempotent and survive every refresh.
+    On an empty tenant, seed the endpoints first with the MCP tool
+    `meho_topology_create_node` (annotate requires both endpoints to
+    exist). It is an operator-plane tool: the MCP session needs the
+    `mcp:admin` scope. The CLI has no verb for it. Curated edges are idempotent and survive every refresh.
 
 This is why a sensor's investigator correlation, or a blast-radius
 check, "degrades to per-sensor findings without topology anchors" on
@@ -241,7 +245,7 @@ walk.
 | CLI: *"`X` is not tracked in the topology graph — run `meho topology refresh` or annotate"* (HTTP 404 `node_untracked`; MCP `{status: "node_untracked", nodes: []}`) | The anchor resolves to no node in your tenant. **Do not read this as "safe to delete"** — the call produced no blast-radius signal at all. Auto-discovery is k8s-only, so every non-k8s target starts here. | `meho topology refresh <target>` (k8s) or `meho topology annotate` the relationships (non-k8s). |
 | *"node `X` is ambiguous across kinds: host, vm — re-run with `--node-kind`"* (HTTP 409) | The bare name maps to more than one node kind in the tenant. | Pin the anchor with `--node-kind <kind>` (CLI) / `node_kind` (MCP). Note `--kind` is the *edge* filter, not the anchor pin — it will not clear this. |
 | `dependents` returns exactly one row | Not an error — that row is the anchor itself (depth 0). It means "tracked, nothing depends on it." | This is your green light for a destructive op. |
-| `path` returns `null` / "no path" | Unreachable within `--max-hops`, a missing endpoint, or a cross-tenant endpoint — all the same answer by design. | Raise `--max-hops`, or check the endpoint names exist (`meho topology list-edges`). |
+| `path` returns `null` / "no path" (CLI, REST) | Unreachable within `--max-hops`, a missing endpoint, or a cross-tenant endpoint — all the same answer on the CLI and REST. Over MCP, `status` tells `no_route` from `node_untracked`. | Raise `--max-hops`, or check the endpoint names exist (`meho topology list-edges`). |
 | `refresh` reports all-zero counts with a "no populator" note | The target's product has no topology populator on this version — the refresh could never change anything. | Curate the edges by hand (`annotate`), or track the populator's issue from the note. |
 | `403 insufficient_role` on `annotate` / `unannotate` | Curated writes need **tenant_admin**; your JWT is operator. | Use a tenant_admin session. |
 

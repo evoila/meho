@@ -246,6 +246,7 @@ async def retire_checklist_endpoint(
             session=session,
             surfaces=surfaces,
             tenant_id=target_tenant,
+            principal_sub=operator.sub,
             blocker_counts=blocker_counts,
             baseline_overrides=body.baseline_overrides,
             source="request_usage",

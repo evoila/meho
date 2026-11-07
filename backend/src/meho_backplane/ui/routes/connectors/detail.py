@@ -96,7 +96,7 @@ from meho_backplane.operations._lookup import (
 )
 from meho_backplane.operations.op_policy import OpKey, effective_policy_map
 from meho_backplane.targets.resolver import resolve_target
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.connectors.operator import (
     OperatorRoleProbe,
@@ -454,7 +454,7 @@ def _project_audit_rows(rows: Iterable[AuditLog]) -> list[dict[str, Any]]:
 
 
 #: Module-level :class:`fastapi.Depends` closures -- ruff B008 idiom.
-_require_ui_session_dep = Depends(require_ui_session)
+_require_ui_operator_dep = Depends(require_ui_operator)
 _get_raw_session_dep = Depends(get_raw_session)
 
 
@@ -629,7 +629,7 @@ def build_detail_router() -> APIRouter:
     async def _handler(
         request: Request,
         name: str,
-        session_ctx: UISessionContext = _require_ui_session_dep,
+        session_ctx: UISessionContext = _require_ui_operator_dep,
         db_session: AsyncSession = _get_raw_session_dep,
     ) -> HTMLResponse:
         """``GET /ui/connectors/{name}``."""
@@ -648,7 +648,7 @@ def build_detail_router() -> APIRouter:
     async def _recent_ops_handler(
         request: Request,
         name: str,
-        session_ctx: UISessionContext = _require_ui_session_dep,
+        session_ctx: UISessionContext = _require_ui_operator_dep,
         db_session: AsyncSession = _get_raw_session_dep,
     ) -> HTMLResponse:
         """``GET /ui/connectors/{name}/recent-operations``."""

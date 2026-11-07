@@ -504,9 +504,10 @@ command and key rotation:
    - With the hook Job, the new Deployment rolls only after the migration
      succeeds.
    - With the built-in PostgreSQL, a failed migration keeps the new pod
-     out of Ready, and the old pods keep serving. Helm sees this failure
-     only with `--wait`. Without it, Helm reports success and only the
-     pod status shows the failure. So run `helm upgrade` with `--wait`.
+     out of Ready. The old pod has already stopped (step 4), so MEHO is
+     down until you run `helm rollback`. Helm sees this failure only with
+     `--wait`. Without it, Helm reports success and only the pod status
+     shows the failure. So run `helm upgrade` with `--wait`.
 3. The new version ends the approval requests that still wait (#5030). A
    person approves one exact release, so at start-up every `pending`
    request from an older release expires with the reason
@@ -514,6 +515,19 @@ command and key rotation:
    has not run is refused before any vendor call. The requester asks
    again. See
    [`codebase/approvals.md`](codebase/approvals.md#an-approval-covers-one-exact-release-5030).
+4. The old pod stops before the new pod starts (#5024). The chart's
+   update strategy is `Recreate` (`updateStrategy`), so two releases never
+   work on the database at the same time. The old pod first keeps serving
+   for 5 seconds (`shutdown.preStopSleepSeconds`), so the Service and the
+   ingress stop sending it requests. Then it takes no new calls and lets
+   running operations finish, for up to 60 seconds
+   (`shutdown.drainSeconds`). An operation that still runs then is
+   recorded as unfinished: a log line `operation_unfinished_at_shutdown`
+   and an audit row with `result_status: unfinished`. Check its target
+   before you run it again. An update therefore costs about one to two
+   minutes without MEHO: the drain, plus the start of the new pod. Plan
+   updates for a quiet time. Details:
+   [`codebase/shutdown-drain.md`](codebase/shutdown-drain.md).
 
 ### Helm 4 / server-side-apply field-conflict caveat
 
@@ -557,7 +571,9 @@ migration hook has no pre-rollback `alembic downgrade`, so the schema stays
 at `N+1` after a rollback to an app version that expects `N`. The chart
 relies on backend forward-compat (an `N` app tolerating an `N+1` schema).
 See the [`helm rollback meho` acceptance contract](acceptance/rollback.md)
-for what "verified" means and the schema-check fallback.
+for what "verified" means and the schema-check fallback. When a new
+release fails to start, the old pod has already stopped (step 4 above), so
+MEHO is down until you roll back; the contract lists the recovery steps.
 
 ## Version-specific upgrade notes
 
@@ -607,6 +623,8 @@ Append a row here in the same PR that carries an upgrade-relevant change
 | **v0.44.0** | The chart sets a metrics token by default (`metricsAuth.enabled: true`): it makes the Secret `<release>-metrics-auth` on the first install and keeps it on upgrades. `/metrics` and the `features` block of `/ready` answer only a caller that sends the token; the verdict and the checks on `/ready`, and `/healthz`, stay open. The API docs pages (`/openapi.json`, `/docs`, `/redoc`) are off unless `API_DOCS_ENABLED` is set. | The chart's ServiceMonitor sends the token by itself. A scrape config of your own needs the token: `kubectl get secret <release>-metrics-auth -o jsonpath='{.data.token}' \| base64 -d`. To keep your own token, set `metricsAuth.existingSecret`; to set none, `metricsAuth.enabled: false`. For the API docs pages on an instance where that is fine, add `API_DOCS_ENABLED: "true"` with `extraEnv`. |
 | **v0.45.0** | Two schema migrations: the alembic head advances **`0135` → `0137`**. They change no existing row: `0136` adds the table `instance_settings_revision` (the history of settings imports; its rows cannot be changed or deleted), and `0137` adds `config_change` to the allowed audit event classes. An operation edit writes this class (#5655, #5794). While `0137` checks the existing audit rows, writes to the audit log wait. The upgrade ends every approval request that still waits (`release_changed`). The chart turns on the built-in PostgreSQL, Keycloak and OpenBao by default (`corePostgres.enabled`, `coreKeycloak.enabled` and `coreVault.enabled` are `true`) and connects MEHO to them: the database login, the OpenBao address and login role, the key for credential writes that wait for approval, and the NetworkPolicy egress by pod. With the built-in OpenBao, each tenant reads and writes only `secret/tenants/<tenant id>/` (#5654). Every token call and every agent runs only `safe` operations at once; the next row has the details (#5764). `meho approvals list` has a new `APPROVE` column after `RUN`, and the approval answers carry `may_approve` and `may_approve_reason` (#5763). An operation with a parameter that holds an address MEHO connects to waits for a person's approval, also with an override or a standing grant. This covers `pfsense.diag.ping`, `winsrv.storage.iscsi.connect` and `wsfc.witness.set`; the built-in `net.*` checks stay `safe` (#5787, #5796). An ingested licence operation stays off for every HTTP method (#5797). The startup probe allows 15 minutes for the first start (#5767). | **Bring-your-own installs, before the upgrade:** set `corePostgres.enabled`, `coreKeycloak.enabled` and `coreVault.enabled` to `false` for each part you bring yourself. Without them, Helm stops with an error that names the key. Installs with the built-in parts: remove `vault.address` and `config.vaultAddr` from your values; leave `postgres.credentialsSecret` empty or set to `<release>-core-postgres-meho`. Back up the database. Decide waiting approvals before the upgrade. Put at least one person in `MEHO-SA-Operators` (see the next row). Expect approvals for the three operations above. A sensor on `pfsense.diag.ping` reads `unknown`; use `net.ping` for sensors. Install the v0.45.0 CLI. A script that reads the `meho approvals list` table should use `--json`. Full list: the "Breaking changes" and "Steps after the upgrade" parts of the `[0.45.0]` CHANGELOG section. |
 | **v0.45.0** | Every token call runs only `safe` operations at once (#3980): MCP, the CLI and REST, also with a person's own token, and every agent. `caution`, `dangerous` and `destructive` changes from a token call wait for approval; the park stamps `waits_because: token_call` on a `caution` change that waits only for this reason. In the web interface (the only path that sets `web_session`), `caution` still runs at once and `dangerous` now waits, like `destructive` and `requires_approval`. Agents' `dangerous` and `destructive` requests now wait for a person's approval instead of `deny` (`_SAFETY_DEFAULT` / `_SAFETY_CEILING`). Service principals keep their standing-grant rule. The approval group rules shipped in v0.44.0 (#5688): only a MEHO-SA-Operator or a tenant admin approves another person's `dangerous` or `destructive` change, and only a MEHO-SA-Operator approves their own. | **Before the upgrade**, put at least one person in `MEHO-SA-Operators` (see `docs-site/install/keycloak-realm.md`, "Who may approve their own changes"); a tenant admin cannot approve their own `dangerous` or `destructive` change. Expect more waiting requests from CLI, MCP and REST users: they approve in the console, or with `meho approvals approve` and a fresh approval sign-in (#3979, #5515). A person may approve their own token `caution` change with a console click (`approval_rule` `token_call_self_approval`). Scripts that run `caution` changes with a token now get `awaiting_approval`; move fixed automation to a service principal with a standing grant. No schema migration for this change. See [`codebase/approvals.md`](codebase/approvals.md). |
+| **v0.45.0** | When a connector states the target versions its operations work on, MEHO runs an operation only on a target inside that range. MEHO checks this each time the operation runs. Outside the range, the call is refused with `unqualified_target_version`, and the error names the range and the target's version. For an operation from an API file, MEHO first looks for the same operation on the connector version that matches the target, and runs it there when it exists and is turned on. MEHO checks the range for operations from an API file and for multi-step operations. From v0.45.0 the VMware connectors state the target versions their multi-step operations work on, so MEHO now applies the check to them. A Sensor on a connector whose range does not include the target's version can read `unknown`. A scheduled job or another saved call on such a connector is refused. | **Before the upgrade**, list your Sensors with `meho sensor list --json` and check that each one uses the connector that matches its target's version. For example, use `vmware-rest-8.0` for a vCenter 8.0.x target and `vmware-rest-9.0` for a vCenter 9.0.x target. A Sensor cannot be changed, so delete a wrong one and create it again on the right connector. Check scheduled jobs and other saved calls the same way. See [Pick the connector version that matches the target](../docs-site/guides/sensors-quickstart.md#pick-the-connector-version-that-matches-the-target). |
+| **v0.46.0** | The key of the params hashes and value fingerprints (audit rows, approval requests, secret moves) is a secret of its own: `PARAMS_HASH_KEY`, chart block `paramsHashKey`. With a built-in core part, the install makes it in the Secret `<release>-core-params-hash` (key `params_hash_key`) and keeps it on every upgrade, so a new database password keeps every hash. Without it, MEHO makes the key from `DATABASE_URL`. New audit hashes and fingerprints do not match the ones made with the key from `DATABASE_URL`. | **Built-in core:** nothing to do. **No built-in part:** store at least 32 random characters in a Kubernetes Secret and set `paramsHashKey.secretName` (and `paramsHashKey.secretKey` if the key name is not `params_hash_key`). A request that waits for approval while you set the key still matches its own params. To rotate the key later, follow "Rotating `PARAMS_HASH_KEY`" in [`codebase/approvals.md`](codebase/approvals.md). |
 
 ## Operational chart knobs
 

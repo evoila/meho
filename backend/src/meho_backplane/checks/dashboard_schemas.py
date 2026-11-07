@@ -94,8 +94,9 @@ _EMAIL_ADAPTER: TypeAdapter[str] = TypeAdapter(EmailStr)
 class DashboardCreate(BaseModel):
     """Request body for ``POST /api/v1/checks/dashboards``.
 
-    Membership is set at create only (no PUT; "edit" is delete + recreate,
-    the trigger-immutability posture). An empty ``sensor_ids`` is permitted --
+    Membership, name and mail settings can be changed later with
+    ``PATCH`` (:mod:`meho_backplane.checks.dashboard_edit`). An empty
+    ``sensor_ids`` is permitted --
     a member-less Dashboard rolls up to ``unknown`` (the zero-member rule) --
     but duplicates are de-duplicated by the service before insert. A foreign
     or absent sensor id is refused 422 ``sensor_not_found`` at the boundary.
@@ -103,15 +104,16 @@ class DashboardCreate(BaseModel):
     *tenant_id* (optional) lets a platform-admin caller target another
     tenant; the boundary enforces the RBAC via ``authorize_tenant_scope``.
 
-    ``notify_email`` / ``notify_min_state`` are the #2719 notification config,
-    set at create only like membership. Omitting ``notify_email`` leaves
-    notifications off for this Dashboard. Since #2764 it carries **one or more**
-    comma-separated recipients: each entry is validated individually with
-    pydantic's ``EmailStr`` (``email-validator``), so a single malformed entry
-    is a boundary 422 naming it rather than a delivery failure discovered hours
-    later on the first transition. The normalised, comma-joined form is what
-    persists (the existing ``text`` column from migration ``0068``, no new
-    migration), and a lone address is stored and read back unchanged.
+    ``notify_email`` / ``notify_min_state`` are the #2719 notification
+    config. Omitting ``notify_email`` leaves notifications off for this
+    Dashboard. Since #2764 it carries **one or more** comma-separated
+    recipients: each entry is validated individually with pydantic's
+    ``EmailStr`` (``email-validator``), so a single malformed entry is a
+    boundary 422 naming it rather than a delivery failure discovered hours
+    later on the first transition. The normalised, comma-joined form is
+    what persists (the existing ``text`` column from migration ``0068``,
+    no new migration), and a lone address is stored and read back
+    unchanged.
 
     ``investigator_prompt`` is the #2721 operator context appended to the
     diagnose-only investigator's briefing. Bounded at
@@ -157,24 +159,32 @@ class DashboardCreate(BaseModel):
         """
         if value is None:
             return None
-        entries = [part.strip() for part in value.split(",") if part.strip()]
-        if not entries:
-            raise ValueError(
-                "notify_email must carry at least one address; omit the field "
-                "to disable notifications"
-            )
-        if len(entries) > _MAX_NOTIFY_RECIPIENTS:
-            raise ValueError(
-                f"notify_email accepts at most {_MAX_NOTIFY_RECIPIENTS} "
-                f"recipients; got {len(entries)}"
-            )
-        validated: list[str] = []
-        for entry in entries:
-            try:
-                validated.append(_EMAIL_ADAPTER.validate_python(entry))
-            except ValidationError as exc:
-                raise ValueError(f"{entry!r} is not a valid email address") from exc
-        return ",".join(validated)
+        return normalise_notify_email(value)
+
+
+def normalise_notify_email(value: str) -> str:
+    """Check a comma-separated recipient list and return it normalised.
+
+    Shared by :class:`DashboardCreate` and the Dashboard edit body. Each entry
+    must be a valid address, at least one and at most
+    :data:`_MAX_NOTIFY_RECIPIENTS` entries.
+    """
+    entries = [part.strip() for part in value.split(",") if part.strip()]
+    if not entries:
+        raise ValueError(
+            "notify_email must carry at least one address; omit the field to disable notifications"
+        )
+    if len(entries) > _MAX_NOTIFY_RECIPIENTS:
+        raise ValueError(
+            f"notify_email accepts at most {_MAX_NOTIFY_RECIPIENTS} recipients; got {len(entries)}"
+        )
+    validated: list[str] = []
+    for entry in entries:
+        try:
+            validated.append(_EMAIL_ADAPTER.validate_python(entry))
+        except ValidationError as exc:
+            raise ValueError(f"{entry!r} is not a valid email address") from exc
+    return ",".join(validated)
 
 
 class DashboardMemberView(BaseModel):

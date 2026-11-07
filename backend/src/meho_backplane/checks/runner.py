@@ -63,8 +63,12 @@ Overlap + concurrency bounds
 
 Evaluations are tracked in a per-process ``dict[sensor_id, Task]``. If a
 sensor's previous evaluation is still running when it comes due again, the tick
-skips the new dispatch and logs ``sensor_evaluation_overlap_skipped`` -- the
-missed instant becomes staleness, consistent with the at-most-once contract.
+leaves the row due (it does not advance ``next_fire_at``) and logs
+``sensor_evaluation_overlap_skipped``. A later tick claims the row again once
+the running evaluation is done, so a due instant is deferred, never lost and
+never fired twice. This matters for an edit (:mod:`.sensor_edit`): it makes
+the sensor due at once so the new settings run promptly, also when the old
+settings are still being checked.
 Concurrent evaluations are bounded by a fixed-constant
 :class:`asyncio.Semaphore` and each evaluation by an :func:`asyncio.timeout`
 that maps to ``unknown``. Residual cross-replica overlap (an evaluation
@@ -160,6 +164,7 @@ from meho_backplane.operations._lookup import lookup_descriptor, parse_connector
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.meta_tools import _resolve_target_or_error
 from meho_backplane.operations.reducer import FullResultCapture, full_result_capture_var
+from meho_backplane.operations.shutdown_drain import is_draining
 from meho_backplane.scheduler.cron import (
     InvalidCronExpressionError,
     InvalidTimezoneError,
@@ -622,21 +627,31 @@ async def _evaluate_and_record(snap: _SensorSnapshot) -> None:
         )
 
 
+def _evaluation_in_flight(sensor_id: uuid.UUID) -> bool:
+    """True while a previous evaluation of *sensor_id* is still running."""
+    existing = _IN_FLIGHT.get(sensor_id)
+    return existing is not None and not existing.done()
+
+
+def _log_overlap_skipped(sensor_id: uuid.UUID, sensor_name: str) -> None:
+    _log().info(
+        "sensor_evaluation_overlap_skipped",
+        sensor_id=str(sensor_id),
+        sensor_name=sensor_name,
+    )
+
+
 def _spawn_evaluation(snap: _SensorSnapshot) -> bool:
     """Spawn a background evaluation for *snap* unless one is still in flight.
 
     Returns ``True`` when a task was spawned, ``False`` on an overlap skip. The
-    overlap guard is the only per-sensor serialization: a sensor whose previous
-    evaluation is not ``done()`` skips this dispatch and logs
-    ``sensor_evaluation_overlap_skipped``. Runs outside the advisory lock.
+    overlap guard is the only per-sensor serialization. The claim loop in
+    :func:`_claim_and_spawn_due` already checks it before it advances a row;
+    this check is the last line for a task that started in between. Runs
+    outside the advisory lock.
     """
-    existing = _IN_FLIGHT.get(snap.id)
-    if existing is not None and not existing.done():
-        _log().info(
-            "sensor_evaluation_overlap_skipped",
-            sensor_id=str(snap.id),
-            sensor_name=snap.name,
-        )
+    if _evaluation_in_flight(snap.id):
+        _log_overlap_skipped(snap.id, snap.name)
         return False
     task = asyncio.create_task(
         _evaluate_and_record(snap),
@@ -661,9 +676,10 @@ async def run_one_sensor_tick() -> int:
     due sensors under the advisory lock, advances each claimed row's
     ``next_fire_at`` (committing before dispatch), parks a row whose persisted
     cadence no longer parses, then -- after releasing the lock -- spawns a
-    backgrounded evaluation per claimed row (subject to the overlap guard). The
-    tick never awaits the evaluations, so it returns promptly and the lock is
-    held for the DB work only.
+    backgrounded evaluation per claimed row. A row whose previous evaluation
+    is still running is neither advanced nor spawned: it stays due for a
+    later tick (the overlap guard). The tick never awaits the evaluations, so
+    it returns promptly and the lock is held for the DB work only.
 
     Every *completed* tick -- including the lock-not-acquired no-op -- stamps
     the #2763 watchdog via :func:`~meho_backplane.checks.watchdog.note_tick_completed`
@@ -696,6 +712,9 @@ async def _claim_and_spawn_due() -> tuple[bool, int]:
     drawing any other connection would skip silently (#3010's observed
     ~35-50 % cadence).
     """
+    if is_draining():
+        # #5024: a stopping pod claims no sensor. The next pod checks it.
+        return (False, 0)
     now = datetime.now(UTC)
     to_dispatch: list[_SensorSnapshot] = []
     async with advisory_lock(_SENSOR_RUNNER_ADVISORY_LOCK_KEY, subsystem="sensor_runner") as locked:
@@ -709,6 +728,12 @@ async def _claim_and_spawn_due() -> tuple[bool, int]:
             rows = await claim_due_sensors(session, now=now, limit=_CLAIM_BATCH_LIMIT)
             for row in rows:
                 try:
+                    if _evaluation_in_flight(row.id):
+                        # Leave the row due: the advance would commit before
+                        # the overlap skip and lose this instant (an edit's
+                        # "run at once" would wait a whole cadence).
+                        _log_overlap_skipped(row.id, row.name)
+                        continue
                     try:
                         advanced = await advance_sensor_next_fire(session, row, fire_instant=now)
                     except (InvalidCronExpressionError, InvalidTimezoneError) as exc:

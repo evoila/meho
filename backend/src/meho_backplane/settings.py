@@ -1423,6 +1423,15 @@ class Settings(BaseModel):
     #: a prior boot would mask a connector's registration change. See
     #: ``run_typed_op_registrars`` for the snapshot/replay contract.
     test_amortize_typed_op_registrars: bool = False
+    #: Test-only: when True, the start fails on purpose right after the
+    #: built-in operation rows and the release stamp were written, inside
+    #: their transaction, after changing every built-in row in a visible
+    #: way. The CI proof on a throwaway install (``helm-test`` in
+    #: ``chart.yml``) sets ``MEHO_TEST_FAIL_START_AFTER_REGISTRATION=1``
+    #: on a broken release to show that a failed start changes no row and
+    #: that ``helm rollback`` serves again (#5024). NEVER set in production:
+    #: the pod never starts.
+    test_fail_start_after_registration: bool = False
     backplane_url: str = ""
     mcp_resource_uri: str = ""
     vault_addr: HttpUrl | None = Field(default=None)
@@ -1787,6 +1796,11 @@ class Settings(BaseModel):
     operation_run_reaper_tick_interval_seconds: int = Field(default=30, ge=5, le=3600)
     operation_run_reaper_max_per_tick: int = Field(default=50, ge=1, le=1000)
     operation_run_lease_ttl_seconds: int = Field(default=60, ge=10, le=3600)
+    # How long a stopping pod waits for running operations to finish
+    # (#5024). Counted from the stop signal. The chart sets it together with
+    # uvicorn's own limit (UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN) and keeps the
+    # pod's grace period longer. See docs/codebase/shutdown-drain.md.
+    shutdown_drain_seconds: int = Field(default=60, ge=0, le=3600)
     # Dispatch flight recorder (#3212, F1/F4/F6 of
     # ``docs/decisions/dispatch-flight-recorder.md``).
     #
@@ -1875,6 +1889,10 @@ class Settings(BaseModel):
     # Dedicated custody key for encrypted credential-write approval handoffs.
     # Unlike the optional UI key this is required only when such an approval parks.
     approval_handoff_encryption_key: str = ""
+    # The key of the params hashes and value fingerprints in audit rows and
+    # approval requests (operations/_validate.py). A secret of its own, so a
+    # new database password keeps every hash. Empty = made from DATABASE_URL.
+    params_hash_key: str = ""
     # G10.1-T3 #869 — BFF sliding-session knobs for the broadcast
     # wall-monitor's long-display requirement. The sliding extension
     # keeps an actively-viewed session alive past its login-time
@@ -2703,6 +2721,9 @@ def get_settings() -> Settings:
         test_amortize_typed_op_registrars=parse_bool_env(
             os.environ.get("MEHO_TEST_AMORTIZE_TYPED_OP_REGISTRARS"),
         ),
+        test_fail_start_after_registration=parse_bool_env(
+            os.environ.get("MEHO_TEST_FAIL_START_AFTER_REGISTRATION"),
+        ),
         backplane_url=os.environ.get("BACKPLANE_URL", ""),
         mcp_resource_uri=os.environ.get("MCP_RESOURCE_URI", ""),
         # Optional: a GSM-backend (Vault-free) install sets no VAULT_ADDR,
@@ -2987,6 +3008,7 @@ def get_settings() -> Settings:
         operation_run_lease_ttl_seconds=int(
             os.environ.get("OPERATION_RUN_LEASE_TTL_SECONDS", "60"),
         ),
+        shutdown_drain_seconds=int(os.environ.get("SHUTDOWN_DRAIN_SECONDS", "60")),
         # Dispatch flight recorder (#3212, F1/F4/F6).
         flight_recorder_enabled=parse_bool_env(
             os.environ.get("FLIGHT_RECORDER_ENABLED", "true"),
@@ -3027,6 +3049,7 @@ def get_settings() -> Settings:
         approval_handoff_encryption_key=os.environ.get(
             "APPROVAL_HANDOFF_ENCRYPTION_KEY", ""
         ).strip(),
+        params_hash_key=os.environ.get("PARAMS_HASH_KEY", "").strip(),
         ui_session_sliding_extension_seconds=int(
             os.environ.get("UI_SESSION_SLIDING_EXTENSION_SECONDS", "3600"),
         ),

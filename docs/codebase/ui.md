@@ -922,7 +922,7 @@ Initiative #337 work-item #6:
 * A 3x2 grid of DaisyUI `card` tiles linking to the five surface
   routes. The sixth tile shows the backplane version + readiness
   badge sourced from `meho_backplane.health.run_probes_async`.
-* A live "recent activity" snippet wired to the session-gated SSE
+* A live "recent activity" snippet wired to the operator-gated SSE
   bridge `/ui/broadcast/stream` (G0.25 `#1696`; the chassis
   originally pointed at the Bearer-only `/api/v1/feed`, which a
   browser `EventSource` can never authenticate against — no
@@ -981,8 +981,9 @@ mobile-reflow CSS on the entry detail page:
 
 - `POST /ui/kb/editor-preview` — HTMX live-preview partial. Accepts a
   `body` form field (max 65 536 bytes), renders it via `render_markdown`,
-  returns the `kb/_editor_preview.html` fragment. Any authenticated
-  operator can call this (read-only Markdown transform; no role gate).
+  returns the `kb/_editor_preview.html` fragment. Any `operator` or
+  `tenant_admin` can call this (read-only Markdown transform on the kb
+  surface's `require_ui_operator` floor).
 - `POST /ui/kb/new` — editor save. Requires `tenant_admin` role (enforced
   by `_require_tenant_admin()`: loads the full `DecryptedSession` via
   `load_session()`, verifies the access token via
@@ -1061,10 +1062,27 @@ body (`_require_ui_role`):
   `/results`, `/my-recent`, `/show/{audit_id}`; the replay tree keeps its
   own tenant_admin check). A `read_only` person gets `403
   operator_required` on these pages before any operation runs or any
-  audit row is read. Read pages that do not run an operation (dashboard,
-  connectors, knowledge, memory, topology, runbook catalog) stay on the
-  session floor, and so does the approvals list, which a `read_only`
-  approver needs.
+  audit row is read. The same floor covers every console read page whose
+  REST twin needs `operator`: event sources, conventions, knowledge
+  (`/ui/kb`), agents and agent runs, agent principals, checks,
+  connectors and the connector registry, the docs corpus, operations,
+  pairing, runbooks and runbook runs, runners, scheduler, sensors,
+  topology, retrieval (`/ui/retrieval` and its four POST tabs), and
+  broadcast (`/ui/broadcast`, `/feed`, `/history`, `/stream`,
+  `/event/{audit_id}`). The pages that hand a read service an
+  `Operator` (event sources, conventions, agent runs) take it from
+  `require_ui_read_operator` (`ui/routes/operator_read.py`), which
+  chains `require_ui_operator`. `build_read_operator`
+  (`ui/routes/memory/operator.py`) checks no role and serves memory
+  reads only: their REST floor is `read_only`.
+  A `read_only` session can open only the dashboard, its account and
+  tenant pages, memory, automation and approvals (the approvals list is
+  what a `read_only` approver needs). `tests/test_ui_operator_read_floor.py`
+  pins this: it checks each operator page against the `require_role`
+  floor of its REST twin, checks that the REST twin of each `read_only`
+  page is open to `read_only`, and walks every console `GET` route with
+  a `read_only` session, expecting `403` on every page that is not on
+  the `read_only` list.
 
 Upload routes chain `require_ui_admin` on top:
 
@@ -1158,9 +1176,13 @@ keeps a full-screen wall display from logging out mid-stream.
 | ----- | ------- |
 | `GET /ui/broadcast` | Full-page live-feed view (`broadcast/feed.html`, extends `base.html`). Sidebar active-state on Broadcast. Accepts `?op_class=&principal=&target=&op_id=` so a copy-pasted filtered URL reproduces the view. `?wall=1` selects the no-chrome wall-monitor layout (`broadcast/wall.html`) instead. |
 | `GET /ui/broadcast/feed` | Filtered feed **fragment** (`broadcast/_feed.html`) — the filter-bar submit target. Re-renders the feed with the active server-side filters baked into a fresh `sse-connect` URL. |
-| `GET /ui/broadcast/stream` | Session-gated SSE bridge (`text/event-stream`). The feed view's `sse-connect` target. Accepts `op_class` / `principal` / `target` filters. |
+| `GET /ui/broadcast/stream` | SSE bridge behind `require_ui_operator` (`text/event-stream`). The feed view's `sse-connect` target. Accepts `op_class` / `principal` / `target` filters. |
 | `GET /ui/broadcast/history` | Last-24h replay **fragment** (`broadcast/_history.html`) — the "Last 24h" tab's HTMX target. A finite read of the tenant's last-24h stored announcements seeded into the shared `broadcastFeed` controller. |
 | `GET /ui/broadcast/event/{audit_id}` | Event detail drawer **fragment** (`broadcast/_event_drawer.html`; `_event_drawer_not_found.html` + HTTP 404 for a missing / cross-tenant id). Shared by the live feed, the wall view, and the history pane. |
+
+Every broadcast route above needs the `operator` role (`require_ui_operator`,
+the floor of `GET /api/v1/broadcast/recent` and `GET /api/v1/feed`); a
+`read_only` session gets `403 operator_required`.
 
 ### Why a UI-owned SSE bridge instead of subscribing to `/api/v1/feed`
 
@@ -1997,7 +2019,9 @@ and expiry-viz+bulk on top of the same router.
   re-verifying the stored access token. Used by every write handler.
   Read handlers use `build_read_operator` which synthesises an
   `OPERATOR`-role operator without a JWT round-trip (the read RBAC
-  matrix only consults the per-row `user_sub`, never the role).
+  matrix only consults the per-row `user_sub`, never the role). It
+  checks no role, so it serves memory reads only (REST floor
+  `read_only`).
 * `backend/src/meho_backplane/ui/templates/memory/` — Jinja2
   templates: `index.html` (full list page), `_cards.html` (HTMX list
   fragment), `detail.html` (full detail page), `_body_view.html` /
@@ -2835,11 +2859,11 @@ the in-process `AgentInvoker` (`list_runs` / `poll`) — the same read path
 the Bearer REST routes use — because a browser carrying only the BFF
 session cookie cannot authenticate the Bearer route. The invoker takes a
 full `Operator` and tenant-scopes every query on `operator.tenant_id`, so
-`ui/routes/agents/runs/operator.py`'s `resolve_run_reader` synthesises a
-tenant-scoped `OPERATOR` from the BFF session context (the no-JWT-round-
-trip read path the memory surface's `build_read_operator` established,
-#877) — sound because the chassis session middleware already
-authenticated the request and tenant isolation is the invoker's job. A
+`ui/routes/agents/runs/operator.py`'s `resolve_run_reader` takes the
+tenant-scoped reader from `require_ui_read_operator`, which checks the
+`operator` role first (the REST floor of `GET /api/v1/agents/runs`; a
+`read_only` session gets `403 operator_required`). Tenant isolation is
+the invoker's job. A
 cross-tenant run is invisible on the list and 404 on the detail. The
 surface never exposes `system_prompt` / `toolset` / approval params — the
 invoker's summary + poll projections carry none of them.
@@ -2898,7 +2922,8 @@ same first-match discipline `/ui/agents/create` follows).
   `keycloak_internal_id` is never surfaced. The `include_revoked` toggle
   flips the service query so revoked rows join the inventory for audit.
 - `GET/POST /ui/agents/principals/register` — register a new principal
-  (**tenant_admin**). An upstream side-effecting op: the service creates a
+  (**tenant_admin**; the `POST` also needs a person: a session of an
+  agent, service or runner login gets 403 `human_principal_required`). An upstream side-effecting op: the service creates a
   Keycloak client + writes its generated credential to Vault before the DB
   row lands. Failures re-render the modal inline (not a generic error):
   empty / bad-character `name` → 422 `name` field error; duplicate
@@ -2992,7 +3017,8 @@ agents list links to `/ui/agents/grants` only for admins (a non-admin would
   body fragment). An absent / malformed / cross-tenant id renders 404
   (existence-leak avoidance, mirroring the REST 404 collapse).
 - `GET/POST /ui/agents/grants/create` — create a permanent or time-bounded
-  grant. The `verdict` `<select>` defaults to the conservative `deny`. A
+  grant. The `POST` here and on `elevate` also needs a person: a session of
+  an agent, service or runner login gets 403 `human_principal_required`. The `verdict` `<select>` defaults to the conservative `deny`. A
   Pydantic `ValidationError` or a service `GrantValidationError` (past /
   naive `expires_at`, bad `target_scope` UUID, duplicate grant) re-renders
   the modal inline with the matching field error + 422.
@@ -3266,7 +3292,7 @@ not the `sub` the per-principal predicate needs); the `_set_csrf_cookie` +
 double-submit pattern (the fragment swaps only the results region and leaves the
 form in place, so it reuses the live cookie token rather than rotating a fresh
 one out from under the un-swapped form — the #1754 desync class); the
-`build_retrieval_router()` factory + module-level `Depends(require_ui_session)`
+`build_retrieval_router()` factory + module-level `Depends(require_ui_operator)`
 closure follow the chassis convention. Like corpus, it routes **through the
 in-process service**, not a self-HTTP call, keeping the audit binding in-process
 and avoiding a network hop — there is no new `/api/v1` endpoint.
@@ -3295,8 +3321,9 @@ ephemeral.
 
 ### Tenant scoping + RBAC
 
-`operator` role minimum (the whole surface sits behind `require_ui_session`,
-**not** `require_ui_admin`, matching the OPERATOR floor the REST route carries).
+`operator` role minimum (the whole surface sits behind `require_ui_operator`,
+**not** `require_ui_admin`, matching the OPERATOR floor the REST route carries;
+a `read_only` session gets `403 operator_required`).
 Diagnostics is **own-tenant only**: tenant identity is derived from the
 reconstructed operator's `tenant_id` and the per-principal isolation predicate
 is bound from `operator.sub` (`principal_sub=`) — there is no `tenant_filter`
@@ -3507,7 +3534,9 @@ discipline is pinned.
 service-principal grants, matching that plane's operator-read REST authority.
 A `tenant_admin` additionally sees agent grants and receives the issue and
 revoke controls for both planes. The BFF repeats that tenant-admin check on
-every write route; hiding the controls is only a usability affordance. Agent
+every write route; hiding the controls is only a usability affordance. Create,
+renew and revoke also need a person (`_human_admin`): a session of an agent,
+service or runner login gets 403 `human_principal_required`. Agent
 grant rows keep the existing agent-principal name resolution. Service grants
 have no service-principal registry, so their stored subject is shown directly;
 concrete target UUIDs resolve through the tenant-scoped target resolver and

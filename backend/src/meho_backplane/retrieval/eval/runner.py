@@ -200,6 +200,7 @@ async def _eval_query(
     expected: list[str],
     retrieve_fn: RetrieveCallable,
     tenant_id: uuid.UUID,
+    principal_sub: str | None,
     source: str,
     hits_to_slugs: Callable[[list[RetrievalHit]], list[str]],
     baseline_corpus_root: Path | None,
@@ -209,8 +210,9 @@ async def _eval_query(
 
     The surface-agnostic core: takes the per-surface conversion
     callable + the tenant the corpus is scoped to, runs the
-    in-process :func:`retrieve` helper with ``source=<surface>``, and
-    folds the resulting hits into the three metrics. Baseline grep
+    in-process :func:`retrieve` helper with ``source=<surface>`` and
+    the caller's ``principal_sub`` (so a user memory of another person
+    never ranks), and folds the resulting hits into the three metrics. Baseline grep
     runs when *baseline_corpus_root* is provided; baseline failures
     surface as ``BaselineConfigError`` upstream rather than silently
     skipping (the runner translates that into a per-surface "baseline
@@ -221,6 +223,7 @@ async def _eval_query(
         query=query,
         source=source,
         limit=k,
+        principal_sub=principal_sub,
     )
     meho_hits = hits_to_slugs(hits)
 
@@ -354,6 +357,7 @@ async def _eval_kb(
     *,
     retrieve_fn: RetrieveCallable,
     tenant_id: uuid.UUID,
+    principal_sub: str | None,
     baseline_corpus_root: Path | None,
     thresholds: Thresholds,
     k: int,
@@ -366,6 +370,7 @@ async def _eval_kb(
             expected=list(row.expected_hits),
             retrieve_fn=retrieve_fn,
             tenant_id=tenant_id,
+            principal_sub=principal_sub,
             source="kb",
             hits_to_slugs=_kb_hits_to_slugs,
             baseline_corpus_root=baseline_corpus_root,
@@ -383,6 +388,7 @@ async def _eval_memory(
     *,
     retrieve_fn: RetrieveCallable,
     tenant_id: uuid.UUID,
+    principal_sub: str | None,
     thresholds: Thresholds,
     k: int,
 ) -> SurfaceResult:
@@ -394,6 +400,7 @@ async def _eval_memory(
             expected=_format_memory_expected(list(row.expected_hits)),
             retrieve_fn=retrieve_fn,
             tenant_id=tenant_id,
+            principal_sub=principal_sub,
             source="memory",
             hits_to_slugs=_memory_hits_to_pairs,
             baseline_corpus_root=None,
@@ -410,6 +417,7 @@ async def _eval_operations(
     *,
     retrieve_fn: RetrieveCallable,
     tenant_id: uuid.UUID,
+    principal_sub: str | None,
     thresholds: Thresholds,
     k: int,
 ) -> SurfaceResult:
@@ -428,6 +436,7 @@ async def _eval_operations(
                 expected=list(row.expected_op_ids),
                 retrieve_fn=retrieve_fn,
                 tenant_id=tenant_id,
+                principal_sub=principal_sub,
                 source="operations",
                 hits_to_slugs=_operations_hits_to_op_ids,
                 baseline_corpus_root=None,
@@ -448,6 +457,7 @@ async def eval_surface(
     surface: Literal["kb", "memory", "operations"],
     *,
     tenant_id: uuid.UUID,
+    principal_sub: str | None = None,
     retrieve_fn: RetrieveCallable | None = None,
     baseline_corpus_root: Path | None = None,
     thresholds: Thresholds = GREEN_DEFAULTS,
@@ -460,6 +470,12 @@ async def eval_surface(
     stub. *baseline_corpus_root* is honoured for the kb surface only
     (memory/operations baselines are deferred per module docstring) —
     pass on memory/operations and the runner silently ignores it.
+
+    *principal_sub* is the caller's OIDC ``sub``. Every query runs with
+    it, so a user memory of another person never ranks and never shows
+    in ``meho_hits``. The production :func:`retrieve` refuses a memory
+    search without it, so a caller that runs the memory surface against
+    the real retriever must pass it.
 
     Raises
     ------
@@ -475,6 +491,7 @@ async def eval_surface(
         return await _eval_kb(
             retrieve_fn=rfn,
             tenant_id=tenant_id,
+            principal_sub=principal_sub,
             baseline_corpus_root=baseline_corpus_root,
             thresholds=thresholds,
             k=k,
@@ -483,12 +500,14 @@ async def eval_surface(
         return await _eval_memory(
             retrieve_fn=rfn,
             tenant_id=tenant_id,
+            principal_sub=principal_sub,
             thresholds=thresholds,
             k=k,
         )
     return await _eval_operations(
         retrieve_fn=rfn,
         tenant_id=tenant_id,
+        principal_sub=principal_sub,
         thresholds=thresholds,
         k=k,
     )
@@ -497,6 +516,7 @@ async def eval_surface(
 async def eval_all(
     *,
     tenant_id: uuid.UUID,
+    principal_sub: str | None = None,
     retrieve_fn: RetrieveCallable | None = None,
     baseline_corpus_root: Path | None = None,
     thresholds: Thresholds = GREEN_DEFAULTS,
@@ -508,6 +528,9 @@ async def eval_all(
     *surfaces* defaults to all three; pass an explicit subset to scope
     the run (e.g. ``["kb"]`` for the CI gate that doesn't yet have
     memory/operations corpora).
+
+    *principal_sub* is the caller's OIDC ``sub``; see
+    :func:`eval_surface`.
 
     The overall verdict is the worst of the per-surface verdicts —
     a single red surface flips the whole eval red. Empty surfaces
@@ -523,6 +546,7 @@ async def eval_all(
         result = await eval_surface(
             s,
             tenant_id=tenant_id,
+            principal_sub=principal_sub,
             retrieve_fn=retrieve_fn,
             baseline_corpus_root=baseline_corpus_root,
             thresholds=thresholds,

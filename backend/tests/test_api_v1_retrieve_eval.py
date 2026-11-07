@@ -189,6 +189,8 @@ def test_eval_route_returns_200_with_result(client: TestClient) -> None:
     call_kwargs = fake_eval.await_args.kwargs
     assert call_kwargs["tenant_id"] == tenant_id
     assert call_kwargs["surfaces"] == ["kb"]
+    # The caller's ``sub`` drives the per-person rule on user memories.
+    assert call_kwargs["principal_sub"] == "op-1"
 
 
 def test_eval_route_default_surface_is_all(client: TestClient) -> None:

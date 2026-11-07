@@ -307,6 +307,23 @@ _ENTERPRISE_PACK: tuple[tuple[str, str, str, str], ...] = (
 )
 
 
+_VERSIONS_PARAGRAPH = (
+    "**Supported versions** is the product-version range an "
+    "implementation advertises. Where a product has more than one "
+    "implementation — a modern and a legacy one, say — both are "
+    "registered and MEHO resolves the right one per target from the "
+    "target's fingerprint, so one estate spanning old and new versions "
+    "just works. A connector can also state the target versions its "
+    "operations work on. MEHO checks this range each time an operation "
+    "runs (at dispatch time), also when the call names the connector "
+    "itself. Outside the range, MEHO refuses the call with "
+    "`unqualified_target_version`, and a Sensor on that connector can "
+    "read `unknown`. So pick the connector whose version matches the "
+    "target, for example `vmware-rest-8.0` for vCenter 8.0.x and "
+    "`vmware-rest-9.0` for vCenter 9.0.x."
+)
+
+
 def _docs_link(product: str) -> str:
     """Return a Markdown link to *product*'s docs page, or "" when it has none."""
     name = _DOCS_PAGE_BY_PRODUCT.get(product, f"connectors-{product}.md")
@@ -399,12 +416,7 @@ def render_connector_index() -> str:
         "",
         "## Versions and how a connector is chosen",
         "",
-        "**Supported versions** is the product-version range an "
-        "implementation advertises. Where a product has more than one "
-        "implementation — a modern and a legacy one, say — both are "
-        "registered and MEHO resolves the right one per target from the "
-        "target's fingerprint, so one estate spanning old and new versions "
-        "just works.",
+        _VERSIONS_PARAGRAPH,
         "",
         "## Maturity and readiness",
         "",
@@ -463,6 +475,25 @@ def _tool_table(rows: list[tuple[str, str, str, str]]) -> list[str]:
     for name, maturity, gating, summary in rows:
         lines.append(f"| `{name}` | {maturity} | {gating} | {_md_escape(summary)} |")
     return lines
+
+
+#: Reads "<place>, or the CLI: `<command> <args>`" out of a human-only
+#: remediation text, so the page names the same place and CLI verb as the
+#: answer an agent gets.
+_HUMAN_ONLY_WHERE = re.compile(r"via the (?P<place>[^,]+), or the CLI: `(?P<cli>[^`]+)`")
+
+
+def _human_only_where(name: str) -> str:
+    """Name where a person makes a human-only decision: console place and CLI verb."""
+    match = _HUMAN_ONLY_WHERE.search(HUMAN_ONLY_MCP_TOOLS[name])
+    if match is None:
+        raise ValueError(f"human-only remediation of {name!r} names no console place and CLI verb")
+    verb = []
+    for word in match["cli"].split():
+        if word.startswith(("<", "-")):
+            break
+        verb.append(word)
+    return f"{match['place']}, or `{' '.join(verb)}`"
 
 
 def render_mcp_tool_index() -> str:
@@ -551,7 +582,7 @@ def render_mcp_tool_index() -> str:
         "| --- | --- |",
     ]
     for name in sorted(HUMAN_ONLY_MCP_TOOLS):
-        lines.append(f"| `{name}` | operator console approvals queue, or the `meho` CLI |")
+        lines.append(f"| `{name}` | {_human_only_where(name)} |")
     lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 

@@ -1975,9 +1975,11 @@ Step 3 measured it first: on 2026-11-07, after steps 1 and 2, 172 hosted
 jobs of pull request runs waited a median of 0.9 minutes (90% under 3
 minutes). The pull request image build (`image.yml` `build` job) then
 moved to `ubuntu-latest`. On main and on tags it still runs on
-`meho-runners-ci`, because those runs push and sign the image. A hosted
-runner has less disk (14 GB) than our machines, so the pull request build
-prints `df -h /` right after the build step.
+`meho-runners-ci`, because those runs push and sign the image. GitHub
+promises only 14 GB of disk on a hosted runner, so the pull request build
+prints `df -h /` right after the build step. On the first hosted run
+(#4626, step 3) the build waited 3 seconds, took 2 minutes 20 seconds
+with a warm cache, and left 85 GB free.
 
 Each `python-unit-shard` carries a 20-minute
 `timeout-minutes` (hang backstop only — the expected shard job wall is

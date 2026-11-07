@@ -392,6 +392,46 @@ def test_editor_save_creates_entry_and_redirects() -> None:
     assert response.headers.get("HX-Redirect") == "/ui/kb/new-entry-slug"
 
 
+def test_editor_save_refuses_an_existing_slug_and_links_to_it() -> None:
+    """``POST /ui/kb/new`` for a slug that exists changes nothing and shows a link."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    existing = _seed_kb_entry(tenant_id=_TENANT_A, slug="taken-slug", body="# Original")
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(
+                "meho_backplane.ui.routes.kb.routes.verify_access_token_with_refresh",
+                new_callable=AsyncMock,
+                return_value=(None, _make_fake_admin_operator(_TENANT_A)),
+            ),
+            patch(
+                "meho_backplane.retrieval.indexer.get_embedding_service",
+                return_value=fake_embedding_service(),
+            ),
+        ):
+            response = client.post(
+                "/ui/kb/new",
+                data={"slug": "taken-slug", "body": "# Replacement", "tags": ""},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    assert "exists already" in response.text
+    assert "current revision 1" in response.text
+    assert 'href="/ui/kb/taken-slug"' in response.text
+
+    from meho_backplane.kb.service import KbService
+
+    kept = asyncio.run(KbService().get_entry(_TENANT_A, "taken-slug"))
+    assert kept is not None
+    assert kept.body == "# Original"
+    assert kept.revision_id == existing.revision_id
+
+
 def test_editor_save_operator_role_returns_403() -> None:
     """``POST /ui/kb/new`` with plain operator role returns 403."""
     _seed_tenant(_TENANT_A, "tenant-a")

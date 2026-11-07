@@ -8,9 +8,11 @@ A kb entry has three parts:
 * The **head** -- one ``documents`` row (``source="kb"``). ``meho://kb/{slug}``
   reads it. A new body overwrites it.
 * The **revisions** -- ``kb_revision`` rows. Each write that changes
-  the body adds one, in the same transaction as the head update. A
-  revision is never updated, so an older body stays readable by its
-  revision id after the head changes.
+  the body or the metadata adds one, in the same transaction as the
+  head update. A revision keeps the body and the metadata it was
+  written with, and is never updated, so an older body stays readable
+  by its revision id after the head changes. One revision id names one
+  exact state of the entry.
 * The **passages** (#3761) -- ``documents`` rows with
   ``source="kb-passage"``, made by :mod:`meho_backplane.kb.passages`
   from the **current** revision only. Search ranks these. When the body
@@ -37,6 +39,14 @@ from the start. The unique index on ``(entry_id, revision_number)`` and
 the unique natural key on ``documents`` are the last guards; a clash
 there also triggers a rerun. The id that is returned always names the
 body that was written.
+
+Every update names the revision it read (``expected``). The check runs
+on every try, against the state that try read, and the publish step
+verifies that state under the lock. A write that names an older
+revision, names none for an existing slug, or names one for a deleted
+entry raises :class:`~meho_backplane.kb.stale_revision.KbStaleRevisionError`
+and writes nothing. Directory ingest passes no expectation and keeps
+its own conflict rules.
 
 The metadata of a write is not fixed up front. :func:`write_entry`
 takes a function that builds it from the head's current metadata, and
@@ -78,6 +88,11 @@ from meho_backplane.kb.schemas import (
     META_PROVENANCE,
     KbEntryRevision,
 )
+from meho_backplane.kb.stale_revision import (
+    KbStaleRevisionError,
+    build_stale_detail,
+    metadata_changed_keys,
+)
 from meho_backplane.retrieval.indexer import (
     IndexItem,
     PreparedIndexBatch,
@@ -89,6 +104,7 @@ from meho_backplane.settings import get_settings
 
 __all__ = [
     "CHUNKER_VERSION",
+    "ExpectedRevision",
     "MetadataForWrite",
     "current_revision_id",
     "delete_entry_rows",
@@ -104,6 +120,18 @@ _WRITE_ATTEMPTS: Final[int] = 3
 #: Builds the metadata to store from the head's current metadata
 #: (``None`` when the entry does not exist yet). Called on every try.
 MetadataForWrite = Callable[[dict[str, Any] | None], dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class ExpectedRevision:
+    """The revision a writer read; ``None`` means the writer read no entry.
+
+    A write with ``ExpectedRevision(None)`` only creates. Pass no
+    expectation at all (``expected=None`` to :func:`write_entry`) to skip
+    the check, as directory ingest does.
+    """
+
+    revision_id: uuid.UUID | None
 
 
 class _StaleHeadError(RuntimeError):
@@ -148,15 +176,18 @@ async def write_entry(
     slug: str,
     body: str,
     metadata_for: MetadataForWrite,
+    expected: ExpectedRevision | None = None,
 ) -> tuple[Document, uuid.UUID, bool]:
     """Publish the head, its current revision and its passages together.
 
     Three steps:
 
-    1. Read the entry as it is now (:class:`_Snapshot`), and call
+    1. Read the entry as it is now (:class:`_Snapshot`), call
        *metadata_for* with the head's metadata (``None`` for a new
-       entry) to get the metadata to store. An error it raises
-       propagates at once; nothing is written.
+       entry) to get the metadata to store, and check *expected*
+       against the snapshot. A refusal from *metadata_for* (the owner
+       rule) comes first. An error either raises propagates at once;
+       nothing is written.
     2. Prepare: split the body into passages and compute every
        embedding. No transaction is open, and nothing is written.
     3. Publish in one short transaction: lock the head, check it still
@@ -176,6 +207,7 @@ async def write_entry(
         try:
             snapshot = await _read_snapshot(tenant_id, slug)
             metadata = metadata_for(snapshot.metadata)
+            await _check_expected(tenant_id, slug, snapshot, expected)
             plan = await _prepare(tenant_id, slug, body, metadata, snapshot)
             doc, revision_id = await _publish(tenant_id, slug, body, metadata, snapshot, plan)
             return doc, revision_id, snapshot.entry_id is None
@@ -190,6 +222,18 @@ async def write_entry(
                 reason=type(exc).__name__,
             )
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+async def _check_expected(
+    tenant_id: uuid.UUID,
+    slug: str,
+    snapshot: _Snapshot,
+    expected: ExpectedRevision | None,
+) -> None:
+    """Raise :class:`KbStaleRevisionError` unless the writer read the current revision."""
+    if expected is None or expected.revision_id == snapshot.revision_id:
+        return
+    raise KbStaleRevisionError(await build_stale_detail(tenant_id, slug, expected.revision_id))
 
 
 async def _read_snapshot(tenant_id: uuid.UUID, slug: str) -> _Snapshot:
@@ -264,20 +308,27 @@ async def _prepare(
     """Decide what changes and compute its embeddings; write nothing.
 
     The head is re-embedded only when its body changed. A new revision
-    is stored only when the body differs from the latest revision. The
-    passages are rebuilt when they do not belong to the current
-    revision and the current chunker and model (a new indexing
-    generation); otherwise they are kept.
+    is stored when the body or the metadata differs from the entry as
+    it is. The passages are rebuilt only when the body changed or they
+    were made by another chunker or model (a new indexing generation).
+    A change to the metadata alone keeps them, so it costs no
+    embedding; they still point at the earlier revision that holds
+    the same body.
     """
     body_hash = compute_body_hash(body)
     model = get_settings().retrieval_embedding_model
     entry_id = snapshot.entry_id or uuid.uuid4()
     head_changed = snapshot.body_hash != body_hash
-    if snapshot.revision_id is not None and snapshot.revision_hash == body_hash:
-        revision_id, new_revision = snapshot.revision_id, False
-    else:
-        revision_id, new_revision = uuid.uuid4(), True
-    rebuild = snapshot.passage_key != (str(revision_id), index_generation(model))
+    body_changed = snapshot.revision_id is None or snapshot.revision_hash != body_hash
+    new_revision = body_changed or bool(metadata_changed_keys(snapshot.metadata, metadata))
+    revision_id = (
+        uuid.uuid4() if new_revision or snapshot.revision_id is None else snapshot.revision_id
+    )
+    rebuild = (
+        body_changed
+        or snapshot.passage_key is None
+        or snapshot.passage_key[1] != index_generation(model)
+    )
 
     items: list[IndexItem] = []
     if head_changed:
@@ -415,6 +466,7 @@ def _add_revision(
             body=body,
             body_hash=compute_body_hash(body),
             provenance=dict(provenance) if isinstance(provenance, dict) else None,
+            entry_metadata=dict(doc.doc_metadata),
             origin="write",
             embedding_model=get_settings().retrieval_embedding_model,
             chunker_version=CHUNKER_VERSION,

@@ -9,8 +9,8 @@ sorted relative-path order, and find every slug claimed by two or more
 files before any write. Those files are reported as conflicts and not
 written, so filesystem listing order never decides which file wins and
 an existing entry with a conflicting slug stays unchanged. Direct
-create (:meth:`KbService.create_entry`) is a different, explicit
-last-write-wins path.
+create (:meth:`KbService.create_entry`) is a different path: it names
+the revision the writer read and refuses a stale write.
 
 Each written entry gets a ``directory`` provenance block (relative
 path, one ``ingested_at`` per run) via :mod:`meho_backplane.kb.provenance`.

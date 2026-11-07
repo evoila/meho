@@ -36,7 +36,10 @@ operational facts for this tenant. Prefer it over local `kb/` files.
 - Prefer `add_to_knowledge` (MCP) / `meho kb add <slug>` (CLI, `--body @-`
   to take the body from stdin) over creating or editing a file under `kb/`.
   The add is audited and immediately searchable by every operator on the
-  tenant.
+  tenant. To change an existing entry, read it first and pass its
+  `revision_id` as `expected_revision` (`--expected-revision` on the
+  CLI). A write without it only creates, and a stale one is refused with
+  the current revision and what changed.
 - `meho kb delete <slug>` — remove an entry; `meho kb ingest <directory>` —
   bulk-import an existing directory of markdown facts.
 

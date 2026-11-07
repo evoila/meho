@@ -336,7 +336,11 @@ async def test_cross_principal_overwrite_status_and_attribution(
             # create), created_by preserved, last_updated bumped.
             b_overwrite = await client.post(
                 "/api/v1/kb",
-                json={"slug": "shared-runbook", "body": "B's different version."},
+                json={
+                    "slug": "shared-runbook",
+                    "body": "B's different version.",
+                    "expected_revision": a_body["revision_id"],
+                },
                 headers=_authed(b_token),
             )
             assert b_overwrite.status_code == 200, b_overwrite.text

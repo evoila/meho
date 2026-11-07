@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document, KbRevision
-from meho_backplane.kb.revisions import CHUNKER_VERSION
+from meho_backplane.kb.revisions import CHUNKER_VERSION, write_entry
 from meho_backplane.kb.service import KbService
 from meho_backplane.settings import get_settings
 from tests._kb_embedding_stub import fake_embedding_service
@@ -73,7 +73,12 @@ async def test_overwrite_keeps_earlier_revision_readable_and_byte_identical() ->
     assert created is True
     assert first.revision_id is not None
 
-    second, _ = await service.create_entry(tenant, "pod-restart", "Use a rollout restart.")
+    second, _ = await service.create_entry(
+        tenant,
+        "pod-restart",
+        "Use a rollout restart.",
+        expected_revision=first.revision_id,
+    )
     assert second.id == first.id
     assert second.revision_id is not None
     assert second.revision_id != first.revision_id
@@ -101,8 +106,10 @@ async def test_overwrite_keeps_earlier_revision_readable_and_byte_identical() ->
 async def test_latest_reads_stay_on_the_head_and_name_its_revision() -> None:
     service = KbService()
     tenant = uuid.uuid4()
-    await service.create_entry(tenant, "dns-check", "old body")
-    latest, _ = await service.create_entry(tenant, "dns-check", "new body")
+    old, _ = await service.create_entry(tenant, "dns-check", "old body")
+    latest, _ = await service.create_entry(
+        tenant, "dns-check", "new body", expected_revision=old.revision_id
+    )
 
     shown = await service.get_entry(tenant, "dns-check")
     assert shown is not None
@@ -114,13 +121,37 @@ async def test_latest_reads_stay_on_the_head_and_name_its_revision() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unchanged_body_reuses_the_current_revision() -> None:
+async def test_unchanged_body_and_metadata_reuse_the_current_revision() -> None:
     service = KbService()
     tenant = uuid.uuid4()
-    first, _ = await service.create_entry(tenant, "same-body", "body")
-    again, _ = await service.create_entry(tenant, "same-body", "body", {"tag": "x"})
+    first, _ = await service.create_entry(tenant, "same-body", "body", {"tag": "x"})
+    again, _ = await service.create_entry(
+        tenant, "same-body", "body", {"tag": "x"}, expected_revision=first.revision_id
+    )
     assert again.revision_id == first.revision_id
     assert await _revision_count(first.id) == 1
+
+
+@pytest.mark.asyncio
+async def test_metadata_change_alone_adds_a_revision_that_keeps_the_metadata() -> None:
+    service = KbService()
+    tenant = uuid.uuid4()
+    first, _ = await service.create_entry(tenant, "header-only", "body", {"tag": "x"})
+    second, _ = await service.create_entry(
+        tenant, "header-only", "body", {"tag": "y"}, expected_revision=first.revision_id
+    )
+    assert second.revision_id != first.revision_id
+    assert second.body == first.body
+    assert await _revision_count(first.id) == 2
+    async with get_sessionmaker()() as session:
+        stored = {
+            row.id: row.entry_metadata
+            for row in await session.scalars(
+                select(KbRevision).where(KbRevision.entry_id == first.id)
+            )
+        }
+    assert stored[first.revision_id]["tag"] == "x"  # type: ignore[index]
+    assert stored[second.revision_id]["tag"] == "y"  # type: ignore[index]
 
 
 @pytest.mark.asyncio
@@ -151,21 +182,29 @@ async def test_overlapping_writes_keep_head_and_returned_revision_in_step() -> N
         await real_flush(self, *args, **kwargs)
 
     with patch.object(AsyncSession, "flush", gated_flush):
-        stale = asyncio.create_task(service.create_entry(tenant, "overlap", "A", {"tag": "late"}))
+        stale = asyncio.create_task(
+            write_entry(
+                tenant_id=tenant,
+                slug="overlap",
+                body="A",
+                metadata_for=lambda _existing: {"tag": "late"},
+            )
+        )
         await asyncio.wait_for(first_flush_reached.wait(), timeout=10)
-        other, _ = await service.create_entry(tenant, "overlap", "B")
+        other, _ = await service.create_entry(
+            tenant, "overlap", "B", expected_revision=first.revision_id
+        )
         release_first_flush.set()
-        resumed, _ = await asyncio.wait_for(stale, timeout=10)
+        resumed_doc, resumed_revision_id, _ = await asyncio.wait_for(stale, timeout=10)
 
     head = await service.get_entry(tenant, "overlap")
     assert head is not None
     assert head.body == "A"
     assert head.metadata["tag"] == "late"
-    assert resumed.body == "A"
-    assert resumed.revision_id is not None
-    assert head.revision_id == resumed.revision_id
+    assert resumed_doc.body == "A"
+    assert head.revision_id == resumed_revision_id
 
-    current = await service.get_revision(tenant, head.id, resumed.revision_id)
+    current = await service.get_revision(tenant, head.id, resumed_revision_id)
     assert current is not None
     assert current.body == head.body
     assert current.revision_number == 3
@@ -183,8 +222,8 @@ async def test_returning_to_an_old_body_adds_a_new_revision() -> None:
     service = KbService()
     tenant = uuid.uuid4()
     one, _ = await service.create_entry(tenant, "flip", "A")
-    await service.create_entry(tenant, "flip", "B")
-    three, _ = await service.create_entry(tenant, "flip", "A")
+    two, _ = await service.create_entry(tenant, "flip", "B", expected_revision=one.revision_id)
+    three, _ = await service.create_entry(tenant, "flip", "A", expected_revision=two.revision_id)
     assert three.revision_id != one.revision_id
     assert three.revision_id is not None
     revision = await service.get_revision(tenant, three.id, three.revision_id)
@@ -241,7 +280,9 @@ async def test_delete_removes_head_and_every_revision() -> None:
     service = KbService()
     tenant = uuid.uuid4()
     first, _ = await service.create_entry(tenant, "to-delete", "v1")
-    second, _ = await service.create_entry(tenant, "to-delete", "v2")
+    second, _ = await service.create_entry(
+        tenant, "to-delete", "v2", expected_revision=first.revision_id
+    )
     keep, _ = await service.create_entry(tenant, "to-keep", "stays")
     assert first.revision_id is not None
     assert second.revision_id is not None
@@ -280,3 +321,27 @@ async def test_failed_delete_leaves_head_and_revisions_readable() -> None:
 
     assert await service.get_entry(tenant, "kept-on-error") is not None
     assert await service.get_revision(tenant, entry.id, entry.revision_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_overlapping_update_from_an_old_revision_is_refused() -> None:
+    """Two writers read the same revision: the first wins, the second is refused."""
+    from meho_backplane.kb.stale_revision import KbStaleRevisionError
+
+    service = KbService()
+    tenant = uuid.uuid4()
+    first, _ = await service.create_entry(tenant, "race", "A")
+    winner, _ = await service.create_entry(tenant, "race", "B", expected_revision=first.revision_id)
+
+    with pytest.raises(KbStaleRevisionError) as info:
+        await service.create_entry(tenant, "race", "C", expected_revision=first.revision_id)
+
+    assert info.value.detail.cause == "stale"
+    assert info.value.detail.current_revision_id == winner.revision_id
+    assert info.value.detail.current_revision_number == 2
+    assert info.value.detail.body_diff is not None
+    assert "+B" in info.value.detail.body_diff
+    head = await service.get_entry(tenant, "race")
+    assert head is not None
+    assert head.body == "B"
+    assert await _revision_count(first.id) == 2

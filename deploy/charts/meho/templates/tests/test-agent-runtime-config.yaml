@@ -48,6 +48,16 @@ spec:
   imagePullSecrets:
     {{- . | nindent 4 }}
   {{- end }}
+  # busybox runs as root unless a user is set, so name "nobody" (65534).
+  # `global.openshift: true` leaves the ids to OpenShift.
+  securityContext:
+    runAsNonRoot: true
+    {{- if not (and .Values.global .Values.global.openshift) }}
+    runAsUser: 65534
+    runAsGroup: 65534
+    {{- end }}
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: agent-runtime-env-check
       # Minimal busybox-class image; only `sh` + `printenv` are needed.

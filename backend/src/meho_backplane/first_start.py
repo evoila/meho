@@ -18,8 +18,11 @@ checks are:
 
 The endpoint needs no login, like the bare ``/ready`` verdict, so the answer
 holds the list only: no stack trace, no token, no exception text. A red
-line names only the host from ``BACKPLANE_URL`` and the names of the
-targets. The checks run again on every call and change nothing.
+line names only the host from ``BACKPLANE_URL``. The reachability line shows
+only a count of the systems that did not answer, never their names. The
+signed-in console page shows the names of the systems of the signed-in
+tenant. The public answer is kept for about 30 seconds, so many calls run
+the checks once. The checks change nothing.
 
 A line has one of three states: ``ok``, ``fail`` or ``skipped``. A check is
 skipped when it cannot run or has no meaning (the certificate check when
@@ -32,6 +35,7 @@ import contextlib
 import socket
 import ssl
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -52,8 +56,10 @@ __all__ = [
     "CLOCK_MAX_SKEW_S",
     "FirstStartLine",
     "FirstStartResponse",
+    "reset_public_cache_for_testing",
     "router",
     "run_first_start_checks",
+    "run_public_first_start_checks",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -66,6 +72,8 @@ CLOCK_MAX_SKEW_S: float = 60.0
 _NETWORK_TIMEOUT_S: float = 5.0
 _TARGET_TIMEOUT_S: float = 10.0
 _MAX_NAMES_SHOWN: int = 10
+#: The public answer is reused for this many seconds.
+_PUBLIC_CACHE_TTL_S: float = 30.0
 
 # OpenSSL verify codes (X509_V_ERR_*) that get their own fix sentence.
 _VERIFY_EXPIRED: int = 10
@@ -327,22 +335,31 @@ async def _probe_one(target: Target) -> bool:
     return bool(fingerprint.reachable)
 
 
-async def _live_targets() -> list[Target]:
+async def _live_targets(tenant_id: uuid.UUID | None = None) -> list[Target]:
+    """Live targets. With *tenant_id*, only the targets of that tenant."""
     from meho_backplane.db.engine import get_sessionmaker
 
+    query = select(Target).where(Target.deleted_at.is_(None))
+    if tenant_id is not None:
+        query = query.where(Target.tenant_id == tenant_id)
     async with get_sessionmaker()() as session:
-        rows = await session.scalars(select(Target).where(Target.deleted_at.is_(None)))
+        rows = await session.scalars(query)
         return list(rows)
 
 
 async def check_reachability(
     *,
-    list_targets: Callable[[], Awaitable[list[Target]]] | None = None,
+    tenant_id: uuid.UUID | None = None,
+    show_names: bool = False,
+    list_targets: Callable[[uuid.UUID | None], Awaitable[list[Target]]] | None = None,
     probe_one: Callable[[Target], Awaitable[bool]] | None = None,
 ) -> FirstStartLine:
-    """Every system in the settings answers the same call as ``meho targets probe``."""
+    """Every system in the settings answers the same call as ``meho targets probe``.
+
+    A red line names the systems only when *show_names* is true.
+    """
     try:
-        targets = await (list_targets or _live_targets)()
+        targets = await (list_targets or _live_targets)(tenant_id)
     except Exception:
         _log.warning("first_start_targets_unreadable", exc_info=True)
         return _line(
@@ -357,6 +374,15 @@ async def check_reachability(
     probe = probe_one or _probe_one
     answers = await asyncio.gather(*(probe(t) for t in targets))
     down = sorted(t.name for t, up in zip(targets, answers, strict=True) if not up)
+    if down and not show_names:
+        return _line(
+            "reachability",
+            "fail",
+            f"{len(down)} of {len(targets)} systems did not answer. "
+            "Sign in to the console to see which ones. "
+            "Check that each one is switched on, that MEHO can reach its address, "
+            "and that its login in MEHO is right.",
+        )
     if down:
         shown = ", ".join(down[:_MAX_NAMES_SHOWN])
         more = f" and {len(down) - _MAX_NAMES_SHOWN} more" if len(down) > _MAX_NAMES_SHOWN else ""
@@ -373,20 +399,54 @@ async def check_reachability(
 # --- The list ---------------------------------------------------------------
 
 
-async def run_first_start_checks() -> FirstStartResponse:
-    """Run the four checks and return the list. Changes nothing."""
+async def run_first_start_checks(
+    *, tenant_id: uuid.UUID | None = None, show_names: bool = False
+) -> FirstStartResponse:
+    """Run the four checks and return the list. Changes nothing.
+
+    The console page passes its tenant and ``show_names=True``. The public
+    endpoint passes neither, so it shows counts only.
+    """
     backplane_url = get_settings().backplane_url
     dns = await check_dns(backplane_url)
     certificate, clock, reachability = await asyncio.gather(
         check_certificate(backplane_url, dns_ok=dns.ok),
         check_clock(),
-        check_reachability(),
+        check_reachability(tenant_id=tenant_id, show_names=show_names),
     )
     lines = [dns, certificate, clock, reachability]
     return FirstStartResponse(ok=all(line.ok for line in lines), checks=lines)
 
 
+_public_cache: tuple[float, FirstStartResponse] | None = None
+_public_lock: asyncio.Lock | None = None
+
+
+def reset_public_cache_for_testing() -> None:
+    """Forget the kept public answer."""
+    global _public_cache, _public_lock
+    _public_cache = None
+    _public_lock = None
+
+
+async def run_public_first_start_checks() -> FirstStartResponse:
+    """The public list: counts only, and reused for about 30 seconds.
+
+    One run at a time: calls that arrive while the checks run wait for that run.
+    """
+    global _public_cache, _public_lock
+    if _public_lock is None:
+        _public_lock = asyncio.Lock()
+    async with _public_lock:
+        now = time.monotonic()
+        if _public_cache is not None and now - _public_cache[0] < _PUBLIC_CACHE_TTL_S:
+            return _public_cache[1]
+        result = await run_first_start_checks()
+        _public_cache = (time.monotonic(), result)
+        return result
+
+
 @router.get("/first-start", response_model=FirstStartResponse)
 async def first_start() -> FirstStartResponse:
     """The first-start list. No login: it shows the verdict lines only."""
-    return await run_first_start_checks()
+    return await run_public_first_start_checks()

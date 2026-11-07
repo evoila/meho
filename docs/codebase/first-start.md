@@ -41,7 +41,10 @@ session maker, the connector resolver.
 
 - DNS is checked for "resolves" only. MEHO does not know the address it is
   served on, so it cannot compare.
-- The endpoint is public. A red reachability line names the targets (all
-  tenants).
+- The endpoint is public. A red reachability line shows only a count of the
+  systems that did not answer. The public answer is kept for 30 seconds, so
+  many calls run the checks once.
+- The console page `/ui/first-start` needs the `operator` role. It names the
+  systems of the signed-in tenant that did not answer.
 - With no person's token, a target whose login is in Vault cannot be read, so
   it shows as not answering.

@@ -31,7 +31,7 @@ from fastapi.testclient import TestClient
 from meho_backplane import first_start
 from meho_backplane.main import app
 from meho_backplane.settings import get_settings
-from meho_backplane.ui.auth.middleware import require_ui_session
+from meho_backplane.ui.auth.middleware import require_ui_operator
 from meho_backplane.ui.routes.first_start import build_first_start_router
 
 _SITE = "https://meho.example.com"
@@ -44,8 +44,10 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     monkeypatch.setenv("BACKPLANE_URL", _SITE)
     get_settings.cache_clear()
+    first_start.reset_public_cache_for_testing()
     yield
     get_settings.cache_clear()
+    first_start.reset_public_cache_for_testing()
 
 
 def _patch_green(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -61,7 +63,7 @@ def _patch_green(monkeypatch: pytest.MonkeyPatch) -> None:
     async def now() -> datetime:
         return datetime.now(UTC)
 
-    async def targets() -> list[Any]:
+    async def targets(tenant_id: Any = None) -> list[Any]:
         return [SimpleNamespace(name="esx-1"), SimpleNamespace(name="esx-2")]
 
     async def probe(target: Any) -> bool:
@@ -154,14 +156,60 @@ def test_unreachable_target_gives_one_red_line(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(first_start, "_probe_one", probe)
     red = _red(_get())
     assert [c["name"] for c in red] == ["reachability"]
-    assert "esx-2" in red[0]["message"]
+    assert "1 of 2 systems did not answer" in red[0]["message"]
     assert "esx-1" not in red[0]["message"]
+    assert "esx-2" not in red[0]["message"]
+
+
+def test_public_answer_is_reused_for_a_short_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_green(monkeypatch)
+    calls = 0
+
+    async def probe(target: Any) -> bool:
+        nonlocal calls
+        calls += 1
+        return True
+
+    monkeypatch.setattr(first_start, "_probe_one", probe)
+    clock = [1000.0]
+    monkeypatch.setattr(first_start.time, "monotonic", lambda: clock[0])
+    _get()
+    _get()
+    assert calls == 2  # two systems, one run
+    clock[0] += first_start._PUBLIC_CACHE_TTL_S + 1
+    _get()
+    assert calls == 4
+
+
+async def test_names_show_only_when_asked_and_only_for_the_tenant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import uuid
+
+    _patch_green(monkeypatch)
+    seen: list[Any] = []
+    tenant = uuid.uuid4()
+
+    async def targets(tenant_id: Any = None) -> list[Any]:
+        seen.append(tenant_id)
+        return [SimpleNamespace(name="esx-1"), SimpleNamespace(name="esx-2")]
+
+    async def probe(target: Any) -> bool:
+        return target.name != "esx-2"
+
+    monkeypatch.setattr(first_start, "_live_targets", targets)
+    monkeypatch.setattr(first_start, "_probe_one", probe)
+    named = await first_start.run_first_start_checks(tenant_id=tenant, show_names=True)
+    assert "esx-2" in named.checks[3].message
+    assert seen == [tenant]
+    plain = await first_start.run_first_start_checks()
+    assert "esx-2" not in plain.checks[3].message
 
 
 def test_no_targets_is_green(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_green(monkeypatch)
 
-    async def none() -> list[Any]:
+    async def none(tenant_id: Any = None) -> list[Any]:
         return []
 
     monkeypatch.setattr(first_start, "_live_targets", none)
@@ -171,7 +219,7 @@ def test_no_targets_is_green(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_unreadable_target_list_is_red_not_green(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_green(monkeypatch)
 
-    async def broken() -> list[Any]:
+    async def broken(tenant_id: Any = None) -> list[Any]:
         raise RuntimeError("hunter2 db down")
 
     monkeypatch.setattr(first_start, "_live_targets", broken)
@@ -341,7 +389,7 @@ def test_console_page_shows_the_same_list(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(first_start, "_database_time", late)
     page_app = FastAPI()
     page_app.include_router(build_first_start_router())
-    page_app.dependency_overrides[require_ui_session] = lambda: None
+    page_app.dependency_overrides[require_ui_operator] = lambda: SimpleNamespace(tenant_id=None)
     page = TestClient(page_app).get("/ui/first-start")
     assert page.status_code == 200
     api = _get()

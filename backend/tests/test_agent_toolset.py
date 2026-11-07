@@ -71,6 +71,7 @@ from structlog.testing import capture_logs
 import meho_backplane.agent.toolset as toolset_mod
 import meho_backplane.agent.toolset_discovery as toolset_discovery
 from meho_backplane.agent import AgentDefinition, PydanticAgentRun
+from meho_backplane.agent import run as agent_run_module
 from meho_backplane.agent.hosted_context import (
     CONTEXT_BLOCK_END,
     CONTEXT_BLOCK_START,
@@ -667,6 +668,17 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_run_logger(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the run module a fresh logger proxy for each test.
+
+    Its module-level ``_log`` may already have cached its bound methods
+    (``cache_logger_on_first_use=True``) in an earlier test on this worker,
+    and a cached logger does not reach ``capture_logs``.
+    """
+    monkeypatch.setattr(agent_run_module, "_log", structlog.get_logger(agent_run_module.__name__))
 
 
 @pytest.fixture

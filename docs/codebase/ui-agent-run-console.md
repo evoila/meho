@@ -168,11 +168,11 @@ rather than re-implementing decide).
 
 ## Known issues / out of scope
 
-- The cancel is not synchronous: the proxy records the durable cancel
-  intent (via `invoker.cancel`) and the run's loop observes the
-  `cancelled` status on its next turn boundary. The console flips to the
-  `cancelled` pill and closes the `EventSource` immediately; the run's own
-  termination follows on the backend.
+- The cancel records the durable `cancelled` state (via `invoker.cancel`)
+  and stops the run's loop: the loop task is cancelled at once on the
+  worker that runs it, and a loop on another worker stops when its
+  heartbeat finds the lease gone. The console flips to the `cancelled`
+  pill and closes the `EventSource` immediately.
 - Bulk-cancel / cancel-from-runs-list is a possible follow-up, not in
   scope here (the runs-list surface is T3 #1830).
 - Cross-agent run history (work_ref / status filters, poll-after-the-fact)

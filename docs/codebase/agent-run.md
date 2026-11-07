@@ -232,11 +232,12 @@ one transaction):
   not a read); a `read_only` operator gets `UnauthorizedCancellationError`.
   Cancelling an already-terminal run surfaces as `IllegalTransitionError`
   (not a silent no-op). The function records the **durable intent**
-  (`status='cancelled'` + `ended_at`); the actual interruption of the
-  in-flight async loop is the runtime's job (G11.1-T1) — the loop
-  observes the cancelled status at its next turn boundary and stops.
-  Recording the intent durably first is what makes cancellation survive
-  a process restart.
+  (`status='cancelled'` + `ended_at`). `AgentInvoker.cancel` then
+  cancels the loop task on its own worker; a loop on another worker
+  stops when its heartbeat gets `LeaseLostError` (the heartbeat calls
+  back into the loop task). The calls the run made before it stopped
+  are charged to the person's spend cap. Recording the cancel durably
+  first is what makes it survive a process restart.
 - `claim_lease(session, row, *, owner, ttl_seconds)` — stamp
   `lease_owner` + `lease_expires_at` on a run a worker is about to
   execute (T4 #825). Status untouched — composed by the caller with

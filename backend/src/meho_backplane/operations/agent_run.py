@@ -866,6 +866,7 @@ async def fail_run(
     row: AgentRun,
     *,
     error: str,
+    cost: Decimal | None = None,
 ) -> AgentRun:
     """Transition a run to ``failed`` and record the failure reason.
 
@@ -877,6 +878,8 @@ async def fail_run(
         session: Open :class:`AsyncSession`; flushed, not committed.
         row: The non-terminal :class:`AgentRun`.
         error: Human-readable failure reason.
+        cost: Cost of the model calls the run made before it failed.
+            ``None`` when it made none.
 
     Returns:
         The mutated, flushed row.
@@ -886,6 +889,8 @@ async def fail_run(
             row's current status.
     """
     row.error = error
+    if cost is not None:
+        row.cost = cost
     return await transition(session, row, AgentRunStatus.FAILED)
 
 
@@ -905,11 +910,11 @@ async def cancel_run(
     (409), not a silent no-op.
 
     The actual interruption of the in-flight async loop is the
-    runtime's responsibility (the AgentRun seam, G11.1-T1): this
-    function records the *durable intent* (status + ``ended_at``); the
-    loop observes the cancelled status on its next turn boundary and
-    stops. Recording the intent durably first is what makes
-    cancellation survive a process restart.
+    invoker's job: this function records the durable cancel (status +
+    ``ended_at``); the invoker then cancels the loop task on its worker,
+    and a loop on another worker stops when its heartbeat finds the lease
+    gone. Recording the cancel durably first is what makes it survive a
+    process restart.
 
     Args:
         session: Open :class:`AsyncSession`; flushed, not committed.

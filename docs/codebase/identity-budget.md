@@ -87,10 +87,20 @@ agent_run loop ─►│ AgentRun.start / .result    │
                └─────────────────────────────────────┘
 ```
 
-A **failed** run skips steps 1-4 entirely; `agent_run.cost` stays NULL
-and no budget rows materialise. Future enforcement may opt to charge
-best-effort partial usage on failure, but the v0.2 contract is
-"failed runs cost nothing".
+A **failed** or **cancelled** run is charged for the model requests it
+finished: the runtime keeps the per-request usage current while the loop
+runs (`AgentRunHandle.request_usages`, the `usage_sink` of
+`stream_events`), and `_finalize_run` runs steps 1-4 with it. A run
+that made no model request costs nothing. When the row is already
+terminal (cancelled), the status is left alone and the charge is still
+applied.
+
+A run that has started and not ended is not charged yet. The pre-run
+gate counts each such run of the person as one request, and
+`_create_run_row` takes a per-person lock (`pg_advisory_xact_lock` on
+PostgreSQL) around that count and the insert of the new run row. So
+with a cap of one request, a second start while the first run is still
+going is refused.
 
 ## The pricing table
 

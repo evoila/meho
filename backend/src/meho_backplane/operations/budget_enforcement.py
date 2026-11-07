@@ -72,8 +72,10 @@ mid-flight is recorded faithfully by
 :func:`~meho_backplane.operations.identity_budget.apply_consumption`
 afterwards, and the *next* run hits the cap pre-flight. The window's
 last spike is the inevitable cost of any per-window-bucket scheme
-that doesn't know per-call token budgets ex-ante (a reservation
-protocol is a v0.3 question, not v0.2).
+that doesn't know per-call token budgets ex-ante. The request count is
+reserved: a run in progress counts as one request (see
+:func:`count_in_flight_runs`), so starts at the same time cannot all pass
+a request cap.
 
 Why three windows, all-of-them gate
 -----------------------------------
@@ -108,6 +110,7 @@ What this module deliberately doesn't do
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
@@ -115,10 +118,11 @@ from typing import Final
 from uuid import UUID
 
 import structlog
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.agent.models import AgentTier
-from meho_backplane.db.models import BudgetWindowKind
+from meho_backplane.db.models import AgentRun, AgentRunStatus, BudgetWindowKind
 from meho_backplane.operations.identity_budget import BudgetReading, get_remaining
 from meho_backplane.settings import Settings
 
@@ -128,6 +132,7 @@ __all__ = [
     "BudgetDecisionKind",
     "BudgetEnforcementSnapshot",
     "EnforcementContext",
+    "count_in_flight_runs",
     "evaluate_pre_run_budget",
     "parse_disabled_tenants",
 ]
@@ -291,6 +296,63 @@ def parse_disabled_tenants(raw: str) -> frozenset[UUID]:
     return frozenset(UUID(part) for part in parts)
 
 
+#: Statuses of a run that has started and has not ended. Such a run is not
+#: charged yet, so the gate counts each one as one request of the cap.
+_IN_FLIGHT_STATUSES: Final[tuple[str, ...]] = (
+    AgentRunStatus.PENDING.value,
+    AgentRunStatus.RUNNING.value,
+    AgentRunStatus.AWAITING_APPROVAL.value,
+)
+
+_SLOT_LOCK_DOMAIN: Final[bytes] = b"agent_run_slot:"
+
+
+def _slot_lock_key(tenant_id: UUID, principal_sub: str) -> int:
+    """Map a ``(tenant, person)`` pair to a stable signed-63-bit advisory-lock key."""
+    digest = hashlib.blake2b(
+        _SLOT_LOCK_DOMAIN + tenant_id.bytes + principal_sub.encode(), digest_size=8
+    ).digest()
+    return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
+
+
+async def count_in_flight_runs(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    principal_sub: str,
+) -> int:
+    """Count the person's top-level runs that have started and not yet ended.
+
+    Child runs are left out: their usage is part of the parent's charge.
+    """
+    result = await session.execute(
+        select(func.count())
+        .select_from(AgentRun)
+        .where(
+            AgentRun.tenant_id == tenant_id,
+            AgentRun.identity_sub == principal_sub,
+            AgentRun.parent_run_id.is_(None),
+            AgentRun.status.in_(_IN_FLIGHT_STATUSES),
+        )
+    )
+    return int(result.scalar_one())
+
+
+async def _lock_run_slot(session: AsyncSession, tenant_id: UUID, principal_sub: str) -> None:
+    """Take a transaction-scoped lock per person, so starts are checked one at a time.
+
+    The lock is held until the caller commits the new run row, so the next
+    start sees that row in its count. A no-op outside PostgreSQL, where one
+    writer runs at a time.
+    """
+    conn = await session.connection()
+    if conn.dialect.name != "postgresql":
+        return
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:k)"), {"k": _slot_lock_key(tenant_id, principal_sub)}
+    )
+
+
 async def evaluate_pre_run_budget(
     session: AsyncSession,
     *,
@@ -298,6 +360,7 @@ async def evaluate_pre_run_budget(
     principal_sub: str,
     requested_tier: AgentTier | None,
     context: EnforcementContext,
+    reserve_slot: bool = False,
 ) -> BudgetDecision:
     """Decide whether a run may start and, if so, against which tier.
 
@@ -328,6 +391,10 @@ async def evaluate_pre_run_budget(
             legacy single-tenant path; no degradation possible, only
             REFUSE on hard caps).
         context: The :class:`EnforcementContext` carrying the knobs.
+        reserve_slot: Take the per-person lock before the count of runs in
+            progress. The caller then creates and commits the new run row
+            in the same transaction, so two starts at the same time cannot
+            both pass the request cap.
 
     Returns:
         A :class:`BudgetDecision`; the caller acts on
@@ -344,12 +411,18 @@ async def evaluate_pre_run_budget(
     # Phase 2 — the three windows. Compute the worst-case across the
     # three for each dimension so the gate is the conservative
     # all-of-them read.
+    if reserve_slot:
+        await _lock_run_slot(session, tenant_id, principal_sub)
+    in_flight = await count_in_flight_runs(
+        session, tenant_id=tenant_id, principal_sub=principal_sub
+    )
     readings = await _read_all_windows(session, tenant_id, principal_sub)
     snapshots = tuple(_snapshot_for(kind, reading) for kind, reading in readings)
 
     # Phase 3 — cap-breach: REFUSE wins over degrade (cap is the
-    # invariant, threshold is the heuristic).
-    refuse_reason = _cap_breach_reason(readings)
+    # invariant, threshold is the heuristic). A run in progress counts as
+    # one request, since it is charged only when it ends.
+    refuse_reason = _cap_breach_reason(readings, in_flight_runs=in_flight)
     if refuse_reason is not None:
         _log.warning(
             "agent_run_refused_budget_exceeded",
@@ -561,6 +634,8 @@ def _ratio_int(consumed: int, limit: int | None) -> float | None:
 
 def _cap_breach_reason(
     readings: list[tuple[BudgetWindowKind, BudgetReading]],
+    *,
+    in_flight_runs: int = 0,
 ) -> str | None:
     """Return a short human-readable reason if any window is at-or-over a cap.
 
@@ -585,7 +660,10 @@ def _cap_breach_reason(
                 f"{kind.value} cost_consumed ({reading.cost_consumed}) "
                 f">= cost_limit ({reading.cost_limit})"
             )
-        if reading.request_limit is not None and reading.requests_consumed >= reading.request_limit:
+        if (
+            reading.request_limit is not None
+            and reading.requests_consumed + in_flight_runs >= reading.request_limit
+        ):
             # Distinguish the per-identity kill switch (limit == 0)
             # from "budget filled by use" so an operator reading the
             # audit row knows which it is.
@@ -593,6 +671,7 @@ def _cap_breach_reason(
                 return f"{kind.value} request_limit is 0 (per-identity kill switch)"
             return (
                 f"{kind.value} requests_consumed ({reading.requests_consumed}) "
+                f"+ runs in progress ({in_flight_runs}) "
                 f">= request_limit ({reading.request_limit})"
             )
     return None

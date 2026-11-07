@@ -38,6 +38,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCall
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RequestUsage
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.agent.invocation import AgentInvoker
 from meho_backplane.agent.run import PydanticAgentRun
@@ -293,10 +294,10 @@ async def test_streamed_run_stamps_cost_and_applies_consumption(
         assert r.requests_consumed == 1
 
 
-async def test_streamed_run_that_fails_charges_nothing(
+async def test_streamed_run_that_fails_is_charged_for_its_calls(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """A streamed run that ends with an error gets no cost and no charge, like other runs."""
+    """A streamed run that ends with an error is charged for the requests it made."""
     await _seed_tenant_and_definition(name="stream-loop-forever")
     invoker = AgentInvoker(
         runtime=PydanticAgentRun(
@@ -309,21 +310,35 @@ async def test_streamed_run_that_fails_charges_nothing(
         )
     )
     op = _make_operator(sub="agent-consumption-streamed-failed")
-    events = [event async for _rid, event in invoker.stream_events(op, "stream-loop-forever", "go")]
+    run_ids = set()
+    events = []
+    async for rid, event in invoker.stream_events(op, "stream-loop-forever", "go"):
+        run_ids.add(rid)
+        events.append(event)
     assert events[-1].kind.value == "error"
+    (run_id,) = run_ids
 
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        rows = (
-            (
-                await session.execute(
-                    select(IdentityBudget).where(IdentityBudget.principal_sub == op.sub)
-                )
-            )
-            .scalars()
-            .all()
-        )
-    assert rows == []
+    async with get_sessionmaker()() as session:
+        rows = await _budget_rows(session, op.sub)
+        row = (
+            await session.execute(select(AgentRunRow).where(AgentRunRow.id == run_id))
+        ).scalar_one()
+    assert row.status == AgentRunStatus.FAILED.value
+    assert row.cost is not None
+    assert row.cost > 0
+    assert {r.window_kind for r in rows} == {"daily", "weekly", "monthly"}
+    for r in rows:
+        assert r.requests_consumed == 1
+        assert r.cost_consumed == row.cost
+        assert r.tokens_consumed > 0
+        assert r.tokens_consumed % 110 == 0
+
+
+async def _budget_rows(session: AsyncSession, sub: str) -> list[IdentityBudget]:
+    result = await session.execute(
+        select(IdentityBudget).where(IdentityBudget.principal_sub == sub)
+    )
+    return list(result.scalars().all())
 
 
 async def test_run_with_cached_prompt_tokens_charges_each_token_once(
@@ -431,28 +446,23 @@ async def test_get_remaining_after_run_reports_correct_gap(
     assert reading.cost_remaining == Decimal("1.00") - expected_cost
 
 
-async def test_failed_run_skips_consumption_application(
+async def test_failed_run_is_charged_for_its_calls(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """A run that fails (turn-budget exhausted) charges no budget bucket.
+    """A run that fails (turn budget exhausted) is charged for the requests it made.
 
-    The contract pinned here: consumption is **success-only**. A run
-    that ends in :attr:`AgentRunStatus.FAILED` neither stamps
-    :attr:`AgentRun.cost` nor materialises any :class:`IdentityBudget`
-    row. Future enforcement (C3-b, #1080) may want to record best-
-    effort partial usage on failed runs, but that is its decision to
-    make explicitly — the v0.2 contract is "failed runs cost nothing".
+    The row's cost is set, and each budget bucket grows by the run's tokens
+    and cost and by one request.
     """
-    from pydantic_ai.messages import ToolCallPart
-
     await _seed_tenant_and_definition(name="loop-forever")
     runtime = PydanticAgentRun(
-        # Model that only calls a missing tool — pydantic_ai burns the
-        # turn budget and surfaces UsageLimitExceeded, which the seam
-        # translates into AgentRunError, which finalize_run records as
-        # ``failed`` (no usage applied).
+        # A model that only calls a missing tool: the loop burns its turn
+        # budget and the seam raises AgentRunError, recorded as ``failed``.
         model_factory=lambda: FunctionModel(
-            lambda messages, info: ModelResponse(parts=[ToolCallPart("nonexistent", {})])
+            lambda messages, info: ModelResponse(
+                parts=[ToolCallPart("nonexistent", {})],
+                usage=RequestUsage(input_tokens=200, output_tokens=20),
+            )
         )
     )
     invoker = AgentInvoker(runtime=runtime)
@@ -460,19 +470,37 @@ async def test_failed_run_skips_consumption_application(
     outcome = await invoker.run(op, "loop-forever", "go")
     assert outcome.status is AgentRunStatus.FAILED
 
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        # No budget rows for this principal.
-        rows = (
-            (
-                await session.execute(
-                    select(IdentityBudget).where(IdentityBudget.principal_sub == op.sub)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        # And the agent_run row's cost is NULL.
+    async with get_sessionmaker()() as session:
+        rows = await _budget_rows(session, op.sub)
+        row = (
+            await session.execute(select(AgentRunRow).where(AgentRunRow.id == outcome.run_id))
+        ).scalar_one()
+    assert row.cost is not None
+    assert row.cost > 0
+    assert {r.window_kind for r in rows} == {"daily", "weekly", "monthly"}
+    for r in rows:
+        assert r.requests_consumed == 1
+        assert r.cost_consumed == row.cost
+        assert r.tokens_consumed > 0
+        assert r.tokens_consumed % 220 == 0
+
+
+async def test_run_that_fails_before_any_model_call_is_not_charged(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A run that raises before its first model response costs nothing."""
+    await _seed_tenant_and_definition(name="raises-at-once")
+
+    def boom(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        raise RuntimeError("provider down")
+
+    invoker = AgentInvoker(runtime=PydanticAgentRun(model_factory=lambda: FunctionModel(boom)))
+    op = _make_operator(sub="agent-consumption-raises")
+    outcome = await invoker.run(op, "raises-at-once", "go")
+    assert outcome.status is AgentRunStatus.FAILED
+
+    async with get_sessionmaker()() as session:
+        rows = await _budget_rows(session, op.sub)
         row = (
             await session.execute(select(AgentRunRow).where(AgentRunRow.id == outcome.run_id))
         ).scalar_one()

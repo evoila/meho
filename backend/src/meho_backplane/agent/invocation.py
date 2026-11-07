@@ -76,7 +76,7 @@ import contextlib
 import os
 import socket
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -93,6 +93,7 @@ from meho_backplane.agent.run import (
     AgentRunError,
     AgentRunEvent,
     AgentRunEventKind,
+    AgentRunHandle,
     BudgetExceededError,
     PydanticAgentRun,
     ScheduledRunNoInputError,
@@ -347,7 +348,11 @@ def _lease_owner() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
 
-async def _heartbeat_loop(run_id: uuid.UUID, owner: str) -> None:
+async def _heartbeat_loop(
+    run_id: uuid.UUID,
+    owner: str,
+    on_lease_lost: Callable[[], None] | None = None,
+) -> None:
     """Extend *run_id*'s lease on a cadence until cancelled or the lease is lost.
 
     Wiring the lease lifecycle into the fire path (#1501) closes the
@@ -366,6 +371,9 @@ async def _heartbeat_loop(run_id: uuid.UUID, owner: str) -> None:
     loop logs and returns so it stops touching a row it no longer owns.
     :class:`asyncio.CancelledError` (the run finished, the sidecar is being
     torn down) propagates verbatim.
+
+    *on_lease_lost* is called when the lease is lost, so a run that was
+    cancelled on another worker stops making model and tool calls.
     """
     settings = get_settings()
     ttl_seconds = settings.agent_run_lease_ttl_seconds
@@ -391,7 +399,41 @@ async def _heartbeat_loop(run_id: uuid.UUID, owner: str) -> None:
             # out from under us. Stop heartbeating -- the run is no
             # longer ours to keep alive.
             _log.info("agent_run_lease_lost", run_id=str(run_id), owner=owner)
+            if on_lease_lost is not None:
+                on_lease_lost()
             return
+
+
+class _LeaseHeartbeat:
+    """The heartbeat sidecar of a run, tied to the task that runs the loop.
+
+    Started inside the loop's task. When the lease is lost (the run was
+    cancelled on another worker), it cancels that task, so the loop makes
+    no more model or tool calls. :meth:`settle` is called once the loop has
+    ended, so a lost lease does not cancel the task while the run is closed.
+    """
+
+    def __init__(self, run_id: uuid.UUID, owner: str) -> None:
+        self._loop_task = asyncio.current_task()
+        self._active = True
+        self._task = asyncio.create_task(
+            _heartbeat_loop(run_id, owner, self._stop_loop),
+            name=f"agent-heartbeat-{run_id}",
+        )
+
+    def _stop_loop(self) -> None:
+        if self._active and self._loop_task is not None:
+            self._loop_task.cancel()
+
+    def settle(self) -> None:
+        self._active = False
+
+    async def close(self) -> None:
+        """Stop the sidecar and wait for it, so no stray task warning shows at GC."""
+        self._active = False
+        self._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._task
 
 
 def _log_decision(
@@ -455,6 +497,11 @@ def _unexecutable_runbook_instruction(
     if toolset_admits_runbook_execution(definition.toolset):
         return None
     return instruction
+
+
+def _handle_usages(handle: AgentRunHandle | None) -> tuple[TokenUsage, ...]:
+    """The usage of the requests a started run has finished (empty before it started)."""
+    return tuple(handle.request_usages) if handle is not None else ()
 
 
 def _split_model_id(model_id: str) -> tuple[str, str]:
@@ -721,6 +768,19 @@ class AgentInvoker:
         owner = _lease_owner()
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
+            # Reserve the run's request under the per-person lock: the check
+            # counts the runs in progress, and this run's row commits in the
+            # same transaction, so the next start counts it.
+            decision = await evaluate_pre_run_budget(
+                session,
+                tenant_id=operator.tenant_id,
+                principal_sub=operator.sub,
+                requested_tier=None,
+                context=EnforcementContext.from_settings(get_settings()),
+                reserve_slot=True,
+            )
+            if decision.kind is BudgetDecisionKind.REFUSE:
+                raise BudgetExceededError(decision.reason)
             row = await run_lifecycle.create_run(
                 session,
                 tenant_id=operator.tenant_id,
@@ -769,7 +829,8 @@ class AgentInvoker:
         non-success callers: refusals, child finalize) leaves the column
         untouched.
 
-        When *usage* is supplied (the success path), the function also:
+        When the run made priced model calls (*usage* on the success path,
+        *request_usages* on every path), the function also:
 
         1. Rebuilds the provider-prefixed model id from the row's
            ``provider`` + ``model`` columns (the inverse of
@@ -783,48 +844,80 @@ class AgentInvoker:
            request. A runtime that reports no per-request usage gets
            *usage* priced as one request.
         3. Stamps that cost on ``agent_run.cost`` through the lifecycle
-           ``succeed_run`` helper (which already accepts the parameter
-           the v0.2 stub-out reserved for this slice).
+           ``succeed_run`` / ``fail_run`` helper.
         4. Applies one increment per active budget bucket (daily +
            weekly + monthly) for the principal via
            :func:`~meho_backplane.operations.identity_budget.apply_consumption`.
 
-        The two writes (``succeed_run`` and ``apply_consumption``) share
-        the same :class:`AsyncSession` and the same commit, so the budget
-        increments are atomic with the run's terminal transition: either
-        both land or neither does. A failure path (``error is not None``)
-        skips consumption entirely -- a failed run has no cost stamp by
-        the v0.2 contract.
+        The two writes (the terminal transition and ``apply_consumption``)
+        share the same :class:`AsyncSession` and the same commit. A run that
+        failed is charged for the calls it made, the same as a run that
+        succeeded. When the row is already terminal (an operator cancelled
+        it), the transition is skipped and the charge is still applied.
         """
+        usages = request_usages or ((usage,) if usage is not None else ())
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             row = await run_lifecycle.get_run(session, run_id)
             if row is None:  # pragma: no cover - row created moments earlier
                 return
+            tenant_id, principal_sub = row.tenant_id, row.identity_sub
+            cost: Decimal | None = None
+            if usages:
+                cost = identity_budget.compute_run_cost(
+                    usages, _full_model_id(row.provider, row.model)
+                )
             try:
                 if error is not None:
-                    await run_lifecycle.fail_run(session, row, error=error)
+                    await run_lifecycle.fail_run(session, row, error=error, cost=cost)
                 else:
-                    cost: Decimal | None = None
-                    if usage is not None:
-                        model_id = _full_model_id(row.provider, row.model)
-                        cost = identity_budget.compute_run_cost(
-                            request_usages or (usage,), model_id
-                        )
                     await run_lifecycle.succeed_run(
                         session, row, output=output or {}, cost=cost, turns=turns
                     )
-                    if usage is not None and cost is not None:
-                        await identity_budget.apply_consumption(
-                            session,
-                            tenant_id=row.tenant_id,
-                            principal_sub=row.identity_sub,
-                            tokens=usage.total_tokens,
-                            cost=cost,
-                        )
             except run_lifecycle.IllegalTransitionError:
                 await session.rollback()
+            if cost is not None:
+                await identity_budget.apply_consumption(
+                    session,
+                    tenant_id=tenant_id,
+                    principal_sub=principal_sub,
+                    tokens=usage.total_tokens
+                    if usage is not None
+                    else sum(u.total_tokens for u in usages),
+                    cost=cost,
+                )
+            await session.commit()
+
+    @staticmethod
+    async def _charge_cancelled_run(
+        run_id: uuid.UUID,
+        *,
+        request_usages: tuple[TokenUsage, ...],
+    ) -> None:
+        """Charge a cancelled run for the model calls it made, leaving its status alone.
+
+        The cancel already wrote the terminal row. A run that is cancelled
+        by a worker shutdown is not terminal; its row is left to the reaper.
+        """
+        if not request_usages:
+            return
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            row = await run_lifecycle.get_run(session, run_id)
+            if row is None:  # pragma: no cover - row created moments earlier
                 return
+            cost = identity_budget.compute_run_cost(
+                request_usages, _full_model_id(row.provider, row.model)
+            )
+            if row.cost is None:
+                row.cost = cost
+            await identity_budget.apply_consumption(
+                session,
+                tenant_id=row.tenant_id,
+                principal_sub=row.identity_sub,
+                tokens=sum(u.total_tokens for u in request_usages),
+                cost=cost,
+            )
             await session.commit()
 
     async def _run_loop_to_completion(
@@ -878,24 +971,31 @@ class AgentInvoker:
         run_token = current_agent_run_id_var.set(run_id)
         session_token = agent_session_id_var.set(run_id)
         meta_token = agent_run_audit_meta_var.set(meta)
-        heartbeat = asyncio.create_task(
-            _heartbeat_loop(run_id, lease_owner),
-            name=f"agent-heartbeat-{run_id}",
-        )
+        heartbeat = _LeaseHeartbeat(run_id, lease_owner)
+        handle: AgentRunHandle | None = None
         try:
             try:
                 handle = self._runtime.start(definition, operator, inputs, run_id=run_id)
                 result = await self._runtime.result(handle)
-            except AgentRunError as exc:
-                await self._finalize_run(run_id, output=None, error=str(exc))
-                return
             except asyncio.CancelledError:
-                # A cancel writes its own terminal row via cancel_run; leave it.
+                # cancel_run wrote the terminal row; only charge the finished calls.
+                heartbeat.settle()
+                await self._charge_cancelled_run(run_id, request_usages=_handle_usages(handle))
                 raise
             except Exception as exc:
-                _log.warning("agent_invoke_unexpected_failure", run_id=str(run_id), error=str(exc))
-                await self._finalize_run(run_id, output=None, error=str(exc))
+                if not isinstance(exc, AgentRunError):
+                    _log.warning(
+                        "agent_invoke_unexpected_failure", run_id=str(run_id), error=str(exc)
+                    )
+                heartbeat.settle()
+                await self._finalize_run(
+                    run_id,
+                    output=None,
+                    error=str(exc),
+                    request_usages=_handle_usages(handle),
+                )
                 return
+            heartbeat.settle()
             usage = TokenUsage(
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
@@ -916,9 +1016,7 @@ class AgentInvoker:
             # so the lease no longer needs extending. Awaiting the cancel
             # keeps a stray "Task was destroyed but it is pending!" warning
             # from surfacing at GC under pytest-asyncio shutdown.
-            heartbeat.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await heartbeat
+            await heartbeat.close()
             agent_run_audit_meta_var.reset(meta_token)
             agent_session_id_var.reset(session_token)
             current_agent_run_id_var.reset(run_token)
@@ -1446,10 +1544,11 @@ class AgentInvoker:
         pending approval is left to expire / be rejected on resume rather
         than being force-decided here.
 
-        The in-flight async loop is *not* interrupted synchronously: this
-        records the durable cancel intent, and the loop observes the
-        ``cancelled`` status on its next turn boundary and stops -- the
-        cancellation contract :func:`cancel_run` documents.
+        This records the durable cancel and stops the loop: on this worker
+        the loop task is cancelled at once; on another worker the loop stops
+        when its heartbeat finds that the run does not hold its lease any more. The
+        calls the run made before it stopped are charged to the person's
+        spend cap.
 
         Raises:
             AgentRunNotFoundError: no run for *run_id* in the tenant.
@@ -1465,6 +1564,11 @@ class AgentInvoker:
                 raise AgentRunNotFoundError(run_id)
             cancelled = await run_lifecycle.cancel_run(session, run_id, operator=operator)
             await session.commit()
+            # Stop the loop on this worker now. A run on another worker stops
+            # when its heartbeat finds the lease gone.
+            state = self._store.get(run_id)
+            if state is not None and state.tenant_id == operator.tenant_id:
+                state.task.cancel()
             agent_name = await _resolve_run_agent_name(
                 session, tenant_id=operator.tenant_id, row=cancelled
             )
@@ -1632,13 +1736,13 @@ class AgentInvoker:
         # lease lapse and the reaper reclaim a live stream. Keep the lease
         # fresh for the stream's lifetime; cancel it once the stream
         # terminates (final/error event, client disconnect, cancel).
-        heartbeat = asyncio.create_task(
-            _heartbeat_loop(run_id, lease_owner),
-            name=f"agent-heartbeat-{run_id}",
-        )
+        heartbeat = _LeaseHeartbeat(run_id, lease_owner)
+        # Usage of the requests the run finished, kept current by the runtime,
+        # so a run that ends by an error or a closed stream is still charged.
+        usage_sink: list[TokenUsage] = []
         try:
             async for event in self._runtime.stream_events(
-                definition, delegated_operator(operator), inputs, run_id
+                definition, delegated_operator(operator), inputs, run_id, usage_sink=usage_sink
             ):
                 if event.kind is AgentRunEventKind.FINAL:
                     terminal_output = _project_output(event.data.get("output"))
@@ -1650,9 +1754,7 @@ class AgentInvoker:
                     turns += 1
                 yield run_id, event
         finally:
-            heartbeat.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await heartbeat
+            await heartbeat.close()
             agent_run_audit_meta_var.reset(meta_token)
             agent_session_id_var.reset(session_token)
             current_agent_run_id_var.reset(run_token)
@@ -1662,7 +1764,7 @@ class AgentInvoker:
                 error=terminal_error,
                 usage=usage,
                 turns=turns,
-                request_usages=request_usages,
+                request_usages=request_usages or tuple(usage_sink),
             )
 
 

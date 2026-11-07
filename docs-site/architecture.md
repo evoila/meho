@@ -2,8 +2,9 @@
 
 MEHO deploys as **one Kubernetes application** (a Helm release). By
 default the chart also brings its own PostgreSQL, Keycloak and OpenBao
-(an open-source fork of Vault). You can replace them with the ones you
-already run ([two ways to install](install/index.md#two-ways-to-install)). This page names every box in the picture, what it
+(an open-source fork of Vault). This is the normal way. You can connect
+your own PostgreSQL or secret store instead
+([two ways to install](install/index.md#two-ways-to-install)). This page names every box in the picture, what it
 does, and — the part that matters when you plan an install — which
 boxes MEHO ships and which ones you can bring.
 
@@ -50,7 +51,7 @@ flowchart LR
 | Backplane (container image) | **MEHO** — `ghcr.io/evoila/meho` | One Deployment, rendered by the Helm chart. |
 | Valkey (activity feed) | **MEHO** — bundled subchart | Installed by the same Helm release; no separate setup. |
 | PostgreSQL + pgvector | **MEHO** by default, or **you** | The chart's built-in PostgreSQL, with pgvector on. Turn it off (`corePostgres.enabled: false`) to use any reachable PostgreSQL with the `vector` extension available — see [the install trail](install/index.md#step-1-pre-create-the-pgvector-extension) for the one privilege nuance. |
-| Keycloak | **MEHO** by default, or **you** | The chart's built-in Keycloak makes the realm `meho`. Your [company login](install/login/index.md) connects to it (AD/LDAP, Entra ID, authentik, your own Keycloak). Turn it off (`coreKeycloak.enabled: false`) to use an existing realm; MEHO then needs a handful of clients configured in it — see [Keycloak realm setup](install/keycloak-realm.md). |
+| Keycloak | **MEHO** | MEHO's built-in Keycloak makes the realm `meho`. Connect your [company login](install/login/index.md) in front of it (AD/LDAP, Entra ID, authentik, your own Keycloak). Replacing it with your own Keycloak is an expert path: it needs realm admin rights to make MEHO's realm, clients and groups — see [Keycloak realm setup](install/keycloak-realm.md). |
 | Credential backend | **MEHO** by default, or **you** | The chart's built-in OpenBao (an open-source fork of Vault). Turn it off (`coreVault.enabled: false`) to use your own HashiCorp Vault **or** Google Secret Manager — see [Credential backends](install/credential-backends.md). |
 | AI agent / MCP client | **You** | MEHO governs agents; it does not run a model. Bring Claude, Cursor, or any MCP client. |
 

@@ -18,7 +18,10 @@
   The re-probe button is rendered only when ``is_tenant_admin``; the
   server-side gate in the probe handler (``resolve_operator_or_403``) is the
   authority -- the template hides the affordance from operators who can't use
-  it.
+  it. A refused probe (403 global row without platform admin, 409, 503)
+  answers with an alert fragment carrying this card's id; the button's
+  ``data-collection-action`` lets ``corpus-collection-actions.js`` turn the
+  swap on for that error answer, so the alert replaces this card.
 
   Probe is slow (a managed-RAG rebuild serializes per project), so the button
   carries ``hx-disabled-elt="this"`` (disabled for the request duration) +
@@ -49,6 +52,7 @@
         <button
           type="button"
           class="btn btn-primary btn-xs gap-1"
+          data-collection-action="probe"
           hx-post="/ui/corpus/collections/{{ collection.collection_key | urlencode }}/probe"
           hx-target="#collection-readiness-card"
           hx-swap="outerHTML"

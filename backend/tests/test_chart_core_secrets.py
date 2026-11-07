@@ -92,6 +92,7 @@ _CORE_NAMES = [
         "ui-auth",
         "check-runner",
         "approval-handoff",
+        "params-hash",
         "broadcast-auth",
         "tls",
         "first-login",
@@ -218,6 +219,7 @@ def test_postgres_plan_makes_the_four_database_secrets() -> None:
         f"{_RELEASE}-core-postgres-meho-app": "postgres-meho-app",
         f"{_RELEASE}-core-postgres-keycloak": "postgres-keycloak",
         f"{_RELEASE}-core-approval-handoff": "approval-handoff",
+        f"{_RELEASE}-core-params-hash": "params-hash",
         f"{_RELEASE}-core-broadcast-auth": "broadcast-auth",
     }
     for kind in ("postgres-meho", "postgres-meho-app"):
@@ -246,6 +248,7 @@ def test_keycloak_plan_makes_the_bootstrap_and_three_client_secrets() -> None:
         "ui-auth",
         "check-runner",
         "approval-handoff",
+        "params-hash",
         "broadcast-auth",
     }
 
@@ -261,6 +264,8 @@ def test_operator_named_secrets_are_checked_with_the_keys_meho_reads() -> None:
             "--set",
             "approvalHandoff.secretName=my-handoff",
             "--set",
+            "paramsHashKey.secretName=my-hash-key",
+            "--set",
             "broadcast.auth.existingSecret=my-valkey",
         )
     )
@@ -269,6 +274,7 @@ def test_operator_named_secrets_are_checked_with_the_keys_meho_reads() -> None:
         "my-su": ("corePostgres.existingSecrets.superuser", ("password",)),
         "my-boot": ("coreKeycloak.existingSecrets.bootstrap", ("client_id", "client_secret")),
         "my-handoff": ("approvalHandoff.secretName", ("approval_handoff_encryption_key",)),
+        "my-hash-key": ("paramsHashKey.secretName", ("params_hash_key",)),
         "my-valkey": ("broadcast.auth.existingSecret", ("requirepass",)),
     }
     made = set(_made(plan).values())
@@ -276,7 +282,7 @@ def test_operator_named_secrets_are_checked_with_the_keys_meho_reads() -> None:
     # `postgres.credentialsSecret` cannot name another one.
     assert "postgres-meho" in made
     assert made.isdisjoint({"postgres-superuser", "keycloak-bootstrap"})
-    assert made.isdisjoint({"approval-handoff", "broadcast-auth", "tls"})
+    assert made.isdisjoint({"approval-handoff", "params-hash", "broadcast-auth", "tls"})
 
 
 def test_tls_secret_is_made_only_when_the_core_name_is_used() -> None:

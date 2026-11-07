@@ -105,6 +105,7 @@ def _make_perfect_retrieve_fn() -> Any:
         source: str | None = None,
         kind: str | None = None,
         limit: int = 10,
+        principal_sub: str | None = None,
     ) -> list[RetrievalHit]:
         # Operations branch — the runner passes ``source="operations"``;
         # RetrievalHit.source_id is the op_id (per
@@ -147,6 +148,7 @@ def _make_terrible_retrieve_fn() -> Any:
         source: str | None = None,
         kind: str | None = None,
         limit: int = 10,
+        principal_sub: str | None = None,
     ) -> list[RetrievalHit]:
         return [
             _make_hit("totally-unrelated-1", source=source or "kb"),
@@ -176,6 +178,7 @@ def _make_partial_retrieve_fn() -> Any:
         source: str | None = None,
         kind: str | None = None,
         limit: int = 10,
+        principal_sub: str | None = None,
     ) -> list[RetrievalHit]:
         slug = answer_map.get(query)
         if slug is None:
@@ -428,6 +431,7 @@ async def test_eval_surface_kb_meho_worse_than_baseline_downgrades_to_red(
         source: str | None = None,
         kind: str | None = None,
         limit: int = 10,
+        principal_sub: str | None = None,
     ) -> list[RetrievalHit]:
         return []
 
@@ -671,6 +675,7 @@ async def test_eval_surface_uses_default_retrieve_when_none_passed() -> None:
         source: str | None = None,
         kind: str | None = None,
         limit: int = 10,
+        principal_sub: str | None = None,
     ) -> list[RetrievalHit]:
         return []
 

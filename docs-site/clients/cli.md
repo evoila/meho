@@ -166,7 +166,7 @@ result confirms CLI, token, ingress, and backplane all agree.
 
 ## Known walls
 
-Two workstation-side issues account for most first-login failures:
+Common first-login failures:
 
 - **Internal-CA trust.** `meho login` dying at its discovery probe with
   `x509: certificate signed by unknown authority` means the
@@ -179,6 +179,15 @@ Two workstation-side issues account for most first-login failures:
   the host resolves to its internal address from the machine you are
   logging in from; a temporary `/etc/hosts` pin to the internal VIP is
   a reliable workaround while you sort DNS out.
+- **Identity provider address.** `meho login` uses the identity
+  provider only over `https://` (plain `http://` only on `localhost`).
+  This also holds when the identity provider answers with a redirect:
+  the CLI follows it only to an `https://` address. The `issuer` in
+  its discovery document must be the realm address
+  MEHO gave, for example `https://<keycloak-host>/realms/<realm>`. If
+  `meho login` says the issuer is not the realm, set
+  `KEYCLOAK_ISSUER_URL` (or `config.keycloakIssuerUrl` in the chart)
+  to the exact `issuer` value of the realm.
 
 For realm-side login failures (`unauthorized_client`,
 `invalid_audience`, the `missing_sub` / `basic`-scope trap), the

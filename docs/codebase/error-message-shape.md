@@ -76,6 +76,16 @@ Examples in current use:
   connector's hand-written licence read, which shows each key masked` —
   see `docs/codebase/spec-ingestion.md`, "Ingested licence reads stay
   off")
+- `ingested_ops_not_accepted` (`call_operation` and `preview_operation`:
+  an ingested op whose target resolves to a connector class that runs
+  only its own hand-written operations. Refused before the call waits for
+  approval and again when an approved call runs; nothing reaches the
+  vendor. A refused call writes one `policy_decision` audit row; a
+  refused preview writes none. The ingest of an API file under the name
+  of such a class answers the same code (REST 422, MCP `-32602`).
+  Message: `ingested_ops_not_accepted: connector <class> runs only its
+  own hand-written operations; ...` — see `docs/codebase/spec-ingestion.md`,
+  "Which connector class ingested operations run on")
 - `receipt_too_large` (`call_operation`: the receipt of a completed run
   could not fit `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`, so the call is
   refused before dispatch and nothing runs — #3641)
@@ -426,6 +436,9 @@ specifically referenced).
 | `POST /api/v1/runbooks/runs` 422 (`missing_params`) and `POST /api/v1/runbooks/runs/{run_id}/next` 422 (`verify_response_required` / `verify_response_mismatch`) | Pydantic validation-error LIST `detail` (`[{"loc", "msg", "type"}]`) with a per-case `type` discriminator, via the shared `http_for` emitter in `api/v1/_errors.py` (registered in `runbook_runs.py`) | compliant (schema-conformant) — landed in #1364. Conforms to the `HTTPValidationError` schema FastAPI auto-declares for the route's 422, so the Go CLI's oapi-codegen client (and any OpenAPI-generated SDK) deserializes it; replaces the prior `detail=str(exc)` string body that forced the CLI's `rawNextResponse` shim | — |
 | `POST/PATCH /api/v1/runbooks/templates*` 422 (`invalid_kb_slug` on draft / edit / publish / deprecate) | Pydantic validation-error LIST `detail` with `type="invalid_kb_slug"`, `loc=["path","slug"]`, via the same `http_for` emitter (registered in `runbook_templates.py`) | compliant (schema-conformant) — landed in #1364 alongside the runs surface | — |
 | `GET /api/v1/runbooks/templates/{slug}` 500 **and** `meho_runbook_show_template` -32603 (`template_body_validation_failed`) | structured `detail` dict (REST, declared in OpenAPI via `_SHOW_RESPONSES`) / `error.data` (MCP `McpInternalError`) with `error='template_body_validation_failed'`, `slug`, `version`, `errors[]` (each `{type, loc, msg}` — url/ctx/input stripped so no non-serialisable object rides the envelope), `message` naming the row + the migration-0054 / re-save remediation + `docs/codebase/runbook-template-hydration.md`. One shared builder `build_template_body_validation_detail` (`runbooks/hydration_errors.py`) so the REST `detail` and the MCP `error.data` can't drift — same cross-transport posture as the ingest envelopes (#777). | compliant (structured) — landed in #2239 (G0.30-T #2239). Before #2239 a legacy empty / whitespace-only step body (PR #2122's forward-only `min_length=1` tightening shipped with no data migration) re-validated on read through `_steps_from_storage` and leaked as a bare `text/plain` 500 (REST) / opaque `-32603 "internal error: ValidationError"` (MCP); the same shared pinned-template hydration sink broke `list_runs` **tenant-wide**. Migration `0054` backfills the offending rows (the durable fix); this envelope covers the residual / future malformed row. See `docs/codebase/runbook-template-hydration.md`. | — |
+
+The two vSphere rows above name `connectors-vmware-rest.md`
+(in the private connectors repository).
 
 The table is the audit artefact's deliverable, not a separate
 spreadsheet. Adding new error surfaces against the convention

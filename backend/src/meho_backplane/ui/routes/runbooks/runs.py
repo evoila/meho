@@ -12,7 +12,7 @@ this module adds the "Runs" tab: list the runs you own (or, for a
 
 This is a pure UI/BFF build over the in-process
 :class:`~meho_backplane.runbooks.run_service.RunbookRunService` -- the
-``require_ui_session`` gate + a direct service call, never the Bearer
+``require_ui_operator`` gate + a direct service call, never the Bearer
 ``/api/v1`` surface (the same posture the read surface uses calling
 :class:`~meho_backplane.runbooks.service.RunbookTemplateService` in
 process). The REST run routes (G12.3-T5 #1311,
@@ -125,7 +125,6 @@ from meho_backplane.runbooks.service import (
 from meho_backplane.ui.auth.middleware import (
     UISessionContext,
     require_ui_operator,
-    require_ui_session,
 )
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.query_filters import EMPTY_STR_TO_NONE
@@ -173,11 +172,9 @@ _MAX_WORK_REF_LENGTH: Final[int] = 512
 #: context is small; this guards the JSON parser against an unbounded paste.
 _MAX_PARAMS_JSON_LENGTH: Final[int] = 16_384
 
-#: Module-level ``Depends`` closure for the operator-session gate (B008
-#: idiom -- no call in a default arg). Matches the read surface's
-#: ``_require_session``.
-_require_session = Depends(require_ui_session)
-#: The ``operator`` role floor of the start POST (matching REST ``start_run``).
+#: Module-level ``Depends`` closure (B008 idiom -- no call in a default
+#: arg). The ``operator`` role floor of the runs list, the start modal and
+#: the start POST, the same floor as the REST run routes.
 _require_operator = Depends(require_ui_operator)
 
 
@@ -454,7 +451,7 @@ def register_runs_routes(router: APIRouter) -> None:
     @router.get("/ui/runbooks/runs", response_class=HTMLResponse)
     async def runbooks_runs(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         assignee: str | None = Query(default=None, max_length=_MAX_ASSIGNEE_LENGTH),
         status: Annotated[_RunStateFilter | None, EMPTY_STR_TO_NONE, Query()] = None,
     ) -> HTMLResponse:
@@ -463,7 +460,7 @@ def register_runs_routes(router: APIRouter) -> None:
     @router.get("/ui/runbooks/runs/start", response_class=HTMLResponse)
     async def runbooks_runs_start_modal(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
     ) -> HTMLResponse:
         return await _render_start_modal(request, session)
 

@@ -219,7 +219,7 @@ func runDecision(
 // decision (#3692) -- who instructed the reviewer, their words, and the
 // refs. decided is the /decide answer; nil prints no self-approval line.
 func printDecision(w io.Writer, idArg string, detail *api.ApprovalRequestView, decided *api.DecideResponseBody) {
-	fmt.Fprintf(w, "approval_request %s → %s\n", idArg, string(detail.Status))
+	fmt.Fprintf(w, "approval_request %s → %s\n", idArg, output.SafeText(string(detail.Status)))
 	if detail.ReviewedBy != nil {
 		fmt.Fprintf(w, "reviewed by: %s\n", principalLabel(*detail.ReviewedBy, detail.ReviewedByName))
 	}
@@ -227,12 +227,12 @@ func printDecision(w io.Writer, idArg string, detail *api.ApprovalRequestView, d
 		fmt.Fprintf(w, "%s\n", line)
 	}
 	if detail.DecidedAt != nil {
-		fmt.Fprintf(w, "decided at:  %s\n", *detail.DecidedAt)
+		fmt.Fprintf(w, "decided at:  %s\n", output.SafeText(*detail.DecidedAt))
 	}
 	if dl := detail.Delegation; dl != nil {
-		fmt.Fprintf(w, "instructed by: %s\n", dl.InstructedBy)
+		fmt.Fprintf(w, "instructed by: %s\n", output.SafeText(dl.InstructedBy))
 		fmt.Fprintf(w, "instruction:   %q\n", dl.Instruction)
-		fmt.Fprintf(w, "refs:          %s\n", strings.Join(dl.Refs, ", "))
+		fmt.Fprintf(w, "refs:          %s\n", output.SafeText(strings.Join(dl.Refs, ", ")))
 	}
 	// An approve runs the operation; say how the run ended (#3543).
 	printRunOutcome(w, detail)

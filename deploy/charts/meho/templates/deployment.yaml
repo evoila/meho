@@ -217,6 +217,29 @@ spec:
                   name: {{ include "meho.agentSecretName" . | quote }}
                   key: {{ .Values.agent.secretKey | quote }}
             {{- end }}
+            {{- with .Values.agent.modelBackend }}
+            # #5851 — which model backend every agent run uses. Plain config.
+            - name: AGENT_MODEL_BACKEND
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.agent.openai.enabled }}
+            # #5851 — an OpenAI-compatible model endpoint. The key is
+            # `secretKeyRef` only, never plaintext; the base URL and the model
+            # are plain config and render only when set.
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "meho.agentOpenaiSecretName" . | quote }}
+                  key: {{ .Values.agent.openai.secretKey | quote }}
+            {{- with .Values.agent.openai.baseUrl }}
+            - name: OPENAI_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.agent.openai.defaultModel }}
+            - name: OPENAI_DEFAULT_MODEL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             {{- if or .Values.keycloakAdmin.enabled .Values.coreKeycloak.enabled }}
             {{- /* With the built-in Keycloak on, all three point at its meho-admin client through the Service (#4591). */}}
             {{- $kc := include "meho.keycloakSettings" . | fromYaml }}
@@ -273,6 +296,15 @@ spec:
                 secretKeyRef:
                   name: {{ $handoff.secretName | quote }}
                   key: {{ $handoff.secretKey | quote }}
+            {{- end }}
+            {{- /* The key of the params hashes and value fingerprints, kept when the database password changes. */}}
+            {{- $hashKey := include "meho.paramsHashKey" . | fromYaml }}
+            {{- if $hashKey.secretName }}
+            - name: PARAMS_HASH_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $hashKey.secretName | quote }}
+                  key: {{ $hashKey.secretKey | quote }}
             {{- end }}
             {{- if .Values.checkRunner.enabled }}
             # #2642 — the in-process check-runner's service-principal

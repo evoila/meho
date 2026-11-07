@@ -6,7 +6,8 @@
   Extends ``base.html`` so the chrome matches the rest of the console. One
   glance answers "which sensors exist / which are failing / which did I
   register but never compose?": each row shows a Sensor's name, its
-  connector_id / op_id, its cadence, the five-state ``last_state`` badge, the
+  connector_id / op_id, its target's product and version (with a warning
+  when the connector does not fit them), its cadence, the five-state ``last_state`` badge, the
   latest observed value, and the relative ``last_evaluated_at`` / ``state_since``.
 
   Filters: two DaisyUI ``<select>``s (status + cadence_kind) form a search bar
@@ -102,6 +103,7 @@
         <tr>
           <th>Sensor</th>
           <th>Operation</th>
+          <th>Target</th>
           <th>Cadence</th>
           <th>Last state</th>
           <th>Last value</th>

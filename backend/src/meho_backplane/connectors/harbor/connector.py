@@ -217,6 +217,8 @@ class HarborConnector(HttpConnector):
     impl_id = "harbor-rest"
     supported_version_range = ">=2.0,<3.0"
     priority = 1
+    # This class serves the operations of its ingested catalog.
+    accepts_ingested_operations = True
 
     def __init__(
         self,

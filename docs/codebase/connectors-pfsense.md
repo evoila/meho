@@ -127,7 +127,10 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
 
 - **Write op handlers** (`ops_write.py`, #3090) — input validators
   (`_validate_gateway_name` / `_validate_interface` / `_validate_gateway_ip` /
-  `_validate_network_cidr`), the `parse_static_routes_xml` config parser, the
+  `_validate_network_cidr`; `_validate_gateway_ip` refuses an IPv6 zone
+  (`%...`) and spaces, like the filter-rule address check, and the
+  `gateway` schema has a pattern for the same rule), the
+  `parse_static_routes_xml` config parser, the
   `pfSsh.php playback` fragment builders (`_build_gateway_playback` /
   `_build_route_playback`), the stage/playback/cleanup helper (`_apply_playback`),
   and the handler functions `pfsense_gateway_add` / `pfsense_route_static_add`

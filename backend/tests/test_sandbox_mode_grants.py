@@ -293,7 +293,7 @@ async def test_setting_lets_a_tenant_admin_create_a_delete_grant_outside_the_con
         )
     assert await rows_in(SandboxDeleteGrant) == 0
     entry = await ServicePrincipalGrantService().create(
-        _TENANT, _CREATOR, _payload("vault.sys.policy.delete"), by_tenant_admin=True
+        _TENANT, _CREATOR, _payload("vault.sys.policy.delete"), creator_role=TenantRole.TENANT_ADMIN
     )
     assert entry.delete_grant is True
     assert await rows_in(SandboxDeleteGrant) == 1
@@ -305,7 +305,10 @@ async def test_setting_changes_nothing_with_the_mode_off(monkeypatch: pytest.Mon
     _allow_delete_grants_from_api(monkeypatch)
     with pytest.raises(GrantValidationError):
         await ServicePrincipalGrantService().create(
-            _TENANT, _CREATOR, _payload("vault.sys.policy.delete"), by_tenant_admin=True
+            _TENANT,
+            _CREATOR,
+            _payload("vault.sys.policy.delete"),
+            creator_role=TenantRole.TENANT_ADMIN,
         )
     assert await rows_in(SandboxDeleteGrant) == 0
     assert await rows_in(ServicePrincipalGrant) == 0

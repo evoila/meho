@@ -31,7 +31,7 @@ Operator reconstruction
 -----------------------
 
 The BFF :class:`~meho_backplane.ui.auth.middleware.UISessionContext` the
-``require_ui_session`` dependency hands route handlers carries only
+``require_ui_operator`` dependency hands route handlers carries only
 ``operator_sub`` / ``tenant_id`` -- not the capability set the
 per-collection entitlement gate needs. The handlers reconstruct the full
 :class:`~meho_backplane.auth.operator.Operator` from the session via the
@@ -60,7 +60,7 @@ A missing / invalid cookie on a fragment fetch falls back to a fresh mint
 Tenant scoping + RBAC
 ---------------------
 
-``operator`` role minimum (enforced by ``require_ui_session``; matches the
+``operator`` role minimum (enforced by ``require_ui_operator``; matches the
 OPERATOR floor both backend routes carry). Tenant identity is derived from
 ``session.tenant_id`` only -- no query parameter or form field overrides
 it, and the reconstructed operator's capability set (also tenant-shaped)
@@ -107,7 +107,7 @@ from meho_backplane.docs_search import (
 from meho_backplane.docs_search.answer import ANSWER_SOURCE_UPSTREAM
 from meho_backplane.docs_search.target_scope import apply_target_default
 from meho_backplane.settings import get_settings
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
@@ -161,7 +161,7 @@ _MEHO_DOCS_REF_PREFIX: Final[str] = "meho://docs/"
 #: Module-level ``Depends`` closure for the operator-session gate. Built
 #: once (rather than inline) to satisfy ruff B008, matching the convention
 #: the kb / topology / dashboard routes established.
-_require_session = Depends(require_ui_session)
+_require_operator = Depends(require_ui_operator)
 
 
 async def _resolve_operator(session: UISessionContext) -> Operator:
@@ -424,7 +424,7 @@ def build_corpus_search_router() -> APIRouter:
     @router.get("/ui/corpus", response_class=HTMLResponse)
     async def corpus_index(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         target: str = Query(default="", max_length=_MAX_TARGET_LENGTH),
     ) -> HTMLResponse:
         """Render the docs-corpus page (delegates to :func:`_render_corpus_index`).
@@ -444,7 +444,7 @@ def build_corpus_search_router() -> APIRouter:
     @router.post("/ui/corpus/search", response_class=HTMLResponse)
     async def corpus_search(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         collection: str = Form(default="", max_length=_MAX_COLLECTION_LENGTH),
         q: str = Form(default="", max_length=_MAX_QUERY_LENGTH),
         mode: str = Form(default=_MODE_SEARCH, max_length=16),

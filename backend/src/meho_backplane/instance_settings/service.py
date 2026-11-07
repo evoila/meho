@@ -25,6 +25,7 @@ their product, impl-id, ``secret_ref`` scope and TLS checks) for targets.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import re
@@ -51,7 +52,7 @@ from meho_backplane.api.v1.targets import (
     update_target,
 )
 from meho_backplane.audit import bind_preallocated_audit_id
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, is_human_principal
 from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
 from meho_backplane.conventions._internal import OverBudgetError, enforce_budget
 from meho_backplane.conventions.schemas import ConventionCreate, ConventionKind, ConventionUpdate
@@ -301,11 +302,23 @@ async def export_settings(session: AsyncSession, tenant_ids: list[uuid.UUID]) ->
     }
 
 
+class _NoAliasDumper(yaml.SafeDumper):  # type: ignore[misc]  # yaml has no stubs here
+    """``SafeDumper`` that writes a value out each time it appears.
+
+    The import refuses anchors and aliases, so the export never writes one,
+    even when one object appears twice in the document.
+    """
+
+    def ignore_aliases(self, data: Any) -> bool:
+        return True
+
+
 def dump_settings_yaml(document: dict[str, Any]) -> str:
     """Render *document* as YAML; stable for equal input (key order kept)."""
     return str(
-        yaml.safe_dump(
+        yaml.dump(
             document,
+            Dumper=_NoAliasDumper,
             sort_keys=False,
             allow_unicode=True,
             default_flow_style=False,
@@ -614,7 +627,8 @@ async def build_plan(
     tenants the file names (the preview has the same rules as the apply).
     """
     plan = ImportPlan(file_sha256=hashlib.sha256(content).hexdigest())
-    parsed = parse_settings_file(content)
+    # In a worker thread: parsing a large file must not hold up other requests.
+    parsed = await asyncio.to_thread(parse_settings_file, content)
     plan.mistakes.extend(parsed.mistakes)
     model = parsed.model
     if model is None:
@@ -920,10 +934,13 @@ async def list_history(
 ) -> list[dict[str, Any]]:
     """The revisions the caller may see, newest first, each with its diff.
 
-    A platform_admin sees every revision. A tenant_admin sees the revisions
-    that touched only their own tenant (a revision's spec holds every tenant it
-    touched, so a multi-tenant one would show other tenants' settings).
+    A platform_admin who is a person sees every revision. Everyone else, also
+    a machine principal whose token carries the platform-admin claim, sees the
+    revisions that touched only their own tenant (a revision's spec holds every
+    tenant it touched, so a multi-tenant one would show other tenants'
+    settings).
     """
+    every_tenant = operator.platform_admin and is_human_principal(operator)
     rows = (
         await session.execute(
             select(InstanceSettingsRevision).order_by(
@@ -935,7 +952,7 @@ async def list_history(
     out: list[dict[str, Any]] = []
     for row in rows:
         before, after = _view(row.spec_before), _view(row.spec_after)
-        if not operator.platform_admin and set(before) | set(after) != {own}:
+        if not every_tenant and set(before) | set(after) != {own}:
             continue
         out.append(
             {

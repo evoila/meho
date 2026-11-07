@@ -20,8 +20,8 @@ Module layout:
   in-process so the budget arithmetic + ordering match the REST surface
   and T4's MCP preamble packer exactly.
 * :mod:`~meho_backplane.ui.routes.conventions.operator` -- the
-  ``resolve_read_context`` dependency that synthesises an OPERATOR-tier
-  :class:`~meho_backplane.auth.operator.Operator` from the BFF session
+  ``resolve_read_context`` dependency that checks the operator role and
+  returns the tenant-scoped :class:`~meho_backplane.auth.operator.Operator`
   plus a soft ``is_tenant_admin`` UX hint for the T2 write affordances.
 
 The umbrella :func:`build_conventions_router` is mounted **before**

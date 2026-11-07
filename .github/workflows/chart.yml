@@ -125,7 +125,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    # Pinned 2026-10-29 with the kind job below (ubuntu-latest is now 26.04, whose Docker breaks kind image load); revisit when kind/docker support it.
+    # Pinned 2026-10-29 with the kind job below (ubuntu-latest is now 26.04,
+    # whose Docker breaks kind image load); revisit when kind/docker support it.
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -152,17 +153,16 @@ jobs:
 
   validate:
     name: Lint + template + kubeconform (PR build gate)
-    # Fork-PR guard: never execute chart logic from a fork on the self-hosted
-    # runner pool. Mirrors image.yml's stance — `runs-on` is internal infra,
-    # so fork PRs are skipped entirely. push events (main, v*) short-circuit
-    # the OR. The trailing `needs.changes.outputs.chart` clause skips this job
+    # Fork-PR guard: fork PRs are skipped entirely (mirrors image.yml).
+    # The job runs on a GitHub-hosted runner: helm and kubeconform come from
+    # public releases. push events (main, v*) short-circuit the OR. The trailing `needs.changes.outputs.chart` clause skips this job
     # (→ reported Success) on PRs that don't touch the chart.
     needs: changes
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.chart == 'true')
-    runs-on: meho-runners-ci
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -181,8 +181,8 @@ jobs:
         # linux-amd64 tarball of v0.6.7.
         #
         # Install target is `$HOME/.local/bin` — a runner-owned directory —
-        # rather than `/usr/local/bin`, because the self-hosted `meho-runners-ci`
-        # pool runs as a non-root user that cannot write to system paths
+        # rather than `/usr/local/bin`, because a runner user may not be able to
+        # write to system paths
         # (writing /usr/local/bin returned `Permission denied` in CI run
         # 25644668781). Appending the directory to `$GITHUB_PATH` is the
         # documented GitHub Actions mechanism for surfacing the binary to

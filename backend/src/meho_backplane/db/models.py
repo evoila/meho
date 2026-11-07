@@ -9149,6 +9149,14 @@ class CheckDashboard(Base):
     # and a boundary rejection names the field and its limit where a CHECK
     # violation would surface as an opaque 500.
     investigator_prompt: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Result of the last alert mail attempt, written by ``checks.mail_result``.
+    # All three are NULL until the first attempt. ``last_mail_reason`` is the
+    # failure reason code and stays NULL when the mail was sent.
+    last_mail_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    last_mail_sent: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
+    last_mail_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

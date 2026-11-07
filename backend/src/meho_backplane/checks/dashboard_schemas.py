@@ -256,6 +256,11 @@ class DashboardRead(BaseModel):
     #: would turn a row that somehow got past the boundary into a 500 on an
     #: unrelated list call.
     investigator_prompt: str | None
+    #: Result of the last alert mail attempt: when, whether it was sent, and
+    #: the failure reason. All NULL until the first attempt.
+    last_mail_at: datetime | None = None
+    last_mail_sent: bool | None = None
+    last_mail_reason: str | None = None
     created_by_sub: str
     created_at: datetime
     updated_at: datetime

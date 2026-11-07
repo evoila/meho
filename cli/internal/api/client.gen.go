@@ -7031,6 +7031,7 @@ type MemoryEntry struct {
 	// the :class:`~meho_backplane.auth.operator.TenantRole` convention.
 	Scope      MemoryScope        `json:"scope"`
 	Slug       string             `json:"slug"`
+	Source     *string            `json:"source"`
 	TargetName *string            `json:"target_name"`
 	TenantId   openapi_types.UUID `json:"tenant_id"`
 	UpdatedAt  time.Time          `json:"updated_at"`

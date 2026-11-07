@@ -31,7 +31,7 @@ func renderSimilarCheck(
 	opts addOptions,
 ) (bool, error) {
 	status := resp.StatusCode()
-	if status != http.StatusConflict && !(opts.DryRun && status == http.StatusOK) {
+	if status != http.StatusConflict && (!opts.DryRun || status != http.StatusOK) {
 		return false, nil
 	}
 	check := resp.JSON409

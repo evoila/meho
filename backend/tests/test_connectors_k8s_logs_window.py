@@ -616,6 +616,48 @@ async def test_window_request_on_the_wire() -> None:
         ("sinceTime", "2026-08-01T00:00:00Z"),
         ("timestamps", True),
     ]
+    assert args.kwargs["headers"]["Accept"] == "application/json"
+
+
+@pytest.mark.asyncio
+async def test_window_request_headers_match_the_sdk_pod_log_call() -> None:
+    """The window read sends the headers of the SDK's own ``/log`` call.
+
+    The API server answers ``406 Not Acceptable`` to an ``Accept`` header
+    none of its serializers can write (``text/plain`` is one). The SDK's
+    generated ``read_namespaced_pod_log`` is the call that works with
+    ``since``, so the window read must send the same headers, and the
+    same query apart from ``sinceTime``.
+    """
+    _page, window_request = await _read_through_real_api_client(
+        _raw_response(f"{_stamp(1)} hello\n".encode())
+    )
+
+    configuration = client.Configuration(host="https://k8s.test:6443")
+    api_client = client.ApiClient(configuration)
+    try:
+        with patch.object(
+            api_client, "request", AsyncMock(return_value=_raw_response(b""))
+        ) as sdk_request:
+            await client.CoreV1Api(api_client).read_namespaced_pod_log(
+                name="argocd-server-7c4b8d-x7r2k",
+                namespace="argocd",
+                container="argocd-server",
+                previous=False,
+                timestamps=True,
+                _preload_content=False,
+            )
+    finally:
+        await api_client.close()
+
+    window_kwargs = window_request.call_args.kwargs
+    sdk_kwargs = sdk_request.call_args.kwargs
+    assert window_kwargs["headers"] == sdk_kwargs["headers"]
+    assert window_kwargs["headers"]["Accept"] != "text/plain"
+    assert window_request.call_args.args == sdk_request.call_args.args
+    window_query_params = dict(window_kwargs["query_params"])
+    assert window_query_params.pop("sinceTime") == "2026-08-01T00:00:00Z"
+    assert window_query_params == dict(sdk_kwargs["query_params"])
 
 
 @pytest.mark.asyncio

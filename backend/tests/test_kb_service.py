@@ -1270,3 +1270,56 @@ async def test_search_entries_short_body_snippet_is_full_body(
         hits = await service.search_entries(uuid.uuid4(), "q")
     assert hits[0].snippet == short
     assert not hits[0].snippet.endswith("…")
+
+
+def _write_header_type_corpus(root: Path) -> None:
+    _write(root / "dated.md", "---\nlearned_at: 2026-11-03\nversion: 3.10\n---\nDated.")
+    _write(root / "stamped.md", "---\nconfirmed_at: 2026-11-03T10:00:00Z\n---\nStamped.")
+    _write(root / "quoted.md", '---\nlearned_at: "2026-11-03"\nversion: "3.10"\n---\nQuoted.')
+
+
+@pytest.mark.asyncio
+async def test_ingest_stores_header_dates_and_versions_as_text(
+    tmp_path: Path,
+    stub_embedding: AsyncMock,
+) -> None:
+    """Unquoted header dates and ``3.10`` are stored as text; the dry run agrees."""
+    _write_header_type_corpus(tmp_path)
+    tenant_id = uuid.uuid4()
+    service = KbService()
+
+    dry = await service.ingest_directory(tmp_path, tenant_id, dry_run=True)
+    assert (dry.inserted_count, dry.error_count) == (3, 0)
+
+    result = await service.ingest_directory(tmp_path, tenant_id)
+    assert (result.inserted_count, result.error_count) == (3, 0)
+
+    expected = {
+        "dated": {"learned_at": "2026-11-03", "version": "3.10"},
+        "stamped": {"confirmed_at": "2026-11-03T10:00:00Z"},
+        "quoted": {"learned_at": "2026-11-03", "version": "3.10"},
+    }
+    for slug, header in expected.items():
+        entry = await service.get_entry(tenant_id, slug)
+        assert entry is not None
+        assert {k: entry.metadata[k] for k in header} == header
+
+
+@pytest.mark.asyncio
+async def test_dry_run_and_real_run_give_the_same_error_for_unstorable_header(
+    tmp_path: Path,
+    stub_embedding: AsyncMock,
+) -> None:
+    _write(tmp_path / "bin.md", "---\nblob: !!binary aGk=\n---\nBody.")
+    _write(tmp_path / "fine.md", "Plain note.")
+    tenant_id = uuid.uuid4()
+    service = KbService()
+
+    dry = await service.ingest_directory(tmp_path, tenant_id, dry_run=True)
+    real = await service.ingest_directory(tmp_path, tenant_id)
+    assert dry.errors == real.errors
+    assert len(real.errors) == 1
+    assert "bin.md" in real.errors[0]
+    assert "'blob'" in real.errors[0]
+    assert len(real.errors[0]) < 200
+    assert (dry.inserted_count, real.inserted_count) == (1, 1)

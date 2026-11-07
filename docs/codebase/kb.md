@@ -170,6 +170,21 @@ Per-file errors (binary file, unreadable bytes, invalid slug,
 malformed front-matter) are caught inside the walker and appended
 to the caller's `errors` list rather than raising.
 
+The walker reads the header with a loader that keeps dates and
+decimal numbers as the text the author wrote. `learned_at:
+2026-11-03` is stored as `"2026-11-03"`, a date with a time as text
+too, and `version: 3.10` as `"3.10"` (every unquoted decimal number
+is text, so a field has one type). Values with quotes are stored
+as they are. A search filter on such a field uses the text form.
+This loader is used only when the file starts with a YAML header
+(`---` on the first line). A JSON header and a file without a
+header are read as before, so a `---` line later in a plain note
+stays body text.
+A header value that still cannot be written as JSON (for example
+`!!binary`) fails that file with one short error that names the
+file and the field. The check is in the walker, so a dry run and a
+real run give the same error.
+
 The walker reads only regular files whose real location is inside
 the folder:
 

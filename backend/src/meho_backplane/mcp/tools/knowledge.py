@@ -366,6 +366,8 @@ register_mcp_tool(
             '"evoila-distilled"}` returns only curated entries, '
             "excluding vendor sidecars). Values must be JSON scalars; "
             "missing keys exclude rows (containment semantics). "
+            "A header date is stored as text, so filter on "
+            '`{"learned_at": "2026-11-03"}`. '
             "Limit defaults to 10; cap is 50 (substrate-enforced). "
             "Surface-name note: every non-MCP MEHO surface calls this "
             "substrate `kb`, not `knowledge` — REST is `/api/v1/kb` "
@@ -405,7 +407,10 @@ register_mcp_tool(
                         "Postgres `documents.metadata @>` containment "
                         "(missing keys exclude the row, multi-key "
                         "intersects). Values must be JSON scalars "
-                        "(string / number / boolean / null)."
+                        "(string / number / boolean / null). A header "
+                        "date or decimal number is stored as text, so "
+                        "filter on the text form (for example "
+                        "'2026-11-03' or '3.10')."
                     ),
                     "properties": {
                         "kind": {"type": "string", "minLength": 1},

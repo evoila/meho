@@ -77,7 +77,13 @@ func newIngestCmd() *cobra.Command {
 			"entry stays unchanged; they are listed under conflicts.\n\n" +
 			"The substrate's body-hash short-circuit means re-ingesting " +
 			"an unchanged corpus only pays an updated_at bump per file; " +
-			"the skipped_count counter rises rather than updated_count.",
+			"the skipped_count counter rises rather than updated_count.\n\n" +
+			"Header dates and decimal numbers are stored as the text you " +
+			"wrote: learned_at: 2026-11-03 is stored as \"2026-11-03\" and " +
+			"version: 3.10 as \"3.10\". A search filter on such a field " +
+			"uses that text. A header value that cannot be stored fails " +
+			"that note with a short error that names the file and the " +
+			"field, in a dry run too.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

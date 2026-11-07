@@ -46,9 +46,13 @@ the tenant-scoped list query.
 
 ### `AgentModelTier` (`agents/schemas.py`)
 
-A `StrEnum` of `standard` / `fast` / `deep`. The tier is *logical* —
-G11.5's multi-provider resolver maps it to a concrete backend at run
-time. The bounded set is enforced as a Pydantic `Literal`-equivalent
+A `StrEnum` of `standard` / `fast` / `deep`. The tier is *logical*.
+MEHO stores it but does not use it at run time yet: the invoker does
+not pass it to the per-tenant model resolver, because the resolver uses
+another set of tiers (`triage` / `investigate` / `summarize`). So every
+stored definition runs on the default model
+(`AgentInvoker._to_agent_definition` in `agent/invocation.py`; see
+[agent-runtime.md](agent-runtime.md)). The bounded set is enforced as a Pydantic `Literal`-equivalent
 (a typed enum field), not a DB `CHECK`, so a future tier lands without a
 migration (the forward-compat argument `BroadcastOverride.scope_field`
 makes).
@@ -164,7 +168,9 @@ Reads (`list` / `show`) require `operator`; writes (`create` / `edit` /
 `delete`) require `tenant_admin`. The REST routes use
 `Depends(require_role(...))`; the MCP tools declare `required_role` on
 the `ToolDefinition` (the registry filter hides write tools from
-non-admins in `tools/list`, and the dispatcher re-checks at call time);
+non-admins in `tools/list`, and the dispatcher re-checks at call time;
+all five tools are on the operator surface, so they list only for a
+session with the `mcp:admin` scope, see [mcp.md](mcp.md));
 the CLI relies on the backend's 403, rendered as `insufficient_role`.
 The service itself does not enforce roles — it assumes the caller has
 validated the tenant role, keeping it callable from unattended contexts.
@@ -183,8 +189,8 @@ event regardless of transport (REST vs MCP).
 
 - `db/models.py` — the `AgentDefinition` ORM table + the shared
   `_PORTABLE_JSON` (JSON → JSONB) column type.
-- `alembic/versions/0015_create_agent_definition.py` — the additive
-  migration creating the table + index (down_revision `0014`).
+- `alembic/versions/0016_create_agent_definition.py` — the additive
+  migration creating the table + index (down_revision `0015`).
 - `auth/operator.py` + `auth/rbac.py` — `Operator`, `TenantRole`,
   `require_role`.
 - `db/engine.py` — `get_sessionmaker` (the session-per-method source).

@@ -4,6 +4,7 @@
 package operation
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -432,14 +433,12 @@ func PrintCallResult(w io.Writer, connectorID, opID string, r *CallResult) {
 	})
 }
 
+// prettyJSON indents the raw JSON as it is. It does not decode it into
+// Go values, so large integers keep every digit.
 func prettyJSON(raw json.RawMessage) (string, error) {
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
+	var out bytes.Buffer
+	if err := json.Indent(&out, raw, "", "  "); err != nil {
 		return "", err
 	}
-	out, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	return string(out), nil
+	return out.String(), nil
 }

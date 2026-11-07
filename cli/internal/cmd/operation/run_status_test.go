@@ -314,3 +314,26 @@ func TestRunStatusJSONPrintsRun(t *testing.T) {
 		t.Errorf("bad JSON %q: %v", out, err)
 	}
 }
+
+// A stored result with an integer above 2^53 must keep every digit,
+// in the human render and under --json, like `meho operation call`.
+func TestRunStatusKeepsLargeIntegers(t *testing.T) {
+	const big = "9007199254740993"
+	body := runBody(t, "succeeded",
+		map[string]any{"status": "ok", "op_id": "vault.kv.read", "result": map[string]any{"id": int64(9007199254740993)}}, nil)
+	if !bytes.Contains(body, []byte(big)) {
+		t.Fatalf("test body lost the number: %s", body)
+	}
+	for _, args := range [][]string{nil, {"--json"}} {
+		f := &fakeOperationsClient{runResponses: []*api.GetOperationRunStatusApiV1OperationsRunsHandleGetResponse{
+			runResp(t, 200, body),
+		}}
+		out, _, err := execRunStatus(t, f, args...)
+		if err != nil {
+			t.Fatalf("execute %v: %v", args, err)
+		}
+		if !strings.Contains(out, big) {
+			t.Errorf("args %v: number changed, want %s in %q", args, big, out)
+		}
+	}
+}

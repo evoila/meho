@@ -97,7 +97,7 @@ func runRunStatus(cmd *cobra.Command, idArg string, wait, jsonOut bool, backplan
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
 	for {
-		view, err := getRun(cmd.Context(), client, runID, wait)
+		view, body, err := getRun(cmd.Context(), client, runID, wait)
 		if err != nil {
 			return renderRunError(cmd, backplaneURL, runID, err, jsonOut)
 		}
@@ -109,18 +109,20 @@ func runRunStatus(cmd *cobra.Command, idArg string, wait, jsonOut bool, backplan
 			}
 			continue
 		}
-		return renderRun(cmd, view, jsonOut)
+		return renderRun(cmd, view, body, jsonOut)
 	}
 }
 
 // getRun reads the run once, with the one-shot 401 refresh. With
 // longCheck the backplane may hold the check open for a few seconds.
+// It also returns the raw answer: the generated type decodes the stored
+// result into float64 values, which change large integers.
 func getRun(
 	ctx context.Context,
 	client operationsAPI,
 	runID uuid.UUID,
 	longCheck bool,
-) (*api.OperationRunStatusResponse, error) {
+) (*api.OperationRunStatusResponse, json.RawMessage, error) {
 	params := &api.GetOperationRunStatusApiV1OperationsRunsHandleGetParams{}
 	if longCheck {
 		w := runCheckWaitSeconds
@@ -128,24 +130,24 @@ func getRun(
 	}
 	resp, err := client.GetOperationRunStatusApiV1OperationsRunsHandleGetWithResponse(ctx, runID, params)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if resp.StatusCode() == http.StatusUnauthorized {
 		if rerr := client.Refresh(ctx); rerr != nil {
-			return nil, rerr
+			return nil, nil, rerr
 		}
 		resp, err = client.GetOperationRunStatusApiV1OperationsRunsHandleGetWithResponse(ctx, runID, params)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	if resp.StatusCode() != http.StatusOK {
-		return nil, classifyNon2xx(resp.HTTPResponse, resp.Body)
+		return nil, nil, classifyNon2xx(resp.HTTPResponse, resp.Body)
 	}
 	if resp.JSON200 == nil {
-		return nil, fmt.Errorf("backplane returned 200 OK but no run in the answer")
+		return nil, nil, fmt.Errorf("backplane returned 200 OK but no run in the answer")
 	}
-	return resp.JSON200, nil
+	return resp.JSON200, json.RawMessage(resp.Body), nil
 }
 
 func renderRunError(cmd *cobra.Command, backplaneURL string, runID uuid.UUID, err error, jsonOut bool) error {
@@ -163,15 +165,17 @@ func runEnded(s api.OperationRunStatus) bool {
 	return s != api.OperationRunStatusPending && s != api.OperationRunStatusRunning
 }
 
-func renderRun(cmd *cobra.Command, view *api.OperationRunStatusResponse, jsonOut bool) error {
+// renderRun prints the run. body is the server's raw answer: --json
+// prints it, so numbers in it keep every digit.
+func renderRun(cmd *cobra.Command, view *api.OperationRunStatusResponse, body json.RawMessage, jsonOut bool) error {
 	w := cmd.OutOrStdout()
 	// Only a run that stored a result has one to show. A failed or
 	// cancelled run is never shown as a success, whatever else it holds.
 	if view.Status == api.OperationRunStatusSucceeded && view.Result != nil {
-		return renderStoredResult(cmd, view, jsonOut)
+		return renderStoredResult(cmd, view, body, jsonOut)
 	}
 	if jsonOut {
-		if err := output.PrintJSON(w, view); err != nil {
+		if err := output.PrintJSON(w, body); err != nil {
 			return err
 		}
 	} else {
@@ -191,18 +195,22 @@ func renderRun(cmd *cobra.Command, view *api.OperationRunStatusResponse, jsonOut
 // renderStoredResult prints the stored OperationResult like `meho
 // operation call` does. The run state `succeeded` only says a result
 // was stored; the stored status decides the output and the exit code.
-func renderStoredResult(cmd *cobra.Command, view *api.OperationRunStatusResponse, jsonOut bool) error {
-	raw, err := json.Marshal(*view.Result)
-	if err != nil {
+// The result is decoded from the raw answer, not from view.Result, so
+// large integers keep every digit, as in `meho operation call`.
+func renderStoredResult(
+	cmd *cobra.Command,
+	view *api.OperationRunStatusResponse,
+	body json.RawMessage,
+	jsonOut bool,
+) error {
+	var answer struct {
+		Result CallResult `json:"result"`
+	}
+	if err := json.Unmarshal(body, &answer); err != nil {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("decode stored result: %v", err)), jsonOut)
 	}
-	var result CallResult
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf("decode stored result: %v", err)), jsonOut)
-	}
-	return renderCallOutcome(cmd, view.ConnectorId, view.OpId, &result, jsonOut, view)
+	return renderCallOutcome(cmd, view.ConnectorId, view.OpId, &answer.Result, jsonOut, body)
 }
 
 func printRunSummary(w io.Writer, v *api.OperationRunStatusResponse) {

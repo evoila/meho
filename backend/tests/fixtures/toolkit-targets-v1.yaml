@@ -30,6 +30,7 @@ targets:
 
   - name: lab-web
     product: linux
+    version: null
     host: web-01.lab.example.com
     secret_ref: secret/toolkit-lab/linux/lab-web
     secret_field_map:

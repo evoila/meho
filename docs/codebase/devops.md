@@ -18,7 +18,8 @@ resources that make up a running backplane:
   `config.forwardedAllowIps`, see
   [`docs/cross-repo/reverse-proxy-contract.md`](../cross-repo/reverse-proxy-contract.md)).
 - Service — ClusterIP front-door for the Deployment, target port `http`.
-- Ingress — TLS-enabled external entry with cert-manager annotations.
+- Ingress — TLS-enabled external entry. The chart adds no cert-manager
+  annotation itself; put one in `ingress.annotations` when you use it.
 - ConfigMap — non-secret env (Keycloak URLs, Vault address, pool sizes,
   `FORWARDED_ALLOW_IPS` for the uvicorn proxy-header trust list, and
   `MEHO_TARGET_SSRF_ALLOWLIST` — the operator-scoped opt-out for the
@@ -30,7 +31,9 @@ resources that make up a running backplane:
   #2318, see `docs/codebase/spec-ingestion.md`)).
 - ServiceAccount — Pod identity, `automountServiceAccountToken: false`.
 - NetworkPolicy — default-deny ingress + explicit egress allow-list to
-  Postgres, Vault, Keycloak, the broadcast subchart, and CoreDNS only.
+  Postgres, Vault, Keycloak, the broadcast subchart, the result-cache
+  subchart (when on), CoreDNS, and the operator's own
+  `networkPolicy.extraEgress` rules.
 - Database migration — `python -m meho_backplane.db.migrate`. With a
   bring-your-own PostgreSQL it is a `pre-install,pre-upgrade` Helm hook Job
   that runs before the Deployment rolls forward. With the built-in
@@ -40,11 +43,22 @@ resources that make up a running backplane:
   [Migration Job](#migration-job-templatesmigration-jobyaml)).
 - Broadcast subchart — in-tree Valkey 9.x Deployment + Service + ConfigMap
   per ADR 0005, plus its **own** ingress NetworkPolicy and a chart-managed
-  `requirepass` Secret (#276) so the store is ingress-isolated and
+  `requirepass` Secret so the store is ingress-isolated and
   authenticated regardless of the umbrella policy.
 - PostgreSQL subchart — the built-in PostgreSQL 17 with pgvector (#4039),
-  off by default (`corePostgres.enabled`); see
+  on by default (`corePostgres.enabled: true`); see
   [PostgreSQL subchart](#postgresql-subchart-chartspostgres-4039).
+- Keycloak and OpenBao subcharts — the built-in login server and password
+  safe, also on by default (`coreKeycloak.enabled: true`,
+  `coreVault.enabled: true`); see
+  [Built-in Keycloak subchart](#built-in-keycloak-subchart-chartskeycloak)
+  and [Built-in OpenBao subchart](#built-in-openbao-subchart-chartsopenbao-4044).
+
+Since v0.45.0 (chart 0.2.0) the three built-in parts are on by default. An
+install that brings its own PostgreSQL, Keycloak or Vault sets the
+matching key to `false` (`corePostgres.enabled`, `coreKeycloak.enabled`,
+`coreVault.enabled`). The steps are under "Breaking changes" of v0.45.0
+in `CHANGELOG.md`.
 
 ## Log shipping (stdout → collector)
 
@@ -72,10 +86,12 @@ exception that keeps uvicorn's own plain format.
 
 ```
 deploy/charts/meho/
-├── Chart.yaml              # apiVersion v2, kubeVersion >=1.28, dependencies: broadcast, result-cache, postgres (alias corePostgres), keycloak (alias coreKeycloak)
+├── Chart.yaml              # apiVersion v2, kubeVersion >=1.28, dependencies: broadcast, result-cache, postgres (alias corePostgres), keycloak (alias coreKeycloak), openbao (alias coreVault)
 ├── .helmignore             # standard exclusions
 ├── values.yaml             # safe-by-default; required fields are blank
 ├── values.schema.json      # draft-07 typed contract; rejects typos and empty required fields
+├── images.txt              # every image of the chart but MEHO's own, pinned by digest (install with no internet)
+├── files/openbao/policies/ # the OpenBao policies the vault-init Job writes
 ├── templates/
 │   ├── _helpers.tpl        # name / fullname / labels / SA helpers
 │   ├── deployment.yaml     # backplane Pod + probes (/healthz, /ready)
@@ -94,6 +110,14 @@ deploy/charts/meho/
 │   ├── tests/test-pgvector.yaml   # helm test pod on the chart's PostgreSQL image
 │   ├── _core-keycloak.tpl  # /auth paths for the Ingress + the hostname check (coreKeycloak.enabled only)
 │   ├── core-keycloak-checks.yaml # renders nothing; runs those checks
+│   ├── core-checks.yaml    # renders nothing; checks values for the built-in PostgreSQL and OpenBao
+│   ├── _core-wiring.tpl    # points the backplane at the built-in parts
+│   ├── _core-vault-init.tpl, core-vault-init.yaml # the OpenBao setup Job, its account and policies
+│   ├── externalsecrets.yaml # ExternalSecrets when `eso.enabled: true`
+│   ├── metrics-auth-secret.yaml # the `/metrics` bearer token Secret
+│   ├── servicemonitor.yaml, prometheusrule.yaml # optional Prometheus Operator objects
+│   ├── pvc-fastembed-cache.yaml # optional cache volume for the embedding model
+│   ├── tests/test-agent-openai-config.yaml, test-agent-runtime-config.yaml, test-ui-console-config.yaml # more helm test pods
 │   └── NOTES.txt           # post-install hints
 └── charts/
     ├── broadcast/          # in-tree Valkey 9.x subchart (ADR 0005)
@@ -104,17 +128,18 @@ deploy/charts/meho/
     │       ├── deployment.yaml    # single-replica Recreate; readonly rootfs + emptyDir /data
     │       ├── service.yaml       # ClusterIP :6379 (port name "redis")
     │       ├── configmap.yaml     # minimal valkey.conf (requirepass Secret-sourced, no persistence)
-    │       ├── secret.yaml        # chart-managed requirepass Secret (#276)
-    │       └── networkpolicy.yaml # own ingress policy: 6379 from backplane only (#276)
+    │       ├── secret.yaml        # chart-managed requirepass Secret
+    │       └── networkpolicy.yaml # own ingress policy: 6379 from backplane only
     ├── result-cache/       # dedicated Valkey for result handles (#3639), same file set
-    ├── postgres/           # built-in PostgreSQL 17 + pgvector (#4039), off by default
+    ├── postgres/           # built-in PostgreSQL 17 + pgvector (#4039), on by default
     │   └── templates/      # statefulset (server + reconcile sidecar), service, configmap (SQL + scripts), networkpolicy
-    └── keycloak/           # built-in Keycloak, off by default (#4040)
-        ├── Chart.yaml
-        ├── values.yaml
-        ├── values.schema.json     # checked only when coreKeycloak.enabled is true
-        ├── files/meho-realm.json  # the MEHO realm, imported at the first start
-        └── templates/             # statefulset, service, configmap-realm, networkpolicy
+    ├── keycloak/           # built-in Keycloak, on by default (#4040)
+    │   ├── Chart.yaml
+    │   ├── values.yaml
+    │   ├── values.schema.json     # checked only when coreKeycloak.enabled is true
+    │   ├── files/meho-realm.json  # the MEHO realm, imported at the first start
+    │   └── templates/             # statefulset, service, configmap-realm, networkpolicy
+    └── openbao/            # built-in OpenBao, on by default (#4044)
 ```
 
 ## Chart contract
@@ -138,7 +163,7 @@ deploy/charts/meho/
   being deployed. The values shipped in `Chart.yaml` are placeholders —
   they exist only so `helm lint` / `helm template` succeed on a fresh
   checkout.
-- `kubeVersion: ">=1.28.0-0"` — matches Goal #11's RKE2 target. The
+- `kubeVersion: ">=1.28.0-0"` — matches the RKE2 target of the v0.1 deploy goal. The
   manifests use only API versions that have been stable since 1.19; the
   floor is set higher than strictly required to align with the test bed.
 - `sources` + `maintainers` + `keywords` follow Artifact Hub norms for
@@ -149,12 +174,12 @@ deploy/charts/meho/
 The Deployment renders `{{ .Values.image.repository }}:{{ .Values.image.tag }}`
 with **no `.Chart.AppVersion` fallback**. `values.schema.json` rejects an
 empty `image.tag` (`minLength: 1`), so every install pins the tag
-operator-supplied at `helm install` / `helm upgrade` time. Goal #11's
-deploy discipline forbids moving references (including a chart-`appVersion`
+operator-supplied at `helm install` / `helm upgrade` time. The v0.1
+deploy rules forbid moving references (including a chart-`appVersion`
 shadow), and the chart enforces that contract at the schema layer rather
 than relying on consumers to remember to `--set image.tag`.
 
-**Digest pinning (`image.digest`, #284 / F15b).** An optional
+**Digest pinning (`image.digest`).** An optional
 `image.digest` (`sha256:<64 hex>`, schema-validated) makes the Deployment —
 and the migration Job, which the chart keeps byte-identical to the
 Deployment — render `repository@digest` instead of `repository:tag`. This
@@ -178,11 +203,10 @@ cosign verify "ghcr.io/evoila/meho@${DIGEST}" \
 ```
 
 (full recipes, including `cosign verify-attestation` for the SBOM, live in
-[`backend/README.md`](../../backend/README.md)). As of #284 **no live
-admission policy enforces this** — the cluster has no Sigstore
+[`backend/README.md`](../../backend/README.md)). **No live admission
+policy enforces this** — the cluster has no Sigstore
 policy-controller / Kyverno image-verification rule, and the lab installer
-(`rdc-hetzner-dc/manifests/meho/install.sh`, a separate repo) runs
-`helm upgrade` without a `cosign verify` step. Adding that gate to the
+in another repo runs `helm upgrade` without a `cosign verify` step. Adding that gate to the
 install path is the cross-repo follow-up; this chart supplies the digest pin
 it verifies against.
 
@@ -192,8 +216,8 @@ it verifies against.
 shape; the operator picks the value.
 
 `imagePullSecrets` is a values-configurable list, empty by default. The
-backplane image is pushed to **public GHCR** (Goal #11's locked artefact-
-distribution principle), so no pull secret is required in the default
+backplane image is pushed to **public GHCR** (the locked artefact-
+distribution rule of the v0.1 deploy goal), so no pull secret is required in the default
 deployment path. Consumers mirroring through a private registry override
 `image.repository` to point at their mirror and (if needed) populate
 `imagePullSecrets`.
@@ -225,7 +249,7 @@ The Deployment renders `startupProbe`, `livenessProbe`, and
 | --- | --- | --- | --- |
 | `startupProbe` | `/healthz` | Pod **restarts** once the budget is exhausted; disables liveness/readiness until it first passes | `periodSeconds: 10`, `timeoutSeconds: 1`, `failureThreshold: 90` (90 × 10s = 900s / 15-min first-boot budget) |
 | `livenessProbe` | `/healthz` (always 200 if the process is up) | Pod **restarts** on failure | `initialDelaySeconds: 30`, `periodSeconds: 10`, `timeoutSeconds: 1`, `failureThreshold: 3` |
-| `readinessProbe` | `/ready` (200 only when every registered probe in the readiness registry passes; 503 with an empty registry at the chassis stage) | Pod **removed from Service endpoints**, no restart | `initialDelaySeconds: 5`, `periodSeconds: 5`, `timeoutSeconds: 2`, `failureThreshold: 3` |
+| `readinessProbe` | `/ready` (200 only when every registered probe in the readiness registry passes: `keycloak`, `vault`, `db`, `broadcast` and `docs_backends`, registered in `main.py`) | Pod **removed from Service endpoints**, no restart | `initialDelaySeconds: 5`, `periodSeconds: 5`, `timeoutSeconds: 2`, `failureThreshold: 3` |
 
 The `startupProbe` (Issue #2393) exists because first boot registers the
 full typed-op catalog and preloads the fastembed embedding model inside the
@@ -264,11 +288,11 @@ guard so an operator on a fast cluster can opt out by clearing
 `probes.startup` (e.g. `--set probes.startup=null`); it ships defaulted-on
 because slow first boots are the common case.
 
-The `/ready` endpoint **returns 503 by design** until G2.2 (Vault /
-Keycloak probes) and G2.3 (Alembic migration probe) register concrete
-probes — that's the fail-closed chassis state, not a bug. During chassis-
-stage dev installs the readinessProbe will hold the Pod out of rotation
-until those probes land; that's the intended signal.
+`/ready` answers 503 while any registered probe fails, so a Pod whose
+Keycloak, Vault, database migration or broadcast store is not ready stays
+out of rotation. An install without Keycloak or Vault (for example the
+`helm-test` job in `chart.yml`) therefore points its readiness probe at
+`/healthz`.
 
 ### Security context
 
@@ -358,7 +382,7 @@ The broadcast clause above is an **egress** allowance on the backplane
 side. A Pod is ingress-isolated only when *some* NetworkPolicy selects it,
 and this policy selects the backplane Pods — not the broadcast store. The
 broadcast subchart therefore ships its **own** ingress NetworkPolicy
-(`charts/broadcast/templates/networkpolicy.yaml`, #276) selecting the
+(`charts/broadcast/templates/networkpolicy.yaml`) selecting the
 broadcast Pod and admitting `tcp/6379` only from the backplane Pods (and
 any `broadcast.networkPolicy.extraAllowedSelectors`), so the store's
 isolation does not depend on the umbrella policy alone.
@@ -384,12 +408,12 @@ section of the deploy guide. SaaS-origin senders and the satellite-runner
 inbound listener are out of scope — they reach the endpoint through the
 ingress hostname, not this rule.
 
-The three egress CIDR fields ship **empty** in `values.yaml` and are
-required-with-shape-validation in the schema **when
-`networkPolicy.enabled: true`**. The chart will not render with the
-default `enabled: true` without explicit per-environment CIDR overrides
-— defense-in-depth against accidentally allowing a wide subnet because
-a typo silently fell through.
+The three egress CIDR fields ship **empty** in `values.yaml`. With
+`networkPolicy.enabled: true`, the schema requires the CIDR of each part
+you bring yourself (PostgreSQL, Vault, Keycloak) and checks its shape. A
+built-in part needs no CIDR: the policy reaches its pod by `podSelector`
+(`allOf` rules in `values.schema.json`). So a typo can never quietly
+allow a wide subnet.
 
 Operators on clusters running an equivalent mesh-level policy (Istio
 `AuthorizationPolicy`, Cilium `CiliumNetworkPolicy`, etc.) can set
@@ -440,8 +464,8 @@ The rest of this section describes the bring-your-own Job.
 
 A Kubernetes `Job` runs as a Helm hook before the Deployment is created
 (install) or rolled forward (upgrade). The container executes
-`python -m meho_backplane.db.migrate` — the entrypoint shipped by Task
-#29 — which invokes `alembic upgrade head` against the same
+`python -m meho_backplane.db.migrate` — the migration runner entrypoint —
+which invokes `alembic upgrade head` against the same
 `DATABASE_URL` Secret the backplane Deployment consumes. The Job uses
 the same image as the backplane (`{{ .Values.image.repository }}:{{ .Values.image.tag }}`)
 so the migrations applied match exactly the revision the rolling-out
@@ -452,7 +476,7 @@ Hook semantics:
 | Annotation | Value | Meaning |
 | --- | --- | --- |
 | `helm.sh/hook` | `pre-install,pre-upgrade` | Runs the Job both on a fresh `helm install` and every `helm upgrade` |
-| `helm.sh/hook-weight` | `"-10"` | Runs ahead of any other hook resources (only documentary at the chassis stage — no other hooks ship yet) |
+| `helm.sh/hook-weight` | `"-10"` | Runs after the backplane ConfigMap hook (weight `-20`), which the Job reads, and after the core secrets hooks |
 | `helm.sh/hook-delete-policy` | `before-hook-creation,hook-succeeded` | Overwrites the previous Job on retry; GCs the Job once it exits 0. `hook-failed` is **intentionally absent** — failed Jobs stay in the namespace for `kubectl logs` forensics |
 
 Pod spec:
@@ -514,8 +538,8 @@ still run as a role that is not a superuser.
 
 ### Core secrets Job (`templates/core-secrets-*.yaml`)
 
-Rendered only when a built-in part is on (`corePostgres.enabled` or
-`coreKeycloak.enabled`); with every part off the chart renders none of these
+Rendered only when a built-in part is on (`corePostgres.enabled`,
+`coreKeycloak.enabled` or `coreVault.enabled`); with every part off the chart renders none of these
 objects. A pre-install and pre-upgrade hook Job (weight -30) runs
 `python -m meho_backplane.core.secrets` from the backplane image and makes
 every missing `<release>-core-*` Secret: database passwords, the Keycloak
@@ -582,8 +606,8 @@ implementation of that decision.
 | Slug | `broadcast` (not `redis`) | The protocol contract matters more than the brand |
 | Workload | `Deployment` (not `StatefulSet`), single replica | Streams are ephemeral in v0.1; HA via Sentinel/Cluster is v0.2+ |
 | Persistence | None (no PVC, `save ""`, `appendonly no`) | Restart-loss of stream history is acceptable in v0.1 |
-| Auth | `requirepass` (default on), Secret-sourced via `secretKeyRef` (#276) | Defense in depth alongside the ingress policy; `protected-mode` stays on |
-| Network isolation | Own ingress NetworkPolicy — `tcp/6379` from backplane Pods only (#276) | The parent policy selects the backplane, not the store; the store needs its own selector to be isolated |
+| Auth | `requirepass` (default on), Secret-sourced via `secretKeyRef` | Defense in depth alongside the ingress policy; `protected-mode` stays on |
+| Network isolation | Own ingress NetworkPolicy — `tcp/6379` from backplane Pods only | The parent policy selects the backplane, not the store; the store needs its own selector to be isolated |
 | Update strategy | `Recreate` | Single-replica + port-bind constraint makes RollingUpdate worse |
 | Probes | TCP `connect` on 6379 | Minimal — avoids coupling to `redis-cli` / `valkey-cli` binary naming variance |
 | Service | ClusterIP `<release>-broadcast:6379` (port name `redis`) | In-cluster only; backplane consumes via the operator-facing `BROADCAST_REDIS_URL` env |
@@ -622,7 +646,7 @@ locked `redis-py` as the driver — it parses `redis://` schemes against a
 Valkey endpoint unchanged (wire-protocol compatibility carries from
 Redis 7.2.4).
 
-**Valkey auth (#276).** `broadcast.auth.enabled: true` (the default)
+**Valkey auth.** `broadcast.auth.enabled: true` (the default)
 renders a chart-managed Secret (`<release>-broadcast-auth`, key
 `requirepass`) — the password is `broadcast.auth.password` when set, an
 operator's `broadcast.auth.existingSecret` when supplied, or a generated
@@ -711,9 +735,9 @@ central deploy and any GitOps-managed install) gains one result-cache pod.
 
 ### PostgreSQL subchart (`charts/postgres/`, #4039)
 
-The built-in PostgreSQL of the core. Off by default
-(`corePostgres.enabled: false`); it turns on by default once the existing
-bring-your-own installs set `corePostgres.enabled: false` in their values.
+The built-in PostgreSQL of the core. On by default
+(`corePostgres.enabled: true`, since chart 0.2.0); an install that brings
+its own PostgreSQL sets it to `false`.
 Design: the internal core design note, §2 (one database server) and §1
 (images, OpenShift).
 
@@ -844,8 +868,9 @@ render and its runner.
 ### Built-in Keycloak subchart (`charts/keycloak/`)
 
 The install can bring its own Keycloak, the login server, so nobody sets
-up a realm by hand. It is **off by default** (`coreKeycloak.enabled:
-false`). With it off, the chart renders exactly what it rendered before.
+up a realm by hand. It is **on by default** (`coreKeycloak.enabled:
+true`, since chart 0.2.0). An install that brings its own Keycloak sets it
+to `false`.
 
 **What it needs.** The built-in PostgreSQL (`corePostgres.enabled:
 true`; the schema refuses `coreKeycloak` without it) and five Secrets
@@ -941,8 +966,10 @@ The file holds **no secret and no host name**. Keycloak fills every
 | MEHO-SA-Operators | `operator` | |
 | MEHO-Admins | `tenant_admin` | |
 | MEHO-Approvers | `read_only` | `approver` = `true` |
+| MEHO-Platform-Admins | (none, and no `tenant_id`) | `platform_admin` = `true` |
 
-**A person is in exactly one of these groups.** The mappers take the first
+**A person is in exactly one of the five role groups.** `MEHO-Platform-Admins`
+is not a role group; it only adds `platform_admin`. The mappers take the first
 group that has the attribute; with two groups the result is not
 predictable. The realm keeps Keycloak's default user profile, which does
 not accept attributes it does not declare, so nobody can put `tenant_role`
@@ -954,12 +981,13 @@ on a person directly: the claim always comes from the group.
 | --- | --- | --- |
 | `meho-backplane` | confidential, no login flow | the token audience only |
 | `meho-cli` | public, device flow | `meho login`; optional scope `offline_access`; offline login idle limit 48 hours (as `bootstrap-clients` with its default `--cli-offline-access`) |
+| `meho-cli-approve` | public, authorization code + PKCE (S256) | redirect `http://127.0.0.1:*`; the approval sign-in: its own login flow `meho approval sign-in` (password, then the one-time code), a 15-minute access token and no refresh token |
 | `meho-mcp` | public, authorization code + PKCE (S256) | redirect URIs `http://localhost:*`, `http://127.0.0.1:*`; optional scopes `offline_access`, `mcp:read`, `mcp:execute`, `mcp:admin`; offline login idle limit 48 hours |
 | `meho-web` | confidential, authorization code + PKCE (S256) | redirect `https://<host>/ui/auth/callback`, after logout `https://<host>/ui/auth/login` |
 | `meho-admin` | confidential, service account | realm-management roles `manage-clients` and `manage-users`; with the company login on, the chart adds `manage-identity-providers` and `manage-realm` (#4592) |
 | `meho-check-runner` | confidential, service account | its tokens carry the audience `meho-check-runner`, not `meho-backplane` |
 
-The three clients people log in with (`meho-cli`, `meho-mcp`, `meho-web`)
+The three main clients people log in with (`meho-cli`, `meho-mcp`, `meho-web`)
 have the default scopes `basic`, `roles`, `web-origins`, `acr`,
 `profile`, `email` and the eight mappers `meho admin keycloak
 bootstrap-clients` sets: `tenant_id`, `tenant_role`, `approver` and
@@ -968,13 +996,16 @@ and `multivalued` false; into the access token and userinfo; `approver`
 and `platform_admin` as booleans), `meho-tenants` (the `meho_tenant`
 values of all the person's groups as the list `meho_tenants`;
 `aggregate.attrs` and `multivalued` true), the audience mappers for
-`meho-backplane` and `https://<host>/mcp`, and the `groups` claim. No client has a fixed-value tenant or role mapper. The group model is
+`meho-backplane` and `https://<host>/mcp`, and the `groups` claim.
+`meho-cli-approve` has the same default scopes and seven of these
+mappers: all but the `https://<host>/mcp` audience. No client has a fixed-value tenant or role mapper. The group model is
 the decision in `docs/decisions/login-role-groups.md`.
 
 **Realm settings.** Offline sessions end after 7 days at most
 (`offlineSessionMaxLifespanEnabled`). Brute-force detection is on.
-Registration is off. `identityProviders` is empty: the company login comes
-later. `attributes.CreateDefaultClientScopes: "true"` keeps Keycloak's
+Registration is off. `identityProviders` is empty in the file; with
+`coreKeycloak.companyLogin.enabled: true` the bootstrap Job adds the
+company login (see [core-bootstrap.md](core-bootstrap.md)). `attributes.CreateDefaultClientScopes: "true"` keeps Keycloak's
 built-in client scopes (`basic`, `profile`, `roles`, …) even though the
 file lists its own `mcp:*` scopes; this attribute needs Keycloak 26.6 or
 newer.
@@ -1105,8 +1136,9 @@ with OpenBao's port 8200.
 ### Built-in OpenBao subchart (`charts/openbao/`, #4044)
 
 The install can bring its own password safe, OpenBao (ADR 0008: OpenBao,
-not HashiCorp Vault). It is **off by default** (`coreVault.enabled:
-false`). With it off, the chart renders exactly what it rendered before.
+not HashiCorp Vault). It is **on by default** (`coreVault.enabled:
+true`, since chart 0.2.0). An install that brings its own Vault sets it to
+`false`.
 The `vault:` block stays for a Vault you bring yourself. MEHO's names stay
 `vault` (`coreVault`, `<release>-vault`, `VAULT_ADDR`): they name the job,
 not the product.
@@ -1198,10 +1230,14 @@ network rule blocks other pods.
 
 ### Metrics scrape wiring (`templates/servicemonitor.yaml`, `templates/prometheusrule.yaml`)
 
-The backplane serves Prometheus exposition at an unauthenticated
-`/metrics` route (`backend/src/meho_backplane/metrics.py`, legacy
+The backplane serves Prometheus exposition at the `/metrics` route
+(`backend/src/meho_backplane/metrics.py`, legacy
 `0.0.4` content type for universal scraper support), but nothing scrapes
-it out of the box. Two **optional, disabled-by-default** Prometheus
+it out of the box. With the chart default `metricsAuth.enabled: true`,
+`/metrics` answers only a caller with the bearer token from the Secret
+`<release>-metrics-auth`, and the ServiceMonitor below sends that token
+([metrics-ready-access.md](metrics-ready-access.md)). Two **optional,
+disabled-by-default** Prometheus
 Operator resources close that gap (Initiative #2884, #2885):
 
 - `serviceMonitor` (`serviceMonitor.enabled`, default `false`) renders a
@@ -1224,7 +1260,7 @@ Operator resources close that gap (Initiative #2884, #2885):
     signal that the activity feed is silently losing events.
   - `MehoBackgroundLoopStalled` (#2888) —
     `(time() - background_loop_last_tick_timestamp_seconds) > (N * background_loop_interval_seconds)`;
-    every one of the 13 lifespan background loops stamps
+    every lifespan background loop stamps
     `background_loop_last_tick_timestamp_seconds{loop}` on each completed
     tick (via `metrics.note_loop_tick`, called at the end of every loop
     body incl. no-op/heartbeat ticks) and re-publishes its cadence as
@@ -1292,15 +1328,15 @@ values overlay:
 
 | Field | Why blank |
 | --- | --- |
-| `image.tag` | Goal #11 deploy discipline: every install pins an immutable tag, never a moving reference |
+| `image.tag` | v0.1 deploy rule: every install pins an immutable tag, never a moving reference |
 | `ingress.host` | Per-environment; no generic placeholder is correct. Required only when `ingress.enabled: true` (the default) — relaxed when ingress is disabled |
-| `ingress.tls.secretName` | Per-environment Secret name (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true |
-| `postgres.credentialsSecret` | Per-environment Secret holding `DATABASE_URL` (ESO-synced from Vault in production) |
+| `ingress.tls.secretName` | Per-environment Secret name (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true and no built-in part is on; with a built-in part an empty name means `<release>-core-tls`, which the install makes |
+| `postgres.credentialsSecret` | Per-environment Secret holding `DATABASE_URL` (ESO-synced from Vault in production). Bring-your-own PostgreSQL only; with the built-in PostgreSQL it stays empty or names `<release>-core-postgres-meho` |
 | `vault.address` | Per-environment Vault endpoint. Required only when `config.credentialBackend: vault` (the default) — a `gsm` install leaves it blank (#2231) |
 | `keycloak.issuer` | Per-environment Keycloak issuer URL. Not set with the built-in Keycloak (`coreKeycloak.enabled`): the chart derives the issuer and the render fails if one is set |
 | `config.keycloakIssuerUrl` / `config.keycloakAudience` / `config.vaultAddr` | ConfigMap env-var mirrors of the above (`backend/src/meho_backplane/settings.py` contract). `config.vaultAddr` is required-when-`credentialBackend: vault`, like `vault.address` |
 | `config.backplaneUrl` / `config.mcpResourceUri` | G0.8-T4 (#633). Blank by design: for the common ingress-fronted deploy the chart derives `BACKPLANE_URL=https://<ingress.host>` (scheme follows `ingress.tls.enabled`) and `MCP_RESOURCE_URI=${BACKPLANE_URL}/mcp` via the `meho.backplaneUrl` / `meho.mcpResourceUri` helpers, so the `/mcp` audience resolves without operator action. Set explicitly only when the public URL differs from the Ingress host, or for a non-default MCP mount. When neither resolves (no ingress / empty host, nothing set) the chart `fail`s at `helm template` / `helm install` time with an actionable message naming `config.backplaneUrl` / `config.mcpResourceUri` / `ingress.host` (#2394, in `templates/configmap.yaml`) instead of rendering an empty audience and letting the pod crash-loop at startup on `audience_not_configured` (`_assert_mcp_resource_uri_configured` in `main.py`, still the runtime backstop). There is no `allowNoMcpResourceUri` escape hatch — for a deliberate MCP-less bring-up before ingress/DNS exists, set a placeholder `config.backplaneUrl`; `/mcp` stays per-request fail-closed regardless. The operator must still add a matching Keycloak `oidc-audience-mapper` — see `docs/cross-repo/mcp-client-setup.md` Step 1 |
-| `networkPolicy.{postgres,vault,keycloak}CIDR` | Per-environment subnet for each upstream. Required only when `networkPolicy.enabled: true` (the default) — relaxed when networkPolicy is disabled. `keycloakCIDR` is not used with the built-in Keycloak |
+| `networkPolicy.{postgres,vault,keycloak}CIDR` | Per-environment subnet for each upstream you bring yourself. Required only when `networkPolicy.enabled: true` (the default) — relaxed when networkPolicy is disabled. Not used for a built-in part |
 
 A blank field falls into the typed-schema contract immediately — `helm
 install` fails before a single Kubernetes resource is created. The
@@ -1323,10 +1359,10 @@ them).
 | Path | Type | Notes |
 | --- | --- | --- |
 | `image.tag` | string | Immutable tag (`sha-<git-sha>` or `v<x.y.z>`); never `:latest`. |
-| `image.digest` | string | Optional `sha256:<64 hex>` digest pin (#284). When set, the Deployment + migration Job render `repository@digest` instead of `repository:tag`; empty (default) uses `image.tag`. |
+| `image.digest` | string | Optional `sha256:<64 hex>` digest pin. When set, the Deployment + migration Job render `repository@digest` instead of `repository:tag`; empty (default) uses `image.tag`. |
 | `ingress.host` | string (`hostname`) | External hostname the chart publishes. Required only when `ingress.enabled: true` (default); skipped when ingress is disabled. |
-| `ingress.tls.secretName` | string | TLS Secret (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true. |
-| `postgres.credentialsSecret` | string | Kubernetes Secret holding `DATABASE_URL` at key `url`. |
+| `ingress.tls.secretName` | string | TLS Secret (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true and no built-in part is on (then empty means `<release>-core-tls`). |
+| `postgres.credentialsSecret` | string | Kubernetes Secret holding `DATABASE_URL` at key `url`. Bring-your-own PostgreSQL only; with the built-in PostgreSQL it stays empty or names `<release>-core-postgres-meho`. |
 | `vault.address` | string (`uri`) | Vault endpoint, e.g. `https://vault.example.org`. Required only when `config.credentialBackend: vault` (the default); a `gsm` install leaves it blank (#2231). |
 | `keycloak.issuer` | string (`uri`) | Keycloak issuer URL (used for `iss` validation + JWKS discovery). Must stay empty with the built-in Keycloak, which sets it. |
 | `config.keycloakIssuerUrl` | string | ConfigMap mirror of the above; consumed by the backplane env. Must stay empty with the built-in Keycloak. |
@@ -1335,8 +1371,8 @@ them).
 | `config.credentialBackend` | enum `vault` \| `gsm` | Credential backend a schemeless target `secret_ref` and the `/api/v1/health` federation proof resolve through (#2227). Default `vault` (rendered `CREDENTIAL_BACKEND`). `vault` requires `vault.address` + `config.vaultAddr`; `gsm` requires `gsm.enabled: true` + `gsm.project` (root-level `allOf` conditional). |
 | `gsm.enabled` / `gsm.project` | boolean / string | GSM credential backend (#2227). Required (`enabled: true` + non-empty `project`) only when `config.credentialBackend: gsm`; inert on a Vault install. Runtime values the backplane reads are `config.gsmProject` (`GSM_PROJECT`) + optional `config.gsmImpersonateSa` (`GSM_IMPERSONATE_SA`). The `gsm.workloadIdentityFederation.*` keys render as `GSM_WIF_*` (#2642 — inert stubs before that); a non-empty `audience` switches credential reads onto the calling operator's identity, which makes *background* dispatch (Sensors, the topology-refresh scheduler, runbook verify dispatch — the callers that dispatch with no operator JWT at all) need an identity of its own — an ambient pod identity or `checkRunner.*`. Connector `probe()` / `fingerprint()` are **not** covered by either: they carry a non-empty placeholder JWT, so they take the WIF branch and fail the exchange regardless. See `docs/deploying.md` § GSM / Vault-free, `deploy/values-examples/values-gsm-example.yaml` (SA-direct), and `deploy/values-examples/values-gsm-wif-example.yaml` (per-operator WIF). |
 | `checkRunner.enabled` / `.clientId` / `.clientSecret.*` | boolean / string / object | In-process check-runner service principal (#2642). `enabled: true` requires a non-empty `clientId` + `clientSecret.secretName`, and wires `CHECK_RUNNER_CLIENT_ID` (plain env) + `CHECK_RUNNER_CLIENT_SECRET` (`secretKeyRef` only). Default `false` renders nothing: background dispatch carries no bearer token and a Sensor whose target needs an operator-context credential read evaluates `unknown`. |
-| `networkPolicy.postgresCIDR` | CIDR (IPv4) | Egress CIDR; pattern-validated. Required only when `networkPolicy.enabled: true` (default). |
-| `networkPolicy.vaultCIDR` | CIDR (IPv4) | Same. |
+| `networkPolicy.postgresCIDR` | CIDR (IPv4) | Egress CIDR; pattern-validated. Required only when `networkPolicy.enabled: true` (default) and the PostgreSQL is your own. |
+| `networkPolicy.vaultCIDR` | CIDR (IPv4) | Same, for a Vault you bring yourself (not used with the built-in OpenBao). |
 | `networkPolicy.keycloakCIDR` | CIDR (IPv4) | Same, but not used (and not required) with the built-in Keycloak, which the backplane reaches by podSelector. |
 
 **Common operator overrides** (safe defaults provided; tune as needed):
@@ -1354,9 +1390,9 @@ them).
 | `networkPolicy.ingressControllerNamespace` | `ingress-nginx` | RKE2 default; override per cluster. |
 | `audit.postgresOnly` | `true` | Postgres-only audit sink baseline. |
 | `broadcast.enabled` | `true` | Deploys the bundled Valkey broadcast subchart. |
-| `corePostgres.enabled` / `coreKeycloak.enabled` | `false` | Built-in core parts (#4041). When on, the core secrets Job makes the missing `<release>-core-*` Secrets; see [core-secrets.md](core-secrets.md). |
+| `corePostgres.enabled` / `coreKeycloak.enabled` / `coreVault.enabled` | `true` | Built-in core parts (#4041), on by default since chart 0.2.0. When on, the core secrets Job makes the missing `<release>-core-*` Secrets; see [core-secrets.md](core-secrets.md). A bring-your-own install sets all three to `false`. |
 | `corePostgres.existingSecrets.{superuser,keycloak}` / `coreKeycloak.existingSecrets.bootstrap` | `""` | Your own Secret instead of a made one; the Job only checks its keys. |
-| `coreKeycloak.enabled` | `false` | Also deploys the built-in Keycloak subchart (#4040). When true it needs `corePostgres.enabled: true`, `coreKeycloak.hostname` (equal to `ingress.host`) and `coreKeycloak.firstTenantId` (a UUID). See [Built-in Keycloak subchart](#built-in-keycloak-subchart-chartskeycloak). |
+| `coreKeycloak.enabled` | `true` | Also deploys the built-in Keycloak subchart (#4040). When true it needs `corePostgres.enabled: true`, `coreKeycloak.hostname` (equal to `ingress.host`) and `coreKeycloak.firstTenantId` (a UUID). See [Built-in Keycloak subchart](#built-in-keycloak-subchart-chartskeycloak). |
 | `connectors.enabled` | `[]` | Opt-in list; pick from the shipped connector catalog (see [`docs/architecture/connectors.md`](../architecture/connectors.md) — VMware/VCF, NSX, Kubernetes, Vault, Harbor, Keycloak, ArgoCD, GCloud, BIND9, pfSense, and more). |
 | `config.ingestJobTimeoutSeconds` | `""` | Async ingest-job watchdog budget override, in seconds (#2318, hardens #2275). Empty (default) omits `INGEST_JOB_TIMEOUT_SECONDS` so the backend's built-in 30-min ceiling applies; set a positive number to raise it for a slow shared executor / large spec fleet. Set via a values file or `--set-string` (bare `--set` coerces to a number and fails the `type: string` schema — as with every `*Seconds` knob here). Non-finite (`inf`/`nan`), non-positive, or malformed values are rejected at the backend (warn + fall back to 30 min), so the watchdog can never be disabled. |
 
@@ -1403,9 +1439,8 @@ both supply the required overrides; ad-hoc lint invocations pass them via
 
 A sanitized example values file lives at
 [`deploy/values-examples/values-rdc-example.yaml`](../../deploy/values-examples/values-rdc-example.yaml).
-It targets the RDC Hetzner dogfooding lab shape (cluster-internal
-Postgres + Vault + Keycloak on `*.evba.lab`, rke2-infra ingress-nginx) and
-is structured so that other Vault-+-Keycloak-+-Postgres-shaped labs can
+It targets a lab with PostgreSQL, Vault and Keycloak inside the cluster
+and an ingress-nginx controller, and is structured so that other Vault-+-Keycloak-+-Postgres-shaped labs can
 copy it, substitute the `<REPLACE: ...>` placeholders, and apply it.
 
 The placeholders are deliberate: every site-specific field
@@ -1417,11 +1452,9 @@ forgotten substitution surfaces as `at '/networkPolicy/postgresCIDR':
 '<REPLACE: ...>' does not match pattern …` instead of silently rendering
 a NetworkPolicy that allows everything (or nothing).
 
-The actual `values-rdc.yaml` for the dogfooding consumer is environment-
-private and lives in
-`evoila-bosnia/claude-rdc-hetzner-dc`'s
-`manifests/meho/values-rdc.yaml` per Goal #11 cross-repo deps; the
-example here is the public template.
+The real values file of each consumer is environment-private and stays
+in that consumer's own deploy repo; the example here is the public
+template.
 
 **External Secrets Operator (ESO) sync patterns.** The chart references
 operator-provisioned Kubernetes Secrets *by name*
@@ -1429,7 +1462,7 @@ operator-provisioned Kubernetes Secrets *by name*
 Secret). It does not ship a `Secret` template or accept secret values
 via `--set`. The recommended sync mechanism is
 [ESO](https://external-secrets.io/) with the upstream store of the
-operator's choice (the RDC lab uses
+operator's choice (for example
 [HashiCorp Vault](https://external-secrets.io/latest/provider/hashicorp-vault/)).
 Two resources combine to materialise a chart-consumable Secret:
 
@@ -1441,7 +1474,7 @@ Two resources combine to materialise a chart-consumable Secret:
    upstream store into a target k8s Secret). Two ownership options:
     - **Default (consumer-managed):** the consumer's GitOps repo applies
       the ExternalSecret alongside or before the chart. The chart
-      references the resulting Secret by name. This is the RDC convention.
+      references the resulting Secret by name. This is the usual way.
     - **Opt-in (chart-managed):** flip `eso.enabled: true` in values and
       the chart renders the ExternalSecret(s) itself via
       `templates/externalsecrets.yaml`. The schema requires
@@ -1473,11 +1506,24 @@ helm upgrade --install meho ./deploy/charts/meho/ \
   --namespace meho \
   --create-namespace \
   --set image.tag=sha-<git-sha> \
-  -f values-rdc.yaml
+  -f my-values.yaml
 ```
 
-The bare-`--set` equivalent (no values file) — useful for CI smoke
-tests:
+With the default values (the built-in PostgreSQL, Keycloak and OpenBao
+on), four keys are enough:
+
+```bash
+helm install meho ./deploy/charts/meho/ \
+  --namespace meho \
+  --create-namespace \
+  --set image.tag=sha-<git-sha> \
+  --set ingress.host=meho.example.org \
+  --set coreKeycloak.hostname=meho.example.org \
+  --set coreKeycloak.firstTenantId=<a new UUID>
+```
+
+The bare-`--set` equivalent for a bring-your-own install (no values
+file) — the shape `ci.yml` renders:
 
 ```bash
 helm install meho ./deploy/charts/meho/ \
@@ -1486,6 +1532,9 @@ helm install meho ./deploy/charts/meho/ \
   --set image.tag=sha-<git-sha> \
   --set ingress.host=meho.example.org \
   --set ingress.tls.secretName=meho-tls \
+  --set corePostgres.enabled=false \
+  --set coreKeycloak.enabled=false \
+  --set coreVault.enabled=false \
   --set postgres.credentialsSecret=meho-postgres \
   --set vault.address=https://vault.example.org \
   --set keycloak.issuer=https://keycloak.example.org/realms/meho \
@@ -1506,11 +1555,15 @@ backplane never starts against a misconfigured set of values.
 
 ```bash
 # helm lint passes only with a values overlay or `--set` overrides for every
-# required-but-blank field; the bare chart deliberately fails-loud:
+# required-but-blank field; the bare chart deliberately fails-loud.
+# These are the bring-your-own flags of ci.yml's helm-lint-template job:
 helm lint deploy/charts/meho/ \
   --set image.tag=test \
   --set ingress.host=meho.test \
   --set ingress.tls.secretName=meho-tls \
+  --set corePostgres.enabled=false \
+  --set coreKeycloak.enabled=false \
+  --set coreVault.enabled=false \
   --set postgres.credentialsSecret=meho-postgres \
   --set vault.address=https://vault.test \
   --set keycloak.issuer=https://keycloak.test/realms/meho \
@@ -1526,6 +1579,9 @@ helm template test-release deploy/charts/meho/ \
   --set image.tag=test \
   --set ingress.host=meho.test \
   --set ingress.tls.secretName=meho-tls \
+  --set corePostgres.enabled=false \
+  --set coreKeycloak.enabled=false \
+  --set coreVault.enabled=false \
   --set postgres.credentialsSecret=meho-postgres \
   --set vault.address=https://vault.test \
   --set keycloak.issuer=https://keycloak.test/realms/meho \
@@ -1541,19 +1597,19 @@ grep -c '^kind:' /tmp/rendered.yaml  # expect >= 6
 
 # Negative tests — the chart fails-loud on the misuse cases the schema covers:
 helm template test deploy/charts/meho/ 2>&1 | grep -E "minLength|valid"
-helm template test deploy/charts/meho/ --set bogus.field=x 2>&1 | grep "additional properties"
+helm template test deploy/charts/meho/ --set bogus.field=x 2>&1 | grep -i "additional property"
 ```
 
 ## Publish workflow (`.github/workflows/chart.yml`)
 
 The chart is packaged, pushed to OCI, and cosign-signed by
-`.github/workflows/chart.yml`. The workflow targets `meho-runners-ci` (the
-project's self-hosted runner pool on the dedicated rke2-ci cluster,
-introduced by #160 + #167 on rke2-meho and migrated to rke2-ci via
-claude-rdc-hetzner-dc#610 / #715) and shares the
-hardening conventions of `image.yml` (Task #33): job-level fork-PR guard,
-SHA-pinned actions with `# vX.Y.Z` comments, minimum `permissions:` block
-(`contents: read`, `packages: write`, `id-token: write`), per-job
+`.github/workflows/chart.yml`. Its `validate`, `publish` and `verify-anonymous-pull` jobs run on `meho-runners-ci`
+(the project's self-hosted runner pool on a dedicated CI cluster,
+introduced by #160 + #167). It shares the
+hardening conventions of `image.yml`: job-level fork-PR guard,
+SHA-pinned actions with `# vX.Y.Z` comments, a minimum `permissions:`
+block (the workflow default is `contents: read`; only the `publish` job
+adds `packages: write` and `id-token: write`), per-job
 `timeout-minutes`, and a `concurrency:` group (see "Every main commit gets
 its image and chart" below).
 
@@ -1591,8 +1647,9 @@ What it costs:
 
 | Trigger | Jobs run | Side effects |
 | --- | --- | --- |
-| `pull_request` against `main` (same-repo PRs only) | `validate` | Lint + render + kubeconform; no push, no sign |
-| `push` to `main` (chart paths) | `validate` -> `publish` -> `verify-anonymous-pull` | Push at calver `0.1.YYYYMMDD-<short-sha>`, cosign-sign, anonymous-pull check |
+| `pull_request` against `main` (same-repo PRs only) | `changes`, `validate`, `helm-test`, `helm-test-byo`, `helm-test-gate` (the kind jobs skip when no chart file changed) | Lint + render + kubeconform + kind install; no push, no sign |
+| `merge_group` | `changes`, `validate`, `helm-test`, `helm-test-byo`, `helm-test-gate` | Full kind install on the merge result; no push, no sign |
+| `push` to `main` (every commit) | `validate` -> `publish` -> `verify-anonymous-pull` | Push at calver `0.1.YYYYMMDD-<short-sha>`, cosign-sign, anonymous-pull check |
 | `push` of a `v*` tag | `validate` -> `publish` -> `verify-anonymous-pull` | Push at plain semver `<x.y.z>` (leading `v` stripped), cosign-sign, anonymous-pull check |
 | Fork PR | (skipped at job level) | None — `head.repo.full_name != github.repository` short-circuits |
 
@@ -1637,14 +1694,14 @@ operator-facing verification command shape is identical between the two
 packages (one workflow file path differs from the other, matched by the
 `--certificate-identity-regexp`).
 
-### Anonymous-pull verification (Goal #11 DoD)
+### Anonymous-pull verification
 
 A dedicated `verify-anonymous-pull` job runs after `publish` on main / tag
 pushes. It installs Helm in a fresh job context and intentionally does
-**not** call `helm registry login`. The job also scrubs any stale
-`HELM_REGISTRY_CONFIG` left over from a prior run on the same self-hosted
-runner. `helm pull oci://ghcr.io/evoila/meho-chart --version <ver>` from
-that scrubbed environment can only succeed if the GHCR package is public
+**not** call `helm registry login`. It runs Helm with a new, empty `HOME`
+folder (and XDG folders), so no login left on the self-hosted runner can
+be used. `helm pull oci://ghcr.io/evoila/meho-chart --version <ver>` from
+that empty environment can only succeed if the GHCR package is public
 — a successful pull is the DoD signal.
 
 ### First-time public-package step
@@ -1721,8 +1778,7 @@ cancelled post-merge CI allowed broken combinations to land silently.
   many full laps it did not semantically change. The queue replaces that
   with a single batched rebase-test-merge against the queued tip: one
   authoritative lap per batch instead of N redundant laps per PR. This
-  is the code-side lever the lab-capacity Initiative
-  (claude-rdc-hetzner-dc#2777) leans on.
+  is the code-side lever for the CI capacity of the lab.
 
 **Required-check → workflow map** (branch protection on `main`,
 `branches/main/protection.required_status_checks.contexts`, 11
@@ -1742,13 +1798,15 @@ hangs the queue forever:
 | `Python License Check` | `dependency-license-check.yml` | yes — `changes` + job-level `if:` |
 | `NPM License Check` | `dependency-license-check.yml` | yes — same shape |
 | `helm install + helm test (pgvector preflight)` | `chart.yml` | **yes (#3253)** — the `helm-test-gate` aggregator (`if: always()`) is the required context and fails closed |
-| `Migration chain (single head)` | `migration-heads.yml` | yes (#4204) — no path filter; when a migration lands on `main`, the push run also posts a fresh check run under this name on every open PR that adds a migration (`scripts/ci/recheck_migration_prs.py`). The operator registered the context after #4204 landed. |
-| `DCO` | **external GitHub App** (`app_id 1861`), not a workflow | **operator must verify** — see caveat below |
+| `Migration chain (single head)` | `migration-heads.yml` | yes (#4204) — no path filter on `pull_request` and `merge_group`; when a migration lands on `main`, the push run also posts a fresh check run under this name on every open PR that adds a migration (`scripts/ci/recheck_migration_prs.py`). The operator registered the context after #4204 landed. |
 
 Two shapes are load-bearing for queue compatibility and appear across
 these workflows:
 
-- **No `on.*.paths` filter on a required-check workflow.** A workflow
+- **No `paths:` filter on the `pull_request` or `merge_group` trigger of a
+  required-check workflow.** (A filter on `push` to `main` is fine:
+  `migration-heads.yml` and `dependency-license-check.yml` have one there.)
+  A workflow
   skipped by a path filter leaves its required context stuck at
   "Expected — waiting for status" and blocks the merge (the #2140
   skipped-vs-pending trap). Instead each conditional workflow always
@@ -1799,8 +1857,7 @@ these workflows:
   queue, preserving PR/push behaviour. When adding any range-deriving
   action to a required-check workflow, check its `merge_group` handling —
   the trigger alone is not enough.
-- **The TruffleHog scanner container image is digest-pinned (#284 /
-  F15b).** The action shells out to `docker run "${IMAGE}:${VERSION}"`,
+- **The TruffleHog scanner container image is digest-pinned.** The action shells out to `docker run "${IMAGE}:${VERSION}"`,
   defaulting `VERSION` to the mutable `:latest` tag — so the required
   secret-scan gate would otherwise run whatever `:latest` resolves to at
   pull time on the self-hosted `meho-runners-ci` pool. `secret-scan.yml`
@@ -1818,50 +1875,13 @@ jobs to `github.event_name == 'push'` (was `!= 'pull_request'`), so a
 queue admission validates the merge result at full depth **without**
 packaging or pushing a chart to GHCR — the merge has not happened yet.
 
-**Enabling the queue is an operator action — a session never flips it.**
-Repo-settings / ruleset mutations are outside a session's remit (the
-park note on #769; restated in #3253). The code side is now complete;
-the operator performs:
-
-1. **Add a `merge_queue` rule to the `protect main` ruleset**
-   (id `14556458`). UI path: *Settings → Rules → Rulesets → protect
-   main → Add rule → Require merge queue*. API path — fetch the ruleset,
-   append the rule, and PUT it back (the endpoint replaces the whole
-   `rules` array, so a blind PUT would drop the existing
-   `pull_request` / `deletion` / `non_fast_forward` rules):
-
-   ```bash
-   gh api repos/evoila/meho/rulesets/14556458 > ruleset.json
-   # add {"type":"merge_queue","parameters":{ ...grouping/merge_method... }}
-   # to .rules, then:
-   gh api -X PUT repos/evoila/meho/rulesets/14556458 --input ruleset.json
-   ```
-
-2. **Verify the queue enforces the same 11 required contexts.** The
-   required checks currently live in *classic* branch protection
-   (`branches/main/protection`), not in the ruleset. Confirm the merge
-   queue waits on the same set against the merge ref — mirror the
-   contexts into a `required_status_checks` rule on the ruleset if the
-   queue does not pick up the classic set.
-
-3. **Verify the `DCO` context reports on `merge_group` refs before
-   enabling.** DCO is provided by an external GitHub App, not a workflow
-   in this repo — nothing in #3253 can make it report on queue refs. If
-   the DCO App does not post a status on the synthesised merge commit,
-   the required `DCO` context will hang the queue. Confirm on a canary
-   queue entry, or remove `DCO` from the queue's required set and keep it
-   as a PR-only gate, before turning the queue on for everyone.
-
-4. **DCO / `require_last_push_approval` /
-   `require_extra_approval_for_unattributed_changes` interplay.** The
-   `protect main` ruleset's `pull_request` rule has both approval
-   ratchets on. The merge queue rebases the PR onto the queued tip, which
-   can re-touch attribution; verify a queued PR still satisfies these on
-   the merge ref, or document the admin-merge fallback. (This is the
-   #769 AC item that was never closed out.)
-
-No repo setting is changed by the session that lands #3253 — only
-workflow files, this doc, and the changelog.
+**The queue is on.** The `protect main` ruleset has the `merge_queue`
+rule (squash, all checks green, up to 10 entries merged together;
+`gh api repos/evoila/meho/rules/branches/main`). The 11 required contexts
+above live in classic branch protection
+(`branches/main/protection.required_status_checks.contexts`), and the
+queue waits for them on the merge ref. Repo settings and rulesets are
+changed by a maintainer, never by a pull request.
 
 ### Matrix
 
@@ -1871,9 +1891,9 @@ workflow files, this doc, and the changelog.
 | `python-unit-shard` (`Python unit shard N/6`) | `backend/` unit + acceptance subtree, split 6 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). A pull request that changes one connector runs one leg instead (`Python unit tests for connector <name>`, see [One-connector unit run](#one-connector-unit-run-5297)). Another pull request may run one leg with the tests the test map picked (`Python unit tests picked by the test map`, see [Test map run](#test-map-run-5642)). |
 | `python-outside-backend` (`Python tests that read files outside backend`) | the backend tests that read files outside `backend/` | Runs only on a PR with no `backend/` change (`backend_python=false`) that is not docs-only. `pytest -n 3` over the fixed list in `backend/tests/_outside_backend_tests.py`, on a GitHub-hosted runner. Non-required; the fan-in requires it on that path (#5296). See [No-backend path (#5296)](#no-backend-path-5296). |
 | `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252); on a no-backend diff it requires `python-outside-backend` to pass (#5296). |
-| `python-integration-shard` (`Python integration shard N/4`) | `backend/tests/integration/` + the G0.7 vSphere canary module, split 4 ways | `uv sync --locked --all-groups` -> `pytest -x -rs` over a file set split by measured time, against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. No xdist inside a shard. Non-required matrix (#5384). |
+| `python-integration-shard` (`Python integration shard N/4`) | `backend/tests/integration/`, split 4 ways | `uv sync --locked --all-groups` -> `pytest -x -rs` over a file set split by measured time, against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. No xdist inside a shard. Non-required matrix (#5384). |
 | `python-integration` (`Python (integration testcontainers)`) | fan-in | `needs: [changes, python-integration-shard]`; **required check (#698)** so the lane that exercises real connector dispatch can no longer ship red. Fails when any shard failed or was cancelled, or the detector is not green; reports success-by-skip on a docs-only diff and on a no-backend diff (#5296). Same rules as `python-unit-lane` (#5384). |
-| `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
+| `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v9 action, golangci-lint v2) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
 
 The six `python-unit-shard` legs run on one of two heavy runner sets
@@ -2072,8 +2092,7 @@ split it the same way as the unit lane:
 - **`python-integration-shard`** — a **4-way matrix** on
   `meho-runners-ci` (not the heavy pool: the tests run serially and
   mostly wait on containers). Each shard lists `find tests/integration
-  -name 'test_*.py'` plus `tests/acceptance/test_g07_vsphere_canary.py`,
-  sorts the list, and pipes it into `tests/_unit_shard_split.py
+  -name 'test_*.py'`, sorts the list, and pipes it into `tests/_unit_shard_split.py
   --durations tests/_integration_shard_durations.json --shard N --total
   4`. Same splitter as the unit shards, with its own measurements. Every
   file lands in exactly one shard; `tests/test_unit_shard_split.py` pins
@@ -2148,8 +2167,8 @@ completes CI in minutes.
   fan-ins that still run and pass on these skips.
 - **What still runs.** `go-lint-test`, `helm-lint-template`, and the sibling
   workflows' required contexts (`Semgrep SAST`, `TruffleHog Secret Scan`,
-  `Python License Check`, `NPM License Check`, `helm install + helm test`,
-  `DCO`) are untouched — already fast, and docs can still leak a secret.
+  `Python License Check`, `NPM License Check`, `helm install + helm test`)
+  are untouched — already fast, and docs can still hold a secret.
 - **Why it cannot skip for code.** A required check that skipped on a *code*
   diff would let an untested change land green. Two independent guards prevent
   it: (1) the classifier is fail-safe, so a code path is never proven
@@ -2232,7 +2251,7 @@ the six shards, so every test still runs before a change lands on `main`.
   connector (not `_shared`, `adapters` or `profiles`). And no code outside
   the connector folders uses the connector, directly or through another
   connector that uses it. Core code is shared by many tests, so a connector
-  that core code uses (for example `vault`, `kubernetes`, `vmware_rest`)
+  that core code uses (for example `vault` or `kubernetes`)
   always gets the full run. Anything else, including a change to `ci.yml`
   or to the tool itself, gives the full run.
 - **What runs.** The matrix of `python-unit-shard` becomes `[1]`. Its
@@ -2361,26 +2380,25 @@ failed to fix: reducing `-n` only shifts the throttle timeline by a few
 minutes against a hard cap.
 
 **The correct fix is burst headroom on the pod's CPU _limit_**, not a
-smaller `-n`. Target: request 4000m / limit 7000m (pending
-`evoila-bosnia/rdc-gitops#70`; tracked here as #1983). Until that lands,
+smaller `-n`. Target: request 4000m / limit 7000m (a change of the runner
+pool, outside this repo; tracked here as #1983). Until that lands,
 do not raise `-n` above the current value to chase wall-clock gains — the
 heartbeat failures will return.
 
-### Vendor vCenter spec-shelf in CI (#2949)
+### Vendor spec shelf in CI (#2949)
 
-The five real-spec vCenter lanes (`test_g07_vsphere_canary.py`, the two
-`tests/integration/test_operations_ingest_*` lanes,
-`test_portgroup_audit_op_id_reconcile.py`,
-`test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`) validate
-ingest + op_id reconciliation against the **real** Broadcom/VMware-licensed
-`vcenter.yaml` / `vi-json.yaml`, which are deliberately not in this public
-repo. `ci.yml` provisions them at runtime, gated on a secret:
+The real-spec lanes check ingest and op_id reconciliation against **real**
+vendor API files that are deliberately not in this public repo (often
+because of their licence). The lists in `ci/spec-shelf/` name the files
+(today Argo CD, Azure ARM, Harbor, Hetzner Robot, Keycloak, Loki, Proxmox
+and RabbitMQ). The vCenter files that started this wiring left with
+evoila's own connectors. `ci.yml` provisions the files at runtime, gated
+on a secret:
 
 - Both Python test jobs (`python-unit-shard` and
   `python-integration-shard` — every shard of each) carry a
   secret-gated "Checkout vendor vCenter spec-shelf" step: a cone-mode sparse
-  checkout of the listed shelf folders (for example `docs/vcenter-9.0/`) from the private
-  `evoila-bosnia/claude-rdc-hetzner-dc` shelf repo into
+  checkout of the listed shelf folders from a private shelf repo into
   `$GITHUB_WORKSPACE/spec-shelf`, authenticated by the **`SPEC_SHELF_TOKEN`**
   repo secret (fine-grained PAT, Contents read-only, that single repo).
 - `MEHO_CONSUMER_DOCS_ROOT` is set **unconditionally** to
@@ -2389,8 +2407,7 @@ repo. `ci.yml` provisions them at runtime, gated on a secret:
   skips, the directory doesn't exist, and the resolvers
   (`backend/tests/_spec_shelf.py`, the product-agnostic #2980 harness)
   return `None` → the lanes
-  `pytest.skip()` exactly as before the wiring. When the secret exists, all
-  five lanes run for real, and a fail-loud verify step turns any shelf-layout
+  `pytest.skip()`. When the secret exists, the lanes run for real, and a fail-loud verify step turns any shelf-layout
   drift into a job failure instead of a silent regression to lane-skip.
 - Lane placement (#2980): the seconds-cheap reconcile lanes run armed in
   the unit sweep. Full-ingest tests of a real vendor spec (minutes per
@@ -2407,7 +2424,7 @@ repo. `ci.yml` provisions them at runtime, gated on a secret:
   "Spec-shelf layout drift" error; a missing, empty or bad list fails it
   too. `ci.yml` names no shelf file. Tests:
   `backend/tests/test_ci_spec_shelf_lists.py`.
-- Per-vendor reconcile lanes beyond vCenter (#2981-#2993) extend the same
+- Per-vendor reconcile lanes (#2981-#2993) extend the same
   wiring — one new list file per product version, no change in
   `ci.yml`, same `SPEC_SHELF_TOKEN`, never a new secret. Standard + extension
   mechanics + red-lane protocol:
@@ -2418,21 +2435,19 @@ repo. `ci.yml` provisions them at runtime, gated on a secret:
 
 Licensing record, signoff gate, and the full provisioning/rotation runbook:
 [`docs/decisions/vendor-spec-ci-provisioning.md`](../decisions/vendor-spec-ci-provisioning.md).
-**Do not provision `SPEC_SHELF_TOKEN` before that ADR's signoff-of-record
-section is completed AND its "Known findings" prerequisite is fixed on
-`main`** — the two reconcile lanes are known-red against the real shelf
-(real op_id findings, the guard working), and both live inside required
-merge-gate jobs, so premature provisioning turns CI red for every PR. The
-wiring is deliberately inert until then.
+The `SPEC_SHELF_TOKEN` secret is set on this repo (`gh secret list`), so
+the lanes run on same-repo pull requests and in the merge queue.
 
 ### Fail-loud posture
 
-No step in `ci.yml` carries `continue-on-error: true` except the Python
-coverage artefact upload. Linters, formatters, type checkers, tests,
-and the kubeconform schema validation are all allowed to fail the job.
-The artefact upload is the only soft-fail: losing it degrades the
-SonarCloud signal (no coverage for the run) but never invalidates the
-test outcome, and `quality-gate.yml` already guards its own
+No step in `ci.yml` that checks a rule carries `continue-on-error: true`.
+Linters, formatters, type checkers, tests, and the kubeconform schema
+validation are all allowed to fail the job. Only steps that store or
+measure something (artefact and junit uploads, timing and memory
+samples) and the two nightly coverage jobs (`python-coverage`,
+`python-coverage-combine`) soft-fail: losing them degrades a signal (for
+example SonarCloud gets no coverage for the run) but never invalidates
+the test outcome, and `quality-gate.yml` already guards its own
 `actions/download-artifact` with `continue-on-error` for the same
 reason.
 
@@ -2535,7 +2550,9 @@ the test map, and sysmon cannot record that (see
 
 ### Fork-PR guard
 
-Every job carries the same `if:` guard the publish workflows use:
+Every job that runs on a pull request carries the same `if:` guard the
+publish workflows use (the fan-in jobs wrap it in `always() && ...`;
+`merge-queue-watchdog` runs only on `merge_group`):
 
 ```yaml
 if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -2577,9 +2594,8 @@ in the correct subdir on its own.
 (cd backend && uv run ruff format --check src/ tests/)
 (cd backend && uv run mypy src/)
 (cd backend && uv run pytest -x --cov=meho_backplane --cov-report=term tests/)
-# To mirror the CI coverage run (both push and PR, Python 3.12+):
-# (cd backend && COVERAGE_CORE=sysmon uv run pytest -n 6 --dist loadscope --maxfail=1 \
-#     --ignore=tests/integration --cov=meho_backplane --cov-report=xml tests/)
+# The CI coverage run is nightly, in 8 shards, with COVERAGE_CORE=ctrace;
+# see "Coverage handoff to SonarCloud" above and sonarcloud.md.
 
 # Go
 # CGO_ENABLED=1 is required for `go test -race` — same reason ci.yml
@@ -2608,21 +2624,16 @@ the publish workflows use where the action overlaps
 `actions/upload-artifact`), so a single supply-chain audit covers all
 of CI. Two actions are unique to `ci.yml`:
 
-- `astral-sh/setup-uv@v10.1.0` — the uv installer, with
+- `astral-sh/setup-uv@v10.3.2` — the uv installer, with
   `enable-cache: true` keyed by `uv.lock`. Every setup-uv step (also in
-  `eval-gate.yml` and `docs-site.yml`) pins uv itself with `version:`,
+  `eval-gate.yml`, `docs-site.yml` and `connector-overlay.yml`) pins uv itself with `version:`,
   so a new uv release cannot change CI on its own. The Python version
   comes from `backend/.python-version` (3.14, the same as the image's
   `python:3.14-slim`). Raise the uv pin by hand, in all steps at once.
-- `golangci/golangci-lint-action@v6.5.2` — pinned to the **v6** major,
-  not v7+/v8+, because the in-tree
-  [`cli/.golangci.yml`](../../cli/.golangci.yml) is written in the
-  golangci-lint v1 config schema (`disable-all` + explicit `enable:`
-  list, v1 linter names like `gosimple` / `errcheck`).
-  golangci-lint-action v7.x+ defaults to the v2 binary which rejects
-  v1 configs; pinning the binary to `v1.64.8` keeps the existing
-  config valid. A future migration to the v2 schema flips both the
-  action major and the binary version together.
+- `golangci/golangci-lint-action@v9.3.0` with the golangci-lint binary
+  pinned to `v2.12.2`. The in-tree
+  [`cli/.golangci.yml`](../../cli/.golangci.yml) uses the golangci-lint
+  v2 config schema. Raise the action and the binary together.
 
 ## Untrusted pull-request isolation
 
@@ -2634,8 +2645,8 @@ pool. GitHub documents this as the primary self-hosted-runner risk; see
 the [secure-use reference](https://docs.github.com/en/actions/reference/security/secure-use).
 `ci.yml`, `image.yml`, `chart.yml`, `pr-smoke.yml`, `plugin-test.yml`,
 `eval-gate.yml`, `mcpb-bundle.yml` and `consumer-tool-name-check.yml`
-already carried the fork guard; the audit below (F06, meho-internal#268)
-closed the workflows that did not.
+already carried the fork guard; the audit below closed the workflows
+that did not.
 
 ### Inventory — every PR-triggered job
 
@@ -2670,7 +2681,7 @@ their isolation posture:
   a skipped required job reports **Success**, so branch protection is
   satisfied while nothing executes on the internal pool. Used where the
   job genuinely needs an internal resource — `security-scan.yml` runs in
-  a `harbor.evba.lab`-proxied container, so relocating it to a disposable
+  a container pulled through the internal Harbor proxy, so relocating it to a disposable
   runner is impossible; the real scan runs on the trusted `merge_group`
   (queue admission) and `push` refs instead.
 
@@ -2693,7 +2704,7 @@ their isolation posture:
 
 For a fork `pull_request`, GitHub runs the workflow body **from the PR
 head** — so the in-YAML arms above hold only while the fork does not also
-rewrite the workflow. They cover the exact exploit in the F06 finding (a
+rewrite the workflow. They cover the exact case the audit found (a
 fork PR touching *only* a checker script inherits `main`'s workflow and
 so routes off the internal pool), but the durable enforcement lives in
 GitHub settings, which a PR cannot edit. Effective settings recorded
@@ -2734,11 +2745,11 @@ could traverse is an infra check, tracked outside this repo.
 
 ## Per-PR ephemeral cluster smoke (`.github/workflows/pr-smoke.yml`)
 
-`pr-smoke.yml` is the per-PR ephemeral-cluster discipline Goal #11 DoD
-bullet 4 hangs off: every PR against `main` builds a PR-tagged
+`pr-smoke.yml` is the per-PR ephemeral-cluster discipline of the v0.1
+deploy goal: every PR against `main` builds a PR-tagged
 backplane image, deploys the chart into a fresh `meho-ci-<pr-number>`
-namespace on the consumer-operated `rke2-infra` Kubernetes cluster
-(claude-rdc-hetzner-dc), runs `scripts/ci/pr-smoke.sh`, and tears the
+namespace on a Kubernetes cluster that the consumer runs, runs
+`scripts/ci/pr-smoke.sh`, and tears the
 namespace down regardless of smoke outcome. It is the inversion of
 MEHO.X's failure mode — every code path that ships through G2.0–G2.6
 closes the real-target feedback loop on a real Kubernetes API before
@@ -2752,7 +2763,7 @@ merge, not against mocks.
 | Runner | `meho-runners-ci` (self-hosted) |
 | Concurrency group | `pr-smoke-${{ github.event.pull_request.number }}` with `cancel-in-progress: true` |
 | Permissions | `contents: read`, `packages: write`, `id-token: write`, `pull-requests: write` |
-| Job timeout | 12 min (8 min smoke budget + cold-cache headroom — Task #50 AC #5) |
+| Job timeout | 12 min (8 min smoke budget + cold-cache headroom) |
 
 `pull_request_target` (not `pull_request`) is the load-bearing choice:
 GitHub Actions executes the workflow file from `main`, not from the PR
@@ -2777,14 +2788,11 @@ smoke capacity scales linearly with PR throughput.
 
 ### Consumer-side auth (gated)
 
-Cluster auth + RBAC for `meho-ci-*` namespaces is provisioned on
-`evoila-bosnia/claude-rdc-hetzner-dc`,
-not in this repo — see
+Cluster auth + RBAC for `meho-ci-*` namespaces is provisioned in the
+consumer's own repo, not in this repo — see
 [`docs/cross-repo/rke2-infra-coordination.md`](../cross-repo/rke2-infra-coordination.md)
 for the full contract (Section 1: auth options; Section 2: RBAC verb
-set; Verification: end-to-end check). The consumer-side tracker is
-`evoila-bosnia/meho-internal#53`
-(G2.7-T5).
+set; Verification: end-to-end check).
 
 The workflow ships now and **fails-skip** (skipped at job level, not
 red) while the consumer side is still being provisioned. Once auth
@@ -2804,8 +2812,7 @@ available — see the
 A clause like `secrets.RDC_KUBECONFIG != ''` therefore collapses to
 undefined at evaluation time and the gate silently breaks. The single
 repository-scoped `vars.RKE2_SMOKE_ENABLED` is the documented gate;
-maintainers flip it to `'true'` after the consumer-side auth (Task
-\#53) lands. The "Build kubeconfig" step still inspects
+maintainers flip it to `'true'` after the consumer-side auth lands. The "Build kubeconfig" step still inspects
 `env.RKE2_CA_CERT` / `env.RDC_KUBECONFIG` to pick Option A vs Option B
 at step level (where the env indirection makes `secrets.*` legal).
 
@@ -2828,7 +2835,7 @@ The repository-scoped `vars.RKE2_SMOKE_ENABLED == 'true'` clause is the
 **single enable knob** for maintainers: once the consumer side rolls
 out and the secrets are provisioned, set the variable to `true` and
 the gate flips on for every subsequent PR. Useful for the `5
-consecutive green smokes` Goal #11 window — flip the var, queue 5 PRs,
+consecutive green smokes` window of the v0.1 deploy goal — flip the var, queue 5 PRs,
 count. While the variable is unset (or `'false'`), the workflow is
 `skipped` at job level (not `failure`), so PRs are never blocked on
 the unrolled-out consumer side.
@@ -2845,22 +2852,22 @@ a single-job layout keeps the teardown invariant trivially correct
 
 Steps, in order:
 
-1. **Checkout PR head SHA** — `actions/checkout@v6.0.2` against
+1. **Checkout PR head SHA** — `actions/checkout@v7.0.1` against
    `${{ github.event.pull_request.head.sha }}` (not `head.ref`).
 2. **QEMU + buildx + GHCR login** — same action SHAs as `image.yml`.
-3. **Build + push PR-tagged image** — `docker/build-push-action@v7.1.0`
+3. **Build + push PR-tagged image** — `docker/build-push-action@v7.4.0`
    pushing `ghcr.io/evoila/meho:pr-<n>-<sha>`. The `<sha>` suffix
    makes the tag immutable per push: a force-push to the PR branch
    produces a NEW tag (new sha), so the deploy step always pulls the
    build the smoke is about to assert against. amd64-only — the
    per-PR feedback loop optimises for time, not for proving multi-arch
    (that invariant belongs to `image.yml` on main-push).
-4. **Install kubectl + Helm** — `azure/setup-kubectl@v5.1.0` (v1.28.15
+4. **Install kubectl + Helm** — `azure/setup-kubectl@v5.2.0` (v1.28.15
    tracking the chart's `kubeVersion: ">=1.28.0-0"` floor) +
-   `azure/setup-helm@v4.3.1` (same SHA as `chart.yml`).
+   `azure/setup-helm@v5.0.1` (same SHA as `chart.yml`).
 5. **Configure kubectl (OIDC mode)** — `actions/github-script@v9.0.0`
    mints an OIDC ID token via `core.getIDToken(audience)` against the
-   consumer-chosen audience (default `rke2-infra.evba.lab`, override
+   consumer-chosen audience (a default in the workflow, override
    via `vars.RKE2_OIDC_AUDIENCE`). Skipped when Option A's inputs
    aren't set, so Option B's kubeconfig path takes over below.
 6. **Build kubeconfig** — assembles `$HOME/.kube/config` from either
@@ -2898,15 +2905,15 @@ operator surface** — four assertions, no Keycloak access token:
 | `/healthz` | HTTP 200 | Liveness probe contract; the in-cluster kubelet uses this exact path |
 | `/version` | `git_sha` present and not `"unknown"` | Confirms the deployed image carries build metadata (`image.yml` / `pr-smoke.yml` pass `GIT_SHA` as a Docker `build-arg`, #631) and isn't a fallback build |
 | `/version` | `chart_version` present, not `"unknown"`, non-empty | Confirms the helm-installed chart injected `CHART_VERSION` from `.Chart.Version` (#631) — the deployed-chart provenance the governance backplane exists to answer |
-| `/api/v1/health` | HTTP 401 unauthenticated | Negative auth test — a 200 here would mean auth middleware regressed open OR Keycloak realm is wired wrong; both are PR-blocking regressions Goal #11 considers non-negotiable |
+| `/api/v1/health` | HTTP 401 unauthenticated | Negative auth test — a 200 here would mean auth middleware regressed open OR Keycloak realm is wired wrong; both are PR-blocking regressions the v0.1 deploy goal treats as non-negotiable |
 
-The full authenticated federation-chain smoke
-(claude-rdc-hetzner-dc/manifests/meho/smoke.sh — operator-facing,
-real Keycloak + Vault credentials, against the persistent install) is
+The full authenticated federation-chain smoke (the consumer's own
+`smoke.sh` — operator-facing, real Keycloak + Vault credentials, against
+the persistent install) is
 **out of scope** for the per-PR ephemeral lane: every PR provisioning
 a Keycloak realm + Vault role would be both slow and a security
-liability. Goal #11 G2.8 covers the authenticated smoke against the
-production-style instance.
+liability. The acceptance contracts below cover the authenticated smoke
+against the production-style instance.
 
 Script invariants:
 
@@ -2928,18 +2935,18 @@ Script invariants:
 
 ### Acceptance-criterion verification
 
-| Criterion (Task #50 AC) | Verification path |
+| Criterion | Verification path |
 | --- | --- |
 | Workflow exists; runs after PR open/update | `gh workflow list --repo evoila/meho` shows `pr-smoke` |
 | Pushes image to `ghcr.io/evoila/meho:pr-<n>` | Verifiable on a live PR run once consumer-side auth is provisioned |
-| Deploys chart to `meho-ci-<n>` on rke2-infra | Same — deferred-AC pending consumer side |
+| Deploys chart to `meho-ci-<n>` on the consumer's cluster | Same — deferred-AC pending consumer side |
 | Tears down namespace regardless of smoke result | `if: always()` on teardown step; `cancel-in-progress: true` invariant covered in concurrency block above |
 | Smoke result posted as PR comment | `actions/github-script` step with `if: always()` gate |
 | Concurrency: PR update cancels prior smoke | `concurrency.cancel-in-progress: true` |
 | Wall-clock < 8min for green smoke | 12-min job timeout with 8-min headline budget; cold buildx cache is the typical worst case; main-push image.yml's cache fills shared layers |
 
 Deferred-AC: every criterion that requires a live run against
-rke2-infra (image-push verification, namespace-create-then-teardown
+the consumer's cluster (image-push verification, namespace-create-then-teardown
 verifiability) is gated on the consumer-side OIDC trust OR
 `RDC_KUBECONFIG` secret landing. Until then the workflow ships in
 "skipped at job level" mode and the AC bullets stay open in the
@@ -3040,11 +3047,12 @@ package, and only for that package:
 
 ## Dependencies
 
-- Image — `ghcr.io/evoila/meho:<tag>` from G2.4 (#31). Multi-arch
+- Image — `ghcr.io/evoila/meho:<tag>` from `image.yml`. Multi-arch
   (amd64 + arm64), cosign-signed, SBOM-attested.
-- Migration runner — invoked by the `pre-install,pre-upgrade` Job hook
-  defined in `templates/migration-job.yaml`; shells out to the
-  entrypoint added in G2.3-T3 (#29) — `python -m meho_backplane.db.migrate`.
+- Migration runner — `python -m meho_backplane.db.migrate`. With the
+  built-in PostgreSQL (the default) the backplane pod's `migrate` init
+  container runs it; with your own PostgreSQL the `pre-install,pre-upgrade`
+  Job hook in `templates/migration-job.yaml` runs it.
 - Broadcast subchart — in-tree at `charts/broadcast/`, Valkey 9.x per
   ADR 0005. Declared in `Chart.yaml`'s `dependencies:` block with
   `repository: ""` (local unpacked subchart; no
@@ -3058,23 +3066,22 @@ package, and only for that package:
 
 ## Known gaps (filled by sibling tasks)
 
-- HPA / PDB / topologySpreadConstraints — deferred to v0.2. v0.1 is
-  single-replica per Goal #11 scope. (ServiceMonitor + PrometheusRule
+- HPA / PDB / topologySpreadConstraints — not built yet. The chart is
+  single-replica. (ServiceMonitor + PrometheusRule
   shipped in #2885 — see "Metrics scrape wiring" under Chart contract.)
-- Broadcast subchart HA (Sentinel/Cluster) and persistence — deferred
-  to v0.2 per ADR 0005. (Valkey `requirepass` auth + the subchart's own
-  ingress NetworkPolicy shipped in #276 — see "Broadcast subchart" above.)
+- Broadcast subchart HA (Sentinel/Cluster) and persistence — not built
+  yet (ADR 0005). (Valkey `requirepass` auth + the subchart's own
+  ingress NetworkPolicy shipped — see "Broadcast subchart" above.)
 - `broadcast.externalEndpoint` opt-out for operators with a managed
-  Redis/Valkey already running — deferred to v0.2 (the
-  `broadcast.enabled: false` knob lands in v0.1 as the disable path).
+  Redis/Valkey already running — not built yet; the key is reserved in
+  `values.yaml`. `broadcast.enabled: false` is the disable path.
 
 ## Cross-repo handshake
 
 The v0.1 deploy contract crosses one repo boundary: `evoila/meho`
-produces the chart + image; the dogfooding consumer
-`evoila-bosnia/claude-rdc-hetzner-dc`
-operates the rke2-infra cluster the per-PR ephemeral smoke and
-post-merge deploy run against. The handshake spec — cluster auth
+produces the chart + image; the dogfooding consumer, in its own repo,
+operates the cluster the per-PR ephemeral smoke and post-merge deploy
+run against. The handshake spec — cluster auth
 options (OIDC trust preferred over a long-lived kubeconfig secret),
 namespace-scoped RBAC for `meho-ci-*`, the `meho-image-pushed`
 `repository_dispatch` event shape, and the verification commands
@@ -3084,10 +3091,10 @@ The companion script
 [`scripts/cross-repo/verify-rke2-access.sh`](../../scripts/cross-repo/verify-rke2-access.sh)
 automates the kubectl portion of the check.
 
-## Acceptance contracts (Goal #11 DoD)
+## Acceptance contracts (v0.1 deploy goal)
 
-Goal #11's Definition of Done is a deploy contract — it is satisfied
-when a `claude-rdc-hetzner-dc` operator can install, smoke, roll back,
+The Definition of Done of the v0.1 deploy goal is a deploy contract — it
+is satisfied when an operator of the consumer can install, smoke, roll back,
 and observe a MEHO instance against the real lab in bounded wall-clock
 time. The producer-side acceptance contracts that codify what
 "passing" looks like for each DoD bullet live in
@@ -3111,10 +3118,10 @@ verifier is invoked as the last step of the consumer's wrapper, and
 the verifier's exit code becomes the wrapper's exit code.
 
 The rollback contract is the **cluster-level** half of the
-forward-compat assurance Goal #11 DoD bullet 3 promises; the
+forward-compat assurance DoD bullet 3 promises; the
 **unit-level** half lives at
 [`backend/tests/migrations/test_migration_rollback.py`](../../backend/tests/migrations/test_migration_rollback.py)
-(Task #30, Initiative #26) and runs on migration-touching PRs via the
+and runs on migration-touching PRs via the
 `python-migration-tests` job in
 [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) (relocated
 out of the every-PR unit lane by #2140; a broken chain still fails
@@ -3126,16 +3133,12 @@ PRs) and real `helm rollback` against the lab (slow, Goal-closing milestone).
 
 ## References
 
-- Parent Goal: #11 — Deployable v0.1
-- Parent Initiative: #36 — G2.5 Helm chart
-- Parent Initiative: #48 — G2.7 CI/CD + per-PR ephemeral smoke
-- Task #50 (G2.7-T2) — Per-PR ephemeral cluster deploy + smoke + teardown
-- Task #53 (G2.7-T5) — Cross-repo coordination tracker (consumer-side kubeconfig + RBAC)
-- Task #55 (G2.8-T1) — `install.sh` cold-deploy acceptance contract + verifier (`docs/acceptance/install.md`, `scripts/acceptance/install-verify.sh`)
-- Task #56 (G2.8-T2) — `smoke.sh` federation-chain acceptance contract + verifier (`docs/acceptance/smoke.md`, `scripts/acceptance/smoke.sh`)
-- Task #57 (G2.8-T3) — `helm rollback` end-to-end acceptance contract + verifier (`docs/acceptance/rollback.md`, `scripts/acceptance/rollback-verify.sh`, `scripts/acceptance/synthetic-n-plus-1.sql`)
-- Task #58 (G2.8-T4) — 5-consecutive-merged-PR green-smoke counter contract + `targets.yaml` `rdc-meho` schema (`docs/acceptance/green-counter.md`, `docs/cross-repo/targets-yaml.md`, `docs/cross-repo/issue-58-consumer-ticket-body.md`, README badge placeholder); consumer-side counter implementation + `targets.yaml` entry tracked on `claude-rdc-hetzner-dc`
-- Task #30 (G2.3-T4) — unit-level forward-compat regression test (`backend/tests/migrations/test_migration_rollback.py`)
+- The acceptance contracts: `docs/acceptance/install.md`,
+  `docs/acceptance/smoke.md`, `docs/acceptance/rollback.md`,
+  `docs/acceptance/green-counter.md` and their verifiers under
+  `scripts/acceptance/`.
+- The unit-level forward-compat regression test:
+  `backend/tests/migrations/test_migration_rollback.py`.
 - Helm `helm rollback` reference: https://helm.sh/docs/helm/helm_rollback/
 - Helm chart hooks reference: https://helm.sh/docs/topics/charts_hooks/
 - GitHub Actions OIDC: https://docs.github.com/en/actions/concepts/security/openid-connect

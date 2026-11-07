@@ -269,6 +269,29 @@ _PLURAL_TO_SINGULAR_KIND: dict[str, str] = {
 }
 
 
+#: Singular kinds that ``k8s.ls`` sends to ``k8s.workload.list`` (value: its ``kind`` param).
+_APPS_WORKLOAD_KINDS: dict[str, str] = {
+    "statefulset": "StatefulSet",
+    "daemonset": "DaemonSet",
+}
+
+#: Kinds ``k8s.ls /<namespace>/<kind>`` can list, named in its error for any other kind.
+_LS_LISTABLE_KINDS: tuple[str, ...] = (
+    "configmaps",
+    "cronjobs",
+    "daemonsets",
+    "deployments",
+    "events",
+    "ingresses",
+    "jobs",
+    "persistentvolumeclaims",
+    "pods",
+    "secrets",
+    "services",
+    "statefulsets",
+)
+
+
 def _normalise_kind_to_singular(kind: str) -> str:
     """Map a ``kubectl get <kind>``-style plural to the singular op-id segment.
 
@@ -1240,10 +1263,11 @@ class KubernetesConnector(Connector):
           argocd?" question costs one round-trip per kind, not one per
           row.
         * ``/<namespace>/<kind>`` -- forwards to ``k8s.<kind>.list`` via
-          :meth:`execute` (the dispatcher shim). Kinds whose ``list`` op
-          hasn't shipped yet come back through ``execute``'s structured
-          ``unknown_op`` envelope; the handler does not pretend to know
-          which kinds will eventually be registered.
+          :meth:`execute` (the dispatcher shim). ``statefulsets`` and
+          ``daemonsets`` go to ``k8s.workload.list``. A kind with no list
+          op, or a sub-op that fails, raises, so the outer answer is an
+          error (not ``ok`` with an error inside). The message names the
+          kinds ``k8s.ls`` can list.
 
         Forwarding-through-execute (rather than calling
         ``CoreV1Api.list_namespaced_<kind>`` directly here) means the
@@ -1368,11 +1392,10 @@ class KubernetesConnector(Connector):
     ) -> dict[str, Any]:
         """Forward to ``k8s.<kind>.list`` via the connector's dispatcher shim.
 
-        The shim resolves the kind-specific op's descriptor; an unknown
-        kind (T3/T4 hasn't shipped its ``list`` op yet) comes back as the
-        structured ``unknown_op`` envelope and the forwarder propagates
-        it verbatim in the ``result`` field, so the operator sees the
-        sub-op's exact error shape rather than a translated one.
+        The shim resolves the kind-specific op's descriptor. A kind with
+        no ``list`` op (``unknown_op``) or any other failed sub-op makes
+        this method raise, so the caller sees an error at the top level.
+        The ``unknown_op`` message names the kinds that can be listed.
 
         ``kind`` is normalised before dispatch: operators type the
         plural form (``pods``, matching ``kubectl get pods``), but the
@@ -1388,8 +1411,21 @@ class KubernetesConnector(Connector):
         """
         op_kind = _normalise_kind_to_singular(kind)
         sub_op_id = f"k8s.{op_kind}.list"
-        sub_params = {"namespace": namespace}
+        sub_params: dict[str, Any] = {"namespace": namespace}
+        if op_kind in _APPS_WORKLOAD_KINDS:
+            # StatefulSets and DaemonSets share one list op with Deployments.
+            sub_op_id = "k8s.workload.list"
+            sub_params["kind"] = _APPS_WORKLOAD_KINDS[op_kind]
         sub_result = await self.execute(target, sub_op_id, sub_params)
+        if sub_result.status != "ok":
+            # Raising makes the outer answer an error too. A caller that reads
+            # only the outer status must not see "ok" with no rows.
+            if (sub_result.extras or {}).get("error_code") == "unknown_op":
+                raise ValueError(
+                    f"k8s.ls cannot list the kind {kind!r}. "
+                    f"Kinds it can list: {', '.join(_LS_LISTABLE_KINDS)}."
+                )
+            raise RuntimeError(f"k8s.ls {sub_op_id} failed: {sub_result.error}")
         # OperationResult is a Pydantic model; ``.model_dump()`` gives
         # the dict shape future dispatch-recording machinery (audit row,
         # broadcast event) can serialise without an extra round-trip.
@@ -1689,6 +1725,17 @@ class KubernetesConnector(Connector):
         from meho_backplane.connectors.kubernetes.ops_cronjob import k8s_cronjob_run
 
         return await k8s_cronjob_run(self, target, operator, params)
+
+    async def k8s_cronjob_list(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.cronjob.list``."""
+        from meho_backplane.connectors.kubernetes.ops_cronjob_list import k8s_cronjob_list
+
+        return await k8s_cronjob_list(self, target, operator, params)
 
     async def k8s_secret_read_to_ref(
         self,

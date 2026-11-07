@@ -185,6 +185,7 @@
  "k8s.cr.info": "read",
  "k8s.cr.list": "read",
  "k8s.crd.list": "read",
+ "k8s.cronjob.list": "read",
  "k8s.cronjob.run": "other",
  "k8s.delete": "write",
  "k8s.deployment.info": "read",

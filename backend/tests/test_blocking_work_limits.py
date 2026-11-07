@@ -294,8 +294,10 @@ async def test_pending_login_flows_never_exceed_the_cap(monkeypatch: pytest.Monk
         await store.put(f"s{n}", code_verifier="v", return_to="/ui/", browser_binding="b")
         assert store.size() <= 5
     assert store.size() == 5
-    assert await store.pop("s0") is None
-    assert await store.pop("s11") is not None
+    oldest = await store.pop("s0")
+    newest = await store.pop("s11")
+    assert oldest is None
+    assert newest is not None
 
 
 async def test_repeated_state_does_not_grow_the_store() -> None:

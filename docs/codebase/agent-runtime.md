@@ -134,12 +134,12 @@ Which meta-tools register is decided by `resolve_agent_tools` in
 the run's operator. The registered set is the **intersection** of:
 
 - **toolset spec** — the definition author's allow-list (`AgentDefinition.toolset`).
-- **identity permissions** — what the run's identity may call. The G11.2
-  per-op permission *model* is not built yet; the permission an identity
-  carries today is its `TenantRole`, gated by `role_at_least` exactly as the
-  MCP and REST surfaces gate it. Each meta-tool declares a role floor; an
-  identity below the floor does not get the tool. This Task *consumes* that
-  gate, it does not invent a new one.
+- **identity permissions** — what the run's identity may call. For tool
+  registration this is the identity's `TenantRole`, gated by `role_at_least`
+  exactly as the MCP and REST surfaces gate it. Each meta-tool declares a
+  role floor; an identity below the floor does not get the tool. The agent's
+  per-op grants are checked later, at dispatch, by the policy gate (see
+  [agent-permission-model.md](agent-permission-model.md)).
 
 A meta-tool failing either side is **not registered** — it is absent from the
 agent's tool surface, so the model cannot attempt it (least-privilege:
@@ -551,8 +551,11 @@ carry the child's run id (see [Lineage](#lineage--the-cascade-tree-is-reconstruc
   `error_type` on a failure, and the agent model and provider. A call the
   toolset refused also holds `error` with `error_code` `denied`, a
   `reason_code` (`role_insufficient` or `connector_not_allowed`) and a short
-  `reason` that names the rule (#5773). Arguments and error text are never
-  stored.
+  `reason` that names the rule. A call the dispatcher refuses carries the
+  same kind of `reason_code` in its own dispatch row (the list is in
+  `operations/deny_reasons.py`, for example `agent_grant_denied`). Audit
+  answers name the agent (`actor_sub`, `actor_name`). Arguments and error
+  text are never stored.
 - **Status.** 200 success, 403 a call the toolset refused (role floor or
   connector allow-list; `_make_meta_tool` raises `ToolRefusedRetry`), 400 bad
   arguments, a retry the tool asked for, or a call to a tool name the run
@@ -685,7 +688,8 @@ is charged to the person's spend cap like a run that is not streamed.
 
 - **REST** (`api/v1/agent_runs.py`): `POST /api/v1/agents/{name}/run`
   (200 with the result for a terminal sync run; 202 with a handle for async
-  / converted-to-async), `GET /api/v1/agents/runs/{handle}` (poll),
+  / converted-to-async), `GET /api/v1/agents/runs` (list runs, newest
+  first), `GET /api/v1/agents/runs/{handle}` (poll),
   `POST /api/v1/agents/runs/{handle}/cancel` (cancel — #1828: transitions a
   non-terminal run to `cancelled` via the shared `cancel_run` service path,
   returns the updated `AgentRunSummaryResponse`; 404 for an unknown /
@@ -695,14 +699,17 @@ is charged to the person's spend cap like a run that is not streamed.
   two-or-more segments deep so they never collide with the one-segment
   `/{name}` definition-CRUD routes.
 - **MCP** (`mcp/tools/agent_runs.py`): `meho_agents_run` (sync/async via an
-  `async` arg) + `meho_agents_run_status` (poll). SSE is REST-only; an MCP
+  `async` arg), `meho_agents_run_status` (poll) and `meho_agents_list_runs`
+  (list runs). All three are on the operator surface, so they list only
+  for a session with the `mcp:admin` scope. SSE is REST-only; an MCP
   caller polls. Cancel is REST/CLI-only (no MCP verb). Both drive the same
   `AgentInvoker` singleton, so a run started over MCP is poll-able over REST
   and vice versa.
 - **CLI** (`cli/internal/cmd/agent/run.go`, `run_status.go`,
-  `run_cancel.go`, `run_events.go`): `meho agent run <name> --input …
-  [--async]`, `meho agent run-status <handle>`, `meho agent run-cancel
-  <handle>` (#1828), `meho agent run-events <name> --input …`.
+  `run_cancel.go`, `run_events.go`, `run_list.go`): `meho agent run <name>
+  --input … [--async]`, `meho agent run-status <handle>`, `meho agent
+  run-cancel <handle>`, `meho agent run-events <name> --input …`, and
+  `meho agent run-list`.
 
 All fronts require the `operator` role and are tenant-scoped via the JWT.
 
@@ -1047,10 +1054,11 @@ correlated by `approval_request_id`.
 
 ## Dependencies
 
-- **`pydantic-ai-slim[anthropic,bedrock]`** (pinned in
+- **`pydantic-ai-slim[anthropic,bedrock,openai]>=2.53.0`** (in
   `backend/pyproject.toml`) — the loop framework + the Anthropic
   provider (`[anthropic]`) + the Bedrock Converse provider (`[bedrock]`,
-  G11.5-T2 #1076; pulls in `boto3`). Both providers are confined to
+  pulls in `boto3`) + the OpenAI-compatible provider (`[openai]`, see
+  "OpenAI-compatible backend" below). The providers are confined to
   `meho_backplane.agent.run` (legacy `default_model_factory`) and
   `meho_backplane.agent.models` (the per-tenant builders).
 - **`anthropic`** — the Anthropic SDK, pulled in transitively from
@@ -1167,6 +1175,13 @@ resolver builds the model; otherwise the legacy `model_factory` runs.
 This dual path keeps every existing test (which injects
 `model_factory=lambda: FunctionModel(...)`) unmodified — definitions
 without a tier still resolve through the factory.
+
+A stored agent definition never sets this tier. Its `model_tier`
+(`standard` / `fast` / `deep`) is a different set of names, and
+`AgentInvoker._to_agent_definition` does not map it. So every hosted run
+of a stored definition uses the `model_factory` path; the resolver is
+reached only by code that builds an `AgentDefinition` with a `tier`
+directly.
 
 ### The three gates
 
@@ -1642,11 +1657,11 @@ the architecture grounding it links back to.
   child row already in a terminal state when the finalizer runs — e.g. a direct
   cancel against the child — is handled: the finalizer swallows the resulting
   `IllegalTransitionError`.)
-- The identity-permission side of the intersection is the tenant role today.
-  When the G11.2 per-op permission model lands, the resolver's role gate is
-  the seam to extend (or replace) with the real per-op grant check — the
-  intersection shape (spec ∩ identity perms) and the "absent, not denied"
-  posture stay the same.
+- The identity-permission side of the toolset intersection is the tenant
+  role. The per-op grants of the agent permission model do not decide
+  which tools register; they apply per call in the dispatcher's policy
+  gate. So a
+  tool can be on the agent's surface while a grant denies the op it calls.
 
 ## References
 

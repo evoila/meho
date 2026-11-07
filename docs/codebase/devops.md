@@ -1629,7 +1629,7 @@ The chart is packaged, pushed to OCI, and cosign-signed by
 `.github/workflows/chart.yml`. Its `publish` and `verify-anonymous-pull` jobs run on `meho-runners-ci`
 (the project's self-hosted runner pool on a dedicated CI cluster,
 introduced by #160 + #167). It shares the
-hardening conventions of `image.yml`: job-level fork-PR guard (the `validate` job runs on GitHub-hosted `ubuntu-24.04`),
+hardening conventions of `image.yml`: job-level fork-PR guard (the `validate` job runs on GitHub-hosted `ubuntu-latest`),
 SHA-pinned actions with `# vX.Y.Z` comments, a minimum `permissions:`
 block (the workflow default is `contents: read`; only the `publish` job
 adds `packages: write` and `id-token: write`), per-job
@@ -2700,7 +2700,7 @@ their isolation posture:
 | --- | --- | --- |
 | `ci.yml` | yes (build/test/lint) | fork guard on every job (skip on fork PR) |
 | `image.yml` | yes (Docker build) | fork guard (skip on fork PR) on the `build` job; the `lock-scan` job runs on GitHub-hosted `ubuntu-latest` and only reads `backend/uv.lock` |
-| `chart.yml` | yes (helm template) | fork guard on the `validate` job, which runs on GitHub-hosted `ubuntu-24.04`; publish/verify jobs are `push`-only |
+| `chart.yml` | yes (helm template) | fork guard on the `validate` job, which runs on GitHub-hosted `ubuntu-latest`; publish/verify jobs are `push`-only |
 | `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |
 | `migration-compat.yml` | yes (runs `check_migration_compat.py`) | **route**: fork PR → disposable GitHub-hosted runner |
 | `migration-heads.yml` | yes (runs `check_migration_heads.py`) | **hosted runner** for every event (#4626); the `recheck-open-prs` job is `push`-only, runs on `ubuntu-latest` from a checkout of `main`, and only reads PR migration files (never runs PR code) |

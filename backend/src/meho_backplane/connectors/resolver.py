@@ -141,6 +141,7 @@ __all__ = [
     "AmbiguousConnectorResolution",
     "NoMatchingConnector",
     "ResolutionLabel",
+    "connector_serves_target",
     "resolve_connector",
     "resolve_connector_or_label",
 ]
@@ -578,6 +579,24 @@ def resolve_target_version(target: Any) -> str | None:
     if isinstance(asserted, str) and asserted:
         return asserted
     return None
+
+
+def connector_serves_target(product: str, version: str, impl_id: str, target: Any) -> bool:
+    """Return whether the connector registered as *(product, version, impl_id)* fits *target*.
+
+    The same match :func:`resolve_connector` uses to build its candidate
+    list: the target's product is *product*, and the target's version is
+    inside the connector's ``supported_version_range`` (a connector with no
+    range, or a wildcard entry, fits every version). The tie-break does not
+    run, so ``True`` does not mean the resolver picks this connector.
+    """
+    if getattr(target, "product", None) != product:
+        return False
+    key = (product, version, impl_id)
+    return any(
+        (c.product, c.version, c.impl_id) == key
+        for c in _filter_candidates(product, resolve_target_version(target))
+    )
 
 
 def _filter_candidates(product: str, target_version: str | None) -> list[_Candidate]:

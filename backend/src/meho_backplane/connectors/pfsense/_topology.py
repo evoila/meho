@@ -29,7 +29,10 @@ refresh service sets; the lease's own times are in ``lease_starts`` and
 
 A failed read raises :class:`PfSenseTopologyReadError`. It never returns
 an empty map, because the refresh service would read an empty map as
-"everything is gone" and mark every node as no longer seen.
+"everything is gone" and mark every node as no longer seen. One
+exception: when the lease file (:data:`LEASE_FILE`) does not exist, the
+DHCP server is off or the firewall uses the Kea DHCP server. Then there
+are no leases, and the subnets still go on the map.
 
 Left out on purpose: loopback addresses, single-address (``/32``)
 entries such as virtual IPs, interfaces without an IPv4 address, and
@@ -49,6 +52,7 @@ from meho_backplane.connectors.schemas import EdgeHint, NodeHint, TopologyHints
 
 __all__ = [
     "INTERFACE_SOURCE",
+    "LEASE_FILE",
     "LEASE_SOURCE",
     "PfSenseTopologyReadError",
     "build_topology_hints",
@@ -59,6 +63,8 @@ __all__ = [
 INTERFACE_SOURCE = "pfsense.interface.list"
 #: ``source`` value on entries that come from the DHCP lease table.
 LEASE_SOURCE = "pfsense.dhcp.leases"
+#: The ISC dhcpd lease file that ``pfsense.dhcp.leases`` reads.
+LEASE_FILE = "/var/dhcpd/var/db/dhcpd.leases"
 
 _Network = ipaddress.IPv4Network | ipaddress.IPv6Network
 

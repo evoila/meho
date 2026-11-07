@@ -746,6 +746,10 @@ class PfSenseConnector(SshConnector):
         A failed read raises
         :class:`~meho_backplane.connectors.pfsense._topology.PfSenseTopologyReadError`,
         so the refresh changes nothing instead of removing every entry.
+        One exception: when the lease read fails because the lease file does
+        not exist (the DHCP server is off, or the firewall uses the Kea
+        DHCP server), there are no leases, and the subnets still go on the
+        map.
 
         ``operator`` is keyword-only: the refresh service passes it when the
         method accepts it (the same seam the Kubernetes connector uses). It
@@ -754,6 +758,7 @@ class PfSenseConnector(SshConnector):
         """
         from meho_backplane.connectors.pfsense._topology import (
             INTERFACE_SOURCE,
+            LEASE_FILE,
             LEASE_SOURCE,
             build_topology_hints,
             rows_or_raise,
@@ -763,8 +768,26 @@ class PfSenseConnector(SshConnector):
         interfaces = rows_or_raise(
             INTERFACE_SOURCE, name, await self.interface_list(target, {}, operator)
         )
-        leases = rows_or_raise(LEASE_SOURCE, name, await self.dhcp_leases(target, {}, operator))
+        lease_answer = await self.dhcp_leases(target, {}, operator)
+        leases: list[dict[str, Any]]
+        if lease_answer.get("error") and await self._lease_file_missing(
+            target, LEASE_FILE, operator
+        ):
+            leases = []
+        else:
+            leases = rows_or_raise(LEASE_SOURCE, name, lease_answer)
         return build_topology_hints(name, interfaces, leases)
+
+    async def _lease_file_missing(
+        self, target: Target, path: str, operator: Operator | None
+    ) -> bool:
+        """Return ``True`` only when ``test -e`` says *path* does not exist.
+
+        ``test -e`` exits 1 when the file is missing. Any other exit code
+        means we do not know, so the caller treats the read as failed.
+        """
+        proc = await self._run_command(target, f"test -e {path}", operator=operator)
+        return proc.exit_status == 1
 
     async def user_list(
         self,

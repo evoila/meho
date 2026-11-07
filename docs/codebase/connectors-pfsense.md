@@ -950,8 +950,13 @@ the connector already has. Code: `connectors/pfsense/_topology.py`.
   exits with an error and prints nothing), `discover_topology` raises
   `PfSenseTopologyReadError`, and SSH errors pass through. The refresh then
   stops before it writes anything. It never treats a failed read as an empty
-  list, which would mark every entry as no longer seen. A firewall whose DHCP
-  server never ran has no lease file, so its refresh fails the same way.
+  list, which would mark every entry as no longer seen.
+- **No lease file.** When the lease read fails, `discover_topology` checks
+  with `test -e` whether `/var/dhcpd/var/db/dhcpd.leases` exists. The file
+  is missing when the DHCP server is off or the firewall uses the Kea DHCP
+  server. Then there are no leases: the subnets still go on the map, with no
+  `host` nodes. If the file is there, or the check gives any answer other
+  than "missing", the read counts as failed and the refresh changes nothing.
 - **Left out:** loopback addresses, single-address (`/32`) entries such as
   virtual IPs, interfaces without an IPv4 address, and IPv6 (`ifconfig`
   gives no IPv6 prefix length in the parsed rows, and the lease file holds

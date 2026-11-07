@@ -9,6 +9,7 @@
 * Leases that are not active (expired, free, backup) are left out.
 * :meth:`PfSenseConnector.discover_topology` runs the two reads and
   raises when one of them fails, so the map never reads "nothing there".
+  A missing lease file (DHCP server off, or Kea) means no leases.
 * Through the refresh service: a refresh adds the entries, and a lease
   that expired later is marked as no longer seen.
 
@@ -304,12 +305,18 @@ def _proc(stdout: str = "", exit_status: int = 0) -> Any:
     return proc
 
 
-def _ssh_answers(ifconfig: Any, leases: Any) -> Any:
+def _ssh_answers(ifconfig: Any, leases: Any, lease_file_check: Any = None) -> Any:
+    """Answer the SSH commands. ``lease_file_check`` answers ``test -e``
+    (default: the lease file exists)."""
+    check = _proc() if lease_file_check is None else lease_file_check
+
     async def _run(target: Any, command: str, operator: Any = None) -> Any:
         if command == "ifconfig -a":
             answer = ifconfig
         elif command == "cat /var/dhcpd/var/db/dhcpd.leases":
             answer = leases
+        elif command == "test -e /var/dhcpd/var/db/dhcpd.leases":
+            answer = check
         else:  # pragma: no cover - a wrong command is a test failure
             raise AssertionError(f"unexpected command {command!r}")
         if isinstance(answer, BaseException):
@@ -362,6 +369,46 @@ async def test_discover_topology_raises_when_a_read_fails(failing: str) -> None:
     )
     with (
         patch.object(connector, "_run_command", AsyncMock(side_effect=_ssh_answers(*answers))),
+        pytest.raises(PfSenseTopologyReadError, match="exit 1"),
+    ):
+        await connector.discover_topology(_TARGET)
+
+
+@pytest.mark.asyncio
+async def test_discover_topology_without_a_lease_file_still_maps_the_subnets() -> None:
+    """DHCP server off or Kea: no lease file, so no hosts, but the subnets land."""
+    connector = PfSenseConnector()
+    operator = MagicMock(name="operator")
+    run = AsyncMock(
+        side_effect=_ssh_answers(
+            _proc(_IFCONFIG), _proc("", exit_status=1), lease_file_check=_proc(exit_status=1)
+        )
+    )
+    with patch.object(connector, "_run_command", run):
+        hints = await connector.discover_topology(_TARGET, operator=operator)
+
+    assert {(n.kind, n.name) for n in hints.nodes} == {
+        ("target", "fw-test"),
+        ("network", "192.0.2.0/24"),
+    }
+    assert [c.args[1] for c in run.await_args_list][-1] == (
+        "test -e /var/dhcpd/var/db/dhcpd.leases"
+    )
+    assert all(c.kwargs["operator"] is operator for c in run.await_args_list)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("check_exit", [0, 2, 255])
+async def test_discover_topology_raises_when_the_lease_file_is_there_but_unread(
+    check_exit: int,
+) -> None:
+    """The file exists (or the check itself failed): the failed read still raises."""
+    connector = PfSenseConnector()
+    answers = _ssh_answers(
+        _proc(_IFCONFIG), _proc("", exit_status=1), lease_file_check=_proc(exit_status=check_exit)
+    )
+    with (
+        patch.object(connector, "_run_command", AsyncMock(side_effect=answers)),
         pytest.raises(PfSenseTopologyReadError, match="exit 1"),
     ):
         await connector.discover_topology(_TARGET)

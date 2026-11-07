@@ -27,6 +27,7 @@ import copy
 import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -37,6 +38,7 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.keycloak import KeycloakConnector  # also loads the registry
 from meho_backplane.connectors.keycloak.ops_write_realm_smtp import (
+    _realm_update_preview,
     has_inline_smtp_password,
     with_smtp_password,
 )
@@ -58,6 +60,7 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.flight_recorder.config import reset_flight_recorder_config_cache_for_testing
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._park_check import park_check_registered
+from meho_backplane.operations._preview import PreviewContext
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations.approval_handoff import ApprovalExecutionPayload, consume
 from meho_backplane.operations.dispatcher import set_default_reducer
@@ -455,18 +458,33 @@ def test_no_inline_smtp_password(params: dict[str, Any]) -> None:
     assert has_inline_smtp_password(params) is False
 
 
+@dataclass
+class _FakeDescriptor:
+    op_id: str
+
+
+def _card_ctx(params: dict[str, Any]) -> PreviewContext:
+    """A preview context with an operator and a descriptor, as the dispatcher builds it."""
+    return PreviewContext(
+        descriptor=_FakeDescriptor(op_id=_OP),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=Operator(
+            sub="keycloak-realm-smtp-card",
+            name="Keycloak realm SMTP card",
+            email=None,
+            raw_jwt="<keycloak-realm-smtp-card-raw-jwt>",
+            tenant_id=uuid.UUID("00000000-0000-0000-0000-000000000935"),
+            tenant_role=TenantRole.OPERATOR,
+        ),
+        target=None,
+        params=params,
+        connector_id=_CONNECTOR_ID,
+    )
+
+
 @pytest.mark.asyncio
 async def test_approval_card_hides_a_password_value() -> None:
-    from meho_backplane.connectors.keycloak.ops_write_realm_smtp import _realm_update_preview
-    from meho_backplane.operations._preview import PreviewContext
-
-    ctx = PreviewContext(
-        descriptor=None,  # type: ignore[arg-type]
-        connector_instance=None,
-        operator=None,  # type: ignore[arg-type]
-        target=None,
-        params={**_inline_params(), "realm": "other-realm"},
-    )
+    ctx = _card_ctx({**_inline_params(), "realm": "other-realm"})
     card = await _realm_update_preview(ctx)
 
     assert card is not None
@@ -502,16 +520,7 @@ def _named_secret_params() -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_approval_card_hides_every_secret_named_value() -> None:
-    from meho_backplane.connectors.keycloak.ops_write_realm_smtp import _realm_update_preview
-    from meho_backplane.operations._preview import PreviewContext
-
-    ctx = PreviewContext(
-        descriptor=None,  # type: ignore[arg-type]
-        connector_instance=None,
-        operator=None,  # type: ignore[arg-type]
-        target=None,
-        params=_named_secret_params(),
-    )
+    ctx = _card_ctx(_named_secret_params())
     card = await _realm_update_preview(ctx)
 
     assert card is not None
@@ -542,6 +551,62 @@ async def test_waiting_request_card_holds_no_secret_named_value(operator: Operat
     assert "mail.example.test" in effect
     row_text = _row_text(requests[0])
     for value in _NAMED_SECRETS.values():
+        assert value not in effect
+        assert value not in row_text
+
+
+#: Made-up secret-shaped text under plain key names. The card must hide
+#: each of them, as the generic params echo does.
+_JWT = (
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+    ".eyJzdWIiOiJtYWRlLXVwLXN1YmplY3QiLCJuYW1lIjoibWFkZS11cCJ9"
+    ".bWFkZS11cC1zaWduYXR1cmUtdmFsdWUtMDkzNQ"
+)
+_BEARER = "made-up-bearer-value-a1b2c3d4e5f6g7h8i9"
+_TOKEN = "made-up-token-value-z9y8x7w6v5u4t3s2"
+_SHAPED_SECRETS = (_JWT, _BEARER, _TOKEN)
+
+
+def _shaped_secret_params() -> dict[str, Any]:
+    params = _ref_params()
+    params["representation"] = {
+        "smtpServer": dict(_SMTP_SETTINGS),
+        "identityProviders": [
+            {"alias": "corp-idp", "config": {"note": f"Bearer {_BEARER}"}},
+        ],
+        "attributes": {"raw": _JWT, "hook": f"token={_TOKEN}", "frontendUrl": "x"},
+    }
+    return params
+
+
+@pytest.mark.asyncio
+async def test_approval_card_hides_secret_shaped_text_under_plain_keys() -> None:
+    card = await _realm_update_preview(_card_ctx(_shaped_secret_params()))
+
+    assert card is not None
+    shown = card["representation"]
+    assert shown["smtpServer"]["host"] == "mail.example.test"
+    assert shown["identityProviders"][0]["alias"] == "corp-idp"
+    assert shown["attributes"]["frontendUrl"] == "x"
+    text = json.dumps(card)
+    for value in _SHAPED_SECRETS:
+        assert value not in text
+
+
+@pytest.mark.asyncio
+async def test_waiting_request_card_holds_no_secret_shaped_text(operator: Operator) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _, put_route = _mount_keycloak(mock, _REALM_BEFORE)
+        result = await _dispatch(operator, _shaped_secret_params(), approved=False)
+
+    assert result.status == "awaiting_approval", result.error
+    assert put_route.call_count == 0
+    requests = await _rows(ApprovalRequest)
+    assert len(requests) == 1
+    effect = json.dumps(requests[0].proposed_effect)
+    assert "mail.example.test" in effect
+    row_text = _row_text(requests[0])
+    for value in _SHAPED_SECRETS:
         assert value not in effect
         assert value not in row_text
 

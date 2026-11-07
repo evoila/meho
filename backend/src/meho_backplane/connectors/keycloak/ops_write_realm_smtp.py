@@ -24,9 +24,10 @@ The op is a credential write (``op_classes.py``), so MEHO shows no
 generic params echo for it. :func:`_realm_update_preview` is its own
 approval card instead: the realm, the requested fields with secret values
 hidden, and where the SMTP password comes from. The card hides a value by
-the Keycloak list of secret fields and by the same name rule as the
-generic params echo, so ``clientSecret``, ``authTokenClientSecret`` or
-``someApiKey`` at any depth show as hidden.
+the Keycloak list of secret fields and then by the same two passes as the
+generic params echo: secret-named keys (``clientSecret``,
+``authTokenClientSecret``, ``someApiKey`` at any depth) and secret-shaped
+text in any value (for example a token) show as hidden.
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import (
-    _scrub_secret_param_keys,
+    _redact_echoed_params,
     register_preview_builder,
 )
 
@@ -141,13 +142,22 @@ def _realm_label(ctx: PreviewContext) -> str | None:
 async def _realm_update_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Approval card for ``keycloak.realm.update``: realm, fields, password source."""
     representation = ctx.params.get("representation")
-    # Two passes: the Keycloak list of secret fields, then the key-name
-    # scrub of the generic params echo (``is_secret_param_name``), which
-    # also catches camelCase names such as ``authTokenClientSecret``. Both
-    # write the same ``***REDACTED***`` marker.
-    hidden = _scrub_secret_param_keys(
-        redact_secret_fields(representation if isinstance(representation, dict) else {})
+    # First the Keycloak list of secret fields, then the shared params
+    # redaction of the generic echo: the key-name scrub (it also catches
+    # camelCase names such as ``authTokenClientSecret``) and the value-shape
+    # pass (tokens and other secret-shaped text under any key).
+    tenant = str(ctx.operator.tenant_id) if ctx.operator.tenant_id is not None else None
+    redacted = _redact_echoed_params(
+        {
+            "representation": redact_secret_fields(
+                representation if isinstance(representation, dict) else {}
+            )
+        },
+        connector_id=ctx.connector_id,
+        tenant=tenant,
+        op_id=ctx.descriptor.op_id,
     )
+    hidden = redacted.get("representation", {})
     preview: dict[str, Any] = {
         "resource": "realm",
         "realm": _realm_label(ctx),

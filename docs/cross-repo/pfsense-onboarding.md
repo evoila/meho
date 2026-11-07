@@ -51,7 +51,8 @@ and local users:
 | `diagnostics` | `pfsense.diag.ping` | `caution`; waits for approval, because it connects to an address you give |
 
 Twenty-four ops total: twelve `safe` reads and twelve ops at `caution`
-or higher. The `meho pfsense` verbs below cover the reads. Run the
+or higher. The `meho pfsense` verbs below cover the reads, except
+`pfsense.mgmt_flow.summary`, which has no verb. Run that read and the
 other ops with `meho operation call` or through the agent path. Every op dispatches through the same
 `POST /api/v1/operations/call` route the agent surface uses — auth,
 policy, audit, broadcast, and JSONFlux all run on every call. The CLI verb tree is operator ergonomics

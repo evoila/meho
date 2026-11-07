@@ -107,7 +107,7 @@ targets:
     product: harbor
     host: harbor.example.com
     port: 443
-    secret_ref: kv/data/harbor/prod-harbor
+    secret_ref: harbor/prod-harbor
     auth_model: shared_service_account
     notes: "Production Harbor 2.11 registry"
 ```
@@ -134,7 +134,9 @@ meho targets probe prod-harbor --json | jq '{product, version, reachable}'
 # Write the Harbor service-account credentials to Vault.
 # Use a Harbor admin account or a system-level robot with registry read
 # and robot-management permissions.
-vault kv put kv/harbor/prod-harbor \
+# MEHO reads the `secret` KV-v2 mount. The target's secret_ref is the
+# path inside that mount (harbor/prod-harbor), without `secret/` or `/data/`.
+vault kv put -mount=secret harbor/prod-harbor \
   username="harbor-svc-account" \
   password="<service-account-password>"
 ```
@@ -387,7 +389,7 @@ Example agent reasoning sequence:
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| `auth_expired` on any verb | Vault path wrong or credentials rotated | `vault kv get kv/harbor/<slug>` + re-stage the secret |
+| `auth_expired` on any verb | Vault path wrong or credentials rotated | `vault kv get -mount=secret harbor/<slug>` + re-stage the secret |
 | `HTTP 401: unauthorized` from connector | Harbor admin password changed | Update Vault secret + restart backplane |
 | `HTTP 404: project not found` | Project name typo or project in different tenant | `meho harbor project list` to confirm name |
 | `HTTP 403: forbidden` on robot create | Service account lacks robot-management permission | Use Harbor admin or a system-level robot |

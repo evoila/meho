@@ -142,8 +142,8 @@ path the connector ships in T1):
 ```bash
 # Path layout: secret/<tenant>/<target>/github-app
 #
-# The target row's `secret_ref` column points to this exact path
-# (KV-v2 path string, no `/data/` infix in the API form). The
+# The target row's `secret_ref` column holds the path inside the
+# `secret` mount: <tenant>/<target>/github-app (no `secret/`, no `/data/`). The
 # connector reads three fields from the secret: `app_id` (the small
 # integer shown on the App settings page), `installation_id` (the
 # integer from the `/settings/installations/<id>` URL recorded in
@@ -200,7 +200,7 @@ targets:
     product: gh
     host: api.github.com
     fqdn: api.github.com
-    secret_ref: secret/<tenant>/github-meho/github-app
+    secret_ref: <tenant>/github-meho/github-app
     auth_model: shared_service_account
     notes: |
       GitHub App "meho-prod" (App ID 123456) installed on
@@ -215,9 +215,9 @@ Notes on the column choices:
 - **`host: api.github.com`** — the connector's HTTP base URL. GHES
   deployments would point this at the org-internal API host, but
   GHES is out of scope for the v0.x connector.
-- **`secret_ref`** — the Vault path string written in Step 4. KV-v2
-  path **without** the `/data/` infix (the connector's Vault session
-  adds it).
+- **`secret_ref`** — the path written in Step 4, inside the `secret`
+  mount: **without** the `secret/` mount name and **without** the
+  `/data/` part (MEHO adds both when it reads the secret).
 - **`auth_model: shared_service_account`** — the App is the single
   machine identity shared across every operator on this target. The
   `AuthModel` enum
@@ -466,7 +466,7 @@ targets:
     product: gh
     host: api.github.com
     fqdn: api.github.com
-    secret_ref: secret/<tenant>/github-meho-pat/github-app
+    secret_ref: <tenant>/github-meho-pat/github-app
     auth_model: shared_service_account
     notes: |
       PAT fallback (operator operator@example.com). Expires 2026-08-25.
@@ -509,7 +509,7 @@ meho targets describe github-meho
 #   name:        github-meho
 #   product:     gh
 #   host:        api.github.com
-#   secret_ref:  secret/<tenant>/github-meho/github-app
+#   secret_ref:  <tenant>/github-meho/github-app
 #   auth_model:  shared_service_account
 ```
 

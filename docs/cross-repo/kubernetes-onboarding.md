@@ -436,11 +436,12 @@ namespace size.
 
 ## Audit and broadcast classification
 
-The read ops are `op_class=read`. The change ops are `op_class=write`,
-with two exceptions: `k8s.secret.create`, `k8s.secret.update` and
+The read ops are `op_class=read`, except `k8s.secret.compare_to_ref`,
+which is `credential_read`. The change ops are `op_class=write`, with
+two exceptions: `k8s.secret.create`, `k8s.secret.update` and
 `k8s.job.create` are `credential_write`, and `k8s.secret.read_to_ref`
-and `k8s.secret.compare_to_ref` are `credential_read` (audit and
-broadcast show only a summary). The audit row carries the canonical
+is `credential_read`. For a `credential_read` op, audit and broadcast
+show only a summary. The audit row carries the canonical
 params and result status; the broadcast event publishes per-tenant.
 
 Two ops deserve operator attention:

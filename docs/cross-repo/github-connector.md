@@ -201,7 +201,7 @@ Expected output (abbreviated):
 name:        github-meho
 product:     gh
 host:        api.github.com
-secret_ref:  secret/<tenant>/github-meho/github-app
+secret_ref:  <tenant>/github-meho/github-app
 auth_model:  shared_service_account
 ```
 

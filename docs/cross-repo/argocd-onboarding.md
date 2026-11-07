@@ -138,7 +138,7 @@ targets:
     product: argocd
     host: argocd.example.com
     port: 443
-    secret_ref: secret/data/my-lab/argocd/api-token
+    secret_ref: my-lab/argocd/api-token
     auth_model: shared_service_account
     preferred_impl_id: argocd-api
 ```
@@ -149,10 +149,10 @@ Then import it:
 $ meho targets import targets.yaml
 ```
 
-The `secret_ref` value matches the Vault path above with the KV-v2
-`/data/` infix (Vault's KV-v2 API path shape — distinct from the
-`<mount> <path>` positional form `meho vault kv put` takes, which omits
-`/data/`). `preferred_impl_id: argocd-api` pins the resolver to this
+The `secret_ref` value is the path inside the `secret` mount, the same
+`<path>` you passed to `meho vault kv put` above. Leave out the `secret/`
+mount name and the `/data/` part: MEHO adds both when it reads the
+secret, and it refuses a `secret_ref` that already has them. `preferred_impl_id: argocd-api` pins the resolver to this
 connector (defensive — there is only one `argocd` impl today, but it
 future-proofs against a sibling transport).
 

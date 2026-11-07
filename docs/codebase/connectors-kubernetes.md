@@ -1107,6 +1107,48 @@ map (`_PLURAL_TO_SINGULAR_KIND`, pre-wired) forwards
 `k8s.ls /<ns>/persistentvolumeclaims` to the new op instead of the
 `unknown_op` envelope.
 
+### What a MEHO install runs -- `k8s.meho.release.info` (`ops_meho_release.py`)
+
+The op shows what a MEHO install on a Kubernetes target runs today. It
+changes nothing. It is the first step of a governed MEHO update: the update
+must know what runs before it changes anything, and what to go back to.
+Group `cluster`. Risk level `caution`, and it waits for approval: `host`
+is an address the caller gives, so it carries `x-meho-caller-address: true`
+and MEHO applies the floor for such an address
+(`operations/caller_address.py`). The op still only reads.
+
+| Parameter   | Meaning |
+| ----------- | ------- |
+| `namespace` | Required. The namespace of the install. |
+| `release`   | Optional, default `meho`. The Helm release name, and the name of the Deployment and of the `HelmChart` object. |
+| `host`      | Optional. A host name or IP address, with an optional `:port`, of this MEHO install. MEHO calls `https://<host>/version` and `/ready` through the address-pinning transport, so the same address check as for a target applies. |
+
+The result has one part for each source. Each part has a `state`:
+`present`, `not present` or `unknown`.
+
+| Part            | Source | Content |
+| --------------- | ------ | ------- |
+| `deployment`    | `AppsV1Api.read_namespaced_deployment` | image, tag, digest, replicas. With a tag-only image the digest is the `imageID` of a running pod. |
+| `helm_chart`    | `HelmChart` object `helm.cattle.io/v1` (RKE2 installs), same namespace | chart, chart version, `values_hash` (sha256 of `valuesContent` and `set`). |
+| `helm_releases` | `CoreV1Api.list_namespaced_secret`, labels `owner=helm,name=<release>` | revision, status, Secret name, `modified_at`; `incomplete` is true when the page cap (10 pages of 200) was reached. |
+| `meho`          | only with `host` | `version`: the `/version` fields; `ready`: `ready`, `status`, `http_status`, `db_ahead`, and name and `ok` of each check. |
+
+How it behaves:
+
+- A 404 is `not present`. Any other failed read (no right, server error,
+  timeout, host not reachable or refused by the address check) is
+  `unknown` with a short `error`, never `not present`. A 401 is raised, so
+  the dispatcher can renew the login.
+- `db_ahead` is true when `/ready` reports `db_ahead=true`: the database
+  has a revision the running image does not know. The older image still
+  starts and stays ready, so going back to the previous chart needs no
+  database restore (`db/migrate.py`, `db/migrations.py`).
+- Secrets: only the names and labels of the Helm release Secrets are read.
+  Their `data` is never copied. The values text of the `HelmChart` is never
+  returned, only the hash. A userinfo part in the chart URL is removed.
+  The flight recorder masks Secret data before it stores a trace
+  (`_wire_span.py`).
+
 ### Read-side Secret redaction (#3501, `redaction.py`)
 
 Response redaction is otherwise pattern-based (the Tier-1 named-pattern

@@ -64,6 +64,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi import status as http_status
 from fastapi.responses import Response
 
+from meho_backplane.api.v1._errors import http_for, register_error
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import authorize_tenant_scope, require_role
 from meho_backplane.checks.schemas import (
@@ -82,6 +83,7 @@ from meho_backplane.checks.sensor_edit import (
 from meho_backplane.checks.sensor_edit import edit_sensor as apply_sensor_edit
 from meho_backplane.checks.service import (
     SensorAdminService,
+    SensorConnectorMismatchError,
     SensorIdentitySubForbiddenError,
     SensorNameConflictError,
     SensorOperationNotFoundError,
@@ -99,6 +101,13 @@ router = APIRouter(prefix="/api/v1/sensors", tags=["sensors"])
 #: :mod:`meho_backplane.api.v1.scheduler`.
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
+
+register_error(
+    SensorConnectorMismatchError,
+    status=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+    type_tag=SensorConnectorMismatchError.error_code,
+    loc=("body", "connector_id"),
+)
 
 #: Canonical operation identifiers bound into ``audit_op_id`` per route.
 _SENSOR_OP_IDS: Final[dict[str, str]] = {
@@ -174,7 +183,9 @@ async def create_sensor(
     ``tenant_admin`` only. ``body.tenant_id`` is optional: when set, the
     sensor is created under that tenant (cross-tenant admin); when null,
     under ``operator.tenant_id``. The safe-only guard refuses a non-safe or
-    unknown op with 422; a duplicate name returns 409.
+    unknown op with 422; a duplicate name returns 409. A connector that does
+    not fit the target's product and version is refused with 422
+    ``sensor_connector_mismatch`` unless the body sets ``force``.
     """
     target_tenant = authorize_tenant_scope(operator, body.tenant_id)
     structlog.contextvars.bind_contextvars(
@@ -214,6 +225,12 @@ async def create_sensor(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=exc.error_code,
         ) from exc
+    except SensorConnectorMismatchError as exc:
+        # 422 -- the connector does not fit the target's product and
+        # version, and the body did not set force. The validation-error
+        # list shape, so the typed CLI client can read it; ``msg`` is the
+        # plain warning, naming the connector that fits when there is one.
+        raise http_for(exc) from exc
     except SensorNameConflictError as exc:
         # 409 -- the (tenant_id, name) pair is already taken.
         raise HTTPException(

@@ -11,6 +11,35 @@
       "minimum": 1,
       "description": "Number of backplane replicas. v0.1 is single-replica; HA lands in v0.2."
     },
+    "updateStrategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "description": "The Deployment update strategy (#5024). Recreate (the default) stops the old pod before the new one starts.",
+      "properties": {
+        "type": {"type": "string", "enum": ["Recreate", "RollingUpdate"]},
+        "rollingUpdate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxSurge": {"type": ["integer", "string"]},
+            "maxUnavailable": {"type": ["integer", "string"]}
+          }
+        }
+      },
+      "if": {"properties": {"type": {"const": "Recreate"}}},
+      "then": {"not": {"required": ["rollingUpdate"]}}
+    },
+    "shutdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preStopSleepSeconds", "drainSeconds"],
+      "description": "How the backplane pod stops (#5024). The grace period is preStopSleepSeconds + drainSeconds + 30.",
+      "properties": {
+        "preStopSleepSeconds": {"type": "integer", "minimum": 0, "maximum": 60},
+        "drainSeconds": {"type": "integer", "minimum": 0, "maximum": 3600}
+      }
+    },
     "image": {
       "type": "object",
       "additionalProperties": false,
@@ -682,6 +711,42 @@
           "minimum": 1,
           "maximum": 128000,
           "description": "Most output tokens the agent asks the model for in one answer. Rendered as `AGENT_MAX_OUTPUT_TOKENS`. Used by the Anthropic backend only. Range [1, 128000], the same bounds the backplane checks at start. Default 4096."
+        },
+        "modelBackend": {
+          "type": "string",
+          "enum": ["", "anthropic", "openai", "bedrock", "vcf-paif"],
+          "description": "Which model backend every agent run uses, rendered as `AGENT_MODEL_BACKEND`. Empty: not rendered, and the backplane uses its own default (`anthropic`)."
+        },
+        "openai": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "An OpenAI-compatible model endpoint (#5851), separate from `agent.enabled`. When `enabled: true`, the chart sets `OPENAI_API_KEY` from a Secret (`secretKeyRef`, never a plain value), and `OPENAI_BASE_URL` / `OPENAI_DEFAULT_MODEL` when they are set. There is no field for the key itself, so a plain key is refused. The Secret is `secretName`, or the `<release>-agent-openai` Secret that `eso.agentOpenai.enabled: true` makes; with neither, `helm template` fails with a fix.",
+          "required": [
+            "enabled"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "baseUrl": {
+              "type": "string",
+              "pattern": "^$|^https?://",
+              "description": "Base URL of the endpoint, rendered as `OPENAI_BASE_URL`. Empty: not rendered, and the backplane uses OpenAI's own service."
+            },
+            "defaultModel": {
+              "type": "string",
+              "description": "Model id the endpoint serves, rendered as `OPENAI_DEFAULT_MODEL`. Empty: not rendered, and the backplane uses its own default."
+            },
+            "secretName": {
+              "type": "string",
+              "description": "Name of the Kubernetes Secret holding the API key. Leave empty with `eso.agentOpenai.enabled: true`."
+            },
+            "secretKey": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Key within the Secret whose value is the API key. Default `api_key`, matching the ESO target."
+            }
+          }
         }
       }
     },
@@ -795,6 +860,15 @@
           "description": "Unset (null, the default) = on when a built-in core part is on, off otherwise (#4047). `true` with an empty `secretName` needs a built-in part, whose secrets Job makes `<release>-core-approval-handoff`; the render fails otherwise."
         },
         "secretName": { "type": "string", "description": "Your own Secret with the Fernet key. Empty = `<release>-core-approval-handoff`, which the install makes when a built-in part is on." },
+        "secretKey": { "type": "string", "minLength": 1 }
+      }
+    },
+    "paramsHashKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The key of the params hashes and value fingerprints in audit rows and approval requests, injected as PARAMS_HASH_KEY only via secretKeyRef. A new database password keeps this key. With no Secret, MEHO makes the key from DATABASE_URL. See docs/codebase/approvals.md.",
+      "properties": {
+        "secretName": { "type": "string", "description": "Your own Secret with the key. Empty = `<release>-core-params-hash`, which the install makes when a built-in part is on." },
         "secretKey": { "type": "string", "minLength": 1 }
       }
     },
@@ -1505,6 +1579,25 @@
               "type": "string",
               "minLength": 1,
               "description": "Property within the remote KV entry that holds the API key. Must match `agent.secretKey` (default `api_key`)."
+            }
+          }
+        },
+        "agentOpenai": {
+          "type": "object",
+          "description": "Optional ExternalSecret for the API key of the OpenAI-compatible model endpoint (#5851). Target Secret is `<release>-agent-openai`, keyed `agent.openai.secretKey` (default `api_key`). Independent of `eso.enabled: true`.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "remoteKey": {
+              "type": "string",
+              "description": "Vault KV path holding the API key. Empty → the template derives it as `<vault.paths.kv>/agent-openai` at render time."
+            },
+            "remoteProperty": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Property within the remote KV entry that holds the API key."
             }
           }
         },

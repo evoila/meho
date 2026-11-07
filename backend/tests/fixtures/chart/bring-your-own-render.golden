@@ -384,6 +384,10 @@ metadata:
     app.kubernetes.io/managed-by: Helm
 spec:
   replicas: 1
+  # Recreate by default (#5024): the old pod has stopped before the new one
+  # starts, so old and new code never share the database.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: meho
@@ -410,6 +414,9 @@ spec:
         app.kubernetes.io/instance: test
     spec:
       serviceAccountName: meho-backplane
+      # The pre-stop wait, the drain and 30 seconds for the rest of the
+      # shutdown (#5024). Kubernetes kills the pod when this time is over.
+      terminationGracePeriodSeconds: 95
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -447,6 +454,13 @@ spec:
             # container (the image build does not know its chart release).
             - name: CHART_VERSION
               value: "<version>"
+            # How long running operations may take to finish after the stop
+            # signal (#5024). uvicorn reads its own limit for open requests
+            # from UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN; both get the same value.
+            - name: SHUTDOWN_DRAIN_SECONDS
+              value: "60"
+            - name: UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN
+              value: "60"
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -621,6 +635,14 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 2
+          # Keep serving for a few seconds after Kubernetes decided to stop
+          # the pod, so the Service and the ingress stop sending it requests
+          # before it closes (#5024). Without it, a request can still reach
+          # the closing pod and the caller gets a short 502.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
           resources:
             limits:
               cpu: 2000m

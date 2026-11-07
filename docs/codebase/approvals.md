@@ -198,8 +198,10 @@ does not say the operation ran and failed. The sentences are in
 `ui/routes/approvals/render.py` (`RESUME_REFUSAL_MESSAGES`), keyed by the
 error code of the stored result.
 
-**During a rolling update.** For a short time old and new pods run side
-by side. A new pod ends the waiting requests it finds when it starts. A
+**During a rolling update.** The chart's default update strategy is
+`Recreate` (#5024): the old pod stops before the new pod starts, so this
+does not happen. With `updateStrategy.type: RollingUpdate`, for a short
+time old and new pods run side by side. A new pod ends the waiting requests it finds when it starts. A
 request that an old pod saves after that point still waits; if it is
 approved, a new pod refuses to run it. Once both releases have this
 check, an old pod also refuses to run a request made by a new pod. In both cases nothing from the wrong release
@@ -355,20 +357,51 @@ Two kinds of rows carry a keyed hash of a call's params:
   Two calls with the same other values get the same hash. For a call without
   secret-named values, both hashes are equal.
 
-The server key is derived from `DATABASE_URL` (HMAC-SHA256 under a fixed
-label). Every install has that value, the key is never stored, and there is
-no new setting. What follows:
+The server key is HMAC-SHA256 of `PARAMS_HASH_KEY` under a fixed label.
+`PARAMS_HASH_KEY` is a secret of its own. The same key also makes the audit
+digest hashes and the value fingerprints (`compute_audit_digest_hash`,
+`compute_value_fingerprint`). The key itself is never stored. What follows:
 
-- Hashes can be compared inside one install. Rows written before the keyed
-  hash hold a plain SHA-256: they stay readable, but they do not match new
-  hashes. The column format (64 hex characters) is unchanged, so there is no
-  migration.
-- A request that was already waiting for approval when MEHO was upgraded
-  holds the plain hash. The approval check accepts it for the request's own
-  params, so the request can still be approved.
-- When `DATABASE_URL` changes (for example a new database password), the key
-  changes: new hashes no longer match older ones, and a request that waits
-  for approval at that moment must be asked for again.
+- **A new database password keeps every hash.** The key does not come from
+  `DATABASE_URL`, so a password rotation changes no hash and no
+  fingerprint, and a request that waits for approval stays valid.
+- **Where the key comes from.** With a built-in core part on, the install
+  makes it once in the Secret `<release>-core-params-hash` (key
+  `params_hash_key`, 32 random characters) and keeps it on every upgrade
+  ([core-secrets.md](core-secrets.md)). Your own Secret:
+  `paramsHashKey.secretName` (and `paramsHashKey.secretKey`), with at least
+  32 random characters.
+- **Without the key.** When `PARAMS_HASH_KEY` is empty (no built-in part and
+  no `paramsHashKey.secretName`), MEHO makes the key from `DATABASE_URL`
+  under the same label. Then a new database password changes the key: new
+  hashes do not match older ones, and a request that waits for approval at
+  that moment must be asked for again.
+- **Requests made before the key was set.** With `PARAMS_HASH_KEY` set, the
+  approval check also accepts the hash under the key made from
+  `DATABASE_URL`, for the request's own params only. So a request made
+  before the key was set (for example by an older pod during a rolling
+  update) can still be approved. This works while `DATABASE_URL` is the
+  same as when the request was made. Audit rows written before the key was
+  set keep their hashes. They do not match new hashes of the same params.
+- **Rows with a plain SHA-256.** Rows written before the keyed hash hold a
+  plain SHA-256: they stay readable, but they do not match new hashes. A
+  request that was already waiting for approval then holds the plain hash,
+  and the approval check accepts it for the request's own params. The
+  column format (64 hex characters) is the same for all of them, so there
+  is no migration.
+- **Rotating `PARAMS_HASH_KEY`.** Change the key only when you must, for
+  example when it was exposed. Steps: decide or withdraw every request that
+  waits for approval; put a new value of 32 random characters into the
+  Secret; restart the backplane pods. With the built-in core:
+
+  ```bash
+  kubectl -n <namespace> patch secret <release>-core-params-hash --type merge \
+    -p "{\"stringData\":{\"params_hash_key\":\"$(openssl rand -hex 16)\"}}"
+  kubectl -n <namespace> rollout restart deployment/<release>-meho
+  ```
+
+  After that, requests made under the old key must be asked for again, and
+  audit hashes and fingerprints from before and after do not match.
 - A client cannot compute these hashes itself, because they need the server
   key. To match a request to a call, use the `approval_request_id` the call
   returns, or the `preview_hash` of a destructive call.

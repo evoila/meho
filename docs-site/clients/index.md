@@ -21,11 +21,14 @@ walls every first connection tends to hit.
 Even if your end goal is an agent in Claude Desktop or Claude Code,
 install and log in with the [`meho` CLI](cli.md) first. Two reasons:
 
-- **Registering targets and secrets has no MCP tools — deliberately.**
-  That is an operator-trust decision, so it lives on the CLI, the
-  operator console, and REST; agents get the read-only `list_targets`
-  tool and consume whatever you registered
+- **The default agent surface cannot register targets or store
+  secrets — deliberately.** That is an operator-trust decision, so it
+  lives on the CLI, the operator console, and REST; agents get the
+  read-only `list_targets` tool and consume whatever you registered
   ([Register targets and secrets](../guides/targets-and-secrets.md)).
+  Over MCP, only a tenant admin session that asked for the operator
+  planes can register a target (`meho_targets_register`; see
+  [MCP surface and scopes](mcp-surface-and-scopes.md)).
   Until at least one target exists, an agent session can discover
   operations but cannot act — so the CLI is a prerequisite for a useful
   agent session anyway.

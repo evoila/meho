@@ -38,7 +38,7 @@
           "health"
         ],
         "summary": "Ready",
-        "description": "Readiness probe with deploy-time feature-gate visibility.\n\nThe verdict comes from :func:`readiness_snapshot` with the default\nwindow (:data:`DEFAULT_READINESS_TTL_S`): the probes run at most once\nper window, and every call inside it reads the cached verdict. The\nprobes do live network calls, and ``/ready`` needs no login, so a\ncaller must not be able to make them run on every call.\n``sandbox_mode`` and ``features`` are added per call, never cached.\n\nThe body depends on the opt-in ``METRICS_AUTH_TOKEN`` guard (#3499,\n#3594). When the token is unset, every caller gets the full body. When\nit is set, only a caller with the matching bearer token gets the\n``features`` block; every other caller (for example a kubelet\nreadiness probe, which cannot send a header from a Secret) gets just\n``status`` + ``checks`` with the same 200 / 503 status code. ``/ready``\nnever answers 401. See\n:func:`~meho_backplane.metrics_access.has_metrics_access`.\n\nReturns 200 with\n``{\"status\": \"ready\", \"checks\": [...], \"sandbox_mode\": \"off\",\n\"features\": {...}}`` when\nat least one probe is registered and every probe reports ``ok``.\nReturns 503 with\n``{\"status\": \"not_ready\", \"checks\": [...], \"sandbox_mode\": \"off\",\n\"features\": {...}}``\notherwise \u2014 including the fail-closed empty-registry case at the\nchassis stage. The empty case is handled explicitly because\n``all([])`` is vacuously ``True`` in Python, which would otherwise\nflip the chassis to \"ready\" with zero evidence.\n\nThe ``features`` block (G0.14-T7 #1148) enumerates the four gated\nfeatures and their configured-vs-missing-env state. It is emitted\non **both** branches \u2014 the operator's \"is this deploy correctly\nwired?\" question is independent of the probe-registry verdict.\nSee :func:`meho_backplane.features.build_features_block` for the\nblock's shape and the audit table in\n``docs/codebase/error-message-shape.md`` for why this surface\nexists (signals 16, 17).\n\n``sandbox_mode`` (#4622) sits at the top level, for every caller, on\npurpose: when the metrics token is set, ``features`` is hidden from a\ncaller without it, and the mode must be readable on every instance.",
+        "description": "Readiness probe with deploy-time feature-gate visibility.\n\nThe verdict comes from :func:`readiness_snapshot` with the default\nwindow (:data:`DEFAULT_READINESS_TTL_S`): the probes run at most once\nper window, and every call inside it reads the cached verdict. The\nprobes do live network calls, and ``/ready`` needs no login, so a\ncaller must not be able to make them run on every call.\n``sandbox_mode`` and ``features`` are added per call, never cached.\n\nThe body depends on the opt-in ``METRICS_AUTH_TOKEN`` guard (#3499,\n#3594). When the token is unset, every caller gets the full body. When\nit is set, only a caller with the matching bearer token gets the\n``features`` block; every other caller (for example a kubelet\nreadiness probe, which cannot send a header from a Secret) gets just\n``status`` + ``checks`` with the same 200 / 503 status code. ``/ready``\nnever answers 401. See\n:func:`~meho_backplane.metrics_access.has_metrics_access`.\n\nReturns 200 with\n``{\"status\": \"ready\", \"checks\": [...], \"sandbox_mode\": \"off\",\n\"features\": {...}}`` when\nat least one probe is registered and every probe reports ``ok``.\nReturns 503 with\n``{\"status\": \"not_ready\", \"checks\": [...], \"sandbox_mode\": \"off\",\n\"features\": {...}}``\notherwise \u2014 including the fail-closed empty-registry case at the\nchassis stage. The empty case is handled explicitly because\n``all([])`` is vacuously ``True`` in Python, which would otherwise\nflip the chassis to \"ready\" with zero evidence.\n\nThe ``features`` block (G0.14-T7 #1148) enumerates the four gated\nfeatures and their configured-vs-missing-env state. It is emitted\non **both** branches \u2014 the operator's \"is this deploy correctly\nwired?\" question is independent of the probe-registry verdict.\nSee :func:`meho_backplane.features.build_features_block` for the\nblock's shape and the audit table in\n``docs/codebase/error-message-shape.md`` for why this surface\nexists (signals 16, 17).\n\n``sandbox_mode`` (#4622) sits at the top level, for every caller, on\npurpose: when the metrics token is set, ``features`` is hidden from a\ncaller without it, and the mode must be readable on every instance.\n\nOnce the pod got its stop signal (#5024), ``/ready`` answers 503 with\n``{\"status\": \"draining\", \"checks\": []}`` and runs no probe, so no new\ntraffic is sent to a pod that is stopping.",
         "operationId": "ready_ready_get",
         "responses": {
           "200": {
@@ -10289,7 +10289,7 @@
           "sensors"
         ],
         "summary": "Create Sensor",
-        "description": "Create one sensor under the operator's tenant.\n\n``tenant_admin`` only. ``body.tenant_id`` is optional: when set, the\nsensor is created under that tenant (cross-tenant admin); when null,\nunder ``operator.tenant_id``. The safe-only guard refuses a non-safe or\nunknown op with 422; a duplicate name returns 409.",
+        "description": "Create one sensor under the operator's tenant.\n\n``tenant_admin`` only. ``body.tenant_id`` is optional: when set, the\nsensor is created under that tenant (cross-tenant admin); when null,\nunder ``operator.tenant_id``. The safe-only guard refuses a non-safe or\nunknown op with 422; a duplicate name returns 409. A connector that does\nnot fit the target's product and version is refused with 422\n``sensor_connector_mismatch`` unless the body sets ``force``.",
         "operationId": "create_sensor_api_v1_sensors_post",
         "parameters": [
           {
@@ -36380,6 +36380,37 @@
         "title": "SensorCadenceKind",
         "description": "Closed enum of the two cadence shapes a :class:`Sensor` may carry.\n\nInitiative #2416 (parent goal #221), Task #2503. One ``sensor`` row\ncarries exactly one cadence, selected by this discriminator; the\ninvariant is enforced by the DB-side ``ck_sensor_cadence_fields``\nCHECK that pairs each kind with its mandatory column (mirroring\n:class:`ScheduledTriggerKind`).\n\nMembers:\n\n* :attr:`INTERVAL` -- fire every ``interval_seconds`` (5..86400). The\n  sub-minute path #2505's interval-tick loop drives.\n* :attr:`CRON` -- fire on a 5-field ``cron_expr`` in ``timezone``. The\n  >=1-minute path #2505 rides on #804's durable scheduler discipline.\n\nClosed enum: widening it is a coordinated DB + model change so the\nenum, the :data:`_SENSOR_CADENCE_KINDS` literal, and migration\n``0064``'s frozen tuple cannot drift."
       },
+      "SensorConnectorFit": {
+        "properties": {
+          "target_product": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Product"
+          },
+          "target_version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Version"
+          },
+          "warning": {
+            "type": "string",
+            "nullable": true,
+            "title": "Warning"
+          },
+          "matching_connector_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Matching Connector Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "target_product",
+          "target_version"
+        ],
+        "title": "SensorConnectorFit",
+        "description": "How a Sensor's connector fits its target, checked each time it is read.\n\nMEHO reads the target's detected product and version (the last probe,\nelse the version an operator set) and checks it against the version\nrange the connector declares, with the same match the dispatcher uses\nto pick a connector for a target. ``warning`` is ``None`` when the\nconnector fits, or when MEHO cannot tell (no known product or version,\nor a connector MEHO does not know). Otherwise it says in plain words\nwhat does not match, and ``matching_connector_id`` names the connector\nthat fits the target, when there is one."
+      },
       "SensorCreate": {
         "properties": {
           "name": {
@@ -36471,6 +36502,11 @@
             "format": "uuid",
             "nullable": true,
             "title": "Tenant Id"
+          },
+          "force": {
+            "type": "boolean",
+            "title": "Force",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -36657,6 +36693,10 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "connector_fit": {
+            "$ref": "#/components/schemas/SensorConnectorFit",
+            "nullable": true
           }
         },
         "type": "object",

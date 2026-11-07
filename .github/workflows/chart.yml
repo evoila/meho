@@ -433,6 +433,53 @@ jobs:
           fi
           echo ">> agent-runtime env wiring verified: secretKeyRef on confidential values, plain env on operator config, no leakage when unset"
 
+      - name: Assert the OpenAI-compatible model endpoint key wires via secretKeyRef (#5851)
+        # With `agent.openai.enabled: true` the chart sets OPENAI_API_KEY
+        # from a Secret only, and OPENAI_BASE_URL / OPENAI_DEFAULT_MODEL as
+        # plain values. The default render from the steps above must carry
+        # none of the three.
+        run: |
+          set -euo pipefail
+          helm template test deploy/charts/meho/ \
+            --set image.tag=test \
+            --set ingress.host=meho.test \
+            --set ingress.tls.secretName=meho-tls \
+            --set corePostgres.enabled=false \
+            --set coreKeycloak.enabled=false \
+            --set coreVault.enabled=false \
+            --set postgres.credentialsSecret=meho-postgres \
+            --set vault.address=https://vault.test \
+            --set keycloak.issuer=https://keycloak.test/realms/meho \
+            --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
+            --set config.keycloakAudience=meho-backplane \
+            --set config.vaultAddr=https://vault.test \
+            --set networkPolicy.postgresCIDR=10.0.1.0/24 \
+            --set networkPolicy.vaultCIDR=10.0.2.0/24 \
+            --set networkPolicy.keycloakCIDR=10.0.3.0/24 \
+            --set agent.openai.enabled=true \
+            --set agent.openai.secretName=model-creds \
+            --set agent.openai.baseUrl=https://model.example.internal/v1 \
+            --set agent.openai.defaultModel=openai:test-model \
+            > /tmp/rendered-openai.yaml
+
+          kubeconform -strict -kubernetes-version 1.28.0 -ignore-missing-schemas -summary /tmp/rendered-openai.yaml
+
+          grep -A2 -F -e '- name: OPENAI_API_KEY' /tmp/rendered-openai.yaml \
+            | grep -F 'secretKeyRef' \
+            || { echo "::error::OPENAI_API_KEY is not wired via secretKeyRef (#5851 regression)"; exit 1; }
+          grep -A1 -F -e '- name: OPENAI_BASE_URL' /tmp/rendered-openai.yaml \
+            | grep -F 'value: "https://model.example.internal/v1"' \
+            || { echo "::error::OPENAI_BASE_URL is not wired as plain env (#5851 regression)"; exit 1; }
+          grep -A1 -F -e '- name: OPENAI_DEFAULT_MODEL' /tmp/rendered-openai.yaml \
+            | grep -F 'value: "openai:test-model"' \
+            || { echo "::error::OPENAI_DEFAULT_MODEL is not wired as plain env (#5851 regression)"; exit 1; }
+
+          if grep -qE '^\s+- name: OPENAI_' /tmp/rendered.yaml; then
+            echo "::error::default render sets OPENAI_* env vars without opt-in (#5851 regression)"
+            exit 1
+          fi
+          echo ">> OpenAI-compatible endpoint wiring verified: secretKeyRef on the key, plain env on URL and model, nothing when unset"
+
       - name: Assert check-runner principal + GSM WIF wire first-class (#2642)
         # #2642: background sensor dispatch needs a credential identity, and
         # a per-operator-WIF GSM install needs the `GSM_WIF_*` env the chart
@@ -787,7 +834,9 @@ jobs:
        needs.changes.outputs.chart == 'true')
     # Pinned 2026-10-29: kind image load fails on ubuntu-26.04's Docker (ubuntu-latest moved there); revisit when kind/docker support it.
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # 30 minutes: the update and rollback proofs of #5024 start the
+    # backplane pod three more times.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -1285,6 +1334,198 @@ jobs:
           echo "recovery-probe logs:"
           kubectl -n meho-test logs pod/broadcast-recovery-probe
 
+      - name: Update with Recreate - the old pod stops before the new one starts (#5024)
+        # The chart's default update strategy is Recreate. A watcher reads
+        # the backplane pods twice a second during a real `helm upgrade`.
+        # The step fails when a new pod appears while the old pod's
+        # backplane container still runs. (The old pod object can stay a
+        # moment longer after its container ended; that is fine.) It writes
+        # the time without a ready MEHO pod into the job summary.
+        run: |
+          set -euo pipefail
+          samples=/tmp/update-samples.txt
+          stop=/tmp/update-samples.stop
+          : > "$samples"
+          rm -f "$stop"
+          sample() {
+            local now
+            now=$(date +%s.%N)
+            kubectl -n meho-test get pods \
+              -l app.kubernetes.io/name=meho,app.kubernetes.io/instance=meho-test \
+              -o jsonpath='{range .items[?(@.metadata.ownerReferences[0].kind=="ReplicaSet")]}{.metadata.name}{","}{.metadata.deletionTimestamp}{","}{.status.conditions[?(@.type=="Ready")].status}{","}{.status.containerStatuses[?(@.name=="backplane")].state.running.startedAt}{";"}{end}' \
+              2>/dev/null | sed "s/^/${now} /" >> "$samples" || true
+            echo >> "$samples"
+          }
+          (
+            while [ ! -f "$stop" ]; do
+              sample
+              sleep 0.5
+            done
+          ) &
+          watcher=$!
+          old_pod=$(kubectl -n meho-test get pods \
+            -l app.kubernetes.io/name=meho,app.kubernetes.io/instance=meho-test \
+            -o jsonpath='{.items[?(@.metadata.ownerReferences[0].kind=="ReplicaSet")].metadata.name}')
+          echo ">> old pod: ${old_pod}"
+          helm upgrade meho-test ./deploy/charts/meho \
+            --namespace meho-test \
+            --kube-as-user meho-installer \
+            --reuse-values \
+            --set-string podAnnotations.update-proof=recreate \
+            --wait \
+            --timeout 10m
+          touch "$stop"
+          wait "$watcher"
+          # helm --wait has seen the new pod ready. The watcher can stop
+          # before it samples that, so take one last sample now.
+          sample
+          python3 - "$samples" "$old_pod" <<'PY'
+          import os
+          import sys
+
+          path, old = sys.argv[1], sys.argv[2]
+          rows = []
+          for line in open(path):
+              line = line.strip()
+              if not line or " " not in line:
+                  continue
+              stamp, pods = line.split(" ", 1)
+              entries = [p.split(",") for p in pods.split(";") if p]
+              rows.append((float(stamp), {e[0]: (e[1], e[2], e[3]) for e in entries}))
+          print(open(path).read())
+          old_running = [t for t, pods in rows if old in pods and pods[old][2]]
+          new_seen = [t for t, pods in rows if any(name != old for name in pods)]
+          if not old_running or not new_seen:
+              sys.exit("the watcher did not see both the old and the new pod")
+          if min(new_seen) <= max(old_running):
+              sys.exit("a new pod appeared while the old pod's container still ran")
+          stopping = [t for t, pods in rows if old in pods and pods[old][0]]
+          start = min(stopping) if stopping else max(old_running)
+          ready = [
+              t for t, pods in rows
+              if any(name != old and state[1] == "True" for name, state in pods.items())
+          ]
+          if not ready:
+              sys.exit("the new pod never reported ready while the watcher ran")
+          downtime = min(ready) - start
+          report = (
+              f"Recreate update: the old pod's container ended {max(old_running) - start:.1f} s "
+              f"after it began to stop; the new pod appeared "
+              f"{min(new_seen) - max(old_running):.1f} s later; "
+              f"no ready MEHO pod for {downtime:.1f} s in total."
+          )
+          print(">> " + report)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(report + "\n")
+          PY
+
+      - name: A failed start after registration is recovered with helm rollback (#5024)
+        # Start a release whose start fails on purpose right after it wrote
+        # its operation rows and its release stamp, inside their
+        # transaction (the test-only setting
+        # MEHO_TEST_FAIL_START_AFTER_REGISTRATION). The broken release
+        # disables every built-in row before it fails and stamps another
+        # release name, so this proves the rollback of attempted changes,
+        # not a rewrite of the same rows. With Recreate the old pod is
+        # already gone. The rows and the stamp must stay as they were,
+        # `helm rollback` must bring the previous release back, and an
+        # operation must work again.
+        run: |
+          set -euo pipefail
+          sel=app.kubernetes.io/name=meho,app.kubernetes.io/instance=meho-test
+          catalog() {
+            kubectl -n meho-test exec meho-test-postgres-0 -c postgres -- \
+              psql -X -tA -h /var/run/postgresql -U postgres -d meho -c "
+                SELECT count(*) || ' ' || md5(coalesce(string_agg(concat_ws('|',
+                  product, version, impl_id, op_id, handler_ref, safety_level,
+                  requires_approval, is_enabled, parameter_schema::text),
+                  E'\n' ORDER BY product, version, impl_id, op_id), ''))
+                  || ' ' || (SELECT coalesce(max(written_by_release), '-') FROM operation_catalog_state)
+                  || ' enabled=' || count(*) FILTER (WHERE is_enabled)
+                FROM endpoint_descriptor WHERE tenant_id IS NULL"
+          }
+          good_rev=$(helm history meho-test -n meho-test -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)[-1]["revision"])')
+          before=$(catalog)
+          echo ">> operation rows before: ${before}"
+          helm upgrade meho-test ./deploy/charts/meho \
+            --namespace meho-test \
+            --kube-as-user meho-installer \
+            --reuse-values \
+            --set-json 'extraEnv=[{"name":"MEHO_TEST_FAIL_START_AFTER_REGISTRATION","value":"1"},{"name":"GIT_SHA","value":"broken-release-for-this-proof"}]'
+          failed=""
+          for _ in $(seq 1 90); do
+            restarts=$(kubectl -n meho-test get pods -l "$sel" \
+              -o jsonpath='{.items[?(@.metadata.ownerReferences[0].kind=="ReplicaSet")].status.containerStatuses[?(@.name=="backplane")].restartCount}' || true)
+            if [ -n "$restarts" ] && [ "$restarts" -ge 1 ]; then failed=yes; break; fi
+            sleep 4
+          done
+          [ -n "$failed" ] || { echo "::error::the broken release did not fail its start"; exit 1; }
+          log=$(kubectl -n meho-test logs deploy/meho-test -c backplane --previous --tail=300 || true)
+          grep -E 'operation_catalog_test_failure|operation_catalog_unchanged' <<<"$log" || true
+          grep -q 'operation_catalog_test_failure' <<<"$log" \
+            || { echo "::error::the broken release did not reach its failure after registration"; exit 1; }
+          grep -q 'operation_catalog_unchanged' <<<"$log" \
+            || { echo "::error::the broken release did not log that it changed no row"; exit 1; }
+          changed=$(grep -oE 'rows_changed["=: ]+[0-9]+' <<<"$log" | grep -oE '[0-9]+$' | head -1)
+          [ "${changed:-0}" -gt 0 ] \
+            || { echo "::error::the broken release changed no row before it failed (rows_changed=${changed:-none})"; exit 1; }
+          echo ">> the broken release changed ${changed} rows and stamped its release before it failed"
+          after_failed=$(catalog)
+          echo ">> operation rows after the failed start: ${after_failed}"
+          [ "$after_failed" = "$before" ] \
+            || { echo "::error::a failed start changed the operation rows or the release stamp"; exit 1; }
+          started=$(date +%s)
+          helm rollback meho-test "$good_rev" \
+            --namespace meho-test \
+            --kube-as-user meho-installer \
+            --wait \
+            --timeout 10m
+          kubectl -n meho-test rollout status deployment/meho-test --timeout=5m
+          pod=$(kubectl -n meho-test get pods -l "$sel" \
+            -o jsonpath='{.items[?(@.metadata.ownerReferences[0].kind=="ReplicaSet")].metadata.name}')
+          kubectl -n meho-test exec "$pod" -c backplane -- python -c '
+          import urllib.request
+          print(urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=10).read().decode())
+          '
+          after_rollback=$(catalog)
+          echo ">> operation rows after the rollback: ${after_rollback}"
+          [ "$after_rollback" = "$before" ] \
+            || { echo "::error::the operation rows differ after the rollback"; exit 1; }
+          # An operation works again: a safe built-in operation that needs no
+          # target, run through the same dispatcher every call uses. This
+          # install has no Keycloak, so the call is made inside the pod.
+          kubectl -n meho-test exec -i "$pod" -c backplane -- python - <<'PY'
+          import asyncio
+          import uuid
+
+          from meho_backplane.auth.operator import Operator, TenantRole
+          from meho_backplane.operations.dispatcher import dispatch
+
+
+          async def main() -> int:
+              operator = Operator(
+                  sub="chart-proof",
+                  raw_jwt="",
+                  tenant_id=uuid.uuid4(),
+                  tenant_role=TenantRole.OPERATOR,
+              )
+              result = await dispatch(
+                  operator=operator,
+                  connector_id="audit-integrity-1.x",
+                  op_id="audit.loose_rows",
+                  target=None,
+                  params={"limit": 1},
+              )
+              print(">> audit.loose_rows after the rollback:", result.status, result.error or "")
+              return 0 if result.status == "ok" else 1
+
+
+          raise SystemExit(asyncio.run(main()))
+          PY
+          report="Failed start after registration: the attempted change to ${changed} rows was rolled back, the rows and the release stamp stayed the same, and helm rollback served again after $(( $(date +%s) - started )) s (an operation ran)."
+          echo ">> ${report}"
+          echo "${report}" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Dump diagnostics on failure
         if: failure()
         run: |
@@ -1749,7 +1990,7 @@ jobs:
         # even though the helm push above succeeds (helm uses its own auth file).
         # Mirrors the working pattern in image.yml; same SHA so a single
         # supply-chain audit covers both pipelines.
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

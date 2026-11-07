@@ -72,7 +72,7 @@ agent_run loop ─►│ AgentRun.start / .result    │
             │  (success path)                         │
             │                                         │
             │  1. provider:model = _full_model_id(.)  │
-            │  2. cost = compute_cost(usage, full_id) │
+            │  2. cost = compute_run_cost(usages, id) │
             │  3. succeed_run(session, row, cost=...) │
             │  4. apply_consumption(session, ...)     │
             │  5. commit                              │
@@ -98,7 +98,7 @@ best-effort partial usage on failure, but the v0.2 contract is
 import time. The keys are the **resolved** provider-prefixed ids the
 runtime emits via `AgentRunAuditMeta.model` (e.g.
 `anthropic:claude-sonnet-5-5`, the default of `AGENT_DEFAULT_MODEL`).
-The runtime calls `compute_cost(usage, model_id)` with the *resolved*
+The runtime calls `compute_run_cost(request_usages, model_id)` with the *resolved*
 id, not the operator-facing logical tier, so the table keys directly
 on what the provider was actually billed for.
 
@@ -115,10 +115,10 @@ A tenant can still price a model that is *not* in the table (see "Prices a
 tenant sets" below). That is a fallback only, never a change of a price in
 the table.
 
-An unknown model id (lookup miss) yields `Decimal(0)` and logs a
-single `warning` per process — the "known unknown" contract. The gate
-that prevents a run from *starting* against an un-priced model lives
-in the multi-provider resolver (G11.5-C4).
+An unknown model id (lookup miss) yields `Decimal(0)` and logs one
+`identity_budget_pricing_miss` warning per model id per process — the
+"known unknown" contract. No gate stops a run on a model with no price:
+MEHO warns at start and shows `spend_counted: false` in the status read.
 
 The table has a row for each current Claude model: `claude-opus-5-5`,
 `claude-sonnet-5-5` and `claude-haiku-5-5`. `cache_write` is the price
@@ -371,4 +371,4 @@ fires only at the hard refusal.
   - `backend/tests/test_agent_run_consumption.py`
 - Initiative #806 §C3; Task #1079; sibling Task #1080 (C3-b
   enforcement gate).
-- Anthropic published pricing (as of 2026-05-27).
+- Anthropic published pricing (5.5 rows as of 2026-11-05).

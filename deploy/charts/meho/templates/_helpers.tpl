@@ -141,6 +141,27 @@ working wiring instead of an unresolvable reference:
 {{- end }}
 
 {{/*
+Name of the Kubernetes Secret that holds the API key of the
+OpenAI-compatible model endpoint (#5851). Same order as
+`meho.agentSecretName`:
+
+  1. `agent.openai.secretName` when set.
+  2. `<release>-agent-openai` when `eso.agentOpenai.enabled: true` (the
+     ExternalSecret in templates/externalsecrets.yaml makes that Secret).
+  3. `fail` with a fix when neither is set. Callers guard the call with
+     `if .Values.agent.openai.enabled`.
+*/}}
+{{- define "meho.agentOpenaiSecretName" -}}
+{{- if .Values.agent.openai.secretName -}}
+{{- .Values.agent.openai.secretName -}}
+{{- else if and .Values.eso.agentOpenai .Values.eso.agentOpenai.enabled -}}
+{{- printf "%s-agent-openai" (include "meho.fullname" .) -}}
+{{- else -}}
+{{- fail "agent.openai.enabled=true requires either agent.openai.secretName=<your-secret> (BYO) or eso.agentOpenai.enabled=true (chart-rendered ExternalSecret). The API key comes only from a Secret." -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Resolved Kubernetes Secret name holding the Keycloak Admin client secret
 (G11.2 #803). Same resolution pattern as `meho.agentSecretName`:
 

@@ -31,6 +31,7 @@ single registrar function. See :mod:`meho_backplane.connectors.net.ops`,
 :mod:`meho_backplane.connectors.net.allowlist`.
 """
 
+from meho_backplane.connectors.net.fingerprint import register_net_fingerprint_operation
 from meho_backplane.connectors.net.http_probe import register_net_http_probe_operations
 from meho_backplane.connectors.net.icmp import register_net_icmp_operations
 from meho_backplane.connectors.net.ntp import register_net_ntp_check_operation
@@ -51,8 +52,10 @@ register_typed_op_registrar(register_net_http_probe_operations)
 register_typed_op_registrar(register_net_ntp_check_operation)
 register_typed_op_registrar(register_net_icmp_operations)
 register_typed_op_registrar(register_net_ssh_keyscan_operation)
+register_typed_op_registrar(register_net_fingerprint_operation)
 
 __all__ = [
+    "register_net_fingerprint_operation",
     "register_net_http_probe_operations",
     "register_net_icmp_operations",
     "register_net_ntp_check_operation",

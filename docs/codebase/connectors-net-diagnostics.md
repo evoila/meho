@@ -27,7 +27,8 @@ Each op queues a registrar in `__init__.py` via
 `http_probe.register_net_http_probe_operations`; `net.ntp_check` →
 `ntp.register_net_ntp_check_operation`; `net.ping` / `net.trace` /
 `net.path_mtu` share `icmp.register_net_icmp_operations`; `net.ssh_keyscan` →
-`ssh_keyscan.register_net_ssh_keyscan_operation`). Siblings therefore extend the
+`ssh_keyscan.register_net_ssh_keyscan_operation`; `net.fingerprint` →
+`fingerprint.register_net_fingerprint_operation`). Siblings therefore extend the
 package by adding (at most) a module and one registrar-queue line rather
 than contending for a single registrar function — which also keeps
 parallel task branches from colliding on one shared file.
@@ -52,7 +53,7 @@ The op is registered under the natural key
 `safety_level="safe"` + `requires_approval=False` make it
 agent-auto-runnable and ungated.
 
-**The nine `net.*` ops need no approval.** Their address fields (`host`,
+**The `net.*` ops need no approval.** Their address fields (`host`,
 `url`, and the `resolver` of `net.dns_lookup`) carry no
 `x-meho-caller-address` marker, so the caller-address floor
 (`docs/codebase/spec-ingestion.md`, "Caller-address floor") does not
@@ -537,6 +538,54 @@ It shares the `net-probe-1.x` identity, and is `safety_level="safe"` +
 `requires_approval=False`: a read-only handshake that offers no credential
 and sends no application data; the allow-list limits where checks can connect.
 
+## `net.fingerprint` — identify one unknown address (#4133)
+
+`net.fingerprint(host, timeout_seconds?)` says which product likely runs
+at one address, without a login and without adding a target. It returns
+the likely product (`vcenter`, `esxi`, `nsx` or `sddc`), the likely
+version, how sure it is (`high` / `medium` / `low` / `none`), the rules
+that matched, and the evidence.
+
+It runs four read-only checks at the same time:
+
+- **TLS certificate** on port 443. It calls `net_tls_inspect` and keeps
+  the leaf's subject, issuer and SAN.
+- **Page title** of `https://<host>/`. It follows up to three redirects,
+  and only when they stay on the same host over https. It reads at most
+  64 KiB and returns only the title, the status, the `Server` header and
+  the path. Never the body.
+- **vSphere "about" answer.** A `RetrieveServiceContent` call on
+  `https://<host>/sdk` (the same call the nmap `vmware-version` script
+  sends). vCenter and ESXi answer it without a login with their name,
+  version, build and `apiType` (`VirtualCenter` or `HostAgent`). The XML
+  is read with `defusedxml`.
+- **SSH banner** on port 22: the first line the server sends. MEHO sends
+  nothing.
+
+The decision is in `fingerprint_rules.py`, with no network code. Each
+rule looks at one field and names one product, with a weight: the "about"
+answer 3, a page title 2, a certificate field 1. The weights add up per
+product. The highest sum wins: 3 or more is `high`, 2 is `medium`, 1 is
+`low`. No match, or two products with the same sum, gives
+`product: "unknown"` and `confidence: "none"` — MEHO does not guess. Only
+the "about" answer gives a version; NSX Manager and SDDC Manager do not
+state their version without a login, so `version` is `null` for them.
+`reachable: false` means no check got an answer.
+
+Limits:
+
+- **One address only.** The allowlist check runs first, as in every
+  `net.*` op. A range like `192.0.2.0/24` is not an IP address, so it is
+  matched as a host name and refused. There is no port parameter and no
+  scan.
+- An address outside the tenant's probe allowlist fails the call with
+  `connector_probe_refused`; the dispatcher writes the error audit row.
+- The registered-target probe (`targets.probe`) is not reused: it picks
+  a connector by the target's known product and logs in with the
+  target's credentials. This op has neither.
+- The rules are tested with recorded answers. A check against real
+  appliances is still open, so a rule may need a change after it.
+
 ## `net.tls_inspect` — full presented certificate chain (T2, #2407)
 
 `net.tls_inspect(host, port, server_name?, timeout_seconds?)` opens a TLS
@@ -828,6 +877,11 @@ target activity warning.
   (`_known_hosts_line`), and the registrar. Uses
   `asyncssh.get_server_host_key` (the house SSH transport) for a no-auth
   handshake per requested key type.
+- `connectors/net/fingerprint.py` — `net_fingerprint` handler, its
+  schemas, the four checks (`_check_tls`, `_check_http`,
+  `_check_vsphere_about`, `_check_ssh`) and the registrar.
+  `connectors/net/fingerprint_rules.py` — the rules, the "about" and
+  title parsers, and `classify`.
 - `connectors/net/icmp.py` — the `net_ping` / `net_trace` /
   `net_path_mtu` handlers, their schemas, the low-level errqueue / ICMP
   primitives (`_checksum`, `_build_echo_request`, `_parse_extended_err`,
@@ -886,6 +940,10 @@ audit row carrying the structured envelope in `payload.error`.
   (`asyncio`, `socket`, `select`, `struct`, `errno`, `os`, `time`) — no
   new runtime dependency. The Linux socket ABI constants the stdlib does
   not surface are pinned as module-level integers.
+- `net.fingerprint`: no new dependency. It uses `httpx` for the two
+  HTTPS reads, `defusedxml` (already a dependency) for the vSphere
+  answer, the `net.tls_inspect` handler for the certificate, and
+  `asyncio` streams for the SSH banner.
 - `net.ssh_keyscan`: **asyncssh** (already the backplane's SSH transport
   dependency, used by every SSH connector via `SshConnector`) — used via
   `asyncssh.get_server_host_key` for the no-auth handshake and the

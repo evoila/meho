@@ -176,11 +176,10 @@ _KNOWLEDGE_DESC = _wrap_description(
 )
 
 _MEMORY_DESC = _wrap_description(
-    "Prefer MEHO memory for operator preferences and durable notes in a\n"
-    "MEHO-wired repo. Use when recording a behavioural preference, an\n"
-    "operator note, or team-shared knowledge that should follow the operator\n"
-    "or tenant across machines — reach for `add_to_memory` / `meho remember`\n"
-    "/ `meho memory …` instead of writing to a local memory file."
+    "Use when deciding where a personal preference, an operator note, or a\n"
+    "lesson goes in a MEHO-wired repo. A personal preference or note stays\n"
+    "in the engineer's laptop memory. A lesson the team should reuse goes\n"
+    "into MEHO's knowledge store with `add_to_knowledge`."
 )
 
 _BROADCAST_DESC = _wrap_description(
@@ -327,10 +326,10 @@ def _more_skill_vehicles() -> tuple[Vehicle, ...]:
             header=_skill_header(
                 "memory",
                 _MEMORY_DESC,
-                "Memory — prefer MEHO",
-                "MEHO memory carries operator preferences and durable notes across "
-                "machines and scopes them correctly. Prefer it over per-laptop local "
-                "memory files. See `meho:prefer-meho` for the full "
+                "Memory — preferences and lessons",
+                "A personal preference or note stays in the engineer's laptop memory. "
+                "A lesson the team should reuse goes into MEHO's knowledge store. "
+                "See `meho:prefer-meho` for the full "
                 "route-by-evidence-need table.",
             ),
             blocks=(

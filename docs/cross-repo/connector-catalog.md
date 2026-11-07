@@ -20,7 +20,7 @@ REST surface — but only once an operator ingests the vendor's OpenAPI
 spec. Doing that by hand means knowing four things per connector: that a
 connector is generic-ingestable at all, where the vendor publishes its
 spec, which `spec.info.version` maps to which release, and which version
-label aligns with a registered connector class. The v0.3.0 RDC dogfood
+label aligns with a registered connector class. An early dogfood run
 showed that friction directly: operators concluded "the vmware connector
 is 13 composites and that's it" because the ingest on-ramp was implicit.
 
@@ -44,6 +44,15 @@ colocated with its loader
 > (see `find_alembic_ini` in `db/migrations.py`). This document is the
 > discoverable pointer in its place.
 
+A connector package can bring its own catalog rows. It calls
+`register_connector_catalog(package, resource="catalog.yaml")` from the
+`__init__` of its connector folder (connector kit 1.1). The file has the
+same `entries` shape. MEHO adds these rows after its own rows and checks
+them the same way. A wrong file, or a second row for the same
+`(product, version)`, stops the start with an error that names the
+package. The VMware connector package brings the `vmware`,
+`sddc-manager` and `nsx` rows this way.
+
 The backplane loads + validates the catalog at startup (a malformed
 catalog crashes the lifespan, so CI's app-boot smoke fails) and serves it
 read-only at `GET /api/v1/connectors/catalog`.
@@ -62,24 +71,32 @@ Each entry is validated by `ConnectorSpecEntry`:
 | `sha256` | Advisory content hash MEHO smoke-tested against; optional, not enforced. |
 | `notes` | Operator context: sharp edges, version quirks, appliance-served vs portal-hosted, curation status. |
 | `catalog_ingest` | **Whether `meho connector ingest --catalog` actually works for this row.** `"supported"` (default) — the upstream serves an OpenAPI spec directly; `--catalog` runs end-to-end. `"spec-only"` — the upstream is an HTML developer-portal landing page or an fqdn-templated appliance URL the catalog can't dereference server-side; the operator must fetch the spec and pass via `--spec`. `GET /api/v1/connectors` reads this field to emit an honest `next_step` hint (G0.18-T8 #1361). See "Spec-only entries" below. |
+| `spec_resource` | **Optional.** File name of an OpenAPI spec that ships with MEHO (or with the connector package) as package data. When set, `--catalog` ingest reads this file and does not fetch `upstream`, so a `null` or `<...>` upstream does not block the ingest. MEHO parses the file at start; a broken file stops the start. |
+| `profile_resource` | **Optional.** File name of a reviewed auth and paging profile that ships as package data. The ingested connector then runs through `ProfiledRestConnector` without hand-written auth code. MEHO checks the profile at start. A row with a profile does not need its `requires_connector_class` to be registered ahead of time. |
+| `op_allowlist` | **Optional.** List of `method` + `path` pairs. When set, the ingest keeps only the operations on the list and drops every other parsed operation before it is stored. The ingest result shows the dropped count. |
 | `safety_overlay` | **Optional safety rules for this spec's ops.** Each rule raises the safety level of matching ingested ops and can turn on approval. See "Safety overlay" below. |
 
 ## Current entries
 
+The table lists the rows in MEHO's own `catalog.yaml`. Rows that a
+connector package brings (for example `vmware`, `sddc-manager` and `nsx`
+from the VMware connector package) show up only when that package is
+installed. Run `meho connector catalog list` to see the rows of your
+backplane.
+
 | Product / version | Shape | `catalog_ingest` | Spec source |
 |---|---|---|---|
-| `vmware` 9.0 | generic | `spec-only` | `vcenter.yaml` + `vi-json.yaml` (appliance-served at `https://<vcenter-fqdn>/`; mirrored on the Broadcom Developer Portal, which serves `text/html`) |
-| `sddc-manager` 9.0 | generic | `spec-only` | SDDC Manager API (appliance-served; Broadcom Developer Portal mirror is `text/html`) |
 | `harbor` 2.x | generic | `supported` | `goharbor` `api/v2.0/swagger.yaml` — **Swagger 2.0**, needs conversion to OpenAPI 3.x before ingest |
-| `nsx` 4.2 | generic | `spec-only` | `/api/v1/spec/openapi/nsx_api.yaml` (appliance-served, `<nsx-mgr-fqdn>`-templated; Broadcom Developer Portal mirror is `text/html`) |
-| `gh` v3 | generic | `supported` | `rest-api-description/main/descriptions/api.github.com/api.github.com.json` — OpenAPI 3.0.3, direct-resolvable, `info.version` 1.1.4 (in compat band `1.x.x` — see Label-vs-spec decoupling below), ~700 paths / ~40 tags. Auth: GitHub App installation tokens (or fine-grained PAT). First-day on-ramp: [`github-connector.md`](./github-connector.md); credential setup: [`github-app-credential.md`](./github-app-credential.md). |
+| `gh` 3 | generic | `supported` | `rest-api-description/main/descriptions/api.github.com/api.github.com.json` — OpenAPI 3.0.3, direct-resolvable, `info.version` 1.1.4 (in compat band `1.x.x` — see Label-vs-spec decoupling below), ~784 paths / ~49 tags. Auth: GitHub App installation tokens (or fine-grained PAT). First-day on-ramp: [`github-connector.md`](./github-connector.md); credential setup: [`github-app-credential.md`](./github-app-credential.md). |
 | `vault` 1.x | typed | n/a (typed) | none (hand-coded connector) |
 | `k8s` 1.x | typed | n/a (typed) | none (typed; per-minor OpenAPI ingest is a future Goal #214 investigation) |
 | `bind9` 9.x | typed | n/a (typed) | none (SSH-only; no REST surface) |
+| `mehoauto` 0.1.0 | generic, profile-backed | `spec-only` | none in the catalog. Ingest the add-on's own `/openapi.json` with `--spec`. The row ships an auth profile and an `op_allowlist` that keeps six operations. |
+| `_fixture` 1.0 | test fixture | `supported` | a small shipped spec and profile (`spec_resource` + `profile_resource`). Not a real connector; it checks the shipped-file path at start. |
 
 `spec_info_version` and `sha256` are populated only after a connector's
 spec has been ingest-verified through MEHO, not from desk research. The
-`gh/v3` entry carries `spec_info_version: 1.1.4` observed against the
+`gh/3` entry carries `spec_info_version: 1.1.4` observed against the
 upstream main branch tip on 2026-05-27 — the value comes from a smoke
 parse of the live spec, not the GitHub release tag (the public
 `rest-api-description` release cadence lags by years; the spec is
@@ -98,8 +115,9 @@ still ship `null`.
    `{"catalog_entry": "<product>/<version>"}` to
    `/api/v1/connectors/ingest`; the backplane resolves the entry,
    fills in `product` + `version` + `impl_id` + `specs[]`, and runs
-   the standard ingest pipeline. Typed-connector entries (`upstream:
-   null`) and fqdn-templated upstream URLs are refused with a
+   the standard ingest pipeline. When the row has a `spec_resource`,
+   MEHO reads the shipped spec file. Otherwise, typed-connector entries
+   (`upstream: null`) and fqdn-templated upstream URLs are refused with a
    structured 422 hint pointing at the explicit-quadruple shape.
    `--catalog` is mutually exclusive with the manual
    `--product`/`--version`/`--impl`/`--spec` flags. Add `--dry-run`
@@ -112,7 +130,7 @@ CLI) hit the same path by POSTing the catalog-driven body shape
 directly. See the *REST shape* section below.
 
 For an entry the catalog can't ingest directly (typed, or fqdn-templated
-upstream such as `nsx`), fall back to the explicit `meho connector ingest
+upstream such as the `nsx` row of the VMware connector package), fall back to the explicit `meho connector ingest
 --product … --version … --impl … --spec <url>` form documented in
 [`connector-ingestion.md`](connector-ingestion.md), reading the `upstream`
 URL(s) from `catalog list`.
@@ -129,7 +147,7 @@ hits.
 the entry against the packaged catalog:
 
 ```json
-{ "catalog_entry": "vmware/9.0", "dry_run": false }
+{ "catalog_entry": "gh/3", "dry_run": false }
 ```
 
 **Explicit-quadruple shape** — pass the resolved triple plus the
@@ -146,9 +164,9 @@ spec sources (MCP admin tool and historical clients):
 
 A body that sets both shapes fails 422 `catalog_entry_conflict`. A
 body that sets neither fails 422 `ingest_request_underspecified`. A
-body that sets `catalog_entry` but the entry is unknown / malformed
-/ typed-only / fqdn-templated fails 422 with one of the four
-classifier codes below — every shape follows the T11
+body that sets `catalog_entry` but the entry is unknown, malformed,
+typed-only, fqdn-templated, or points at an HTML page fails 422 with
+one of the five catalog codes below — every shape follows the T11
 [error-message-shape](../codebase/error-message-shape.md) convention:
 
 | Failure | Code | When |
@@ -156,7 +174,8 @@ classifier codes below — every shape follows the T11
 | Reference missing `/` separator | `catalog_entry_malformed` | `"vmware9.0"` |
 | Reference well-formed, not in catalog | `catalog_entry_not_found` | `"foo/1.0"` |
 | Resolved entry has `upstream: null` | `catalog_entry_typed_connector` | `"vault/1.x"` |
-| Resolved entry's upstream has `<...>` placeholders | `catalog_entry_templated_upstream` | `"nsx/4.2"` |
+| Resolved entry's upstream has `<...>` placeholders | `catalog_entry_templated_upstream` | a row with `https://<appliance-fqdn>/...` |
+| Upstream answers with something that is not a spec (for example `text/html`) | `catalog_entry_upstream_not_spec` | a developer-portal page |
 | Both shapes supplied | `catalog_entry_conflict` | shape conflict |
 | Neither shape supplied | `ingest_request_underspecified` | empty body |
 
@@ -242,7 +261,10 @@ A handful of upstreams in the curated catalog **cannot drive
    (`catalog_entry_templated_upstream` 422). The Broadcom mirror
    listed alongside it is again `text/html`.
 
-For these rows the catalog row sets `catalog_ingest: spec-only`.
+For these rows the catalog row sets `catalog_ingest: spec-only`. In
+MEHO's own catalog, `mehoauto/0.1.0` is spec-only. The `vmware`,
+`sddc-manager` and `nsx` rows above come with the VMware connector
+package.
 That has two operator-visible consequences:
 
 - **`GET /api/v1/connectors`** — the `state="registered"` row's
@@ -290,7 +312,9 @@ The ingest gives each op a safety level from its HTTP method. Some specs
 hide risky actions behind `POST`. For example, the vCenter VI-JSON spec
 uses `POST /VirtualMachine/{moId}/PowerOnVM_Task` to power on a VM, so
 the op lands at `caution` with no approval. Use `safety_overlay` to make
-such ops stricter, without changing the ingest code.
+such ops stricter, without changing the ingest code. The example below
+is from a `vmware` row; in a deployment, that row comes with the VMware
+connector package, and a package row carries its overlay the same way.
 
 ```yaml
   - product: vmware
@@ -321,6 +345,10 @@ Rules:
   approval is on if any rule turns it on.
 - The overlay runs after the connector safety floor, at ingest time.
   The dry-run ingest shows the same result.
+- After the overlay, two more floors run for every ingested op. A read
+  whose answer holds credentials, and an op with a parameter that holds
+  an address MEHO connects to, get at least `caution` and wait for
+  approval.
 
 **Apply it with a re-ingest.** The overlay changes nothing in the
 database by itself. After you deploy a catalog change, run the next

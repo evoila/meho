@@ -1,6 +1,6 @@
 # Connector auth — the per-target credential read identity (decision)
 
-**Status:** proposed (gates Goal [#214](https://github.com/evoila/meho/issues/214) execution)
+**Status:** proposed (gates Goal [#214](https://github.com/evoila/meho/issues/214) execution). Option A is what the code does now: the loaders take the `Operator` and read through `vault_client_for_operator` (see [What the code does now](#what-the-code-does-now)).
 **Date:** 2026-05-22
 **Context doc:** [docs/research/214-connector-credential-broker.md](../research/214-connector-credential-broker.md)
 
@@ -15,17 +15,27 @@ loader signature, the RBAC model, and the audit trail:
 > **What identity performs the per-target Vault read — the operator's, or the
 > backplane's own service identity?**
 
+## What the code does now
+
+- The loader types take the `Operator`: `KubeconfigLoader` in [`kubernetes/kubeconfig.py`](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py) and `VcfCredentialsLoader` in [`_shared/vcf_auth.py`](../../backend/src/meho_backplane/connectors/_shared/vcf_auth.py).
+- `HttpConnector.auth_headers(target, operator)` in [`adapters/http.py`](../../backend/src/meho_backplane/connectors/adapters/http.py) gets the full `Operator`.
+- The shared loaders in [`_shared/vault_creds.py`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py) (for example `load_basic_credentials`) open `vault_client_for_operator(operator)` and read the target's `secret_ref`.
+- A `secret_ref` with a scheme prefix (`<kind>:<ref>`) is read from another credential store through [`_shared/credential_backend.py`](../../backend/src/meho_backplane/connectors/_shared/credential_backend.py) (`CREDENTIAL_BACKEND`). A bare path is read from Vault KV-v2.
+- The VMware connectors named below (`vmware_rest`, `_shared/vcf_auth.py` users) ship in evoila's enterprise pack, not in this repository ([decision record](../decisions/2026-10-28-own-connectors-leave-the-public-tree.md)). Their file references below are kept as the history of the proposal.
+
+The rest of this page is the proposal as written, with its reasoning.
+
 ## Options
 
 ### Option A — Operator-context (forward the operator's JWT) ✅ recommended
 
 The loader calls the already-built
-[`vault_client_for_operator(operator)`](../../backend/src/meho_backplane/auth/vault.py#L198),
+[`vault_client_for_operator(operator)`](../../backend/src/meho_backplane/auth/vault.py),
 which forwards the operator's validated Keycloak JWT to Vault's JWT/OIDC auth
 method (the existing `meho-mcp` role) and reads `target.secret_ref` as a KV-v2
 secret under the operator's identity. This is exactly what the `vault-1.x`
 connector already does for every op
-([vault/ops.py:294](../../backend/src/meho_backplane/connectors/vault/ops.py#L294)).
+([vault/ops.py](../../backend/src/meho_backplane/connectors/vault/ops.py)).
 
 - **RBAC:** the operator's Vault policy. A single role enforces *per-operator*
   path scoping via **ACL policy templating** —
@@ -68,9 +78,9 @@ Four reasons, in priority order:
    MEHO does not currently have.
 2. **It is the stubs' stated intent.** Every stub's docstring and error message
    says "the *operator-context* per-target Vault credential read is not yet
-   wired" ([vmware_rest/session.py:99](../../backend/src/meho_backplane/connectors/vmware_rest/session.py#L99),
-   [_shared/vcf_auth.py:182](../../backend/src/meho_backplane/connectors/_shared/vcf_auth.py#L182),
-   [kubernetes/kubeconfig.py:86](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py#L86)).
+   wired" (`vmware_rest/session.py`, now in the enterprise pack,
+   [_shared/vcf_auth.py](../../backend/src/meho_backplane/connectors/_shared/vcf_auth.py),
+   [kubernetes/kubeconfig.py](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py)).
 3. **Per-operator RBAC *and* audit through one role**, via templated policy — the
    research-doc §2 finding. Option B can't match the attribution without extra
    machinery (token exchange).
@@ -84,7 +94,7 @@ more.
 
 Background/scheduled work (e.g. the topology scheduler) runs as a synthesised
 system operator with `raw_jwt=""`
-([connectors/vault/connector.py:311](../../backend/src/meho_backplane/connectors/vault/connector.py#L311)).
+([connectors/vault/connector.py](../../backend/src/meho_backplane/connectors/vault/connector.py)).
 Such a call **cannot** perform an operator-context Vault read. For v0.x this is
 acceptable and explicit: **system-initiated calls that need a vendor credential
 are out of scope** — today the only system caller (the readiness probe) hits
@@ -103,9 +113,9 @@ The change is mechanical and bounded; `operator.raw_jwt` already reaches
 1. **Loader type aliases** gain an `Operator` parameter:
    - `VsphereSessionLoader = Callable[[VsphereTargetLike], Awaitable[dict]]` →
      `Callable[[VsphereTargetLike, Operator], Awaitable[dict]]`
-     ([vmware_rest/session.py:86](../../backend/src/meho_backplane/connectors/vmware_rest/session.py#L86))
-   - `VcfCredentialsLoader` ([_shared/vcf_auth.py:165](../../backend/src/meho_backplane/connectors/_shared/vcf_auth.py#L165))
-   - `KubeconfigLoader` ([kubernetes/kubeconfig.py:53](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py#L53))
+     (`vmware_rest/session.py`, now in the enterprise pack)
+   - `VcfCredentialsLoader` ([_shared/vcf_auth.py](../../backend/src/meho_backplane/connectors/_shared/vcf_auth.py))
+   - `KubeconfigLoader` ([kubernetes/kubeconfig.py](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py))
 
    **Pass the full `Operator`, not just `raw_jwt`** — `vault_client_for_operator`
    takes an `Operator`, and the future `per_user` model needs `operator.sub` to
@@ -113,16 +123,16 @@ The change is mechanical and bounded; `operator.raw_jwt` already reaches
 
 2. **`auth_headers` stops discarding `raw_jwt`** and threads the operator down to
    the loader. Today `auth_headers(target, raw_jwt)` does `del raw_jwt`
-   ([vmware_rest/connector.py:270](../../backend/src/meho_backplane/connectors/vmware_rest/connector.py#L270)).
+   (`vmware_rest/connector.py`, now in the enterprise pack).
    Cleanest fix: the dispatcher already has the full `Operator`; thread the
    `Operator` (not just `raw_jwt`) from `dispatch_ingested`
-   ([_branches.py:167](../../backend/src/meho_backplane/operations/_branches.py#L167))
+   ([_branches.py](../../backend/src/meho_backplane/operations/_branches.py))
    → `_request_json`/`_post_json` → `auth_headers` → `_session_token` → loader.
    This is an `HttpConnector` ABC-surface change
-   ([adapters/http.py:103,119,159](../../backend/src/meho_backplane/connectors/adapters/http.py#L103))
+   ([adapters/http.py](../../backend/src/meho_backplane/connectors/adapters/http.py))
    affecting every HTTP connector — do it once in the base + vmware as the canary,
    then fan out. `CredentialsCache.get(target)` →
-   `get(target, operator)` ([_shared/vcf_auth.py:251](../../backend/src/meho_backplane/connectors/_shared/vcf_auth.py#L251)).
+   `get(target, operator)` ([_shared/vcf_auth.py](../../backend/src/meho_backplane/connectors/_shared/vcf_auth.py)).
 
 3. **The loader body** becomes: `async with vault_client_for_operator(operator)
    as client: read KV-v2 at target.secret_ref → return {"username","password"}`
@@ -156,7 +166,12 @@ credential-read leaf of the chain.
 ## Cache scoping under `shared_service_account`
 
 Each connector that holds Vault-sourced credentials or session tokens caches
-them per target — keyed on `target.name` alone, with no operator dimension.
+them per target, with no operator dimension. The key is the target's
+`(tenant_id, id)` (`target_cache_key` in
+`backend/src/meho_backplane/connectors/_shared/cache_key.py`), so two
+same-named targets in two tenants never share an entry. Login tokens use
+`credential_cache_key` instead: two targets in one tenant with the same
+secret and the same login address share one token and one login.
 This is intentional under the only auth model State 2 supports
 (`shared_service_account`) and load-bearing in the docstrings of every cache
 site. Restating it here so future review (human and bot) doesn't relitigate
@@ -190,21 +205,24 @@ For a target tagged `shared_service_account`:
 
 | Connector | File | Cache | Notes |
 | --- | --- | --- | --- |
-| Shared VCF helper (vROps, vRLI, Fleet) | `backend/src/meho_backplane/connectors/_shared/vcf_auth.py` | `CredentialsCache` | Credential dict cache; per-target `{username, password}` consumed via HTTP Basic by vROps/Fleet and via session-establish by vRLI. |
-| vRLI | `backend/src/meho_backplane/connectors/vcf_logs/connector.py` | `_session_tokens` (in `_session_token`) | Bearer-token cache; the session id from `POST /api/v2/sessions`. |
-| vcf-automation (provider plane) | `backend/src/meho_backplane/connectors/vcf_automation/connector.py` | `_provider_tokens` (in `_provider_session_token`) | `X-VMWARE-VCLOUD-ACCESS-TOKEN` JWT cache. |
-| vcf-automation (tenant plane) | `backend/src/meho_backplane/connectors/vcf_automation/connector.py` | `_tenant_tokens` (in `_tenant_session_token`) | `{"token": ...}` body-value cache. |
-| vmware-rest | `backend/src/meho_backplane/connectors/vmware_rest/connector.py` | `_session_tokens` (in `_session_token`) | `vmware-api-session-id` cache; the G3.9 precedent every other cache here copied. |
+| Shared VCF helper (used by the VMware connectors of the enterprise pack) | `backend/src/meho_backplane/connectors/_shared/vcf_auth.py` | `CredentialsCache` | Credential dict cache; per-target `{username, password}`. |
 | harbor | `backend/src/meho_backplane/connectors/harbor/connector.py` | `_creds_cache` (in `_load_credentials`) | Credential dict cache; per-target `{username, password}` consumed via HTTP Basic. |
-| sddc-manager | `backend/src/meho_backplane/connectors/sddc_manager/connector.py` | `_creds_cache` (in `_load_credentials`) | Credential dict cache; per-target `{username, password}` consumed via HTTP Basic (username suffixed with `@sso_realm`). |
 | SSH adapter (every connector built on `SshConnector`) | `backend/src/meho_backplane/connectors/adapters/ssh.py` | `_connections` (in `_connect`) | Open SSH connection pool, keyed on `(tenant_id, id, caller kind, caller sub)`. Not a credential cache: an entry is a logged-in session, so it is handed back only to the caller whose own Vault read opened it. The caller kind keeps the check runner, a call without a token (a runbook verification) and an operator-less probe in their own slots, also when they run under a person's `sub`. `invalidate_credentials` drops every caller's connection to the target. |
+
+The other public connectors follow the same pattern: a `SecretReaders` list
+and an `invalidate_credentials` hook. They are `argocd`, `azure`, `entra`,
+`gcloud`, `github`, `hetzner_robot`, `keycloak`, `kubernetes`, `phpipam`,
+`proxmox`, `rabbitmq` and the profiled connectors (`connectors/profiled.py`).
+The vRLI, vcf-automation, vmware-rest and sddc-manager caches ship with the
+VMware connectors in the enterprise pack.
 
 Every cache site applies a fail-closed guard before the cache lookup so a
 cache hit can never short-circuit past the loader and return
 previously-primed credentials to a caller that could not itself resolve
 them. The **primary** fail-closed gate lives one layer deeper, in the
-credential loader's `_resolve_secret_ref` helper at
-[`vault_creds.py:188`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py#L188);
+Vault credential backend's `load_secret_data` in
+[`vault_creds.py`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py),
+which refuses an empty `operator.raw_jwt` before any Vault call;
 the cache guards are the **second** layer — defense-in-depth.
 
 The guard has two parts:
@@ -241,8 +259,8 @@ reject the system caller; the loader and the cache guards do.)
 
 The credential caches above are populated on the **first** load and are
 otherwise long-lived: the credential dict is written *before* the login
-attempt (e.g. `sddc-manager` writes `_creds_cache` then calls
-`POST /v1/tokens`), and the session-token invalidation seam
+attempt (e.g. `harbor` fills `_creds_cache` in `_load_credentials`
+before the first vendor call), and the session-token invalidation seam
 (`invalidate_session`, the #2067 dispatch-path recovery) deliberately leaves
 the credential cache intact — a mid-session 401 means the *token* expired, not
 that the credential is wrong. That left one gap: a credential rejected at
@@ -262,8 +280,8 @@ converges with no restart. Eviction is not paired with an immediate retry: at
 failure time the restage has not happened yet, so a retry would only replay the
 rejected bytes; convergence needs the operator's restage between dispatches.
 
-`nsx`, `vmware-rest`, `hcx`, `salt`, the SRM / vSphere Replication base, `vro`
-and the profiled connectors cache only the session token and re-read the
+The profiled connectors (and, in the enterprise pack, `nsx`, `vmware-rest`,
+`hcx`, `salt`, the SRM / vSphere Replication base and `vro`) cache only the session token and re-read the
 service-account credential from Vault on every establish, so a restage already
 converges on the next cold-session dispatch. Their `invalidate_credentials`
 hook drops the session and forgets who has read the target's secret, so after
@@ -272,7 +290,7 @@ a target change every caller reads the new secret before the next login.
 ### Why not key the cache on the operator too
 
 Under `shared_service_account` the underlying credential is shared. A
-`(target.name, operator.sub)` cache key would multiply the cache by every
+`(target key, operator.sub)` cache key would multiply the cache by every
 operator who has ever dispatched against the target, all entries holding
 byte-identical credentials. Storage waste, identical wire traffic, no
 extra audit fidelity (Vault still attributes only the first read per
@@ -294,7 +312,7 @@ per target.
 
 Both of those auth models are explicitly out of scope for State 2 (see
 `Goal #214` and the boundary checks in each connector's `auth_headers`).
-When either lands, the cache key MUST extend to `(target.name,
+When either lands, the cache key MUST extend to `(target key,
 operator.sub)` because the credential pair (or kubeconfig user, or
 impersonation chain) becomes per-operator. Until then, threading
 `operator.sub` into the key is speculative complexity — the cache shape

@@ -36,6 +36,7 @@ from meho_backplane.operations.approval_queue import (
     approval_result_state,
     get_request,
     pending_chain_positions,
+    result_state_of_envelope,
 )
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME
 from meho_backplane.ui.references import subject_ref
@@ -75,6 +76,7 @@ RESULT_STATE_PILL: Final[dict[str, tuple[str, str]]] = {
     "started": ("running", "badge-info"),
     "executed": ("ran OK", "badge-success"),
     "failed": ("run failed", "badge-error"),
+    "uncertain": ("outcome unknown", "badge-warning"),
 }
 
 
@@ -122,6 +124,7 @@ def project_outcome(outcome: ResumeOutcome | None) -> dict[str, Any] | None:
         "audit_id": audit_id,
         "audit_href": f"/ui/audit?audit_id={audit_id}" if audit_id else None,
         "guidance": outcome.guidance,
+        "execution_outcome": outcome.execution_outcome,
         "refused_message": RESUME_REFUSAL_MESSAGES.get(outcome.error_code or ""),
     }
 
@@ -151,7 +154,7 @@ def project_run_result(result: Any, *, parked_op_id: str) -> dict[str, Any] | No
         with_approval_guidance(envelope, parked_op_id=parked_op_id)
     )
     return {
-        "result_state": "executed" if outcome.result_status == "ok" else "failed",
+        "result_state": result_state_of_envelope(envelope).value,
         "outcome": project_outcome(outcome),
     }
 
@@ -172,7 +175,11 @@ async def project_stored_run_result(request: ApprovalRequest) -> dict[str, Any]:
     async with get_sessionmaker()() as db_session:
         fresh = await get_request(db_session, tenant_id=request.tenant_id, request_id=request.id)
     state = approval_result_state(fresh)
-    if state in (ApprovalResultState.EXECUTED, ApprovalResultState.FAILED):
+    if state in (
+        ApprovalResultState.EXECUTED,
+        ApprovalResultState.FAILED,
+        ApprovalResultState.UNCERTAIN,
+    ):
         return {"result_state": state.value, "outcome": project_outcome(resume_outcome(fresh))}
     return {"result_state": ApprovalResultState.STARTED.value, "outcome": None}
 

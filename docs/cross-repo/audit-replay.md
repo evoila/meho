@@ -9,7 +9,7 @@ Copyright (c) 2026 evoila Group
 
 ## What replay answers (and how it differs from query)
 
-[`meho audit query`](./audit-query.md) is a filter over the whole audit log: target, principal, op-id glob, op-class, result-status, time window. It returns a flat page of rows newest-first. That is the right tool for "who patched rdc-nsx on Tuesday?" — a fan-out across many sessions and many operators.
+[`meho audit query`](./audit-query.md) is a filter over the whole audit log: target, principal, op-id glob, op-class, result-status, time window. It returns a flat page of rows newest-first. That is the right tool for "who patched nsx-prod on Tuesday?" — a fan-out across many sessions and many operators.
 
 `meho audit replay` is the opposite shape. You hand it **one** `agent_session_id` and it reconstructs that session's entire run as a **parent/child tree**: every operation the session issued, in chronological order, with composite operations (a runbook that dispatched child operations) nested under their parent. That is the forensics / debugging / compliance shape — "show me everything session `<id>` did, in order, with the lineage between operations" (the Motivation from Initiative [#377](https://github.com/evoila/meho/issues/377)).
 
@@ -32,14 +32,14 @@ Replay is keyed on `agent_session_id` — the MCP-session correlation id (the `M
 Every audit row carries `agent_session_id` (it is part of the `AuditEntry` shape every query returns). Pull it out with `--json` and `jq`:
 
 ```bash
-meho audit query --target rdc-vcenter --since 24h --json \
+meho audit query --target vcenter-prod --since 24h --json \
   | jq -r '.rows[].agent_session_id'
 ```
 
 Filter out the NULLs and dedupe to get the distinct sessions that touched a target:
 
 ```bash
-meho audit query --target rdc-vcenter --since 24h --json \
+meho audit query --target vcenter-prod --since 24h --json \
   | jq -r '.rows[].agent_session_id | select(. != null)' | sort -u
 ```
 
@@ -60,7 +60,7 @@ A service principal call **without** a `work_ref` still has no session id. Send 
 
 ## CLI usage
 
-`meho audit replay` is the sixth verb under `meho audit ...`, alongside the five query verbs documented in [`audit-query.md`](./audit-query.md). It wraps the [G8.2-T4 REST route](../../backend/src/meho_backplane/api/v1/audit.py) `GET /api/v1/audit/sessions/{session_id}/replay`.
+`meho audit replay` is one of the verbs under `meho audit ...`, next to the five query verbs documented in [`audit-query.md`](./audit-query.md). It wraps the [G8.2-T4 REST route](../../backend/src/meho_backplane/api/v1/audit.py) `GET /api/v1/audit/sessions/{session_id}/replay`.
 
 ```bash
 meho audit replay <session-id> [--json] [--max-depth N] [--backplane <url>]
@@ -75,7 +75,7 @@ meho audit replay <session-id> [--json] [--max-depth N] [--backplane <url>]
 The default output is an ASCII tree, one line per node, children indented under their parent with `├──` / `└──` connectors. Each line has the shape:
 
 ```
-<occurred_at> <op_id> [<result_status>] (<duration_ms>ms)
+<occurred_at> <op_id> [<result_status>] (<duration_ms>ms) tenant=<tenant> [actor=<actor_sub>]
 ```
 
 A worked session — a VM migration that dispatched a power-off, which in turn waited on a task, plus a later list call:
@@ -88,7 +88,7 @@ $ meho audit replay 11111111-1111-1111-1111-111111111111
 └── 2026-05-13T10:05:00Z vsphere.vm.list [ok] (8ms) tenant=team-a
 ```
 
-Roots are emitted in chronological order; children are ordered by `(occurred_at, id)`. A node with no recorded duration renders `(-ms)` so the column stays present and grep-friendly. Each line ends with `tenant=<name>`: the tenant name, or the tenant id when MEHO has no name for it (#5238). An unknown, foreign, or empty session prints `no audit rows in this session` and exits cleanly (exit code 0) — a session that belongs to another tenant is indistinguishable from one that never existed (see [Tenant boundary](#tenant-boundary-and-the-10000-row-cap)).
+Roots are emitted in chronological order; children are ordered by `(occurred_at, id)`. A node with no recorded duration renders `(-ms)` so the column stays present and grep-friendly. Each line ends with `tenant=<name>`: the tenant name, or the tenant id when MEHO has no name for it (#5238). When an agent acted for the person, the line also ends with `actor=<actor_sub>`. An unknown, foreign, or empty session prints `no audit rows in this session` and exits cleanly (exit code 0) — a session that belongs to another tenant is indistinguishable from one that never existed (see [Tenant boundary](#tenant-boundary-and-the-10000-row-cap)).
 
 ### `--json`
 
@@ -209,9 +209,10 @@ The per-node field set (inherited from `AuditEntry`, plus the two structural fie
 |---|---|
 | `id` | Audit row id (UUID). |
 | `ts` | When the operation occurred (`audit_log.occurred_at`). |
-| `tenant_id` | The owning tenant. |
+| `tenant_id` / `tenant_name` | The owning tenant, and its name (`null` when the tenant row is gone). |
 | `principal_sub` | The operator's JWT subject. |
-| `principal_name` | Operator display name. `null` in v0.2 (not yet captured at write time). |
+| `principal_name` | Operator display name. Set on MCP rows; `null` on plain HTTP rows. |
+| `actor_sub` / `actor_name` | The agent that acted for the person in `principal_sub`, and its name. `null` when nobody acted for another login. |
 | `target_id` / `target_name` | The target the operation hit, if any. |
 | `method` / `path` | The underlying HTTP method + path. |
 | `status_code` | The HTTP status code. |
@@ -221,6 +222,10 @@ The per-node field set (inherited from `AuditEntry`, plus the two structural fie
 | `op_id` / `op_class` / `result_status` | Computed at query time — the same trichotomy the broadcast classifier uses. |
 | `parent_audit_id` | The lineage edge — the audit row this node hangs under. |
 | `agent_session_id` | The MCP session correlation id (the replay key). |
+| `work_ref` | The external change-ticket reference, or `null`. |
+| `policy_decision` | The policy verdict on the row (`auto-execute` / `needs-approval` / `deny`), or `null` when no policy check ran. |
+| `event_class` | What kind of record the row is, for example `operation_execution` or `approval_decision`. |
+| `sandbox_mode` | Whether the instance ran in sandbox mode when it wrote the row. |
 | `broadcast_event_id` | `null` in v0.2 (the FK runs the other way: `BroadcastEvent.audit_id` points at the row). |
 | `depth` | Distance from the session root. |
 | `children` | Direct children (`list[ReplayNode]`). |

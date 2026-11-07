@@ -10,7 +10,7 @@ Copyright (c) 2026 evoila Group
 > operator running the CLI — never observe the cleartext. The agent
 > submits only declarative `<kind>:<ref>` references; the backplane reads
 > the value, writes it to the sink, and returns only the move **status**,
-> the value's **SHA-256**, and its **byte length** — never the value. The
+> the value's keyed **fingerprint**, and its **byte length** — never the value. The
 > move is change-class (`safety_level="dangerous"`,
 > `requires_approval=True`): it routes through the existing approval
 > queue before it executes. This page is the operator/reviewer-facing
@@ -94,7 +94,7 @@ done). A move may be **same-kind** (`vault` → `vault`) or **cross-kind**
 | `kind` | Role | `ref` grammar | Example |
 | --- | --- | --- | --- |
 | `vault` | source **and** sink | `<path>#<field>` — a KV-v2 path with a required `#<field>` fragment selecting one field | `vault:secret/db/prod#password` |
-| `keycloak` | sink **only** | `<target>/<realm>/<username>#password` — `#password` is the only writable field | `keycloak:rdc-keycloak/evba/operator-a#password` |
+| `keycloak` | sink **only** | `<target>/<realm>/<username>#password` — `#password` is the only writable field | `keycloak:kc/meho/operator-a#password` |
 
 **vault** (`vault:` —
 [`vault_endpoint.py`](../../backend/src/meho_backplane/connectors/secret/vault_endpoint.py)).
@@ -103,7 +103,7 @@ A vault-kv adapter is both a source (`read_secret`) and a sink
 moves one field, not a whole secret body. The mount defaults to `secret`
 (the deployment KV-v2 mount); a non-default mount is a richer-ref-grammar
 follow-up, not wired here. Reads and writes go through
-[`vault_client_for_operator`](../../backend/src/meho_backplane/auth/vault.py#L199)
+[`vault_client_for_operator`](../../backend/src/meho_backplane/auth/vault.py)
 under the **operator's** own Vault token (JWT/OIDC login, revoked on
 exit), so the move runs inside the operator's existing authorization
 envelope and per-operator Vault policy — see
@@ -176,7 +176,7 @@ Each claim below ties to the mechanism that enforces it.
 | **CLI args / argv / shell history / `ps`** | there is no value-bearing flag — `--from`/`--to`/`--reason` carry only addresses + a reason ([`move.go`](../../cli/internal/cmd/secret/move.go)). The value is never typed. |
 | **Op params** | `additionalProperties: false` on the param schema rejects a smuggled value field; the params carry only references + reason ([`ops.py`](../../backend/src/meho_backplane/connectors/secret/ops.py), `SECRET_MOVE_PARAMETER_SCHEMA`). |
 | **The op response** | the handler returns only `{status, value_fingerprint, length}`; the response schema is `additionalProperties: false` over those three ([`ops.py`](../../backend/src/meho_backplane/connectors/secret/ops.py)). |
-| **Logs** | the only in-memory carrier, [`SecretMaterial`](../../backend/src/meho_backplane/connectors/secret/endpoints.py), overrides `__repr__`/`__str__` to render `<SecretMaterial len=N fingerprint=…>` — so a stray `logger.info(..., material=m)` or f-string renders the redacted form, never the value. Adapters log only field **names**/paths, never values, mirroring [`strip_credential_value`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py#L104)'s "No secret in logs" discipline. |
+| **Logs** | the only in-memory carrier, [`SecretMaterial`](../../backend/src/meho_backplane/connectors/secret/endpoints.py), overrides `__repr__`/`__str__` to render `<SecretMaterial len=N fingerprint=…>` — so a stray `logger.info(..., material=m)` or f-string renders the redacted form, never the value. Adapters log only field **names**/paths, never values, mirroring [`strip_credential_value`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py)'s "No secret in logs" discipline. |
 | **The audit row** | this is the load-bearing distinction. The generic dispatch path persists the raw payload behind redaction ([`dispatcher.py`](../../backend/src/meho_backplane/operations/dispatcher.py) module docstring, step 9). For `secret.move` there is **no raw value for the audit row to carry in the first place**: the value was never in the params (only references) and never in the response (only a keyed fingerprint + length). The audit row stores the value-free params + the value-free return. There is nothing to redact. |
 | **The approval `proposed_effect`** | the park-time preview builder ([`move_preview.py`](../../backend/src/meho_backplane/connectors/secret/move_preview.py)) summarises only the parsed `{kind, ref}` of `--from`/`--to` plus the operator `reason`. It does **no store I/O at all**, so it cannot observe a value to leak. |
 | **Broadcast / event payloads** | [`classify_op("secret.move")`](../../backend/src/meho_backplane/broadcast/events.py) returns `"other"` (`.move` is in neither the read- nor write-suffix set, and `secret.move` is in no credential allowlist). The broadcast carries the same value-free params + response the audit row sees — there is no value in them to broadcast. |
@@ -217,13 +217,13 @@ and no value ever rests in a durable artifact.
 
 1. **Operator-context credential reads — no god-mode.** The vault
    adapter reads and writes under the **operator's own** Vault token via
-   [`vault_client_for_operator`](../../backend/src/meho_backplane/auth/vault.py#L199),
+   [`vault_client_for_operator`](../../backend/src/meho_backplane/auth/vault.py),
    bounded by that operator's Vault policy (per-operator RBAC + audit
    through one role — see
    [`connector-vault-policy.md`](./connector-vault-policy.md) §2/§5/§6).
    The backplane never holds a broad backplane policy for the move. The
    operator identity is carried by
-   [`Operator`](../../backend/src/meho_backplane/auth/operator.py#L118),
+   [`Operator`](../../backend/src/meho_backplane/auth/operator.py),
    whose `raw_jwt` is `repr=False` so it never leaks via `repr()`.
 
 2. **Change-class / `dangerous` classification.** The op registers
@@ -234,18 +234,17 @@ and no value ever rests in a durable artifact.
    `dangerous` carries **two distinct properties** that are worth
    stating precisely, because they are stronger than "parked":
 
-   - **Default with no live grant ⇒ `deny`** (not park). An agent with no
+   - **Default with no live grant ⇒ `needs-approval`.** An agent with no
      matching `AgentPermission` grant — or one whose grant has expired —
-     is **denied** the move; it does not park and can never auto-execute.
-   - **Ceiling ⇒ `needs-approval`.** Even a grant that carries
-     `auto-execute` is **capped to `needs-approval`** for a `dangerous`
-     op. So a live grant only lifts the verdict off the deny baseline
-     *to park for approval* — it can never make a credential move
-     auto-execute.
+     waits for a person's approval. It never auto-executes.
+   - **Ceiling ⇒ `needs-approval`.** A grant can make the verdict
+     stricter (`deny`), but a grant that carries `auto-execute` is
+     **capped to `needs-approval`** for a `dangerous` op. No grant can
+     make a credential move auto-execute.
 
-   In short: no grant ⇒ denied; a live grant ⇒ parked for four-eyes; an
-   `auto-execute` grant ⇒ still only parked. A credential move never runs
-   without a human in the loop.
+   In short: no grant ⇒ waits for approval; a `deny` grant ⇒ denied; an
+   `auto-execute` grant ⇒ still waits for approval. A credential move
+   never runs without a human in the loop.
 
 3. **Mandatory approval-queue gating (four-eyes).** A change-class
    dispatch parks at `status=awaiting_approval`
@@ -265,7 +264,8 @@ and no value ever rests in a durable artifact.
    row — an `op_pattern` glob (e.g. `secret.*`), a `target_scope`, a
    `verdict`, and a bounded `expires_at` — **not** a bearer token an
    operator passes on the command line. An expired grant is excluded by
-   the resolver, so the agent reverts to the deny baseline. The pending
+   the resolver, so the agent falls back to the default: the move waits
+   for a person's approval. The pending
    approval request likewise carries an `expires_at`; a parked row swept
    to `EXPIRED` is no longer decidable (`/decide` → 409).
 
@@ -326,7 +326,7 @@ account from a Vault-held credential, proving the "≥2 kinds" surface):
 ```bash
 meho secret move \
   --from vault:secret/identity/operator-a#password \
-  --to   keycloak:rdc-keycloak/evba/operator-a#password \
+  --to   keycloak:kc/meho/operator-a#password \
   --reason 'seed operator-a Keycloak password from Vault'
 ```
 
@@ -364,10 +364,12 @@ A target has two parts, and each part moves in its own way:
    other settings. The row never holds the login itself, only
    `secret_ref`, the path to it. Write the targets to a file and load
    that file on the new instance with `meho targets import`
-   ([`import.go`](../../cli/internal/cmd/targets/import.go)). A
-   `meho targets export` command is planned
-   ([#4048](https://github.com/evoila/meho/issues/4048)); until then,
-   write the file by hand or from `meho targets list --json`.
+   ([`import.go`](../../cli/internal/cmd/targets/import.go)). Write the
+   file by hand or from `meho targets list --json`. Since 0.45.0,
+   `GET /api/v1/settings/export` also writes the targets of a tenant,
+   with the policies and conventions, into one file that
+   `POST /api/v1/settings/import` loads on the new instance; the command
+   line has no verb for it yet.
 2. **The login** — the value at `secret_ref` in the old instance's
    Vault. `secret.move` cannot do this: it only works inside one
    instance. Use the two handoff steps below. Nobody sees the value.
@@ -388,10 +390,11 @@ In this section, **A** is the instance that has the login now, and
   B needs no other login for A's Vault: the handoff is the only key.
 - Both steps are `dangerous` with `requires_approval: true`. Each one
   waits until a second person approves it on its own instance.
-- Both results carry only the status, the value's SHA-256 and its
-  length (the export also carries the handoff). Each instance writes an
-  audit record for its own step, and the **two records carry the same
-  SHA-256**, so an auditor can match them.
+- Both results carry only the status, the value's keyed fingerprint
+  (HMAC-SHA256 under a random key that lives only in the handoff) and
+  its length (the export also carries the handoff). Each instance writes
+  an audit record for its own step, and the **two records carry the same
+  fingerprint**, so an auditor can match them.
 
 ### 5.2 Steps
 
@@ -464,7 +467,7 @@ hides the raised message; read the details in `extras.remediation`.
 | the source or sink is outside this operator's tenant path | the `from` or `to` path is not under the operator's tenant; nothing was read or sent | use a path under the tenant, then run the step again |
 | the source could not be read | the `from` path or field does not exist | check the path and the field name, then export again |
 | the store did not accept the handoff | the handoff was already used, expired, or was made by another store | run the export on A again |
-| SHA-256 does not match | the value is not the one the export reported | nothing was written; find out why, then export again |
+| the fingerprint does not match `expect_fingerprint` | the value is not the one the export reported, or an older MEHO made the handoff | nothing was written; find out why, then export again |
 | the handoff was used, but writing failed | the sink write on B failed after the handoff was used | fix the sink, then export again |
 
 If an import says the handoff was **already used** and you did not use
@@ -492,11 +495,11 @@ it, someone else did. Treat the login as exposed and change it.
   [`cli/internal/cmd/secret/secret.go`](../../cli/internal/cmd/secret/secret.go),
   [`cli/internal/cmd/secret/move.go`](../../cli/internal/cmd/secret/move.go)
 - Operator-context Vault client (per-operator RBAC):
-  [`backend/src/meho_backplane/auth/vault.py`](../../backend/src/meho_backplane/auth/vault.py#L199)
+  [`backend/src/meho_backplane/auth/vault.py`](../../backend/src/meho_backplane/auth/vault.py)
 - "No secret in logs" discipline the adapters mirror:
-  [`backend/src/meho_backplane/connectors/_shared/vault_creds.py`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py#L104)
+  [`backend/src/meho_backplane/connectors/_shared/vault_creds.py`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py)
 - Operator identity (`raw_jwt` `repr=False`):
-  [`backend/src/meho_backplane/auth/operator.py`](../../backend/src/meho_backplane/auth/operator.py#L118)
+  [`backend/src/meho_backplane/auth/operator.py`](../../backend/src/meho_backplane/auth/operator.py)
 - `dangerous` safety rule (an agent's call waits for a person's approval; no grant can let it run on its own):
   [`backend/src/meho_backplane/auth/permissions.py`](../../backend/src/meho_backplane/auth/permissions.py)
 - Dispatch policy gate + audit + redaction (why the value would otherwise

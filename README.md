@@ -138,8 +138,9 @@ device-code flow) — the agent never sees a backend credential.
 > what's interesting on the MEHO backplane right now?
 
 The session calls the `search_memory` tool over MCP. MEHO authorises the
-call against your role, executes it under a just-in-time credential, and
-reduces the result before the agent ever sees it.
+call against your role, runs it, and reduces the result before the agent
+ever sees it. A call that reaches a backend system, through
+`call_operation`, runs under a just-in-time credential.
 
 **3. The operation leaves an audit trail.** Every `tools/call` lands one
 immutable audit row, attributed to *your* Keycloak `sub` — and emits a
@@ -147,7 +148,7 @@ broadcast event other watchers can see:
 
 ```bash
 meho audit query --op-id search_memory --limit 1 --json \
-  | jq '.rows[0] | {principal_sub, op_id, occurred_at}'
+  | jq '.rows[0] | {principal_sub, op_id, ts}'
 # -> {"principal_sub": "<your-keycloak-sub>", "op_id": "search_memory", ...}
 ```
 
@@ -188,15 +189,17 @@ MEHO ships as five operator-facing artefacts:
   [`docs/codebase/backend.md`](./docs/codebase/backend.md).
 - **Helm chart** — `meho-chart` published as an OCI artefact at
   `ghcr.io/evoila/meho-chart`. Renders the Deployment, Service, Ingress,
-  NetworkPolicy, pre-install migration Job, the bundled Valkey broadcast
-  subchart, and the typed `values.schema.json` contract that rejects
+  NetworkPolicy, pre-install migration Job, the bundled subcharts
+  (PostgreSQL, Keycloak, OpenBao, the Valkey broadcast store and an
+  optional Valkey result cache), and the typed `values.schema.json` contract that rejects
   misconfigured installs at `helm install` / `helm upgrade` /
   `helm template`. Chart walkthrough:
   [`docs/codebase/devops.md`](./docs/codebase/devops.md).
-- **Operator CLI** — `meho` Go binary (cobra) with ~40 command groups
-  spanning auth (`login`, `status`, `version`), the operation surface
+- **Operator CLI** — `meho` Go binary (cobra) with about 50 top-level
+  commands spanning auth (`login`, `status`, `version`), the operation surface
   (`operation`, `connector`, `targets`, `audit`, `broadcast`,
-  `retrieval`, `kb`, `runbook`, `memory`), agents + scheduling (`agent`,
+  `retrieval`, `kb`, `runbook`, and `remember` / `recall` for memory),
+  checks (`sensor`, `dashboard`), agents + scheduling (`agent`,
   `agent-principal`, `approvals`, `scheduler`), per-vendor connector
   aliases (`k8s`, `vault`, `harbor`, `keycloak`, `argocd`, `gcloud`,
   `bind9`, `pfsense`, and more; the `vmware` and `nsx` aliases need the
@@ -480,9 +483,8 @@ governed by the [Code of Conduct](./CODE_OF_CONDUCT.md).
 
 See [`CONTRIBUTING.md`](./CONTRIBUTING.md). Contributions require a
 Developer Certificate of Origin sign-off (`git commit -s`) — there is
-no CLA. Public-from-day-1: every line of MEHO ships on `evoila/meho`
-from commit #1; operator-sensitive coordination lives in
-`evoila-bosnia/meho-internal` (issues + ADRs only, no code).
+no CLA. Public from day 1: all MEHO code ships on `evoila/meho`, from
+the first commit on.
 
 ## Security
 
@@ -513,8 +515,5 @@ for the sign-off discipline.
 
 ## History
 
-This repository was bootstrapped on 2026-05-09 as a strategic reset.
-The prior MEHO codebase lives at `evoila-bosnia/MEHO.X`, deprecated
-and retained for reference.
-</content>
-</invoke>
+This repository was started on 2026-05-09 as a fresh start. The
+earlier MEHO codebase is deprecated and kept for reference only.

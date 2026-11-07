@@ -200,6 +200,10 @@ func runInOrder(cmd *cobra.Command, opts inOrderOpts) error {
 	return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(stopMessage(res)), opts.JSONOut)
 }
 
+// uncertainStopAdvice ends a stop line for a step whose outcome MEHO does
+// not know (#5025). It never says "send it again".
+const uncertainStopAdvice = "MEHO does not know if the change happened. Do not run it again. Check the target first"
+
 type inOrderRunner struct {
 	cmd    *cobra.Command
 	client *api.AuthedClient
@@ -222,6 +226,9 @@ func (r *inOrderRunner) runStep(ctx context.Context, item *api.ApprovalRequestVi
 		}
 		if item.ResultState != nil && *item.ResultState == api.ApprovalResultStateStarted {
 			return &stepStop{detail: "approved earlier; " + fmt.Sprintf(stepNotEnded, step.ID)}
+		}
+		if item.ResultState != nil && *item.ResultState == api.ApprovalResultStateUncertain {
+			return &stepStop{detail: "approved earlier, but " + uncertainStopAdvice}
 		}
 		return &stepStop{detail: fmt.Sprintf(
 			"approved earlier, but its run did not end OK (run: %s). An approval is used once, "+
@@ -285,6 +292,11 @@ func checkDispatch(resp *api.DecideApprovalRequestApiV1ApprovalsRequestIdDecideP
 	if resp.JSON200.DispatchError != nil && *resp.JSON200.DispatchError != "" {
 		detail += ": " + *resp.JSON200.DispatchError
 	}
+	// MEHO does not know if the change happened (#5025): the advice is to
+	// check the target, never to send it again.
+	if resp.JSON200.DispatchExecutionOutcome != nil && *resp.JSON200.DispatchExecutionOutcome == uncertainOutcome {
+		return &stepStop{detail: detail + ". " + uncertainStopAdvice}, false
+	}
 	return &stepStop{detail: detail + ". An approval is used once, so this step cannot run again " +
 		"from here. Ask the requester to send it again"}, false
 }
@@ -307,6 +319,8 @@ func (r *inOrderRunner) waitForStoredResult(ctx context.Context, id uuid.UUID, s
 				step.Outcome = stepApproved
 				step.Detail = "the waiting requester ran it; ran OK"
 				return nil
+			case api.ApprovalResultStateUncertain:
+				return &stepStop{detail: "approved, but " + uncertainStopAdvice}
 			case api.ApprovalResultStateFailed:
 				return &stepStop{detail: "approved, but the run by the waiting requester failed. An approval " +
 					"is used once, so this step cannot run again from here. Ask the requester to send it again"}

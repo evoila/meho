@@ -37,16 +37,22 @@ release fails up-front instead of CrashLoopBackOff-ing at first request.
   [`../deploy/values-examples/values-kind.yaml`](../deploy/values-examples/values-kind.yaml).
   This guide covers **production-shaped** installs against an
   operator-managed cluster.
-- MEHO is on-prem-first: v0.1 expects an operator-managed PostgreSQL
-  cluster (no bundled PG subchart), an operator-run Vault **or** GCP
-  Secret Manager, and a Keycloak realm. See
+- MEHO is on-prem-first. By default the chart installs its own
+  PostgreSQL, Keycloak and OpenBao (an open-source Vault):
+  `corePostgres.enabled`, `coreKeycloak.enabled` and `coreVault.enabled`
+  are `true`. A production-shaped install usually brings its own
+  PostgreSQL, Vault **or** GCP Secret Manager, and Keycloak realm, and
+  sets the matching keys to `false`. See
   [`codebase/devops.md`](codebase/devops.md) for the chart's internals and
   [`acceptance/install.md`](acceptance/install.md) for the cold-deploy
   acceptance contract.
 
 ## Deploy from cold — prerequisites checklist
 
-Satisfy every row before the first `helm install`. Two of the original
+Satisfy every row before the first `helm install`. The rows are for an
+install that brings its own PostgreSQL, Keycloak and Vault (the
+`core*.enabled` keys set to `false`). With the built-in parts, the
+chart takes care of the pgvector, database Secret and Keycloak rows. Two of the original
 cold-install foot-guns (migrate-hook ServiceAccount ordering, #2391; the
 unresolvable-MCP-audience dark boot, #2394) are now handled **inside the
 chart** and are noted below as "chart-handled" — no operator step remains,
@@ -461,9 +467,12 @@ encrypted with this key while it waits. **Without the key, MEHO denies every
 such operation** — for human and service callers alike. A credential-write
 that runs at once under a standing grant does not need the key.
 
-The chart keeps `approvalHandoff` off by default, because the key must come
-from a Secret you create. So this step is **required** on any deployment that
-uses credential-write operations:
+With a built-in core part (`corePostgres`, `coreKeycloak` or `coreVault`
+on), the install makes the key itself in the Secret
+`<release>-core-approval-handoff` and keeps it on upgrades; there is no
+step. Without a built-in part, `approvalHandoff` is off by default, because
+the key must come from a Secret you create. Then this step is **required**
+on any deployment that uses credential-write operations:
 
 1. Create a Fernet key:
    `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
@@ -676,8 +685,9 @@ each lives inline in
   preload finish inside the liveness `initialDelaySeconds`.
 - **`extraVolumes` / `extraVolumeMounts` / `extraEnv`** — the internal-CA
   trust-bundle mount point (`SSL_CERT_FILE`) and any other operator env.
-  Applied to **both** the backplane container and the migration Job
-  container.
+  Applied to **both** the backplane container and the migration container
+  (the migration Job, or the `migrate` init container with the built-in
+  PostgreSQL).
 - **`sandboxMode.*`** — only for an instance that holds disposable test
   systems ([decision](decisions/sandbox-mode.md)). All three are read at
   boot only; no request can change them.

@@ -5,7 +5,7 @@ implementation given the v2 registry keyed on
 `(product, version, impl_id)`. Shipped with [G0.6-T2
 (#393)](https://github.com/evoila/meho/issues/393); read alongside
 [connectors.md](connectors.md) (the v0.2 transitional architecture) and
-the upcoming `operations-substrate.md` (G0.6-T10, #400).
+[operations-substrate.md](operations-substrate.md) (G0.6-T10, #400).
 
 ## Why a resolver
 
@@ -27,19 +27,24 @@ walks that table to pick the right class for a given target.
 
 ## Input shape
 
-`resolve_connector(target)` reads three attributes from the target:
+`resolve_connector(target)` reads these attributes from the target:
 
 - `target.product` — required. The product slug stored on the Target
   row (`targets.product`). Filters the candidate set.
 - `target.fingerprint.version` — optional. The version string from the
   most recent fingerprint (e.g. `"9.0.2"`). Drives the
-  `supported_version_range` match; absent fingerprint = no versioned
-  connectors are eligible (only v1-style entries with `None` range).
+  `supported_version_range` match. The fingerprint is stored as a JSON
+  dict; the resolver reads the dict key and an object attribute.
+- `target.version` — optional. The version the operator typed on the
+  target (`TargetCreate` / `TargetUpdate`). Used only when the
+  fingerprint has no version, so a new target resolves before its first
+  probe. With neither version, no versioned connector is eligible (only
+  wildcard entries and entries with a `None` range).
 - `target.preferred_impl_id` — optional. Operator override pinning a
-  specific implementation when the tie-break ladder can't decide. The
-  column is added to the Target model by the [G0.3 amendments
-  (#224)](https://github.com/evoila/meho/issues/224); until that lands,
-  the resolver reads it via `getattr(..., None)` and tolerates absence.
+  specific implementation when the tie-break ladder can't decide. It is
+  a nullable text column on the Target model (added by the [G0.3
+  amendments (#224)](https://github.com/evoila/meho/issues/224)). It
+  matches a candidate's `impl_id`, or its `<impl_id>-<version>`.
 
 ### Canonical product identity
 
@@ -65,17 +70,33 @@ retired — each connector now carries one short canonical token, and a
 target's `product` is that token verbatim.
 
 [`register_connector_v2`](../../backend/src/meho_backplane/connectors/registry.py)
-logs a WARN when a registration's product does not round-trip; with the
-family aligned this check is silent at boot and stays advisory until
-[#1816](https://github.com/evoila/meho/issues/1816) promotes it to a
-hard fail.
+raises `RuntimeError` when a registration's product does not round-trip,
+so the backplane does not start
+([#1816](https://github.com/evoila/meho/issues/1816)). There is no
+allowlist. The wildcard row `(product, "", "")` is exempt.
 
 ## Tie-break ladder
 
 When two or more connectors advertise support for a target's
 `(product, version)` pair:
 
-### Step 0 — hand-rolled class beats auto-shim
+### Step 0a — versioned entry beats wildcard entry
+
+Every typed connector registers a wildcard row `(product, "", "")`
+next to its versioned row, so a target with no version still resolves
+(G0.15-T6, [#1215](https://github.com/evoila/meho/issues/1215)). A
+wildcard row matches its product for any version. When a wildcard and
+at least one versioned row are both candidates, the wildcard is
+dropped first.
+
+### Step 0b — hand-rolled class beats profiled connector beats auto-shim
+
+Candidates are ranked by tier (`shim_kind` in
+[`connectors/base.py`](../../backend/src/meho_backplane/connectors/base.py)):
+hand-coded (`"none"`) beats profiled (`ProfiledRestConnector`, `"profiled"`)
+beats the bare auto-shim (`"bare"`). Only the highest tier present stays
+([#1967](https://github.com/evoila/meho/issues/1967)). The rest of this
+section explains the first case.
 
 The [spec-ingestion pipeline](spec-ingestion.md) auto-registers a
 `GenericRestConnector` shim per ingested `(product, version, impl_id)`
@@ -125,10 +146,11 @@ are equally good", not "operator overrides any system decision".
 
 `Connector.priority: int = 0` class attribute, set by the connector
 subclass. Higher wins. Use this when two impls share the same range
-and no operator preference has been recorded (e.g. one is the
+and no operator preference decides (none is set, or the preferred impl
+is not a candidate) (e.g. one is the
 preferred default for the fleet, the other is a fallback).
 
-### After all three steps
+### After all the steps
 
 If two or more candidates remain, the resolver raises
 `AmbiguousConnectorResolution` with the candidate list. Operators
@@ -203,14 +225,13 @@ Step 3 reads `priority` from each candidate class; higher wins.
 The shipped v1 entry point
 `register_connector(product, cls)` still works — and it writes the
 same class to **both** registry layers (v1 as `product → cls`, v2 as
-`(product, "", "") → cls`). Existing `VaultConnector` and
-`KubernetesConnector` registrations participate in v2 resolution
-without code change.
+`(product, "", "") → cls`). These are the wildcard rows of step 0a.
+Typed connectors register both a wildcard row and a versioned row.
 
 A connector class whose `supported_version_range` is left at the
 default `None` (the v0.6-T3 class attribute) matches any target
 version — including targets without a fingerprint at all. This is the
-behaviour the shipped Vault and Kubernetes connectors get for free.
+behaviour a connector with no range gets.
 
 ## Error shapes
 
@@ -235,12 +256,10 @@ wraps `resolve_connector(target)` and translates the two exception
 classes above to structured `(cls, label, exception_message)`
 tuples. Both the dispatcher's connector-resolution step
 ([`_resolve_connector_instance`](../../backend/src/meho_backplane/operations/dispatcher.py))
-and the `/api/v1/targets/{name}/probe` route consult this helper —
-the single source of truth ensures the two surfaces never disagree on
-whether a target's connector resolves. The pre-G0.14 asymmetry
-(consumer feedback signal 19 in `claude-rdc-hetzner-dc#697` —
-`/probe` consulted the v1 `get_connector` lookup while dispatch
-consulted v2 `resolve_connector`) is closed by this helper.
+and the `/api/v1/targets/{name}/probe` route consult this helper. The
+operation preview, the catalog guard and the Sensor connector-fit check
+use it too. One source of truth means these surfaces never disagree on
+whether a target's connector resolves.
 
 ## References
 

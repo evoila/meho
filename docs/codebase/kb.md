@@ -166,6 +166,21 @@ Per-file errors (binary file, unreadable bytes, invalid slug,
 malformed front-matter) are caught inside the walker and appended
 to the caller's `errors` list rather than raising.
 
+The walker reads the header with a loader that keeps dates and
+decimal numbers as the text the author wrote. `learned_at:
+2026-11-03` is stored as `"2026-11-03"`, a date with a time as text
+too, and `version: 3.10` as `"3.10"` (every unquoted decimal number
+is text, so a field has one type). Values with quotes are stored
+as they are. A search filter on such a field uses the text form.
+This loader is used only when the file starts with a YAML header
+(`---` on the first line). A JSON header and a file without a
+header are read as before, so a `---` line later in a plain note
+stays body text.
+A header value that still cannot be written as JSON (for example
+`!!binary`) fails that file with one short error that names the
+file and the field. The check is in the walker, so a dry run and a
+real run give the same error.
+
 The walker reads only regular files whose real location is inside
 the folder:
 
@@ -483,7 +498,18 @@ until the entry is deleted.
 1. Translate optional `filters['kind']` into the substrate's `kind`
    argument; every other key becomes a `metadata_filters` term. Passage
    rows carry the entry's metadata, so these filters match passages
-   the same way they matched entries.
+   the same way they matched entries. The rules for these metadata
+   keys:
+   - **All keys must match.** A hit must have every key in its
+     metadata, with the same value. A key the entry does not have
+     drops the entry. The retriever checks this with PostgreSQL
+     `metadata @> filters`.
+   - **Values are simple values:** text, a number, `true` / `false`,
+     or `null`. The check compares top-level keys only.
+   - Example: `{"kind": "kb-entry", "source_kind": "evoila-distilled"}`
+     keeps only curated kb entries. `{"product": "vsphere",
+     "version": 8}` keeps only entries whose metadata has both
+     `product: "vsphere"` and `version: 8`.
 2. Call `meho_backplane.retrieval.retriever.retrieve` with
    `source=KB_SOURCE`, the query, the `kind` filter and
    `limit=CANDIDATE_LIMIT` (50). The retriever maps `source="kb"` (and

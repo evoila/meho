@@ -4561,6 +4561,9 @@ class OperationRunStatus(StrEnum):
       from a persisted error envelope on a ``succeeded`` run.
     * :attr:`CANCELLED` -- an authorized operator cancelled a non-terminal
       run (terminal).
+    * :attr:`UNCERTAIN` -- the worker of a run that changes something died
+      mid-flight (reaped), so MEHO does not know if the change happened
+      (terminal, #5025). A dead run of a read operation is ``failed``.
 
     There is deliberately no ``awaiting_approval`` state (unlike
     :class:`AgentRunStatus`): a governed dispatch runs to a terminal
@@ -4574,6 +4577,7 @@ class OperationRunStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    UNCERTAIN = "uncertain"
 
 
 class OperationRunOrigin(StrEnum):

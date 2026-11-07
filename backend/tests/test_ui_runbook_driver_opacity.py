@@ -101,6 +101,18 @@ from tests._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from tests._oidc_jwt_helpers import mint_token as _mint_token
 from tests._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from tests._oidc_jwt_helpers import public_jwks as _public_jwks
+from tests._ui_role_helpers import allow_ui_operator_role
+
+
+@pytest.fixture(autouse=True)
+def _ui_operator_role(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The console pages under test sit behind the ``operator`` role check.
+
+    The ``read_only`` tests keep the real check: they prove the 403.
+    """
+    if "read_only" not in request.node.name:
+        allow_ui_operator_role(monkeypatch)
+
 
 # ---------------------------------------------------------------------------
 # Constants

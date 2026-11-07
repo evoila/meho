@@ -87,6 +87,14 @@ from meho_backplane.ui.templating import reset_templating_for_testing
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import DEFAULT_TENANT_ID as _DEFAULT_TENANT_ID
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
+from ._ui_role_helpers import allow_ui_operator_role
+
+
+@pytest.fixture(autouse=True)
+def _ui_operator_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The console pages under test sit behind the ``operator`` role check."""
+    allow_ui_operator_role(monkeypatch)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures -- env, JWKS cache, isolated DB, fresh module state

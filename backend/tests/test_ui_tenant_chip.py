@@ -76,6 +76,15 @@ from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
 
+from ._ui_role_helpers import allow_ui_operator_role
+
+
+@pytest.fixture(autouse=True)
+def _ui_operator_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The console pages under test sit behind the ``operator`` role check."""
+    allow_ui_operator_role(monkeypatch)
+
+
 _BACKPLANE_URL = "https://meho.test"
 
 _TENANT_ID = uuid.UUID("33333333-3333-3333-3333-333333333333")

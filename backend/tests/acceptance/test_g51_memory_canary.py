@@ -1191,6 +1191,7 @@ async def test_eval_corpus_retrieval_quality_against_seeded_memory(
     result = await eval_surface(
         "memory",
         tenant_id=op_a_operator.tenant_id,
+        principal_sub=op_a_operator.sub,
     )
 
     assert result.surface == "memory"

@@ -16080,17 +16080,6 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UISessionContext",
-                "nullable": true,
-                "title": "Session Ctx"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -16258,17 +16247,6 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UISessionContext",
-                "nullable": true,
-                "title": "Session Ctx"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -16523,17 +16501,6 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UISessionContext",
-                "nullable": true,
-                "title": "Session Ctx"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -24384,6 +24351,11 @@
             "type": "object",
             "title": "Proposed Effect"
           },
+          "reveal_secret": {
+            "type": "boolean",
+            "title": "Reveal Secret",
+            "default": false
+          },
           "status": {
             "$ref": "#/components/schemas/ApprovalRequestStatus"
           },
@@ -25110,7 +25082,7 @@
           "legacy_request"
         ],
         "title": "AuditEventClass",
-        "description": "What kind of accountable event one ``audit_log`` row records (#3733).\n\nThe set is closed. The database CHECK ``ck_audit_log_event_class``\nrejects any other value, so a new class needs a code change and a\nmigration together.\n\n* :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation\n  (success or failure), or a MEHO-internal action such as a topology\n  edit, a retention sweep or a reaper.\n* :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:\n  a policy deny, a rate-limit refusal, or a park for approval.\n* :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,\n  rejected, or let an approval request expire, or its sender withdrew\n  it (#5717). The operation did not run on any of these rows.\n* :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a\n  refresh-token replay or a broken satellite effect chain.\n* :attr:`CONFIG_CHANGE` -- an operator changed the settings of one\n  operation with ``meho_connector_edit_op``: turned it on or off, or\n  changed its risk level, approval rule, description or guidance\n  (#5791). The operation did not run. The row's ``payload[\"op_id\"]``\n  names the edited operation.\n* :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every\n  row written before migration ``0106`` reads as this class; it is never\n  guessed from ``method`` / ``path``. The REST and MCP request wrapper\n  rows also keep this class while ``AUDIT_WRAPPER_ROWS_RETIRED`` is off;\n  with it on they write a decision or execution class, or no row\n  (#3757, :mod:`meho_backplane.audit_cutover`)."
+        "description": "What kind of accountable event one ``audit_log`` row records (#3733).\n\nThe set is closed. The database CHECK ``ck_audit_log_event_class``\nrejects any other value, so a new class needs a code change and a\nmigration together.\n\n* :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation\n  (success or failure), or a MEHO-internal action such as a topology\n  edit, a retention sweep or a reaper.\n* :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:\n  a policy deny, a rate-limit refusal, or a park for approval.\n* :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,\n  rejected, or let an approval request expire, or its sender withdrew\n  it (#5717). The operation did not run on any of these rows.\n* :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a\n  refresh-token replay or a broken satellite effect chain.\n* :attr:`CONFIG_CHANGE` -- an operator changed the settings of\n  operations, and none of them ran. Two writers: an edit of one\n  operation with ``meho_connector_edit_op`` (turned it on or off, or\n  changed its risk level, approval rule, description or guidance,\n  #5791), and a tenant's own on or off switch with\n  ``meho_connector_tenant_setting``, for one operation or a whole\n  group (#5864). The row's ``payload[\"op_id\"]`` names the edited\n  operation; a group switch names ``payload[\"group_key\"]`` instead.\n* :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every\n  row written before migration ``0106`` reads as this class; it is never\n  guessed from ``method`` / ``path``. The REST and MCP request wrapper\n  rows also keep this class while ``AUDIT_WRAPPER_ROWS_RETIRED`` is off;\n  with it on they write a decision or execution class, or no row\n  (#3757, :mod:`meho_backplane.audit_cutover`)."
       },
       "AuditQueryRequest": {
         "properties": {

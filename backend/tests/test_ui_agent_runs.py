@@ -55,6 +55,15 @@ from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.templating import reset_templating_for_testing
 
+from ._ui_role_helpers import allow_ui_operator_role
+
+
+@pytest.fixture(autouse=True)
+def _ui_operator_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The console pages under test sit behind the ``operator`` role check."""
+    allow_ui_operator_role(monkeypatch)
+
+
 _TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
 _TENANT_B = uuid.UUID("22222222-2222-2222-2222-222222222222")
 

@@ -125,9 +125,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    # Pinned 2026-10-29 with the kind job below (ubuntu-latest is now 26.04,
-    # whose Docker breaks kind image load); revisit when kind/docker support it.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       chart: ${{ steps.detect.outputs.chart }}
@@ -832,8 +830,7 @@ jobs:
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.chart == 'true')
-    # Pinned 2026-10-29: kind image load fails on ubuntu-26.04's Docker (ubuntu-latest moved there); revisit when kind/docker support it.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     # 30 minutes: the update and rollback proofs of #5024 start the
     # backplane pod three more times.
     timeout-minutes: 30
@@ -939,6 +936,16 @@ jobs:
         # anonymous-pull rate-limit that's tripped this repo's other
         # CI lanes (Python lane, image build, Semgrep) on busy days.
         #
+        # Each image is copied into the kind node with `docker save` and
+        # `ctr images import`, without `--all-platforms`. `kind load` imports
+        # all platforms, and the index of a Docker Hub image names layers of
+        # other platforms that Docker's containerd image store does not have.
+        #
+        # Each Docker Hub image is pulled for linux/amd64 only. Docker with the
+        # containerd image store keeps only the layers of the pulled platform,
+        # so a pull of every platform makes `kind load` fail with
+        # "content digest ... not found".
+        #
         # The PostgreSQL image is pulled by the digest the chart pins,
         # then tagged and loaded by tag: ``kind load`` keeps the tag, so
         # the steps below render it by tag (``corePostgres.image.digest=``).
@@ -949,14 +956,13 @@ jobs:
           pg_repo=$(yq '.corePostgres.image.repository' "$values")
           pg_tag=$(yq '.corePostgres.image.tag' "$values")
           pg_digest=$(yq '.corePostgres.image.digest' "$values")
-          docker pull valkey/valkey:9.0-alpine
-          docker pull "${pg_repo}@${pg_digest}"
+          docker pull --platform linux/amd64 valkey/valkey:9.0-alpine
+          docker pull --platform linux/amd64 "${pg_repo}@${pg_digest}"
           docker tag "${pg_repo}@${pg_digest}" "${pg_repo}:${pg_tag}"
-          kind load docker-image \
-            ghcr.io/evoila/meho:test \
-            valkey/valkey:9.0-alpine \
-            "${pg_repo}:${pg_tag}" \
-            --name meho-helm-test
+          for img in ghcr.io/evoila/meho:test valkey/valkey:9.0-alpine "${pg_repo}:${pg_tag}"; do
+            docker save "$img" | docker exec --privileged -i meho-helm-test-control-plane \
+              ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs -
+          done
 
       - name: Create the namespace and a namespace admin (#4099)
         # What a customer's cluster admin does before the install: create
@@ -1596,7 +1602,7 @@ jobs:
     # jobs run at the same time, so neither job needs more time.
     #
     # Same conditions as `helm-test`: the `changes` filter and the fork guard
-    # in the `if:` below, `ubuntu-24.04` for kind, and `helm install` and
+    # in the `if:` below, `ubuntu-latest` for kind, and `helm install` and
     # `helm test` as the namespace admin of #4099. The `if:` skips this job
     # on a PR that does not touch the chart, and a skipped job reports
     # Success. The required `helm-test-gate` needs this job too, so a broken
@@ -1609,8 +1615,7 @@ jobs:
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.chart == 'true')
-    # Pinned 2026-10-29 with `helm-test` (ubuntu-latest is now 26.04, whose Docker breaks kind image load); revisit when kind/docker support it.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -1663,6 +1668,7 @@ jobs:
           cache-from: type=gha
 
       - name: Load images into kind
+        # Docker Hub images are pulled for linux/amd64 only, as in `helm-test`.
         # Three images: the backplane image built above, the chart's
         # PostgreSQL image (the database below and the helm test pod) and the
         # broadcast store's Valkey image. The chart pins the last two by
@@ -1679,11 +1685,14 @@ jobs:
             repo=$(yq ".${part}.image.repository" "$values")
             tag=$(yq ".${part}.image.tag" "$values")
             digest=$(yq ".${part}.image.digest" "$values")
-            docker pull "${repo}@${digest}"
+            docker pull --platform linux/amd64 "${repo}@${digest}"
             docker tag "${repo}@${digest}" "${repo}:${tag}"
             images+=("${repo}:${tag}")
           done
-          kind load docker-image "${images[@]}" --name meho-helm-test
+          for img in "${images[@]}"; do
+            docker save "$img" | docker exec --privileged -i meho-helm-test-control-plane \
+              ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs -
+          done
 
       - name: Create the namespace and a namespace admin (#4099)
         # Same as in `helm-test`.
@@ -1887,8 +1896,7 @@ jobs:
     name: helm install + helm test (pgvector preflight)
     if: always()
     needs: [changes, validate, helm-test, helm-test-byo]
-    # Pinned 2026-10-29 with the kind job (ubuntu-latest is now 26.04, whose Docker breaks kind image load); revisit when kind/docker support it.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Evaluate gate

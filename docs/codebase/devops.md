@@ -1661,6 +1661,11 @@ What it costs:
   the `meho-runners-ci` pool (the same pool as the integration test
   shards), so they take two or three of its runners for about 25
   minutes. The chart jobs on this pool take a few minutes.
+  Pull request image builds do not use this pool: since #4626 (step 3)
+  they run on GitHub-hosted `ubuntu-latest` runners. A pull request
+  build never logs in, pushes or signs, so it needs nothing from the
+  internal network. Publishing from `main` and from tags stays on
+  `meho-runners-ci`.
 - Runs can finish out of order. The moving `:main` image alias then
   points at an older commit for a short time, until the newer run
   finishes. `:main` is never a deploy target: deploys pin
@@ -1965,6 +1970,14 @@ organisation shares a 20-concurrent-job limit across all its repositories
 on the current plan, so a job on a hosted runner can still wait when many
 hosted jobs run at once — measure the hosted wait before moving a long
 job such as the image build (#4626, step 3).
+
+Step 3 measured it first: on 2026-11-07, after steps 1 and 2, 172 hosted
+jobs of pull request runs waited a median of 0.9 minutes (90% under 3
+minutes). The pull request image build (`image.yml` `build` job) then
+moved to `ubuntu-latest`. On main and on tags it still runs on
+`meho-runners-ci`, because those runs push and sign the image. A hosted
+runner has less disk (14 GB) than our machines, so the pull request build
+prints `df -h /` right after the build step.
 
 Each `python-unit-shard` carries a 20-minute
 `timeout-minutes` (hang backstop only — the expected shard job wall is
@@ -2699,7 +2712,7 @@ their isolation posture:
 | Workflow | Runs untrusted PR code? | Isolation mechanism |
 | --- | --- | --- |
 | `ci.yml` | yes (build/test/lint) | fork guard on every job (skip on fork PR) |
-| `image.yml` | yes (Docker build) | fork guard (skip on fork PR) on the `build` job; the `lock-scan` job runs on GitHub-hosted `ubuntu-latest` and only reads `backend/uv.lock` |
+| `image.yml` | yes (Docker build) | fork guard (skip on fork PR) on the `build` job, which runs on GitHub-hosted `ubuntu-latest` for pull requests and on `meho-runners-ci` only for `main` and tag pushes; the `lock-scan` job runs on GitHub-hosted `ubuntu-latest` and only reads `backend/uv.lock` |
 | `chart.yml` | yes (helm template) | fork guard on the `validate` job, which runs on GitHub-hosted `ubuntu-24.04`; publish/verify jobs are `push`-only |
 | `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |
 | `migration-compat.yml` | yes (runs `check_migration_compat.py`) | **route**: fork PR → disposable GitHub-hosted runner |

@@ -20,6 +20,7 @@ secret), matching ``test_connectors_k8s_storage_cr.py``.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -446,3 +447,43 @@ def test_helm_chart_input_is_not_mutated() -> None:
     redact_kubernetes_payload(original)
     assert original["spec"]["valuesContent"] == _CHART_VALUES_TEXT
     assert original["spec"]["set"]["adminPassword"] == _CHART_SET_VALUE
+
+
+def _chart_with_saved_manifest(*, with_kind: bool = True) -> dict[str, Any]:
+    """A chart made with ``kubectl apply``: its annotation repeats the manifest."""
+    chart = _make_helm_chart(with_kind=with_kind)
+    chart["metadata"]["annotations"] = {
+        LAST_APPLIED_ANNOTATION: json.dumps(_make_helm_chart()),
+        "owner": "platform-group",
+    }
+    return chart
+
+
+def test_helm_chart_annotation_values_are_redacted_keys_kept() -> None:
+    """The last-applied annotation holds the chart values too, so no value is shown."""
+    out = redact_kubernetes_payload(_chart_with_saved_manifest())
+
+    annotations = out["metadata"]["annotations"]
+    assert set(annotations) == {LAST_APPLIED_ANNOTATION, "owner"}
+    assert all(value.startswith(REDACTED_PREFIX) for value in annotations.values())
+    assert annotations["owner"] == redact_secret_value("platform-group")
+    assert out["metadata"]["name"] == "meho"
+    blob = json.dumps(out)
+    assert _CHART_VALUES_TEXT not in blob
+    assert _CHART_SET_VALUE not in blob
+
+
+def test_helm_chart_list_item_annotation_values_are_redacted() -> None:
+    """A kind-less list item with a saved manifest is masked like a named chart."""
+    chart_list = {
+        "kind": "HelmChartList",
+        "apiVersion": "helm.cattle.io/v1",
+        "metadata": {},
+        "items": [_chart_with_saved_manifest(with_kind=False)],
+    }
+    out = redact_kubernetes_payload(chart_list)
+
+    annotations = out["items"][0]["metadata"]["annotations"]
+    assert set(annotations) == {LAST_APPLIED_ANNOTATION, "owner"}
+    assert all(value.startswith(REDACTED_PREFIX) for value in annotations.values())
+    assert _CHART_VALUES_TEXT not in json.dumps(out)

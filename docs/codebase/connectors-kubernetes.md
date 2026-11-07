@@ -1187,7 +1187,8 @@ How it behaves:
 - Secrets: only the names and labels of the Helm release Secrets are read.
   Their `data` is never copied. The values text of the `HelmChart` is never
   returned, only the hash. A userinfo part in the chart URL is removed.
-  The flight recorder masks Secret data and `HelmChart` values before it
+  The flight recorder masks Secret data, `HelmChart` values and `HelmChart`
+  annotations (the last-applied annotation repeats the values) before it
   stores a trace (`redaction.py`, `_wire_span.py`), so the recorded API
   answers hold no values text either
   (`test_trace_capture_records_no_values_text_and_no_secret_data`).
@@ -1212,7 +1213,10 @@ The same walk masks the Helm values of a `kind: HelmChart` object (the
 k3s / RKE2 `helm.cattle.io/v1` resource) and of the kind-less items of a
 `HelmChartList`: `spec.valuesContent` becomes one placeholder, and every
 value of `spec.set` becomes one (keys kept). Chart values often hold
-passwords. `k8s.meho.release.info` reads such objects, and the flight
+passwords. A chart made with `kubectl apply` also carries its whole
+manifest, values included, in the last-applied annotation, so every
+annotation value of a `HelmChart` becomes a placeholder too (keys kept),
+as on a Secret. `k8s.meho.release.info` reads such objects, and the flight
 recorder (next paragraph) records the answer only in this masked form.
 
 The redactor is wired into `custom_resource_row`

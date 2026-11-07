@@ -48,9 +48,12 @@ The walk also masks the values of a ``kind: HelmChart`` object (the k3s /
 RKE2 ``helm.cattle.io/v1`` resource, and the items of a ``HelmChartList``).
 Its ``spec.valuesContent`` text and every value of its ``spec.set`` map
 are the Helm values of an install, which often hold passwords. Each is
-replaced by the same placeholder plus digest; the ``set`` keys stay. So a
-``k8s.meho.release.info`` read of the MEHO chart, or a ``k8s.cr.info`` of
-any ``HelmChart``, records and returns no values text.
+replaced by the same placeholder plus digest; the ``set`` keys stay. A
+``HelmChart`` made with ``kubectl apply`` also carries its whole manifest,
+values included, in the last-applied annotation, so every
+``metadata.annotations`` value of a chart is replaced too (keys kept),
+as on a Secret. So a ``k8s.meho.release.info`` read of the MEHO chart, or
+a ``k8s.cr.info`` of any ``HelmChart``, records and returns no values text.
 
 Note on the current CR projection: ``custom_resource_row`` otherwise
 keeps only ``metadata`` + bounded ``.spec`` / ``.status`` excerpts and
@@ -93,9 +96,10 @@ SECRET_KIND = "Secret"
 SECRET_LIST_KIND = "SecretList"
 
 #: The annotation ``kubectl apply`` writes with the full last manifest. On
-#: a Secret it repeats every ``data`` / ``stringData`` value. The walk
-#: redacts every annotation value on a Secret (this one included); the CR
-#: row projection also leaves this one out on every kind.
+#: a Secret it repeats every ``data`` / ``stringData`` value, and on a
+#: HelmChart its Helm values. The walk redacts every annotation value on a
+#: Secret and on a HelmChart (this one included); the CR row projection
+#: also leaves this one out on every kind.
 LAST_APPLIED_ANNOTATION = "kubectl.kubernetes.io/last-applied-configuration"
 
 #: The two maps on a ``Secret`` whose values are secret material:
@@ -159,7 +163,9 @@ def redact_kubernetes_payload(value: Any) -> Any:
     A mapping whose ``kind`` is :data:`HELM_CHART_KIND` (or a kind-less
     item of a :data:`HELM_CHART_LIST_KIND` envelope) gets its
     ``spec.valuesContent`` and every ``spec.set`` value replaced the same
-    way (:data:`HELM_CHART_VALUE_FIELDS`); the ``set`` keys stay.
+    way (:data:`HELM_CHART_VALUE_FIELDS`); the ``set`` keys stay. Its
+    ``metadata.annotations`` values are replaced like a Secret's, because
+    the last-applied annotation repeats the whole chart, values included.
     Every other value is walked so a ``Secret`` nested inside a
     ``List``-kind envelope or a ``k8s.cr.list`` ``items`` array is still
     caught. Scalars pass through unchanged. The input is never mutated --
@@ -183,8 +189,8 @@ def _walk(value: Any, *, implied_kind: str | None) -> Any:
                     inner_key: redact_secret_value(inner_val)
                     for inner_key, inner_val in item.items()
                 }
-            elif is_secret and key == "metadata" and isinstance(item, dict):
-                out[key] = _redact_secret_metadata(item)
+            elif (is_secret or is_chart) and key == "metadata" and isinstance(item, dict):
+                out[key] = _redact_metadata(item)
             elif is_chart and key == "spec" and isinstance(item, dict):
                 out[key] = _redact_chart_spec(item)
             elif key == "items" and isinstance(item, list):
@@ -215,8 +221,8 @@ def _redact_chart_spec(spec: dict[Any, Any]) -> dict[Any, Any]:
     return out
 
 
-def _redact_secret_metadata(metadata: dict[Any, Any]) -> dict[Any, Any]:
-    """Copy a Secret's ``metadata`` with every annotation value redacted.
+def _redact_metadata(metadata: dict[Any, Any]) -> dict[Any, Any]:
+    """Copy a Secret's or HelmChart's ``metadata`` with every annotation value redacted.
 
     Annotation keys stay, so a read still shows which annotations exist.
     """

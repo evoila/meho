@@ -54,7 +54,10 @@ from meho_backplane.connectors.kubernetes import (
 )
 from meho_backplane.connectors.kubernetes._wire_span import instrument_api_client
 from meho_backplane.connectors.kubernetes.ops_meho_release import parse_image, values_hash
-from meho_backplane.connectors.kubernetes.redaction import REDACTED_PREFIX
+from meho_backplane.connectors.kubernetes.redaction import (
+    LAST_APPLIED_ANNOTATION,
+    REDACTED_PREFIX,
+)
 from meho_backplane.flight_recorder import capture
 from meho_backplane.settings import get_settings
 
@@ -724,6 +727,8 @@ async def api_server() -> AsyncIterator[client.ApiClient]:
 
     async def charts(_request: web.Request) -> web.Response:
         wanted = _helm_chart_obj(namespace="kube-system", target_namespace="meho")
+        # ``kubectl apply`` saves the whole manifest, values included, here.
+        wanted["metadata"]["annotations"] = {LAST_APPLIED_ANNOTATION: json.dumps(wanted)}
         return web.json_response(_chart_list(wanted), headers=headers)
 
     async def secrets(_request: web.Request) -> web.Response:
@@ -767,10 +772,14 @@ async def test_trace_capture_records_no_values_text_and_no_secret_data(
     spans = [dict(span.attributes) for span in scope.spans]
     assert [span.status for span in scope.spans] == ["200", "404", "200", "200"]
     chart_span = spans[2]
-    recorded_spec = chart_span["response_body"]["items"][0]["spec"]
+    recorded_chart = chart_span["response_body"]["items"][0]
+    recorded_spec = recorded_chart["spec"]
     assert recorded_spec["valuesContent"].startswith(REDACTED_PREFIX)
     assert recorded_spec["set"]["adminPassword"].startswith(REDACTED_PREFIX)
     assert recorded_spec["version"] == "1.4.0"
+    recorded_annotations = recorded_chart["metadata"]["annotations"]
+    assert set(recorded_annotations) == {LAST_APPLIED_ANNOTATION}
+    assert recorded_annotations[LAST_APPLIED_ANNOTATION].startswith(REDACTED_PREFIX)
     assert spans[3]["response_body"]["items"][0]["data"]["release"].startswith(REDACTED_PREFIX)
     dumped = json.dumps(spans) + json.dumps(result)
     for forbidden in (_VALUES_TEXT, _SET_VALUE, _SECRET_BLOB, "made-up-values-text"):

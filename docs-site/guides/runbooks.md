@@ -90,7 +90,7 @@ steps:
         namespace: ingress
         name: tls-cert
         key: tls.crt
-        ref: {path: ingress/tls-cert, key: tls.crt}
+        ref: {path: tenants/<tenant-id>/ingress/tls-cert, key: tls.crt}
       expect: {same: true}
 ```
 
@@ -99,7 +99,12 @@ confirms) or `type: operation_call` (MEHO runs the op against the run's
 target and checks that every key in `expect` is in the op's result with
 the same value). `k8s.secret.info` returns only key names and sizes,
 never a value. `k8s.secret.compare_to_ref` answers `same: true` when the
-secret's key and its Vault copy hold the same value. The template needs
+secret's key and its Vault copy hold the same value. MEHO reads the Vault
+copy with the caller's own tenant guard, so `ref.path` must lie under
+the caller's tenant subtree, `tenants/<tenant-id>/…`. Replace
+`<tenant-id>` with your tenant UUID before you draft the template. A
+path outside that subtree answers `same: false` with the Vault copy
+marked `forbidden`. The template needs
 a `title` and a `description`. Every step needs an `id` (lower-case
 letters, digits and `-`, starting with a letter). Draft, then publish
 the version that `draft-template` printed:

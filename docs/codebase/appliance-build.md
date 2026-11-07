@@ -287,8 +287,9 @@ test (#4816).
   migration (#5145), and v0.39.0 has no OpenBao setup (#4044). That build
   had no first start in it, so two appliances from one OVA (different RKE2
   CAs and SSH host keys) wait for the next lab build and import.
-- **The hardening (#4640)** has not run on a real build yet; see
-  [appliance-cis.md](appliance-cis.md).
+- **The hardening** ran on the first real lab build. Its result and the
+  fixes made since then are in [appliance-cis.md](appliance-cis.md),
+  "Known issues".
 - **The cloud image's `ubuntu` user** is not made (no `default` in the
   user-data). If a later cloud-init version changes that rule, the check
   finds no such user; add it to `check_clean` if the first build shows one.

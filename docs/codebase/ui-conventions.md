@@ -123,7 +123,7 @@ Two details that are easy to get wrong:
   one in the column layout above.
 
 One trap for whoever clears the remainder:
-`tests/test_ui_corpus_collections_table.py:618-619` asserts the dead
+`tests/test_ui_corpus_collections_table.py:619-620` asserts the dead
 classes are *present*. That test changes in the same pull request, or CI
 fails.
 

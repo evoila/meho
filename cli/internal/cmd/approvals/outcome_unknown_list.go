@@ -12,7 +12,8 @@ import (
 )
 
 // printOutcomeUnknownTable renders `meho approvals list --outcome-unknown`
-// (#5026): what ran, on which target, when, who asked and who approved.
+// (#5026): what ran, on which target, when the latest run started, who
+// asked and who approved.
 // Columns: ID, WHY, OP, TARGET, STARTED, PRINCIPAL, APPROVED-BY. WHY is
 // "uncertain" or "no-result". The advice follows the table.
 func printOutcomeUnknownTable(w io.Writer, items []api.ApprovalRequestView, offset int) {
@@ -31,9 +32,11 @@ func printOutcomeUnknownTable(w io.Writer, items []api.ApprovalRequestView, offs
 		if e.TargetId != nil {
 			target = e.TargetId.String()
 		}
+		// STARTED is when the latest run started (the latest re-run, else
+		// the first run): the time the list counts its minutes from.
 		started := "-"
-		if e.ResumeOutcome != nil && e.ResumeOutcome.ResumedAt != nil {
-			started = *e.ResumeOutcome.ResumedAt
+		if e.OutcomeUnknown != nil && e.OutcomeUnknown.RunStartedAt != nil {
+			started = *e.OutcomeUnknown.RunStartedAt
 		}
 		approvedBy := "-"
 		if e.ReviewedBy != nil {

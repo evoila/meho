@@ -304,6 +304,10 @@ class OutcomeUnknownView(BaseModel):
     reason: OutcomeUnknownReason
     #: What to do: do not run it again, check the target first.
     advice: str
+    #: When the latest run started (ISO 8601): the latest re-run, else the
+    #: first run (``resume_outcome.resumed_at``). The minutes of the list
+    #: count from this time.
+    run_started_at: str | None
 
 
 class OutcomeCheckView(BaseModel):
@@ -589,7 +593,9 @@ def _outcome_unknown_view(row: ApprovalRequest) -> OutcomeUnknownView | None:
     unknown = outcome_unknown_of(row)
     if unknown is None:
         return None
-    return OutcomeUnknownView(reason=unknown.reason, advice=unknown.advice)
+    return OutcomeUnknownView(
+        reason=unknown.reason, advice=unknown.advice, run_started_at=unknown.run_started_at
+    )
 
 
 def _outcome_check_view(row: ApprovalRequest) -> OutcomeCheckView | None:

@@ -103,6 +103,9 @@ class OutcomeUnknown:
 
     reason: OutcomeUnknownReason
     advice: str
+    #: When the latest run started (ISO 8601): the latest re-run, else the
+    #: first run. The minutes of the list count from this time.
+    run_started_at: str | None
 
 
 @dataclass(frozen=True)
@@ -188,9 +191,11 @@ def outcome_unknown(
     reason = _unknown_reason(request, now=now, after=after)
     if reason is None or _check_covers(request, reason):
         return None
+    started = _run_started_at(request)
+    started_at = started.isoformat() if started is not None else None
     if reason is OutcomeUnknownReason.UNCERTAIN:
-        return OutcomeUnknown(reason, UNCERTAIN_ADVICE)
-    return OutcomeUnknown(reason, STARTED_NO_RESULT_ADVICE)
+        return OutcomeUnknown(reason, UNCERTAIN_ADVICE, started_at)
+    return OutcomeUnknown(reason, STARTED_NO_RESULT_ADVICE, started_at)
 
 
 def _outcome_unknown_clause(cutoff: datetime) -> Any:

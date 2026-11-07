@@ -93,6 +93,12 @@ def _ago(minutes: float) -> datetime:
     return datetime.now(UTC) - timedelta(minutes=minutes)
 
 
+def _parse_utc(value: str) -> datetime:
+    """Parse an ISO time; treat a naive one (the SQLite test driver) as UTC."""
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 def _operator(
     *,
     sub: str = _CHECKER,
@@ -276,13 +282,17 @@ async def _set(request_id: uuid.UUID, **values: Any) -> None:
 @pytest.mark.asyncio
 async def test_the_minutes_count_from_the_start_of_the_latest_rerun() -> None:
     fresh_rerun = await _seed(resumed_at=_ago(60), rerun_count=1, rerun_started_at=_ago(5))
-    old_rerun = await _seed(resumed_at=_ago(60), rerun_count=1, rerun_started_at=_ago(20))
+    rerun_start = _ago(20)
+    old_rerun = await _seed(resumed_at=_ago(60), rerun_count=1, rerun_started_at=rerun_start)
 
     assert await _listed_ids() == {old_rerun}
     assert outcome_unknown(await _load(fresh_rerun)) is None
     reason = outcome_unknown(await _load(old_rerun))
     assert reason is not None
     assert reason.reason is OutcomeUnknownReason.STARTED_NO_RESULT
+    # The view shows the start of the latest run, not of the first run.
+    assert reason.run_started_at is not None
+    assert abs(_parse_utc(reason.run_started_at) - rerun_start) < timedelta(seconds=1)
 
 
 @pytest.mark.asyncio
@@ -555,12 +565,15 @@ async def test_rest_and_mcp_list_match_the_service(
     body = response.json()
     assert {uuid.UUID(item["id"]) for item in body} == {uncertain, started} == await _listed_ids()
     by_id = {uuid.UUID(item["id"]): item for item in body}
-    assert by_id[uncertain]["outcome_unknown"] == {
-        "reason": "uncertain",
-        "advice": UNCERTAIN_ADVICE,
-    }
+    assert by_id[uncertain]["outcome_unknown"]["reason"] == "uncertain"
+    assert by_id[uncertain]["outcome_unknown"]["advice"] == UNCERTAIN_ADVICE
     assert by_id[started]["outcome_unknown"]["reason"] == "started_no_result"
     assert by_id[started]["resume_outcome"]["resumed_at"] is not None
+    # No re-run: the latest run is the first run.
+    started_at = by_id[started]["outcome_unknown"]["run_started_at"]
+    assert started_at is not None
+    first_run = by_id[started]["resume_outcome"]["resumed_at"]
+    assert abs(_parse_utc(started_at) - _parse_utc(first_run)) < timedelta(seconds=1)
     assert by_id[started]["reviewed_by"] == "op:approver"
     assert by_id[started]["outcome_check"] is None
 
@@ -568,6 +581,7 @@ async def test_rest_and_mcp_list_match_the_service(
     assert {uuid.UUID(item["id"]) for item in mcp["items"]} == {uncertain, started}
     mcp_by_id = {uuid.UUID(item["id"]): item for item in mcp["items"]}
     assert mcp_by_id[started]["outcome_unknown"]["advice"] == STARTED_NO_RESULT_ADVICE
+    assert mcp_by_id[started]["outcome_unknown"]["run_started_at"] == started_at
 
 
 @pytest.mark.asyncio

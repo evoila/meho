@@ -7139,8 +7139,9 @@ class ApprovalRequest(Base):
     rerun_count: Mapped[int] = mapped_column(
         sa.Integer(), nullable=False, default=0, server_default=sa.text("0")
     )
-    # When the latest re-run started (#5026). NULL until the first re-run;
-    # then the latest run started at ``resumed_at``. The re-run claim sets it
+    # When the latest re-run started (#5026). NULL until the first re-run.
+    # Until then, the latest run is the first run, which started at
+    # ``resumed_at``. The re-run claim sets it
     # in the same UPDATE that adds one to ``rerun_count``. The "outcome
     # unknown" list counts its minutes from the start of the latest run.
     # Added by migration ``0141``.

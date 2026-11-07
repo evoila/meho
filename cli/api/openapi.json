@@ -33922,12 +33922,18 @@
           "advice": {
             "type": "string",
             "title": "Advice"
+          },
+          "run_started_at": {
+            "type": "string",
+            "nullable": true,
+            "title": "Run Started At"
           }
         },
         "type": "object",
         "required": [
           "reason",
-          "advice"
+          "advice",
+          "run_started_at"
         ],
         "title": "OutcomeUnknownView",
         "description": "Why an approved request is on the \"outcome unknown\" list (#5026)."

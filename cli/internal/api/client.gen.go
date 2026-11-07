@@ -7690,7 +7690,8 @@ type OutcomeUnknownView struct {
 	Advice string `json:"advice"`
 
 	// Reason Why a request is on the "outcome unknown" list.
-	Reason OutcomeUnknownReason `json:"reason"`
+	Reason       OutcomeUnknownReason `json:"reason"`
+	RunStartedAt *string              `json:"run_started_at"`
 }
 
 // PairAddonRequest Intake for :meth:`AddonPairingService.pair` — the handshake body.

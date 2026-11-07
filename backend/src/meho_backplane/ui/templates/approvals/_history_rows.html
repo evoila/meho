@@ -47,16 +47,21 @@
         {#- Outcome unknown (#5026): a person checked the target and wrote
             down what they found, or a run started long ago and stored no
             result, so someone must check it. -#}
-        {% if req.outcome_check %}
+        {#- The list state wins over an earlier check: a check covers one
+            reason and one run, so a request can be back on the list. An
+            uncertain run already has its own run-state badge. -#}
+        {% if req.outcome_unknown %}
+          {% if req.outcome_unknown.reason == "started_no_result" %}
+            <span
+              class="badge badge-sm badge-warning"
+              data-outcome-unknown="{{ req.outcome_unknown.reason }}"
+            >no result: check it</span>
+          {% endif %}
+        {% elif req.outcome_check %}
           <span
             class="badge badge-sm badge-neutral"
             data-outcome-check="{{ req.outcome_check.verdict }}"
           >{{ "checked: it happened" if req.outcome_check.verdict == "happened" else "checked: it did not happen" }}</span>
-        {% elif req.outcome_unknown and req.outcome_unknown.reason == "started_no_result" %}
-          <span
-            class="badge badge-sm badge-warning"
-            data-outcome-unknown="{{ req.outcome_unknown.reason }}"
-          >no result: check it</span>
         {% endif %}
         <p class="truncate font-mono text-sm">{{ req.op_id }}</p>
         {#- Chain step (#3596): this pending request is step k of N pending

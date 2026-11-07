@@ -1806,10 +1806,12 @@ so they show the same rows:
 | Console | the "Outcome unknown" tab of `/ui/approvals` |
 
 Each row says what ran (`op_id`, `connector_id`), on which target
-(`target_id`), when (`resume_outcome.resumed_at`), who asked
-(`principal_sub`), who approved (`reviewed_by`) and what to check. The
-REST and MCP views carry `outcome_unknown: {reason, advice}` on every
-listed request (and on show), `null` on all others. The advice of an
+(`target_id`), when the latest run started (`outcome_unknown.run_started_at`:
+the latest re-run, else the first run; the minutes count from this time),
+who asked (`principal_sub`), who approved (`reviewed_by`) and what to check.
+The REST and MCP views carry `outcome_unknown: {reason, advice,
+run_started_at}` on every listed request (and on show), `null` on all
+others. `resume_outcome.resumed_at` stays the start of the first run. The advice of an
 `uncertain` run is the same advice as above. A run with no result gets: "The
 run started and stored no result. MEHO does not know if the change
 happened. Do not run it again. Check the target first."

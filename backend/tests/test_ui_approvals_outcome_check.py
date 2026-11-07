@@ -67,6 +67,18 @@ def _load(request_id: uuid.UUID) -> ApprovalRequest:
     return asyncio.run(_do())
 
 
+def _set_columns(request_id: uuid.UUID, **values: object) -> None:
+    async def _do() -> None:
+        async with get_sessionmaker()() as session:
+            row = await session.get(ApprovalRequest, request_id)
+            assert row is not None
+            for name, value in values.items():
+                setattr(row, name, value)
+            await session.commit()
+
+    asyncio.run(_do())
+
+
 def _service_ids() -> set[uuid.UUID]:
     async def _do() -> set[uuid.UUID]:
         async with get_sessionmaker()() as session:
@@ -128,6 +140,49 @@ def test_detail_modal_offers_the_check_for_a_run_with_no_result() -> None:
     assert f'hx-post="/ui/approvals/{rid}/outcome-check"' in response.text
 
 
+def test_request_back_on_the_list_offers_the_check_again() -> None:
+    """A re-run after a check puts the request back on the list.
+
+    The old check covers the first run only. The row shows the warning
+    badge, and the modal shows the old check as an earlier check and offers
+    the form again.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _approved(op_id="op.rerun.after.check", resumed_at=_ago(90))
+    _set_columns(
+        rid,
+        outcome_checked_at=_ago(60),
+        outcome_checked_by=_REVIEWER_SUB,
+        outcome_check_verdict="did_not_happen",
+        outcome_check_note="nothing on the host",
+        outcome_check_reason="started_no_result",
+        rerun_count=1,
+        rerun_started_at=_ago(30),
+    )
+    assert rid in _service_ids()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A)
+
+    with (
+        respx.mock(assert_all_called=False),
+        patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+    ):
+        client = _authenticated_client(session_id)
+        rows = client.get("/ui/approvals/list?tab=outcome_unknown")
+        modal = client.get(f"/ui/approvals/{rid}")
+
+    assert rows.status_code == 200, rows.text
+    assert "op.rerun.after.check" in rows.text
+    assert 'data-outcome-unknown="started_no_result"' in rows.text
+    assert "data-outcome-check=" not in rows.text
+    assert modal.status_code == 200, modal.text
+    assert 'data-testid="approval-outcome-unknown"' in modal.text
+    assert 'data-earlier="true"' in modal.text
+    assert "Earlier check" in modal.text
+    assert "nothing on the host" in modal.text
+    assert 'data-testid="approval-outcome-check-form"' in modal.text
+
+
 def test_mark_as_checked_records_the_check_and_runs_nothing() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
     rid = _approved(resumed_at=_ago(1), resume_result=_UNCERTAIN)
@@ -153,6 +208,7 @@ def test_mark_as_checked_records_the_check_and_runs_nothing() -> None:
     assert response.headers.get("HX-Trigger") == "meho:approval-bump"
     assert 'data-testid="approval-outcome-check"' in response.text
     assert 'data-verdict="did_not_happen"' in response.text
+    assert 'data-earlier="false"' in response.text
     assert "no new VM on the host" in response.text
     assert 'data-testid="approval-outcome-check-form"' not in response.text
     resume.assert_not_called()

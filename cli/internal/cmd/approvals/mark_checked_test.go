@@ -20,12 +20,15 @@ func startedNoResultView(t *testing.T) api.ApprovalRequestView {
 	t.Helper()
 	d := newApprovalView(t, "approved", "T-test")
 	started := api.ApprovalResultStateStarted
-	resumedAt := "2026-11-07T10:00:00Z"
+	// The first run started at 09:00; a re-run started at 10:00.
+	resumedAt := "2026-11-07T09:00:00Z"
+	runStartedAt := "2026-11-07T10:00:00Z"
 	d.ResultState = &started
 	d.ResumeOutcome = &api.ApprovalResumeOutcomeView{ResumedAt: &resumedAt}
 	d.OutcomeUnknown = &api.OutcomeUnknownView{
-		Reason: api.OutcomeUnknownReasonStartedNoResult,
-		Advice: "The run started and stored no result. MEHO does not know if the change happened. Do not run it again. Check the target first.",
+		Reason:       api.OutcomeUnknownReasonStartedNoResult,
+		Advice:       "The run started and stored no result. MEHO does not know if the change happened. Do not run it again. Check the target first.",
+		RunStartedAt: &runStartedAt,
 	}
 	return d
 }
@@ -84,6 +87,10 @@ func TestPrintOutcomeUnknownTable(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("table missing %q in:\n%s", want, out)
 		}
+	}
+	// STARTED shows the latest run start, the time the list counts from.
+	if strings.Contains(out, "2026-11-07T09:00:00Z") {
+		t.Errorf("STARTED shows the first run start, want the latest run start:\n%s", out)
 	}
 
 	var empty bytes.Buffer

@@ -328,9 +328,12 @@
           {% if request.outcome_unknown and request.outcome_unknown.reason == "started_no_result" %}
             <p class="mt-2 text-sm font-semibold" data-testid="approval-outcome-unknown">{{ request.outcome_unknown.advice }}</p>
           {% endif %}
+          {#- A check covers one reason and one run. When the request is back
+              on the list (a re-run, or a new reason), the stored check is an
+              earlier check: show it as such and offer the form again. -#}
           {% if request.outcome_check %}
-            <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-outcome-check" data-verdict="{{ request.outcome_check.verdict }}">
-              <dt class="opacity-70">Checked</dt>
+            <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-outcome-check" data-verdict="{{ request.outcome_check.verdict }}" data-earlier="{{ 'true' if request.outcome_unknown else 'false' }}">
+              <dt class="opacity-70">{{ "Earlier check" if request.outcome_unknown else "Checked" }}</dt>
               <dd>{{ "It happened" if request.outcome_check.verdict == "happened" else "It did not happen" }}</dd>
               <dt class="opacity-70">Note</dt>
               <dd class="[overflow-wrap:anywhere]">{{ request.outcome_check.note }}</dd>
@@ -339,7 +342,8 @@
               <dt class="opacity-70">Checked at</dt>
               <dd><time datetime="{{ request.outcome_check.checked_at }}" class="font-mono text-xs">{{ request.outcome_check.checked_at }}</time></dd>
             </dl>
-          {% elif request.outcome_unknown %}
+          {% endif %}
+          {% if request.outcome_unknown %}
             <form
               class="mt-3 flex flex-col gap-2"
               data-testid="approval-outcome-check-form"

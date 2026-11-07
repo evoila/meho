@@ -169,7 +169,11 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
         # #5026: why the outcome is unknown and what to check, and what a
         # person recorded after they checked the target.
         "outcome_unknown": (
-            {"reason": unknown.reason.value, "advice": unknown.advice}
+            {
+                "reason": unknown.reason.value,
+                "advice": unknown.advice,
+                "run_started_at": unknown.run_started_at,
+            }
             if unknown is not None
             else None
         ),

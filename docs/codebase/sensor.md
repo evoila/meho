@@ -48,8 +48,8 @@ See `docs/codebase/audit_query.md` § *Loose rows: the standing check*.
 - `meho_backplane.db.models.Sensor` — the ORM row. 30 columns: identity
   (`connector_id` + `op_id`), `params`/`target`, `assertion` (JSON), the
   cadence union, `severity`/`for_seconds`, the confirmation knobs
-  `retry_times`/`retry_backoff_seconds` (#2799, create-only like every
-  other sensor knob), the latest-result projection (including the
+  `retry_times`/`retry_backoff_seconds` (#2799, set at create; the edit
+  path does not change them), the latest-result projection (including the
   soft-state window `pending_state`/`pending_count`), and
   `status`/`status_reason`. `pending_state`'s CHECK admits `CheckState`
   minus `skip` (`skip` is a rollup-side derivation, never an evaluation
@@ -343,10 +343,53 @@ Surfaces: REST (`api/v1/sensors.py`, registered in `main.py`), MCP
 (`mcp/tools/sensors.py`, auto-loaded), Go CLI (`cli/internal/cmd/sensor/`).
 Each surface carries the four verbs — `list` / `create` / `delete` plus the
 `results` trend query (#2756): `GET /api/v1/sensors/{id}/results`, the
-`meho_sensor_results` MCP tool, and `meho sensor results <id>`. There is
-**no** update / pause / resume path — `status` is server-initialized to
-`active` at create (clients cannot supply it; a body carrying `status` is a
-422) and transitions to `paused` only via #2505's runner parking.
+`meho_sensor_results` MCP tool, and `meho sensor results <id>`. REST and
+the CLI also carry **edit** (`PATCH /api/v1/sensors/{id}`,
+`meho sensor edit <id>`; see **Edit** below). There is **no** pause /
+resume path — `status` is server-initialized to `active` at create
+(clients cannot supply it; a body carrying `status` is a 422) and
+transitions to `paused` only via #2505's runner parking.
+
+**Edit** (`PATCH /api/v1/sensors/{id}` → `checks/sensor_edit.edit_sensor`)
+changes a Sensor in place, so its id, its `sensor_results` history and its
+Dashboard memberships stay:
+
+1. The body (`SensorUpdate`, `extra="forbid"`) can change `name`,
+   `connector_id`, `op_id`, `params`, `assertion`, the cadence
+   (`cadence_kind`, `interval_seconds`, `cron_expr`, `timezone`) and
+   `severity`. A field left out or sent as `null` keeps its value; an
+   empty body is a 422. Sending `cadence_kind` clears the field of the
+   other kind.
+2. In one transaction: the shared connector-usage lock, then the row with
+   `SELECT ... FOR UPDATE`, so two edits cannot overwrite each other.
+3. The row merged with the body must be a valid `SensorCreate` (else 422
+   `sensor_edit_invalid`), and its operation must exist and be a safe read
+   — the same checks as create (422 `sensor_operation_not_found` /
+   `sensor_requires_safe_operation`). A taken name is 409.
+4. When a value really changes: the row is updated, `next_fire_at` is set
+   to now (the runner checks it on its next tick), the soft-state window
+   (`pending_state` / `pending_count`) is cleared because it was measured
+   with the old settings, and a Sensor the runner had parked is `active`
+   again (its new cadence passed the create check). `last_state` stays
+   until that run. When nothing changes, the row is not written.
+5. The route binds `audit_before` / `audit_after` with only the changed
+   fields, after `scrub_secret_fields` hides secret-named values, so the
+   audit row of the request (`op_id=sensor.edit`) carries the old and new
+   values.
+
+`identity_sub`, `target`, `for_seconds` and the retry knobs are not
+editable.
+
+A Dashboard has the same edit (`PATCH /api/v1/checks/dashboards/{id}` →
+`checks/dashboard_edit.edit_dashboard`, `meho dashboard edit <id>`):
+`add_sensor_ids` / `remove_sensor_ids`, `name`, `notify_email` (an empty
+string turns mail off) and `notify_min_state`. The id stays. Adding a
+member that is already there, or removing one that is not, changes
+nothing, so the same edit is safe to send twice. An added Sensor that is
+not in the tenant is 422 `sensor_not_found`; more than 200 members is 422
+`dashboard_edit_invalid`. The audit row (`op_id=dashboard.edit`) carries
+`before` / `after`, with `sensor_ids` as sorted lists when the members
+change.
 
 ## Dependencies
 
@@ -397,12 +440,18 @@ Each surface carries the four verbs — `list` / `create` / `delete` plus the
   itself. See
   `docs/codebase/connectors-net-diagnostics.md` § *Refusal is a dispatch
   error, not a reading*.
+- **An evaluation that is already running when an edit commits** still
+  records its result, measured with the old settings. The run the edit
+  makes due is not lost: the runner leaves a row due while its previous
+  evaluation is running (it does not advance `next_fire_at`), so the new
+  settings run on the first tick after that evaluation ends.
 - The safe-only guard's descriptor read and the insert are in separate
   sessions (a TOCTOU window); acceptable because the runner re-asserts the
   safe-tier floor at dispatch (#303), so a race that lands a non-safe
   descriptor records `unknown` rather than executing.
-- **The `identity_sub` ownership guard (#2699) is create-time only.** There
-  is no update route, so it covers every new row, but any `sensor` row
+- **The `identity_sub` ownership guard (#2699) is create-time only.** The
+  edit route cannot change `identity_sub`, so it covers every new row, but
+  any `sensor` row
   persisted *before* the guard landed with a spoofed `identity_sub` keeps
   dispatching (and audit-attributing) under it — no data migration
   normalises historical rows. Deployments that ran the pre-guard build

@@ -22,10 +22,16 @@ Route inventory
 * ``POST /api/v1/sensors`` -- create a sensor. Body:
   :class:`~meho_backplane.checks.schemas.SensorCreate`. Returns the row
   with HTTP 201. Role: ``tenant_admin``. The safe-only guard refuses a
-  non-safe / unknown op with 422; there is no update / pause / resume path
+  non-safe / unknown op with 422; there is no pause / resume path
   (status transitions only via #2505's parking).
 * ``DELETE /api/v1/sensors/{sensor_id}`` -- hard-delete a sensor. Returns
   204. Role: ``tenant_admin``.
+* ``PATCH /api/v1/sensors/{sensor_id}`` -- edit a sensor in place: the id,
+  the result history and the dashboard memberships stay, and the sensor
+  runs once right after the change. Body:
+  :class:`~meho_backplane.checks.sensor_edit.SensorUpdate`. Role:
+  ``tenant_admin``. The audit row carries ``before`` / ``after`` with the
+  changed fields.
 
 Tenant scoping + cross-tenant admin
 -----------------------------------
@@ -70,6 +76,11 @@ from meho_backplane.checks.schemas import (
     SensorResultsQuery,
     SensorStatusFilter,
 )
+from meho_backplane.checks.sensor_edit import (
+    SensorEditInvalidError,
+    SensorUpdate,
+)
+from meho_backplane.checks.sensor_edit import edit_sensor as apply_sensor_edit
 from meho_backplane.checks.service import (
     SensorAdminService,
     SensorConnectorMismatchError,
@@ -79,6 +90,7 @@ from meho_backplane.checks.service import (
     SensorRequiresSafeOperationError,
     SensorResultsCursorError,
 )
+from meho_backplane.redaction.secret_fields import scrub_secret_fields
 
 __all__ = ["router"]
 
@@ -102,6 +114,7 @@ _SENSOR_OP_IDS: Final[dict[str, str]] = {
     "list": "sensor.list",
     "create": "sensor.create",
     "delete": "sensor.delete",
+    "edit": "sensor.edit",
     "results": "sensor.results",
 }
 
@@ -311,3 +324,60 @@ async def list_sensor_results(
         )
     structlog.contextvars.bind_contextvars(audit_row_count=len(page.items))
     return page
+
+
+@router.patch("/{sensor_id}", response_model=SensorRead)
+async def edit_sensor(
+    sensor_id: Annotated[uuid.UUID, Path()],
+    body: SensorUpdate,
+    operator: Annotated[Operator, _require_admin],
+    tenant_filter: UUID | None = Query(default=None),
+) -> SensorRead:
+    """Change some fields of one sensor; keep its id, history and dashboards.
+
+    ``tenant_admin`` only. Only the fields in the body change. The changed
+    sensor is checked like a new one: an invalid result is 422
+    ``sensor_edit_invalid``, an unknown or non-safe operation is 422, and a
+    name that is taken is 409. A cross-tenant / absent id is 404
+    ``sensor_not_found``. After the change the sensor is due at once, so the
+    runner checks it on its next tick. The audit row of the request carries
+    ``before`` and ``after`` with the changed fields (secret-named values
+    hidden).
+    """
+    target_tenant = authorize_tenant_scope(operator, tenant_filter)
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_SENSOR_OP_IDS["edit"],
+        audit_op_class="write",
+        audit_sensor_id=str(sensor_id),
+    )
+    _bind_tenant_scope_contextvar(
+        operator_tenant_id=operator.tenant_id,
+        target_tenant_id=target_tenant,
+    )
+    try:
+        result = await apply_sensor_edit(target_tenant, sensor_id, body)
+    except SensorEditInvalidError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"{exc.error_code}: {exc}",
+        ) from exc
+    except (SensorOperationNotFoundError, SensorRequiresSafeOperationError) as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=exc.error_code,
+        ) from exc
+    except SensorNameConflictError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=exc.error_code,
+        ) from exc
+    if result is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="sensor_not_found",
+        )
+    structlog.contextvars.bind_contextvars(
+        audit_before=scrub_secret_fields(result.before),
+        audit_after=scrub_secret_fields(result.after),
+    )
+    return result.sensor

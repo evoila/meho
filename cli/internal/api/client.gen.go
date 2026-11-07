@@ -276,6 +276,12 @@ const (
 	DashboardReadStateUnknown  DashboardReadState = "unknown"
 )
 
+// Defines values for DashboardUpdateNotifyMinState.
+const (
+	DashboardUpdateNotifyMinStateCritical DashboardUpdateNotifyMinState = "critical"
+	DashboardUpdateNotifyMinStateDegraded DashboardUpdateNotifyMinState = "degraded"
+)
+
 // Defines values for DocsChunkScoreKind.
 const (
 	DocsChunkScoreKindDistance   DocsChunkScoreKind = "distance"
@@ -4691,8 +4697,9 @@ type DailyUsageBucketSurface string
 
 // DashboardCreate Request body for “POST /api/v1/checks/dashboards“.
 //
-// Membership is set at create only (no PUT; "edit" is delete + recreate,
-// the trigger-immutability posture). An empty “sensor_ids“ is permitted --
+// Membership, name and mail settings can be changed later with
+// “PATCH“ (:mod:`meho_backplane.checks.dashboard_edit`). An empty
+// “sensor_ids“ is permitted --
 // a member-less Dashboard rolls up to “unknown“ (the zero-member rule) --
 // but duplicates are de-duplicated by the service before insert. A foreign
 // or absent sensor id is refused 422 “sensor_not_found“ at the boundary.
@@ -4700,15 +4707,16 @@ type DailyUsageBucketSurface string
 // *tenant_id* (optional) lets a platform-admin caller target another
 // tenant; the boundary enforces the RBAC via “authorize_tenant_scope“.
 //
-// “notify_email“ / “notify_min_state“ are the #2719 notification config,
-// set at create only like membership. Omitting “notify_email“ leaves
-// notifications off for this Dashboard. Since #2764 it carries **one or more**
-// comma-separated recipients: each entry is validated individually with
-// pydantic's “EmailStr“ (“email-validator“), so a single malformed entry
-// is a boundary 422 naming it rather than a delivery failure discovered hours
-// later on the first transition. The normalised, comma-joined form is what
-// persists (the existing “text“ column from migration “0068“, no new
-// migration), and a lone address is stored and read back unchanged.
+// “notify_email“ / “notify_min_state“ are the #2719 notification
+// config. Omitting “notify_email“ leaves notifications off for this
+// Dashboard. Since #2764 it carries **one or more** comma-separated
+// recipients: each entry is validated individually with pydantic's
+// “EmailStr“ (“email-validator“), so a single malformed entry is a
+// boundary 422 naming it rather than a delivery failure discovered hours
+// later on the first transition. The normalised, comma-joined form is
+// what persists (the existing “text“ column from migration “0068“,
+// no new migration), and a lone address is stored and read back
+// unchanged.
 //
 // “investigator_prompt“ is the #2721 operator context appended to the
 // diagnose-only investigator's briefing. Bounded at
@@ -4850,6 +4858,28 @@ type DashboardReadNotifyMinState string
 
 // DashboardReadState defines model for DashboardRead.State.
 type DashboardReadState string
+
+// DashboardUpdate Request body for “PATCH /api/v1/checks/dashboards/{dashboard_id}“.
+//
+// Every field is optional; at least one must be set. A field that is left
+// out, or sent as “null“, keeps its value.
+//
+//   - “add_sensor_ids“ / “remove_sensor_ids“ -- Sensors to add to or
+//     remove from the members. One id cannot be in both lists.
+//   - “notify_email“ -- one or more comma-separated recipients. An empty
+//     string turns mail off.
+//   - “notify_min_state“ -- the state a change must reach before mail is
+//     sent.
+type DashboardUpdate struct {
+	AddSensorIds    *[]openapi_types.UUID          `json:"add_sensor_ids"`
+	Name            *string                        `json:"name"`
+	NotifyEmail     *string                        `json:"notify_email"`
+	NotifyMinState  *DashboardUpdateNotifyMinState `json:"notify_min_state"`
+	RemoveSensorIds *[]openapi_types.UUID          `json:"remove_sensor_ids"`
+}
+
+// DashboardUpdateNotifyMinState defines model for DashboardUpdate.NotifyMinState.
+type DashboardUpdateNotifyMinState string
 
 // DbStatus Database migration status.
 //
@@ -9533,6 +9563,60 @@ type SensorSeverity string
 // #2506's rollup derives “skip“ for paused rows.
 type SensorStatus string
 
+// SensorUpdate Request body for “PATCH /api/v1/sensors/{sensor_id}“.
+//
+// Every field is optional. A field that is left out, or sent as “null“,
+// keeps its value. At least one field must be set.
+//
+// To change the cadence kind, send “cadence_kind“ with its matching
+// field: “interval_seconds“ for “interval“, “cron_expr“ (and
+// optionally “timezone“) for “cron“. The field of the old kind is
+// cleared.
+type SensorUpdate struct {
+	// Assertion A full assertion: one select stage feeding one typed comparator.
+	//
+	// #2503 imports this model to validate a Sensor's ``assertion`` payload at
+	// the wire (a bad path or comparator is a 422 at create); #2505 feeds it the
+	// op-result payload; #2506 rolls the outcomes up into a Dashboard.
+	Assertion *AssertionSpec `json:"assertion,omitempty"`
+
+	// CadenceKind Closed enum of the two cadence shapes a :class:`Sensor` may carry.
+	//
+	// Initiative #2416 (parent goal #221), Task #2503. One ``sensor`` row
+	// carries exactly one cadence, selected by this discriminator; the
+	// invariant is enforced by the DB-side ``ck_sensor_cadence_fields``
+	// CHECK that pairs each kind with its mandatory column (mirroring
+	// :class:`ScheduledTriggerKind`).
+	//
+	// Members:
+	//
+	// * :attr:`INTERVAL` -- fire every ``interval_seconds`` (5..86400). The
+	//   sub-minute path #2505's interval-tick loop drives.
+	// * :attr:`CRON` -- fire on a 5-field ``cron_expr`` in ``timezone``. The
+	//   >=1-minute path #2505 rides on #804's durable scheduler discipline.
+	//
+	// Closed enum: widening it is a coordinated DB + model change so the
+	// enum, the :data:`_SENSOR_CADENCE_KINDS` literal, and migration
+	// ``0064``'s frozen tuple cannot drift.
+	CadenceKind     *SensorCadenceKind      `json:"cadence_kind,omitempty"`
+	ConnectorId     *string                 `json:"connector_id"`
+	CronExpr        *string                 `json:"cron_expr"`
+	IntervalSeconds *int                    `json:"interval_seconds"`
+	Name            *string                 `json:"name"`
+	OpId            *string                 `json:"op_id"`
+	Params          *map[string]interface{} `json:"params"`
+
+	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
+	//
+	// The per-sensor cap #2506 applies to the rollup: a ``degraded``-severity
+	// sensor whose assertion fails contributes at most ``degraded``, a
+	// ``critical`` one contributes ``critical``. The five-state vocabulary
+	// itself is declared once in #2504's :data:`CheckState`; this is only
+	// the two operator-selectable severities.
+	Severity *SensorSeverity `json:"severity,omitempty"`
+	Timezone *string         `json:"timezone"`
+}
+
 // ServiceGrantCreate Body for creating a standing scoped auto-approval grant.
 //
 // “extra="forbid"“ rejects unknown fields with 422. “op_id“ and
@@ -11554,6 +11638,12 @@ type GetDashboardApiV1ChecksDashboardsDashboardIdGetParams struct {
 	Authorization *string             `json:"authorization,omitempty"`
 }
 
+// EditDashboardApiV1ChecksDashboardsDashboardIdPatchParams defines parameters for EditDashboardApiV1ChecksDashboardsDashboardIdPatch.
+type EditDashboardApiV1ChecksDashboardsDashboardIdPatchParams struct {
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
 // PostResultsApiV1ChecksResultsPostParams defines parameters for PostResultsApiV1ChecksResultsPost.
 type PostResultsApiV1ChecksResultsPostParams struct {
 	Authorization          *string `json:"authorization,omitempty"`
@@ -12173,6 +12263,12 @@ type CreateSensorApiV1SensorsPostParams struct {
 
 // DeleteSensorApiV1SensorsSensorIdDeleteParams defines parameters for DeleteSensorApiV1SensorsSensorIdDelete.
 type DeleteSensorApiV1SensorsSensorIdDeleteParams struct {
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
+// EditSensorApiV1SensorsSensorIdPatchParams defines parameters for EditSensorApiV1SensorsSensorIdPatch.
+type EditSensorApiV1SensorsSensorIdPatchParams struct {
 	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
 	Authorization *string             `json:"authorization,omitempty"`
 }
@@ -12865,6 +12961,9 @@ type PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody = AssignmentDocu
 // CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody defines body for CreateDashboardApiV1ChecksDashboardsPost for application/json ContentType.
 type CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody = DashboardCreate
 
+// EditDashboardApiV1ChecksDashboardsDashboardIdPatchJSONRequestBody defines body for EditDashboardApiV1ChecksDashboardsDashboardIdPatch for application/json ContentType.
+type EditDashboardApiV1ChecksDashboardsDashboardIdPatchJSONRequestBody = DashboardUpdate
+
 // PostResultsApiV1ChecksResultsPostJSONRequestBody defines body for PostResultsApiV1ChecksResultsPost for application/json ContentType.
 type PostResultsApiV1ChecksResultsPostJSONRequestBody = RunnerResultBatch
 
@@ -12981,6 +13080,9 @@ type SearchDocsEndpointApiV1SearchDocsPostJSONRequestBody = SearchDocsRequest
 
 // CreateSensorApiV1SensorsPostJSONRequestBody defines body for CreateSensorApiV1SensorsPost for application/json ContentType.
 type CreateSensorApiV1SensorsPostJSONRequestBody = SensorCreate
+
+// EditSensorApiV1SensorsSensorIdPatchJSONRequestBody defines body for EditSensorApiV1SensorsSensorIdPatch for application/json ContentType.
+type EditSensorApiV1SensorsSensorIdPatchJSONRequestBody = SensorUpdate
 
 // CreateGrantApiV1ServicePrincipalsGrantsPostJSONRequestBody defines body for CreateGrantApiV1ServicePrincipalsGrantsPost for application/json ContentType.
 type CreateGrantApiV1ServicePrincipalsGrantsPostJSONRequestBody = ServiceGrantCreate
@@ -15240,6 +15342,11 @@ type ClientInterface interface {
 	// GetDashboardApiV1ChecksDashboardsDashboardIdGet request
 	GetDashboardApiV1ChecksDashboardsDashboardIdGet(ctx context.Context, dashboardId openapi_types.UUID, params *GetDashboardApiV1ChecksDashboardsDashboardIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// EditDashboardApiV1ChecksDashboardsDashboardIdPatchWithBody request with any body
+	EditDashboardApiV1ChecksDashboardsDashboardIdPatchWithBody(ctx context.Context, dashboardId openapi_types.UUID, params *EditDashboardApiV1ChecksDashboardsDashboardIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	EditDashboardApiV1ChecksDashboardsDashboardIdPatch(ctx context.Context, dashboardId openapi_types.UUID, params *EditDashboardApiV1ChecksDashboardsDashboardIdPatchParams, body EditDashboardApiV1ChecksDashboardsDashboardIdPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// PostResultsApiV1ChecksResultsPostWithBody request with any body
 	PostResultsApiV1ChecksResultsPostWithBody(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -15593,6 +15700,11 @@ type ClientInterface interface {
 
 	// DeleteSensorApiV1SensorsSensorIdDelete request
 	DeleteSensorApiV1SensorsSensorIdDelete(ctx context.Context, sensorId openapi_types.UUID, params *DeleteSensorApiV1SensorsSensorIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EditSensorApiV1SensorsSensorIdPatchWithBody request with any body
+	EditSensorApiV1SensorsSensorIdPatchWithBody(ctx context.Context, sensorId openapi_types.UUID, params *EditSensorApiV1SensorsSensorIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	EditSensorApiV1SensorsSensorIdPatch(ctx context.Context, sensorId openapi_types.UUID, params *EditSensorApiV1SensorsSensorIdPatchParams, body EditSensorApiV1SensorsSensorIdPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListSensorResultsApiV1SensorsSensorIdResultsGet request
 	ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -17611,6 +17723,30 @@ func (c *Client) GetDashboardApiV1ChecksDashboardsDashboardIdGet(ctx context.Con
 	return c.Client.Do(req)
 }
 
+func (c *Client) EditDashboardApiV1ChecksDashboardsDashboardIdPatchWithBody(ctx context.Context, dashboardId openapi_types.UUID, params *EditDashboardApiV1ChecksDashboardsDashboardIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEditDashboardApiV1ChecksDashboardsDashboardIdPatchRequestWithBody(c.Server, dashboardId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EditDashboardApiV1ChecksDashboardsDashboardIdPatch(ctx context.Context, dashboardId openapi_types.UUID, params *EditDashboardApiV1ChecksDashboardsDashboardIdPatchParams, body EditDashboardApiV1ChecksDashboardsDashboardIdPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEditDashboardApiV1ChecksDashboardsDashboardIdPatchRequest(c.Server, dashboardId, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) PostResultsApiV1ChecksResultsPostWithBody(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostResultsApiV1ChecksResultsPostRequestWithBody(c.Server, params, contentType, body)
 	if err != nil {
@@ -19173,6 +19309,30 @@ func (c *Client) CreateSensorApiV1SensorsPost(ctx context.Context, params *Creat
 
 func (c *Client) DeleteSensorApiV1SensorsSensorIdDelete(ctx context.Context, sensorId openapi_types.UUID, params *DeleteSensorApiV1SensorsSensorIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDeleteSensorApiV1SensorsSensorIdDeleteRequest(c.Server, sensorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EditSensorApiV1SensorsSensorIdPatchWithBody(ctx context.Context, sensorId openapi_types.UUID, params *EditSensorApiV1SensorsSensorIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEditSensorApiV1SensorsSensorIdPatchRequestWithBody(c.Server, sensorId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EditSensorApiV1SensorsSensorIdPatch(ctx context.Context, sensorId openapi_types.UUID, params *EditSensorApiV1SensorsSensorIdPatchParams, body EditSensorApiV1SensorsSensorIdPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEditSensorApiV1SensorsSensorIdPatchRequest(c.Server, sensorId, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -27750,6 +27910,90 @@ func NewGetDashboardApiV1ChecksDashboardsDashboardIdGetRequest(server string, da
 	return req, nil
 }
 
+// NewEditDashboardApiV1ChecksDashboardsDashboardIdPatchRequest calls the generic EditDashboardApiV1ChecksDashboardsDashboardIdPatch builder with application/json body
+func NewEditDashboardApiV1ChecksDashboardsDashboardIdPatchRequest(server string, dashboardId openapi_types.UUID, params *EditDashboardApiV1ChecksDashboardsDashboardIdPatchParams, body EditDashboardApiV1ChecksDashboardsDashboardIdPatchJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewEditDashboardApiV1ChecksDashboardsDashboardIdPatchRequestWithBody(server, dashboardId, params, "application/json", bodyReader)
+}
+
+// NewEditDashboardApiV1ChecksDashboardsDashboardIdPatchRequestWithBody generates requests for EditDashboardApiV1ChecksDashboardsDashboardIdPatch with any type of body
+func NewEditDashboardApiV1ChecksDashboardsDashboardIdPatchRequestWithBody(server string, dashboardId openapi_types.UUID, params *EditDashboardApiV1ChecksDashboardsDashboardIdPatchParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "dashboard_id", runtime.ParamLocationPath, dashboardId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/dashboards/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewPostResultsApiV1ChecksResultsPostRequest calls the generic PostResultsApiV1ChecksResultsPost builder with application/json body
 func NewPostResultsApiV1ChecksResultsPostRequest(server string, params *PostResultsApiV1ChecksResultsPostParams, body PostResultsApiV1ChecksResultsPostJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -33996,6 +34240,90 @@ func NewDeleteSensorApiV1SensorsSensorIdDeleteRequest(server string, sensorId op
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewEditSensorApiV1SensorsSensorIdPatchRequest calls the generic EditSensorApiV1SensorsSensorIdPatch builder with application/json body
+func NewEditSensorApiV1SensorsSensorIdPatchRequest(server string, sensorId openapi_types.UUID, params *EditSensorApiV1SensorsSensorIdPatchParams, body EditSensorApiV1SensorsSensorIdPatchJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewEditSensorApiV1SensorsSensorIdPatchRequestWithBody(server, sensorId, params, "application/json", bodyReader)
+}
+
+// NewEditSensorApiV1SensorsSensorIdPatchRequestWithBody generates requests for EditSensorApiV1SensorsSensorIdPatch with any type of body
+func NewEditSensorApiV1SensorsSensorIdPatchRequestWithBody(server string, sensorId openapi_types.UUID, params *EditSensorApiV1SensorsSensorIdPatchParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "sensor_id", runtime.ParamLocationPath, sensorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/sensors/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -48007,6 +48335,11 @@ type ClientWithResponsesInterface interface {
 	// GetDashboardApiV1ChecksDashboardsDashboardIdGetWithResponse request
 	GetDashboardApiV1ChecksDashboardsDashboardIdGetWithResponse(ctx context.Context, dashboardId openapi_types.UUID, params *GetDashboardApiV1ChecksDashboardsDashboardIdGetParams, reqEditors ...RequestEditorFn) (*GetDashboardApiV1ChecksDashboardsDashboardIdGetResponse, error)
 
+	// EditDashboardApiV1ChecksDashboardsDashboardIdPatchWithBodyWithResponse request with any body
+	EditDashboardApiV1ChecksDashboardsDashboardIdPatchWithBodyWithResponse(ctx context.Context, dashboardId openapi_types.UUID, params *EditDashboardApiV1ChecksDashboardsDashboardIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditDashboardApiV1ChecksDashboardsDashboardIdPatchResponse, error)
+
+	EditDashboardApiV1ChecksDashboardsDashboardIdPatchWithResponse(ctx context.Context, dashboardId openapi_types.UUID, params *EditDashboardApiV1ChecksDashboardsDashboardIdPatchParams, body EditDashboardApiV1ChecksDashboardsDashboardIdPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*EditDashboardApiV1ChecksDashboardsDashboardIdPatchResponse, error)
+
 	// PostResultsApiV1ChecksResultsPostWithBodyWithResponse request with any body
 	PostResultsApiV1ChecksResultsPostWithBodyWithResponse(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostResultsApiV1ChecksResultsPostResponse, error)
 
@@ -48360,6 +48693,11 @@ type ClientWithResponsesInterface interface {
 
 	// DeleteSensorApiV1SensorsSensorIdDeleteWithResponse request
 	DeleteSensorApiV1SensorsSensorIdDeleteWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *DeleteSensorApiV1SensorsSensorIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteSensorApiV1SensorsSensorIdDeleteResponse, error)
+
+	// EditSensorApiV1SensorsSensorIdPatchWithBodyWithResponse request with any body
+	EditSensorApiV1SensorsSensorIdPatchWithBodyWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *EditSensorApiV1SensorsSensorIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditSensorApiV1SensorsSensorIdPatchResponse, error)
+
+	EditSensorApiV1SensorsSensorIdPatchWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *EditSensorApiV1SensorsSensorIdPatchParams, body EditSensorApiV1SensorsSensorIdPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*EditSensorApiV1SensorsSensorIdPatchResponse, error)
 
 	// ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse request
 	ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*ListSensorResultsApiV1SensorsSensorIdResultsGetResponse, error)
@@ -50777,6 +51115,29 @@ func (r GetDashboardApiV1ChecksDashboardsDashboardIdGetResponse) StatusCode() in
 	return 0
 }
 
+type EditDashboardApiV1ChecksDashboardsDashboardIdPatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DashboardDetail
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r EditDashboardApiV1ChecksDashboardsDashboardIdPatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EditDashboardApiV1ChecksDashboardsDashboardIdPatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type PostResultsApiV1ChecksResultsPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -52892,6 +53253,29 @@ func (r DeleteSensorApiV1SensorsSensorIdDeleteResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r DeleteSensorApiV1SensorsSensorIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type EditSensorApiV1SensorsSensorIdPatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *SensorRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r EditSensorApiV1SensorsSensorIdPatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EditSensorApiV1SensorsSensorIdPatchResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -59377,6 +59761,23 @@ func (c *ClientWithResponses) GetDashboardApiV1ChecksDashboardsDashboardIdGetWit
 	return ParseGetDashboardApiV1ChecksDashboardsDashboardIdGetResponse(rsp)
 }
 
+// EditDashboardApiV1ChecksDashboardsDashboardIdPatchWithBodyWithResponse request with arbitrary body returning *EditDashboardApiV1ChecksDashboardsDashboardIdPatchResponse
+func (c *ClientWithResponses) EditDashboardApiV1ChecksDashboardsDashboardIdPatchWithBodyWithResponse(ctx context.Context, dashboardId openapi_types.UUID, params *EditDashboardApiV1ChecksDashboardsDashboardIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditDashboardApiV1ChecksDashboardsDashboardIdPatchResponse, error) {
+	rsp, err := c.EditDashboardApiV1ChecksDashboardsDashboardIdPatchWithBody(ctx, dashboardId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEditDashboardApiV1ChecksDashboardsDashboardIdPatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) EditDashboardApiV1ChecksDashboardsDashboardIdPatchWithResponse(ctx context.Context, dashboardId openapi_types.UUID, params *EditDashboardApiV1ChecksDashboardsDashboardIdPatchParams, body EditDashboardApiV1ChecksDashboardsDashboardIdPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*EditDashboardApiV1ChecksDashboardsDashboardIdPatchResponse, error) {
+	rsp, err := c.EditDashboardApiV1ChecksDashboardsDashboardIdPatch(ctx, dashboardId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEditDashboardApiV1ChecksDashboardsDashboardIdPatchResponse(rsp)
+}
+
 // PostResultsApiV1ChecksResultsPostWithBodyWithResponse request with arbitrary body returning *PostResultsApiV1ChecksResultsPostResponse
 func (c *ClientWithResponses) PostResultsApiV1ChecksResultsPostWithBodyWithResponse(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostResultsApiV1ChecksResultsPostResponse, error) {
 	rsp, err := c.PostResultsApiV1ChecksResultsPostWithBody(ctx, params, contentType, body, reqEditors...)
@@ -60515,6 +60916,23 @@ func (c *ClientWithResponses) DeleteSensorApiV1SensorsSensorIdDeleteWithResponse
 		return nil, err
 	}
 	return ParseDeleteSensorApiV1SensorsSensorIdDeleteResponse(rsp)
+}
+
+// EditSensorApiV1SensorsSensorIdPatchWithBodyWithResponse request with arbitrary body returning *EditSensorApiV1SensorsSensorIdPatchResponse
+func (c *ClientWithResponses) EditSensorApiV1SensorsSensorIdPatchWithBodyWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *EditSensorApiV1SensorsSensorIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditSensorApiV1SensorsSensorIdPatchResponse, error) {
+	rsp, err := c.EditSensorApiV1SensorsSensorIdPatchWithBody(ctx, sensorId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEditSensorApiV1SensorsSensorIdPatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) EditSensorApiV1SensorsSensorIdPatchWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *EditSensorApiV1SensorsSensorIdPatchParams, body EditSensorApiV1SensorsSensorIdPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*EditSensorApiV1SensorsSensorIdPatchResponse, error) {
+	rsp, err := c.EditSensorApiV1SensorsSensorIdPatch(ctx, sensorId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEditSensorApiV1SensorsSensorIdPatchResponse(rsp)
 }
 
 // ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse request returning *ListSensorResultsApiV1SensorsSensorIdResultsGetResponse
@@ -65836,6 +66254,39 @@ func ParseGetDashboardApiV1ChecksDashboardsDashboardIdGetResponse(rsp *http.Resp
 	return response, nil
 }
 
+// ParseEditDashboardApiV1ChecksDashboardsDashboardIdPatchResponse parses an HTTP response from a EditDashboardApiV1ChecksDashboardsDashboardIdPatchWithResponse call
+func ParseEditDashboardApiV1ChecksDashboardsDashboardIdPatchResponse(rsp *http.Response) (*EditDashboardApiV1ChecksDashboardsDashboardIdPatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EditDashboardApiV1ChecksDashboardsDashboardIdPatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DashboardDetail
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParsePostResultsApiV1ChecksResultsPostResponse parses an HTTP response from a PostResultsApiV1ChecksResultsPostWithResponse call
 func ParsePostResultsApiV1ChecksResultsPostResponse(rsp *http.Response) (*PostResultsApiV1ChecksResultsPostResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -68780,6 +69231,39 @@ func ParseDeleteSensorApiV1SensorsSensorIdDeleteResponse(rsp *http.Response) (*D
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEditSensorApiV1SensorsSensorIdPatchResponse parses an HTTP response from a EditSensorApiV1SensorsSensorIdPatchWithResponse call
+func ParseEditSensorApiV1SensorsSensorIdPatchResponse(rsp *http.Response) (*EditSensorApiV1SensorsSensorIdPatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EditSensorApiV1SensorsSensorIdPatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SensorRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

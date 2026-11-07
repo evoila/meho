@@ -437,11 +437,12 @@ async def test_origin_check_rejects_unknown() -> None:
             await session.commit()
 
 
-def test_terminal_statuses_are_the_three_terminal_states() -> None:
+def test_terminal_statuses_are_the_four_terminal_states() -> None:
     assert {
         OperationRunStatus.SUCCEEDED,
         OperationRunStatus.FAILED,
         OperationRunStatus.CANCELLED,
+        OperationRunStatus.UNCERTAIN,
     } == TERMINAL_STATUSES
 
 
@@ -472,5 +473,28 @@ def _load_migration_0080() -> object:
 def test_migration_literals_match_model_enum() -> None:
     """Migration ``0080``'s frozen tuples match the model enums (drift guard)."""
     module = _load_migration_0080()
-    assert set(module._OPERATION_RUN_STATUSES) == {s.value for s in OperationRunStatus}  # type: ignore[attr-defined]
+    # 0080 is a frozen snapshot of the five original values; 0138 added the sixth.
+    assert set(module._OPERATION_RUN_STATUSES) == {  # type: ignore[attr-defined]
+        s.value for s in OperationRunStatus if s is not OperationRunStatus.UNCERTAIN
+    }
     assert set(module._OPERATION_RUN_ORIGINS) == {o.value for o in OperationRunOrigin}  # type: ignore[attr-defined]
+
+
+def test_migration_0138_literals_match_model_enum() -> None:
+    """Migration ``0138`` widens the status CHECK to the full model enum (#5025)."""
+    path = (
+        Path(__file__).resolve().parent.parent
+        / "alembic"
+        / "versions"
+        / "0138_add_operation_run_uncertain_status.py"
+    )
+    spec = importlib.util.spec_from_file_location("_migration_0138", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert set(module._OPERATION_RUN_STATUSES) == {s.value for s in OperationRunStatus}
+
+
+def test_running_run_may_become_uncertain_and_uncertain_is_terminal() -> None:
+    assert OperationRunStatus.UNCERTAIN in ALLOWED_TRANSITIONS[OperationRunStatus.RUNNING]
+    assert ALLOWED_TRANSITIONS[OperationRunStatus.UNCERTAIN] == frozenset()

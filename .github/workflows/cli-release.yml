@@ -41,6 +41,11 @@
 # the tag's chart and image. It attaches the tar, SHA256SUMS-linux and
 # SHA256SUMS-linux.cosign.bundle to the same Release.
 #
+# After `linux-download`, the `security-sheet` job calls
+# security-sheet.yml (#4639). It checks every signature of the release,
+# writes the security sheet and attaches it, the SBOM of the image and the
+# full scan report to the same Release.
+#
 # Permissions design follows the same per-job least-privilege posture
 # as chart.yml + image.yml:
 #   * workflow-default = `contents: read` (just enough to checkout).
@@ -51,6 +56,7 @@
 #     in this Task's scope.
 #   * `linux-download` grants the same two to the called workflow, where
 #     only its `publish` job (sign + attach) uses them.
+#   * `security-sheet` grants only `contents: write` (attach the files).
 
 name: cli-release
 
@@ -458,3 +464,18 @@ jobs:
     permissions:
       contents: write
       id-token: write
+
+  security-sheet:
+    name: Security sheet (meho-security-sheet-<tag>.md)
+    # Makes the security sheet of this tag and attaches it, the SBOM and the
+    # full scan report to the release (#4639). It runs after
+    # `linux-download`, because it checks the signature of every checksum
+    # file of the release, SHA256SUMS-linux too. See
+    # .github/workflows/security-sheet.yml.
+    needs: linux-download
+    uses: ./.github/workflows/security-sheet.yml
+    with:
+      tag: ${{ github.ref_name }}
+    # Only to attach the three files to the release.
+    permissions:
+      contents: write

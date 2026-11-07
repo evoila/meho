@@ -109,6 +109,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_operations_meta_tools.py",
     "tests/test_proxy_headers.py",
     "tests/test_reference_docs_drift.py",
+    "tests/test_release_security_sheet.py",
     "tests/test_shared_lists_only_shrink.py",
     "tests/test_soak_harness_driver.py",
     "tests/test_soak_harness_host_detach_from_vds.py",

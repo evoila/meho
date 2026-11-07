@@ -1,0 +1,229 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Makes the security sheet of a release and attaches it to the GitHub
+# Release (#4639). The sheet is one short Markdown file for the customer's
+# security team: the open ports, the CIS results, the vulnerability scan of
+# the MEHO image, the SBOM and how to check each signature. See
+# docs/codebase/release-security-sheet.md.
+#
+# Two ways to run it:
+#   * workflow_call from cli-release.yml on every v* tag, after the
+#     `linux-download` job. By then image.yml and chart.yml have published
+#     and signed the image and the chart of the tag (the download build
+#     waits for them), and every checksum file is on the release.
+#   * workflow_dispatch with a tag, to make the sheet of a release again.
+#
+# What the job does, for the tag:
+#   1. checks the cosign signature of the image, the chart and the three
+#      signed checksum files of the release, with the same commands the
+#      sheet gives the reader. A failed check stops the job: no sheet;
+#   2. reads the SBOM from the image's signed attestation;
+#   3. scans the image by digest with Trivy (all severities, the same
+#      exception file as the image job, never fails on a finding);
+#   4. reads the firewall's port list from the tag's install script, and
+#      the appliance's CIS exception list from the tag;
+#   5. writes the sheet with scripts/release/security_sheet.py and attaches
+#      the sheet, the SBOM and the full scan report to the release.
+# The collected data stays as the workflow artifact `security-sheet-data`
+# for 90 days. With it, the release manager can add the results of a test
+# install later (docs/RELEASING.md, step 5).
+#
+# Two checkouts: the script and the template come from the commit of this
+# workflow run (`tool/`), the data from the tag (`release/`). So a manual
+# run can use a fixed template for an older tag.
+#
+# Runner: GitHub-hosted ubuntu-latest. It runs no pull-request code (no
+# pull_request trigger). Permissions: contents: write, only to attach the
+# files to the release.
+
+name: security-sheet
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: The release tag, for example v1.0.0.
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag, for example v1.0.0.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-sheet-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  sheet:
+    name: Make and attach the security sheet
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.tag }}
+      ISSUER: https://token.actions.githubusercontent.com
+      WORKFLOWS: https://github.com/${{ github.repository }}/.github/workflows
+      DATA: ${{ github.workspace }}/data
+    steps:
+      - name: Check the tag
+        run: |
+          set -euo pipefail
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::The tag '${TAG}' is not like v1.0.0."
+            exit 1
+          fi
+
+      - name: Checkout the script and the template
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: tool
+          persist-credentials: false
+
+      - name: Checkout the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          path: release
+          persist-credentials: false
+
+      - name: Install regctl
+        # Same pinned version and checksum as linux-download.yml.
+        run: |
+          set -euo pipefail
+          REGCTL_VER=v0.11.6
+          REGCTL_SHA=8e0e62a497fcdb8048d18aa927a139613176ba0531f412bc541044e28f9856bd
+          curl -fsSL -o "${RUNNER_TEMP}/regctl" \
+            "https://github.com/regclient/regclient/releases/download/${REGCTL_VER}/regctl-linux-amd64"
+          echo "${REGCTL_SHA}  ${RUNNER_TEMP}/regctl" | sha256sum -c -
+          mkdir -p "${HOME}/.local/bin"
+          install -m 0755 "${RUNNER_TEMP}/regctl" "${HOME}/.local/bin/regctl"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+
+      - name: Install cosign
+        # Same pin as image.yml, chart.yml and cli-release.yml (cosign v3.0.6).
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Read the image and chart digests
+        id: digests
+        run: |
+          set -euo pipefail
+          IMAGE_DIGEST=$(regctl image digest "ghcr.io/evoila/meho:${TAG}")
+          CHART_DIGEST=$(regctl image digest "ghcr.io/evoila/meho-chart:${TAG#v}")
+          echo "image=${IMAGE_DIGEST}" >> "${GITHUB_OUTPUT}"
+          echo "chart=${CHART_DIGEST}" >> "${GITHUB_OUTPUT}"
+          echo "Image ${IMAGE_DIGEST}, chart ${CHART_DIGEST}"
+
+      - name: Check the signatures of the image and the chart
+        env:
+          IMAGE_DIGEST: ${{ steps.digests.outputs.image }}
+          CHART_DIGEST: ${{ steps.digests.outputs.chart }}
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-identity "${WORKFLOWS}/image.yml@refs/tags/${TAG}" \
+            --certificate-oidc-issuer "${ISSUER}" \
+            "ghcr.io/evoila/meho@${IMAGE_DIGEST}" > /dev/null
+          cosign verify \
+            --certificate-identity "${WORKFLOWS}/chart.yml@refs/tags/${TAG}" \
+            --certificate-oidc-issuer "${ISSUER}" \
+            "ghcr.io/evoila/meho-chart@${CHART_DIGEST}" > /dev/null
+
+      - name: Check the signatures of the checksum files of the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/sums"
+          cd "${RUNNER_TEMP}/sums"
+          for pair in SHA256SUMS:cli-release SHA256SUMS-mcpb:cli-release SHA256SUMS-linux:linux-download; do
+            file=${pair%%:*}
+            workflow=${pair##*:}
+            gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --pattern "${file}" --pattern "${file}.cosign.bundle"
+            cosign verify-blob \
+              --certificate-identity "${WORKFLOWS}/${workflow}.yml@refs/tags/${TAG}" \
+              --certificate-oidc-issuer "${ISSUER}" \
+              --bundle "${file}.cosign.bundle" "${file}"
+          done
+
+      - name: Read the SBOM from the image's signed attestation
+        env:
+          IMAGE_DIGEST: ${{ steps.digests.outputs.image }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${DATA}"
+          cosign verify-attestation --type spdxjson \
+            --certificate-identity "${WORKFLOWS}/image.yml@refs/tags/${TAG}" \
+            --certificate-oidc-issuer "${ISSUER}" \
+            "ghcr.io/evoila/meho@${IMAGE_DIGEST}" > "${RUNNER_TEMP}/attestations.jsonl"
+          # One line per attestation; image.yml attests the SBOM once per digest.
+          head -n 1 "${RUNNER_TEMP}/attestations.jsonl" \
+            | jq -e '.payload | @base64d | fromjson | .predicate' > "${DATA}/sbom.spdx.json"
+
+      - name: Scan the image (Trivy, all severities)
+        # Same action commit and exception file as the image job. It does not
+        # fail on a finding: the sheet reports the findings. The image job's
+        # gate already refused any fixable CRITICAL or HIGH finding before it
+        # published the image.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: ghcr.io/evoila/meho@${{ steps.digests.outputs.image }}
+          scanners: vuln
+          format: json
+          output: data/trivy.json
+          trivyignores: release/.trivyignore
+          exit-code: '0'
+
+      - name: Collect the facts and the port list of the tag
+        env:
+          IMAGE_DIGEST: ${{ steps.digests.outputs.image }}
+          CHART_DIGEST: ${{ steps.digests.outputs.chart }}
+        run: |
+          set -euo pipefail
+          bash -c 'source release/deploy/linux-server/lib/firewall.sh && firewall_port_list' > "${DATA}/ports.txt"
+          cp release/.trivyignore "${DATA}/trivyignore"
+          cp release/deploy/appliance/cis/exceptions.md "${DATA}/cis-exceptions.md"
+          jq -n \
+            --arg tag "${TAG}" \
+            --arg commit "$(git -C release rev-parse HEAD)" \
+            --arg image_digest "${IMAGE_DIGEST}" \
+            --arg chart_digest "${CHART_DIGEST}" \
+            --arg made_on "$(date -u +%Y-%m-%d)" \
+            '{tag: $tag, commit: $commit, image_digest: $image_digest, chart_digest: $chart_digest, made_on: $made_on}' \
+            > "${DATA}/facts.json"
+
+      - name: Write the sheet
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/assets"
+          python3 tool/scripts/release/security_sheet.py \
+            --data "${DATA}" --out "${RUNNER_TEMP}/assets/meho-security-sheet-${TAG}.md"
+          cp "${DATA}/trivy.json" "${RUNNER_TEMP}/assets/meho-vulnerability-scan-${TAG}.json"
+          cp "${DATA}/sbom.spdx.json" "${RUNNER_TEMP}/assets/meho-sbom-${TAG}.spdx.json"
+          cat "${RUNNER_TEMP}/assets/meho-security-sheet-${TAG}.md" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Keep the data as a workflow artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: security-sheet-data
+          path: data/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Attach the sheet, the SBOM and the scan report to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "${TAG}" --repo "${GITHUB_REPOSITORY}" --clobber \
+            "${RUNNER_TEMP}/assets/meho-security-sheet-${TAG}.md" \
+            "${RUNNER_TEMP}/assets/meho-vulnerability-scan-${TAG}.json" \
+            "${RUNNER_TEMP}/assets/meho-sbom-${TAG}.spdx.json"

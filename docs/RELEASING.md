@@ -40,6 +40,14 @@ image of the tag (at most 60 minutes). Then it builds the download, checks
 it, and attaches it to the same Release
 ([`docs/codebase/linux-server-download.md`](codebase/linux-server-download.md)).
 
+Last, `cli-release.yml` calls `security-sheet.yml`. It checks the
+signature of the image, the chart and each checksum file, scans the image,
+and attaches three files to the Release: the security sheet
+`meho-security-sheet-vX.Y.Z.md` (one short file for the customer's
+security team), the SBOM `meho-sbom-vX.Y.Z.spdx.json` and the full scan
+report `meho-vulnerability-scan-vX.Y.Z.json`
+([`docs/codebase/release-security-sheet.md`](codebase/release-security-sheet.md)).
+
 ## Supply-chain and CI baseline
 
 A release is only as trustworthy as the pipeline that built it. Two
@@ -380,6 +388,38 @@ form-2 download.
   If the job failed, read its `[FAIL]` line. The most likely one is the
   size limit (1.9 GiB): the design's answer is to split the download into
   two release files.
+- [ ] The security sheet `meho-security-sheet-vX.Y.Z.md`, the SBOM
+  `meho-sbom-vX.Y.Z.spdx.json` and the scan report
+  `meho-vulnerability-scan-vX.Y.Z.json` are attached (job `security-sheet`
+  of `cli-release.yml` green). Read the sheet. If the job failed, fix the
+  cause and run the workflow `security-sheet` by hand with the tag:
+  `gh workflow run security-sheet.yml --repo evoila/meho -f tag=vX.Y.Z`.
+- [ ] **Add the test-install results to the security sheet.** Three parts
+  of the sheet come from a test install: a port scan of a form-2 install,
+  RKE2's CIS result on it, and the appliance's CIS scan. Until the release
+  tests add them by themselves, they say "Not measured for this release
+  yet". A final release (not an rc) ships with all three filled. Put the
+  results into a folder, as plain text:
+  - `lab/ports.txt`: a port scan of the form-2 install from another
+    machine (for example `nmap -sS -sU -p 22,80,443,6443,8472 <address>`);
+  - `lab/rke2-cis.txt`: what shows that RKE2's CIS profile is on and every
+    pod is ready (for example the output of `meho-host check`);
+  - `lab/ubuntu-cis.txt`: the file `meho-appliance-X.Y.Z-cis.txt` of the
+    `appliance-build` run of this tag.
+
+  Remove host names from the files first: the sheet is public. The script
+  replaces IPv4 addresses with `<address>` by itself. Then write the sheet
+  again from the data of the release job and replace it on the Release:
+
+  ```bash
+  TAG=vX.Y.Z
+  # <run-id>: the cli-release run of the tag, or the last security-sheet run.
+  gh run download <run-id> --repo evoila/meho --name security-sheet-data --dir data
+  python3 scripts/release/security_sheet.py --data data --lab lab \
+    --out "meho-security-sheet-$TAG.md"
+  # Read the sheet. Then:
+  gh release upload "$TAG" "meho-security-sheet-$TAG.md" --repo evoila/meho --clobber
+  ```
 
 #### Maintainer one-time setup — GHCR package visibility
 
@@ -925,6 +965,9 @@ Steps 2–7 as written, with `PREV` = the last **final** tag (R1
   Release is **not** marked pre-release; `meho version` → `v1.0.0`;
   chart `1.0.0`; docs republish `1.0` in place (`latest` already points
   there since `rc.1`).
+- [ ] The security sheet of `v1.0.0` is on the Release, and every
+  measured part is filled from this release's data: the three
+  test-install parts too (step 5).
 - [ ] #2661 definition of done: all five gates recorded as holding on
   the promoted rc; the rc tags stay (they are the audit trail of what
   was measured).
@@ -998,7 +1041,9 @@ follow-up task.
 [ ] 4. Tagged vX.Y.Z + pushed
 [ ] 5. GH Release notes correct (not [Unreleased] fallback); image, chart,
        CLI tarballs all published; form-2 download + SHA256SUMS-linux
-       attached, signature and checksum checked
+       attached, signature and checksum checked; security sheet, SBOM
+       and scan report attached, test-install results added (final
+       release)
 [ ] 6. Deployed to the lab cluster; smoke-green
 [ ] 6a. Post-deploy enablement — for each gate in /ready features:
         configure the env vars per the cited doc; verify gate

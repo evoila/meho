@@ -287,7 +287,9 @@ The empty spec `{}` resolves, in order: `list_operation_groups`,
 `list_targets`, `preview_operation`, `result_query`, `broadcast_announce`,
 `broadcast_recent`, `broadcast_watch`. A definition with `toolset is None`
 keeps the legacy two tools until it is migrated to a spec. Runbook, approval, and admin tools stay
-out of the catalog on purpose; this is not full parity with the MCP working surface.
+out of the catalog on purpose. For each working-surface tool a hosted run has
+or does not have, see
+[Hosted tools compared with the MCP working surface](#hosted-tools-compared-with-the-mcp-working-surface-5852).
 
 Hosted calls to these four tools do not write the per-call MCP audit row
 (`mcp/audit.py`); that row belongs to the MCP transport. They write the
@@ -446,6 +448,77 @@ Fixtures in `tests/test_agent_toolset.py` pin the configured-empty, legacy
 `None`, granted-versus-denied capability, budget-overflow, usage-link, and
 run-id (two concurrent runs, a bound durable id, a parent and its child)
 cases.
+
+### Hosted tools compared with the MCP working surface (#5852)
+
+An agent over MCP sees 26 working-surface tools. A hosted agent can get 19 of
+them. This table says, for each MCP tool, whether a hosted run can have it,
+and why not when it cannot. A test (`tests/test_agent_toolset_working_surface.py`)
+checks that this table and the hosted catalog agree.
+
+"Default" means a definition gets the tool when its spec leaves out
+`meta_tools`. "Opt-in" means the spec must name it in `meta_tools`. Every
+hosted tool also needs its role floor, and the docs tools need the tenant's
+`meho-docs` capability, as on MCP.
+
+| MCP tool | Hosted | How, or why not |
+|---|---|---|
+| `meho_status` | yes | Default. Same health payload, without the MCP session fields. |
+| `meho_connector_list` | yes | Default. Shows only the allowed connectors when the spec has a `connectors` list. |
+| `list_operation_groups` | yes | Default. |
+| `search_operations` | yes | Default. |
+| `call_operation` | yes | Default. Same dispatch: policy, grants, approval and audit. |
+| `preview_operation` | yes | Default. |
+| `result_query` | yes | Default. |
+| `list_targets` | yes | Default. |
+| `meho_broadcast_announce` | yes | Default, named `broadcast_announce`. |
+| `meho_broadcast_recent` | yes | Default, named `broadcast_recent`. |
+| `meho_broadcast_watch` | yes | Default, named `broadcast_watch`. |
+| `query_topology` | yes | Opt-in. |
+| `search_memory` | yes | Opt-in. |
+| `search_knowledge` | yes | Opt-in. |
+| `add_to_memory` | yes | Opt-in. Writes with the agent's limits: only a `tenant_admin` writes `tenant` scope, and a direct run narrows a `tenant_admin` caller to `operator`. |
+| `add_to_knowledge` | yes | Opt-in. Writes with the agent's limits: an `operator` changes only its own entries and cannot set `source_kind`. |
+| `list_doc_collections` | yes | Opt-in. Needs the docs add-on. |
+| `search_docs` | yes | Opt-in. Needs the docs add-on. |
+| `read_docs` | yes | Opt-in. Needs the docs add-on. |
+| `ask_docs` | no | It makes its own model call to write the answer. That call does not use the run's model setting, so a run on our own model server would still send text to another model provider. Its cost is also not counted in the run's budget. A hosted agent uses `search_docs` and `read_docs` and writes the answer itself. |
+| `meho_runbook_start` | no | Each runbook step must be confirmed by a person. An agent loop cannot do that for them (#2077). A run whose prompt asks to run a runbook is refused at start. |
+| `meho_runbook_next` | no | Same reason as `meho_runbook_start`: it confirms or answers a step, and only a person may do that. |
+| `meho_runbook_abort` | no | Ends a runbook run. A hosted agent cannot start one, and stopping a person's run is their decision. |
+| `meho_runbook_list_runs` | no | Lists runbook runs. Useful only with the run tools above, which a hosted agent does not have. |
+| `meho_runbook_list_templates` | no | A hosted agent cannot run a runbook. With the steps in front of it, a model may do them one by one through `call_operation` and skip the confirm a person gives at each step. |
+| `meho_runbook_show_template` | no | Same reason as `meho_runbook_list_templates`. |
+
+Tools that come with a paired add-on (for example the automation add-on) are
+not part of the 26 and are not in the hosted catalog.
+
+The hosted run also has two tools MCP does not: `read_context_resource`
+(reads a Memory, knowledge or convention URI; MCP clients use
+`resources/read`) and `invoke_agent` (starts a child run).
+
+How the five added tools are wired (`agent/toolset_discovery.py`):
+
+- `build_write_meta_tools` and `build_docs_meta_tools` use the same `_bridge`
+  and `_governed_handler` as the tools above. So the MCP handler, the MCP
+  wire schema, the role floor, the capability, and the input schema check
+  are the same code as on MCP. `MetaToolSpec.required_capability` carries the
+  capability; `resolve_agent_toolset` leaves a tool out with the reason
+  `capability_missing` when the tenant does not have it.
+- A docs backend that is down (`CorpusUnavailable`) or a collection that is
+  not ready yet (`CollectionNotReadyError`) goes back to the model as a
+  failed tool result (`ToolFailed`). On MCP it is a retryable internal error;
+  in a hosted run any other exception would end the run. The text for a
+  backend that is down is fixed, so it never names the backend.
+- The hosted descriptions add one sentence to `add_to_knowledge` and
+  `search_docs`: there is no `resources/read`, so use `read_context_resource`
+  or `read_docs`.
+- Each call writes the agent tool call row, with the MCP tool's `op_class`
+  (`write` for the two add tools).
+
+Known gap: the delivery receipt lists a tool the role may not use
+(`role_below_floor`), but not a docs tool left out for `capability_missing`.
+The `agent_toolset_resolved` log line shows both.
 
 ### Audit of agent tool calls (#4234)
 

@@ -36,6 +36,8 @@ or on again, and a second person must approve each call. #3965 adds an
 optional `descr` to `pfsense.gateway.add` and `pfsense.route.static.add`, and
 the read `pfsense.diag.ping`: a short ping that runs on the firewall, from
 one of the firewall's own addresses, to prove that a route carries traffic.
+#4131 puts the firewall's subnets and active DHCP leases on the topology map
+(see "Topology map" below).
 
 Source: `backend/src/meho_backplane/connectors/pfsense/`.
 
@@ -921,6 +923,45 @@ packets take, without the user's own client.
 FreeBSD `ping(8)` (pfSense 2.7 runs FreeBSD 14) accepts `-4` / `-6`, `-c`,
 `-n`, `-S`, `-t` and `-W` for IPv4 and IPv6 alike, and exits 0 (a reply came
 back), 2 (no reply) or another value (an error).
+
+## Topology map (`discover_topology`, #4131)
+
+`PfSenseConnector.discover_topology` fills the topology map from two reads
+the connector already has. Code: `connectors/pfsense/_topology.py`.
+
+| Map entry | Comes from | Name | Edge |
+|---|---|---|---|
+| `target` node: the firewall | the target | target name | — |
+| `network` node: one per IPv4 subnet the firewall has an address in | `pfsense.interface.list` | the subnet, for example `<subnet>/24` | `network` `routes-through` the firewall |
+| `host` node: one per **active** DHCP lease | `pfsense.dhcp.leases` | the lease's IP address | `host` `belongs-to` the subnet that holds the address; a lease outside every known subnet `routes-through` the firewall |
+
+- **Source and time.** Every node and edge has a `source` property: the
+  operation it came from. The time MEHO last saw an entry is the row's
+  `last_seen`. A `network` node lists its `interfaces` (device name, the
+  firewall's address, MAC address, link status). A `host` node has
+  `address`, `mac`, `hostname`, `binding_state`, and the lease's own times
+  `lease_starts` and `lease_ends` (ISO 8601, UTC, or `never`).
+- **Expired leases.** Only leases with `binding_state` `active` are added.
+  The lease parser already reports an active lease whose end time has passed
+  as `expired`. So when a lease expires, the next refresh leaves it out, and
+  the refresh service marks its `host` node as no longer seen
+  (`last_seen` empty).
+- **A failed read changes nothing.** When either read fails (the command
+  exits with an error and prints nothing), `discover_topology` raises
+  `PfSenseTopologyReadError`, and SSH errors pass through. The refresh then
+  stops before it writes anything. It never treats a failed read as an empty
+  list, which would mark every entry as no longer seen. A firewall whose DHCP
+  server never ran has no lease file, so its refresh fails the same way.
+- **Left out:** loopback addresses, single-address (`/32`) entries such as
+  virtual IPs, interfaces without an IPv4 address, and IPv6 (`ifconfig`
+  gives no IPv6 prefix length in the parsed rows, and the lease file holds
+  only DHCPv4 leases).
+- **Scheduled refresh.** The SSH key is read under the caller's identity. The
+  scheduled refresh has no person's token, so a target whose key is in Vault
+  is updated only by `meho topology refresh <target>` (see
+  `docs/codebase/topology.md`, "Scheduler").
+
+Tests: `backend/tests/test_connectors_pfsense_topology.py`.
 
 ## Known issues
 

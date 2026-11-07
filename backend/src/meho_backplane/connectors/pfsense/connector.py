@@ -78,6 +78,7 @@ from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
     ProbeResult,
+    TopologyHints,
 )
 
 __all__ = ["PfSenseConnector"]
@@ -730,6 +731,40 @@ class PfSenseConnector(SshConnector):
         )
 
         return await _pfsense_dhcp_leases(self, target, params, operator)
+
+    async def discover_topology(
+        self,
+        target: Target,
+        *,
+        operator: Operator | None = None,
+    ) -> TopologyHints:
+        """Return the firewall's subnets and active DHCP leases for the map (#4131).
+
+        Runs ``pfsense.interface.list`` and ``pfsense.dhcp.leases`` and
+        builds the map entries with
+        :func:`~meho_backplane.connectors.pfsense._topology.build_topology_hints`.
+        A failed read raises
+        :class:`~meho_backplane.connectors.pfsense._topology.PfSenseTopologyReadError`,
+        so the refresh changes nothing instead of removing every entry.
+
+        ``operator`` is keyword-only: the refresh service passes it when the
+        method accepts it (the same seam the Kubernetes connector uses). It
+        reaches the SSH login, which reads the target's key under the
+        operator's identity.
+        """
+        from meho_backplane.connectors.pfsense._topology import (
+            INTERFACE_SOURCE,
+            LEASE_SOURCE,
+            build_topology_hints,
+            rows_or_raise,
+        )
+
+        name = str(getattr(target, "name", target))
+        interfaces = rows_or_raise(
+            INTERFACE_SOURCE, name, await self.interface_list(target, {}, operator)
+        )
+        leases = rows_or_raise(LEASE_SOURCE, name, await self.dhcp_leases(target, {}, operator))
+        return build_topology_hints(name, interfaces, leases)
 
     async def user_list(
         self,

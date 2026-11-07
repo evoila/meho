@@ -23,8 +23,8 @@ operator (or an agent, before recommending a destructive op) can ask
 - **`Connector.discover_topology(target) -> TopologyHints`** — the
   per-connector probe hook on the connector ABC
   (`backend/src/meho_backplane/connectors/base.py`). The base class
-  returns an empty `TopologyHints`; in this repository only the
-  Kubernetes connector overrides it (see
+  returns an empty `TopologyHints`; in this repository the
+  Kubernetes and pfSense connectors override it (see
   [Curated-until-populator-covers policy](#curated-until-populator-covers-policy)). `TopologyHints` / `NodeHint` / `EdgeHint` are frozen
   Pydantic v2 models in
   `backend/src/meho_backplane/connectors/schemas.py`.
@@ -205,12 +205,15 @@ rules below, and the CLI walkthrough live in
 
 The auto/curated split assumes **populator coverage**: an
 auto-discoverable kind is left to the probes only where a populator
-actually emits it. v0.2 auto-discovery is **Kubernetes-only** — the
+actually emits it. In this repository auto-discovery covers only
+Kubernetes and pfSense — the
 base connector's `discover_topology` is a no-op
 ([`connectors/base.py`](../../backend/src/meho_backplane/connectors/base.py))
-and only the Kubernetes connector overrides it
+and only the Kubernetes connector
 ([`connectors/kubernetes/connector.py`](../../backend/src/meho_backplane/connectors/kubernetes/connector.py))
-— so for a non-k8s pair (a virtualization-management appliance
+and the pfSense connector (subnets and DHCP leases,
+[`connectors/pfsense/_topology.py`](../../backend/src/meho_backplane/connectors/pfsense/_topology.py))
+override it — so for a non-k8s pair (a virtualization-management appliance
 `runs-on` its host cluster, a workload `runs-on` a hypervisor) no probe
 ever emits `runs-on` / `mounts` / `routes-through` / `belongs-to`.
 

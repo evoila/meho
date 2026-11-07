@@ -523,21 +523,12 @@ An install made before the console admin existed has no console admin,
 and the bootstrap Job cannot make one: the temporary first-start account
 was removed on the first run, and `meho-admin` cannot make users in realm
 `master`. The Job does not fail. It says in its log that there is no
-console admin and points here. Make one once by hand
-([Keycloak: recovering the admin account](https://www.keycloak.org/server/bootstrap-admin-recovery)):
+console admin and points here. Make one once by hand:
 
 1. Make a temporary admin in realm `master`. Skip this if you already
-   have a `master` admin. In the running Keycloak pod, which already has
-   the database settings (port 9001, because the server uses 9000):
-
-    ```bash
-    kubectl -n <namespace> exec -it <release>-keycloak-0 -- \
-      /opt/keycloak/bin/kc.sh bootstrap-admin user \
-      --username temp-admin --http-management-port 9001
-    ```
-
-    It asks for a password. This starts a second Java process in the
-    pod, so the pod needs some spare memory.
+   have a `master` admin. Keycloak must be stopped for this, so follow
+   [Keycloak break-glass](keycloak-break-glass.md), steps 1 to 3. Then
+   come back here.
 
 2. With `exposeAdmin: true` (see above), open
    `https://<host>/auth/admin/master/console/` and log in as `temp-admin`.
@@ -565,6 +556,9 @@ console admin and points here. Make one once by hand
    `master` admin.
 
 Then log in as in [The console admin](#the-console-admin).
+
+Lost the login of every Keycloak admin? Follow
+[Keycloak break-glass](keycloak-break-glass.md).
 
 ## The MCP client (`meho-mcp`)
 

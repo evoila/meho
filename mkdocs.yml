@@ -63,6 +63,7 @@ nav:
       - The install trail: install/index.md
       - Credential backends: install/credential-backends.md
       - Keycloak realm setup: install/keycloak-realm.md
+      - "Keycloak break-glass: get admin access back": install/keycloak-break-glass.md
       - Company login with authentik: install/company-login-authentik.md
       - "OpenBao unseal key: who keeps what": install/openbao-unseal-key.md
       - Company login:

@@ -8,7 +8,17 @@
   "rememberMe": true,
   "ssoSessionIdleTimeoutRememberMe": 2592000,
   "ssoSessionMaxLifespanRememberMe": 2592000,
+  "eventsEnabled": true,
+  "eventsExpiration": 15552000,
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": false,
   "bruteForceProtected": true,
+  "permanentLockout": false,
+  "failureFactor": 5,
+  "waitIncrementSeconds": 60,
+  "maxFailureWaitSeconds": 600,
+  "maxDeltaTimeSeconds": 43200,
+  "accessTokenLifespan": 300,
   "ssoSessionIdleTimeout": 3600,
   "ssoSessionMaxLifespan": 36000,
   "offlineSessionMaxLifespanEnabled": true,
@@ -17,6 +27,7 @@
   "webAuthnPolicyPasswordlessUserVerificationRequirement": "required",
   "webAuthnPolicyPasswordlessResidentKey": "required",
   "attributes": {
+    "adminEventsExpiration": "15552000",
     "CreateDefaultClientScopes": "true"
   },
   "clientScopes": [

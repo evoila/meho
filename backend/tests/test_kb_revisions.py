@@ -154,6 +154,41 @@ async def test_metadata_change_alone_adds_a_revision_that_keeps_the_metadata() -
     assert stored[second.revision_id]["tag"] == "y"  # type: ignore[index]
 
 
+@pytest.mark.parametrize(
+    ("old_meta", "new_meta", "changed_key"),
+    [
+        pytest.param({"tag": "x"}, {"tag": "x", "note": None}, "note", id="key-added-with-null"),
+        pytest.param({"tag": "x", "note": None}, {"tag": "x"}, "note", id="key-removed-with-null"),
+        pytest.param({"flag": False}, {"flag": 0}, "flag", id="false-becomes-zero"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_small_metadata_change_adds_a_revision_and_makes_the_old_one_stale(
+    old_meta: dict[str, Any], new_meta: dict[str, Any], changed_key: str
+) -> None:
+    """A null key or a type change is a change: a later write from the old revision is refused."""
+    from meho_backplane.kb.stale_revision import KbStaleRevisionError
+
+    service = KbService()
+    tenant = uuid.uuid4()
+    first, _ = await service.create_entry(tenant, "small-change", "body", old_meta)
+    second, _ = await service.create_entry(
+        tenant, "small-change", "body", new_meta, expected_revision=first.revision_id
+    )
+    assert second.revision_id != first.revision_id
+    assert await _revision_count(first.id) == 2
+
+    with pytest.raises(KbStaleRevisionError) as info:
+        await service.create_entry(
+            tenant, "small-change", "body", old_meta, expected_revision=first.revision_id
+        )
+
+    assert info.value.detail.cause == "stale"
+    assert info.value.detail.current_revision_id == second.revision_id
+    assert info.value.detail.changed_metadata_keys == [changed_key]
+    assert await _revision_count(first.id) == 2
+
+
 @pytest.mark.asyncio
 async def test_overlapping_writes_keep_head_and_returned_revision_in_step() -> None:
     """An unchanged-body write that read the head before another write changed it.

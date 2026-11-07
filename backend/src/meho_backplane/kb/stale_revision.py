@@ -22,6 +22,7 @@ The body difference and the key names are stored text, so
 from __future__ import annotations
 
 import difflib
+import json
 import uuid
 from datetime import datetime
 from typing import Any, Final, Literal
@@ -126,13 +127,23 @@ def metadata_changed_keys(
 ) -> list[str] | None:
     """Return the sorted metadata keys whose value differs; ``None`` when *before* is unknown.
 
-    The provenance block and ``last_updated_by_sub`` are left out: they
+    A key counts as changed when it is added or removed, also with the
+    value ``null``, or when its JSON value differs. The JSON types are
+    kept apart: ``false`` is not ``0``, and ``"1"`` is not ``1``. The
+    provenance block and ``last_updated_by_sub`` are left out: they
     change on every write.
     """
     if before is None or after is None:
         return None
     keys = (set(before) | set(after)) - _VOLATILE_KEYS
-    return sorted(key for key in keys if before.get(key) != after.get(key))
+    return sorted(key for key in keys if _json_of(before, key) != _json_of(after, key))
+
+
+def _json_of(metadata: dict[str, Any], key: str) -> str | None:
+    """The canonical JSON text of one metadata value; ``None`` when the key is absent."""
+    if key not in metadata:
+        return None
+    return json.dumps(metadata[key], sort_keys=True, default=str)
 
 
 def _body_diff(before: str, after: str) -> tuple[str, bool]:

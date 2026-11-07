@@ -49,6 +49,18 @@ def test_changed_keys_are_unknown_when_the_read_revision_kept_no_metadata() -> N
     assert metadata_changed_keys(None, {"a": 1}) is None
 
 
+def test_changed_keys_see_a_key_added_or_removed_with_a_null_value() -> None:
+    assert metadata_changed_keys({"a": 1}, {"a": 1, "b": None}) == ["b"]
+    assert metadata_changed_keys({"a": 1, "b": None}, {"a": 1}) == ["b"]
+
+
+def test_changed_keys_keep_the_json_types_apart() -> None:
+    assert metadata_changed_keys({"flag": False}, {"flag": 0}) == ["flag"]
+    assert metadata_changed_keys({"n": 1}, {"n": "1"}) == ["n"]
+    assert metadata_changed_keys({"n": 1}, {"n": 1.0}) == ["n"]
+    assert metadata_changed_keys({"x": {"a": 1, "b": [False]}}, {"x": {"b": [False], "a": 1}}) == []
+
+
 @pytest.mark.asyncio
 async def test_the_body_difference_and_the_key_list_stay_inside_the_limits() -> None:
     service = KbService()

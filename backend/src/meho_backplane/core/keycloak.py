@@ -21,7 +21,10 @@ running realm up to date through the Admin REST API:
   limit of a long login) to a client that does not have them yet, and
   keeps a value that is there;
 * it makes the first admin and the second person with temporary passwords,
-  stored in ``<release>-core-first-login``;
+  stored in ``<release>-core-first-login``; their first login also sets an
+  authenticator code and shows recovery codes;
+* it turns on recovery codes in the realm
+  (:mod:`meho_backplane.core.keycloak_recovery`);
 * it makes the five role groups of every extra tenant in
   ``coreKeycloak.tenants`` (``MEHO-<tenant>-<Role>``); these carry only the
   ``meho_tenant`` attribute;
@@ -82,6 +85,7 @@ from meho_backplane.core.keycloak_api import (
     id_from,
 )
 from meho_backplane.core.keycloak_flows import OVERRIDES, ensure_flows, flow_overrides
+from meho_backplane.core.keycloak_recovery import ensure_recovery_codes
 from meho_backplane.core.secrets import (
     CoreSecretsError,
     KubernetesSecretStore,
@@ -157,6 +161,9 @@ CONSOLE_ADMIN_LEFT_OUT_ROLES = frozenset({"impersonation"})
 # The console admin sets a new password and an authenticator code at its first
 # login: realm ``master`` asks for no code by default.
 CONSOLE_ADMIN_ACTIONS = ("UPDATE_PASSWORD", "CONFIGURE_TOTP")
+# The two local accounts set a new password and an authenticator code at their
+# first login. An account that exists already keeps its actions.
+FIRST_LOGIN_ACTIONS = ("UPDATE_PASSWORD", "CONFIGURE_TOTP")
 # Keycloak keeps this prefix for the users behind service clients
 # (``service-account-meho-admin``); a person must not get one of those names.
 SERVICE_ACCOUNT_PREFIX = "service-account-"
@@ -667,8 +674,12 @@ async def _ensure_first_login(realm: _Realm, plan: Plan, store: SecretStore) -> 
     for key in ("admin_username", "approver_username"):
         _require_plain_user(data[key], where)
         _note_kept_name(plan.first_login_secret, data[key], fresh[key])
-    await realm.ensure_user(data["admin_username"], data["admin_password"], ADMIN_GROUPS)
-    await realm.ensure_user(data["approver_username"], data["approver_password"], APPROVER_GROUPS)
+    await realm.ensure_user(
+        data["admin_username"], data["admin_password"], ADMIN_GROUPS, FIRST_LOGIN_ACTIONS
+    )
+    await realm.ensure_user(
+        data["approver_username"], data["approver_password"], APPROVER_GROUPS, FIRST_LOGIN_ACTIONS
+    )
 
 
 async def _ensure_console_admin(
@@ -897,6 +908,7 @@ async def finish_realm(
         for group in tenant_groups(tenant):
             await realm.ensure_group(group, drop=OLD_ACCESS_ATTRIBUTES)
     flow_ids = await ensure_flows(admin, realm_file.get("authenticationFlows") or [])
+    await ensure_recovery_codes(admin)
     for want in realm_file.get("clients") or []:
         await realm.ensure_client(want, scope_ids, flow_ids)
     if plan.ci.enabled:

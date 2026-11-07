@@ -61,11 +61,27 @@ What is true after the Job ran:
 | Second person | `coreKeycloak.firstLogin.approverUsername` (default `approver`) | `MEHO-SA-Operators` | `tenant_role: operator` |
 
 Both get a 32-character password from the one alphabet `[A-Za-z0-9]`, stored
-as a temporary credential with the required action `UPDATE_PASSWORD`, so
-Keycloak forces a change at the first login. The realm's user profile also
-wants a first name, a last name and an email, so the first browser login
-asks for those too. Until both are done, a login without a browser (for
+as a temporary credential with the required actions `UPDATE_PASSWORD` and
+`CONFIGURE_TOTP`, so Keycloak forces a change at the first login and then
+asks the person to set up an authenticator app. The realm's user profile
+also wants a first name, a last name and an email, so the first browser
+login asks for those too. After the code app, the login shows twelve
+recovery codes once (see "Recovery codes" below). A later login asks for
+the code, or for one recovery code instead. Until both are done, a login without a browser (for
 example the password grant) is refused with "Account is not fully set up".
+
+**Recovery codes.** Keycloak reads the realm file only at its first start,
+so every run sets two realm settings through the Admin API
+(`core/keycloak_recovery.py`): the "Configure OTP" required action gets the
+option "Add recovery codes" (config key `add-recovery-codes`), and the step
+"Recovery Authentication Code Form" of the `browser` flow goes from Disabled
+to Alternative. Both need `manage-realm`: the first-start account has it;
+`meho-admin` has it only with the company login on. Without it the stage
+prints one line ("recovery codes: not set") and goes on. A run that finds
+both set changes nothing. An account that exists already keeps its required
+actions, so the code app is asked of new installs only. A test that logs in
+as one of these accounts without a browser must send the code too: keep the
+secret of the code app like a password and make the code from it.
 
 The Secret `<release>-core-first-login` holds `admin_username`,
 `admin_password`, `approver_username` and `approver_password`. The install

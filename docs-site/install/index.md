@@ -676,7 +676,9 @@ resulting token in your OS keyring.
 with temporary passwords: the first admin (`admin`) and a second person
 who can approve the admin's changes (`approver`). Both are in the
 Secret `meho-core-first-login`. Keycloak asks for a new password, a
-name and an email at the first login. Read the admin's login with:
+name and an email at the first login. Then it asks you to set up an
+authenticator app, and shows twelve recovery codes once. Save them: each
+works one time, instead of the code from the app. Read the admin's login with:
 
 ```bash
 kubectl -n meho get secret meho-core-first-login \

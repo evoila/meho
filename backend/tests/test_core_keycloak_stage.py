@@ -122,6 +122,23 @@ class FakeKeycloak:
         # Login flows by alias; each has its steps in ``executions``.
         self.flows: dict[str, dict[str, Any]] = {}
         self._add_flow({"alias": "browser", "providerId": "basic-flow", "topLevel": True})
+        # Keycloak's built-in browser flow: the recovery code step is off.
+        self._add_flow(
+            {"alias": "Browser - Conditional 2FA", "providerId": "basic-flow", "topLevel": False}
+        )
+        self._add_step("browser", None, "Browser - Conditional 2FA")
+        self._add_step("Browser - Conditional 2FA", "auth-otp-form", None)
+        self._add_step("Browser - Conditional 2FA", "auth-recovery-authn-code-form", None)
+        # The required action "Configure OTP", as Keycloak lists it.
+        self.totp_action: dict[str, Any] = {
+            "alias": "CONFIGURE_TOTP",
+            "name": "Configure OTP",
+            "providerId": "CONFIGURE_TOTP",
+            "enabled": True,
+            "defaultAction": False,
+            "priority": 10,
+            "config": {},
+        }
         # False: the account lacks manage-realm, so login flows answer 403.
         self.flow_rights = flow_rights
         # The n-th call to the login flow API answers HTTP 500 once: a run
@@ -261,6 +278,7 @@ class FakeKeycloak:
                 "clients": self.clients,
                 "users": self.users,
                 "flows": self.flows,
+                "totp_action": self.totp_action,
                 "master_users": self.master_users,
             }
         )
@@ -334,6 +352,10 @@ class FakeKeycloak:
             return Reply(200, [{"id": user["id"], "username": user["username"]}] if user else [])
         if path.startswith("/admin/realms/meho/authentication/") and not self.flow_rights:
             return Reply(403, {"error": "HTTP 403 Forbidden"})
+        if path == "/admin/realms/meho/authentication/required-actions/CONFIGURE_TOTP":
+            if not self.flow_rights:
+                return Reply(403, {"error": "HTTP 403 Forbidden"})
+            return Reply(200, copy.deepcopy(self.totp_action))
         if path == "/admin/realms/meho/authentication/flows":
             return Reply(
                 200,
@@ -455,6 +477,11 @@ class FakeKeycloak:
         raise AssertionError(f"unexpected POST {path}")
 
     def _put(self, path: str, body: Any, params: dict[str, str]) -> Reply:
+        if path == "/admin/realms/meho/authentication/required-actions/CONFIGURE_TOTP":
+            assert self.flow_rights
+            assert body["alias"] == "CONFIGURE_TOTP"
+            self.totp_action = copy.deepcopy(body)
+            return Reply(204, None)
         if match := re.fullmatch(r"/admin/realms/meho/groups/([^/]+)", path):
             group = self._group_by_id(match.group(1))
             assert group is not None
@@ -552,12 +579,13 @@ async def test_fresh_install_makes_people_sets_secrets_and_removes_the_first_sta
     assert admin["credentials"] == [
         {"type": "password", "value": secret["admin_password"], "temporary": True}
     ]
-    assert admin["requiredActions"] == ["UPDATE_PASSWORD"]
+    assert admin["requiredActions"] == ["UPDATE_PASSWORD", "CONFIGURE_TOTP"]
     assert admin["groups"] == ["MEHO-Admins", "MEHO-Platform-Admins"]
     approver = kc.users["approver"]
     assert approver["credentials"][0]["value"] == secret["approver_password"]
     assert approver["credentials"][0]["temporary"] is True
     assert approver["groups"] == ["MEHO-SA-Operators"]
+    assert approver["requiredActions"] == ["UPDATE_PASSWORD", "CONFIGURE_TOTP"]
 
     assert kc.clients["meho-admin"]["secret"] == _ENV[ADMIN_SECRET_ENV]
     assert kc.clients["meho-web"]["secret"] == _ENV["MEHO_REALM_WEB_CLIENT_SECRET"]
@@ -652,6 +680,89 @@ async def test_upgrade_adds_what_a_newer_realm_file_brings(
     )
     assert "client meho-web: kept (secret set)" in out
     assert "user admin: kept" in out
+
+
+_RECOVERY = "auth-recovery-authn-code-form"
+
+
+def _recovery_requirement(kc: FakeKeycloak) -> str:
+    return next(s for s in kc.flow_steps("browser") if s.get("providerId") == _RECOVERY)[
+        "requirement"
+    ]
+
+
+async def test_recovery_codes_are_turned_on_in_the_realm(
+    realm_file: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    kc = _fresh()
+    assert kc.totp_action["config"] == {}
+    assert _recovery_requirement(kc) == "DISABLED"
+
+    await finish_realm(_plan(realm_file), _ENV, kc, FakeStore())
+
+    assert kc.totp_action["config"] == {"add-recovery-codes": "true"}
+    assert kc.totp_action["enabled"] is True, "the rest of the action is kept"
+    assert _recovery_requirement(kc) == "ALTERNATIVE"
+    assert "recovery codes: set" in capfd.readouterr().out
+
+
+async def test_second_run_leaves_the_recovery_settings_alone(
+    realm_file: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    kc = _fresh()
+    plan = _plan(realm_file)
+    await finish_realm(plan, _ENV, kc, FakeStore())
+    kc.calls.clear()
+    capfd.readouterr()
+
+    await finish_realm(plan, _ENV, kc, FakeStore())
+
+    assert not [c for c in kc.calls if c[0] == "PUT" and "required-actions" in c[1]]
+    assert "recovery codes: kept" in capfd.readouterr().out
+
+
+async def test_a_recovery_option_set_with_other_options_keeps_them(realm_file: Path) -> None:
+    kc = _fresh()
+    kc.totp_action["config"] = {"max_auth_age": "300"}
+
+    await finish_realm(_plan(realm_file), _ENV, kc, FakeStore())
+
+    assert kc.totp_action["config"] == {"max_auth_age": "300", "add-recovery-codes": "true"}
+
+
+async def test_without_the_right_to_change_login_settings_recovery_codes_are_skipped(
+    realm_file: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    kc = _fresh(flow_rights=False)
+
+    await finish_realm(_plan(realm_file), _ENV, kc, FakeStore())
+
+    assert kc.totp_action["config"] == {}
+    assert _recovery_requirement(kc) == "DISABLED"
+    assert "recovery codes: not set (no right to change login settings)" in capfd.readouterr().out
+
+
+async def test_a_browser_flow_without_the_recovery_step_is_reported(
+    realm_file: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    kc = _fresh()
+    kc.flows["Browser - Conditional 2FA"]["executions"].pop()
+
+    await finish_realm(_plan(realm_file), _ENV, kc, FakeStore())
+
+    assert "recovery codes: not set (the browser flow has no recovery code step)" in (
+        capfd.readouterr().out
+    )
+
+
+async def test_an_existing_local_account_keeps_its_required_actions(realm_file: Path) -> None:
+    kc = _fresh()
+    kc.users["admin"] = {"id": "u1", "username": "admin", "requiredActions": []}
+
+    await finish_realm(_plan(realm_file), _ENV, kc, FakeStore())
+
+    assert kc.users["admin"]["requiredActions"] == []
+    assert kc.users["approver"]["requiredActions"] == ["UPDATE_PASSWORD", "CONFIGURE_TOTP"]
 
 
 _APPROVAL_FLOW = "meho approval sign-in"
@@ -802,7 +913,14 @@ async def test_a_login_flow_with_other_steps_is_kept_and_not_bound(
     ) in out
     assert "authenticationFlowBindingOverrides" not in kc.clients["meho-cli-approve"]
     assert _steps(kc, _APPROVAL_FLOW) == [*_APPROVAL_STEPS, ("auth-cookie", "ALTERNATIVE", 0)]
-    assert not [c for c in kc.calls if c[0] in {"POST", "PUT"} and "authentication" in c[1]]
+    assert not [
+        c
+        for c in kc.calls
+        if c[0] in {"POST", "PUT"}
+        and "authentication" in c[1]
+        and "browser" not in c[1]
+        and "required-actions" not in c[1]
+    ]
 
 
 async def test_upgrade_sets_the_token_settings_of_an_existing_approval_client(

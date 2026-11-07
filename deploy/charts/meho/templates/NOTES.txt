@@ -43,9 +43,12 @@ Built-in PostgreSQL (corePostgres):
 Built-in OpenBao (coreVault), the password safe:
   - StatefulSet / {{ include "coreVault.fullname" . }}; pods reach it at http://{{ include "coreVault.fullname" . }}:{{ .Values.coreVault.service.port }}.
   - It unseals itself after every restart while the Secret {{ $unseal }} exists.
-    Print the unseal key:
-      kubectl -n {{ .Release.Namespace }} get secret {{ $unseal }} -o jsonpath='{.data.key}' | base64 -d
-    Copy this to your key store now; for a keyholder at every restart, delete the Secret and restart OpenBao:
+    Copy the unseal key to the clipboard (use the line for your desktop), then paste it into your key store now:
+      macOS:           kubectl -n {{ .Release.Namespace }} get secret {{ $unseal }} -o jsonpath='{.data.key}' | base64 -d | pbcopy
+      Linux (X11):     kubectl -n {{ .Release.Namespace }} get secret {{ $unseal }} -o jsonpath='{.data.key}' | base64 -d | xclip -selection clipboard
+      Linux (Wayland): kubectl -n {{ .Release.Namespace }} get secret {{ $unseal }} -o jsonpath='{.data.key}' | base64 -d | wl-copy
+    Do not run it without the last pipe: the key would show on screen. Clear the clipboard after you save it.
+    For a keyholder at every restart, delete the Secret and restart OpenBao:
       kubectl -n {{ .Release.Namespace }} delete secret {{ $unseal }}
       kubectl -n {{ .Release.Namespace }} rollout restart statefulset {{ include "coreVault.fullname" . }}
     In keyholder mode, unseal by hand with:
@@ -110,9 +113,16 @@ First login (built-in Keycloak):
   (groups MEHO-Admins and MEHO-Platform-Admins, with platform_admin) and a
   second person who can approve (group MEHO-SA-Operators). The Secret
   {{ printf "%s-core-first-login" .Release.Name }} holds their user names and passwords; it keeps the names
-  from the first install even when coreKeycloak.firstLogin changes later. Read one with:
-       kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-first-login" .Release.Name }} -o jsonpath='{.data.admin_username}' | base64 -d
+  from the first install even when coreKeycloak.firstLogin changes later.
   (keys: admin_username, admin_password, approver_username, approver_password)
+  Read a user name with:
+       kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-first-login" .Release.Name }} -o jsonpath='{.data.admin_username}' | base64 -d
+  Copy a password to the clipboard (use the line for your desktop):
+       macOS:           kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-first-login" .Release.Name }} -o jsonpath='{.data.admin_password}' | base64 -d | pbcopy
+       Linux (X11):     kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-first-login" .Release.Name }} -o jsonpath='{.data.admin_password}' | base64 -d | xclip -selection clipboard
+       Linux (Wayland): kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-first-login" .Release.Name }} -o jsonpath='{.data.admin_password}' | base64 -d | wl-copy
+  Do not run a password command without the last pipe: the password would show on screen.
+  Clear the clipboard after the first login. For the second person, use the key approver_password.
   Then log in with `meho login https://{{ .Values.coreKeycloak.hostname }}` or open https://{{ .Values.coreKeycloak.hostname }}/ui/.
   Keycloak asks for a new password, a name and an email at the first login.
 {{- if .Values.coreKeycloak.companyLogin.enabled }}
@@ -135,6 +145,8 @@ Keycloak admin console (realm meho):
   password and an authenticator code:
        kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-console-admin" .Release.Name }} -o jsonpath='{.data.username}' | base64 -d
   (keys: username, password)
+  Copy the password to the clipboard the same way, with the key password, for example on macOS:
+       kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-console-admin" .Release.Name }} -o jsonpath='{.data.password}' | base64 -d | pbcopy
   The console is https://{{ .Values.coreKeycloak.hostname }}/auth/admin/master/console/#/meho
 {{- if .Values.coreKeycloak.ingress.exposeAdmin }}
   (routed: coreKeycloak.ingress.exposeAdmin=true).

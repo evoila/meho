@@ -333,6 +333,27 @@ def test_notes_name_the_first_login_secret_and_the_command_but_no_value() -> Non
     assert "{{- if .Values.coreKeycloak.enabled }}" in notes[: notes.index("First login")]
 
 
+_SECRET_KEY_RE = re.compile(r"\.data\.(?!(?:admin_|approver_)?username\})")
+_CLIPBOARD_TOOLS = ("pbcopy", "xclip -selection clipboard", "wl-copy")
+
+
+def test_notes_send_secret_values_to_the_clipboard_not_the_screen() -> None:
+    notes = (_CHART_DIR / "templates" / "NOTES.txt").read_text(encoding="utf-8")
+    secret_lines = [
+        line.strip()
+        for line in notes.splitlines()
+        if "base64 -d" in line and _SECRET_KEY_RE.search(line)
+    ]
+    assert len(secret_lines) >= 7
+    for line in secret_lines:
+        assert line.endswith(_CLIPBOARD_TOOLS), line
+    for tool in _CLIPBOARD_TOOLS:
+        assert any(line.endswith(tool) for line in secret_lines)
+    assert "{.data.admin_password}" in notes
+    assert "{.data.key}" in notes
+    assert "without the last pipe" in notes
+
+
 def test_notes_name_the_console_admin_secret_and_console() -> None:
     notes = (_CHART_DIR / "templates" / "NOTES.txt").read_text(encoding="utf-8")
     block = notes[notes.index("Keycloak admin console (realm meho)") :]

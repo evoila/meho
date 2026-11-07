@@ -491,9 +491,13 @@ they do not come from realm `meho`.
     ```bash
     kubectl -n <namespace> get secret <release>-core-console-admin \
       -o jsonpath='{.data.username}' | base64 -d; echo
+    # macOS; on Linux use `xclip -selection clipboard` or `wl-copy` instead of `pbcopy`
     kubectl -n <namespace> get secret <release>-core-console-admin \
-      -o jsonpath='{.data.password}' | base64 -d; echo
+      -o jsonpath='{.data.password}' | base64 -d | pbcopy
     ```
+
+    The password goes to the clipboard so it does not show on screen. Clear
+    the clipboard after the first login.
 
 3. Open `https://<host>/auth/admin/master/console/#/meho` and log in
    with that name. Keycloak asks for a new password, a name and an

@@ -38,11 +38,7 @@ def _time_property(what: str) -> dict[str, Any]:
     return {
         "type": ["string", "null"],
         "minLength": 1,
-        "description": (
-            f"{what} An ISO 8601 date or time, for example '2026-08-01' "
-            "(a date means midnight UTC; a time without an offset is UTC). "
-            "Inclusive."
-        ),
+        "description": f"{what} ISO 8601 date or time, inclusive.",
     }
 
 
@@ -87,7 +83,8 @@ FILTER_TOOL_TEXT: Final[str] = (
     "`version` and `status` match the lesson header exactly, `tags` "
     "needs every listed tag, `confirmed_after`/`confirmed_before` limit "
     "the header's `confirmed_at` (an entry without it is left out), and "
-    "`updated_after`/`updated_before` limit the time of the last write. "
+    "`updated_after`/`updated_before` limit the time of the last write "
+    "(ISO 8601; a date alone is midnight UTC, no offset means UTC). "
     "Example: confirmed lessons for one version from the last 90 days = "
     "`status='confirmed'`, `product`, `version`, `confirmed_after=<date "
     "90 days ago>`. "

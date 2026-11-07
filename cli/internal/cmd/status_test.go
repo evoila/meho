@@ -609,3 +609,119 @@ func TestMain(m *testing.M) {
 	_ = os.Unsetenv("XDG_CONFIG_HOME")
 	os.Exit(m.Run())
 }
+
+// firstStartServer serves GET /first-start and records whether any
+// Authorization header came in.
+func firstStartServer(t *testing.T, body []byte, status int) (string, *[]string) {
+	t.Helper()
+	var auths []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/first-start", func(w http.ResponseWriter, r *http.Request) {
+		auths = append(auths, r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv.URL, &auths
+}
+
+func TestStatus_FirstStart_AllGreen(t *testing.T) {
+	withTempXDG(t)
+	url, auths := firstStartServer(t, mustJSON(map[string]any{
+		"ok": true,
+		"checks": []map[string]any{
+			{"name": "dns", "status": "ok", "message": "The host name meho.example.com resolves."},
+			{"name": "certificate", "status": "skipped", "message": "BACKPLANE_URL uses http."},
+		},
+	}), http.StatusOK)
+
+	stdout, stderr, err := runStatus(t, "--first-start", "--backplane", url)
+	if err != nil {
+		t.Fatalf("unexpected error: %v\nstderr:\n%s", err, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"GREEN   dns",
+		"The host name meho.example.com resolves.",
+		"SKIPPED certificate",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in stdout:\n%s", want, out)
+		}
+	}
+	if len(*auths) != 1 || (*auths)[0] != "" {
+		t.Errorf("first-start must be called once without a token, got %v", *auths)
+	}
+}
+
+func TestStatus_FirstStart_RedLineExitsSix(t *testing.T) {
+	withTempXDG(t)
+	url, _ := firstStartServer(t, mustJSON(map[string]any{
+		"ok": false,
+		"checks": []map[string]any{
+			{"name": "clock", "status": "fail", "message": "The clock of MEHO is 300 seconds away from the clock of Keycloak."},
+		},
+	}), http.StatusOK)
+
+	stdout, _, err := runStatus(t, "--first-start", "--backplane", url)
+	var coder output.ExitCoder
+	if !errors.As(err, &coder) || coder.ExitCode() != output.ExitFirstStartFailed {
+		t.Fatalf("want exit %d, got %v", output.ExitFirstStartFailed, err)
+	}
+	if !strings.Contains(stdout.String(), "RED     clock") {
+		t.Errorf("missing red clock line:\n%s", stdout.String())
+	}
+}
+
+func TestStatus_FirstStart_JSONIsTheSameList(t *testing.T) {
+	withTempXDG(t)
+	url, _ := firstStartServer(t, mustJSON(map[string]any{
+		"ok":     true,
+		"checks": []map[string]any{{"name": "dns", "status": "ok", "message": "fine"}},
+	}), http.StatusOK)
+
+	stdout, _, err := runStatus(t, "--first-start", "--json", "--backplane", url)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got firstStartList
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if !got.OK || len(got.Checks) != 1 || got.Checks[0].Name != "dns" {
+		t.Errorf("unexpected list: %+v", got)
+	}
+}
+
+func TestStatus_FirstStart_OldBackplaneAndBadBody(t *testing.T) {
+	withTempXDG(t)
+	for name, tc := range map[string]struct {
+		body   []byte
+		status int
+	}{
+		"not found": {[]byte(`{"detail":"Not Found"}`), http.StatusNotFound},
+		"bad body":  {[]byte(`not json`), http.StatusOK},
+	} {
+		url, _ := firstStartServer(t, tc.body, tc.status)
+		_, _, err := runStatus(t, "--first-start", "--backplane", url)
+		var coder output.ExitCoder
+		if !errors.As(err, &coder) || coder.ExitCode() != output.ExitUnexpected {
+			t.Errorf("%s: want exit %d, got %v", name, output.ExitUnexpected, err)
+		}
+	}
+}
+
+func TestStatus_FirstStart_UnreachableAndWatchConflict(t *testing.T) {
+	withTempXDG(t)
+	_, _, err := runStatus(t, "--first-start", "--backplane", "http://127.0.0.1:1")
+	var coder output.ExitCoder
+	if !errors.As(err, &coder) || coder.ExitCode() != output.ExitUnreachable {
+		t.Errorf("want exit %d, got %v", output.ExitUnreachable, err)
+	}
+	_, _, err = runStatus(t, "--first-start", "--watch", "--backplane", "http://127.0.0.1:1")
+	if !errors.As(err, &coder) || coder.ExitCode() != output.ExitUsage {
+		t.Errorf("want exit %d, got %v", output.ExitUsage, err)
+	}
+}

@@ -4798,6 +4798,7 @@ meho status [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--first-start` — show the first-start checks (DNS name, certificate, clock, reachability of the systems) as a red/green list; needs no login
 - `--json` — emit a single JSON document on stdout instead of the human summary
 - `--op-class` — filter --watch events by op_class (read, write, credential_read, audit_query)
 - `--principal` — filter --watch events by principal_sub (JWT subject claim)

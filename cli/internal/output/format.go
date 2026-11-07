@@ -78,6 +78,10 @@ const (
 	// ExitInsufficientRole (both are "tenant_admin must act");
 	// callers branch on the error code string, not the integer.
 	ExitInsufficientBudget = 5
+	// ExitFirstStartFailed indicates `meho status --first-start`
+	// got the list and at least one line is red. The fix is on the
+	// site (DNS, certificate, clock or a system), not in the CLI.
+	ExitFirstStartFailed = 6
 )
 
 // Error codes (the "error" field in the JSON error envelope). The
@@ -111,6 +115,9 @@ const (
 	// splits an entry. Surfaced by `meho conventions list` per
 	// G7.1-T7 #1094.
 	ErrCodeInsufficientBudget = "insufficient_budget"
+	// ErrCodeFirstStartFailed pairs with ExitFirstStartFailed. At
+	// least one line of the first-start list is red.
+	ErrCodeFirstStartFailed = "first_start_failed"
 )
 
 // StructuredError is the error shape produced by every meho

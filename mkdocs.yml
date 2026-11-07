@@ -72,6 +72,7 @@ nav:
           - Entra ID: install/login/entra-id.md
           - Your own Keycloak: install/login/customer-keycloak.md
       - TLS and ingress: install/tls-ingress.md
+      - First-start checks: install/first-start-checks.md
       - Upgrades: install/upgrades.md
       - Local kind quickstart: install/kind-quickstart.md
   - Connect clients:

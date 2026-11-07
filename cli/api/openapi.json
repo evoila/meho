@@ -52,6 +52,28 @@
         }
       }
     },
+    "/first-start": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "First Start",
+        "description": "The first-start list. No login: it shows the verdict lines only.",
+        "operationId": "first_start_first_start_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FirstStartResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/version": {
       "get": {
         "tags": [
@@ -23103,6 +23125,28 @@
         }
       }
     },
+    "/ui/first-start": {
+      "get": {
+        "tags": [
+          "ui-first-start"
+        ],
+        "summary": "Ui First Start",
+        "description": "``GET /ui/first-start``.",
+        "operationId": "ui_first_start_ui_first_start_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/vault/list": {
       "get": {
         "tags": [
@@ -31480,6 +31524,57 @@
         ],
         "title": "FingerprintResult",
         "description": "Connector fingerprint per consumer-needs L95."
+      },
+      "FirstStartLine": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "fail",
+              "skipped"
+            ],
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "status",
+          "message"
+        ],
+        "title": "FirstStartLine",
+        "description": "One line of the first-start list."
+      },
+      "FirstStartResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/FirstStartLine"
+            },
+            "type": "array",
+            "title": "Checks"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "checks"
+        ],
+        "title": "FirstStartResponse",
+        "description": "The whole list. ``ok`` is true when no line is ``fail``."
       },
       "ForkInfo": {
         "properties": {

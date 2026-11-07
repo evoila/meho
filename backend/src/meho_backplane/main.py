@@ -163,6 +163,7 @@ from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.docs_search.readiness_probe import docs_backends_readiness_probe
 from meho_backplane.events import start_event_drain, stop_event_drain
+from meho_backplane.first_start import router as first_start_router
 from meho_backplane.flight_recorder.reaper import (
     start_flight_recorder_reaper,
     stop_flight_recorder_reaper,
@@ -1014,6 +1015,7 @@ app.add_middleware(RequestBodyLimitMiddleware)
 app.add_exception_handler(StarletteHTTPException, ui_session_expired_exception_handler)
 
 app.include_router(health_router)
+app.include_router(first_start_router)
 app.include_router(version_router)
 app.include_router(api_v1_auth_config_router)
 app.include_router(api_v1_health_router)

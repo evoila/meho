@@ -12,8 +12,14 @@ Copyright (c) 2026 evoila Group
 > [`backend/src/meho_backplane/connectors/keycloak/`](../../backend/src/meho_backplane/connectors/keycloak/);
 > the engineering-facing companion is
 > [`docs/codebase/connectors-keycloak.md`](../codebase/connectors-keycloak.md).
-> This doc is the cookbook every RDC operator reads when inspecting or
-> auditing the managed Keycloak realm through `meho keycloak …`.
+> This doc is the cookbook for an operator who inspects or audits the
+> managed Keycloak realm through `meho keycloak …`.
+
+**Built-in or your own Keycloak.** The steps on this page are the same
+for both. MEHO registers no `keycloak` target by itself, also not for the
+built-in Keycloak (`coreKeycloak.enabled: true`, the chart default since
+0.45.0). To manage a realm with these operations, register a target as
+shown below. The realm of the built-in Keycloak is `meho`.
 
 ## What this surface is
 
@@ -47,8 +53,9 @@ scripts. The read ops:
 | `role` | `keycloak.role.users` | `GET .../roles/{role-name}/users` | read-only |
 | `group` | `keycloak.group.list` | `GET .../groups` (or `.../groups/{group-id}/children`) | read-only |
 | `group` | `keycloak.group.member.list` | `GET .../groups/{group-id}/members` | read-only |
+| `identity_provider` | `keycloak.identity_provider.list` | `GET .../identity-provider/instances` and the login flows | read-only |
 
-Ten read ops. All are `safety_level="safe"` and
+Eleven read ops. All are `safety_level="safe"` and
 `requires_approval=False`. The write ops (below) are `caution`,
 `dangerous` or `destructive`, and all are `requires_approval=True`.
 Every op dispatches through the same
@@ -70,6 +77,12 @@ takes the role **name**, from `role.list`.
 group when you pass `parent_id`. By default Keycloak leaves out the group
 attributes. Pass `brief=false` to see them (for example the `tenant_id`
 and `tenant_role` of a role group).
+
+`identity_provider.list` lists the outside logins of the managed realm
+(for example a company login over OIDC or SAML): alias, display name,
+type, enabled, hidden on the login page, and the login flows that send
+people straight to it. It never returns the provider's `config`, which
+holds the client secret.
 
 ### The write surface (G3.13-T4 #1406)
 
@@ -97,8 +110,13 @@ approves it through the queue.
 | `group_write` | `keycloak.group.member.add` | `PUT .../users/{user-id}/groups/{groupId}` | dangerous |
 | `group_write` | `keycloak.group.member.remove` | `DELETE .../users/{user-id}/groups/{groupId}` | dangerous |
 | `group_write` | `keycloak.group.delete` | `DELETE .../groups/{group-id}` | destructive |
+| `realm_write` | `keycloak.realm.delete` | `DELETE /admin/realms/{realm}` | destructive |
+| `user_write` | `keycloak.user.logout` | `POST .../users/{id}/logout` | caution |
+| `user_login_check` | `keycloak.user.check_login` | `POST /realms/{realm}/protocol/openid-connect/token` | caution |
+| `authflow_write` | `keycloak.authflow.ensure_approval_flow` | `.../authentication/flows` and `PUT .../clients/{id}` | caution |
+| `authflow_write` | `keycloak.authflow.ensure_passkey_code_skip` | `.../authentication/flows` and `PUT /admin/realms/{realm}` | caution |
 
-Sixteen write ops. The group column is the registered group key: use it
+Twenty-one write ops. The group column is the registered group key: use it
 as the `group` argument of `search_operations` (for example
 `group="realm_write"` finds `keycloak.realm.create`).
 
@@ -118,6 +136,25 @@ user to it, gives that user access to a tenant. This is the same risk as
   `group_id` or `group_name`, and the user by `user_id` or `username`.
   They are safe to run twice: adding a user who is already a member, or
   removing a user who is not a member, returns `unchanged=true`.
+
+The last five rows of the table:
+
+- `user.logout` ends every live session of one user, so their refresh
+  tokens stop working at once. It does not change the password and never
+  signs out other users. CLI: `meho keycloak user logout`.
+- `user.check_login` tries one login for one user, with a password read
+  from Vault (`password_secret_ref`, like `user.reset_password`). It
+  answers only `accepted`, `refused` or `error`, never the password or a
+  token, and ends the new session at once. A refused try counts toward
+  Keycloak's lockout for failed logins.
+- `authflow.ensure_approval_flow` adds the login flow `meho approval
+  sign-in` to a realm made before the chart's realm file had it, and
+  binds it to the client `meho-cli-approve`.
+- `authflow.ensure_passkey_code_skip` lets a passkey login skip the
+  one-time code on a realm made with a Keycloak older than 26.4. It
+  copies the `browser` flow as `browser with passkeys`, adds the step
+  and makes the copy the realm's browser flow.
+- `realm.delete` deletes a whole realm. See the next section.
 
 Three properties are load-bearing for correctness and safety:
 
@@ -147,11 +184,12 @@ Three properties are load-bearing for correctness and safety:
 #### Deletes need a preview and a second person's approval
 
 `keycloak.user.delete`, `keycloak.group.delete` and
-`keycloak.client.delete` remove one object each. They are on the
-`destructive` risk level, so they run differently from the other writes.
-MEHO always denies a delete to an agent. No grant can change that.
-Any other caller, for example a person or a service account, can ask
-for a delete. The request always waits until a second person approves it.
+`keycloak.client.delete` remove one object each. `keycloak.realm.delete`
+removes a whole realm, with every user, client, group and session in it.
+They are on the `destructive` risk level, so they run differently from
+the other writes. Every delete waits until a second person approves it,
+also when an agent asks for it. No grant lets a delete run without that
+approval.
 
 1. **Preview first.** Call `preview_operation` with the same params. It
    shows what will be deleted and returns a `preview_hash`. Nothing is
@@ -174,6 +212,10 @@ Other rules:
   `delete_subgroups=true`. Keycloak deletes the sub-groups with it.
 - It is safe to run twice: if the object is already gone, nothing is
   deleted and the result says `already_absent: true`.
+- `realm.delete` needs the realm name (`realm`); it never falls back to
+  the target's managed realm. MEHO refuses (`protected_realm`) the realm
+  `master`, the target's `admin_realm`, the target's `managed_realm`, and
+  the realm of MEHO's own login. Names are compared without case.
 
 `keycloak.idp.create` (identity-provider federation) is **deferred** —
 it is not exercised by the current bootstrap scripts (#1406), so it is
@@ -300,8 +342,8 @@ direct-access-grant client).
   `>=26.0,<27.0`.
 - **An admin credential stored in Vault.** A confidential service-account
   client (preferred) or an admin username/password (break-glass), stored
-  at the target's `secret_ref` path. For the RDC fleet the consumer path
-  is `secret/rdc-hetzner-dc/keycloak/admin`. The service-account client
+  at the target's `secret_ref` path (for example
+  `secret/keycloak/admin`). The service-account client
   needs the `realm-management` roles to read the managed realm (at
   minimum `view-realm`, `view-clients`, `view-users` for the read
   ops). See [credential split](#the-admin-vs-operator-credential-split-load-bearing).
@@ -318,20 +360,22 @@ A keycloak target row carries:
 
 | Field | Example | Notes |
 | --- | --- | --- |
-| `name` | `rdc-keycloak` | Slug used with `--target` |
+| `name` | `kc` | Slug used with `--target` |
 | `product` | `keycloak` | Must be exactly `keycloak` |
-| `host` | `keycloak.rdc-hetzner-dc.evba.lab` | Keycloak host |
+| `host` | `keycloak.example.com` | Keycloak host |
 | `port` | `443` | HTTPS port |
-| `secret_ref` | `rdc-hetzner-dc/keycloak/admin` | Vault KV-v2 path to the **admin** credential |
+| `secret_ref` | `keycloak/admin` | Vault KV-v2 path to the **admin** credential |
 | `auth_model` | `shared_service_account` | The only supported auth model (admin credential is a shared service account, not a per-operator identity) |
 | `preferred_impl_id` | `keycloak-admin` | G0.6 resolver tie-break override → pins the `keycloak-admin-26.x` connector |
 | `extras.admin_realm` | `master` | Realm the admin client authenticates against (default `master`) |
-| `extras.managed_realm` | `evba` | Realm the connector manages + fingerprints (default `evba`) |
+| `extras.managed_realm` | `meho` | Realm the connector manages + fingerprints |
 
 The two realm knobs live on `target.extras` (a free-form JSONB column) so
-they are target-configurable without a schema migration. Both fall back
-to their defaults (`master` / `evba`) when absent, so a target on the RDC
-fleet that uses those realms can omit `extras` entirely.
+they are target-configurable without a schema migration. `admin_realm`
+falls back to `master` when absent. Always set `managed_realm`: its
+fallback is a fixed realm name from early development, not `meho`
+(`DEFAULT_MANAGED_REALM` in
+[`session.py`](../../backend/src/meho_backplane/connectors/keycloak/session.py)).
 
 `auth_headers` rejects any `auth_model` other than
 `shared_service_account` (or `None` for pre-G0.3 targets) with a clear
@@ -341,16 +385,16 @@ fleet that uses those realms can omit `extras` entirely.
 
 ```yaml
 targets:
-  - name: rdc-keycloak
+  - name: kc
     product: keycloak
-    host: keycloak.rdc-hetzner-dc.evba.lab
+    host: keycloak.example.com
     port: 443
-    secret_ref: rdc-hetzner-dc/keycloak/admin
+    secret_ref: keycloak/admin
     auth_model: shared_service_account
     preferred_impl_id: keycloak-admin
     extras:
       admin_realm: master
-      managed_realm: evba
+      managed_realm: meho
 ```
 
 Register with:
@@ -362,7 +406,7 @@ $ meho targets import targets.yaml
 Verify with:
 
 ```console
-$ meho targets probe rdc-keycloak
+$ meho targets probe kc
 ```
 
 A green probe confirms: the admin credential reads out of Vault, the
@@ -379,36 +423,36 @@ server version from `GET /admin/serverinfo` (`systemInfo.version`).
 
 ```console
 # Verify the target is reachable + admin credentials work
-$ meho targets probe rdc-keycloak
+$ meho targets probe kc
 
 # Read the managed realm's top-level config
-$ meho keycloak realm get --target rdc-keycloak
+$ meho keycloak realm get --target kc
 
 # List clients in the realm
-$ meho keycloak client list --target rdc-keycloak
+$ meho keycloak client list --target kc
 
 # Filter to one client by its human clientId
-$ meho keycloak client list --target rdc-keycloak --client-id meho-backplane
+$ meho keycloak client list --target kc --client-id meho-backplane
 
 # Fetch one client's full config by its internal UUID
-$ meho keycloak client get --target rdc-keycloak --id 11111111-1111-1111-1111-111111111111
+$ meho keycloak client get --target kc --id 11111111-1111-1111-1111-111111111111
 
 # List client scopes
-$ meho keycloak client-scope list --target rdc-keycloak
+$ meho keycloak client-scope list --target kc
 
 # List users (credentials never surface)
-$ meho keycloak user list --target rdc-keycloak --username operator-a
+$ meho keycloak user list --target kc --username operator-a
 
 # Read a user's realm + client role mappings by internal UUID
-$ meho keycloak role-mapping get --target rdc-keycloak --id 22222222-2222-2222-2222-222222222222
+$ meho keycloak role-mapping get --target kc --id 22222222-2222-2222-2222-222222222222
 
 # List groups with their attributes, then the members of one group
 $ meho keycloak group list --target kc --attributes
 $ meho keycloak group member list --target kc --id 33333333-3333-3333-3333-333333333333
 
 # JSON output for piping to jq
-$ meho keycloak client list --target rdc-keycloak --json | jq '.result.rows[].id'
-$ meho keycloak realm get --target rdc-keycloak --json | jq '.result.realm.sslRequired'
+$ meho keycloak client list --target kc --json | jq '.result.rows[].id'
+$ meho keycloak realm get --target kc --json | jq '.result.realm.sslRequired'
 ```
 
 ## Verb reference
@@ -527,7 +571,7 @@ reaches every Keycloak op via:
 ```
 search_operations(connector_id="keycloak-admin-26.x", query="realm client user role")
 call_operation(connector_id="keycloak-admin-26.x", op_id="keycloak.client.list",
-               target="rdc-keycloak", params={"client_id": "meho-backplane"})
+               target="kc", params={"client_id": "meho-backplane"})
 ```
 
 `search_operations(connector_id="keycloak", …)` surfaces the Keycloak
@@ -548,32 +592,32 @@ representation body from a JSON file via `--representation-file` / `-f`.
 
 ```console
 # Create a realm (idempotent: re-running on an existing realm succeeds)
-$ meho keycloak realm create --target rdc-keycloak -f realm-evba.json
+$ meho keycloak realm create --target kc -f realm-meho.json
 
 # Update the managed realm's top-level config
-$ meho keycloak realm update --target rdc-keycloak -f realm-patch.json
+$ meho keycloak realm update --target kc -f realm-patch.json
 
 # Create a client; update one by clientId (resolved to its UUID)
-$ meho keycloak client create --target rdc-keycloak -f client-meho-web.json
-$ meho keycloak client update --target rdc-keycloak --client-id meho-web -f client-patch.json
+$ meho keycloak client create --target kc -f client-meho-web.json
+$ meho keycloak client update --target kc --client-id meho-web -f client-patch.json
 
 # Create a client scope
-$ meho keycloak client-scope create --target rdc-keycloak -f scope-roles.json
+$ meho keycloak client-scope create --target kc -f scope-roles.json
 
 # Add the tenant_id claim mapper to a client (by clientId)
-$ meho keycloak protocol-mapper create --target rdc-keycloak \
+$ meho keycloak protocol-mapper create --target kc \
     --client-id meho-web -f mapper-tenant-id.json
 
 # Create a user; the password is read from Vault, never passed inline
-$ meho keycloak user create --target rdc-keycloak -f user-operator-a.json \
-    --password-secret-ref rdc-hetzner-dc/keycloak/operator-a
+$ meho keycloak user create --target kc -f user-operator-a.json \
+    --password-secret-ref keycloak/operator-a
 
 # Reset a user's password from Vault (by username → UUID)
-$ meho keycloak user reset-password --target rdc-keycloak \
-    --username operator-a --password-secret-ref rdc-hetzner-dc/keycloak/operator-a
+$ meho keycloak user reset-password --target kc \
+    --username operator-a --password-secret-ref keycloak/operator-a
 
 # Grant a realm role to a user (privilege grant; --role is repeatable)
-$ meho keycloak role-mapping assign --target rdc-keycloak \
+$ meho keycloak role-mapping assign --target kc \
     --username operator-a --role tenant_admin
 
 # Create a role group with attributes (--attribute is repeatable;
@@ -590,6 +634,9 @@ $ meho keycloak group member add --target kc \
     --group-name role-tenant-2 --username operator-a
 $ meho keycloak group member remove --target kc \
     --group-name role-tenant-2 --username operator-a
+
+# End every live session of one user
+$ meho keycloak user logout --target kc --username operator-a
 ```
 
 `group update-attributes` finds the group by `--id` or `--name`.
@@ -602,7 +649,7 @@ returns `status=awaiting_approval` and parks the call in the approval
 queue. A human approves it through the queue; the approved write then
 runs against Keycloak.
 
-The three delete verbs work in two steps (see
+The four delete verbs work in two steps (see
 [Deletes need a preview and a second person's approval](#deletes-need-a-preview-and-a-second-persons-approval)):
 
 ```console
@@ -614,36 +661,40 @@ $ meho keycloak user delete --target kc --username event-guest
 $ meho keycloak user delete --target kc --username event-guest \
     --preview-hash <hash>
 
-# The same two steps for a group (--name) and a client (--client-id)
+# The same two steps for a group (--name), a client (--client-id)
+# and a whole realm (--realm)
 $ meho keycloak group delete --target kc --name event-team
 $ meho keycloak client delete --target kc --client-id event-app
+$ meho keycloak realm delete --target kc --realm event-realm
 ```
 
-Each delete verb also takes `--id <uuid>` instead of the name.
+The user, group and client delete verbs also take `--id <uuid>`
+instead of the name.
 `group delete` takes `--delete-subgroups` to delete a group that has
 sub-groups. Do not run the command again after the approval.
 
 ## Audit and broadcast
 
 Every `meho keycloak …` dispatch writes an audit row to the
-`operation_audit_log` table:
+`audit_log` table:
 
-- `connector_id = "keycloak-admin-26.x"`
-- `op_id` = the dispatched op (e.g. `keycloak.client.list`)
 - `target_id` = the resolved target row ID
-- `params_hash` = keyed hash of the input params, with secret-named values left out (for replay detection)
-- `status` = `ok` / `error` / `denied`
 - `duration_ms` = connector wall-clock time
+- in `payload`: `op_id` (e.g. `keycloak.client.list`),
+  `connector_product` / `connector_version` / `connector_impl_id`
+  (`keycloak` / `26.x` / `keycloak-admin`), `params_hash` (a keyed hash of
+  the input params, with secret-named values left out) and
+  `result_status`
 
-Broadcast events follow the standard envelope (CLAUDE.md §6 §7). The ten
+Broadcast events follow the standard envelope (CLAUDE.md §6 §7). The eleven
 read ops are `safety_level="safe"` and broadcast with `risk_level=LOW`
 unless the agent's policy engine overrides. The write ops broadcast under
 their mutation class — `keycloak.role_mapping.assign`, the create /
-update verbs, the group ops and the deletes as `write`, and the two
-password ops
-(`keycloak.user.create` / `keycloak.user.reset_password`) as
-`credential_write`, which collapses the broadcast to aggregate-only so no
-credential material reaches the feed.
+update verbs, the group ops, `keycloak.user.logout` and the deletes as
+`write`, and the three password ops
+(`keycloak.user.create` / `keycloak.user.reset_password` /
+`keycloak.user.check_login`) as `credential_write`, which collapses the
+broadcast to aggregate-only so no credential material reaches the feed.
 
 ## Troubleshooting
 
@@ -663,11 +714,11 @@ credential material reaches the feed.
 | --- | --- |
 | G3.13-T1 #1393 — `KeycloakConnector` skeleton + admin credential loader + fingerprint + dual registration | ✅ merged |
 | G3.13-T2 #1394 — 6 curated read ops (realm / client / client-scope / user / role-mapping), secret-redacted | ✅ merged |
-| G3.13-T3 #1395 — `meho keycloak …` CLI verbs (all 6 ops) | ✅ this PR |
-| MCP `search_operations` / `call_operation` dispatch reviewed | ✅ this PR (`test_connectors_keycloak_e2e.py`) |
+| G3.13-T3 #1395 — `meho keycloak …` CLI verbs (all 6 ops) | ✅ merged |
+| MCP `search_operations` / `call_operation` dispatch reviewed | ✅ merged (`test_connectors_keycloak_e2e.py`) |
 | respx recorded-fixture E2E for all 6 ops + admin-token refresh through dispatch | ✅ `test_connectors_keycloak_e2e.py` |
 | `docs/cross-repo/keycloak-onboarding.md` with admin-vs-operator split + deferred-write note | ✅ this document |
-| G3.13-T4 #1406 — approval-gated write ops (realm/client/scope/protocol-mapper/user/role-mapping) that retire the 5 bootstrap scripts | ✅ this PR (`idp.create` deferred — not exercised by the scripts) |
+| G3.13-T4 #1406 — approval-gated write ops (realm/client/scope/protocol-mapper/user/role-mapping) that retire the 5 bootstrap scripts | ✅ merged (`idp.create` deferred — not exercised by the scripts) |
 
 ## References
 

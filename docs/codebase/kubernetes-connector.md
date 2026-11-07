@@ -2,8 +2,9 @@
 
 ## Overview
 
-The Kubernetes connector ships read-only typed operations against any
-Kubernetes API server reachable from the backplane. It is identified by
+The Kubernetes connector ships typed operations against any Kubernetes
+API server reachable from the backplane: reads, plus writes and
+`k8s.exec` that wait for approval. It is identified by
 the registry-v2 triple `(product="k8s", version="1.x", impl_id="k8s")`
 (single-impl pattern, mirroring Vault -- the library name
 `kubernetes_asyncio` lives in the package layout + `pyproject.toml`
@@ -18,8 +19,7 @@ Operations register into the G0.6 `endpoint_descriptor` table via
 `POST /api/v1/operations/call`.
 
 The connector is the reference shape for every typed connector that
-follows (Vault is the other example today; bind9, pfSense, Holodeck
-copy this pattern in G3.x).
+follows (Vault, bind9 and pfSense use the same pattern).
 
 ## Key types
 
@@ -32,9 +32,8 @@ copy this pattern in G3.x).
   tenant-unique `(tenant_id, id)` tuple from the shared
   `target_cache_key` helper (`connectors/_shared/cache_key.py`). Keying
   on the target-row primary key — not `target.name` and not
-  `target.secret_ref` — is a cross-tenant isolation requirement
-  (security F04, #266): two targets in different tenants that share a
-  name *or* a Vault `secret_ref` must never collapse onto one cached
+  `target.secret_ref` — is a cross-tenant isolation requirement: two
+  targets in different tenants that share a name *or* a Vault `secret_ref` must never collapse onto one cached
   client, or the second tenant is served the first tenant's
   authenticated client without passing its own credential-store
   authorization. Both cache fast-paths also apply the
@@ -78,9 +77,9 @@ copy this pattern in G3.x).
   UUIDs, so it satisfies the Protocol structurally.
 
 * `ops_logs.py` (the `k8s.logs` handler)
-  -- contains the module-level `k8s_logs(connector, target, params)`
+  -- contains the module-level `k8s_logs(connector, target, operator, params)`
   function, JSON Schemas (`K8S_LOGS_PARAMETER_SCHEMA`,
-  `K8S_LOGS_RESPONSE_SCHEMA`), `LLM_INSTRUCTIONS` blob, and helpers
+  `K8S_LOGS_RESPONSE_SCHEMA`), the `K8S_LOGS_LLM_INSTRUCTIONS` blob, and helpers
   (`parse_duration`, `resolve_pod_and_container`,
   `truncate_lines_to_byte_cap`, the `PodNotFoundError` /
   `MultiContainerAmbiguityError` exception types).
@@ -123,7 +122,8 @@ copy this pattern in G3.x).
 4. The dispatcher imports `handler_ref` (via
    `importlib.import_module` + chained `getattr`), binds the unbound
    method against the registered `KubernetesConnector` instance, and
-   awaits it as `handler(target=target, params=params)`.
+   awaits it as `handler(operator=operator, target=target, params=params)`
+   (`operator` is passed when the handler takes it).
 5. Handler returns `dict[str, Any]`. The dispatcher's default
    [`JsonFluxReducer`](../architecture/jsonflux.md) (G0.6.1, #750)
    lands a small dict verbatim into `OperationResult.result`, or
@@ -137,10 +137,10 @@ copy this pattern in G3.x).
 1. Dispatcher validates `params` against `K8S_LOGS_PARAMETER_SCHEMA`
    (pod_name + namespace required; tail capped at 5000; since matches
    `^\s*\d+\s*[smhd]\s*$`; since_time / until_time are RFC 3339 times).
-2. `KubernetesConnector.logs(target, params)` delegates to
-   `ops_logs.k8s_logs(connector, target, params)`.
+2. `KubernetesConnector.logs(operator, target, params)` delegates to
+   `ops_logs.k8s_logs(connector, target, operator, params)`.
 3. `k8s_logs` resolves the `ApiClient` for the target via
-   `connector._get_api_client(target)` (cached on the tenant-unique
+   `connector._get_api_client(target, operator)` (cached on the tenant-unique
    `(tenant_id, id)` key) and builds a `client.CoreV1Api(api_client)`.
 4. `resolve_pod_and_container()` lists pods in the namespace, picks
    the exact match if present, falls back to prefix match. Multi-
@@ -218,7 +218,7 @@ window:
 * A long window still comes back behind a result handle, as any long
   `lines` list does.
 * Limit: Kubernetes keeps only part of a log. The node rotates old log
-  files away, and MEHO cannot read what Kubernetes no longer serves.
+  files away, and MEHO can read only what Kubernetes still serves.
 
 ## Dependencies
 
@@ -237,14 +237,13 @@ window:
 ## Known issues
 
 * **Pod resolver fetches the full namespace pod list** even when the
-  caller already has the exact pod name. G3.2-T3 (#323) ships the
-  paginated server-side resolver against `read_namespaced_pod` +
-  `field_selector`; `ops_logs.resolve_pod_and_container` switches
-  to that path once T3 lands.
+  caller already has the exact pod name:
+  `ops_logs.resolve_pod_and_container` calls `list_namespaced_pod` and
+  matches the name in MEHO.
 * **No log streaming.** v0.2 is non-streaming by design (MCP's
   `tools/call` envelope has no streaming shape in 2025-06-18; the
-  connector's `OperationResult` is single-response). Operators
-  following live logs continue using `kubectl-vcf.sh -f` until v0.2.next.
+  connector's `OperationResult` is single-response). To follow a live
+  log, use `kubectl logs -f` outside MEHO.
 * **A burst within one second is read again on every page.** The API
   server sends `sinceTime` to the node in whole seconds, so every
   page starts at the start of the second of `next_since_time`. The

@@ -436,6 +436,11 @@ from meho_backplane.operations.reducer import (
 from meho_backplane.operations.result_document import json_text_bytes
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.secondary_target_policy import approved_requester_sub
+from meho_backplane.operations.shutdown_drain import (
+    is_draining,
+    shutting_down_result,
+    track_operation,
+)
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
     apply_connector_boundary_redaction,
@@ -3596,7 +3601,59 @@ async def dispatch(
     floor), so the approved op would loop back into the queue and never
     execute. It is not part of the public agent/MCP/CLI surface; the
     gate is the only authorization path for an ordinary dispatch.
+
+    While the pod stops (#5024, :mod:`.shutdown_drain`), a new top-level
+    call is refused with ``meho_shutting_down`` before anything is sent.
+    A step of a running multi-step operation and an approved run whose
+    claim was already taken are not new work and go on. Every top-level
+    call is kept in the list of running calls, so the stopping pod can wait
+    for it and record it when it does not finish.
     """
+    if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
+        return await _dispatch_now(
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            target=target,
+            params=params,
+            _approved=_approved,
+            preview_hash=preview_hash,
+            idempotency_key=idempotency_key,
+        )
+    if is_draining() and not _approved:
+        _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
+        return shutting_down_result(op_id)
+    async with track_operation(
+        op_id=op_id,
+        connector_id=connector_id,
+        operator_sub=operator.sub,
+        tenant_id=operator.tenant_id,
+        approved_run=_approved,
+    ):
+        return await _dispatch_now(
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            target=target,
+            params=params,
+            _approved=_approved,
+            preview_hash=preview_hash,
+            idempotency_key=idempotency_key,
+        )
+
+
+async def _dispatch_now(
+    *,
+    operator: Operator,
+    connector_id: str,
+    op_id: str,
+    target: Any,
+    params: dict[str, Any],
+    _approved: bool = False,
+    preview_hash: str | None = None,
+    idempotency_key: str | None = None,
+) -> OperationResult:
+    """Run one operation call: the body of :func:`dispatch`."""
     started = time.monotonic()
     # ``reveal_secret`` is a MEHO dispatch control, not a connector op param.
     # Strip it before hashing / schema validation / handler forwarding: every

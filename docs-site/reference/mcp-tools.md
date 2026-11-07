@@ -122,6 +122,6 @@ Approving or rejecting a parked operation, and granting an agent a privilege ele
 
 | Tool | Where the decision is made |
 | --- | --- |
-| `meho_agents_grant_elevate` | operator console approvals queue, or the `meho` CLI |
-| `meho_approvals_approve` | operator console approvals queue, or the `meho` CLI |
-| `meho_approvals_reject` | operator console approvals queue, or the `meho` CLI |
+| `meho_agents_grant_elevate` | operator console, or `meho agent grant elevate` |
+| `meho_approvals_approve` | operator console approvals queue, or `meho approvals approve` |
+| `meho_approvals_reject` | operator console approvals queue, or `meho approvals reject` |

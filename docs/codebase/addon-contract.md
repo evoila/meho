@@ -1,8 +1,8 @@
 # Add-on pairing contract (versioned) + proof plane
 
 The **add-on pairing contract** is the versioned integration surface a sibling
-product (first consumers: meho-automation, meho-ssp) speaks to become a
-first-class, governed peer of the backplane. Initiative #2900 builds it across
+product (the first one is meho-automation) speaks to become a
+first-class, governed peer of the backplane. The contract has
 four planes, each documented on its own page; this page is the **contract-level
 synthesis** — the version it declares, how it behaves under version skew, and
 the reference-double **proof plane** (#3030) that shows the four planes compose
@@ -133,14 +133,20 @@ ways:
   returns `tools/list` byte-identical to the baseline.
 
 Both compare against a baseline **captured live at test start**, not a pinned
-literal tool list. This is deliberate: the working surface grows over time (the
-sibling #3029 paired-surface-activation task lights up the first-party
-`automation` family gated on pairing state), and the conformance property is
-"pairing an arbitrary add-on and advertising a family is data, not surface
-growth" — which stays true regardless of how the baseline itself evolves.
-`all_tools_for` filters the registry by role / capability / surface only and
-never reads pairing state, so the invariant is structural; the test guards
-against a regression that would make it otherwise.
+literal tool list. This is deliberate: the working surface grows over time, and
+the conformance property is "pairing an arbitrary add-on and advertising a
+family is data, not surface growth" — which stays true however the baseline
+changes.
+
+`all_tools_for` has four gates: role, capability, surface and add-on family.
+The add-on family gate shows a tool only when the tool declares a
+`required_addon_family` and that family is active (paired, contract-healthy).
+An advertised family name never creates a tool. Only a tool that MEHO itself
+registers with `required_addon_family` can appear. Today that is
+`meho_automation_list`, for the `automation` family (see
+[`addon-pairing.md`](addon-pairing.md), "Paired-surface activation"). The
+reference double advertises a family that no tool declares, so `tools/list`
+stays the same.
 
 ### Trust model
 
@@ -158,7 +164,7 @@ tied to a specific structural mechanism and its guarding test.
 - `operations/addon_pairing.AddonPairingService` — `pair` / `unpair` / `list_` /
   `get` / `get_by_client_id` / `heartbeat`.
 - `operations/addon_capability.AddonCapabilityService` — `declare` /
-  `list_declared` / `active_capabilities`.
+  `list_declared` / `active_capabilities` / `active_meta_tool_families`.
 - `operations/addon_step_events.AddonStepEventService` — `record_if_owned` /
   `record_if_owned_committed` / `resolve_pairing_for_sub` / `list_for_pairing`.
 - `operations/addon_orchestration` — `resolve_or_open_orchestration_run` /

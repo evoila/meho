@@ -7,7 +7,8 @@
 
 The memory service is the persistent, RBAC-gated key-value layer that
 backs both the REST surface (`/api/v1/memory/...`) and the MCP meta-
-tools (`add_to_memory`, `search_memory`, `meho_memory_promote`, plus
+tools (`add_to_memory`, `search_memory`, `meho_memory_promote` (operator
+plane: needs `tenant_admin` and the `mcp:admin` scope), plus
 the resource templates `meho://memory/id/{document_uuid}` and
 `meho://memory/{scope}/{slug}`). All memory
 rows are stored in the shared `documents` table under
@@ -20,13 +21,15 @@ table.
 The package is intentionally narrow in mutation surface: there are
 five scopes (`user`, `user-tenant`, `user-target`, `tenant`,
 `target`), one verb per CRUD shape (`remember`, `recall`, `forget`,
-`list_memories`, `search_memories`, `promote`), and one RBAC matrix
-(`MemoryRbacResolver`). Every transition is sized to fit inside one
+`list_memories`, `search_memories`, `promote`), one RBAC matrix
+(`MemoryRbacResolver`), and one promotion check (`assert_can_promote`). Every transition is sized to fit inside one
 session boundary.
 
-Three transports — the REST router under `/api/v1/memory`, the MCP
-`add_to_memory` / `search_memory` meta-tools, and the CLI `meho
-memory` verb — all funnel through the same tenant-scoped
+Four callers — the REST router under `/api/v1/memory`, the MCP
+`add_to_memory` / `search_memory` meta-tools, the top-level CLI verbs
+`meho remember` / `recall` / `forget` / `list` / `promote` (they call
+REST), and the operator console (`POST /ui/memory/create`) — all use
+the same tenant-scoped
 `MemoryService` that owns the RBAC matrix and the substrate I/O.
 
 ## Key types
@@ -38,11 +41,11 @@ Closed enum of the five scopes. Each value drives the
 
 | scope            | natural-key encoding                          | who can read           | who can write              |
 | ---------------- | --------------------------------------------- | ---------------------- | -------------------------- |
-| `user`           | `user:<sub>:<slug>`                           | owning operator only   | owning operator only       |
-| `user-tenant`    | `user-tenant:<sub>:<slug>`                    | owning operator only   | owning operator only       |
-| `user-target`    | `user-target:<sub>:<target_name>:<slug>`      | owning operator only   | owning operator only       |
+| `user`           | `user:<sub>:<slug>`                           | owning operator only   | owning operator, not `read_only` |
+| `user-tenant`    | `user-tenant:<sub>:<slug>`                    | owning operator only   | owning operator, not `read_only` |
+| `user-target`    | `user-target:<sub>:<target_name>:<slug>`      | owning operator only   | owning operator, not `read_only` |
 | `tenant`         | `tenant:<slug>`                               | every tenant operator  | `tenant_admin` only        |
-| `target`         | `target:<target_name>:<slug>`                 | every tenant operator  | `tenant_admin` only        |
+| `target`         | `target:<target_name>:<slug>`                 | every tenant operator  | every operator, not `read_only` |
 
 The colon-joined encoding is the reason `MemoryEntryCreate.slug`
 pydantic-rejects colon-bearing slugs — without the guard the rsplit
@@ -202,8 +205,9 @@ operator console persisted `expires_at = null` and the expiry sweeper
 
 1. Validate `slug` (auto-generated 12-char hex if absent) and reject
    target-scoped writes without a `target_name`.
-2. Check RBAC: `tenant_admin` for `tenant` / `target` writes;
-   any operator for the three user-flavoured scopes.
+2. Check RBAC: `read_only` can write no scope. `tenant` writes need
+   `tenant_admin`. Any other operator can write the three user-flavoured
+   scopes and `target`.
 3. Compute `source_id` via `encode_source_id`.
 4. Build merged `doc_metadata` (caller keys + service-owned
    `scope` / `user_sub` / `target_name` / `expires_at`).
@@ -391,10 +395,19 @@ a hit is always the selected read on its `locator`.
 
 ### Promote path
 
-Tenant-admin-only widening of a row's scope (`user → user-tenant →
-tenant` etc.). Implemented as an insert-then-delete inside one
-transaction, idempotent against re-runs via a `promoted_from`
-marker.
+Widening of a row's scope along two ladders: `user → user-tenant →
+tenant` and `user → user-target → target`. One step at a time. A step
+to `tenant` or `target` needs `tenant_admin`; a step to `user-tenant`
+or `user-target` needs any role except `read_only`
+(`memory/rbac.py:assert_can_promote`). The target row is inserted in one
+transaction, and the source row is deleted in the same transaction only
+with `move` (`--move` on the CLI); otherwise the source stays. The
+target row never expires. A re-run returns the existing target row,
+matched by its `promoted_from` marker. If the new slug already holds a
+row that did not come from this source, MEHO answers 409. A step to
+`target` by a role below `tenant_admin` raises `NotImplementedError`
+(REST answers 501), because per-target access checks are not built.
+On MCP, `meho_memory_promote` needs `tenant_admin` for every step.
 
 ## Dependencies
 
@@ -436,7 +449,7 @@ marker.
 ## Known issues
 
 * **`onupdate` on `Document.updated_at` fires only on ORM UPDATEs.**
-  Raw-SQL updates against PG bypass the SQLAlchemy hook. The memory
+  Raw-SQL updates against PG skip the SQLAlchemy hook. The memory
   write paths go through the ORM-backed `index_document`, so the
   hook fires; ad-hoc admin SQL would not.
 * **No async-indexer fan-out.** Every `remember` blocks on the
@@ -450,7 +463,7 @@ marker.
   `tests/acceptance/test_g51_memory_canary.py`.
 * **The expiry sweeper still compares strings.** `memory/expiry.py`
   deletes rows by a text `<` against `now()` in ISO form. That is only
-  right for UTC values; search no longer depends on it, because the
+  right for UTC values; search does not depend on it, because the
   search SQL parses the timestamp itself.
 * The MCP `add_to_memory` body field underwent a rename
   `content` -> `body` to align with `add_to_knowledge` and the REST
@@ -461,7 +474,8 @@ marker.
   compatibility shim. v0.6.x accepts both fields: `body` is canonical
   and wins when both are supplied; `content` is a deprecated alias
   that fires a structured `add_to_memory_field_deprecated` warning
-  log line with `replacement="body"`. The shim is dropped in v0.7.
+  log line with `replacement="body"`. MEHO still accepts the `content`
+  alias.
 * Non-`user` scopes have no default-TTL gate by design (per #624's
   narrow scope). A future Task widening it should change the
   `scope is not MemoryScope.USER` branch in `memory/ttl.py` and add
@@ -476,8 +490,8 @@ marker.
 * T3 #423 — MCP meta-tools.
 * Goal #221 — Foundational substrate; parents the v0.3.x stream.
 * Initiative #772 — G0.9.1 v0.3.2 dogfood hardening.
-* Task #775 (G0.9.1-T3) — apply default-TTL injection on the MCP
-  `add_to_memory` path; lifts the resolver into `memory/ttl.py`.
+* The default TTL on the MCP `add_to_memory` path; the resolver lives
+  in `memory/ttl.py`.
 * Task #624 (G5.2-T2) — original default-TTL contract for the REST
   surface.
 * #3741 — Memory eligibility before ranking, `POST /api/v1/memory/search`,
@@ -496,7 +510,7 @@ marker.
 
 See also: [`untrusted-text-envelope.md`](./untrusted-text-envelope.md)
 — both memory resources serve `body`, and `search_memory` serves each
-`snippet`, inside the `<<UNTRUSTED_AGENT_TEXT` guard envelope (stored
-prompt-injection hardening at the LLM-facing read boundary).
+`snippet`, inside the `<<UNTRUSTED_AGENT_TEXT` guard envelope, so the
+model reads stored text as data, not as instructions.
 [`result-delivery.md`](./result-delivery.md) — the shared wire limits
 and `delivery` states the search response and the selected read use.

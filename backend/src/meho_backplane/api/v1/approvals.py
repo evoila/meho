@@ -300,6 +300,10 @@ class ApprovalRequestView(BaseModel):
     #: for a non-destructive request. Additive.
     preview_hash: str | None = None
     proposed_effect: dict[str, Any]
+    #: The requester asked for the hidden values of the answer
+    #: (``reveal_secret: true``). When ``True``, the approved run returns
+    #: the secret values to the requester. Read off the row. Additive.
+    reveal_secret: bool = False
     status: ApprovalRequestStatus
     #: Run phase of an approved request (#3486): ``not_started`` /
     #: ``started`` / ``executed`` / ``failed``. ``None`` unless ``status`` is
@@ -540,6 +544,7 @@ def _view(
         params_hash=row.params_hash,
         preview_hash=row.preview_hash,
         proposed_effect=row.proposed_effect,
+        reveal_secret=bool(row.reveal_secret),
         status=ApprovalRequestStatus(row.status),
         result_state=approval_result_state(row),
         resume_outcome=_resume_outcome_view(row),

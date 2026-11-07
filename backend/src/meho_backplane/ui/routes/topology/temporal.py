@@ -18,7 +18,7 @@ Why a session BFF and not the Bearer ``/api/v1/topology/*`` routes
 The REST temporal routes are Bearer-gated over a verified JWT. A browser
 carrying only the BFF session cookie cannot authenticate them. So this
 module adds ``/ui/topology/{timeline,history/{name},diff}`` sub-routes that
-are ``require_ui_session`` and call the
+are ``require_ui_operator``-gated and call the
 :mod:`~meho_backplane.topology.query` **service** in-process
 (:func:`~meho_backplane.topology.query.query_timeline` /
 :func:`~meho_backplane.topology.query.query_history` /
@@ -31,7 +31,8 @@ RBAC + the audit footgun (load-bearing)
 ---------------------------------------
 
 All three reads are **``operator``** at the REST layer; the BFF mirrors that
-(any authenticated session reconstructs an operator via
+(``require_ui_operator`` answers ``403 operator_required`` for a ``read_only``
+session, then the handler reconstructs the operator via
 :func:`~meho_backplane.ui.routes.connectors.operator.lift_operator_from_session`).
 
 The three REST routes bind ``audit_op_class="audit_query"`` (NOT ``read``)
@@ -95,7 +96,7 @@ from meho_backplane.topology.query import (
 )
 from meho_backplane.topology.resolvers import AmbiguousNodeError, NodeNotFoundError
 from meho_backplane.topology.timeline_cursor import InvalidTimelineCursorError
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.routes.connectors.operator import lift_operator_from_session
 from meho_backplane.ui.templating import get_templates
 
@@ -124,7 +125,7 @@ _TIMELINE_PAGE_SIZE = 50
 
 #: Module-level ``Depends`` closures (ruff B008 guard), matching the
 #: convention every UI surface router follows.
-_require_session = Depends(require_ui_session)
+_require_operator = Depends(require_ui_operator)
 _get_raw_session_dep = Depends(get_raw_session)
 
 
@@ -473,7 +474,7 @@ def build_temporal_router() -> APIRouter:
     @router.get("/ui/topology/timeline", response_class=HTMLResponse)
     async def timeline(
         request: Request,
-        session_ctx: UISessionContext = _require_session,
+        session_ctx: UISessionContext = _require_operator,
         db_session: AsyncSession = _get_raw_session_dep,
         target: str | None = Query(default=None, max_length=256),
         since: datetime | None = Query(default=None),
@@ -496,7 +497,7 @@ def build_temporal_router() -> APIRouter:
     @router.get("/ui/topology/diff", response_class=HTMLResponse)
     async def diff(
         request: Request,
-        session_ctx: UISessionContext = _require_session,
+        session_ctx: UISessionContext = _require_operator,
         ts1: datetime = Query(..., description="exclusive lower bound on valid_from"),
         ts2: datetime = Query(..., description="inclusive upper bound on valid_from"),
         kind: str | None = Query(default=None, max_length=64),
@@ -516,7 +517,7 @@ def build_temporal_router() -> APIRouter:
     async def history(
         request: Request,
         name: str,
-        session_ctx: UISessionContext = _require_session,
+        session_ctx: UISessionContext = _require_operator,
         kind: str | None = Query(default=None, max_length=64),
     ) -> HTMLResponse:
         """``GET /ui/topology/history/{name}`` — per-resource history."""

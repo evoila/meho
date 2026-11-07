@@ -215,6 +215,9 @@ def project_request_to_view(
     pass it; the key is always present so the templates stay
     ``StrictUndefined``-safe.
 
+    ``reveal_secret`` is ``True`` when the requester asked for the hidden
+    values of the answer: the approved run returns them to the requester.
+
     ``withdrawn_at`` / ``withdraw_reason`` (#4987) say when and why the
     sender withdrew the request; both are ``None`` on any other row.
 
@@ -243,6 +246,7 @@ def project_request_to_view(
         "requester": subject_ref(row.principal_sub, row.principal_name),
         "reviewer": subject_ref(row.reviewed_by, row.reviewed_by_name),
         "proposed_effect": row.proposed_effect,
+        "reveal_secret": bool(row.reveal_secret),
         "status": row.status,
         "reviewed_by": row.reviewed_by,
         "work_ref": row.work_ref,

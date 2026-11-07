@@ -486,7 +486,11 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
   redaction of the other fields stays). It works on every operation. An
   agent principal, or a person's hosted agent run (an RFC 8693 actor is
   bound), is refused before the policy gate: `status="denied"`, a
-  synchronous `POLICY_DECISION` audit row, and no value. The people's call
+  synchronous `POLICY_DECISION` audit row, and no value. A service
+  principal's call waits for a person's approval, also when the policy
+  gate would run it at once (`dispatcher._reveal_waits_for_approval` turns
+  the `auto-execute` verdict into `needs-approval`); a person's call keeps
+  the verdict of the gate. The people's call
   sites are the `/ui` Vault console (`ui/routes/vault/routes.py`,
   reveal-on-click) and CLI `meho secret read`
   (`cli/internal/cmd/secret/read.go`).

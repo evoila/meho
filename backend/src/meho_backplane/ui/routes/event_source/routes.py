@@ -7,8 +7,9 @@ Classic server-rendered forms + POST/redirect-get, CSRF via the shared
 double-submit token. Every write reuses the REST handler in
 :mod:`meho_backplane.api.v1.event_source` (the ``meho_targets_register``
 -> ``create_target`` reuse pattern) so persistence, tenant scoping, and
-Vault secret custody are shared, not duplicated. Reads run at operator
-role; writes gate to ``tenant_admin`` via
+Vault secret custody are shared, not duplicated. Reads need the operator
+role (:func:`~meho_backplane.ui.routes.operator_read.require_ui_read_operator`,
+the same floor as the REST read); writes gate to ``tenant_admin`` via
 :func:`~meho_backplane.ui.routes.connectors.operator.resolve_operator_or_403`
 (403 otherwise).
 """
@@ -31,6 +32,7 @@ from meho_backplane.api.v1.event_source import (
     list_event_sources,
     update_event_source,
 )
+from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_raw_session, get_session
 from meho_backplane.event_source.resolver import resolve_event_source
 from meho_backplane.event_source.schemas import (
@@ -46,7 +48,7 @@ from meho_backplane.ui.routes.connectors.operator import (
     resolve_operator_or_403,
     resolve_role_probe,
 )
-from meho_backplane.ui.routes.memory.operator import build_read_operator
+from meho_backplane.ui.routes.operator_read import require_ui_read_operator
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_event_source_router"]
@@ -59,6 +61,7 @@ _AUTH_OPTIONS = [a.value for a in EventSourceAuthStrategy]
 _STATUS_OPTIONS = [s.value for s in EventSourceStatus]
 
 _require_session_dep = Depends(require_ui_session)
+_read_operator_dep = Depends(require_ui_read_operator)
 _read_session_dep = Depends(get_session)
 _raw_session_dep = Depends(get_raw_session)
 
@@ -216,10 +219,10 @@ def _detail(exc: HTTPException) -> str:
 
 async def _list(
     request: Request,
+    operator: Operator = _read_operator_dep,
     session_ctx: UISessionContext = _require_session_dep,
     session: AsyncSession = _read_session_dep,
 ) -> HTMLResponse:
-    operator = build_read_operator(session_ctx)
     probe = await resolve_role_probe(request, session_ctx)
     envelope = await list_event_sources(
         operator=operator, session=session, status_filter=None, limit=_LIST_LIMIT, cursor=None

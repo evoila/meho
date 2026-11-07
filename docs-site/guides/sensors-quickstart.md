@@ -125,8 +125,9 @@ meho sensor list
 # <uuid>      pods-not-running  active  ok          every 60s   2026-07-31T09:21:12Z  critical
 ```
 
-There is deliberately **no update or pause verb** — a sensor is
-immutable after create ("edit" is delete + recreate). Nor is `paused`
+To change a sensor later, use `meho sensor edit` (see
+[Change a sensor or a dashboard](#change-a-sensor-or-a-dashboard)).
+There is deliberately **no pause verb**. Nor is `paused`
 a self-protection you can wait for: the runner parks a sensor **only**
 when its stored cadence (`cron_expr` / `timezone`) no longer parses,
 stamping `status_reason` with `invalid_cadence:<error>`. There is no
@@ -145,7 +146,9 @@ meho dashboard create --name estate-health \
   --sensor-id <uuid-from-sensor-list>
 ```
 
-`--sensor-id` repeats for more members (membership is create-only).
+`--sensor-id` repeats for more members. To add or remove members later,
+use `meho dashboard edit` (see
+[Change a sensor or a dashboard](#change-a-sensor-or-a-dashboard)).
 Read it back:
 
 ```bash
@@ -200,6 +203,47 @@ Then watch the timeline unfold:
 Each evaluation stores its evidence on the sensor's projection
 (`last_value`, `last_evidence`, `last_evaluated_at`) — enough to see
 *what* the assertion saw without a results-history table.
+
+## Change a sensor or a dashboard
+
+You can change a sensor or a dashboard in place. Its id stays. A sensor
+also keeps its result history and its place in every dashboard. Only the
+flags you give change.
+
+Change a sensor, for example to move it to another connector version:
+
+```bash
+meho sensor edit <sensor_id> --connector-id <new-connector-id>
+```
+
+You can change `--name`, `--connector-id`, `--op-id`, `--params`,
+`--assertion`, the cadence and `--severity`. To switch from an interval
+to a cron cadence, give the kind and its field together:
+
+```bash
+meho sensor edit <sensor_id> --cadence-kind cron --cron-expr "*/5 * * * *"
+```
+
+MEHO checks the changed sensor like a new one: the operation must exist
+and be `safe`. The sensor runs once right after the change, so you see
+the new result on the next runner tick.
+
+Change a dashboard: add or remove members, change the name or the mail
+settings:
+
+```bash
+meho dashboard edit <dashboard_id> \
+  --add-sensor <uuid> --remove-sensor <uuid> \
+  --notify-min-state degraded
+```
+
+`--add-sensor` and `--remove-sensor` repeat. `--notify-email` sets new
+recipients; `--notify-off` turns mail off. Sending the same edit twice
+changes nothing the second time.
+
+Both edits need the `tenant_admin` role. The audit log records the old
+and the new value of each changed field. The REST routes are
+`PATCH /api/v1/sensors/{id}` and `PATCH /api/v1/checks/dashboards/{id}`.
 
 ## The investigator (optional deep tier)
 
@@ -298,8 +342,8 @@ is also the sensors feature's road-to-GA tracker.
 | Sensor stuck `unknown`, evidence says *"selection is not a scalar, found array"* | Your `select.path` points at a list (e.g. `$.rows`), not a scalar. | Select a scalar — `$.total` for list-shaped Kubernetes results — or add an `aggregate` (`count`, `max`, …) to the select. |
 | Target-bound sensor `unknown` forever, dispatch error names a credential read | No background credential identity on this deploy — the table above. | Work [Sensors and your credential backend](#sensors-and-your-credential-backend). |
 | No sensor is evaluated; the backplane log shows `sensor_runner_refused` | `checkRunner.*` is on, Vault is in use, and `VAULT_CHECK_RUNNER_ROLE` is unset or the same as `VAULT_OIDC_ROLE`. | Give the runner a Vault role of its own and set `VAULT_CHECK_RUNNER_ROLE` (see the warning above), or turn `checkRunner.enabled` off. |
-| Sensor `unknown` though it was green a minute ago | Staleness: no fresh evaluation past `next_fire_at` + 60 s grace — the runner is down, or the previous evaluation is still in flight and the overlap guard skipped this tick. | Check the runner's health. A *parked* sensor is a different symptom: it shows `paused` and rolls up `skip`, never `unknown`. |
-| Dashboard `unknown` with all members green | The dashboard has zero members — an empty member set rolls up `unknown` by rule. | Add members (delete + recreate the dashboard). |
+| Sensor `unknown` though it was green a minute ago | Staleness: no fresh evaluation past `next_fire_at` + 60 s grace — the runner is down, or the previous evaluation is still in flight, so the sensor stays due until it ends. | Check the runner's health. A *parked* sensor is a different symptom: it shows `paused` and rolls up `skip`, never `unknown`. |
+| Dashboard `unknown` with all members green | The dashboard has zero members — an empty member set rolls up `unknown` by rule. | Add members: `meho dashboard edit <dashboard_id> --add-sensor <uuid>`. |
 | A sensor reads `unknown` with the reason `op_not_safe_at_dispatch` | The pinned operation is not `safe` now. For example, a connector re-ingest changed its safety class (the ingest result names the affected sensors in `safety_changes`), or the operation connects to an address you give (`pfsense.diag.ping` since v0.45.0). Sensors never run an operation that is not `safe`. | Pin a safe operation instead. For a ping, use `net.ping`. |
 | A sensor reads `unknown`, reason `dispatch_not_ok`, and `dispatch_error` starts with `unqualified_target_version` | The target's version is outside the version range of the sensor's connector, for example `vmware-rest-9.0` on a vCenter 8.0.3 target. The error names the range and the target's version. If it says the target has no known version, MEHO does not know the target's version yet. | Delete the sensor and create it again on the connector that matches the target's version (`vmware-rest-8.0` for vCenter 8.0.x). For a target with no known version, run `meho targets probe <name>` or set its version. See [Pick the connector version that matches the target](#pick-the-connector-version-that-matches-the-target). |
 

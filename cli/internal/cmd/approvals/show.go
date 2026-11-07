@@ -139,6 +139,7 @@ func fetchDetail(
 func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 	w := cmd.OutOrStdout()
 	rc := d.ReviewerContext
+	printRevealNotice(w, "", d)
 	// The redacted "what will happen" sentence (#3353) leads the detail so
 	// a human reads what the request DOES before scanning the ids below.
 	if rc != nil && rc.Summary != nil && *rc.Summary != "" {

@@ -1480,7 +1480,8 @@ itself only. Other tenants keep the install default.
   install default stays the `edit-op` / `enable` / `disable` paths,
   which need `platform_admin` for a built-in row (#3616).
 - **Audit.** Every change writes one audit row with path
-  `meho_connector_tenant_setting` in the same transaction. The payload
+  `meho_connector_tenant_setting` and event class `config_change`
+  (#5864) in the same transaction. The payload
   names the connector, the target tenant, the op or group, and the new
   value. A write that changes nothing writes no row.
 - **Showing both values.** `GET /api/v1/connectors/{id}/tenant-settings`

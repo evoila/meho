@@ -43,8 +43,8 @@ func newCreateCmd() *cobra.Command {
 			"operator-role JWT lands as 403 insufficient_role.\n\n" +
 			"--name is the operator-facing handle (unique per tenant). " +
 			"--description is optional free-form prose. --sensor-id names one " +
-			"member Sensor and is repeatable; membership is set at create " +
-			"only (there is no edit verb — \"edit\" is delete + recreate). An " +
+			"member Sensor and is repeatable; `meho dashboard edit` changes " +
+			"the members later. An " +
 			"empty member set is legal and rolls up 'unknown' (the zero-member " +
 			"rule); duplicate ids are de-duplicated server-side. --tenant " +
 			"targets another tenant (platform_admin cross-tenant create).\n\n" +
@@ -54,8 +54,8 @@ func newCreateCmd() *cobra.Command {
 			"critical (default critical): an edge notifies when the worse of " +
 			"its two states reaches the floor, so at 'critical' a recovery " +
 			"from critical back to ok sends the all-clear while ok -> " +
-			"degraded stays silent. Both are set at create only, like " +
-			"membership.\n\n" +
+			"degraded stays silent. `meho dashboard edit` changes both " +
+			"later.\n\n" +
 			"--investigator-prompt adds operator context to the briefing the " +
 			"diagnose-only investigator receives when this dashboard goes " +
 			"non-green: what this dashboard means, where to look first, what is " +

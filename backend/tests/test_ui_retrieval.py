@@ -83,6 +83,15 @@ from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
 
+from ._ui_role_helpers import allow_ui_operator_role
+
+
+@pytest.fixture(autouse=True)
+def _ui_operator_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The console pages under test sit behind the ``operator`` role check."""
+    allow_ui_operator_role(monkeypatch)
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -1361,6 +1370,9 @@ def test_eval_own_tenant_only_no_baseline() -> None:
     eval_mock.assert_awaited_once()
     kwargs = eval_mock.await_args.kwargs
     assert kwargs["tenant_id"] == _TENANT_A
+    # The operator's ``sub`` rides along, so no user memory of another
+    # person can rank in the answer.
+    assert kwargs["principal_sub"] == operator.sub
     # No baseline argument is ever passed -- the 501 server-side baseline path
     # cannot be reached from this surface.
     assert not any("baseline" in key for key in kwargs)
@@ -1724,6 +1736,7 @@ def test_retire_platform_admin_forwards_tenant_filter() -> None:
     kwargs = retire_mock.await_args.kwargs
     # The cross-tenant claim is authorized (platform admin) and forwarded.
     assert kwargs["tenant_id"] == _TENANT_B
+    assert kwargs["principal_sub"] == operator.sub
     # Every supported surface is requested, in order.
     assert list(kwargs["surfaces"]) == ["kb", "memory", "operations"]
     # The UI sends no CLI-fill-only body fields.

@@ -330,6 +330,23 @@ Two kinds of rows carry a keyed hash of a call's params:
     credential write. A flag sent again with the params of a run comes off
     before the hash check and does not change the stored choice (see
     [redaction.md](redaction.md#secret-named-fields-in-every-answer-reveal_secret-for-people-and-service-principals)).
+  - Every approval surface shows the choice, so the approver knows that
+    approving returns the secret values to the requester. REST
+    (`ApprovalRequestView.reveal_secret`) and MCP (`meho_approvals_list` /
+    `meho_approvals_get`) carry the field (`false` when not asked). The
+    console request window names it in the detail list on every status
+    (`data-approval-reveal-secret`) and in the warning above Approve of a
+    pending request (`data-approval-gate-reveal-secret`). The in-order
+    window marks the step (`data-approval-in-order-reveal-secret`). The
+    CLI prints the line "Hidden values: ..." in `meho approvals show` and
+    in the prompt of `approve` for several requests or in order
+    (`cli/internal/cmd/approvals/reveal.go`). Tests:
+    `tests/test_approval_surfaces_reveal_secret.py`,
+    `cli/internal/cmd/approvals/reveal_test.go`.
+  - A service principal's `reveal_secret: true` always waits for a
+    person's approval, also on a call the policy gate would run at once
+    (`dispatcher._reveal_waits_for_approval`). So the request reaches
+    these surfaces before any value is returned.
 - **Audit rows** (`payload.params_hash` on dispatch, MCP and hosted-agent
   tool rows, and `operation_run.params_hash`) store the hash, not the params.
   They use the same keyed hash, but each secret-named value (`password`,

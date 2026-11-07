@@ -15,11 +15,17 @@ Copyright (c) 2026 evoila Group
 > This doc is the cookbook for an operator who inspects or audits the
 > managed Keycloak realm through `meho keycloak …`.
 
-**Built-in or your own Keycloak.** The steps on this page are the same
-for both. MEHO registers no `keycloak` target by itself, also not for the
-built-in Keycloak (`coreKeycloak.enabled: true`, the chart default since
-0.45.0). To manage a realm with these operations, register a target as
-shown below. The realm of the built-in Keycloak is `meho`.
+**Use a Keycloak that serves at the root path.** MEHO registers no
+`keycloak` target by itself. To manage a realm with these operations,
+register a target as shown below. The connector sends its calls to
+`/realms/...` and `/admin/...` at the root of the target's host. It adds
+no path prefix.
+
+The built-in Keycloak of the chart (`coreKeycloak.enabled: true`, the
+chart default since 0.45.0) serves everything under `/auth`. So the
+connector cannot reach it: the sign-in and the probe fail. This page
+works only with a Keycloak that serves at the root path, such as your
+own Keycloak with no `http-relative-path` set.
 
 ## What this surface is
 
@@ -181,22 +187,28 @@ Three properties are load-bearing for correctness and safety:
   never an inline `--password`, so the secret never lands in shell
   history or `ps` output.
 
-#### Deletes need a preview and a second person's approval
+#### Deletes need a preview and an approval
 
 `keycloak.user.delete`, `keycloak.group.delete` and
 `keycloak.client.delete` remove one object each. `keycloak.realm.delete`
 removes a whole realm, with every user, client, group and session in it.
 They are on the `destructive` risk level, so they run differently from
-the other writes. Every delete waits until a second person approves it,
-also when an agent asks for it. No grant lets a delete run without that
-approval.
+the other writes. Every delete waits for approval, also when an agent
+asks for it. No grant lets a delete run without that approval. An agent
+can never approve: approval is a human decision in the web console or
+the CLI.
+
+One exception: a member of the `MEHO-SA-Operators` group may approve
+their own changes at every risk level, deletes included. Everyone else
+needs a second person.
 
 1. **Preview first.** Call `preview_operation` with the same params. It
    shows what will be deleted and returns a `preview_hash`. Nothing is
    deleted yet.
 2. **Ask for approval.** Call `call_operation` with the same params and
-   the `preview_hash`. The request then waits until a **second person**
-   approves it. You cannot approve your own delete.
+   the `preview_hash`. The request then waits until a person approves it.
+   You cannot approve your own delete, unless you are in
+   `MEHO-SA-Operators`.
 3. **The delete runs** after the approval. MEHO reports `deleted: true`
    only after a read of the object answers 404.
 
@@ -343,7 +355,7 @@ direct-access-grant client).
 - **An admin credential stored in Vault.** A confidential service-account
   client (preferred) or an admin username/password (break-glass), stored
   at the target's `secret_ref` path (for example
-  `secret/keycloak/admin`). The service-account client
+  `secret/tenants/<tenant_id>/keycloak/admin`). The service-account client
   needs the `realm-management` roles to read the managed realm (at
   minimum `view-realm`, `view-clients`, `view-users` for the read
   ops). See [credential split](#the-admin-vs-operator-credential-split-load-bearing).
@@ -364,7 +376,7 @@ A keycloak target row carries:
 | `product` | `keycloak` | Must be exactly `keycloak` |
 | `host` | `keycloak.example.com` | Keycloak host |
 | `port` | `443` | HTTPS port |
-| `secret_ref` | `keycloak/admin` | Vault KV-v2 path to the **admin** credential |
+| `secret_ref` | `tenants/<tenant_id>/keycloak/admin` | Vault KV-v2 path to the **admin** credential. It must be under `tenants/<tenant_id>/`, or MEHO refuses the target with HTTP 422 |
 | `auth_model` | `shared_service_account` | The only supported auth model (admin credential is a shared service account, not a per-operator identity) |
 | `preferred_impl_id` | `keycloak-admin` | G0.6 resolver tie-break override → pins the `keycloak-admin-26.x` connector |
 | `extras.admin_realm` | `master` | Realm the admin client authenticates against (default `master`) |
@@ -389,7 +401,7 @@ targets:
     product: keycloak
     host: keycloak.example.com
     port: 443
-    secret_ref: keycloak/admin
+    secret_ref: tenants/<tenant_id>/keycloak/admin  # put your tenant id here
     auth_model: shared_service_account
     preferred_impl_id: keycloak-admin
     extras:
@@ -650,7 +662,7 @@ queue. A human approves it through the queue; the approved write then
 runs against Keycloak.
 
 The four delete verbs work in two steps (see
-[Deletes need a preview and a second person's approval](#deletes-need-a-preview-and-a-second-persons-approval)):
+[Deletes need a preview and an approval](#deletes-need-a-preview-and-an-approval)):
 
 ```console
 # Step 1: preview only. Nothing is deleted. It prints a preview_hash.

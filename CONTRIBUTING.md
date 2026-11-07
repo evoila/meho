@@ -8,15 +8,14 @@ coordination model works.
 
 ## How we develop: the dogfood loop
 
-`evoila/meho` (this repo — public, all code) and
-`evoila-bosnia/claude-rdc-hetzner-dc` (private, the operator-side
-manifests and runbooks for the RDC Hetzner dogfooding lab) are coupled.
-Every feature ships first to the dogfooding consumer; operator feedback
+`evoila/meho` (this repo — public, all code) is coupled to evoila's own
+lab. The lab runs MEHO against real systems; its manifests and runbooks
+live in a private repo. Every feature ships first to the lab; operator feedback
 loops back into `evoila/meho` via PRs. The discipline is: features
 merge against **real-target deploys**, not mocks.
 
 When you propose a feature touching the deploy contract (image, chart,
-or CLI), expect a coupled discussion thread on the consumer repo —
+or CLI), expect a coupled discussion thread on the lab side —
 that's not a side conversation, it's how we measure done. The
 [`deploy/values-examples/values-rdc-example.yaml`](./deploy/values-examples/values-rdc-example.yaml)
 in this repo is the sanitized template; the actual live values file
@@ -25,10 +24,10 @@ the contract is right.
 
 ## Public from day 1, deliberately
 
-This repo is OSS and public from commit #1. We never quarantine work
+This repo is OSS and public from the first commit. We never quarantine work
 here under "private until ready" reasoning. Either it ships in public
-from the start, or it goes to `evoila-bosnia/meho-internal` (planning
-issues, ADRs, sensitive operator material only — **no code**).
+from the start, or it stays in the maintainers' private planning repo
+(planning issues and sensitive operator material only — **no code**).
 
 If you're nervous about something being "not ready enough" for public —
 file a **draft PR**. The review thread is the conversation, not a
@@ -37,26 +36,24 @@ release. The codebase walkthroughs at
 "here's what shipped so far"; they're updated as part of the PR that
 introduces the change, never after the fact.
 
-## Bidirectional coordination with claude-rdc-hetzner-dc
+## Coordination with the lab
 
 For features that touch the deploy contract (image, chart, CLI),
 expect this flow:
 
-1. Issue filed on `evoila-bosnia/meho-internal` (the planning repo).
-   Goal → Initiative → Task hierarchy per project 19; the Task is
-   what a PR closes.
-2. Sibling issue filed on `evoila-bosnia/claude-rdc-hetzner-dc`
-   capturing the consumer-side prerequisites (kubeconfig, RBAC,
-   ExternalSecret manifests, …).
+1. Issue filed on `evoila/meho`. Issues form a Goal → Initiative →
+   Task hierarchy, marked with the `goal`, `initiative` and `task`
+   labels; the Task is what a PR closes.
+2. A lab-side issue captures the lab's prerequisites (kubeconfig,
+   RBAC, ExternalSecret manifests, …).
 3. PR opens against `evoila/meho` with `Closes #<task>` referencing
-   the planning issue.
-4. PR merges only when CI is green **and** the consumer-side ticket
-   has the manifests merged that the new chart version requires.
+   the Task.
+4. PR merges only when CI is green **and** the lab side has merged
+   the manifests that the new chart version requires.
 
 For features that are purely backplane-internal (audit format,
-federation internals, observability wiring), no consumer-side ticket
-is needed — but a heads-up in the consumer's `CLAUDE.md` "MEHO
-transition" section is courteous.
+federation internals, observability wiring), no lab-side issue
+is needed — but a heads-up to the lab operators is courteous.
 
 ## Development setup
 
@@ -66,7 +63,7 @@ index.
 
 | Artefact | Language | Local-dev README |
 | --- | --- | --- |
-| Backplane | Python 3.13 + FastAPI | [`backend/README.md`](./backend/README.md) — `uv sync`, `docker compose up`, pytest layout |
+| Backplane | Python 3.14 + FastAPI | [`backend/README.md`](./backend/README.md) — `uv sync`, pytest layout |
 | Helm chart | YAML + Helm 3 | [`deploy/charts/meho/`](./deploy/charts/meho/) — `helm template`, `helm lint`; [`deploy/values-examples/README.md`](./deploy/values-examples/README.md) covers the install flow |
 | Operator CLI | Go 1.26.10+ | [`cli/README.md`](./cli/README.md) — `go build`, oapi-codegen wiring, `meho version` smoke |
 
@@ -77,14 +74,15 @@ runs the chart's install plumbing — pre-install migration Job, the
 Deployment, the Valkey broadcast subchart — against a real Kubernetes
 API.
 
-For real federation work, the dogfooding lab on RDC Hetzner is the
-target — coordinate via the consumer-side ticket.
+For real federation work, use the existing-Kubernetes install in
+[`README.md`](./README.md): there the chart brings its own Keycloak and
+OpenBao.
 
 ## Pull request flow
 
 1. **Branch from `main`.** Convention: `feat/<issue#>-<slug>`,
    `fix/<issue#>-<slug>`, `chore/<slug>`, etc. The `<issue#>` is the
-   planning issue on `evoila-bosnia/meho-internal`.
+   number of the Task on `evoila/meho`.
 2. **Make your change.** Stay in scope — adjacent findings go into
    the PR description, not stealth commits. Do not edit
    `CHANGELOG.md`. The release pull request adds the line for your
@@ -97,7 +95,7 @@ target — coordinate via the consumer-side ticket.
    `feat(connector): ...`, `fix(policy): ...`, `chore(ci): ...`,
    `docs(readme): ...`. The pre-commit `conventional-pre-commit`
    hook enforces this on `commit-msg`.
-5. **Reference the planning issue** in the PR body with
+5. **Reference the Task** in the PR body with
    `Closes #<task-number>` (or `Refs #<n>` for partial work).
 6. **Push, open a PR** targeting `main` on `evoila/meho`.
 7. **CI must pass** — every required check is green; no overrides.
@@ -107,9 +105,7 @@ target — coordinate via the consumer-side ticket.
    why a finding is wrong inline. Reviewers (people, Claude, Codex) do
    not ask for CHANGELOG lines in a code pull request.
 9. **Maintainer review** approves the human side. Reviews on
-   `evoila/meho` are mandatory; reviews on `evoila-bosnia/meho-internal`
-   PRs (planning-only, ADRs, governance docs) are best-effort because
-   those PRs touch no code.
+   `evoila/meho` are mandatory.
 10. **Squash merge.** The PR title (which becomes the merge commit
     subject) is what shows up in `git log` on `main`.
 
@@ -236,10 +232,10 @@ regression, image start-failure), attach: chart version, image tag,
 `kubectl get pods -n meho`, and the relevant pod logs.
 
 For broader proposals (new connector, new policy primitive, deploy
-flow change), the right route is a planning issue on
-`evoila-bosnia/meho-internal` — that repo holds the
-Goal → Initiative → Task hierarchy under project 19, and a PR on
-`evoila/meho` closes one of the Tasks.
+flow change), start with the feature request template or a thread in
+[GitHub Discussions](https://github.com/evoila/meho/discussions).
+Maintainers turn an accepted proposal into a Goal → Initiative → Task
+hierarchy on `evoila/meho`, and a PR closes one of the Tasks.
 
 ## Security
 

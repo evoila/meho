@@ -1,7 +1,7 @@
 # Dispatch flight recorder: per-dispatch request/response traces, operator-plane by default and agent-readable only through the narrow waist (decision)
 
 **Status:** decided — operator determination of record (2026-08-30/31);
-establishes the security-review-first design for per-dispatch trace capture
+establishes the security-review-first design for per-dispatch trace capture. Shipped in 0.32.0.
 **Date:** 2026-08-30
 **Goal:** operator-facing run transparency — an operator (and a paired add-on's
 run UI) must be able to see, for one governed dispatch, the actual vendor
@@ -315,7 +315,7 @@ docs-only PR** — this PR touches only the new file plus the CHANGELOG.
 
 A second consumer registered during the review: the paired automation add-on will
 consume flight-recorder traces as **replay fixtures** for its blueprint *simulate*
-mode (evoila-bosnia/meho-automation#159) — a real run's traces become the
+mode — a real run's traces become the
 simulated-vendor responses for CI regression runs of pack changes. The design
 consequence is explicit and recorded here so it is not "fixed" later on the replay
 use case's behalf: **fixtures are exported by the consumer at capture time** into
@@ -369,8 +369,7 @@ replay use case.
    Transports covered: REST (`adapters/http.py`), SSH (`adapters/ssh.py`), and the
    SDK/wire families (hvac, googleapiclient, kubernetes, pymongo, postgres).
 7. **Consumer proof** — the paired automation add-on's run UI renders a real
-   dispatch trace end-to-end, plus the replay-fixture export path
-   (evoila-bosnia/meho-automation#159).
+   dispatch trace end-to-end, plus the replay-fixture export path.
 
 ## References
 

@@ -19,6 +19,12 @@ Two halves:
 The gating architecture decision this research feeds is written up separately
 in [docs/architecture/connector-auth.md](../architecture/connector-auth.md).
 
+> This page is a research record from 2026-05-22. The `file:line` evidence
+> describes the tree of that day. The VMware files it names (`vmware_rest`,
+> the NSX and vcsim tests) ship in evoila's enterprise pack, not in this
+> repository, so they are plain text here, not links. What the code does
+> now is in [connector-auth.md](../architecture/connector-auth.md#what-the-code-does-now).
+
 ---
 
 ## §1 — Execution-gap map: wired vs stubbed
@@ -42,9 +48,9 @@ path that does not generalise (see the bind9 note below).
 | Source-kind branches (`ingested`/`typed`/`composite`) | ✅ wired | [operations/_branches.py:119](../../backend/src/meho_backplane/operations/_branches.py#L119) |
 | `operator.raw_jwt` carried to connector transport | ✅ wired | `dispatch_ingested` reads `raw_jwt = operator.raw_jwt` and forwards it to `_request_json`/`_post_json` — [_branches.py:167](../../backend/src/meho_backplane/operations/_branches.py#L167) |
 | HTTP transport injects auth via `auth_headers(target, raw_jwt)` | ✅ wired | [adapters/http.py:143](../../backend/src/meho_backplane/connectors/adapters/http.py#L143) calls `await self.auth_headers(target, raw_jwt)` |
-| **REST connector `auth_headers` uses `raw_jwt`** | ❌ **discards it** | `vmware_rest` does `del raw_jwt` then `self._session_token(target)` — [vmware_rest/connector.py:270](../../backend/src/meho_backplane/connectors/vmware_rest/connector.py#L270) |
-| **Loader receives operator identity** | ❌ **signature is `loader(target)`** | `VsphereSessionLoader = Callable[[VsphereTargetLike], Awaitable[dict[str,str]]]` — [vmware_rest/session.py:86](../../backend/src/meho_backplane/connectors/vmware_rest/session.py#L86). No `operator`/`raw_jwt` parameter. |
-| **Default loader does the Vault read** | ❌ **`NotImplementedError` stub** | [vmware_rest/session.py:99](../../backend/src/meho_backplane/connectors/vmware_rest/session.py#L99); shared VCF stub [_shared/vcf_auth.py:182](../../backend/src/meho_backplane/connectors/_shared/vcf_auth.py#L182); k8s [kubernetes/kubeconfig.py:86](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py#L86) |
+| **REST connector `auth_headers` uses `raw_jwt`** | ❌ **discards it** | `vmware_rest` does `del raw_jwt` then `self._session_token(target)` — `vmware_rest/connector.py:270` |
+| **Loader receives operator identity** | ❌ **signature is `loader(target)`** | `VsphereSessionLoader = Callable[[VsphereTargetLike], Awaitable[dict[str,str]]]` — `vmware_rest/session.py:86`. No `operator`/`raw_jwt` parameter. |
+| **Default loader does the Vault read** | ❌ **`NotImplementedError` stub** | `vmware_rest/session.py:99`; shared VCF stub [_shared/vcf_auth.py:182](../../backend/src/meho_backplane/connectors/_shared/vcf_auth.py#L182); k8s [kubernetes/kubeconfig.py:86](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py#L86) |
 | Operator-context Vault read primitive | ✅ **exists, proven** | `vault_client_for_operator(operator)` JWT/OIDC-logs-in with `operator.raw_jwt`, yields an authed hvac client, revokes on exit — [auth/vault.py:198](../../backend/src/meho_backplane/auth/vault.py#L198) |
 | KV-v2 read under operator identity | ✅ **exists, proven** | Vault connector op: `async with vault_client_for_operator(operator) as client: client.secrets.kv.v2.read_secret_version(path=..., mount_point=...)` — [vault/ops.py:294](../../backend/src/meho_backplane/connectors/vault/ops.py#L294) |
 
@@ -94,9 +100,9 @@ exactly what isolates the production loader as the single missing piece:
 - vmware: `VmwareRestConnector(session_loader=_stub_loader)` and an explicit
   test asserting the default raises (`pytest.raises(NotImplementedError,
   match=r"deliberate stub.*#214")`) —
-  [tests/test_connectors_vmware_rest_auth.py:106,143](../../backend/tests/test_connectors_vmware_rest_auth.py)
+  `tests/test_connectors_vmware_rest_auth.py:106,143`
 - nsx: `instance._session_loader = _nsx_session_loader  # bypass Vault` —
-  [tests/test_connectors_nsx_e2e.py:223](../../backend/tests/test_connectors_nsx_e2e.py#L223)
+  `tests/test_connectors_nsx_e2e.py:223`
 - vcf-*/sddc/harbor: same injected-loader shape in their `_e2e` / `_auth` tests.
 
 ### vcsim is NOT a real-vCenter E2E (scoping consequence)
@@ -104,7 +110,7 @@ exactly what isolates the production loader as the single missing piece:
 The vmware integration test is **respx-mocked**, not a live `vmware/vcsim`
 container — because govmomi's vcsim does not serve the modern `/api/about`
 endpoint `fingerprint()` calls (it 404s):
-[tests/integration/test_connectors_vmware_rest_vcsim.py:4-16](../../backend/tests/integration/test_connectors_vmware_rest_vcsim.py).
+`tests/integration/test_connectors_vmware_rest_vcsim.py:4-16`.
 **Consequence for Goal #214:** the "one real call" proof cannot be vcsim for the
 modern REST surface. It must be either (a) a recorded-fixture E2E (respx replay
 of a captured real-vCenter exchange) for CI, plus (b) an opt-in smoke against a
@@ -236,7 +242,7 @@ they are only missing the credential the session-establish call needs:
   `vmware-api-session-id` token reused on subsequent calls; falls back to legacy
   `POST /rest/com/vmware/cis/session` on 404 (vcsim/older vCenter). Token cached
   per `target.name` under an `asyncio.Lock`; revoked via `DELETE` on `aclose()`.
-  ([vmware_rest/connector.py:309](../../backend/src/meho_backplane/connectors/vmware_rest/connector.py#L309); confirmed against [VMware vSphere Automation REST API Programming Guide 8.0](https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere-sdks-tools/8-0/vmware-vsphere-automation-rest-programming-guide-8-0.html))
+  (`vmware_rest/connector.py:309`; confirmed against [VMware vSphere Automation REST API Programming Guide 8.0](https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere-sdks-tools/8-0/vmware-vsphere-automation-rest-programming-guide-8-0.html))
 - **vRLI / NSX / VCF:** session-login POST → token, with single-retry-on-401
   around downstream calls; the shared round-trip is `vcf_session_login`
   ([_shared/vcf_auth.py:354](../../backend/src/meho_backplane/connectors/_shared/vcf_auth.py#L354)).
@@ -258,7 +264,7 @@ JWT must be live at session-establish time).
 `AuthModel` re-exported from `connectors/schemas.py`). Every REST connector's
 `auth_headers` accepts only `shared_service_account` (or `None`) and raises
 `NotImplementedError` naming the target + mode for the others
-([vmware_rest/connector.py:271-277](../../backend/src/meho_backplane/connectors/vmware_rest/connector.py#L271)).
+(`vmware_rest/connector.py:271-277`).
 
 - **shared_service_account** — one vendor service account per target, stored in
   Vault, read by the backplane. The day-1 model; what this Goal wires.
@@ -365,7 +371,7 @@ credential, who the downstream identity is, and how attribution is kept.
 - **Recorded fixtures (respx replay).** The vmware integration test already
   replays a captured vCenter exchange via respx instead of a live appliance —
   the pattern to extend: capture once against a lab vCenter, scrub secrets,
-  replay in CI. ([test_connectors_vmware_rest_vcsim.py](../../backend/tests/integration/test_connectors_vmware_rest_vcsim.py))
+  replay in CI. (`test_connectors_vmware_rest_vcsim.py`)
 - **Injected loader = secret-free unit/E2E gate.** All connector tests inject a
   fake loader (§1). Keep that: the production loader's *own* test exercises the
   Vault read against a **Vault dev-mode harness** (the rubric's State-2 bar),

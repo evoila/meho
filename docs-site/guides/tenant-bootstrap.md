@@ -139,6 +139,12 @@ extraEnv:
 Without this step, logins still work, but MEHO does not notice a person
 who is in a default group and in a new group at the same time.
 
+This check runs only for a login whose token has no `meho_tenants`
+list. A realm with the `meho-tenants` mapper (the standard setup from
+v0.39.0 on) sends that list, and MEHO then takes the tenant from the
+`meho_tenant` attribute of the groups instead. See
+[One person in several tenants](several-tenants.md).
+
 ## Step 4: Create the users
 
 Create each person with a password that is stored in Vault. Do not put

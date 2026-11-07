@@ -1,6 +1,7 @@
 # A multi-step operation that stops part-way gets its own audit row (decision)
 
 **Status:** proposed — a person decides by merging this file ([#4275](https://github.com/evoila/meho/issues/4275) asks a person to answer)
+**Shipped:** merged on 2026-10-20 and shipped in 0.36.0.
 **Date:** 2026-10-20
 **Issue:** [#4275](https://github.com/evoila/meho/issues/4275)
 **Builds on:** [#4274](https://github.com/evoila/meho/issues/4274) (error rows), [#3733](https://github.com/evoila/meho/issues/3733) (kinds of audit rows), [#4217](https://github.com/evoila/meho/issues/4217) (continue after approval), [#2086](https://github.com/evoila/meho/issues/2086) (approval links)

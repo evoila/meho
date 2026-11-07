@@ -9,8 +9,10 @@ files (`0001_*.py`, `0002_*.py`, …). The chain runs against both SQLite
 
 The Alembic environment (`backend/alembic/env.py`) uses an async cookbook so
 migrations run via the same `asyncio`-aware engine the application uses. Each
-migration file's `upgrade()` and `downgrade()` functions run synchronously
-inside an `asyncio.run()` call made by Alembic — do not `await` in migration
+migration file's `upgrade()` and `downgrade()` functions run synchronously:
+through `AsyncConnection.run_sync`, inside an `asyncio.run()` call in `env.py`
+for a plain `alembic upgrade`, or on the connection that the migration runner
+(`meho_backplane.db.migrate`) hands over. Do not `await` in migration
 bodies; use synchronous SQLAlchemy Core (`op.get_bind()` / `bind.execute()`).
 
 ## File naming
@@ -192,6 +194,8 @@ example is `audit_log` being **append-only** (CLAUDE.md postulate 7 / v0.1-spec
 section 6). Migration `0100` installs a `BEFORE UPDATE OR DELETE ... FOR EACH ROW`
 trigger (`audit_log_append_only`, calling `audit_log_reject_mutation()`) that
 `RAISE`s on a direct `UPDATE` / `DELETE`, while `INSERT` / `SELECT` stay untouched.
+Migration `0136` uses the same pattern for `instance_settings_revision`
+(trigger `instance_settings_revision_append_only`; see `settings.md`).
 
 What the trigger does and does not stop:
 

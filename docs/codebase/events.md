@@ -49,7 +49,7 @@ backend/src/meho_backplane/events/
 ```
 
 Plus the persistence shape in
-[backend/src/meho_backplane/db/models.py](backend/src/meho_backplane/db/models.py):
+[backend/src/meho_backplane/db/models.py](../../backend/src/meho_backplane/db/models.py):
 
 - `EventOutbox` — one row per emitted event. Columns: `event_id` (PG
   `BIGSERIAL` / SQLite `Integer`), `tenant_id` (FK), `event_kind`
@@ -59,8 +59,8 @@ Plus the persistence shape in
   (`NULL` for internal producers; a producer-supplied idempotency token
   for at-least-once external ingest), and `origin` (`NULL` = internal
   producer, else the external event-source id). Two partial indexes:
-  `(processed_at, event_id)` on `processed_at IS NULL` drives the
-  drain's claim query, and the **unique** `event_outbox_tenant_dedupe_idx`
+  `event_outbox_unprocessed_idx` on `(event_id)` `WHERE processed_at IS
+  NULL` drives the drain's claim query, and the **unique** `event_outbox_tenant_dedupe_idx`
   on `(tenant_id, dedupe_key)` `WHERE dedupe_key IS NOT NULL` makes a
   duplicate external delivery collide at insert.
 - `EVENT_OUTBOX_NOTIFY_CHANNEL` — the PG channel name the producer
@@ -145,7 +145,7 @@ events. When the producer's transaction commits, the listener opens a
 
 `drain.py`'s background `asyncio` task is wired into the FastAPI
 lifespan via `start_event_drain` / `stop_event_drain` in
-[backend/src/meho_backplane/main.py](backend/src/meho_backplane/main.py).
+[backend/src/meho_backplane/main.py](../../backend/src/meho_backplane/main.py).
 It is gated on `EVENT_DRAIN_ENABLED=true` (default), the same shape as
 the scheduler / topology-refresh / memory-expiry / grant-expiry
 sweepers.
@@ -176,12 +176,12 @@ On each tick (default 10s, settable via
    `SKIP LOCKED` is the belt-and-braces guarantee: even with the
    advisory-lock guard removed, two concurrent claimers never receive
    the same row. The partial index
-   `event_outbox_unprocessed_idx ON (processed_at, event_id) WHERE
-   processed_at IS NULL` keeps the claim query O(log unprocessed)
+   `event_outbox_unprocessed_idx ON (event_id) WHERE processed_at IS
+   NULL` (a plain index on `event_id` on SQLite) keeps the claim query O(log unprocessed)
    rather than O(total rows).
 
 3. **Stamp `claimed_at` + `claimed_by`** (observability — the
-   `claimed_by` column carries `pod_name` so a stuck poll can be
+   `claimed_by` column carries `<hostname>:<pid>` so a stuck poll can be
    traced to the holding replica). The claim is a separate UPDATE on
    the same open session as the SELECT; the FOR UPDATE row-lock
    carries through to the UPDATE.
@@ -215,15 +215,23 @@ On each tick (default 10s, settable via
 
 ## Advisory-lock keys
 
-Two PG advisory locks coexist on the same DB; each has a distinct
-63-bit signed-int key so the locks never collide:
+Several PG advisory locks coexist on the same DB. Each has a distinct
+64-bit signed-int key so the locks never collide. The fixed keys spell
+ASCII words:
 
 | Key | Hex | ASCII | Owner |
 |---|---|---|---|
 | `_SCHEDULER_ADVISORY_LOCK_KEY` | `0x4D45_484F_5343_4844` | `MEHOSCHD` | `scheduler/loop.py` (cron + one-off, T2 #1065) |
 | `_EVENT_DRAIN_ADVISORY_LOCK_KEY` | `0x4D45_484F_4556_5442` | `MEHOEVTB` | `events/drain.py` (event outbox, this Task) |
+| `_SENSOR_RUNNER_ADVISORY_LOCK_KEY` | `0x4D45_484F_5345_4E53` | `MEHOSENS` | `checks/runner.py` (sensor runner) |
+| `MIGRATION_LOCK_KEY` | `0x4D45_484F_4D49_4752` | `MEHOMIGR` | `db/migrate.py` (start-up migrations) |
 
-Distinct keys mean both loops can run concurrently without starving
+Other loops derive their key from a blake2b hash of a fixed label:
+`agent/reaper.py`, `operations/operation_run_reaper.py`,
+`gateway/deadman.py` and `gateway/unreported_mint.py`. The topology
+scheduler takes one lock per `(tenant, target)`.
+
+Distinct keys mean the loops can run concurrently without starving
 each other — the scheduler's lock holder does not block the drain's
 claim, and vice versa. The ASCII spellings make the keys easy to
 recognise in `pg_locks` during operator triage.
@@ -619,11 +627,11 @@ comfortable; revisit if a connector emits bursts.
 
 ## Settings
 
-Both gated via env vars (defaults shown in parens):
+All three are set through env vars (defaults shown in parens):
 
 - `EVENT_DRAIN_ENABLED` (`true`) — start the drain task at lifespan
-  startup. `false` opts out cleanly (the start helper returns `None`
-  and the lifespan shutdown tolerates that shape).
+  startup. `false` opts out cleanly (the lifespan does not start the
+  drain task, and shutdown skips the stop step).
 - `EVENT_DRAIN_TICK_INTERVAL_SECONDS` (`10`, range `[1, 3600]`) —
   bound between consecutive polled scans. The `NOTIFY` hint can cut
   the actual wake-up shorter than this interval; this bounds the
@@ -636,9 +644,9 @@ Both gated via env vars (defaults shown in parens):
 
 ## Test coverage
 
-- [backend/tests/test_event_outbox.py](backend/tests/test_event_outbox.py)
+- [backend/tests/test_event_outbox.py](../../backend/tests/test_event_outbox.py)
   — producer + drain unit tests:
-  - `test_publish_inserts_outbox_row_in_caller_transaction`
+  - `test_publish_commits_with_producer`
   - `test_publish_rolls_back_with_producer`
   - `test_succeed_run_publishes_outbox_event_in_same_tx`
   - `test_fail_run_publishes_outbox_event`
@@ -647,37 +655,37 @@ Both gated via env vars (defaults shown in parens):
     ticks, sum of processed == N exactly
   - `test_restart_durability_drains_unprocessed_rows` — publish →
     simulate kill → restart → tick drains the row
-- [backend/tests/test_event_matcher.py](backend/tests/test_event_matcher.py)
+- [backend/tests/test_event_matcher.py](../../backend/tests/test_event_matcher.py)
   — subscription-matcher unit tests (#2878): containment direction,
   end-to-end `agent_run.completed` → matching trigger → agent run with
   work_ref, non-matching filter fires nothing, redelivery dedupe,
   `BudgetExceededError` no-retry, input-less trigger fires with a
   synthesised untrusted-enveloped prompt.
-- [backend/tests/integration/test_event_matcher_pg.py](backend/tests/integration/test_event_matcher_pg.py)
+- [backend/tests/integration/test_event_matcher_pg.py](../../backend/tests/integration/test_event_matcher_pg.py)
   — the same end-to-end chain against a real Postgres container (#2878).
-- [backend/tests/migrations/test_migration_0027_event_outbox.py](backend/tests/migrations/test_migration_0027_event_outbox.py)
+- [backend/tests/migrations/test_migration_0027_event_outbox.py](../../backend/tests/migrations/test_migration_0027_event_outbox.py)
   — schema + index migration round-trip
-- [backend/tests/migrations/test_migration_0073_event_outbox_dedupe.py](backend/tests/migrations/test_migration_0073_event_outbox_dedupe.py)
+- [backend/tests/migrations/test_migration_0073_event_outbox_dedupe.py](../../backend/tests/migrations/test_migration_0073_event_outbox_dedupe.py)
   — `dedupe_key` / `origin` additive columns + partial unique dedupe
   index (per-tenant uniqueness, NULL-unconstrained, SQLite partial-index
   parity, downgrade round-trip)
 - Inbound ingest (#2881):
-  - [backend/tests/test_events_ingest_auth.py](backend/tests/test_events_ingest_auth.py)
+  - [backend/tests/test_events_ingest_auth.py](../../backend/tests/test_events_ingest_auth.py)
     — per-strategy constant-time auth: bad signature, replay window,
     static-header, basic, and the `compare_digest`-for-every-secret guard
-  - [backend/tests/test_events_ingest_rate_limit.py](backend/tests/test_events_ingest_rate_limit.py)
+  - [backend/tests/test_events_ingest_rate_limit.py](../../backend/tests/test_events_ingest_rate_limit.py)
     — 429 + `Retry-After`, per-source isolation, `0` disables, Valkey
     fail-loud
-  - [backend/tests/test_events_ingest_config.py](backend/tests/test_events_ingest_config.py)
+  - [backend/tests/test_events_ingest_config.py](../../backend/tests/test_events_ingest_config.py)
     — per-source `extras` config resolution + security clamps
-  - [backend/tests/test_api_v1_events_ingest.py](backend/tests/test_api_v1_events_ingest.py)
-    — endpoint: uniform 404, 413-before-buffer, 401, 202 + outbox
-    `origin`/`dedupe_key` + `__ingest__` audit row, idempotent 200,
-    broadcast fail-open, 429/400 mapping
-  - [backend/tests/test_events_ingest_e2e.py](backend/tests/test_events_ingest_e2e.py)
+  - [backend/tests/test_api_v1_events_ingest.py](../../backend/tests/test_api_v1_events_ingest.py)
+    — endpoint: one uniform 401 for a missing, paused or wrongly signed
+    source, 413-before-buffer, 202 + outbox `origin`/`dedupe_key` +
+    `__ingest__` audit row, idempotent 200, 429/400 mapping
+  - [backend/tests/test_events_ingest_e2e.py](../../backend/tests/test_events_ingest_e2e.py)
     — POSTed event → drain tick → matched `kind=event` trigger → agent run
 - First-wave normalisers (#2882):
-  - [backend/tests/test_event_normalizers.py](backend/tests/test_event_normalizers.py)
+  - [backend/tests/test_event_normalizers.py](../../backend/tests/test_event_normalizers.py)
     — golden per-vendor payloads (Alertmanager v4, Grafana ≥ 12,
     VCF Operations template, Harbor default + CloudEvents, generic-json):
     `event_type` + match-field extraction, the top-level lift + filter-recipe

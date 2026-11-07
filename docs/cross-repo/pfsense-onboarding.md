@@ -11,8 +11,8 @@ Copyright (c) 2026 evoila Group
 > handlers live in
 > [`backend/src/meho_backplane/connectors/pfsense/`](../../backend/src/meho_backplane/connectors/pfsense/);
 > the engineering-facing companion is
-> [`docs/codebase/connectors-pfsense.md`](../codebase/connectors-pfsense.md)
-> (if present). This doc is the cookbook every operator reads when
+> [`docs/codebase/connectors-pfsense.md`](../codebase/connectors-pfsense.md).
+> This doc is the cookbook every operator reads when
 > retiring the bash wrapper in favour of `meho pfsense …`.
 
 ## What this surface is
@@ -27,23 +27,35 @@ The `-ssh` discriminator in the impl_id leaves room for a future
 `pfsense-rest-2.7` or `pfsense-api-v3` sibling without breaking the
 resolver's tie-break ladder; v0.1 ships only the SSH transport.
 
-The v0.1 op surface (Initiative
-[#370](https://github.com/evoila/meho/issues/370)) is the read-only
-working set operators use for daily firewall and network diagnostics:
+The op surface covers daily firewall and network diagnostics, plus
+writes that change routes, gateways, firewall rules, NAT rules, aliases
+and local users:
 
 | Group | Ops | Class |
 | --- | --- | --- |
 | `identity` | `pfsense.about` | read-only fingerprint |
 | `config` | `pfsense.version` | read-only version summary |
-| `firewall` | `pfsense.firewall.rules`, `pfsense.firewall.state` | read-only |
-| `nat` | `pfsense.nat.rules` | read-only |
-| `network` | `pfsense.interface.list`, `pfsense.gateway.list` | read-only |
 | `config` | `pfsense.config.show` | read-only XML dump, known secrets removed |
+| `firewall` | `pfsense.firewall.rules`, `pfsense.firewall.state`, `pfsense.mgmt_flow.summary` | read-only |
+| `firewall` | `pfsense.filter.rule.add` (`dangerous`), `pfsense.filter.rule.delete` (`destructive`) | writes; wait for a second person to approve |
+| `nat` | `pfsense.nat.rules` | read-only |
+| `nat` | `pfsense.nat.delete` | `destructive` write; waits for approval |
+| `network` | `pfsense.interface.list`, `pfsense.gateway.list` | read-only |
+| `dhcp` | `pfsense.dhcp.leases` | read-only |
+| `routing` | `pfsense.route.static.list` | read-only |
+| `routing` | `pfsense.route.static.add`, `pfsense.gateway.add` | `caution` writes; no approval |
+| `routing` | `pfsense.route.static.delete`, `pfsense.gateway.delete` | `destructive` writes; wait for approval |
+| `users` | `pfsense.user.list` | read-only |
+| `users` | `pfsense.user.disable`, `pfsense.user.enable` | `dangerous` writes; wait for approval |
+| `alias` | `pfsense.alias.delete`, `pfsense.alias.member.remove` | `destructive` writes; wait for approval |
+| `diagnostics` | `pfsense.diag.ping` | `caution`; waits for approval, because it connects to an address you give |
 
-Eight ops total. Every op dispatches through the same
+Twenty-four ops total: twelve `safe` reads and twelve ops at `caution`
+or higher. The `meho pfsense` verbs below cover the reads, except
+`pfsense.mgmt_flow.summary`, which has no verb. Run that read and the
+other ops with `meho operation call` or through the agent path. Every op dispatches through the same
 `POST /api/v1/operations/call` route the agent surface uses — auth,
-policy, audit, broadcast, and JSONFlux all run as documented in
-[CLAUDE.md](../../CLAUDE.md) §6. The CLI verb tree is operator ergonomics
+policy, audit, broadcast, and JSONFlux all run on every call. The CLI verb tree is operator ergonomics
 over that one route; it is **not** a separate data path and is **not**
 mirrored on the MCP surface (CLAUDE.md postulate 5 — the agent reaches
 every pfSense op via the narrow-waist meta-tools, see the
@@ -63,9 +75,9 @@ every pfSense op via the narrow-waist meta-tools, see the
     (System → User Manager → add user, set shell to `/bin/sh`).
   - Or configure the `admin` user's shell to `/bin/sh` in the pfSense
     user manager if your policy allows it.
-  - The `meho-pfsense` user needs sudo permissions if any write ops
-    are added in a future initiative; for the current read-only surface
-    no sudo is required.
+  - The write ops stage a PHP script under `/etc/phpshellsessions/`
+    and run it with `pfSsh.php playback`. For the writes, the SSH user
+    must be able to do both. The reads need no `sudo`.
 - **pfctl + ifconfig + cat accessible.** The connector runs `pfctl -sr`,
   `pfctl -ss`, `pfctl -sn`, `ifconfig -a`, and `cat /cf/conf/config.xml`
   via SSH. These commands are available in pfSense's base shell. The
@@ -86,14 +98,20 @@ every pfSense op via the narrow-waist meta-tools, see the
 
 The shipped connector's auth model is `shared_service_account` over
 SSH key auth. The SSH credential is stored in Vault at a per-host path
-under the operator tenant's KV-v2 mount, then materialized onto the
-target row's `secret_ref` column.
+under the operator tenant's KV-v2 mount. The target row's `secret_ref`
+column holds that path, and MEHO reads the secret at dispatch time.
 
 **Only SSH key auth is supported.** The pfSense SSH server will accept
 a password for the `admin` user, but the connector deliberately refuses
 password credentials — the `_auth_config` method raises `ValueError` for
 any secret missing `ssh_private_key`. This is intentional: password auth
 exposes the credential in the SSH handshake log and in `auth.log`.
+
+The secret must also pin the host key. Put the firewall's OpenSSH
+`known_hosts` line(s) in a `known_hosts` field. For a lab target only,
+`known_hosts_insecure: true` turns the check off (MEHO logs a warning on
+every connect). A secret with neither field fails with
+`SshHostKeyUnpinnedError` before MEHO sends the key.
 
 ### Creating the dedicated SSH user in pfSense
 
@@ -118,8 +136,9 @@ Vault.
 
 ### Storing the SSH credential in Vault
 
-Use the tenant's KV-v2 path convention:
-`secret/<tenant>/pfsense/<host>`. Example via `meho vault kv put`:
+Use the tenant's KV-v2 path convention: `<tenant>/pfsense/<host>` under
+the `secret` mount. The target's `secret_ref` is that path without the
+mount name. Example via `meho vault kv put`:
 
 ```console
 $ meho vault kv put --target vault-01 secret \
@@ -132,7 +151,8 @@ $ meho vault kv put --target vault-01 secret \
 ```json
 {
   "username": "meho-pfsense",
-  "ssh_private_key": "<PEM-encoded OpenSSH private key>"
+  "ssh_private_key": "<PEM-encoded OpenSSH private key>",
+  "known_hosts": "192.0.2.1 ssh-ed25519 <base64-host-key>"
 }
 ```
 
@@ -151,7 +171,7 @@ targets:
     product: pfsense
     host: 192.0.2.1
     port: 22
-    secret_ref: secret/example-tenant/pfsense/pfsense-01
+    secret_ref: example-tenant/pfsense/pfsense-01
     auth_model: shared_service_account
 ```
 
@@ -330,6 +350,20 @@ secret shapes replaced by `***REDACTED***`, its character length and
 in.
 For structured gateway data, prefer `meho pfsense network gateway`.
 
+### DHCP, routes and users — `meho pfsense dhcp leases` / `route list` / `user list`
+
+```console
+$ meho pfsense dhcp leases --target fw-01
+$ meho pfsense route list --target fw-01
+$ meho pfsense user list --target fw-01 --json
+```
+
+| Verb | op_id | Result |
+| --- | --- | --- |
+| `dhcp leases` | `pfsense.dhcp.leases` | Live DHCPv4 leases from the ISC dhcpd lease file. |
+| `route list` | `pfsense.route.static.list` | One row per static route from `config.xml`. |
+| `user list` | `pfsense.user.list` | One row per local user. Secret fields are never read. |
+
 ## The agent meta-tool path
 
 Per CLAUDE.md postulate 5, these CLI verbs are **operator-only
@@ -341,11 +375,12 @@ meta-tools used for every other connector:
 search_operations(connector_id="pfsense-ssh-2.7", query="firewall rules")
 → [{"op_id": "pfsense.firewall.rules", "summary": "List the active pfSense firewall filter rules from pfctl.", ...}]
 
-call_operation(op_id="pfsense.firewall.rules", target={"name": "fw-01"}, params={})
+call_operation(connector_id="pfsense-ssh-2.7", op_id="pfsense.firewall.rules", target={"name": "fw-01"}, params={})
 → OperationResult{status="ok", result={"rows": [...], "total": 2}}
 ```
 
-The `llm_instructions` on each op provide agent-readable guidance:
+The `llm_instructions` on each op give agents guidance. For the first
+eight reads:
 
 | Op | `when_to_use` summary |
 | --- | --- |

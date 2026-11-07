@@ -64,7 +64,8 @@ Four things follow from a successful pairing:
   [approvals](approvals-and-break-glass.md) every operation obeys.
 
 Pairing and unpairing are reversible and audited, and a paired add-on's
-health shows in the backplane's `/status`.
+health shows in the `pairings` field of `GET /api/v1/health` and of
+`meho_status`.
 
 ## The two add-ons
 

@@ -1,20 +1,20 @@
 # Management-plane break-glass: an offline-anchored, edge-expired, recorded emergency reach path (decision)
 
 **Status:** recorded, not scheduled — Option D was adopted on 2026-09-06 and parked
-the same day (Damir Topic): the network-level lockdown it serves is not pursued for
-the current shared estate; enforcement moved to the operator tooling layer
-(evoila-bosnia/meho-internal#286). This record stands as the design to build if a
+the same day (the maintainer): the network-level lockdown it serves is not pursued for
+the current shared estate; enforcement moved to the operator tooling layer.
+This record stands as the design to build if a
 governed-only environment is stood up.
 **Date:** 2026-09-05
 **Decided:** 2026-09-06
-**Goal:** management-plane lockdown (evoila-bosnia/meho-internal#234) — its
+**Goal:** management-plane lockdown — its
 enforcement ratchet **cannot reach stage 3 (deny-with-log) without this**: the Goal
 makes "break-glass live and tested first" an explicit prerequisite for denying
 operator-direct reach to management planes.
-**Initiative:** evoila-bosnia/meho-internal#248 — management-plane break-glass,
+**Initiative:** management-plane break-glass,
 backplane-independent emergency operator reach (this record **is** the mechanism
 decision that Initiative's implementation Tasks depend on).
-**Task:** evoila-bosnia/meho-internal#251 — decide the mechanism + specify the
+**Task:** decide the mechanism + specify the
 backplane-independent issuance and audit-import contract (this file).
 **Composes with:** [docs/decisions/satellite-write-path.md](satellite-write-path.md)
 (scoped-hybrid remote writes, fail-closed) and
@@ -26,17 +26,17 @@ that break-glass arm *is*.
 ## Disposition (2026-09-06)
 
 Option D was adopted and parked the same day: the network-level lockdown this path
-serves (Goal #234) is not being pursued for the current shared estate — whose
+serves (the lockdown Goal) is not being pursued for the current shared estate — whose
 operators include teams outside the governed workflow — so enforcement moves to the
 operator tooling layer (Claude Code hooks in the operators' working repo plus a
-deviation ledger), tracked in evoila-bosnia/meho-internal#286. This decision record
+deviation ledger), tracked in the private planning repo. This decision record
 stands as the recorded design. The implementation Tasks (#3411, #3412 and three in
 the internal tracker) were closed as not planned and can be reopened if a
 governed-only environment is stood up.
 
 ## The problem
 
-In the lockdown end-state (Goal #234, stages 3–4) an operator laptop has **no
+In the lockdown end-state (the lockdown Goal, stages 3–4) an operator laptop has **no
 network route to any appliance management plane** — the backplane (central instance
 + satellite runners) is the sole management-plane ingress, which is what makes the
 audit log the *complete* record of estate mutations and the policy/approvals plane
@@ -342,14 +342,14 @@ network/access *reach* when the whole backplane is unavailable.
 ## Scope / non-goals
 
 - **This decision records the design, not the code.** The implementation seams are
-  the post-decision Tasks under evoila-bosnia/meho-internal#248, unimplemented. This
+  the post-decision Tasks of the break-glass Initiative, unimplemented. This
   file is the design/decision home.
 - **The mechanism pick, the one-hour TTL, and the recording bastion are decided**
   (2026-09-06): Option D adopted, certificate `notAfter` and edge hard-cap both one
   hour, and the recording chokepoint is a recording bastion. Changing any of them
   needs a new decision entry.
 - **Management planes only.** Data-plane / workload-network emergency access is out
-  of scope (Goal #234 non-goal).
+  of scope (a non-goal of the lockdown Goal).
 - **No standing privileged VPN.** Break-glass is the opposite of standing access —
   time-boxed, approved, recorded.
 - **No change to the self-approval break-glass** (above).
@@ -359,7 +359,7 @@ network/access *reach* when the whole backplane is unavailable.
 
 ## Implementation shape (for the post-decision Tasks)
 
-Were filed as Tasks under evoila-bosnia/meho-internal#248 and closed not-planned on
+Were filed as Tasks under the break-glass Initiative and closed not-planned on
 2026-09-06 with the parking of the lockdown; reopen them from that Initiative if the
 design is scheduled.
 
@@ -384,10 +384,10 @@ design is scheduled.
 
 ## References
 
-- Parent Goal evoila-bosnia/meho-internal#234 (management-plane lockdown — the
-  Break-glass section that requires this) and Initiative
-  evoila-bosnia/meho-internal#248 (the design/build/cold-test home); Task
-  evoila-bosnia/meho-internal#251 (this decision).
+- Parent Goal: management-plane lockdown (its Break-glass section requires
+  this). Initiative: management-plane break-glass (the design/build/cold-test
+  home). Task: decide the mechanism (this decision). All three are tracked in
+  the private planning repo.
 - Sibling decisions this composes with: [satellite-write-path.md](satellite-write-path.md)
   (fail-closed scoped-hybrid remote writes; it names the **central-or-break-glass**
   arm this decision defines the break-glass half of, and its store-and-forward effect

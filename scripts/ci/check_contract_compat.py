@@ -24,8 +24,11 @@ tree and lists every breaking change:
   required argument, a narrower type or a removed enum value; in an output
   schema a removed field, a field that is no longer required, a changed
   type, or a removed output schema. A schema without ``type`` accepts any
-  type. ``oneOf`` and ``anyOf`` branches are compared by position; a
-  branch removed from an input or added to an output is breaking.
+  type. ``oneOf`` and ``anyOf`` branches are paired by content, not by
+  position: equal branches first, then the closest of the rest. A branch
+  removed from an input or added to an output is breaking. In an input
+  ``oneOf``, two branches that newly accept the same type are breaking too
+  (a value that fits two branches fails ``oneOf``).
 
 A breaking change is allowed only on a pull request that has the
 ``breaking-change`` label **and** a ``## Breaking changes`` section in its
@@ -161,38 +164,124 @@ def _type_text(types: frozenset[str]) -> str:
     return "any" if types == _ANY_TYPE else str(sorted(types))
 
 
+def _with_integer(types: frozenset[str]) -> frozenset[str]:
+    """Return *types* plus ``integer`` when it has ``number``: an integer is a number."""
+    return types | {"integer"} if "number" in types else types
+
+
 def _compare_type(
     where: str, base: dict[str, Any], head: dict[str, Any], is_input: bool
 ) -> list[str]:
     old, new = _types(base), _types(head)
-    if old == new or (is_input and old <= new):
+    if old == new or (is_input and old <= _with_integer(new)):
         return []
     return [f"{where}: type changed from {_type_text(old)} to {_type_text(new)}"]
+
+
+def _branch_types(branch: Any) -> frozenset[str]:
+    return _types(branch) if isinstance(branch, dict) else _ANY_TYPE
+
+
+def _shared_types(first: frozenset[str], second: frozenset[str]) -> frozenset[str]:
+    """Return the JSON types a value can have under both; an integer is a number."""
+    return _with_integer(first) & _with_integer(second)
+
+
+def _pair_branches(old: list[Any], new: list[Any], is_input: bool) -> list[tuple[int, int]]:
+    """Pair each old branch with one new branch, whatever their positions.
+
+    Equal branches are paired first. Each old branch left over takes the
+    new branch with the fewest differences (then the nearest position). A
+    branch without a partner stays out of the list.
+    """
+    pairs: list[tuple[int, int]] = []
+    free_new = list(range(len(new)))
+    free_old: list[int] = []
+    for index, branch in enumerate(old):
+        equal = [j for j in free_new if new[j] == branch]
+        if equal:
+            pairs.append((index, equal[0]))
+            free_new.remove(equal[0])
+        else:
+            free_old.append(index)
+    for index in free_old:
+        if not free_new:
+            break
+        closest = min(
+            free_new,
+            key=lambda j: (len(compare_schema("", old[index], new[j], is_input)), abs(index - j)),
+        )
+        pairs.append((index, closest))
+        free_new.remove(closest)
+    return sorted(pairs)
+
+
+def _one_of_overlaps(
+    where: str, old: list[Any], new: list[Any], pairs: list[tuple[int, int]]
+) -> list[str]:
+    """Report two input ``oneOf`` branches that newly accept the same type.
+
+    A value must match exactly one ``oneOf`` branch. When a new branch, or a
+    widened branch, accepts a type that another branch accepts too, a value
+    of that type matched before and is rejected now.
+    """
+    partner = {j: i for i, j in pairs}
+    found: list[str] = []
+    for j in range(len(new)):
+        for k in range(j + 1, len(new)):
+            shared = _shared_types(_branch_types(new[j]), _branch_types(new[k]))
+            if not shared:
+                continue
+            if (
+                j in partner
+                and k in partner
+                and _shared_types(_branch_types(old[partner[j]]), _branch_types(old[partner[k]]))
+            ):
+                continue
+            found.append(
+                f"{where}: oneOf branches {j} and {k} both accept {_type_text(shared)} now "
+                "(a value that fits two branches fails oneOf)"
+            )
+    return found
+
+
+def _branch_list_added_or_removed(
+    where: str, key: str, old: Any, new: Any, is_input: bool
+) -> list[str]:
+    """Report a ``oneOf``/``anyOf`` list that only *base* or only *head* has."""
+    if isinstance(old, list) and not is_input:
+        return [f"{where}: {key} removed"]
+    if isinstance(new, list) and is_input:
+        return [f"{where}: {key} added"]
+    return []
+
+
+def _compare_branch_lists(
+    where: str, key: str, old: list[Any], new: list[Any], is_input: bool
+) -> list[str]:
+    found: list[str] = []
+    fewer_or_more = len(new) < len(old) if is_input else len(new) > len(old)
+    if fewer_or_more:
+        found.append(f"{where}: {key} has {len(new)} branches instead of {len(old)}")
+    pairs = _pair_branches(old, new, is_input)
+    for index, partner in pairs:
+        found += compare_schema(f"{where} {key}[{partner}]", old[index], new[partner], is_input)
+    if is_input and key == "oneOf":
+        found += _one_of_overlaps(where, old, new, pairs)
+    return found
 
 
 def _compare_branches(
     where: str, base: dict[str, Any], head: dict[str, Any], is_input: bool
 ) -> list[str]:
-    """Compare ``oneOf`` and ``anyOf`` branches, paired by their position."""
+    """Compare ``oneOf`` and ``anyOf`` branches; the index is the position in *head*."""
     found: list[str] = []
     for key in _BRANCH_KEYS:
         old, new = base.get(key), head.get(key)
-        if not isinstance(old, list) and not isinstance(new, list):
-            continue
-        if not isinstance(new, list):
-            if not is_input:
-                found.append(f"{where}: {key} removed")
-            continue
-        if not isinstance(old, list):
-            if is_input:
-                found.append(f"{where}: {key} added")
-            continue
-        if is_input and len(new) < len(old):
-            found.append(f"{where}: {key} has {len(new)} branches instead of {len(old)}")
-        if not is_input and len(new) > len(old):
-            found.append(f"{where}: {key} has {len(new)} branches instead of {len(old)}")
-        for index, (old_branch, new_branch) in enumerate(zip(old, new, strict=False)):
-            found += compare_schema(f"{where} {key}[{index}]", old_branch, new_branch, is_input)
+        if isinstance(old, list) and isinstance(new, list):
+            found += _compare_branch_lists(where, key, old, new, is_input)
+        else:
+            found += _branch_list_added_or_removed(where, key, old, new, is_input)
     return found
 
 

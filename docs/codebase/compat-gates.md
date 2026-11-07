@@ -46,14 +46,26 @@ lists every breaking change.
 
 A schema without `type` accepts any type. So adding a `type` to such an
 argument is breaking, and removing the `type` of an output field is
-breaking too.
+breaking too. An integer is a number: an argument that accepted `integer`
+and accepts `number` now is not breaking.
 
 The rules look into nested `properties`, array `items`, and the branches of
-`oneOf` and `anyOf`. The branches are compared by their position in the
-list. A branch removed from an input, or a new branch in an output, is
-breaking. A new tool, a
-new optional argument, a new output field and a new enum value in an input
-are not breaking.
+`oneOf` and `anyOf`. Branches are paired by content, not by position:
+equal branches first, then each branch left over takes the closest one
+(the fewest differences, then the nearest position). So a change of their
+order is not breaking. The index in a message is the position in the new
+schema. A branch removed from an input, or a new branch in an output, is
+breaking.
+
+`oneOf` in an input gets one more rule. A value must match exactly one
+`oneOf` branch. So when a new or widened branch accepts a type that another
+branch accepts too (an integer is also a number, and a branch without
+`type` accepts every type), a value of that type matched before and is
+rejected now. That is breaking. `anyOf` has no such rule: more branches
+only accept more.
+
+A new tool, a new optional argument, a new output field and a new enum
+value in an input are not breaking.
 
 ### When the check cannot run
 

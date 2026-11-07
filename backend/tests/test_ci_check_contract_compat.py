@@ -144,6 +144,12 @@ def test_move_off_the_working_surface_is_breaking_but_the_reverse_is_not() -> No
             "type changed from ['null', 'string'] to ['string']",
         ),
         (
+            lambda t: t["outputSchema"]["properties"]["items"]["items"]["properties"]["id"].update(
+                type="number"
+            ),
+            "MCP tool list_things output.items[].id: type changed from ['string'] to ['number']",
+        ),
+        (
             lambda t: t["outputSchema"]["properties"]["items"]["items"]["properties"].pop("id"),
             "MCP tool list_things output.items[]: field 'id' removed",
         ),
@@ -171,6 +177,7 @@ def test_breaking_schema_changes_are_found(edit: Any, expected: str) -> None:
         lambda t: t["inputSchema"]["properties"].update(new={"type": "string"}),
         lambda t: t["inputSchema"]["properties"]["status"]["enum"].append("archived"),
         lambda t: t["inputSchema"]["properties"]["limit"].update(type=["integer", "null"]),
+        lambda t: t["inputSchema"]["properties"]["limit"].update(type="number"),
         lambda t: t["inputSchema"]["properties"]["status"].pop("enum"),
         lambda t: t["inputSchema"]["properties"]["limit"].pop("type"),
         lambda t: t["outputSchema"]["properties"].update(extra={"type": "string"}),
@@ -205,6 +212,7 @@ def _branched() -> dict[str, Any]:
             "type": "object",
             "properties": {
                 "query": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+                "target": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
             },
         },
         outputSchema={
@@ -286,11 +294,74 @@ def test_branch_changes(edit: Any, expected: list[str]) -> None:
         lambda t: t["outputSchema"]["oneOf"][0]["properties"].update(extra={"type": "string"}),
         lambda t: t["outputSchema"]["oneOf"].pop(),
         lambda t: t["inputSchema"]["properties"]["query"]["anyOf"].append({"type": "null"}),
+        lambda t: t["inputSchema"]["properties"]["query"]["anyOf"].append({"type": "number"}),
         lambda t: t["inputSchema"]["properties"]["query"].pop("anyOf"),
+        lambda t: t["inputSchema"]["properties"]["target"]["oneOf"].append({"type": "null"}),
+        lambda t: t["inputSchema"]["properties"]["target"]["oneOf"].append({"type": "boolean"}),
+        lambda t: t["inputSchema"]["properties"]["target"]["oneOf"][1].update(type="number"),
     ],
 )
 def test_branch_changes_that_are_not_breaking(edit: Any) -> None:
     assert _branched_changed(edit) == []
+
+
+@pytest.mark.parametrize(
+    ("edit", "expected"),
+    [
+        (
+            lambda t: t["inputSchema"]["properties"]["target"]["oneOf"].append({"type": "number"}),
+            "MCP tool search input.target: oneOf branches 1 and 2 both accept ['integer'] now "
+            "(a value that fits two branches fails oneOf)",
+        ),
+        (
+            lambda t: t["inputSchema"]["properties"]["target"]["oneOf"].append({}),
+            "MCP tool search input.target: oneOf branches 0 and 2 both accept ['string'] now "
+            "(a value that fits two branches fails oneOf)",
+        ),
+        (
+            lambda t: t["inputSchema"]["properties"]["target"]["oneOf"][1].pop("type"),
+            "MCP tool search input.target: oneOf branches 0 and 1 both accept ['string'] now "
+            "(a value that fits two branches fails oneOf)",
+        ),
+    ],
+)
+def test_input_one_of_branches_that_start_to_overlap_are_breaking(edit: Any, expected: str) -> None:
+    found = _branched_changed(edit)
+    assert expected in found
+    assert all("both accept" in line for line in found)
+
+
+def test_input_one_of_branches_that_overlapped_before_are_not_reported() -> None:
+    base = _branched()
+    base["inputSchema"]["properties"]["target"]["oneOf"] = [
+        {"type": "object", "required": ["a"]},
+        {"type": "object", "required": ["b"]},
+    ]
+    head = copy.deepcopy(base)
+    head["inputSchema"]["properties"]["target"]["oneOf"][0]["properties"] = {"a": {}}
+    assert compat.mcp_breaking(_snap(base), _snap(head)) == []
+
+
+def _reverse_branches(t: dict[str, Any]) -> None:
+    t["outputSchema"]["oneOf"].reverse()
+    t["inputSchema"]["properties"]["query"]["anyOf"].reverse()
+    t["inputSchema"]["properties"]["target"]["oneOf"].reverse()
+
+
+def test_reordered_branches_are_not_breaking() -> None:
+    assert _branched_changed(_reverse_branches) == []
+
+
+def test_reordered_branches_are_still_compared_with_their_partner() -> None:
+    def edit(t: dict[str, Any]) -> None:
+        _reverse_branches(t)
+        t["outputSchema"]["oneOf"][1]["properties"]["took_ms"].update(type="string")
+        t["inputSchema"]["properties"]["query"]["anyOf"][0].update(type="boolean")
+
+    assert _branched_changed(edit) == [
+        "MCP tool search input.query anyOf[0]: type changed from ['integer'] to ['boolean']",
+        "MCP tool search output oneOf[1].took_ms: type changed from ['integer'] to ['string']",
+    ]
 
 
 def test_new_branches_on_an_input_are_breaking() -> None:

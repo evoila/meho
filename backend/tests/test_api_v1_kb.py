@@ -71,8 +71,11 @@ from meho_backplane.kb.schemas import (
     KbIngestConflict,
     KbIngestionResult,
     KbProvenance,
+    KbSharedNotAllowedError,
+    KbSharedSlugError,
 )
 from meho_backplane.kb.service import KbIngestRootError
+from meho_backplane.lesson_header import LessonHeaderError
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 
@@ -655,6 +658,33 @@ def test_create_returns_201_and_entry(client: TestClient) -> None:
     # The operator's OIDC sub is forwarded so the service can stamp
     # attribution (#1845).
     assert call_kwargs["actor_sub"] == "op-admin"
+
+
+@pytest.mark.parametrize(
+    ("raised", "expected_status"),
+    [
+        (LessonHeaderError("type must be one of fact, lesson; got 'x'"), 422),
+        (KbSharedSlugError("lab-note"), 403),
+        (KbSharedNotAllowedError(uuid.uuid4()), 403),
+    ],
+)
+def test_create_maps_header_and_shared_errors(
+    client: TestClient, raised: Exception, expected_status: int
+) -> None:
+    """A wrong header is a 422; a refused shared write is a 403, both with the reason."""
+    key, token = _admin_token(tenant_id=uuid.uuid4())
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.kb.KbService.create_entry", AsyncMock(side_effect=raised)),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/kb",
+            json={"slug": "lab-note", "body": "b"},
+            headers=_authed(token),
+        )
+    assert response.status_code == expected_status
+    assert response.json()["detail"] == str(raised)
 
 
 def test_create_overwrite_returns_200(client: TestClient) -> None:

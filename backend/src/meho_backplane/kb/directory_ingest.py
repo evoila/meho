@@ -41,6 +41,8 @@ from meho_backplane.kb.schemas import (
     KbIngestConflict,
     KbIngestionResult,
 )
+from meho_backplane.kb.shared import check_may_share, refuse_shared_slug
+from meho_backplane.lesson_header import add_candidate_expiry
 from meho_backplane.retrieval.indexer import compute_body_hash
 from meho_backplane.settings import get_settings
 
@@ -242,21 +244,23 @@ async def _ingest_one(
     else:
         action = "updated"
 
+    # The tenant must be allowed to write this slug and this ``shared`` value,
+    # also in a dry run, so the preview shows the same errors a real run would.
+    check_may_share(tenant_id, record.metadata)
+    await refuse_shared_slug(tenant_id, slug)
     if dry_run:
         return action
-
-    enriched_metadata = stamp_provenance(
-        record.metadata,
-        source_kind="directory",
-        relative_path=record.relative_path,
-        ingested_at=ingested_at,
-    )
 
     await write_entry(
         tenant_id=tenant_id,
         slug=slug,
         body=record.body,
-        metadata_for=lambda _existing: enriched_metadata,
+        metadata_for=lambda existing: stamp_provenance(
+            add_candidate_expiry(record.metadata, existing=existing, now=ingested_at),
+            source_kind="directory",
+            relative_path=record.relative_path,
+            ingested_at=ingested_at,
+        ),
     )
     return action
 

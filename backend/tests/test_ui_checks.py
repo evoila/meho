@@ -319,6 +319,42 @@ def test_detail_renders_member_table() -> None:
     assert "degraded" in body  # the member + rollup badge
 
 
+def test_detail_shows_who_acknowledged_a_member_until_when_and_why() -> None:
+    """An acknowledged member shows who, until when and why next to its real state (#4128)."""
+    from meho_backplane.checks.acknowledgement import (
+        SensorAcknowledgementCreate,
+        acknowledge_sensor,
+    )
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    sid = _seed_sensor(tenant_id=_TENANT_A, name="disk-space", last_state="critical")
+    dash_id = _seed_dashboard(tenant_id=_TENANT_A, name="prod-health", sensor_ids=[sid])
+    until = datetime(2099, 1, 2, 3, 4, tzinfo=UTC)
+    asyncio.run(
+        acknowledge_sensor(
+            tenant_id=_TENANT_A,
+            sensor_id=sid,
+            created_by_sub="op-alice",
+            payload=SensorAcknowledgementCreate(
+                expires_at=until, reason="fix_planned", note="Disk swap <b>Friday</b>"
+            ),
+            now=until - timedelta(days=1),
+        )
+    )
+    client, mock = _client_with_role(tenant_id=_TENANT_A)
+    try:
+        response = client.get(f"/ui/checks/{dash_id}")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "acknowledged" in body
+    assert "by op-alice" in body
+    assert "until 2099-01-02 03:04 UTC" in body
+    assert "fix planned: Disk swap &lt;b&gt;Friday&lt;/b&gt;" in body
+    assert "critical" in body  # the real state stays visible
+
+
 def _set_mail_result(dash_id: uuid.UUID, *, sent: bool, reason: str | None) -> None:
     from meho_backplane.checks.mail_result import record_mail_result
 

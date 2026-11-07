@@ -391,6 +391,48 @@ not in the tenant is 422 `sensor_not_found`; more than 200 members is 422
 `before` / `after`, with `sensor_ids` as sorted lists when the members
 change.
 
+### Acknowledged findings (#4128)
+
+A person can acknowledge a Sensor that is not green: until when, why
+and who. Code: `checks/acknowledgement.py`, table
+`sensor_acknowledgements` (migration `0142`), model
+`SensorAcknowledgement`.
+
+- **Create.** `POST /api/v1/sensors/{id}/acknowledgement`
+  (`api/v1/sensor_acknowledgements.py`), `meho sensor ack`. Body
+  `SensorAcknowledgementCreate`: `expires_at` (required, with a time
+  zone), `reason` (`accepted_risk` / `fix_planned` / `false_alarm`),
+  `note` (1..500 characters). Role `operator` and
+  `require_human_principal`: agent, service and runner tokens get 403.
+  No MCP tool. Refusals: no or naive `expires_at` (422 at the body), an
+  end time in the past or more than 90 days away (422
+  `sensor_ack_invalid_end_time`), a green or never-checked Sensor (422
+  `sensor_ack_not_failing`), an active acknowledgement already there
+  (409 `sensor_ack_already_open`; a partial unique index on
+  `sensor_id WHERE ended_at IS NULL` also stops a race), another
+  tenant (404). The request's audit row (`op_id=sensor.acknowledge`)
+  carries the new row under `after`.
+- **Active** means `ended_at IS NULL` and `expires_at` in the future. Every
+  reader checks the time itself, so an acknowledgement stops counting at
+  its end time.
+- **End.** `settle_acknowledgement` runs inside `record_sensor_result`,
+  after the confirmation gate, in the same transaction. Past its end time
+  it ends as `expired` (`ended_at = expires_at`); when the committed state
+  ranks worse than `acked_state` (`ok`/`skip` < `unknown`/`degraded` <
+  `critical`) it ends as `state_worse`. Each end adds an `INTERNAL` audit
+  row (`operator_sub=system:checks-acknowledgement`, path
+  `sensor.acknowledgement.expire` or `sensor.acknowledgement.end`) to the
+  same transaction. So the expiry row is written at the Sensor's next
+  result after the end time, not at the end time itself; a paused Sensor
+  gets it only when it runs again.
+- **Effects.** The advisory (`checks-advisory.md`) says `acknowledged`
+  for a Dashboard whose every non-green member is acknowledged. The
+  warning mail (`checks-notifications.md`) is skipped when every Sensor
+  it is about is acknowledged. The Dashboard detail
+  (`DashboardMemberView.acknowledgement`, REST and `/ui/checks/{id}`)
+  shows who, until when and why next to the real states. The rollup, the
+  states and the investigator do not change.
+
 ## Dependencies
 
 - **#2504** `meho_backplane.checks.assertions` — `AssertionSpec` (embedded

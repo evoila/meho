@@ -168,11 +168,13 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Final, cast
 
 import structlog
 
 from meho_backplane.broadcast.client import get_broadcast_client
+from meho_backplane.checks.acknowledgement import all_acknowledged
 from meho_backplane.checks.mail_result import record_mail_result
 from meho_backplane.connectors.mail.allowlist import (
     RecipientNotAllowedError,
@@ -427,6 +429,28 @@ def _suppression_key(
     if sensor_id is not None:
         return f"meho:checks:notify:{tenant_id}:{dashboard_id}:member:{sensor_id}:{state}"
     return f"meho:checks:notify:{tenant_id}:{dashboard_id}:{state}"
+
+
+async def _acknowledged(notice: DashboardNotice) -> bool:
+    """True when every Sensor this warning is about is acknowledged (#4128).
+
+    A "new problem" notice is about its one member; a Dashboard notice is
+    about its non-green members. A notice with no member is never treated
+    as acknowledged. Fail-open: when the read fails, the mail is sent.
+    """
+    if notice.member_change is not None:
+        sensor_ids = [notice.member_change.sensor_id]
+    else:
+        sensor_ids = [m.sensor_id for m in notice.members]
+    try:
+        return await all_acknowledged(sensor_ids, datetime.now(UTC))
+    except Exception:
+        _log().warning(
+            "checks_notify_acknowledgement_read_failed",
+            dashboard_id=str(notice.dashboard_id),
+            exc_info=True,
+        )
+        return False
 
 
 async def _claim_suppression(notice: DashboardNotice, window_seconds: int) -> bool:
@@ -733,6 +757,8 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
       (the state every pre-#2719 row backfills to);
     * the edge does not reach ``notify_min_state`` (see
       :func:`_crosses_threshold`);
+    * it is a warning (not an all-clear) and every Sensor it is about is
+      acknowledged (#4128, see :func:`_acknowledged`);
     * a same-state notification already claimed this edge's flap window
       (#2732, see :func:`_claim_suppression`; skipped entirely when the
       window is ``0`` or the crossing is into a rank-0 state);
@@ -783,6 +809,9 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
             notify_min_state=notice.notify_min_state,
             **_log_fields(notice),
         )
+        return
+    if suppressible and await _acknowledged(notice):
+        _log().info("checks_notify_skipped_acknowledged", **_log_fields(notice))
         return
     if window_minutes > 0 and suppressible:
         window_seconds = window_minutes * 60

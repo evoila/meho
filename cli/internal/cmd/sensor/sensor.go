@@ -144,15 +144,15 @@ func loadJSONObjectFlag(cmd *cobra.Command, raw, flagName string) (map[string]an
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sensor",
-		Short: "Manage deterministic-check sensors (list / create / edit / delete / results)",
+		Short: "Manage deterministic-check sensors (list / create / edit / delete / results / ack)",
 		Long: "Manage tenant-scoped sensors wired by the deterministic " +
 			"check layer (Initiative #2416). A sensor pins an (op + args + " +
 			"assertion + cadence + severity) tuple the check runner " +
 			"evaluates on a schedule (kind=interval for sub-minute cadence, " +
 			"kind=cron for >=1-minute cadence). The op must be safe (a " +
 			"caution/dangerous op is refused at create and edit). Write verbs " +
-			"(create / edit / delete) require tenant_admin; the read verb (list) is " +
-			"operator-level. Tenant scoping is enforced server-side via the " +
+			"(create / edit / delete) require tenant_admin; the read verb (list) and " +
+			"ack (acknowledge a finding for a set time) are operator-level. Tenant scoping is enforced server-side via the " +
 			"JWT; platform_admin callers may use --tenant to act on another " +
 			"tenant's sensors.",
 		SilenceUsage: true,
@@ -162,6 +162,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newDeleteCmd())
 	cmd.AddCommand(newEditCmd())
 	cmd.AddCommand(newResultsCmd())
+	cmd.AddCommand(newAckCmd())
 	return cmd
 }
 

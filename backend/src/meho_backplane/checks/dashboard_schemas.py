@@ -32,6 +32,7 @@ from pydantic import (
     field_validator,
 )
 
+from meho_backplane.checks.acknowledgement import SensorAcknowledgementRead
 from meho_backplane.checks.assertions import CheckState
 from meho_backplane.db.models import SensorSeverity, SensorStatus
 
@@ -220,6 +221,10 @@ class DashboardMemberView(BaseModel):
     last_evidence: dict[str, object] | None
     last_evaluated_at: datetime | None
     next_fire_at: datetime | None
+    #: The active acknowledgement (#4128): who, until when and why. ``None``
+    #: when nobody acknowledged the member. The states above stay the real
+    #: ones.
+    acknowledgement: SensorAcknowledgementRead | None = None
 
 
 class DashboardRead(BaseModel):

@@ -6,7 +6,8 @@
   badge plus the member table: each member Sensor with its raw + effective
   state, the *pending* marker (a failing state still held by the ``for:``
   window), the held-since instant, the severity cap, and the last observed
-  value / evidence. Read-only.
+  value / evidence. Read-only. An acknowledged member (#4128) also shows who
+  acknowledged it, until when and why, next to its real state.
 -#}
 {% extends "base.html" %}
 
@@ -71,6 +72,14 @@
                 <span class="badge {{ m.effective_state_badge }} badge-sm">{{ m.effective_state }}</span>
                 {% if m.pending %}
                   <span class="badge badge-warning badge-xs" title="Failing, but held by the for: window">pending</span>
+                {% endif %}
+                {% if m.acknowledgement %}
+                  <div class="mt-1 text-xs" data-testid="member-acknowledgement">
+                    <span class="badge badge-info badge-xs">acknowledged</span>
+                    by {{ m.acknowledgement.by }}
+                    until {{ m.acknowledgement.until.strftime("%Y-%m-%d %H:%M UTC") }}
+                    &middot; {{ m.acknowledgement.reason }}: {{ m.acknowledgement.note }}
+                  </div>
                 {% endif %}
               </td>
               <td>

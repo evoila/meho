@@ -59,6 +59,7 @@ Design contract (mirrors the #2550 mould):
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any, Final
 
 import structlog
@@ -67,6 +68,7 @@ from sqlalchemy import select
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.client import get_broadcast_client
+from meho_backplane.checks.acknowledgement import acknowledged_dashboards
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import CheckDashboard
 from meho_backplane.settings import get_settings
@@ -138,8 +140,13 @@ def _dedupe_key(
 
 async def _non_green_dashboards(
     tenant_id: uuid.UUID,
-) -> list[tuple[uuid.UUID, str, str]]:
+) -> tuple[list[tuple[uuid.UUID, str, str]], dict[uuid.UUID, datetime]]:
     """Read ``(id, name, last_rollup_state)`` for non-green memo rows.
+
+    Also returns the Dashboards among them whose every non-green member is
+    acknowledged (#4128), with the earliest end time of those
+    acknowledgements. Same session; the second read runs only when a row
+    is non-green.
 
     One SELECT riding ``check_dashboard_tenant_idx``; rows whose memo is
     ``NULL`` (never transitioned) or outside :data:`_ADVISORY_STATES`
@@ -159,7 +166,34 @@ async def _non_green_dashboards(
             .order_by(CheckDashboard.name)
             .limit(_ADVISORY_MAX_DASHBOARDS)
         )
-        return [(row[0], row[1], row[2]) for row in rows.all()]
+        found = [(row[0], row[1], row[2]) for row in rows.all()]
+        if not found:
+            return [], {}
+        acked = await acknowledged_dashboards(
+            session, [dashboard_id for dashboard_id, _n, _s in found], datetime.now(UTC)
+        )
+        return found, acked
+
+
+def _entry(
+    dashboard_id: uuid.UUID,
+    name: str,
+    state: str,
+    acked_until: datetime | None,
+) -> tuple[str, dict[str, Any]]:
+    """The dedupe-key state segment and the entry for one Dashboard.
+
+    An acknowledged Dashboard (#4128) says ``acknowledged`` and until when,
+    instead of the warning, under its own key: the caller is told once per
+    window that the finding is acknowledged, and the warning comes back
+    under the plain key when the acknowledgement ends.
+    """
+    entry: dict[str, Any] = {"dashboard_id": str(dashboard_id), "name": name, "state": state}
+    if acked_until is None:
+        return state, entry
+    entry["acknowledged"] = True
+    entry["acknowledged_until"] = acked_until.isoformat()
+    return f"{state}:acknowledged", entry
 
 
 async def _claim_unannounced(
@@ -200,7 +234,9 @@ async def build_checks_alert_advisory(operator: Operator) -> dict[str, Any]:
 
     Returns ``{"checks_alert_advisory": [{"dashboard_id", "name",
     "state"}, ...]}`` or an empty dict (no key added) when the advisory
-    does not apply. The empty-dict short-circuits, in order:
+    does not apply. A Dashboard whose every non-green member is
+    acknowledged (#4128) also carries ``acknowledged: true`` and
+    ``acknowledged_until`` (see :func:`_entry`). The empty-dict short-circuits, in order:
 
     * the feature is disabled (``checks_alert_advisory_window_minutes
       == 0`` -- checked before any DB or Valkey I/O);
@@ -228,20 +264,22 @@ async def build_checks_alert_advisory(operator: Operator) -> dict[str, Any]:
     if window_minutes <= 0:
         return {}
     try:
-        rows = await _non_green_dashboards(operator.tenant_id)
+        rows, acked = await _non_green_dashboards(operator.tenant_id)
         if not rows:
             return {}
         actor_sub = resolve_actor_sub()
-        entries = await _claim_unannounced(
-            [
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        for dashboard_id, name, state in rows:
+            key_state, entry = _entry(dashboard_id, name, state, acked.get(dashboard_id))
+            candidates.append(
                 (
-                    _dedupe_key(operator.tenant_id, operator.sub, actor_sub, dashboard_id, state),
-                    {"dashboard_id": str(dashboard_id), "name": name, "state": state},
+                    _dedupe_key(
+                        operator.tenant_id, operator.sub, actor_sub, dashboard_id, key_state
+                    ),
+                    entry,
                 )
-                for dashboard_id, name, state in rows
-            ],
-            window_minutes * 60,
-        )
+            )
+        entries = await _claim_unannounced(candidates, window_minutes * 60)
     except Exception:
         # Advisory is best-effort awareness; any failure (a DB or Valkey
         # teardown included) must never convert a successful dispatch

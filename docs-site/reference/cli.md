@@ -4569,11 +4569,25 @@ meho secret read <mount> <path> [flags]
 
 ## `meho sensor`
 
-Manage deterministic-check sensors (list / create / edit / delete / results)
+Manage deterministic-check sensors (list / create / edit / delete / results / ack)
 
 ```
 meho sensor
 ```
+
+### `meho sensor ack`
+
+Acknowledge a sensor finding until a set time, with a reason (operator)
+
+```
+meho sensor ack <sensor_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit the raw acknowledgement JSON instead of the summary
+- `--note` — short text that says why; required
+- `--reason` — accepted_risk | fix_planned | false_alarm; required
+- `--until` — end time (RFC 3339) or duration from now (e.g. 72h); required
 
 ### `meho sensor create`
 

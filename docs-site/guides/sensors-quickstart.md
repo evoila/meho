@@ -283,6 +283,40 @@ Both edits need the `tenant_admin` role. The audit log records the old
 and the new value of each changed field. The REST routes are
 `PATCH /api/v1/sensors/{id}` and `PATCH /api/v1/checks/dashboards/{id}`.
 
+## Acknowledge a finding
+
+Sometimes a red sensor is known and someone is on it. You can
+acknowledge it for a set time, with a reason. The sensor keeps running
+and its real state stays visible.
+
+```bash
+meho sensor ack <sensor_id> --until 72h \
+  --reason fix_planned --note "Disk swap on Friday"
+```
+
+- `--until` is required: a time (`2026-12-01T18:00:00Z`) or a duration
+  from now (`72h`). At most 90 days.
+- `--reason` is `accepted_risk`, `fix_planned` or `false_alarm`.
+- `--note` is a short text that says why.
+
+While the acknowledgement is active:
+
+- the advisory on operation answers says "acknowledged" instead of the
+  warning;
+- the warning mails for this sensor are not sent again (the all-clear
+  mail still goes out);
+- the dashboard page shows who acknowledged it, until when and why,
+  next to the real state.
+
+It ends at the end time. It ends earlier when the sensor gets worse,
+for example from `degraded` to `critical`. Then the warnings come back.
+MEHO writes an audit row when you acknowledge, and when it ends.
+
+You need the `operator` role. An agent cannot acknowledge, and there is
+no MCP tool for it. The REST route is
+`POST /api/v1/sensors/{id}/acknowledgement`. A green sensor is refused,
+and so is a sensor that is already acknowledged.
+
 ## The investigator (optional deep tier)
 
 When a dashboard's rollup crosses from green into a non-green state,

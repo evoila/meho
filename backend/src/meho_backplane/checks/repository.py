@@ -30,6 +30,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.checks.acknowledgement import settle_acknowledgement
 from meho_backplane.checks.assertions import CheckState
 from meho_backplane.db.models import Sensor, SensorCadenceKind, SensorResult, SensorStatus
 from meho_backplane.scheduler.cron import next_fire_after
@@ -289,7 +290,11 @@ async def record_sensor_result(
             evidence=evidence,
             evaluated_at=evaluated_at,
         )
-    return await _commit_through_confirmation_gate(session, row, state, evaluated_at)
+    changed = await _commit_through_confirmation_gate(session, row, state, evaluated_at)
+    # #4128: end an acknowledgement whose time is up or whose Sensor got
+    # worse, with its audit row, in this same transaction.
+    await settle_acknowledgement(session, row, evaluated_at)
+    return changed
 
 
 async def list_sensor_results(

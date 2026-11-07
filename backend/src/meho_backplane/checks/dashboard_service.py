@@ -42,6 +42,10 @@ from typing import cast
 import structlog
 from sqlalchemy.exc import IntegrityError
 
+from meho_backplane.checks.acknowledgement import (
+    SensorAcknowledgementRead,
+    active_acknowledgements,
+)
 from meho_backplane.checks.assertions import CheckState
 from meho_backplane.checks.dashboard_repository import (
     create_dashboard,
@@ -132,7 +136,11 @@ def _member_state(sensor: Sensor) -> MemberState:
     )
 
 
-def _member_view(sensor: Sensor, evaluation: MemberEvaluation) -> DashboardMemberView:
+def _member_view(
+    sensor: Sensor,
+    evaluation: MemberEvaluation,
+    acknowledgement: SensorAcknowledgementRead | None = None,
+) -> DashboardMemberView:
     """Assemble one member's detail-row view from its sensor + evaluation."""
     return DashboardMemberView(
         sensor_id=sensor.id,
@@ -150,6 +158,7 @@ def _member_view(sensor: Sensor, evaluation: MemberEvaluation) -> DashboardMembe
         last_evidence=sensor.last_evidence,
         last_evaluated_at=sensor.last_evaluated_at,
         next_fire_at=sensor.next_fire_at,
+        acknowledgement=acknowledgement,
     )
 
 
@@ -176,11 +185,19 @@ def _to_read(row: CheckDashboard, sensors: Sequence[Sensor], now: datetime) -> D
     )
 
 
-def _to_detail(row: CheckDashboard, sensors: Sequence[Sensor], now: datetime) -> DashboardDetail:
+def _to_detail(
+    row: CheckDashboard,
+    sensors: Sequence[Sensor],
+    now: datetime,
+    acks: dict[uuid.UUID, SensorAcknowledgementRead] | None = None,
+) -> DashboardDetail:
     """Build the detail view (rolled-up state + per-member breakdown)."""
     evaluations = [evaluate_member(_member_state(s), now) for s in sensors]
     state = fold(evaluations)
-    members = [_member_view(s, e) for s, e in zip(sensors, evaluations, strict=True)]
+    acks = acks or {}
+    members = [
+        _member_view(s, e, acks.get(s.id)) for s, e in zip(sensors, evaluations, strict=True)
+    ]
     return DashboardDetail(
         id=row.id,
         tenant_id=row.tenant_id,
@@ -307,7 +324,8 @@ class CheckDashboardAdminService:
             if row is None:
                 return None
             sensors = (await members_by_dashboard(session, dashboard_ids=[row.id])).get(row.id, [])
-            return _to_detail(row, sensors, now)
+            acks = await active_acknowledgements(session, [s.id for s in sensors], now)
+            return _to_detail(row, sensors, now, acks)
 
     async def delete(self, tenant_id: uuid.UUID, dashboard_id: uuid.UUID) -> bool:
         """Delete a Dashboard by id; return ``True`` when a row was removed.

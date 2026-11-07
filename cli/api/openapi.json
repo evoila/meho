@@ -10583,6 +10583,70 @@
         }
       }
     },
+    "/api/v1/sensors/{sensor_id}/acknowledgement": {
+      "post": {
+        "tags": [
+          "sensors"
+        ],
+        "summary": "Acknowledge Sensor Finding",
+        "description": "Acknowledge one Sensor finding of the caller's tenant: until when and why.",
+        "operationId": "acknowledge_sensor_finding_api_v1_sensors__sensor_id__acknowledgement_post",
+        "parameters": [
+          {
+            "name": "sensor_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Sensor Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SensorAcknowledgementCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SensorAcknowledgementRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/checks/dashboards": {
       "get": {
         "tags": [
@@ -29674,6 +29738,10 @@
             "format": "date-time",
             "nullable": true,
             "title": "Next Fire At"
+          },
+          "acknowledgement": {
+            "$ref": "#/components/schemas/SensorAcknowledgementRead",
+            "nullable": true
           }
         },
         "type": "object",
@@ -36414,6 +36482,119 @@
         ],
         "title": "SelectSpec",
         "description": "The select stage: a dotted path and at most one bounded aggregate.\n\nWith no aggregate the path must resolve to a scalar; with an aggregate it\nmust resolve to a list (either a ``[*]`` projection or a directly selected\narray). The path is compiled at model-parse time so an invalid grammar is\na 422, not an evaluation-time surprise."
+      },
+      "SensorAcknowledgementCreate": {
+        "properties": {
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "accepted_risk",
+              "fix_planned",
+              "false_alarm"
+            ],
+            "title": "Reason"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "expires_at",
+          "reason",
+          "note"
+        ],
+        "title": "SensorAcknowledgementCreate",
+        "description": "Body of ``POST /api/v1/sensors/{id}/acknowledgement``.\n\n``expires_at`` is required and must carry a time zone: an acknowledgement\nwithout an end time is refused with 422."
+      },
+      "SensorAcknowledgementRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "sensor_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Sensor Id"
+          },
+          "acked_state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "title": "Acked State"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "accepted_risk",
+              "fix_planned",
+              "false_alarm"
+            ],
+            "title": "Reason"
+          },
+          "note": {
+            "type": "string",
+            "title": "Note"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At"
+          },
+          "ended_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Ended At"
+          },
+          "end_reason": {
+            "type": "string",
+            "enum": [
+              "expired",
+              "state_worse"
+            ],
+            "nullable": true,
+            "title": "End Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "sensor_id",
+          "acked_state",
+          "reason",
+          "note",
+          "created_by_sub",
+          "created_at",
+          "expires_at"
+        ],
+        "title": "SensorAcknowledgementRead",
+        "description": "One acknowledgement as REST, the CLI and the Dashboard detail show it."
       },
       "SensorCadenceKind": {
         "type": "string",

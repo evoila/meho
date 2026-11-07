@@ -9204,6 +9204,77 @@ class CheckDashboardSensor(Base):
     )
 
 
+#: Why a person acknowledged a Sensor finding (#4128). A closed set, so a
+#: report can count the reasons; the short text says the rest.
+SENSOR_ACK_REASONS: tuple[str, ...] = ("accepted_risk", "fix_planned", "false_alarm")
+
+#: The Sensor states a person can acknowledge: every state that is not green.
+#: ``skip`` is never a Sensor's own state (only a rollup derivation).
+SENSOR_ACK_STATES: tuple[str, ...] = ("unknown", "degraded", "critical")
+
+#: Why an acknowledgement ended before or at its end time.
+SENSOR_ACK_END_REASONS: tuple[str, ...] = ("expired", "state_worse")
+
+
+class SensorAcknowledgement(Base):
+    """A person's acknowledgement of one Sensor finding, for a set time (#4128).
+
+    While it is active (``ended_at IS NULL`` and ``expires_at`` is in the
+    future), the in-band advisory says "acknowledged" and the warning mails
+    for this Sensor are not sent again. The Sensor keeps running and its
+    real state stays visible.
+
+    It ends at ``expires_at`` (``end_reason='expired'``), or early when the
+    Sensor's state gets worse than ``acked_state``
+    (``end_reason='state_worse'``). ``checks.acknowledgement`` writes the
+    end and its audit row in the same transaction as the Sensor result that
+    caused it. A partial unique index allows one open row per Sensor.
+    """
+
+    __tablename__ = "sensor_acknowledgements"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    sensor_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("sensor.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # The Sensor's state when the person acknowledged it. A later state
+    # worse than this one ends the acknowledgement early.
+    acked_state: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    note: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    end_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+
+    __table_args__ = (
+        Index(
+            "sensor_acknowledgements_open_idx",
+            "sensor_id",
+            unique=True,
+            postgresql_where=sa.text("ended_at IS NULL"),
+            sqlite_where=sa.text("ended_at IS NULL"),
+        ),
+        sa.CheckConstraint(
+            _ck_in("acked_state", SENSOR_ACK_STATES),
+            name="ck_sensor_acknowledgements_acked_state",
+        ),
+        sa.CheckConstraint(
+            _ck_in("reason", SENSOR_ACK_REASONS),
+            name="ck_sensor_acknowledgements_reason",
+        ),
+        sa.CheckConstraint(
+            _ck_in("end_reason", SENSOR_ACK_END_REASONS),
+            name="ck_sensor_acknowledgements_end_reason",
+        ),
+    )
+
+
 class DispatchTrace(Base):
     """Per-dispatch flight-recorder trace header (#3212, F6).
 

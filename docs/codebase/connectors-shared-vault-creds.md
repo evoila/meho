@@ -166,7 +166,8 @@ dispatcher's `connector_error` branch.
    The per-request Vault token is revoked on context exit.
 6. **Structural unwrap.** KV-v2's GET returns `{"data": {"data":
    {<secret kv>}, "metadata": {...}}}`; the secret content is the nested
-   `data["data"]` (the same double-unwrap `vault/ops.py:308` performs). A
+   `data["data"]` (the same double-unwrap the `vault.kv.read` handler in
+   `vault/ops.py` performs). A
    malformed payload raises `VaultCredentialsReadError`, not a bare
    `KeyError`. This is the backend's return value — the shared loader
    takes it from here.
@@ -225,7 +226,7 @@ the pure routing layer the loaders funnel through (#2229, Initiative
 This is the target-credential analogue of
 `connectors/secret/endpoints.py`'s `SECRET_ENDPOINT_REGISTRY` (the
 `secret.move` broker seam). The two are intentionally separate registries:
-the broker moves one opaque value and reports only its SHA-256
+the broker moves one opaque value and reports only its keyed fingerprint
 (`SecretEndpoint.read_secret` → `SecretMaterial`), while a credential
 backend returns a named-field payload a connector session builder
 consumes. Same shape, different contract.
@@ -319,7 +320,7 @@ provider, optionally impersonates `GSM_WIF_SERVICE_ACCOUNT` (via the IAM
 `generateAccessToken` URL) for the final read, and the token is discarded
 when the credential goes out of scope. This restores *GCP-layer*
 per-operator attribution — GCP's audit log names the operator — mirroring
-the Vault `vault_client_for_operator` JIT contract (`auth/vault.py:198`): a
+the Vault `vault_client_for_operator` JIT contract (`auth/vault.py`): a
 fresh credential per operation, never cached across requests. Selection is
 per-read: WIF configured **and** an operator JWT present ⇒ operator path;
 unconfigured ⇒ the Phase-1 SA-direct path, unchanged (no behaviour change
@@ -375,7 +376,7 @@ per-target vendor credentials where it previously failed closed:
   is reconstructed from `operator_sub` and **not validated from a bearer
   token**;
 - the legacy `execute()` shims in ~15 connectors (`postgres`, `keycloak`,
-  `rabbitmq`, `loki`, `nsx`, …), whose own docstrings still assert they
+  `rabbitmq`, `loki`, `mongodb`, `mssql`, …), whose own docstrings still assert they
   "fail closed in the credential loader" — untrue on GSM since #2642.
 
 The `/api/v1/health` and `/ready` probes are **not** on that list. They
@@ -591,11 +592,10 @@ Rules for the key:
 - A target with no `secret_ref` falls back to `target_cache_key`: there is
   nothing to compare, so the token stays per target.
 
-Connectors that key their tokens this way: the ingested (profiled)
-connectors, SRM and vSphere Replication (`vmware_shared/dr_rest.py`), HCX, Salt,
-vRO, vra8, VCF Automation, VCF Operations, VCF Operations for Logs, VCF
-Fleet, VCF Installer, SDDC Manager (VCF 5 and 9), Cloud Director and the
-Proxmox ticket.
+Connectors in this repo that key their tokens this way: the ingested
+(profiled) connectors, FreeIPA and the Proxmox ticket. The VMware
+connectors named above ship in the separate connector package
+([decision](../decisions/2026-10-28-own-connectors-leave-the-public-tree.md)).
 
 Not changed, on purpose:
 
@@ -628,15 +628,15 @@ entries.
   `asyncio.to_thread`.
 - **`meho_backplane.auth.vault.vault_client_for_operator`** — the
   JWT/OIDC login context manager; the proven operator-context Vault read
-  primitive (`auth/vault.py:198`).
+  primitive (`auth/vault.py`).
 - **`meho_backplane.auth.operator.Operator`** — the frozen request-scoped
   operator whose `raw_jwt` is forwarded to Vault.
 - **`structlog`** — the `vault_basic_credentials_loaded` event.
-- **`google-cloud-secret-manager`** (2.29.0 resolved) — the `gsm` backend's
+- **`google-cloud-secret-manager`** (2.31.0 resolved) — the `gsm` backend's
   `SecretManagerServiceClient.access_secret_version(name=...)` →
   `response.payload.data` (bytes). Synchronous; wrapped in
   `asyncio.to_thread`.
-- **`google-auth`** (2.55.1 resolved) — `google.auth.default()` for the ADC
+- **`google-auth`** (2.62.0 resolved) — `google.auth.default()` for the ADC
   source and `google.auth.impersonated_credentials.Credentials` for the
   optional SA-direct impersonation the `gsm` backend reuses from
   `GcloudConnector`. The WIF path (#2232) uses
@@ -650,7 +650,7 @@ entries.
 - The `secret_ref` is read under a single `mount` (default `"secret"`).
   A non-default mount is passed via `mount=`, not embedded in the ref
   string. An API-path-shaped ref (mount or `/data/` segment embedded, e.g.
-  `kv/data/...`) is **rejected** by the shape guard (step 3) rather than
+  `kv/data/...`) is **rejected** by the shape guard (step 4) rather than
   silently double-resolving — `secret_ref` is path-only and logical, per
   the consumer convention. Registration-time validation (a Pydantic
   validator on `Target.secret_ref` that fails even earlier) is out of
@@ -666,7 +666,7 @@ entries.
   fires. That is unobservable in a running backplane — the chassis env is
   required at startup — but a unit test driving the fail-closed path with
   no chassis env now needs to pin `KEYCLOAK_ISSUER_URL` /
-  `KEYCLOAK_AUDIENCE` (the six `tests/test_connectors_*_auth.py` suites
+  `KEYCLOAK_AUDIENCE` (the three `tests/test_connectors_*_auth.py` suites
   carry a `_chassis_settings_env` fixture for exactly this).
 - `_require_secret_ref` still raises `VaultCredentialsReadError` for an
   unset `secret_ref` on **every** backend: it is a shared-loader error
@@ -723,7 +723,7 @@ entries.
 - Research: `docs/research/214-connector-credential-broker.md` §2 (KV-v2),
   §6 (no-secret-in-logs), §7 (testing without real secrets).
 - Lift source: `backend/src/meho_backplane/connectors/vault/ops.py`
-  L284-312 (the `vault_client_for_operator` + KV-v2 read + structural
+  (the `vault_client_for_operator` + KV-v2 read + structural
   unwrap).
-- Primitive: `backend/src/meho_backplane/auth/vault.py` L198
+- Primitive: `backend/src/meho_backplane/auth/vault.py`
   (`vault_client_for_operator`), error classes L79-107.

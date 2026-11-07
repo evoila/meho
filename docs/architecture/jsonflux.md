@@ -192,8 +192,13 @@ verbatim on the `register()` docstring.
 Data only ever enters the engine via in-memory Arrow tables
 (`conn.register`); DuckDB is never asked to read a file or URL itself —
 sources are decoded in Python (`msgspec`) and handed over as Arrow. The
-`QueryEngine` constructor enforces that contract on the `:memory:`
-connection via `_harden_connection()`:
+`QueryEngine` constructor opens the `:memory:` connection with
+`config={"threads": 1}`, plus `"async_threads": 1` on duckdb 2.0 or newer.
+duckdb 2.0 starts its own pool of I/O threads for each connection, sized by
+the CPU count, and a later `SET threads` does not limit that pool. duckdb
+1.5 does not know the `async_threads` option and rejects it, so the engine
+passes it only on 2.0 or newer. The constructor then enforces the
+data contract via `_harden_connection()`:
 
 ```python
 self.conn.execute("SET enable_external_access=false")
@@ -212,7 +217,7 @@ third-party and built-in extension installs/loads; `max_memory` and
 `threads` bound the engine's resources; `lock_configuration=true` freezes
 all further configuration and so must be applied **last** — every `SET`
 above must precede it, because a post-lock `SET` raises
-`InvalidInputException` on the pinned `duckdb==1.5.5`. This is
+`InvalidInputException`. This is
 defense-in-depth against the latent arbitrary-file-read / SSRF /
 untrusted-extension surface that arbitrary SQL (e.g. the `result_query`
 query surface, #3366) would expose. See the
@@ -537,8 +542,8 @@ operators and aggregate functions are fixed
 allow-lists; caller values bind as DuckDB prepared-statement parameters,
 never string-interpolated. The unsafe forms are simply **not
 expressible** — there is no `sql=` argument on any transport. This is a
-stronger property than sanitizing a caller SQL string, verified against
-the locked `duckdb==1.5.5` / `pyarrow==25.0.1`: a `:memory:` database
+stronger property than sanitizing a caller SQL string, because of how
+DuckDB behaves: a `:memory:` database
 cannot be opened `read_only` (raises `CatalogException`); with
 `enable_external_access=false` an in-memory `CREATE TABLE … AS SELECT`
 still succeeds; and `execute("A; B")` silently runs both statements — so

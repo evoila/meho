@@ -3,8 +3,8 @@
 
 """Create the ``memory_revision`` table.
 
-Revision ID: 0138
-Revises: 0137
+Revision ID: 0139
+Revises: 0138
 Create Date: 2026-11-07
 
 A memory entry is one ``documents`` row (``source='memory'``). A new write
@@ -37,8 +37,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0138"
-down_revision: str | None = "0137"
+revision: str = "0139"
+down_revision: str | None = "0138"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

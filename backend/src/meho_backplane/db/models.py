@@ -908,6 +908,20 @@ class Tenant(Base):
         nullable=True,
         default=None,
     )
+    # Per-tenant prices for agent models that MEHO's own price table
+    # (``MODEL_PRICING``) does not know, for example an open model on a
+    # model server the tenant runs itself (#5853). A map from model id to
+    # ``{"input": "<USD>", "output": "<USD>"}`` per million tokens; the
+    # prices are decimal strings, so no float rounding gets in. ``NULL``
+    # means no prices. Read and written through
+    # :mod:`meho_backplane.operations.tenant_model_prices`. A model in
+    # ``MODEL_PRICING`` always keeps that price. Nullable, so migration
+    # ``0138`` needs no backfill.
+    agent_model_prices: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -4385,6 +4399,15 @@ class AgentRun(Base):
         nullable=True,
         default=None,
     )
+    # Token counts of a succeeded run (#5853), summed over its model
+    # requests. ``input_tokens`` is the uncached input only; the cached
+    # input is in the two cache columns (``0`` when the provider does not
+    # report a prompt cache). ``NULL`` on a run that did not succeed and
+    # on rows written before migration ``0138``.
+    input_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    output_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    cache_read_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    cache_write_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
     output: Mapped[dict[str, object] | None] = mapped_column(
         _PORTABLE_JSON,
         nullable=True,

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0140_add_approval_request_outcome_check`` (#5026).
+"""Tests for Alembic migration ``0141_add_approval_request_outcome_check`` (#5026).
 
 The migration adds six nullable columns that hold what a person found when
 they checked the target of an approved run with an unknown outcome, one
@@ -31,8 +31,8 @@ from meho_backplane.operations.approval_outcome_check import (
 )
 from meho_backplane.settings import get_settings
 
-_REVISION = "0140"
-_DOWN_REVISION = "0139"
+_REVISION = "0141"
+_DOWN_REVISION = "0140"
 _TABLE = "approval_request"
 _COLUMNS = (
     "outcome_checked_at",
@@ -49,7 +49,7 @@ _VERSIONS = Path(__file__).resolve().parent.parent.parent / "alembic" / "version
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0140.db"
+    db_path = tmp_path / "migration_0141.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
@@ -96,7 +96,7 @@ def _insert(sync_url: str, *, row_id: str, verdict: str | None, reason: str | No
 def test_verdicts_and_reasons_match_the_enums() -> None:
     """The migration's value tuples equal the enums (drift guard)."""
     spec = importlib.util.spec_from_file_location(
-        "_migration_0140", _VERSIONS / "0140_add_approval_request_outcome_check.py"
+        "_migration_0141", _VERSIONS / "0141_add_approval_request_outcome_check.py"
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

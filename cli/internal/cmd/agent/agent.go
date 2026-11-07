@@ -82,7 +82,7 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "agent",
-		Short: "Manage agent definitions (list / show / create / edit / delete)",
+		Short: "Manage agent definitions, runs and grants (list / show / create / edit / delete / run / grant)",
 		Long: "Manage tenant-scoped agent definitions wired by G11.1. " +
 			"An agent definition holds the identity reference, logical " +
 			"model tier, system prompt, toolset spec, turn budget, and " +

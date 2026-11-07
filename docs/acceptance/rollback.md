@@ -168,13 +168,70 @@ and the MCP tool `meho_status` show it as `operation_catalog`:
 | `not_recorded` | No start since this check shipped has written the rows yet. |
 | `unknown` | The database could not be read. The `db` field says more. |
 
-**What still happens during an update.** The chart uses Kubernetes'
-rolling update today. The new pod starts while the old pod still serves.
-When the new pod has started, it has written its rows, so the old pod
-serves the new rows until it stops. This is also true when the new pod
-then never becomes ready (for example Keycloak or Vault cannot be
-reached): its start did not fail, so its rows stay. `/ready` does not
-look at the operation rows.
+**The old pod stops before the new pod starts (#5024).** The chart's
+update strategy is `Recreate` (value `updateStrategy`). Kubernetes stops
+the old pod first and starts the new pod only when the old one is gone.
+So old and new code never work on the database at the same time, and no
+old pod serves the rows of a new release. The cost is about one to two
+minutes without MEHO per update.
+
+How the old pod stops:
+
+1. It keeps serving for `shutdown.preStopSleepSeconds` (default 5), so
+   the Service and the ingress stop sending it requests.
+2. It gets the stop signal. From then on `/ready` answers 503, and it
+   takes no new calls: a new call gets the error `meho_shutting_down`,
+   and nothing is sent to the target. The sensor runner and the scheduler
+   start no new work.
+3. Running operations may finish, for up to `shutdown.drainSeconds`
+   (default 60).
+4. An operation that still runs at that limit is recorded as unfinished:
+   a log line `operation_unfinished_at_shutdown` and an audit row with
+   `result_status: unfinished` and `execution_outcome: uncertain`. It may
+   have reached the target. MEHO never runs it again by itself. An
+   approved request keeps its "started" mark with no result, and an async
+   run stays `running` until its lease ends, so the recovery at the next
+   start can find both.
+
+Kubernetes kills the pod when its grace period is over: the pre-stop wait
+plus the drain plus 30 seconds.
+
+**With `updateStrategy.type: RollingUpdate`** (only for installs with
+several pods) the new pod starts while the old pod still serves. When the
+new pod has started, it has written its rows, so the old pod serves the
+new rows until it stops. This is also true when the new pod then never
+becomes ready (for example Keycloak or Vault cannot be reached): its start
+did not fail, so its rows stay. `/ready` does not look at the operation
+rows.
+
+**When the new release fails to start.** With `Recreate`, the old pod is
+already gone, so MEHO is down until you act. A failed start changed no
+operation row, so the previous release can simply run again:
+
+1. See why the start failed:
+   `kubectl logs -n <ns> deploy/<release> -c backplane --previous`
+   (and `-c migrate --previous` with the built-in PostgreSQL).
+2. Find the last good revision: `helm history <release> -n <ns>`.
+3. Roll back and wait until the pod is ready:
+   `helm rollback <release> <revision> -n <ns> --wait --timeout 10m`.
+4. Check that MEHO serves again: `GET /healthz` answers 200, and
+   `GET /version` shows the previous release's `git_sha`.
+5. Check the operation rows: `GET /api/v1/health` shows
+   `operation_catalog` with `same_release`. If it shows
+   `other_release`, follow the steps below.
+6. Check the audit log for rows with `result_status: unfinished` from the
+   time of the update, and check their targets before anyone runs them
+   again.
+
+CI runs this recovery on every chart change: the `helm-test` job in
+`.github/workflows/chart.yml` updates a throwaway install and checks that
+the old pod has stopped before the new one starts. Then it starts a
+release that fails on purpose right after it wrote its operation rows and
+its release stamp (the test-only setting
+`MEHO_TEST_FAIL_START_AFTER_REGISTRATION`; the broken release disables
+every built-in row and stamps another release name before it fails). It
+checks that the rows and the stamp did not change, rolls back, and runs an
+operation on the restored release.
 
 **What to do when a pod reports `other_release`:**
 

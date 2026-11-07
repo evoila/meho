@@ -164,6 +164,7 @@ from meho_backplane.operations._lookup import lookup_descriptor, parse_connector
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.meta_tools import _resolve_target_or_error
 from meho_backplane.operations.reducer import FullResultCapture, full_result_capture_var
+from meho_backplane.operations.shutdown_drain import is_draining
 from meho_backplane.scheduler.cron import (
     InvalidCronExpressionError,
     InvalidTimezoneError,
@@ -711,6 +712,9 @@ async def _claim_and_spawn_due() -> tuple[bool, int]:
     drawing any other connection would skip silently (#3010's observed
     ~35-50 % cadence).
     """
+    if is_draining():
+        # #5024: a stopping pod claims no sensor. The next pod checks it.
+        return (False, 0)
     now = datetime.now(UTC)
     to_dispatch: list[_SensorSnapshot] = []
     async with advisory_lock(_SENSOR_RUNNER_ADVISORY_LOCK_KEY, subsystem="sensor_runner") as locked:

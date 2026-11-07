@@ -37,6 +37,10 @@ Four of the 26 — the grounded-documentation add-on tools `ask_docs`,
 has provisioned the `meho-docs` capability. A session without that
 capability lists the other 22.
 
+One more working-surface tool, `meho_automation_list`, is listed only
+while an automation add-on is paired with MEHO and healthy. It is not
+one of the 26.
+
 The working surface is the same across every connector. An agent picks a
 connector, lists its operation groups, searches for the operation it
 needs, previews it, and calls it — the vendor's own identifiers stay in
@@ -62,7 +66,7 @@ The governance and lifecycle tools — connector lifecycle and ingest,
 agents / principals / grants, scheduler, sensors, broadcast overrides,
 runbook **template authoring**, topology **mutations**, target
 registration, doc-collection create/delete, memory promotion, approvals
-**read**, and audit query — form a second tier of **53 operator-plane
+**read**, and audit query — form a second tier of **54 operator-plane
 tools**. They are absent from a default session's tool list and refused
 at call time, and they appear **only** for a session that explicitly
 requested the `mcp:admin` OAuth scope.
@@ -166,6 +170,6 @@ right saves a round of `-32602` errors:
 
 This page describes the tiering, not every row. The complete per-tool
 inventory — each tool, its surface tier, and the claim that gates it —
-is published as a generated MCP tool reference in the
-[Reference](../reference/index.md) section, generated from the live
-`tools/list` snapshot so it cannot drift from the product.
+is the generated [MCP tool reference](../reference/mcp-tools.md). It is
+generated from the backplane's tool registry, and a CI check fails when
+the page and the registry disagree.

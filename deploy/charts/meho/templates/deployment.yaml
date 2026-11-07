@@ -1,3 +1,14 @@
+{{- /*
+  An upgrade with --reuse-values from a release older than these keys has no
+  shutdown or updateStrategy value. Fall back to the chart defaults then.
+  hasKey (not default) keeps an explicit 0.
+*/}}
+{{- $sd := .Values.shutdown | default dict }}
+{{- $preStopSleep := 5 }}
+{{- if hasKey $sd "preStopSleepSeconds" }}{{ $preStopSleep = $sd.preStopSleepSeconds }}{{ end }}
+{{- $drain := 60 }}
+{{- if hasKey $sd "drainSeconds" }}{{ $drain = $sd.drainSeconds }}{{ end }}
+{{- $strategy := .Values.updateStrategy | default (dict "type" "Recreate") }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -6,6 +17,10 @@ metadata:
     {{- include "meho.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  # Recreate by default (#5024): the old pod has stopped before the new one
+  # starts, so old and new code never share the database.
+  strategy:
+    {{- toYaml $strategy | nindent 4 }}
   selector:
     matchLabels:
       {{- include "meho.selectorLabels" . | nindent 6 }}
@@ -38,6 +53,9 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "meho.serviceAccountName" . }}
+      # The pre-stop wait, the drain and 30 seconds for the rest of the
+      # shutdown (#5024). Kubernetes kills the pod when this time is over.
+      terminationGracePeriodSeconds: {{ add $preStopSleep $drain 30 }}
       automountServiceAccountToken: false
       {{- with include "meho.core.imagePullSecrets" . }}
       imagePullSecrets:
@@ -67,8 +85,10 @@ spec:
         # runner waits for the database (`MIGRATION_DB_WAIT_SECONDS`,
         # default 300 s) and holds a PostgreSQL advisory lock while it
         # migrates, so a second replica waits and then changes nothing. A
-        # failed migration keeps the pod out of Ready: `helm --wait` fails
-        # and, on upgrade, the old pods keep serving. An older image after
+        # failed migration keeps the pod out of Ready: `helm --wait` fails.
+        # With the default Recreate strategy the old pod has already stopped,
+        # so MEHO is down until `helm rollback` (docs/acceptance/rollback.md).
+        # An older image after
         # `helm rollback` leaves a newer schema alone (rollback contract,
         # docs/codebase/migrations.md). Same container as the Job: image
         # and digest pin, command, environment, security context, volumes
@@ -134,6 +154,13 @@ spec:
             # container (the image build does not know its chart release).
             - name: CHART_VERSION
               value: {{ .Chart.Version | quote }}
+            # How long running operations may take to finish after the stop
+            # signal (#5024). uvicorn reads its own limit for open requests
+            # from UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN; both get the same value.
+            - name: SHUTDOWN_DRAIN_SECONDS
+              value: {{ $drain | quote }}
+            - name: UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN
+              value: {{ $drain | quote }}
             {{- /*
             The running backplane logs in with its own, narrower login when
             the install has one (`meho.postgres.backplaneSecretName`); the
@@ -363,6 +390,16 @@ spec:
             {{- toYaml .Values.probes.liveness | nindent 12 }}
           readinessProbe:
             {{- toYaml .Values.probes.readiness | nindent 12 }}
+          {{- if gt (int $preStopSleep) 0 }}
+          # Keep serving for a few seconds after Kubernetes decided to stop
+          # the pod, so the Service and the ingress stop sending it requests
+          # before it closes (#5024). Without it, a request can still reach
+          # the closing pod and the caller gets a short 502.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", {{ $preStopSleep | quote }}]
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:

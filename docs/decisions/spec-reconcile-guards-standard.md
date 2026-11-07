@@ -1,6 +1,7 @@
 # Spec-reconcile guards as standard — hand-coded vendor paths are checked against a vendor spec when one is pinned (decision)
 
 **Status:** accepted; changed on 2026-10-30 (see "The standard")
+**Superseded in part by:** [own connectors leave the public tree](2026-10-28-own-connectors-leave-the-public-tree.md). The VMware lanes, their tests and `_vcenter_spec.py` left this repository in 0.44.0, with the VMware connectors. The standard and the harness stay here. The public lanes are the ones whose files are in `ci/spec-shelf/`.
 **Date:** 2026-08-17
 **Task:** [#2980](https://github.com/evoila/meho/issues/2980) (initiative
 [#2979](https://github.com/evoila/meho/issues/2979), wave 3 of the guard
@@ -66,8 +67,8 @@ Scope boundaries:
 ## The harness (what a lane is)
 
 `backend/tests/_spec_shelf.py` (#2980) generalises the vcenter-only
-resolver (`tests/acceptance/_vcenter_spec.py`, which now delegates its
-shelf-root branch to it) into three calls; a complete lane is
+resolver (`tests/acceptance/_vcenter_spec.py`, which left this repository
+with the VMware connectors) into three calls; a complete lane is
 `backend/tests/test_spec_shelf_example_lane.py` (<30 lines):
 
 ```python
@@ -107,7 +108,8 @@ Two cost classes of shelf-backed test, two CI homes:
 - **Reconcile lanes** (this standard's subject, every #2981-#2993
   lane): parse the pinned spec, set-compare op_ids. No DB, no
   embeddings, no containers — **seconds** when armed. They live in the
-  required unit sweep (`python-lint-test`) like any unit test, and
+  required unit sweep (the `python-unit-shard` jobs behind the
+  `Python (ruff + mypy + pytest)` check) like any unit test, and
   need **no gating of any kind**.
 - **Full-ingest canaries** (today: the G0.7 vSphere canary,
   `tests/acceptance/test_g07_vsphere_canary.py`): drive the whole
@@ -115,8 +117,9 @@ Two cost classes of shelf-backed test, two CI homes:
   grouping pass — over the full pinned corpus. **Minutes per lane**
   when armed (a full two-spec ingest measures ~164 s on CI runners,
   amortised once per module — see the shared-corpus pattern below).
-  They run in exactly one armed lane: `python-integration` (its pytest
-  step runs `tests/integration/`). A full-ingest test placed in the unit
+  They run in exactly one armed lane: the `python-integration-shard`
+  jobs (their pytest step runs `tests/integration/`; `python-integration`
+  collects their results). A full-ingest test placed in the unit
   sweep must opt out there with a collection-time `skipif` marker, so an
   opted-out lane never even spins the module-scoped Postgres container.
   (The vSphere canary that set this pattern left the public tree with
@@ -240,8 +243,8 @@ pinnable. The record below replaces the exclusion; the lane is armed.
   30 paths covered the vendor-documented
   `/api/v1/spec/openapi/nsx_*` family** the NSX REST API portal
   (`developer.broadcom.com/xapis/nsx-t-data-center-rest-api/latest/`)
-  actually names. Probed 2026-08-18 against the live lab manager
-  (`c2fs1-nsx` / `nsx-mgmt-01a`, NSX 9.1.0.0.25318225, session-auth):
+  actually names. Probed 2026-08-18 against a live lab manager
+  (NSX 9.1.0.0.25318225, session-auth):
   `GET /api/v1/spec/openapi/nsx_api.json` (200; 4,417,173 B),
   `nsx_api.yaml` (200; 5,429,995 B), `nsx_policy_api.json` (200;
   12,195,576 B), `nsx_policy_api.yaml` (200; 14,683,229 B). The public
@@ -291,8 +294,8 @@ pinnable. The record below replaces the exclusion; the lane is armed.
   [`vendor-spec-ci-provisioning.md`](vendor-spec-ci-provisioning.md)
   (vendor-licensed form — NSX manager-served content is fetched into
   ephemeral CI); local pre-verify green against a full local shelf.
-  **Sequencing:** the shelf pin lands via consumer-repo PR
-  (`claude-rdc-hetzner-dc#2514`) which must merge before this repo's
+  **Sequencing:** the shelf pin lands via a consumer-repo PR
+  which must merge before this repo's
   widened verify step can pass.
 
 ### vcf-automation-9.0 — tenant plane ARMED, provider plane excluded (#2983)
@@ -337,13 +340,13 @@ split.
   `*openapi*.{json,yaml}` is empty in both; the hand-written
   `govcd/openapi_endpoints.go` endpoint→version map is the only
   machine-readable surface (consumer kb
-  `vcf-automation-9.0-provider-object-model.md`, #501). That map
+  `vcf-automation-9.0-provider-object-model.md`). That map
   covers only the cloudapi object families — not the classic `/api/*`
   surface, not the session endpoints, not `/site` — so pinning it
   cannot serve a reconcile authority for the five paths above without
   false reds. (2) **Appliance-served spec** —
   `/cloudapi/1.0.0/openapi*` → 404 with a correctly-versioned
-  `Accept` (live Holodeck VCFA 9.0.2, 2026-05-16, #501). (3)
+  `Accept` (live Holodeck VCFA 9.0.2, 2026-05-16). (3)
   **Broadcom dev-portal (xapis)** — the VCFA pages there cover the
   consumption/tenant surface already vendored in `vra-sdk-go`
   (MANIFEST survey note). **Residual risk, named** (the nsx lesson —
@@ -362,8 +365,8 @@ split.
   parse (the path is provider-plane): the pinned SDK map places
   Region under the `vcf/` cloudapi prefix, and the shelf's live-probe
   record has the `1.0.0/` form → 404 with `/cloudapi/vcf/regions`
-  serving (2026-05-16 #505 build run; re-confirmed by later probes,
-  #499/#2006). **Mechanical repoint** to `GET:/cloudapi/vcf/regions`
+  serving (2026-05-16 build run; re-confirmed by later probes).
+  **Mechanical repoint** to `GET:/cloudapi/vcf/regions`
   — same resource, same paged `values[]`/`resultTotal` envelope, same
   `Accept` (the cloudapi form; `provider_accept_for_path` keys on the
   `/api/` prefix only), plane classification unchanged. A residual left
@@ -437,7 +440,7 @@ is proven on every run, with no served-op-id compare.
   plane speaks (VCFA absorbed vCD's provider plane); the appliance serves
   no `/cloudapi/1.0.0/openapi*` (the evidenced 404 recorded for the
   `vcf-automation-9.0` provider plane above — live Holodeck VCFA 9.0.2,
-  2026-05-16, #501 — applies to the same endpoint family). A VMware Cloud
+  2026-05-16 — applies to the same endpoint family). A VMware Cloud
   Director OpenAPI *is* published on the Broadcom developer portal
   (`developer.broadcom.com/xapis/vmware-cloud-director-openapi`), but it
   is not a pinnable vendored Apache-2.0 artifact and covers only the
@@ -797,7 +800,8 @@ the file is there.
 
 - **Check file:** `backend/tests/test_connectors_freeipa_spec_reconcile.py`.
   It reads the `*_COMMAND` constants of `connectors/freeipa/rpc.py` live and
-  pins the set (17 commands), with the login and JSON paths. These tests run
+  pins the set (17 commands on 2026-10-29; 34 since the write commands
+  were added), with the login and JSON paths. These tests run
   always. The compare test reads `freeipa-4.13.4/API.txt` from the shelf,
   takes every `command: <name>/<version>` line, and skips while the file is
   missing.
@@ -847,7 +851,7 @@ guard") and #2970 confirmed it at 11/13. The protocol, per finding:
   `METHOD:/path` literal for a shelf-pinned product must extend that
   product's lane (or the lane's introspection must already sweep it in).
 - The example lane doubles as the harness's CI-armed integration proof:
-  it runs against the real `vcenter-9.0` shelf on every same-repo PR.
+  it runs against the real `keycloak-26.3` shelf on every same-repo PR.
 
 ## References
 

@@ -4,6 +4,8 @@
 1 November 2026 (see "Who builds, signs and reviews"); the folder list was
 corrected on 2 November 2026 with the removal pull request (22 connector
 folders, `idb` included)
+**Shipped:** the first wave left the public tree in 0.44.0. `azure` is still in the public tree.
+**Superseded in part by:** [the connector kit](2026-11-01-connector-kit.md). The connector kit became its own package, `meho-connector-kit` (`backend/connector-kit/`).
 **Date:** 2026-10-28
 **Applies to:** the removal Task [#3345](https://github.com/evoila/meho/issues/3345)
 and the connector packages Initiative [#5060](https://github.com/evoila/meho/issues/5060)
@@ -39,7 +41,8 @@ and the connector packages Initiative [#5060](https://github.com/evoila/meho/iss
   build and its docs.
 - **Core connectors.** The backplane imports them, or they are MEHO's own:
   `vault`, `keycloak`, `secret`, `mail`, `net`, `targets`, `topology`,
-  `audit`, `migration` and `meho_automation`.
+  `audit`, `inventory` (named `migration` when this was decided) and
+  `meho_automation`.
   - Vault stays public because core code imports it in many places: the
     dispatcher, the preview, the API, the login and the console.
   - Keycloak stays public because it is MEHO's own login.

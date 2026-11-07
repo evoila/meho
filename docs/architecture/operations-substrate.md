@@ -2,18 +2,18 @@
 
 > Read [CLAUDE.md](../../CLAUDE.md) first for the postulates that scope this substrate. This document covers the implementation that landed under [Initiative #388 G0.6](https://github.com/evoila/meho/issues/388).
 
-How MEHO stores every operation an agent can dispatch as a database row, resolves the right connector implementation per target, and routes calls through one dispatcher that applies validation, policy, JSONFlux reduction, audit, and broadcast.
+How MEHO stores every operation an agent can dispatch as a database row, resolves the right connector implementation per target, and routes calls through one dispatcher that applies validation, policy, JSONFlux reduction, and audit. The dispatcher posts no broadcast event: the broadcast feed carries only agent announcements.
 
 The substrate replaces the v0.2 transitional `_op_map`-per-connector shape documented in [connectors.md](connectors.md). Operations now live as rows in `endpoint_descriptor`; the dispatcher reads them at request time; the agent surface is a small fixed set of meta-tools (per [CLAUDE.md](../../CLAUDE.md) postulate 5) rather than one MCP tool per vendor verb.
 
 ## What this substrate does
 
-One sentence: stores every operation an agent can dispatch as a database row, resolves the right connector implementation per target via a tie-break ladder, and routes calls through a single dispatcher that applies authn-bound operator context + JSON-Schema validation + policy gating + JSONFlux reduction + audit + broadcast.
+One sentence: stores every operation an agent can dispatch as a database row, resolves the right connector implementation per target via a tie-break ladder, and routes calls through a single dispatcher that applies authn-bound operator context + JSON-Schema validation + policy gating + JSONFlux reduction + audit.
 
 Three connector kinds share the substrate:
 
-- **Generic (ingested)** — operations auto-derived from a vendor OpenAPI spec by G0.7 into `endpoint_descriptor` rows (`source_kind='ingested'`). Examples planned: `vmware-rest-9.0`, `nsx-4.2`, `harbor-2.x`, `hetzner-robot-2026-04`.
-- **Typed** — operations hand-coded against a vendor SDK; registered into the same `endpoint_descriptor` table via [`register_typed_operation()`](../../backend/src/meho_backplane/operations/typed_register.py) at connector init (`source_kind='typed'`). Shipped: `vault-1.x`, `k8s-1.x` (kubernetes_asyncio). Planned: `bind9-9.x`, `pfsense-2.7`, `holodeck-9.0`.
+- **Generic (ingested)** — operations auto-derived from a vendor OpenAPI spec by G0.7 into `endpoint_descriptor` rows (`source_kind='ingested'`). Example: `harbor-rest-2.x`.
+- **Typed** — operations hand-coded against a vendor SDK; registered into the same `endpoint_descriptor` table via [`register_typed_operation()`](../../backend/src/meho_backplane/operations/typed_register.py) at connector init (`source_kind='typed'`). Examples: `vault-1.x`, `k8s-1.x` (kubernetes_asyncio), `bind9-ssh-9.x`. The full list is the generated [connector reference](../../docs-site/reference/connectors.md); the VMware connectors ship in evoila's enterprise pack, not in this repository ([decision record](../decisions/2026-10-28-own-connectors-leave-the-public-tree.md)). The VMware names below are examples.
 - **Composite** — hand-authored handlers that orchestrate other operations via the dispatcher's recursive sub-call (`source_kind='composite'`). Bounded recursion, audit-tree linkage; see [Composites + audit-tree linkage](#composites--audit-tree-linkage).
 
 ## The two tables
@@ -41,11 +41,13 @@ One row per `(product, version, impl_id, op_id)` — covers every operation the 
 | `parameter_schema`    | JSON       | JSON Schema 2020-12 (OpenAPI 3.1 compatible). Validated by the dispatcher before routing.                                            |
 | `response_schema`     | JSON NULL  | Informational in v0.2; consumed by future reducers.                                                                                  |
 | `llm_instructions`    | JSON NULL  | Per-op agent guidance (`"when_to_call"`, `"parameter_hints"`, `"output_format"`).                                                    |
-| `safety_level`        | Text CHECK | `'safe'` / `'caution'` / `'dangerous'`. v0.2 policy gate consumes this.                                                              |
+| `safety_level`        | Text CHECK | `'safe'` / `'caution'` / `'dangerous'` / `'destructive'`. The policy gate consumes this.                                             |
 | `requires_approval`   | Bool       | Forces `status='pending'` audit row + operator decision before dispatch. Orthogonal to `safety_level`.                               |
 | `is_enabled`          | Bool       |                                                                                                                                      |
+| `needs_reingest`      | Bool       | Set when an ingested row's `parameter_schema` does not resolve on its own; a same-spec re-ingest repairs it in place.               |
 | `embedding`           | vector(384) | pgvector on PG, JSON-encoded Text on SQLite. Populated by the typed-op registrar; same dim as `documents.embedding` (G0.4).         |
 | `custom_description`, `custom_notes` | Text NULL | Operator-authored overrides applied by G0.7 review without overwriting the upstream source-of-truth columns.               |
+| `owner_package`       | Text NULL  | The connector package that wrote the row. When that package is not installed, discovery hides the row and dispatch refuses it with `connector_package_not_installed`. |
 | `created_at`, `updated_at` | timestamptz | `updated_at` advanced on every upsert.                                                                                          |
 
 **Indexes:**
@@ -110,11 +112,12 @@ The shipped v1 entry point `register_connector(product, cls)` dual-writes to **b
 
 The full ladder is documented in [connector-resolution.md](connector-resolution.md) with three worked examples; the short version:
 
+0. **Versioned beats wildcard, and hand-coded beats profiled beats auto-shim.** A wildcard row `(product, "", "")` drops out when a versioned row also matches; then only the highest connector tier stays.
 1. **Most-specific-version-match wins.** Bounded ranges (`>=X,<Y`) beat half-bounded (`>=X`) beat `None` (no range advertised).
 2. **Operator/tenant preference.** When step 1 leaves ≥ 2 candidates and `target.preferred_impl_id` is set, the matching `impl_id` wins.
 3. **Class `priority` attribute.** `Connector.priority: int = 0` — higher wins. Use this when two impls share a range and no operator override exists.
 
-After all three steps, ≥ 2 candidates remaining → `AmbiguousConnectorResolution` (a `LookupError` subclass) with a sorted candidate list. Zero candidates → `NoMatchingConnector` (also a `LookupError`).
+After all the steps, ≥ 2 candidates remaining → `AmbiguousConnectorResolution` (a `LookupError` subclass) with a sorted candidate list. Zero candidates → `NoMatchingConnector` (also a `LookupError`).
 
 ## The Connector ABC (G0.6 metadata)
 
@@ -133,7 +136,7 @@ class Connector(ABC):
 
 Class-level (not instance-level): the resolver consults them on the class itself before the registry creates any instance. PEP 440 specifier grammar via `packaging.specifiers.SpecifierSet` backs the range comparison.
 
-The role of `execute()` post-G0.6 — the original ABC method `Connector.execute(target, op_id, params) -> OperationResult` shipped in G0.2 — is now a **dispatcher shim** in both refactored connectors. Shipped `VaultConnector.execute()` and `KubernetesConnector.execute()` thin-wrap `dispatch(...)`. The original chassis route at `/api/v1/connectors/{product}/{op_id}` that motivated the shim was deprecated and removed by T11 (#412); `POST /api/v1/operations/call` is the canonical dispatch surface. `execute()` stays as the typed-connector branch of the dispatcher (`source_kind == "typed"`) — composite handlers and code paths that build their own `OperationResult` continue to call `connector.execute(target, op_id, params)` directly.
+The role of `execute()` post-G0.6 — the original ABC method `Connector.execute(target, op_id, params) -> OperationResult` shipped in G0.2: the base class default **refuses** a direct call. The dispatcher never calls `execute()`; its typed branch (`dispatch_typed` in [`_branches.py`](../../backend/src/meho_backplane/operations/_branches.py)) calls the handler that `handler_ref` names. A new connector does not write `execute()`. `VaultConnector.execute()` and `KubernetesConnector.execute()` keep a thin shim for operator-less callers such as the Vault readiness probe. The original chassis route at `/api/v1/connectors/{product}/{op_id}` was deprecated and removed by T11 (#412); `POST /api/v1/operations/call` is the canonical dispatch surface.
 
 ## Operation registration paths
 
@@ -177,7 +180,7 @@ The two-phase shape lets every `__init__.py` stay sync while the typed-op upsert
 
 G0.7 (#389, separate Initiative) populates `endpoint_descriptor` rows directly from an OpenAPI 3.0/3.1 spec. `source_kind='ingested'`; `method` + `path` populated; `handler_ref` NULL (the dispatcher's ingested branch uses the connector's HTTP transport, not a dotted handler). The G0.7 review queue gates ingested rows behind `review_status='staged'` until an operator approves them; the dispatcher only routes to `'enabled'` ops.
 
-Architecture details for G0.7 land in a separate doc (out of scope for this one).
+Architecture details for G0.7 are in [spec-ingestion.md](spec-ingestion.md).
 
 ### Composites — `register_typed_operation` with `source_kind='composite'`
 
@@ -197,19 +200,19 @@ flowchart TD
     C -->|hit| D[3. validate_params]
     D -->|invalid| Z2[result_invalid_params]
     D -->|valid| E[4. policy_gate]
-    E -->|denied| Z3["result_denied&#10;+ audit_and_broadcast_safe"]
+    E -->|denied| Z3["result_denied&#10;+ audit_safe"]
     E -->|allowed| F["5. resolve_connector_or_label"]
     F -->|no match| Z4[result_no_connector]
     F -->|ambiguous| Z4a[result_ambiguous_connector]
     F -->|cls| G["6. branch on source_kind&#10;ingested / typed / composite"]
     G --> H["7. reduce&#10;(JSONFlux)"]
-    H -->|reducer raises| Z5["ok, delivery=unavailable&#10;+ audit_and_broadcast_safe"]
-    H -->|raw, handle| I["8. audit_and_broadcast_safe&#10;(write row, publish event)"]
+    H -->|reducer raises| Z5["ok, delivery=unavailable&#10;+ audit_safe"]
+    H -->|raw, handle| I["8. audit_safe&#10;(write row)"]
     I -->|row committed| J[9. return OperationResult]
     I -->|audit commit fails| Z8["audit_commit_failed&#10;(outcome uncertain, retry=false)"]
-    G -->|handler raises| Z6["connector_error&#10;+ audit_and_broadcast_safe"]
-    G -->|handler raises NotImplementedError| Z6a["connector_unsupported&#10;+ audit_and_broadcast_safe"]
-    G -->|ImportError / TypeError| Z7["handler_unreachable&#10;+ audit_and_broadcast_safe"]
+    G -->|handler raises| Z6["connector_error&#10;+ audit_safe"]
+    G -->|handler raises NotImplementedError| Z6a["connector_unsupported&#10;+ audit_safe"]
+    G -->|ImportError / TypeError| Z7["handler_unreachable&#10;+ audit_safe"]
 ```
 
 The eight phases (steps 2–9) map directly to function calls in the dispatcher module:
@@ -217,11 +220,11 @@ The eight phases (steps 2–9) map directly to function calls in the dispatcher 
 1. **Parse `connector_id`** → `(product, version, impl_id)` via [`_lookup.parse_connector_id`](../../backend/src/meho_backplane/operations/_lookup.py). Convention: `connector_id` is `"<impl_id>-<version>"` (e.g. `"vmware-rest-9.0"`, `"vault-1.x"`, `"k8s-1.x"`); the parser splits on the last hyphen-major-version pattern. For single-impl connectors (Vault, K8s) the convention is `impl_id == product` so the form collapses to `"<product>-<version>"`; multi-impl connectors (vmware-rest) keep the discriminator in `impl_id`.
 2. **Look up `EndpointDescriptor`** by the natural key `(tenant_id, product, version, impl_id, op_id)` with the tenant union (`tenant_id IS NULL OR tenant_id == operator.tenant_id`). Miss → structured `unknown_op` error with `known_op_count` in `extras` so the agent's "did you mean" path has a signal.
 3. **Validate `params`** against `descriptor.parameter_schema` via `jsonschema.Draft202012Validator`. Invalid → structured `invalid_params` error carrying every validator path that failed.
-4. **Policy gate.** v0.2 default-allow; `requires_approval=True` → `denied`. The gate writes an audit row before returning (so denials are visible in `audit_log` even though the op never executed).
-5. **Resolve the connector class** via [`resolve_connector_or_label(target)`](../../backend/src/meho_backplane/connectors/resolver.py) — the shared wrapper around `resolve_connector(target)` — and instantiate it (cached at module level via [`_handler_resolve.get_or_create_connector_instance`](../../backend/src/meho_backplane/operations/_handler_resolve.py)). The helper translates resolver exceptions to labels: `NoMatchingConnector` → `no_connector` (structured error, message in `extras.exception_message`); `AmbiguousConnectorResolution` → `ambiguous_connector` (G0.14-T1 #1142 — message naming the candidates + the remediation step rides in `extras.exception_message`). Both source-kind branches (ingested AND typed/composite-with-target) share this helper; the `/api/v1/targets/{name}/probe` route consults the same helper so dispatch and probe agree on yes/no/ambiguous (consumer feedback signal 19, `claude-rdc-hetzner-dc#697`). A typed/composite op with `target=None` skips the resolver: a connector-bound (self-first) handler yields the `target_required` label (G0.20-T6 #1506 — keyed on handler shape, not just source-kind), while a module-level handler dispatches with `connector_instance=None`.
+4. **Policy gate.** Allows the call, refuses it (`denied`), or makes it wait for a person to approve it (`awaiting_approval`, with a durable `ApprovalRequest` row); `requires_approval=True` leads to the wait. The gate writes an audit row before returning (so a refusal or a wait is visible in `audit_log` even though the op never executed).
+5. **Resolve the connector class** via [`resolve_connector_or_label(target)`](../../backend/src/meho_backplane/connectors/resolver.py) — the shared wrapper around `resolve_connector(target)` — and instantiate it (cached at module level via [`_handler_resolve.get_or_create_connector_instance`](../../backend/src/meho_backplane/operations/_handler_resolve.py)). The helper translates resolver exceptions to labels: `NoMatchingConnector` → `no_connector` (structured error, message in `extras.exception_message`); `AmbiguousConnectorResolution` → `ambiguous_connector` (G0.14-T1 #1142 — message naming the candidates + the remediation step rides in `extras.exception_message`). Both source-kind branches (ingested AND typed/composite-with-target) share this helper; the `/api/v1/targets/{name}/probe` route consults the same helper so dispatch and probe agree on yes/no/ambiguous. A typed/composite op with `target=None` skips the resolver: a connector-bound (self-first) handler yields the `target_required` label (G0.20-T6 #1506 — keyed on handler shape, not just source-kind), while a module-level handler dispatches with `connector_instance=None`.
 6. **Branch on `descriptor.source_kind`** — see [`operations/_branches.py`](../../backend/src/meho_backplane/operations/_branches.py).
-7. **JSONFlux-wrap the response via the `Reducer`.** The default is [`JsonFluxReducer`](jsonflux.md) (G0.6.1, #750), which materializes large set-shaped responses as a `ResultHandle` and passes small ones through; the call is **wrapped in `try/except`** so a reducer exception after a completed handler lands as `status='ok'` with `delivery='unavailable'` and `extras.retry=false` (#3636; the audit row + broadcast event still fire).
-8. **Write the audit row + publish a broadcast event** via [`_audit.audit_and_broadcast_safe`](../../backend/src/meho_backplane/operations/_audit.py). Broadcast failure → logged, fail-open per `publish_event`'s contract (unchanged). Audit-row failure on the success path **fails closed** for every op, read or write: the durable DISPATCH row is a hard precondition of a successful return (CLAUDE.md postulate 7 / v0.1-spec §6). The handler already ran, so the caller gets `audit_commit_failed` (`status='error'`, `extras.execution_outcome='uncertain'`, `extras.retry=false`, no `audit_id`), not `status='ok'` and not `connector_error` — the connector call itself worked. The broadcast is skipped so no event references a phantom row. (Before this change a safe read kept its `ok` when the row failed; that fail-open rule is gone.) A completed handler whose reducer fails, with a committed row, stays `status='ok'` with `delivery='unavailable'` and `extras.retry=false`.
+7. **JSONFlux-wrap the response via the `Reducer`.** The default is [`JsonFluxReducer`](jsonflux.md) (G0.6.1, #750), which materializes large set-shaped responses as a `ResultHandle` and passes small ones through; the call is **wrapped in `try/except`** so a reducer exception after a completed handler lands as `status='ok'` with `delivery='unavailable'` and `extras.retry=false` (#3636; the audit row is still written).
+8. **Write the audit row** via [`_audit.audit_safe`](../../backend/src/meho_backplane/operations/_audit.py). No broadcast event is posted. Audit-row failure on the success path **fails closed** for every op, read or write: the durable DISPATCH row is a hard precondition of a successful return (CLAUDE.md postulate 7 / v0.1-spec §6). The handler already ran, so the caller gets `audit_commit_failed` (`status='error'`, `extras.execution_outcome='uncertain'`, `extras.retry=false`, no `audit_id`), not `status='ok'` and not `connector_error` — the connector call itself worked. A completed handler whose reducer fails, with a committed row, stays `status='ok'` with `delivery='unavailable'` and `extras.retry=false`.
 9. **Return the `OperationResult`.**
 
 ### Error contract — "always return, never raise"
@@ -255,12 +258,14 @@ Why always-return: two distinct surfaces consume `dispatch()`. HTTP routes via F
 ```python
 class OperationResult(BaseModel):
     model_config = ConfigDict(frozen=True)
-    status: str                              # "ok" | "error" | "denied"
+    status: str                              # "ok" | "pending" | "error" | "denied"
     op_id: str
     result: dict[str, Any] | list[Any] | None = None
     error: str | None = None
     duration_ms: float
     handle: ResultHandle | None = None       # Set by JsonFluxReducer for large set-shaped payloads; None otherwise
+    audit_id: UUID | None = None             # set only after the dispatch audit row commits
+    delivery: Literal["complete", "partial", "unavailable"] | None = None
     extras: Mapping[str, Any] = ...          # frozen via @model_validator(mode="after")
 ```
 
@@ -282,7 +287,7 @@ In both forms a genuinely-unsafe char (space, control chars) is still percent-en
 Two contextvars participate in audit-row composition:
 
 - `parent_audit_id_var` (in [`_audit.py`](../../backend/src/meho_backplane/operations/_audit.py)) — set by the composite branch (see below) so the child dispatch's audit row links back to its parent via the `audit_log.parent_audit_id` column (migration `0006`).
-- `audit_target_id` (a structlog `contextvars` key, bound by [`meta_tools.py::call_operation`](../../backend/src/meho_backplane/operations/meta_tools.py)) — surfaces the resolved target's UUID to the chassis `AuditMiddleware` for non-dispatcher write paths. The dispatcher's own audit row uses `descriptor.target_id` directly, not via this contextvar (`audit_log.target_id` is a real column added by [#351 G0.3-T1](https://github.com/evoila/meho/issues/351)).
+- `audit_target_id` (a structlog `contextvars` key, bound by [`meta_tools.py::call_operation`](../../backend/src/meho_backplane/operations/meta_tools.py)) — surfaces the resolved target's UUID to the chassis `AuditMiddleware` for non-dispatcher write paths. The dispatcher's own audit row takes the id from the resolved target (`_resolve_target_id` in `_audit.py`), not via this contextvar (`audit_log.target_id` is a real column added by [#351 G0.3-T1](https://github.com/evoila/meho/issues/351)).
 
 ## Composites + audit-tree linkage
 
@@ -325,7 +330,7 @@ Spelling the contract as a `typing.Protocol` rather than a raw `Callable` alias 
 
 `dispatch_child` is not the only sub-call capability. A composite handler can instead (or additionally) declare a `connector` parameter; `dispatch_composite` then forwards the connector instance the dispatcher already resolved for the composite's `target` (via `_resolve_connector_instance`). A handler that opts in issues sub-calls through the connector's own session (`connector._get_json` / `connector._post_json` + `connector.mount_op_path`) with **no** `endpoint_descriptor` lookup — the "two-world" posture (Goal #2247) that keeps a code-shipped op's dispatch path off a mutable catalog row.
 
-Both seams are forwarded **only when the handler declares the matching parameter**, so the `dispatch_child`-only handlers above are unchanged, and the registration guard (`validate_composite_handler_signature`) accepts a handler declaring either or both. Taking the direct path deliberately drops the per-sub-op audit row, param validation, recursion bound, and policy/broadcast that `dispatch_child` provides; those trade-offs — and why per-sub-op policy stays load-bearing for *write* composites — are documented on the "Why `dispatch_child` not direct httpx" note in [`connectors/vmware_rest/composites/_read.py`](../../backend/src/meho_backplane/connectors/vmware_rest/composites/_read.py). The vmware-rest write composites use the direct seam (for example `vmware.composite.vm.destroy`, through `_write_sub_op` in [`connectors/vmware_rest/composites/_write.py`](../../backend/src/meho_backplane/connectors/vmware_rest/composites/_write.py)); the migrations of Initiatives #2248 and #2249 are done.
+Both seams are forwarded **only when the handler declares the matching parameter**, so the `dispatch_child`-only handlers above are unchanged, and the registration guard (`validate_composite_handler_signature`) accepts a handler declaring either or both. Taking the direct path deliberately drops the per-sub-op audit row, param validation, recursion bound, and policy check that `dispatch_child` provides; those trade-offs — and why per-sub-op policy stays load-bearing for *write* composites — are documented on the "Why `dispatch_child` not direct httpx" note in `connectors/vmware_rest/composites/_read.py`. The vmware-rest write composites use the direct seam (for example `vmware.composite.vm.destroy`, through `_write_sub_op` in `connectors/vmware_rest/composites/_write.py`); the migrations of Initiatives #2248 and #2249 are done. These VMware files ship in evoila's enterprise pack, not in this repository.
 
 ### Preserving write-composite policy on the direct path (`enforce_subop_policy`, #2254)
 
@@ -412,7 +417,7 @@ class Reducer(Protocol):
 
 The dispatcher always invokes `reduce()` after the handler returns and before the audit phase fires. A real reducer returns a reduced payload + a `ResultHandle` for large set-shaped responses while leaving small/scalar payloads alone. v0.2 ships [`JsonFluxReducer`](../../backend/src/meho_backplane/operations/jsonflux_reducer.py) as the default — installed at app startup via `set_default_reducer(JsonFluxReducer())` in [`main.py`](../../backend/src/meho_backplane/main.py); `PassThroughReducer` remains a test utility (the module-level fallback the running app overwrites). See [`jsonflux.md`](jsonflux.md) for the vendored reducer's provenance, license chain, and constructor defaults.
 
-The dispatcher's reducer call is wrapped in `try/except`: a reducer exception lands as `connector_error` with the audit + broadcast still firing. `PassThroughReducer` can't raise, but [`set_default_reducer(...)`](../../backend/src/meho_backplane/operations/dispatcher.py) is the seam through which the real `JsonFluxReducer` (in-memory DuckDB materialization) is swapped in.
+The dispatcher's reducer call is wrapped in `try/except`: a reducer exception after a completed handler lands as `status='ok'` with `delivery='unavailable'` and `extras.retry=false`, and the audit row is still written (#3636). `PassThroughReducer` can't raise, but [`set_default_reducer(...)`](../../backend/src/meho_backplane/operations/dispatcher.py) is the seam through which the real `JsonFluxReducer` (in-memory DuckDB materialization) is swapped in.
 
 ### `PassThroughReducer` test utility
 
@@ -446,13 +451,13 @@ Frozen Pydantic model with `MappingProxyType`-wrapped nested mappings (via `@mod
 
 `JsonFluxReducer` populates `handle` for large set-shaped responses (G0.6.1, #750) and spills the full row set to the Valkey-backed `ResultHandleStore`; the `result_query` MCP meta-tool **and** the REST route `POST /api/v1/operations/result-query` read windows back from it through the shared `read_result_window` core (G0.20-T7 #1507; REST parity #3179). See [`jsonflux.md` § Read-back](jsonflux.md#read-back-the-resulthandlestore-g020-t7-1507).
 
-## The three operation meta-tools
+## The operation meta-tools
 
-[`operations/meta_tools.py`](../../backend/src/meho_backplane/operations/meta_tools.py) ships the agent-facing surface over the substrate. Three of the ~17 fixed meta-tools defined in [CLAUDE.md](../../CLAUDE.md) live here:
+[`operations/meta_tools.py`](../../backend/src/meho_backplane/operations/meta_tools.py) ships the agent-facing surface over the substrate. Four of the 26 working-surface meta-tools ([`docs/codebase/mcp.md`](../codebase/mcp.md)) live here: the three below and `preview_operation`, which answers what `call_operation` would do without running it.
 
 ### `list_operation_groups(connector_id)`
 
-Returns the operation groups for a connector that are visible to the agent. Tenant scoping: union of built-in + tenant-curated rows. A group surfaces when it is `review_status='enabled'` **or** still staged/disabled at the group level yet holding ≥1 per-op-enabled descriptor (`edit_op is_enabled=true`); the latter is flagged `partial=true` with a non-zero `enabled_op_count` so groups-first discovery isn't blind to per-op enablement that `search_operations` + dispatch already honour (claude-rdc-hetzner-dc#1136). A group that is not enabled and holds zero enabled ops stays hidden. Operation counts per group are aggregated in a single DB pass (no N+1).
+Returns the operation groups for a connector that are visible to the agent. Tenant scoping: union of built-in + tenant-curated rows. A group surfaces when it is `review_status='enabled'` **or** still staged/disabled at the group level yet holding ≥1 per-op-enabled descriptor (`edit_op is_enabled=true`); the latter is flagged `partial=true` with a non-zero `enabled_op_count` so groups-first discovery isn't blind to per-op enablement that `search_operations` + dispatch already honour. A group that is not enabled and holds zero enabled ops stays hidden. Operation counts per group are aggregated in a single DB pass (no N+1).
 
 The agent uses this **first** when it doesn't know which group to search within.
 
@@ -464,33 +469,35 @@ Hybrid BM25 + cosine + RRF retrieval over `endpoint_descriptor` rows scoped to a
 
 ### `call_operation(connector_id, op_id, target=None, params={})`
 
-Invokes `dispatch(...)` after resolving the optional `target` descriptor (a partial like `{"name": "rdc-vcenter"}`) into a full `Target` ORM row via `meho_backplane.targets.resolver.resolve_target`. Passing `target=None` is valid for typed operations whose handler doesn't consume a target.
+Invokes `dispatch(...)` after resolving the optional `target` descriptor (a bare name like `"my-vcenter"` or a partial like `{"name": "my-vcenter"}`) into a full `Target` ORM row via `meho_backplane.targets.resolver.resolve_target`. Passing `target=None` is valid for typed operations whose handler doesn't consume a target.
 
 Returns the full `OperationResult` serialised via `model_dump(mode="json")`. Errors surface inside the envelope (`status='error'` + `error='<code>: …'`), not as exceptions.
 
 ### Agent-facing surface aligned with CLAUDE.md
 
-Per [CLAUDE.md](../../CLAUDE.md) postulate 5, the agent never sees per-op MCP tools (`vsphere.vm.list`); it sees a fixed set of meta-tools and picks operations through them. Vendor operations reach the agent through `search_operations` + `call_operation`. The three meta-tools register as MCP tools in [`mcp/tools/operations.py`](../../backend/src/meho_backplane/mcp/tools/operations.py).
+Per [CLAUDE.md](../../CLAUDE.md) postulate 5, the agent never sees per-op MCP tools (`vsphere.vm.list`); it sees a fixed set of meta-tools and picks operations through them. Vendor operations reach the agent through `search_operations` + `call_operation`. The operation meta-tools register as MCP tools in [`mcp/tools/operations.py`](../../backend/src/meho_backplane/mcp/tools/operations.py).
 
 ### REST route mirror
 
-[`api/v1/operations.py`](../../backend/src/meho_backplane/api/v1/operations.py) mirrors the three meta-tools as REST endpoints under `/api/v1/operations/*`:
+[`api/v1/operations.py`](../../backend/src/meho_backplane/api/v1/operations.py) mirrors the operation meta-tools as REST endpoints under `/api/v1/operations/*`:
 
 - `GET /api/v1/operations/groups?connector_id=...` — `list_operation_groups`
 - `GET /api/v1/operations/search?connector_id=...&query=...&group=...&limit=...` — `search_operations`
 - `POST /api/v1/operations/call` (body: `CallOperationBody`) — `call_operation`
 - `POST /api/v1/operations/result-query` (body: `ResultQueryBody`) — the REST twin of the MCP `result_query` tool; both wrap the shared `read_result_window` core so a REST consumer that received a reduced handle off `/call` can page it back (#3179)
+- `POST /api/v1/operations/preview` — `preview_operation`
+- `GET /api/v1/operations/governed-subops` — the governed sub-operations of multi-step operations
 - `GET /api/v1/operations/{descriptor_id}` — inspect a single descriptor (gated on `tenant_admin` because `llm_instructions` is the per-op agent prompt and reading it amounts to a prompt leak)
 
 The CLI `meho operation ...` verbs mirror the same surface. Wire identity across MCP + REST + CLI is the contract every CLI verb relies on.
 
 ## Worked example: end-to-end dispatch
 
-A `call_operation(connector_id="vmware-rest-9.0", op_id="GET:/api/vcenter/cluster", target={"name": "rdc-vcenter"}, params={"filter.names": ["prod-cluster"]})` call from MCP wire arrival to `OperationResult` return:
+A `call_operation(connector_id="vmware-rest-9.0", op_id="GET:/api/vcenter/cluster", target={"name": "my-vcenter"}, params={"filter.names": ["prod-cluster"]})` call from MCP wire arrival to `OperationResult` return:
 
 1. **MCP wire arrival.** Claude.ai's MCP client sends a `tools/call` JSON-RPC envelope with `name="call_operation"` and `arguments={...}`. The chassis MCP transport (`/mcp` route) validates `MCP-Protocol-Version`, JWT `aud == MCP_RESOURCE_URI`, and the JSON-RPC envelope shape, then dispatches to the registered `call_operation` handler.
 
-2. **`call_operation` handler.** Resolves the partial `target` descriptor: opens a DB session, calls `resolve_target(session, operator.tenant_id, "rdc-vcenter")`, gets back the `Target` ORM row. Binds `audit_target_id = str(target.id)` on `structlog.contextvars` so the audit row carries it. Invokes `await dispatch(operator=…, connector_id="vmware-rest-9.0", op_id="GET:/api/vcenter/cluster", target=resolved_target, params=…)`.
+2. **`call_operation` handler.** Resolves the partial `target` descriptor: opens a DB session, calls `resolve_target(session, operator.tenant_id, "my-vcenter")`, gets back the `Target` ORM row. Binds `audit_target_id = str(target.id)` on `structlog.contextvars` so the audit row carries it. Invokes `await dispatch(operator=…, connector_id="vmware-rest-9.0", op_id="GET:/api/vcenter/cluster", target=resolved_target, params=…)`.
 
 3. **Dispatcher step 1 — parse.** `parse_connector_id("vmware-rest-9.0")` → `("vmware", "9.0", "vmware-rest")`.
 
@@ -502,13 +509,13 @@ A `call_operation(connector_id="vmware-rest-9.0", op_id="GET:/api/vcenter/cluste
 
 7. **Dispatcher step 5 — resolve connector.** `resolve_connector(target)` walks the v2 registry: `target.product='vmware'`, `target.fingerprint.version='9.0.2'`, `target.preferred_impl_id=None`. The `("vmware", "9.0", "vmware-rest")` entry advertises `supported_version_range=">=9.0,<10.0"`, matches `9.0.2`, wins step 1 (most specific). The class is instantiated (cached at module level via `get_or_create_connector_instance`).
 
-8. **Dispatcher step 6 — branch on `source_kind`.** `dispatch_ingested(...)`: splits params into the four buckets (`filter.names` → query), substitutes `{}` placeholders in `path` (none here), calls `connector._request_json(target, "GET", "/api/vcenter/cluster", raw_jwt=operator.raw_jwt, params={"filter.names": ["prod-cluster"]})`. The vSphere REST returns `[{"cluster": "domain-c1", "name": "prod-cluster", ...}]`.
+8. **Dispatcher step 6 — branch on `source_kind`.** `dispatch_ingested(...)`: splits params into the four buckets (`filter.names` → query), substitutes `{}` placeholders in `path` (none here), calls `connector._request_json(target, "GET", "/api/vcenter/cluster", operator=operator, params={"filter.names": ["prod-cluster"]})`. The vSphere REST returns `[{"cluster": "domain-c1", "name": "prod-cluster", ...}]`.
 
 9. **Dispatcher step 7 — reduce.** `JsonFluxReducer.reduce(raw, response_schema, context)` returns `(raw, None)` — the one-cluster list is under the row/byte threshold, so it passes through unreduced. A larger cluster list would return a `(summary, ResultHandle)` instead.
 
-10. **Dispatcher step 8 — audit + broadcast.** `audit_and_broadcast_safe(...)`:
-    - INSERT into `audit_log`: `id=audit_uuid`, `operator_sub`, `tenant_id`, `target_id=target.id`, `parent_audit_id=None` (no parent — top-level dispatch), `method='DISPATCH'`, `path='GET:/api/vcenter/cluster'`, `status_code=200`, `duration_ms=42.3`, `payload={"op_id": …, "params_hash": "sha256:…", "source_kind": "ingested", "connector_product": "vmware", "connector_version": "9.0", "connector_impl_id": "vmware-rest", "result_status": "ok"}`.
-    - Publish `BroadcastEvent(event_id, ts, tenant_id, principal_sub, principal_name, target_name="rdc-vcenter", op_id="GET:/api/vcenter/cluster", op_class="read", result_status="ok", audit_id=audit_uuid, payload=redact_payload(...))`. Subscribers receive it via the SSE `/api/v1/feed` route.
+10. **Dispatcher step 8 — audit.** `audit_safe(...)`:
+    - INSERT into `audit_log`: `id=audit_uuid`, `operator_sub`, `tenant_id`, `target_id=target.id`, `parent_audit_id=None` (no parent — top-level dispatch), `method='DISPATCH'`, `path='GET:/api/vcenter/cluster'`, `status_code=200`, `duration_ms=42.3`, `payload={"op_id": …, "params_hash": "<HMAC-SHA256 hex>", "source_kind": "ingested", "connector_product": "vmware", "connector_version": "9.0", "connector_impl_id": "vmware-rest", "result_status": "ok"}`.
+    - No broadcast event is posted; the audit row is the record.
 
 11. **Dispatcher step 9 — return.** `OperationResult(status="ok", op_id="GET:/api/vcenter/cluster", result=[…], handle=None, duration_ms=42.3, extras=MappingProxyType({}))`.
 
@@ -522,7 +529,7 @@ The substrate replaces several v0.2-transitional shapes documented in [connector
 - **Per-vendor MCP tools** (`vsphere.vm.list`, `vault.kv.read` registered as their own MCP tools). Violates [CLAUDE.md](../../CLAUDE.md) postulate 5. Vendor operations reach the agent through `call_operation`, not as their own meta-tools.
 - **Closure handlers.** `handler_ref` MUST be a dotted path the dispatcher can resolve with `importlib` + `getattr`. Closures, lambdas, and `functools.partial` wrappers are rejected at registration time with `HandlerRefError` (a `ValueError` subclass — existing `except ValueError` in connector init paths catches it).
 - **Direct `register_operations()` classmethod calls.** The canonical pattern is `register_typed_op_registrar(callable)` queued at module import + `run_typed_op_registrars()` driven by the lifespan. Vault and K8s converged on this; future connectors follow.
-- **`Connector.execute(...)` as the dispatch entry point.** The ABC's `execute()` is now a thin shim over `dispatch(...)` for backward compatibility with the chassis route. New code calls `dispatch(...)` directly (via `call_operation` or a CLI verb).
+- **`Connector.execute(...)` as the dispatch entry point.** The ABC's default `execute()` refuses a direct call. New code calls `dispatch(...)` (via `call_operation` or a CLI verb).
 
 ## Migration from the v0.2 transitional shape
 
@@ -536,7 +543,7 @@ Two refactors shipped under G0.6 to validate the substrate's ergonomics on real 
 For a new typed connector under [G3](https://github.com/evoila/meho/issues/214):
 
 1. **Create the package** at `backend/src/meho_backplane/connectors/<product>/`.
-2. **Implement the subclass** in `connector.py`: set `product`, `version`, `impl_id`, `supported_version_range`, optionally `priority`; implement `fingerprint`, `probe`, and an `execute` shim that calls `dispatch(...)`.
+2. **Implement the subclass** in `connector.py`: set `product`, `version`, `impl_id`, `supported_version_range`, optionally `priority`; implement `fingerprint` and `probe`. Do not write `execute`: the dispatcher calls the registered handlers. (Connector packages built outside this repository use the connector kit; see [`2026-11-01-connector-kit.md`](../decisions/2026-11-01-connector-kit.md).)
 3. **Author typed-op handlers** as `async def` module-level functions (or bound methods on the connector class).
 4. **Write a registrar** in `ops.py` as `async def register_<product>_typed_operations(*, embedding_service=None) -> None:` that calls `register_typed_operation(...)` for every op. Pass the `embedding_service` test-seam through to each call so chassis tests can inject a stub.
 5. **Register in `__init__.py`:**
@@ -558,4 +565,3 @@ For a composite — author the handler as an `async def` with the `dispatch_chil
 - Related architecture docs: [connectors.md](connectors.md) (v0.2 transitional baseline this substrate replaces), [connector-resolution.md](connector-resolution.md) (the resolver's tie-break ladder with worked examples), [mcp.md](mcp.md) (the MCP wire path that surfaces `call_operation`).
 - ADR: [locked-decisions.md](../decisions/locked-decisions.md) — locked architecture decisions; the substrate operationalises postulates 4–7.
 - Spec source: v0.1-spec §"Operations" L289–313 (the canonical contract the substrate operationalises) and §"JSONFlux / result handles" L294–311.
-- Best-practices anchor: `.claude/skills/implement-issue/devops_best_practices.md` (architecture docs reflect shipped code; mermaid diagrams for control flow).

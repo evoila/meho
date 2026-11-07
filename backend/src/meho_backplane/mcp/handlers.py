@@ -112,6 +112,7 @@ from meho_backplane.mcp.registry import (
     redacted_audit_uri,
     role_at_least,
     surface_visible,
+    tool_role_gate_met,
 )
 from meho_backplane.mcp.server import (
     McpExecutionFailedError,
@@ -847,6 +848,8 @@ def _operator_meets_required_role(
     the list-time RBAC filter. The shared rule lives in the registry
     module; this helper is a thin re-application at the call site.
     """
+    if isinstance(defn, ToolDefinition):
+        return tool_role_gate_met(operator, defn)
     return role_at_least(operator.tenant_role, defn.required_role)
 
 

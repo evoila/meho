@@ -71,7 +71,7 @@ person must approve it before it runs:
 | --- | --- | --- |
 | cluster | `k8s.about` | — |
 | inventory | `k8s.ls`, `k8s.namespace.list`, `k8s.node.list` | `k8s.namespace.create`, `k8s.cordon` (`caution`) |
-| workload | `k8s.pod.list`, `k8s.pod.info`, `k8s.deployment.list`, `k8s.deployment.info`, `k8s.job.list`, `k8s.job.info`, `k8s.workload.list` | `k8s.scale`, `k8s.rollout.restart`, `k8s.label`, `k8s.annotate`, `k8s.cronjob.run` (`caution`); `k8s.apply`, `k8s.delete`, `k8s.job.create` (`dangerous`) |
+| workload | `k8s.pod.list`, `k8s.pod.info`, `k8s.deployment.list`, `k8s.deployment.info`, `k8s.job.list`, `k8s.job.info`, `k8s.cronjob.list`, `k8s.workload.list` | `k8s.scale`, `k8s.rollout.restart`, `k8s.label`, `k8s.annotate`, `k8s.cronjob.run` (`caution`); `k8s.apply`, `k8s.delete`, `k8s.job.create` (`dangerous`) |
 | network | `k8s.service.list`, `k8s.ingress.list` | — |
 | config | `k8s.configmap.list` (keys only), `k8s.configmap.info` (full data), `k8s.secret.list`, `k8s.secret.info` (key names, never values), `k8s.secret.compare_to_ref` | `k8s.secret.read_to_ref` (`caution`); `k8s.secret.create`, `k8s.secret.update` (`dangerous`); `k8s.secret.delete` (`destructive`) |
 | storage | `k8s.persistentvolume.list`, `k8s.persistentvolumeclaim.list`, `k8s.storageclass.list` | — |
@@ -291,7 +291,7 @@ $ meho k8s ls --target my-cluster /argocd/pods    # forwards to k8s.pod.list
 | Verb | op_id | Notes |
 | --- | --- | --- |
 | `about` | `k8s.about` | Cluster product / version / platform. No params. |
-| `ls [path]` | `k8s.ls` | Three shapes by path: `/` → namespaces + cluster-scoped kinds; `/<ns>` → kind→count summary; `/<ns>/<kind>` → forwards to `k8s.<kind>.list`. |
+| `ls [path]` | `k8s.ls` | Three shapes by path: `/` → namespaces + cluster-scoped kinds; `/<ns>` → kind→count summary; `/<ns>/<kind>` → forwards to `k8s.<kind>.list` (`statefulsets` and `daemonsets` go to `k8s.workload.list`). A kind with no list op is an error that names the kinds it can list. |
 
 ### Inventory — `meho k8s namespace / node …`
 

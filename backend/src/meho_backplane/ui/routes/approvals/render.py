@@ -26,6 +26,7 @@ from meho_backplane.operations.approval_outcome import (
     resume_outcome_from_envelope,
     with_approval_guidance,
 )
+from meho_backplane.operations.approval_outcome_check import outcome_check, outcome_unknown
 from meho_backplane.operations.approval_queue import (
     EXPIRED_REASON_MESSAGES,
     ApprovalNotFoundError,
@@ -241,6 +242,9 @@ def project_request_to_view(
     waited) and tell the requester to ask again; ``release_id`` is the
     release the request was made under. The reason keys are ``None`` for a
     request that is not expired.
+
+    ``outcome_unknown`` and ``outcome_check`` (#5026): see
+    :func:`_project_outcome_check`.
     """
     result_state = approval_result_state(row)
     expired_reason = approval_expired_reason(row)
@@ -269,6 +273,34 @@ def project_request_to_view(
         "expired_reason": expired_reason.value if expired_reason else None,
         "expired_message": EXPIRED_REASON_MESSAGES[expired_reason] if expired_reason else None,
         "release_id": row.release_id,
+        **_project_outcome_check(row),
+    }
+
+
+def _project_outcome_check(row: ApprovalRequest) -> dict[str, Any]:
+    """The two outcome-unknown keys of the template dict (#5026).
+
+    ``outcome_unknown`` is ``{"reason", "advice"}`` when the request is on
+    the "outcome unknown" list, else ``None``. ``outcome_check`` is
+    ``{"verdict", "note", "checker", "checked_at"}`` once a person marked it
+    as checked, else ``None``.
+    """
+    unknown = outcome_unknown(row)
+    check = outcome_check(row)
+    return {
+        "outcome_unknown": (
+            {"reason": unknown.reason.value, "advice": unknown.advice} if unknown else None
+        ),
+        "outcome_check": (
+            {
+                "verdict": check.verdict.value,
+                "note": check.note,
+                "checker": subject_ref(check.checked_by, check.checked_by_name),
+                "checked_at": check.checked_at,
+            }
+            if check
+            else None
+        ),
     }
 
 

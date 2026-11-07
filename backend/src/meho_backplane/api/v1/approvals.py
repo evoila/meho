@@ -109,6 +109,18 @@ from meho_backplane.operations.approval_context import (
     resolve_reviewer_context,
 )
 from meho_backplane.operations.approval_outcome import resume_outcome
+from meho_backplane.operations.approval_outcome_check import (
+    OutcomeAlreadyCheckedError,
+    OutcomeCheckVerdict,
+    OutcomeNotUnknownError,
+    OutcomeUnknownReason,
+    list_outcome_unknown,
+    mark_outcome_checked,
+    outcome_check,
+)
+from meho_backplane.operations.approval_outcome_check import (
+    outcome_unknown as outcome_unknown_of,
+)
 from meho_backplane.operations.approval_queue import (
     EXPIRED_REASON_MESSAGES,
     MAX_REASON_LENGTH,
@@ -281,6 +293,49 @@ class ApprovalResumeOutcomeView(BaseModel):
     execution_outcome: str | None = None
 
 
+class OutcomeUnknownView(BaseModel):
+    """Why an approved request is on the "outcome unknown" list (#5026)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    #: ``uncertain`` (the stored result says MEHO does not know) or
+    #: ``started_no_result`` (the run started more than
+    #: ``APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES`` ago and stored no result).
+    reason: OutcomeUnknownReason
+    #: What to do: do not run it again, check the target first.
+    advice: str
+
+
+class OutcomeCheckView(BaseModel):
+    """What a person recorded after they checked the target (#5026)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    #: ``happened`` or ``did_not_happen``.
+    verdict: OutcomeCheckVerdict
+    #: What the person checked.
+    note: str
+    checked_by: str
+    #: Display name of the person, or ``None`` when the token had no name.
+    checked_by_name: str | None
+    checked_at: str
+
+
+class OutcomeCheckRequestBody(BaseModel):
+    """POST body for ``…/outcome-check`` (#5026)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: OutcomeCheckVerdict = Field(
+        description="What you found on the target: 'happened' or 'did_not_happen'.",
+    )
+    note: str = Field(
+        min_length=1,
+        max_length=_MAX_REASON_LENGTH,
+        description="What you checked, in your own words. Stored on the request and the audit row.",
+    )
+
+
 class ApprovalRequestView(BaseModel):
     """Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`."""
 
@@ -320,6 +375,13 @@ class ApprovalRequestView(BaseModel):
     #: status, error code and the run's audit id. ``None`` until the run
     #: starts, and for a request that is not ``approved``. Additive.
     resume_outcome: ApprovalResumeOutcomeView | None = None
+    #: Set when the request is on the "outcome unknown" list (#5026): why,
+    #: and what to check. ``None`` for every other request. Additive.
+    outcome_unknown: OutcomeUnknownView | None = None
+    #: What a person recorded after they checked the target (#5026). The
+    #: stored result and ``result_state`` stay as they were. ``None`` until
+    #: someone marks the request as checked. Additive.
+    outcome_check: OutcomeCheckView | None = None
     #: Why an ``expired`` request expired (#5030): ``deadline_passed`` or
     #: ``release_changed`` (MEHO was updated while it waited). ``None``
     #: unless ``status`` is ``expired``. Read off the row. Additive.
@@ -522,6 +584,28 @@ def _resume_outcome_view(row: ApprovalRequest) -> ApprovalResumeOutcomeView | No
     )
 
 
+def _outcome_unknown_view(row: ApprovalRequest) -> OutcomeUnknownView | None:
+    """Why *row* is on the "outcome unknown" list (#5026), or ``None``."""
+    unknown = outcome_unknown_of(row)
+    if unknown is None:
+        return None
+    return OutcomeUnknownView(reason=unknown.reason, advice=unknown.advice)
+
+
+def _outcome_check_view(row: ApprovalRequest) -> OutcomeCheckView | None:
+    """What a person recorded for *row* (#5026), or ``None``."""
+    check = outcome_check(row)
+    if check is None:
+        return None
+    return OutcomeCheckView(
+        verdict=check.verdict,
+        note=check.note,
+        checked_by=check.checked_by,
+        checked_by_name=check.checked_by_name,
+        checked_at=check.checked_at,
+    )
+
+
 def _execution_outcome(dispatch_result: Any) -> str | None:
     """``uncertain`` when the run's result says MEHO does not know (#5025), else ``None``."""
     envelope = {
@@ -564,6 +648,8 @@ def _view(
         status=ApprovalRequestStatus(row.status),
         result_state=approval_result_state(row),
         resume_outcome=_resume_outcome_view(row),
+        outcome_unknown=_outcome_unknown_view(row),
+        outcome_check=_outcome_check_view(row),
         expired_reason=expired_reason,
         expired_message=EXPIRED_REASON_MESSAGES[expired_reason] if expired_reason else None,
         release_id=row.release_id,
@@ -789,6 +875,16 @@ async def list_approvals(
             "of requests under one change ticket was sent in."
         ),
     ),
+    outcome_unknown: bool = Query(
+        default=False,
+        description=(
+            "List only approved requests whose outcome MEHO does not know and "
+            "that nobody marked as checked: the result says 'uncertain', or the "
+            "run started more than APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES "
+            "(default 15) ago and stored no result. When true, 'status' is "
+            "ignored. Defaults to false."
+        ),
+    ),
     operator: Operator = _require_approvals_access,
 ) -> list[ApprovalRequestView]:
     """List approval requests for the operator's tenant.
@@ -803,12 +899,25 @@ async def list_approvals(
     oldest-first (``created_at ASC``, ties broken on ``id``) so a chain of
     requests under one change ticket reads in the order it was sent
     (#3596). ``limit`` / ``offset`` page through the result; no ``limit``
-    returns every match.
+    returns every match. ``?outcome_unknown=true`` lists the approved
+    requests whose outcome MEHO does not know (#5026), the same list the
+    console, the CLI and MCP show; ``status`` is then ignored.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id="approval.list",
         audit_op_class="read",
     )
+    if outcome_unknown:
+        async with get_sessionmaker()() as session:
+            unknown_rows = await list_outcome_unknown(
+                session,
+                tenant_id=operator.tenant_id,
+                work_ref=work_ref,
+                limit=limit,
+                offset=offset,
+                order=order,
+            )
+        return [_view(r, right=approve_right(operator, r)) for r in unknown_rows]
     # Validate status value against the closed enum; "all" means no filter.
     status_filter: ApprovalRequestStatus | None = None
     if status != "all":
@@ -1263,6 +1372,68 @@ async def withdraw_approval_request(
         audit_id=request._audit_id,  # type: ignore[attr-defined]
     )
     return _view(request)
+
+
+@router.post(
+    "/{request_id}/outcome-check",
+    response_model=ApprovalRequestView,
+    dependencies=[_require_human],
+)
+async def mark_approval_outcome_checked(
+    request_id: Annotated[uuid.UUID, Path()],
+    body: OutcomeCheckRequestBody,
+    operator: Operator = _require_approvals_access,
+) -> ApprovalRequestView:
+    """Record what you found on the target of a run with an unknown outcome (#5026).
+
+    For an approved request on the "outcome unknown" list. A person who may
+    decide approvals records "it happened" or "it did not happen" with a
+    note. MEHO writes one ``approval.outcome_check`` audit row and the
+    request leaves the list. The stored result stays as it was, and nothing
+    runs.
+
+    HTTP status codes:
+
+    * 200 — recorded.
+    * 403 — not a person, or a role that may not decide approvals.
+    * 404 — request not found (or belongs to another tenant).
+    * 409 — ``outcome_already_checked``, or ``outcome_not_unknown`` when the
+      request is not on the list (not approved, not run, a known result,
+      or a run that started less than the set minutes ago).
+    * 422 — an unknown verdict, or an empty or too long note.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="approval.outcome_check",
+        audit_op_class="write",
+        audit_approval_request_id=str(request_id),
+    )
+    try:
+        async with get_sessionmaker()() as session:
+            request = await mark_outcome_checked(
+                session, request_id, operator=operator, verdict=body.verdict, note=body.note
+            )
+            await session.commit()
+    except UnauthorizedApprovalError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN, detail="insufficient_role"
+        ) from exc
+    except ApprovalNotFoundError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND, detail="approval_request_not_found"
+        ) from exc
+    except OutcomeAlreadyCheckedError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT, detail="outcome_already_checked"
+        ) from exc
+    except OutcomeNotUnknownError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT, detail="outcome_not_unknown"
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT, detail="note_required"
+        ) from exc
+    return _view(request, right=approve_right(operator, request))
 
 
 class RerunRequestBody(BaseModel):

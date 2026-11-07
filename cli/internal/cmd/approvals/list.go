@@ -18,7 +18,7 @@ import (
 
 // newListCmd returns the `meho approvals list` command.
 //
-//	meho approvals list [--status pending|approved|rejected|expired|all] [--filter-work-ref REF] [--order oldest|newest] [--limit N] [--offset N] [--json] [--backplane <url>]
+//	meho approvals list [--status pending|approved|rejected|expired|all] [--outcome-unknown] [--filter-work-ref REF] [--order oldest|newest] [--limit N] [--offset N] [--json] [--backplane <url>]
 //
 // Role: operator. Lists approval requests for the operator's tenant via
 // GET /api/v1/approvals: newest first, or oldest first with
@@ -28,6 +28,7 @@ import (
 func newListCmd() *cobra.Command {
 	var (
 		statusFilter      string
+		outcomeUnknown    bool
 		workRef           string
 		order             string
 		limit             int
@@ -52,6 +53,13 @@ func newListCmd() *cobra.Command {
 			"come back (1..500; no limit when omitted). --offset " +
 			"skips that many requests first. --json emits the raw " +
 			"JSON array for jq pipelines.\n\n" +
+			"--outcome-unknown lists the approved changes whose outcome " +
+			"MEHO does not know and that nobody marked as checked: the run " +
+			"ended uncertain, or it started more than 15 minutes ago (the " +
+			"server setting APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES) and " +
+			"stored no result. Do not run these again: check the target, " +
+			"then record what you found with `meho approvals mark-checked`. " +
+			"It cannot be combined with --status.\n\n" +
 			"The APPROVE column says whether you may approve each " +
 			"pending request. MEHO works this out with the same checks " +
 			"as the approve: yes; yes:own_change (your own change, " +
@@ -68,6 +76,7 @@ func newListCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runList(cmd, listOpts{
 				StatusFilter:      statusFilter,
+				OutcomeUnknown:    outcomeUnknown,
 				WorkRef:           workref.Filter(cmd, workRef),
 				Order:             order,
 				Limit:             limit,
@@ -79,6 +88,8 @@ func newListCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&statusFilter, "status", "",
 		"filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)")
+	cmd.Flags().BoolVar(&outcomeUnknown, "outcome-unknown", false,
+		"list approved changes whose outcome MEHO does not know, for you to check")
 	cmd.Flags().StringVar(&workRef, workref.FilterFlag, "",
 		"filter by external change-ticket reference, exact match (e.g. gh:evoila/meho#1)")
 	cmd.Flags().StringVar(&order, "order", "",
@@ -98,6 +109,7 @@ func newListCmd() *cobra.Command {
 
 type listOpts struct {
 	StatusFilter      string
+	OutcomeUnknown    bool
 	WorkRef           string
 	Order             string
 	Limit             int
@@ -118,6 +130,13 @@ func runList(cmd *cobra.Command, opts listOpts) error {
 				"--status must be one of: pending, approved, rejected, expired, withdrawn, all; got %q",
 				opts.StatusFilter,
 			)),
+			opts.JSONOut,
+		)
+	}
+	if opts.OutcomeUnknown && opts.StatusFilter != "" {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected("--outcome-unknown cannot be combined with --status"),
 			opts.JSONOut,
 		)
 	}
@@ -168,6 +187,10 @@ func runList(cmd *cobra.Command, opts listOpts) error {
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), items)
 	}
+	if opts.OutcomeUnknown {
+		printOutcomeUnknownTable(cmd.OutOrStdout(), items, opts.Offset)
+		return nil
+	}
 	printListTable(cmd.OutOrStdout(), items, opts.StatusFilter, opts.WorkRef, opts.Offset)
 	return nil
 }
@@ -191,6 +214,10 @@ func fetchList(
 	if opts.WorkRef != "" {
 		w := opts.WorkRef
 		params.WorkRef = &w
+	}
+	if opts.OutcomeUnknown {
+		u := true
+		params.OutcomeUnknown = &u
 	}
 	if order := listOrder(opts); order != "" {
 		o := api.ListApprovalsApiV1ApprovalsGetParamsOrder(order)

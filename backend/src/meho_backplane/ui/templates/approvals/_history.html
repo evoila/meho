@@ -79,7 +79,7 @@
         hx-include="[name='work_ref']"
         hx-push-url="/ui/approvals?tab={{ tab }}{% if work_ref %}&work_ref={{ work_ref | urlencode }}{% endif %}"
       >
-        {{ tab | capitalize }}
+        {{ "Outcome unknown" if tab == "outcome_unknown" else tab | capitalize }}
       </button>
     {% endfor %}
   </div>
@@ -171,6 +171,11 @@
           <p class="text-base opacity-60">No pending approvals</p>
           <p class="text-sm opacity-40">
             New requests appear here the moment an agent action needs your sign-off.
+          </p>
+        {% elif active_tab == "outcome_unknown" %}
+          <p class="text-base opacity-60">No approved changes with an unknown outcome</p>
+          <p class="text-sm opacity-40">
+            An approved change shows here when MEHO does not know if it happened. Someone then checks the target.
           </p>
         {% elif active_tab == "all" %}
           <p class="text-base opacity-60">No approval requests yet</p>

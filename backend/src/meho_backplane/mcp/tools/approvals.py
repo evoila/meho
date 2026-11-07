@@ -51,6 +51,11 @@ from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.approval_outcome import resume_outcome
+from meho_backplane.operations.approval_outcome_check import (
+    list_outcome_unknown,
+    outcome_check,
+    outcome_unknown,
+)
 from meho_backplane.operations.approval_queue import (
     EXPIRED_REASON_MESSAGES,
     ApprovalNotFoundError,
@@ -132,6 +137,8 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
     result_state = approval_result_state(row)
     outcome = resume_outcome(row)
     expired_reason = approval_expired_reason(row)
+    unknown = outcome_unknown(row)
+    check = outcome_check(row)
     return {
         "id": str(row.id),
         "tenant_id": str(row.tenant_id),
@@ -157,6 +164,24 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
                 "execution_outcome": outcome.execution_outcome,
             }
             if outcome is not None
+            else None
+        ),
+        # #5026: why the outcome is unknown and what to check, and what a
+        # person recorded after they checked the target.
+        "outcome_unknown": (
+            {"reason": unknown.reason.value, "advice": unknown.advice}
+            if unknown is not None
+            else None
+        ),
+        "outcome_check": (
+            {
+                "verdict": check.verdict.value,
+                "note": check.note,
+                "checked_by": check.checked_by,
+                "checked_by_name": check.checked_by_name,
+                "checked_at": check.checked_at,
+            }
+            if check is not None
             else None
         ),
         # #5030: why an expired request expired, and the advice to ask again.
@@ -231,16 +256,29 @@ async def _list_handler(
             raise McpInvalidParamsError("work_ref must be a non-empty string when supplied")
         work_ref_filter = work_ref_raw
 
+    outcome_unknown_only = arguments.get("outcome_unknown", False)
+    if not isinstance(outcome_unknown_only, bool):
+        raise McpInvalidParamsError("outcome_unknown must be true or false")
+
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        rows = await list_pending(
-            session,
-            tenant_id=operator.tenant_id,
-            status=status_filter,
-            work_ref=work_ref_filter,
-            limit=limit,
-            offset=offset,
-        )
+        if outcome_unknown_only:
+            rows = await list_outcome_unknown(
+                session,
+                tenant_id=operator.tenant_id,
+                work_ref=work_ref_filter,
+                limit=limit,
+                offset=offset,
+            )
+        else:
+            rows = await list_pending(
+                session,
+                tenant_id=operator.tenant_id,
+                status=status_filter,
+                work_ref=work_ref_filter,
+                limit=limit,
+                offset=offset,
+            )
     return {
         "items": [_row_to_dict(r) for r in rows],
         "limit": limit,
@@ -257,7 +295,9 @@ register_mcp_tool(
             "List approval requests for your tenant. "
             "Operator-level. Use status='pending' (default) for the "
             "common case — requests awaiting a decision. Pass status='all' "
-            "for every state. Pagination via limit / offset."
+            "for every state. Pass outcome_unknown=true for approved "
+            "changes whose outcome MEHO does not know, for a person to "
+            "check. Pagination via limit / offset."
         ),
         inputSchema={
             "type": "object",
@@ -293,6 +333,19 @@ register_mcp_tool(
                         "match), e.g. 'gh:evoila/meho#1' — the requests "
                         "authorised by change ticket X. Omit for no "
                         "work_ref filter."
+                    ),
+                },
+                "outcome_unknown": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "List only approved requests whose outcome MEHO does "
+                        "not know and that nobody marked as checked: the "
+                        "result says 'uncertain', or the run started more "
+                        "than APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES (default "
+                        "15) ago and stored no result. Do not run these "
+                        "again; a person checks the target. When true, "
+                        "`status` is ignored."
                     ),
                 },
             },

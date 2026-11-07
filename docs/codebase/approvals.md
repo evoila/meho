@@ -1756,6 +1756,76 @@ record before the vendor call: its first record is the audit row written
 after the call. That gap is open. A restart in the middle of such a call
 leaves no trace, and the caller sees the dropped connection.
 
+#### The "outcome unknown" list and "Mark as checked" (#5026)
+
+Someone must look at an approved change whose outcome MEHO does not know.
+The "outcome unknown" list shows these changes, and a person records what
+they found on the target. Code: `operations/approval_outcome_check.py`.
+
+**Who is on the list.** An `approved` request that nobody marked as
+checked, and either:
+
+- its stored result is `uncertain` (`reason` `uncertain`), or
+- its run started (`resumed_at`) more than
+  `APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES` minutes ago (default 15, from 1
+  to 1440) and stored no result (`reason` `started_no_result`). A run that
+  started less than that ago is not listed: it may still be running.
+
+A request that never ran, a run with a known result (`executed` or
+`failed`), a request that is not `approved`, and a request of another
+tenant are never listed. A long operation that is still running after the
+set minutes is listed too. So is a re-run (#5417) that is still running
+after that time, because the time counts from the first run (`resumed_at`).
+Marking such a run does not stop it.
+
+`list_outcome_unknown` is the one list rule (one SQL clause, with
+`outcome_unknown` as its Python twin for one row). Every surface reads it,
+so they show the same rows:
+
+| Surface | How |
+|---|---|
+| REST | `GET /api/v1/approvals?outcome_unknown=true` (`status` is ignored) |
+| MCP | `meho_approvals_list` with `outcome_unknown: true` (`status` is ignored) |
+| CLI | `meho approvals list --outcome-unknown` (not with `--status`) |
+| Console | the "Outcome unknown" tab of `/ui/approvals` |
+
+Each row says what ran (`op_id`, `connector_id`), on which target
+(`target_id`), when (`resume_outcome.resumed_at`), who asked
+(`principal_sub`), who approved (`reviewed_by`) and what to check. The
+REST and MCP views carry `outcome_unknown: {reason, advice}` on every
+listed request (and on show), `null` on all others. The advice of an
+`uncertain` run is the same advice as above. A run with no result gets: "The
+run started and stored no result. MEHO does not know if the change
+happened. Do not run it again. Check the target first."
+
+**Mark as checked.** `POST /api/v1/approvals/{id}/outcome-check` with
+`{"verdict": "happened" | "did_not_happen", "note": "..."}`, `meho
+approvals mark-checked <id> --outcome happened|did-not-happen --note TEXT`,
+or the form in the console modal (`POST /ui/approvals/{id}/outcome-check`).
+`mark_outcome_checked`:
+
+- needs a person who may decide approvals (the same rule as approve and
+  reject: `_check_reviewer_role`, and the REST route is human-only). No
+  fresh sign-in is needed: nothing runs.
+- needs a note (1 to 2000 characters, not only spaces).
+- locks the row and refuses a request that is not on the list right now
+  (409 `outcome_not_unknown`) or is already checked (409
+  `outcome_already_checked`).
+- sets five columns on the request (`outcome_checked_at`,
+  `outcome_checked_by`, `outcome_checked_by_name`, `outcome_check_verdict`,
+  `outcome_check_note`, migration `0140`) and writes one audit row:
+  `path` `approval.outcome_check`, class `approval_decision`, status 200,
+  with `verdict`, `note` and `outcome_unknown_reason` in the payload.
+- keeps the stored result (`resume_result`) and `result_state` as they
+  were, and never runs anything. An approved request starts only once, so
+  the check cannot start it again.
+
+REST and MCP show the check as `outcome_check: {verdict, note, checked_by,
+checked_by_name, checked_at}`. `meho approvals show` prints `Checked:`,
+`Check note:`, `Checked by:` and `Checked at:`. The console shows a
+"checked: it happened" or "checked: it did not happen" badge in the list
+and the check in the modal. A checked request leaves the list.
+
 ### 4. Approved, but the run failed: `resume_outcome` (#3543)
 
 `status` stays `approved` even when the run after the approval failed (for
@@ -2797,12 +2867,15 @@ token-decode + live decouple verification, and a rollback note — lives in
 | `POST` | `/api/v1/approvals/{id}/decide` | **human** operator **or** approver; **fresh sign-in** for `approved` | Decide (`approved` / `rejected`) by id alone. `approved` needs a fresh approval sign-in like `/approve` (#3979, #5515). On every approval it runs the op with the **stored** params (#1503) and returns the outcome in `dispatch_*`. This is the same for a direct op and an agent-run request (#2293): `claim_resume` lets only one caller run it, so when the waiting agent ran it first, `dispatch_status` is `already_resumed`. 403 `human_principal_required` for a machine `principal_kind`. |
 | `POST` | `/api/v1/approvals/{id}/reject` | **human** operator **or** approver | Reject. The op never executes. 403 `human_principal_required` for a machine `principal_kind`. |
 | `POST` | `/api/v1/approvals/{id}/withdraw` | **request sender** (any role, any principal kind) | The sender takes back its own pending request (#4987). Not a decision. 403 `not_request_sender` for anyone else; 409 on a closed request. Writes an `approval.withdraw` audit row. |
+| `POST` | `/api/v1/approvals/{id}/outcome-check` | **human** operator **or** approver | Record what a person found on the target of an approved run whose outcome MEHO does not know (#5026): `verdict` `happened` / `did_not_happen` and a `note`. Runs nothing; writes an `approval.outcome_check` audit row. 409 `outcome_not_unknown` / `outcome_already_checked`. `GET /api/v1/approvals?outcome_unknown=true` lists these requests. |
 
 ### MCP (`backend/src/meho_backplane/mcp/tools/approvals.py`)
 
 Two **read** `meho_approvals_*` tools (both `TenantRole.OPERATOR`-gated):
 
-- `meho_approvals_list` — `status` filter (`pending` default), `limit`/`offset`.
+- `meho_approvals_list` — `status` filter (`pending` default), `limit`/`offset`,
+  `work_ref`, and `outcome_unknown` (#5026: approved changes whose outcome
+  MEHO does not know).
 - `meho_approvals_get` — full detail by id.
 
 The decision verbs — `approve` and `reject` — have **no MCP path under
@@ -2825,7 +2898,9 @@ dispatcher re-checks `required_role` at `tools/call`.
 `meho approvals list / show <id> / approve <id> / reject <id> [--reason]`
 verbs that hit the REST surface via the generated typed client.
 `meho approvals withdraw <id> [--reason]` lets the sender take back its own
-pending request (#4987). `meho approvals result <id> [--json]` lets the
+pending request (#4987). `meho approvals list --outcome-unknown` and
+`meho approvals mark-checked <id>` are the outcome-unknown list and its
+check (#5026, see above). `meho approvals result <id> [--json]` lets the
 sender read the output of its approved run from the owner-only `/result`
 read (#5313). It prints the stored result the way `meho operation call`
 does (with the `meho operation result-query` command for a result
@@ -2941,13 +3016,14 @@ no new gate, service call, route, or migration.
 | Verb | Path | Purpose |
 |---|---|---|
 | `GET` | `/ui/approvals/badge` | Live **pending** count for the app-shell bell. Always `status='pending'` — it counts actionable work, not history. |
-| `GET` | `/ui/approvals` | Content-negotiated. A normal navigation (no `HX-Request`) → the **full-page console**: status tabs (Pending / Approved / Rejected / Expired / All), a `work_ref` filter, an oldest/newest toggle (`order`, #3596), and the decision-history list. The bell's `hx-get` (`HX-Request: true`) → the pending **panel** modal fragment, oldest first with step numbers when a change ticket has two or more pending requests (#3596). (G10.8-T #1827) |
+| `GET` | `/ui/approvals` | Content-negotiated. A normal navigation (no `HX-Request`) → the **full-page console**: status tabs (Pending / Approved / Rejected / Expired / All, plus an "Outcome unknown" tab, #5026), a `work_ref` filter, an oldest/newest toggle (`order`, #3596), and the decision-history list. The bell's `hx-get` (`HX-Request: true`) → the pending **panel** modal fragment, oldest first with step numbers when a change ticket has two or more pending requests (#3596). (G10.8-T #1827) |
 | `GET` | `/ui/approvals/list` | Decision-history partial — the HTMX swap target for the status tabs / `work_ref` filter / oldest-newest toggle / "Load more" offset pager. Reuses `list_pending(status=…, work_ref=…, offset=…, order=…)`; `tab=all` passes `status=None`. `order` is `oldest`, `newest`, or empty (the default rule in "Chains of requests under one change ticket" below); any other value is a 422. Pages with a real offset, not the badge's 50-row glance cap. (G10.8-T #1827) |
 | `GET` | `/ui/approvals/{id}` | Request-detail modal. A pending row offers Approve/Deny; a **decided** row renders read-only with a decision banner ("Approved/Rejected by X at T"). An approved row also shows how its run ended; a failed run turns the banner red (#3543). The `proposed_effect` envelope renders **structurally** (#2447), not as raw JSON (below). |
 | `POST` | `/ui/approvals/{id}/approve` | Approve in-process + re-dispatch the parked op + the fail-open `approval.approved` add-on step event. Needs a recent console sign-in that asked for the credentials (the fresh approval sign-in rule above); otherwise the modal re-renders with the sign-in link. |
 | `POST` | `/ui/approvals/{id}/reject` | Reject in-process + the `approval.rejected` add-on step event; the op never runs. |
 | `GET` | `/ui/approvals/in-order?work_ref=` | The "Approve group in order" modal: the change ticket's requests oldest first and a Start button (#3597). |
 | `POST` | `/ui/approvals/in-order` | Runs the steps in order (form: `work_ref`, `reason`, `confirm_id`, one `step_id` per step shown); renders what happened to each step (#3597). Approves nothing when a pending request of the ticket is not among the posted `step_id`s. |
+| `POST` | `/ui/approvals/{id}/outcome-check` | "Mark as checked" in the modal of a request on the "Outcome unknown" tab (#5026): form `verdict` and `note`. Runs nothing; the modal shows the recorded check. |
 
 The console is **read-only over substrate that already exists** — it adds
 no new service call, no `api/v1` Bearer route, no CLI verb, and no

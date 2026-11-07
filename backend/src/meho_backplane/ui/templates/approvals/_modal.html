@@ -322,6 +322,55 @@
               {% endif %}
             </dl>
           {% endif %}
+          {#- Outcome unknown (#5026). A run that started long ago with no
+              result gets the same advice as an uncertain one. A person checks
+              the target and records what they found; nothing runs. -#}
+          {% if request.outcome_unknown and request.outcome_unknown.reason == "started_no_result" %}
+            <p class="mt-2 text-sm font-semibold" data-testid="approval-outcome-unknown">{{ request.outcome_unknown.advice }}</p>
+          {% endif %}
+          {% if request.outcome_check %}
+            <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-outcome-check" data-verdict="{{ request.outcome_check.verdict }}">
+              <dt class="opacity-70">Checked</dt>
+              <dd>{{ "It happened" if request.outcome_check.verdict == "happened" else "It did not happen" }}</dd>
+              <dt class="opacity-70">Note</dt>
+              <dd class="[overflow-wrap:anywhere]">{{ request.outcome_check.note }}</dd>
+              <dt class="opacity-70">Checked by</dt>
+              <dd>{{ subject(request.outcome_check.checker) }}</dd>
+              <dt class="opacity-70">Checked at</dt>
+              <dd><time datetime="{{ request.outcome_check.checked_at }}" class="font-mono text-xs">{{ request.outcome_check.checked_at }}</time></dd>
+            </dl>
+          {% elif request.outcome_unknown %}
+            <form
+              class="mt-3 flex flex-col gap-2"
+              data-testid="approval-outcome-check-form"
+              hx-post="/ui/approvals/{{ request.id }}/outcome-check"
+              hx-target="#meho-approvals-modal-container"
+              hx-swap="innerHTML"
+              hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+              hx-disabled-elt="find button"
+            >
+              <p class="text-sm">Mark as checked: what did you find on the target? This only records your answer. MEHO runs nothing.</p>
+              <label class="flex items-center gap-2 text-sm">
+                <input type="radio" name="verdict" value="happened" class="radio radio-sm" required />
+                It happened
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <input type="radio" name="verdict" value="did_not_happen" class="radio radio-sm" required />
+                It did not happen
+              </label>
+              <textarea
+                name="note"
+                class="textarea textarea-bordered textarea-sm w-full"
+                maxlength="2000"
+                required
+                placeholder="What did you check?"
+                aria-label="Note: what did you check?"
+              ></textarea>
+              <div class="flex justify-end">
+                <button type="submit" class="btn btn-sm" data-confirm="outcome-check">Mark as checked</button>
+              </div>
+            </form>
+          {% endif %}
           {#- Delegated decision (#3692): the approver acted on another human's
               written instruction. Read off the decision audit row; absent for an
               ordinary decision. -#}

@@ -10913,7 +10913,7 @@
           "approvals"
         ],
         "summary": "List Approvals",
-        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired`` / ``?status=withdrawn``, ``?status=all`` for every\nstate (the same sentinel ``meho_approvals_list`` accepts), and by\nchange ticket via\n``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first\n(``created_at DESC``) by default; ``?order=oldest`` returns\noldest-first (``created_at ASC``, ties broken on ``id``) so a chain of\nrequests under one change ticket reads in the order it was sent\n(#3596). ``limit`` / ``offset`` page through the result; no ``limit``\nreturns every match.",
+        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired`` / ``?status=withdrawn``, ``?status=all`` for every\nstate (the same sentinel ``meho_approvals_list`` accepts), and by\nchange ticket via\n``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first\n(``created_at DESC``) by default; ``?order=oldest`` returns\noldest-first (``created_at ASC``, ties broken on ``id``) so a chain of\nrequests under one change ticket reads in the order it was sent\n(#3596). ``limit`` / ``offset`` page through the result; no ``limit``\nreturns every match. ``?outcome_unknown=true`` lists the approved\nrequests whose outcome MEHO does not know (#5026), the same list the\nconsole, the CLI and MCP show; ``status`` is then ignored.",
         "operationId": "list_approvals_api_v1_approvals_get",
         "parameters": [
           {
@@ -10982,6 +10982,18 @@
               "title": "Order"
             },
             "description": "Sort by creation time. 'newest' (default) lists the newest request first; 'oldest' lists the oldest first, which is the order a chain of requests under one change ticket was sent in."
+          },
+          {
+            "name": "outcome_unknown",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "List only approved requests whose outcome MEHO does not know and that nobody marked as checked: the result says 'uncertain', or the run started more than APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES (default 15) ago and stored no result. When true, 'status' is ignored. Defaults to false.",
+              "default": false,
+              "title": "Outcome Unknown"
+            },
+            "description": "List only approved requests whose outcome MEHO does not know and that nobody marked as checked: the result says 'uncertain', or the run started more than APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES (default 15) ago and stored no result. When true, 'status' is ignored. Defaults to false."
           },
           {
             "name": "authorization",
@@ -11294,6 +11306,70 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/WithdrawRequestBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequestView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/approvals/{request_id}/outcome-check": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Mark Approval Outcome Checked",
+        "description": "Record what you found on the target of a run with an unknown outcome (#5026).\n\nFor an approved request on the \"outcome unknown\" list. A person who may\ndecide approvals records \"it happened\" or \"it did not happen\" with a\nnote. MEHO writes one ``approval.outcome_check`` audit row and the\nrequest leaves the list. The stored result stays as it was, and nothing\nruns.\n\nHTTP status codes:\n\n* 200 \u2014 recorded.\n* 403 \u2014 not a person, or a role that may not decide approvals.\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 ``outcome_already_checked``, or ``outcome_not_unknown`` when the\n  request is not on the list (not approved, not run, a known result,\n  or a run that started less than the set minutes ago).\n* 422 \u2014 an unknown verdict, or an empty or too long note.",
+        "operationId": "mark_approval_outcome_checked_api_v1_approvals__request_id__outcome_check_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OutcomeCheckRequestBody"
               }
             }
           }
@@ -21028,6 +21104,60 @@
         }
       }
     },
+    "/ui/approvals/{request_id}/outcome-check": {
+      "post": {
+        "tags": [
+          "ui-approvals"
+        ],
+        "summary": "Approval Outcome Check",
+        "description": "Record the check, then render the detail modal again.",
+        "operationId": "approval_outcome_check_ui_approvals__request_id__outcome_check_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_approval_outcome_check_ui_approvals__request_id__outcome_check_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/scheduler": {
       "get": {
         "tags": [
@@ -24633,6 +24763,14 @@
             "$ref": "#/components/schemas/ApprovalResumeOutcomeView",
             "nullable": true
           },
+          "outcome_unknown": {
+            "$ref": "#/components/schemas/OutcomeUnknownView",
+            "nullable": true
+          },
+          "outcome_check": {
+            "$ref": "#/components/schemas/OutcomeCheckView",
+            "nullable": true
+          },
           "expired_reason": {
             "$ref": "#/components/schemas/ApprovalExpiredReason",
             "nullable": true
@@ -26001,6 +26139,24 @@
         },
         "type": "object",
         "title": "Body_approval_approve_ui_approvals__request_id__approve_post"
+      },
+      "Body_approval_outcome_check_ui_approvals__request_id__outcome_check_post": {
+        "properties": {
+          "verdict": {
+            "$ref": "#/components/schemas/OutcomeCheckVerdict"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Note",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "verdict"
+        ],
+        "title": "Body_approval_outcome_check_ui_approvals__request_id__outcome_check_post"
       },
       "Body_approval_reject_ui_approvals__request_id__reject_post": {
         "properties": {
@@ -33650,6 +33806,99 @@
         ],
         "title": "OrderBy",
         "description": "One ``ORDER BY`` term: a known column plus a direction."
+      },
+      "OutcomeCheckRequestBody": {
+        "properties": {
+          "verdict": {
+            "$ref": "#/components/schemas/OutcomeCheckVerdict",
+            "description": "What you found on the target: 'happened' or 'did_not_happen'."
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Note",
+            "description": "What you checked, in your own words. Stored on the request and the audit row."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "verdict",
+          "note"
+        ],
+        "title": "OutcomeCheckRequestBody",
+        "description": "POST body for ``\u2026/outcome-check`` (#5026)."
+      },
+      "OutcomeCheckVerdict": {
+        "type": "string",
+        "enum": [
+          "happened",
+          "did_not_happen"
+        ],
+        "title": "OutcomeCheckVerdict",
+        "description": "What the person found on the target."
+      },
+      "OutcomeCheckView": {
+        "properties": {
+          "verdict": {
+            "$ref": "#/components/schemas/OutcomeCheckVerdict"
+          },
+          "note": {
+            "type": "string",
+            "title": "Note"
+          },
+          "checked_by": {
+            "type": "string",
+            "title": "Checked By"
+          },
+          "checked_by_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Checked By Name"
+          },
+          "checked_at": {
+            "type": "string",
+            "title": "Checked At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "verdict",
+          "note",
+          "checked_by",
+          "checked_by_name",
+          "checked_at"
+        ],
+        "title": "OutcomeCheckView",
+        "description": "What a person recorded after they checked the target (#5026)."
+      },
+      "OutcomeUnknownReason": {
+        "type": "string",
+        "enum": [
+          "uncertain",
+          "started_no_result"
+        ],
+        "title": "OutcomeUnknownReason",
+        "description": "Why a request is on the \"outcome unknown\" list."
+      },
+      "OutcomeUnknownView": {
+        "properties": {
+          "reason": {
+            "$ref": "#/components/schemas/OutcomeUnknownReason"
+          },
+          "advice": {
+            "type": "string",
+            "title": "Advice"
+          }
+        },
+        "type": "object",
+        "required": [
+          "reason",
+          "advice"
+        ],
+        "title": "OutcomeUnknownView",
+        "description": "Why an approved request is on the \"outcome unknown\" list (#5026)."
       },
       "PairAddonRequest": {
         "properties": {

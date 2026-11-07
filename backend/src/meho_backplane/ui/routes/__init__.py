@@ -93,7 +93,11 @@ from meho_backplane.ui.routes.account import build_account_router
 from meho_backplane.ui.routes.agents import build_agents_router
 from meho_backplane.ui.routes.agents.grants import build_agent_grants_router
 from meho_backplane.ui.routes.agents.runs import build_runs_router
-from meho_backplane.ui.routes.approvals import build_approvals_router, build_in_order_router
+from meho_backplane.ui.routes.approvals import (
+    build_approvals_router,
+    build_in_order_router,
+    build_outcome_check_router,
+)
 from meho_backplane.ui.routes.audit import build_audit_router
 from meho_backplane.ui.routes.automation import build_automation_router
 from meho_backplane.ui.routes.broadcast import build_router as build_broadcast_router
@@ -244,6 +248,8 @@ def build_router() -> APIRouter:
     # approvals router's ``/ui/approvals/{request_id}`` slug route.
     router.include_router(build_in_order_router())
     router.include_router(build_approvals_router())
+    # Mark a run with an unknown outcome as checked (#5026).
+    router.include_router(build_outcome_check_router())
     # Scheduler lands ``/ui/scheduler`` + ``/ui/scheduler/{trigger_id}`` +
     # the literal ``/ui/scheduler/create`` + ``/ui/scheduler/validate-cron``
     # + ``/ui/scheduler/{id}/cancel`` write routes (G10.8-T6 #1826); the

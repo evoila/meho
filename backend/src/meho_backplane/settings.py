@@ -1781,6 +1781,9 @@ class Settings(BaseModel):
     approval_default_ttl_seconds: int = Field(default=14 * 24 * 3600, ge=60)
     approval_expiry_enabled: bool = True
     approval_expiry_tick_interval_seconds: int = Field(default=300, ge=60, le=86400)
+    # #5026 -- an approved run that started and stored no result after this
+    # many minutes is listed for operators to check ("outcome unknown").
+    approval_outcome_unknown_after_minutes: int = Field(default=15, ge=1, le=1440)
     # #3151 — op-id patterns a service-principal standing grant may never
     # cover (delete-shaped ops are the floor of what runs unattended, never
     # grantable). See ``operations.service_grants``.
@@ -3012,6 +3015,10 @@ def get_settings() -> Settings:
         ),
         approval_expiry_tick_interval_seconds=int(
             os.environ.get("APPROVAL_EXPIRY_TICK_INTERVAL_SECONDS", "300"),
+        ),
+        # #5026 -- when a started run with no result counts as outcome unknown.
+        approval_outcome_unknown_after_minutes=int(
+            os.environ.get("APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES", "15"),
         ),
         # #3151 — delete-shaped op-id patterns never grantable to a service
         # principal. Comma-separated override; empty keeps the default set.

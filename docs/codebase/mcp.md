@@ -592,7 +592,11 @@ dispatcher:
   are added, like a normal call: a result that no longer fits keeps
   `status="ok"` and its `audit_id` and gets `delivery="partial"` or
   `"unavailable"`. A failed or cancelled run gives `status="error"` and `extras.error_code`
-  `run_failed` / `run_cancelled`. Checking never runs the call again.
+  `run_failed` / `run_cancelled`. A run of a change whose worker died gives
+  `run_uncertain` with `extras.execution_outcome` `uncertain`, `retry`
+  `false` and the advice in `extras.remediation`: MEHO does not know if the
+  change happened, do not run it again, check the target first (#5025).
+  Checking never runs the call again.
 - **`wait_seconds`** (only with `run_id`, #5264) makes the check wait up to
   that many seconds for the run to end. The answer comes as soon as the run
   ends, or after the wait with `pending` / `running` as before. `0` or no

@@ -76,7 +76,7 @@ verbs run the same governed dispatch.
 
 | The task needs … | MEHO surface (reach here first) | Local break-glass |
 |---|---|---|
-| an operator **preference or note** | MCP `search_memory` / `add_to_memory` · CLI `meho memory …` / `meho remember` (scopes `user` / `user-tenant` / `tenant`) | a local memory file |
+| a **personal preference or note** | the engineer's own laptop memory — it stays there; if it turns out to be a team fact, add it to MEHO knowledge (next row) | n/a — the laptop memory is the normal place, not a fallback |
 | a **prior incident or team lesson** | MCP `search_knowledge` / `add_to_knowledge` · CLI `meho kb …` | `grep` / edit under a local `kb/` |
 | a **vendor- or version-specific fact** | MCP `list_doc_collections` → `search_docs` / `ask_docs` (capability-gated — see note) | local `docs/` sidecars |
 | the **live state of a target** | MCP `search_operations` → `preview_operation` → `call_operation`, with `result_query` to page a set-shaped result (never a raw dump) · CLI `meho operation …` / `meho <connector> <op>` | a local connector wrapper |
@@ -148,19 +148,12 @@ ground it.
   memory. These tools are gated by the `meho-docs` capability; a session
   without it does not see them.
 
-### Memory — recording preferences and notes
+### Memory — personal preferences and notes
 
-MEHO memory carries operator preferences and durable notes across machines
-and scopes them correctly. Prefer it over per-laptop local memory files for
-anything that should persist beyond one checkout. Pick the narrowest scope
-that fits:
-
-- `add_to_memory` (MCP) / `meho remember "…" --scope user` (CLI) — a
-  behavioural preference that follows the operator across every tenant.
-- `meho remember "…" --scope user-tenant` (the default) — the operator's
-  notes scoped to one tenant.
-- `meho remember "…" --scope tenant` — team-shared knowledge visible to the
-  whole tenant (requires the `tenant_admin` role).
+A personal preference or note stays in the engineer's laptop memory. Do not
+write it to MEHO. A lesson the team should reuse does not belong in laptop
+memory: add it to MEHO's knowledge store with `add_to_knowledge`. When a
+personal note turns out to be a team fact, move it there.
 
 ### Memory — recalling and managing
 
@@ -357,15 +350,17 @@ answer.
 A **verified** outcome goes back to the right store, through the backplane,
 so the next session inherits it:
 
-- an operator **preference** → scoped memory (`add_to_memory`, the narrowest
-  scope that fits);
-- a **reusable lesson** → tenant knowledge (`add_to_knowledge`);
+- a **reusable lesson** → MEHO's knowledge store (`add_to_knowledge`), never
+  a file in a repo's knowledge folder;
+- a **personal preference or note** → stays in the engineer's laptop memory.
+  When it turns out to be a team fact, move it to MEHO's knowledge store
+  (`add_to_knowledge`);
 - a **repeatable procedure** → propose a runbook template (agent-driven) or
   an automation blueprint (operator-launched).
 
 Mark **hypothesis vs verified** on the way in, and keep provenance (what was
-observed, when, against which target). Writing back through the backplane
-rather than a local file is what makes the outcome audited and visible to
+observed, when, against which target). Writing a lesson back through the
+backplane rather than a local file is what makes it audited and visible to
 the team.
 
 **A session proposes; it never approves.** Parking a destructive operation

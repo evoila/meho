@@ -180,6 +180,29 @@ func TestMapEntryVersionIsTopLevel(t *testing.T) {
 	}
 }
 
+func TestParseTargetsYAMLNullVersionIsAccepted(t *testing.T) {
+	t.Parallel()
+	in := []byte(`
+targets:
+  - name: addon
+    product: demo-product
+    host: addon.example.test
+    version: null
+`)
+	entries, err := parseTargetsYAML(in)
+	if err != nil {
+		t.Fatalf("parseTargetsYAML: a null version must parse, got %v", err)
+	}
+	body, warnings := entryToCreateBody(entries[0])
+	v, present := body["version"]
+	if !present || v != nil {
+		t.Errorf("version: got %v (present=%v); want null at the top level", v, present)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("warnings: got %v; want none", warnings)
+	}
+}
+
 func TestParseTargetsYAMLNonStringVersionFails(t *testing.T) {
 	t.Parallel()
 	in := []byte(`

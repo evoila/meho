@@ -181,11 +181,14 @@ verbatim on the `register()` docstring.
 
 > **Note on list-of-scalars.** `register(unwrap="auto")` classifies a
 > *list of scalars* (Vault's `{"keys": ["a", "b", ...]}`) as metadata and
-> collapses it to a 1-row table — not one row per key. The
-> [reducer adapter](#reducer-adapter) compensates by normalizing
-> list-of-scalars to `[{"value": "a"}, ...]` rows *before* calling
-> `register()`, so the row count (the threshold input) is correct for
-> every vendor shape. See `_normalize_rows` in `jsonflux_reducer.py`.
+> collapses it to a 1-row table — not one row per key. MEHO's own code
+> does not call `register()`: the [reducer adapter](#reducer-adapter)
+> detects the collection itself and normalizes list-of-scalars to
+> `[{"value": "a"}, ...]` rows (`_normalize_rows` in
+> `jsonflux_reducer.py`), so the row count (the threshold input) is
+> correct for every vendor shape. The `result_query` core hands DuckDB an
+> Arrow table directly (`engine.conn.register` in
+> `operations/result_query.py`).
 
 ### Connection sandbox
 
@@ -640,7 +643,8 @@ register_typed_operation(
 `dispatcher._result_ordering_from_descriptor(descriptor)` lifts the raw
 dict from `descriptor.llm_instructions["result_ordering"]` and threads it
 through `reducer_context["result_ordering"]` — the exact sibling of the
-`pagination_hint` path. `JsonFluxReducer._sample_from_tail` reads it; on
+`pagination_hint` path. The module function `_sample_from_tail` in
+`jsonflux_reducer.py` reads it; on
 `{"sample": "tail"}` the reducer takes the raw chronological tail slice,
 which reads like the bottom of a `kubectl logs` window. A
 missing / malformed / any-other value keeps the head-first default —
@@ -659,8 +663,9 @@ and its `SddcTask` is `{id, name, status, …, sddcSubTasks: […]}`. Before
 #3084 an over-threshold `validationChecks` reduction swallowed the
 top-level scalars, so a governed `installer.sddc.spec.validate` returned
 a summary without the validation `id` — the submit → poll loop could not
-be driven through the governed surface alone (observed live against a
-VCF Installer 9.0.2 appliance).
+be driven through the governed surface alone. (The VCF Installer
+connector ships in evoila's enterprise pack, not in this repository; the
+hint works the same for every connector.)
 
 Connectors whose op returns such a shape declare a `result_scalars`
 hint under `llm_instructions`:
@@ -803,8 +808,9 @@ For the wire shape of `fetch_more` on a serialized `ResultHandle`,
 see [`operations-substrate.md` § `ResultHandle` shape](operations-substrate.md#resulthandle-shape-future-facing).
 
 For how the dispatcher invokes the reducer (the `try/except` wrap that
-turns a reducer exception into `connector_error` with audit + broadcast
-still firing, and the `ResultHandle` shape), see
+keeps a completed operation `ok` when the reducer fails, with
+`delivery="unavailable"` and the audit row still written, and the
+`ResultHandle` shape), see
 [`operations-substrate.md` §JSONFlux integration](operations-substrate.md#jsonflux-integration).
 
 ## Upstream-sync runbook
@@ -816,8 +822,8 @@ pin this runbook syncs *from* is recorded in
 1. **Find new commits since the pin.** In the attached MEHO.X checkout:
 
    ```bash
-   git -C /Users/damirtopic/repos/evoila-bosnia/MEHO.X fetch origin
-   git -C /Users/damirtopic/repos/evoila-bosnia/MEHO.X \
+   git -C /path/to/MEHO.X fetch origin
+   git -C /path/to/MEHO.X \
      log --oneline fc82cf93..origin/main -- meho_app/jsonflux/
    ```
 
@@ -828,7 +834,7 @@ pin this runbook syncs *from* is recorded in
    and catch any *new* files MEHO.X added that need a fresh SPDX header):
 
    ```bash
-   git -C /Users/damirtopic/repos/evoila-bosnia/MEHO.X \
+   git -C /path/to/MEHO.X \
      log --oneline --stat fc82cf93..origin/main -- meho_app/jsonflux/
    ```
 
@@ -839,7 +845,7 @@ pin this runbook syncs *from* is recorded in
    ```bash
    # For each changed file, diff the MEHO.X range and apply by hand or
    # via `git apply --3way` after rewriting the path prefix:
-   git -C /Users/damirtopic/repos/evoila-bosnia/MEHO.X \
+   git -C /path/to/MEHO.X \
      diff fc82cf93..origin/main -- meho_app/jsonflux/query/engine.py
    ```
 
@@ -879,11 +885,12 @@ pin this runbook syncs *from* is recorded in
    uv run pytest tests/
    ```
 
-   If `register()` behavior changed upstream, the adapter's
-   collection-detection assumptions
+   The reducer adapter
    ([`jsonflux_reducer.py`](../../backend/src/meho_backplane/operations/jsonflux_reducer.py))
-   may need a matching update — the adapter normalizes list-of-scalars and
-   reads `engine.tables[...]["row_count"]`, so a rename there is breaking.
+   does its own collection detection and does not call `register()`. A
+   change to the engine's hardening (`_harden_connection`) or to how
+   `result_query` uses `engine.conn` does matter: re-run the result-query
+   tests.
 
 6. **Update the pin and commit.** Bump the `fc82cf93` SHA to the new
    MEHO.X SHA in **three** places, then commit:
@@ -925,7 +932,7 @@ out-of-scope to automate.
    upstream-sync header rewrite. Do **not** carry the Apache-2.0 header
    into MEHO.X.
 
-3. **Open the fix as a PR on MEHO.X** (`evoila-bosnia/MEHO.X`), crediting
+3. **Open the fix as a PR on MEHO.X** (the MEHO.X repository), crediting
    the chain on the commit so authorship survives the round-trip:
 
    ```

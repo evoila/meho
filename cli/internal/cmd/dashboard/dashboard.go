@@ -407,6 +407,18 @@ func printDashboardSummary(w io.Writer, d *api.DashboardDetail) {
 	if prompt := derefString(d.InvestigatorPrompt); strings.TrimSpace(prompt) != "" {
 		fmt.Fprintf(w, "%-18s\n%s\n", "investigator_prompt:", indentBlock(prompt))
 	}
+	// Last alert mail result. Absent until the first attempt. A failure
+	// prints its reason so a blocked mail port shows here, not only in logs.
+	if d.LastMailAt != nil {
+		result := "sent"
+		if d.LastMailSent != nil && !*d.LastMailSent {
+			result = "not sent"
+			if reason := derefString(d.LastMailReason); reason != "" {
+				result += " (" + sanitizeCell(reason) + ")"
+			}
+		}
+		fmt.Fprintf(w, "%-18s %s, %s\n", "last_mail:", formatTime(d.LastMailAt), result)
+	}
 	fmt.Fprintf(w, "%-18s %d\n", "member_count:", d.MemberCount)
 	fmt.Fprintf(w, "%-18s %s\n", "created_by:", d.CreatedBySub)
 	fmt.Fprintf(w, "%-18s %s\n", "created_at:", formatTime(&d.CreatedAt))

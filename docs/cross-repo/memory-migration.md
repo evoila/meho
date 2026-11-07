@@ -10,8 +10,8 @@ Copyright (c) 2026 evoila Group
 ## Why this matters
 
 - Today every operator's Claude sessions read and write `~/.claude/projects/<...>/memory/<file>.md` on a single laptop. What one operator's Claude learns is invisible to every other operator's Claude. The corpus dies with the laptop.
-- After the migration: server-side memory across five scopes; **the team becomes the unit of memory** per consumer-needs.md §G5 L131 (an internal document; the public design is in [memory.md](../architecture/memory.md)). A senior teaching their Claude about an infrastructure target can promote that memory to `tenant` scope and every junior's Claude session in the same tenant sees it the next time it searches.
-- The migration is **one-way** — there is no "restore from laptop" path. The mitigation is the G5.3 #375 per-file picker (when shipped), which lets the operator choose per-file whether each laptop entry migrates, stays laptop-local (machine-specific paths, scratch notes), or gets edited before sending. Until G5.3 ships, the manual `meho remember` path documented here is the migration recipe.
+- After the migration: server-side memory across five scopes; **the team becomes the unit of memory** (see [memory.md](../architecture/memory.md)). A senior teaching their Claude about an infrastructure target can promote that memory to `tenant` scope and every junior's Claude session in the same tenant sees it the next time it searches.
+- The migration is **one-way** — there is no "restore from laptop" path. The mitigation is the `meho migrate memory` per-file picker (G5.3 #375). It lets the operator choose per file whether each laptop entry migrates, stays laptop-local (machine-specific paths, scratch notes), or gets edited before sending. The manual `meho remember` path below works for any scope.
 
 ## The 5-scope decision matrix
 
@@ -20,10 +20,10 @@ Every memory entry lives in exactly one scope. Pick the narrowest scope that cap
 | Scope | Visible to | Use for |
 |---|---|---|
 | `user` | Just you, across **every** tenant you belong to | Personal behavioral preferences that travel with you ("I prefer kubectl over k9s", "always show me JSON output first") |
-| `user-tenant` | Just you, within this tenant | Personal context scoped to one lab ("for rdc-internal I'm investigating the snapshot regression") |
-| `user-target` | Just you, scoped to one target | Personal notes about one vCenter / k8s cluster ("my local kubectl alias `pf` port-forwards to rdc-tools-1") |
+| `user-tenant` | Just you, within this tenant | Personal context scoped to one lab ("for lab-a I'm investigating the snapshot regression") |
+| `user-target` | Just you, scoped to one target | Personal notes about one vCenter / k8s cluster ("my local kubectl alias `pf` port-forwards to tools-1") |
 | `tenant` | Everyone in your tenant (read); `tenant_admin` only (write) | Team-wide conventions ("we use GitOps for everything"; "PR titles follow conventional-commits") |
-| `target` | Anyone with access to this target (in v0.2: every operator in the target's tenant) | Target-specific gotchas ("rdc-vcenter requires VPN"; "vmware-prod has stricter snapshot quotas") |
+| `target` | Anyone with access to this target (in v0.2: every operator in the target's tenant) | Target-specific gotchas ("vcenter-prod requires VPN"; "vmware-prod has stricter snapshot quotas") |
 
 Decision tree:
 
@@ -42,9 +42,9 @@ Two corollaries:
 - **Roles.** `meho remember` / `recall` / `forget` / `list` are `operator`-level. Writes to `tenant` scope require `tenant_admin` (the server returns 403 from the `MemoryRbacResolver`; the CLI surfaces the exit code 5 `insufficient_role`). `read_only` callers can read `tenant` / `target` memories but cannot write any scope.
 - **A running backplane.** `meho login <backplane-url>` writes a session token the CLI reuses across every verb. Override per-call with `--backplane <url>`.
 - **Tenant context.** The JWT carries `tenant_id` — `meho remember` is scoped to the tenant your token was issued for. To migrate memories that belong in a different tenant, `meho login` against that tenant first.
-- **Your laptop-local memory directory.** Claude Code keeps memory files at `~/.claude/projects/<sanitized-cwd-path>/memory/<slug>.md`. The exact path depends on your working directory at the time the memory was written. The G5.3 #375 verb will walk this directory automatically when it lands.
+- **Your laptop-local memory directory.** Claude Code keeps memory files at `~/.claude/projects/<sanitized-cwd-path>/memory/<slug>.md`. The exact path depends on your working directory at the time the memory was written. `meho migrate memory` finds this directory for you (see below).
 
-## Migration path — G5.3 (when shipped)
+## Migration path — `meho migrate memory`
 
 The first-class migration UX is the G5.3 #375 verb:
 
@@ -52,20 +52,20 @@ The first-class migration UX is the G5.3 #375 verb:
 meho migrate memory
 ```
 
-It walks `~/.claude/projects/<...>/memory/`, parses the YAML frontmatter, runs a machine-local heuristic (flagging files with `/Users/<name>/`, `*.local`, `host.docker.internal`, ...), suggests a scope per file based on the `type:` frontmatter (`user` / `feedback` → `user`; `project` → `user-tenant`; `reference` → `user`), and presents an interactive picker (huh-based form). For each file the operator chooses:
+It walks `~/.claude/projects/<...>/memory/` (or `$CLAUDE_PROJECT_DIR/memory/`, or the folder you pass with `--source`), parses the YAML frontmatter, runs a machine-local heuristic (flagging files with `/Users/<name>/`, `*.local`, `host.docker.internal`, ...), suggests the `user` scope for each file, and presents an interactive picker (huh-based form). For each file the operator chooses:
 
 - **Migrate to the suggested scope** (default), or
-- **Migrate to a different scope** (the picker filters tenant / target out unless your role permits), or
+- **Migrate to a different scope** (the picker offers only `user` today; for another scope, skip the file and use the manual path below), or
 - **Skip — keep laptop-local** (machine-specific paths, scratch notes), or
 - **Edit body, then migrate** (strip machine-local snippets first).
 
-Idempotency: each entry is POSTed with a stable `source_id` derived from the body's SHA-256, so re-running the migration after editing one laptop file updates that row in place and is a no-op for everything else.
+Idempotency: the slug comes from the file name, and the server keys each entry on its scope, your user, the target, and the slug. Re-running the migration after editing one laptop file updates that row in place; unchanged entries stay as they are.
 
-A `--dry-run` flag prints the per-entry envelopes that would be sent; `--non-interactive` migrates the safest defaults (`type: user` and `type: feedback` only) at their suggested scope, useful for automation.
+A `--dry-run` flag prints the per-entry envelopes that would be sent; `--non-interactive` migrates the safest defaults (`type: user` and `type: feedback` only) at their suggested scope, useful for automation. Machine-local files are skipped unless you pass `--include-machine-local` (the interactive picker only). After `meho login`, MEHO prints a tip when it finds laptop memory files and no migration marker. Pass `--mark-migrated` to set the marker after a successful run.
 
-## Migration path — manual (until G5.3 ships)
+## Migration path — manual
 
-Until [#375 G5.3](https://github.com/evoila/meho/issues/375) lands, walk the directory manually and pipe each file's body through `meho remember`. The shape is the same — pick the scope per file, hand the body to the CLI:
+To pick any scope per file, walk the directory by hand and pipe each file's body through `meho remember`. The shape is the same — pick the scope per file, hand the body to the CLI:
 
 ```bash
 cd ~/.claude/projects/<sanitized-cwd>/memory
@@ -132,14 +132,14 @@ Rollback is forward-only — the migration writes new server-side rows; the lapt
    meho list --scope user --include-expired --json
    ```
 
-   `--include-expired` surfaces entries whose `metadata.expires_at` is in the past (relevant once G5.2 ships) so you see the full state, not just the read-side-visible subset.
+   `--include-expired` surfaces entries whose `metadata.expires_at` is in the past so you see the full state, not just the read-side-visible subset.
 
 2. **Delete individual entries**:
 
    ```bash
    meho forget user/kubectl-preference                # quiet on a present row
    meho forget user/already-gone                      # idempotent — no error on missing rows
-   meho forget user-target/cluster-note --target rdc-tools-1   # target-scoped delete
+   meho forget user-target/cluster-note --target tools-1   # target-scoped delete
    meho forget user/old-thing --confirm               # skip the y/N prompt for scripted use
    ```
 
@@ -148,7 +148,7 @@ Rollback is forward-only — the migration writes new server-side rows; the lapt
 There is **no "restore from laptop" path** built into MEHO. The mitigation is:
 
 - The original laptop files are still in `~/.claude/projects/<...>/memory/` until the operator deletes them. Keep the laptop directory until you've validated the server-side corpus.
-- G5.3's per-file picker is the safety net for "I didn't want to migrate that one" — the picker shows the body before each POST, so the wrong entries don't reach the server in the first place.
+- The `meho migrate memory` picker is the safety net for "I didn't want to migrate that one" — the picker shows the body before each POST, so the wrong entries don't reach the server in the first place.
 - Server-side `meho forget` cleans up rows the operator wrote by mistake. Re-running `meho remember` from the laptop file restores them.
 
 For a tenant-scoped rollback ("we agreed to roll back the team-wide `gitops-convention` memory"), the same `meho forget tenant/<slug>` works — the verb requires `tenant_admin` for tenant scope writes (delete is a write, in the RBAC matrix).
@@ -162,7 +162,7 @@ Once the laptop directory is migrated (or you've decided which files stay laptop
 
   ```bash
   meho remember "I prefer kubectl over k9s" --scope user --slug kubectl-preference
-  meho remember "rdc-vcenter requires VPN" --scope target --target rdc-vcenter --slug vpn-requirement
+  meho remember "vcenter-prod requires VPN" --scope target --target vcenter-prod --slug vpn-requirement
   meho remember "tenant convention: PR titles follow conventional-commits" --scope tenant --slug pr-title-convention
   ```
 
@@ -170,7 +170,7 @@ Once the laptop directory is migrated (or you've decided which files stay laptop
 
 Ephemeral session notes do not need to live in memory — the agent's working memory is fine. Memory is for durable learnings (preferences, conventions, gotchas) that should outlast a single session.
 
-## Promoting between scopes (when G5.2 ships)
+## Promoting between scopes
 
 [#374 G5.2](https://github.com/evoila/meho/issues/374) ships the `meho promote` verb:
 
@@ -180,7 +180,7 @@ meho promote user-tenant/<slug> --to tenant       # requires tenant_admin
 meho promote user/<slug> --to user-target --move  # move (delete source) rather than copy
 ```
 
-Promotion is **one-way and operator-initiated** — there is no `meho demote` and no AI-suggested promotion (explicitly disallowed per consumer-needs.md §G5 "Out of scope"). Until G5.2 ships, the manual equivalent is "`meho recall` the source, `meho remember` at the target scope, `meho forget` the source".
+Promotion is **one-way and operator-initiated** — there is no `meho demote` and no AI-suggested promotion (by design). The manual equivalent is "`meho recall` the source, `meho remember` at the target scope, `meho forget` the source".
 
 ## Related
 
@@ -188,6 +188,5 @@ Promotion is **one-way and operator-initiated** — there is no `meho demote` an
 - [Initiative #332 G5.1](https://github.com/evoila/meho/issues/332) — scope + definition of done; the surface this runbook documents.
 - [Initiative #374 G5.2](https://github.com/evoila/meho/issues/374) — auto-expiry + tenant-promotion verb + per-scope RBAC tightening (default 7-day TTL on user scope, `meho promote`).
 - [Initiative #375 G5.3](https://github.com/evoila/meho/issues/375) — laptop-local migration UX (`meho migrate memory` interactive per-file picker + machine-local heuristic + post-login nudge).
-- Consumer-needs.md §G5 L130-160 (an internal document) — the canonical product spec for the memory layer (team-as-unit-of-memory unlock, 5-scope shape, auto-expiry policy, operator-initiated promotion only).
 - [`docs/cross-repo/README.md`](./README.md) — the index of cross-repo coordination specs and operator runbooks this doc is listed in.
 - [`docs/cross-repo/kb-migration.md`](./kb-migration.md) — the sister runbook for migrating the consumer's `kb/` corpus into MEHO. Memory and kb ride the same G0.4 substrate but answer different questions ("what does this operator / team prefer" vs "what do we know about vendor X").

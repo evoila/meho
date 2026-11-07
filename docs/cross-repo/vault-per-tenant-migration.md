@@ -16,6 +16,11 @@ Copyright (c) 2026 evoila Group
 > Implemented for [#1723](https://github.com/evoila/meho/issues/1723)
 > (Goal #221, Initiative #1685).
 
+**Built-in OpenBao.** An install with the built-in OpenBao
+(`coreVault.enabled: true`, the chart default since 0.45.0) starts on the
+per-tenant layout and has nothing to migrate. This runbook is for a Vault
+you bring yourself that still holds secrets under the per-`sub` layout.
+
 ## Why migrate
 
 The shipped layout stored each target's credential per operator `sub`
@@ -64,7 +69,7 @@ covers the **existing** secrets that predate the change.
   honoured verbatim — the backplane never silently re-homes a ref you set.
 
 The backplane **never auto-relocates the secret material in Vault** —
-RDC owns the Vault deployment. Moving the bytes is this runbook.
+the operator owns the Vault deployment. Moving the bytes is this runbook.
 
 ## Prerequisites
 

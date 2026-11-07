@@ -3910,10 +3910,10 @@
             "schema": {
               "$ref": "#/components/schemas/OperationRunStatus",
               "nullable": true,
-              "description": "Filter by lifecycle status (pending / running / succeeded / failed / cancelled). Omit for every state.",
+              "description": "Filter by lifecycle status (pending / running / succeeded / failed / cancelled / uncertain). Omit for every state.",
               "title": "Status"
             },
-            "description": "Filter by lifecycle status (pending / running / succeeded / failed / cancelled). Omit for every state."
+            "description": "Filter by lifecycle status (pending / running / succeeded / failed / cancelled / uncertain). Omit for every state."
           },
           {
             "name": "limit",
@@ -24733,10 +24733,11 @@
           "not_started",
           "started",
           "executed",
-          "failed"
+          "failed",
+          "uncertain"
         ],
         "title": "ApprovalResultState",
-        "description": "Whether an approved request has run yet (#3486).\n\nRead off the row, never stored. ``status`` keeps its closed four-state\ncontract; this field adds the run phase next to it, so a client that\nlists or shows requests can tell \"approved, not run yet\" from\n\"approved and run\" without polling the owner-only ``/result`` read.\n\n* :attr:`NOT_STARTED` -- approved, and no resumer has claimed the run\n  yet (``resumed_at IS NULL``).\n* :attr:`STARTED` -- a resumer claimed the run (``resumed_at`` is set),\n  but no result is stored. Either the op is still running, or the run\n  ended without a stored result: the result write is best-effort, and a\n  re-dispatch that raised instead of returning an envelope stores\n  nothing. Both resume paths (operator surfaces and the in-process\n  agent waiter) store the envelope they get back.\n* :attr:`EXECUTED` -- the stored result has ``status == \"ok\"``.\n* :attr:`FAILED` -- a result is stored and its ``status`` is not ``ok``."
+        "description": "Whether an approved request has run yet (#3486).\n\nRead off the row, never stored. ``status`` keeps its closed four-state\ncontract; this field adds the run phase next to it, so a client that\nlists or shows requests can tell \"approved, not run yet\" from\n\"approved and run\" without polling the owner-only ``/result`` read.\n\n* :attr:`NOT_STARTED` -- approved, and no resumer has claimed the run\n  yet (``resumed_at IS NULL``).\n* :attr:`STARTED` -- a resumer claimed the run (``resumed_at`` is set),\n  but no result is stored. Either the op is still running, or the run\n  ended without a stored result: the result write is best-effort, and a\n  re-dispatch that raised instead of returning an envelope stores\n  nothing. Both resume paths (operator surfaces and the in-process\n  agent waiter) store the envelope they get back.\n* :attr:`EXECUTED` -- the stored result has ``status == \"ok\"``.\n* :attr:`FAILED` -- a result is stored and its ``status`` is not ``ok``.\n* :attr:`UNCERTAIN` -- a result is stored, its ``status`` is not ``ok``,\n  and it says MEHO does not know if the change happened\n  (``extras.execution_outcome == \"uncertain\"``). This covers a lost\n  vendor answer after the request was sent, a failed audit write, and an\n  approved run that MEHO lost in a restart. MEHO never runs it again, and\n  every view says: do not run it again, check the target first."
       },
       "ApprovalResultView": {
         "properties": {
@@ -24808,6 +24809,11 @@
             "type": "string",
             "nullable": true,
             "title": "Guidance"
+          },
+          "execution_outcome": {
+            "type": "string",
+            "nullable": true,
+            "title": "Execution Outcome"
           }
         },
         "type": "object",
@@ -29507,6 +29513,22 @@
             "nullable": true,
             "title": "Investigator Prompt"
           },
+          "last_mail_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Mail At"
+          },
+          "last_mail_sent": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Last Mail Sent"
+          },
+          "last_mail_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Last Mail Reason"
+          },
           "created_by_sub": {
             "type": "string",
             "title": "Created By Sub"
@@ -29741,6 +29763,22 @@
             "nullable": true,
             "title": "Investigator Prompt"
           },
+          "last_mail_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Mail At"
+          },
+          "last_mail_sent": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Last Mail Sent"
+          },
+          "last_mail_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Last Mail Reason"
+          },
           "created_by_sub": {
             "type": "string",
             "title": "Created By Sub"
@@ -29931,6 +29969,11 @@
             "nullable": true,
             "title": "Dispatch Error"
           },
+          "dispatch_execution_outcome": {
+            "type": "string",
+            "nullable": true,
+            "title": "Dispatch Execution Outcome"
+          },
           "self_approved": {
             "type": "boolean",
             "nullable": true,
@@ -29949,7 +29992,7 @@
           "reason"
         ],
         "title": "DecideResponseBody",
-        "description": "Response for a successful operator decision.\n\nThe ``dispatch_*`` fields are populated whenever ``/decide`` attempted\nthe approved op's re-dispatch \u2014 for **every** approved request now, not\nonly direct operator ops (#2293). ``dispatch_status`` is ``\"ok\"`` when\n``/decide`` won the exactly-one-resumer claim and executed (the direct\nop, or the run-bound fallback when the in-process waiter was gone), or\n``\"already_resumed\"`` when the in-process agent waiter won the claim\nfirst (the run-bound waiter-alive case) \u2014 a benign \"executed elsewhere\"\nthat keeps the approver from double-dispatching. They stay ``None``\nonly on a rejection.\n\n``decided_by`` names the effective authenticated user (the reviewer's\nstable ``sub``) whose credential made this decision, so a CLI / console\ncan show *who* decided without a second lookup (#3290). Additive and\noptional \u2014 a client that ignores it is unaffected.\n\n``decided_by_name`` carries the reviewer's human display name alongside\n``decided_by`` (#3300), from the deciding operator's JWT ``name`` claim,\nso a client renders *who* without resolving the GUID itself. ``None``\nwhen the token carried no name \u2014 the client fails open to ``decided_by``.\nDisplay name only: no email or other profile field is added here.\n\n``self_approved`` and ``approval_rule`` (#3329) are the same values the\n``approval.decision`` audit row records: whether the person approved\ntheir own change, and the rule that allowed the approval\n(``sa_operator_self_approval``, ``break_glass_self_approval``,\n``sa_operator_or_admin`` or ``reviewer``). The command line prints a\nself-approval line from them. Both are ``None`` on a rejection."
+        "description": "Response for a successful operator decision.\n\nThe ``dispatch_*`` fields are populated whenever ``/decide`` attempted\nthe approved op's re-dispatch \u2014 for **every** approved request now, not\nonly direct operator ops (#2293). ``dispatch_status`` is ``\"ok\"`` when\n``/decide`` won the exactly-one-resumer claim and executed (the direct\nop, or the run-bound fallback when the in-process waiter was gone), or\n``\"already_resumed\"`` when the in-process agent waiter won the claim\nfirst (the run-bound waiter-alive case) \u2014 a benign \"executed elsewhere\"\nthat keeps the approver from double-dispatching. They stay ``None``\nonly on a rejection.\n\n``decided_by`` names the effective authenticated user (the reviewer's\nstable ``sub``) whose credential made this decision, so a CLI / console\ncan show *who* decided without a second lookup (#3290). Additive and\noptional \u2014 a client that ignores it is unaffected.\n\n``decided_by_name`` carries the reviewer's human display name alongside\n``decided_by`` (#3300), from the deciding operator's JWT ``name`` claim,\nso a client renders *who* without resolving the GUID itself. ``None``\nwhen the token carried no name \u2014 the client fails open to ``decided_by``.\nDisplay name only: no email or other profile field is added here.\n\n``self_approved`` and ``approval_rule`` (#3329) are the same values the\n``approval.decision`` audit row records: whether the person approved\ntheir own change, and the rule that allowed the approval\n(``sa_operator_self_approval``, ``break_glass_self_approval``,\n``sa_operator_or_admin`` or ``reviewer``). The command line prints a\nself-approval line from them. Both are ``None`` on a rejection.\n\n``dispatch_execution_outcome`` (#5025) is ``uncertain`` when the run\nended without MEHO knowing if the change happened (a lost vendor answer\nafter the request was sent, or a failed audit write): do not run it\nagain, check the target first. ``None`` for any other run, so a client\nthat reads it can tell this run from a plain failure without a second\nread. Additive."
       },
       "DeclareCapabilitiesRequest": {
         "properties": {
@@ -33414,10 +33457,11 @@
           "running",
           "succeeded",
           "failed",
-          "cancelled"
+          "cancelled",
+          "uncertain"
         ],
         "title": "OperationRunStatus",
-        "description": "Closed lifecycle status of an :class:`OperationRun`.\n\nAsync governed dispatch (#3079). A ``POST /api/v1/operations/call``\n(or ``/approvals/{id}/approve``) submitted in async mode creates one\ndurable ``operation_run`` row whose ``status`` walks an explicit,\nenforced state machine. The legal transitions live in\n:data:`meho_backplane.operations.operation_run.ALLOWED_TRANSITIONS`;\nthe service rejects any edge not on that map so an illegal jump cannot\nland in the DB.\n\nMembers:\n\n* :attr:`PENDING` -- the row was created but the background task has\n  not started executing the dispatch yet (initial state on insert).\n* :attr:`RUNNING` -- the background task is executing the governed\n  dispatch (target resolve + policy + connector call + audit).\n* :attr:`SUCCEEDED` -- the dispatch **completed** and its full\n  :class:`~meho_backplane.connectors.schemas.OperationResult` envelope\n  is persisted on ``result`` (terminal). Note this is the *run*\n  completing, not the op succeeding: a dispatch that returned\n  ``status='error'`` / ``'denied'`` / ``'needs-approval'`` is a\n  ``succeeded`` **run** whose persisted envelope carries that\n  dispatch status. The dropped-response class the feature eliminates\n  is exactly this: the envelope is durable regardless of the caller's\n  connection.\n* :attr:`FAILED` -- the background task itself did not complete: the\n  worker died mid-flight (lease lapsed, reaped by the operation-run\n  reaper) or the dispatch raised unexpectedly (terminal). Distinct\n  from a persisted error envelope on a ``succeeded`` run.\n* :attr:`CANCELLED` -- an authorized operator cancelled a non-terminal\n  run (terminal).\n\nThere is deliberately no ``awaiting_approval`` state (unlike\n:class:`AgentRunStatus`): a governed dispatch runs to a terminal\nenvelope in one shot. A ``needs-approval`` dispatch parks its own\n:class:`ApprovalRequest` and is recorded as a ``succeeded`` run whose\nenvelope names the parked request."
+        "description": "Closed lifecycle status of an :class:`OperationRun`.\n\nAsync governed dispatch (#3079). A ``POST /api/v1/operations/call``\n(or ``/approvals/{id}/approve``) submitted in async mode creates one\ndurable ``operation_run`` row whose ``status`` walks an explicit,\nenforced state machine. The legal transitions live in\n:data:`meho_backplane.operations.operation_run.ALLOWED_TRANSITIONS`;\nthe service rejects any edge not on that map so an illegal jump cannot\nland in the DB.\n\nMembers:\n\n* :attr:`PENDING` -- the row was created but the background task has\n  not started executing the dispatch yet (initial state on insert).\n* :attr:`RUNNING` -- the background task is executing the governed\n  dispatch (target resolve + policy + connector call + audit).\n* :attr:`SUCCEEDED` -- the dispatch **completed** and its full\n  :class:`~meho_backplane.connectors.schemas.OperationResult` envelope\n  is persisted on ``result`` (terminal). Note this is the *run*\n  completing, not the op succeeding: a dispatch that returned\n  ``status='error'`` / ``'denied'`` / ``'needs-approval'`` is a\n  ``succeeded`` **run** whose persisted envelope carries that\n  dispatch status. The dropped-response class the feature eliminates\n  is exactly this: the envelope is durable regardless of the caller's\n  connection.\n* :attr:`FAILED` -- the background task itself did not complete: the\n  worker died mid-flight (lease lapsed, reaped by the operation-run\n  reaper) or the dispatch raised unexpectedly (terminal). Distinct\n  from a persisted error envelope on a ``succeeded`` run.\n* :attr:`CANCELLED` -- an authorized operator cancelled a non-terminal\n  run (terminal).\n* :attr:`UNCERTAIN` -- the worker of a run that changes something died\n  mid-flight (reaped), so MEHO does not know if the change happened\n  (terminal, #5025). A dead run of a read operation is ``failed``.\n\nThere is deliberately no ``awaiting_approval`` state (unlike\n:class:`AgentRunStatus`): a governed dispatch runs to a terminal\nenvelope in one shot. A ``needs-approval`` dispatch parks its own\n:class:`ApprovalRequest` and is recorded as a ``succeeded`` run whose\nenvelope names the parked request."
       },
       "OperationRunStatusResponse": {
         "properties": {

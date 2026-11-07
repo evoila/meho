@@ -4510,6 +4510,9 @@ class OperationRunStatus(StrEnum):
       from a persisted error envelope on a ``succeeded`` run.
     * :attr:`CANCELLED` -- an authorized operator cancelled a non-terminal
       run (terminal).
+    * :attr:`UNCERTAIN` -- the worker of a run that changes something died
+      mid-flight (reaped), so MEHO does not know if the change happened
+      (terminal, #5025). A dead run of a read operation is ``failed``.
 
     There is deliberately no ``awaiting_approval`` state (unlike
     :class:`AgentRunStatus`): a governed dispatch runs to a terminal
@@ -4523,6 +4526,7 @@ class OperationRunStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    UNCERTAIN = "uncertain"
 
 
 class OperationRunOrigin(StrEnum):
@@ -9094,6 +9098,14 @@ class CheckDashboard(Base):
     # and a boundary rejection names the field and its limit where a CHECK
     # violation would surface as an opaque 500.
     investigator_prompt: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Result of the last alert mail attempt, written by ``checks.mail_result``.
+    # All three are NULL until the first attempt. ``last_mail_reason`` is the
+    # failure reason code and stays NULL when the mail was sent.
+    last_mail_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    last_mail_sent: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
+    last_mail_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

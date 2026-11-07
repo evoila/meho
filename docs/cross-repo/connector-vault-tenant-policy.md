@@ -23,6 +23,24 @@ Enterprise namespaces
 ([Vault — ACL policy templating tutorial](https://developer.hashicorp.com/vault/tutorials/policies/policy-templating),
 [Vault — identity ACL policy templates](https://developer.hashicorp.com/vault/docs/secrets/identity/deduplication/acl-policy-templates)).
 
+**Built-in OpenBao.** With the built-in OpenBao
+(`coreVault.enabled: true`, the chart default since 0.45.0), the setup
+Job writes the three policies of §2 and needs none of §3 and §4. Two
+differences:
+
+- The policies read the tenant from the login's metadata
+  (`{{identity.entity.aliases.<jwt accessor>.metadata.tenant_id}}`), which
+  the `meho-mcp` role copies from the token's `tenant_id` claim at each
+  login. No entity metadata is written.
+- There are three groups in all, one per `tenant_role` value
+  (`meho-tenant-read-only`, `meho-tenant-operator`, `meho-tenant-admin`),
+  shared by every tenant. The login's `tenant_role` claim picks the
+  group.
+
+The policy files are in
+[`deploy/charts/meho/files/openbao/policies/`](../../deploy/charts/meho/files/openbao/policies/).
+The rest of this page is the recipe for a Vault you bring yourself.
+
 ## Why per-tenant templated, not per-operator copies
 
 The shipped layout stored secrets **per operator `sub`**
@@ -191,7 +209,7 @@ vault policy write meho-tenant-admin     meho-tenant-admin.hcl
 operator's Vault identity entity carries a `tenant_id` metadata key**. The
 JWT carries the claim (`tenant_id` by default,
 [`settings.py`](../../backend/src/meho_backplane/settings.py)
-`tenant_id_claim`;
+`jwt_tenant_claim_name`, env `JWT_TENANT_CLAIM_NAME`;
 [`auth/jwt.py`](../../backend/src/meho_backplane/auth/jwt.py)
 `_extract_tenant_id`), and MEHO materialises it on every
 [`Operator`](../../backend/src/meho_backplane/auth/operator.py)
@@ -344,7 +362,7 @@ policy and its groups), follow
   [`connectors/vault/ops_sys_policy.py`](../../backend/src/meho_backplane/connectors/vault/ops_sys_policy.py)
 - `tenant_id` JWT claim plumbing:
   [`auth/jwt.py`](../../backend/src/meho_backplane/auth/jwt.py) `_extract_tenant_id`,
-  [`settings.py`](../../backend/src/meho_backplane/settings.py) (`tenant_id_claim`)
+  [`settings.py`](../../backend/src/meho_backplane/settings.py) (`jwt_tenant_claim_name`)
 - Vault — [ACL policy templating tutorial](https://developer.hashicorp.com/vault/tutorials/policies/policy-templating)
 - Vault — [identity ACL policy templates](https://developer.hashicorp.com/vault/docs/secrets/identity/deduplication/acl-policy-templates)
 - Vault — [policy templating constraints](https://developer.hashicorp.com/vault/docs/concepts/policies)

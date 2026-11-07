@@ -14,34 +14,39 @@ Copyright (c) 2026 evoila Group
 
 ## What broadcast is
 
-Every authenticated request that produces an audit row also produces
-exactly one **broadcast event** on a per-tenant Valkey stream
-(`meho:feed:<tenant_id>`). Subscribers tail the stream to get a
-real-time view of what every operator in their tenant is doing —
-the equivalent of `git log --follow` for inventory operations.
+Broadcast is the tenant's feed of **agent announcements**. An agent
+says what it starts, how the work goes, and when it is done, so other
+operators and agents in the tenant can see it. Nothing else is on the
+feed. Operation runs, approvals, checks, topology writes and other
+automatic activity make no broadcast event; the audit log is their
+record. Read them with `meho audit query` or `query_audit`, and read
+waiting approvals with `meho approvals list`.
 
-The audit row is the **canonical record** (durable, queryable via
-G8's audit-query API). The broadcast feed is the **real-time view**
-(in-memory in Valkey, capped at ~10 000 events per tenant, ~24 h
-worth at moderate load). A subscriber that misses an event still
-finds it in `audit_log`; a subscriber that needs ordering guarantees
-queries audit_log by `audit_id` to reconcile gaps.
+MEHO stores every announcement in the `agent_announcement` table, and
+every reader reads that table in the order the rows were saved. The
+per-tenant Valkey stream (`meho:feed:<tenant_id>`, capped at about
+10 000 entries) only wakes live readers early. When Valkey is down,
+readers check the table every 5 seconds, so they still see every
+announcement, only later. A weekly clean-up deletes announcements older
+than 90 days (chart value `broadcastAnnouncement.retentionDays`).
 
-## Three transports
+## Transports
 
-Every transport reads the same per-tenant stream. Pick by use case:
+Every transport reads the same per-tenant announcements. Pick by use case:
 
 | Transport | Best for | Spec |
 |---|---|---|
 | `meho status --watch` CLI | Terminal-resident operator triage | G6.1-T5 (#311) |
 | `GET /api/v1/feed` SSE | Custom dashboards, browser-side viewers, scripts that need live push | G6.1-T4 (#310) |
-| `meho://tenant/{tenant_id}/feed` MCP resource | LLM clients (Claude, MCP-aware agents) that poll a snapshot | G6.1-T6 (this task) |
+| `meho broadcast recent` / `announce` / `watch` CLI | Operators and scripts that read, post or tail announcements from a terminal | #3470 |
+| `meho://tenant/{tenant_id}/feed` MCP resource | LLM clients (Claude, MCP-aware agents) that poll a snapshot | G6.1-T6 |
 | `meho_broadcast_recent` MCP tool | LLM clients that need filter / since / cursor pagination over the same stream | G6.4-T1 (#1091) |
 | `meho_broadcast_announce` MCP tool | Agents publishing intent / progress / completion narratives that other operators can read | G6.4-T2 (#1092) |
 | `meho_broadcast_watch` MCP tool | LLM clients that need long-poll "wait for the next batch" without an SSE socket | G6.4-T3 (#1093) |
 
-The Slack mirror (G6.2 #333) and any future web admin UI subscribe
-the same way — XREAD against the per-tenant stream key.
+The operator console reads the same announcements through
+`/ui/broadcast/stream`. There is no Slack mirror (#333 was closed as
+not planned).
 
 ## CLI: `meho status --watch`
 
@@ -49,22 +54,28 @@ The fastest path for an operator at a terminal:
 
 ```console
 $ meho status --watch
-[12:04:01] ok       op-alice   vsphere.vm.list      cluster=prod-vc-1
-[12:04:02] denied   op-bob     vault.kv.read        (credential read — aggregate-only)
-[12:04:05] ok       op-alice   k8s.pod.get          target=meho-prod
+2026-05-25T10:00:00Z  op-alice                announce            start   investigating cluster X latency  [target=prod-vc-1]
+2026-05-25T10:01:40Z  op-bob                  announce            update  draining node worker-3  [target=kube-prod]
 ```
+
+Each line is: time, principal, the word `announce`, the phase, and the
+activity text with its target.
 
 Filters (composable):
 
 ```console
-$ meho status --watch --filter op=vault           # only vault ops
-$ meho status --filter principal=op-alice         # only one operator
-$ meho status --watch --filter target=meho-prod   # only one target
+$ meho status --watch --principal op-alice    # only one operator
+$ meho status --watch --target prod-vc-1      # only one target
 ```
 
-The CLI handles reconnect-with-replay automatically via SSE's
-`Last-Event-Id`. A laptop closing its lid loses no events on
-reconnect — the Valkey stream replays from the last seen entry id.
+`--op-class` is still accepted, but it matches operation events only,
+so no announcement matches it. Add `--json` for one JSON object per
+line. `meho broadcast watch` takes the same flags and reads the same
+feed.
+
+The CLI reconnects by itself and sends SSE's `Last-Event-Id`. A laptop
+that closes its lid loses no announcements: on reconnect the feed
+resumes right after the last announcement the CLI got.
 
 ## HTTP SSE: `GET /api/v1/feed`
 
@@ -73,24 +84,34 @@ fit (custom dashboard, headless script, third-party tool):
 
 ```javascript
 const events = new EventSource(
-  `${BACKPLANE_URL}/api/v1/feed?op_class=write`,
+  `${BACKPLANE_URL}/api/v1/feed?target=prod-vc-1`,
   { withCredentials: true },
 );
 
 events.addEventListener("broadcast", (msg) => {
   const event = JSON.parse(msg.data);
-  console.log(event.op_id, event.principal_sub, event.result_status);
+  console.log(event.principal_sub, event.phase, event.activity);
 });
 ```
 
 Query parameters (all optional, exact-match):
 
-* `op_class` — one of `read`, `write`, `credential_read`,
-  `audit_query`, `other`.
+* `op_class` — still accepted, but it matches operation events only,
+  so no announcement matches it.
 * `principal` — JWT `sub` claim (operator identifier).
-* `target` — target name (when the op operates on a specific target).
-* `since=<entry_id>` — replay cursor (server-side bridges; SSE
-  clients use the `Last-Event-Id` header instead).
+* `target` — target name.
+* `since` — a watch checkpoint (`w1.…`) or an ISO-8601 time (replay
+  every announcement stored from that time). Any other value returns
+  400. SSE clients use the `Last-Event-Id` header instead; it wins over
+  `since`.
+
+Each frame is `event: broadcast` with the announcement as JSON in
+`data` and a watch checkpoint in `id`. With no `Last-Event-Id` and no
+`since`, a new connection first gets the newest 50 announcements, then
+waits for new ones. When retention removed announcements the reader
+would have returned, the feed sends one `event: gap` frame. A database
+error after streaming began becomes one `event: feed_error` frame, and
+the stream ends.
 
 Heartbeats: the server emits `: heartbeat\n\n` (SSE comment line)
 every 30 s of outbound silence so intermediaries (nginx, ALB,
@@ -103,7 +124,7 @@ the Valkey BLOCKing read.
 ## MCP resource: `meho://tenant/{tenant_id}/feed`
 
 Designed for LLM clients that poll a snapshot rather than maintain
-a live socket. The resource returns the **most recent 50 events** in
+a live socket. The resource returns the **newest 50 announcements** in
 chronological order:
 
 ```console
@@ -112,8 +133,8 @@ $ mcp-inspector --uri "meho://tenant/<your-uuid>/feed"
   "tenant_id": "<uuid>",
   "count": 47,
   "events": [
-    {"event_id": "...", "ts": "...", "op_id": "vault.kv.read", ...},
-    {"event_id": "...", "ts": "...", "op_id": "k8s.pod.get",  ...},
+    {"kind": "agent_announcement", "event_id": "...", "phase": "start", ...},
+    {"kind": "agent_announcement", "event_id": "...", "phase": "update", ...},
     ...
   ]
 }
@@ -135,7 +156,7 @@ only**. MEHO stores every announcement before it sends it out, and
 `meho_broadcast_recent` reads that store in the order the
 announcements were saved. Operation events (what was run, by whom) are
 not in this answer; read them with `query_audit`. The SSE feed above
-still shows operation, approval and check events.
+shows the same announcements.
 
 ```json
 {
@@ -254,6 +275,13 @@ recommends three calls per session: a `start` announcement at task
 entry, periodic `update` announcements during long work, and a
 `completion` announcement at wrap-up.
 
+Only a registered agent can post: a call inside a MEHO-hosted agent
+run, or a call with the token of an agent registered with
+`meho agent-principal register`. A person's own login can read, but a
+post gets `agent_identity_required` (MCP -32602, REST 403). The CLI
+verb `meho broadcast announce` and `POST /api/v1/broadcast/announce`
+follow the same rule.
+
 ```json
 {
   "name": "meho_broadcast_announce",
@@ -337,7 +365,8 @@ surface treats them as **untrusted**:
 
 * **Frontend rendering**: HTML-escape on display via the existing UI
   sanitisation chain.
-* **Slack mirror** (G6.2): plain-text mode, no rich formatting.
+* **CLI** (`meho status --watch`): prints the activity as plain text
+  and never treats it as input.
 * **LLM consumption** (other agents reading via
   `meho_broadcast_recent`): the calling agent MUST NOT treat another
   agent's `activity` as policy / system input. This is the same
@@ -346,12 +375,10 @@ surface treats them as **untrusted**:
   agent-untrusted operational rules (see
   [`backend/src/meho_backplane/conventions/preamble.py`](../../backend/src/meho_backplane/conventions/preamble.py)).
 
-### Stored first, then sent out (distinct from audit-driven publisher)
+### Stored first, then sent out
 
 `meho_broadcast_announce` stores the announcement before it sends it
-out. Where the audit-driven publisher swallows Valkey errors silently
-(the audit row is canonical; a missed broadcast is acceptable
-degradation), the announce path works like this:
+out. The call works like this:
 
 * **Storing fails** → the call fails with JSON-RPC `INTERNAL_ERROR`
   (-32603) and nothing was stored. The agent explicitly emitted the
@@ -366,7 +393,8 @@ degradation), the announce path works like this:
 
 Tenant scoping is **structural**: the input schema has no `tenant_id`
 argument; the announcement always writes to the operator's own tenant
-stream. RBAC: `operator` role minimum.
+stream. RBAC: `operator` role minimum, and the caller must be a
+registered agent (see above).
 
 ## MCP tool: `meho_broadcast_watch`
 
@@ -474,7 +502,8 @@ works in the tenant that issued it. RBAC: `operator` role minimum.
 
 **Why long-poll, not MCP `resources/subscribe`:** the MCP server's
 `initialize` response advertises `subscribe: false` (per
-[`backend/src/meho_backplane/mcp/resources/kb.py`](../../backend/src/meho_backplane/mcp/resources/kb.py)),
+`RESOURCES_SUBSCRIBE_ENABLED` in
+[`backend/src/meho_backplane/mcp/server.py`](../../backend/src/meho_backplane/mcp/server.py)),
 deferring server-push to v0.2.next. Long-poll is the pragmatic v0.2
 shape — same caller pattern as a subscribe-loop, same per-tenant
 isolation, no extra capability on the wire.
@@ -485,45 +514,24 @@ the dispatcher tears the call down), Starlette propagates
 re-raises it after logging — the chassis worker is released on the
 next event-loop tick.
 
-## PII defaults (decision #3)
+## Detail rules for sensitive operations (decision #3)
 
-The publisher applies a sensitivity classifier to every event
-**before** XADD onto the stream. The taxonomy:
+Broadcast carries no operation events, so no operation parameters reach
+the feed. MEHO still sorts every call into an op class and records a
+detail level (`full` or `aggregate`) on the call's audit row, under
+`broadcast_detail_effective`. The operator console uses that level:
+for a row recorded as `aggregate` — the default for the credential
+classes (`credential_read`, `credential_mint`, `credential_write`) and
+for `audit_query` — the audit drawer hides the request parameters.
 
-| `op_class` | Examples | Payload visibility |
-|---|---|---|
-| `credential_read` | `vault.kv.read`, `vault.kv.list` | **Aggregate only.** Payload: `{op_id, target_name, result_status}`. Path / key names / values are stripped. |
-| `audit_query` | G8 audit verbs | **Aggregate only.** Payload: `{op_id, result_status, row_count}`. Filter contents stripped. |
-| `read` | `.list`, `.info`, `.get`, `.about`, `.ls` suffix | **Full detail.** Payload carries request params + structured response summary. |
-| `write` | `.create`, `.update`, `.delete`, `.patch` suffix | **Full detail.** Same shape as `read`. |
-| `other` | Anything else (chassis HTTP routes, unmapped ops) | **Full detail.** |
-
-Operators verifying credential reads are correctly aggregate-only:
-
-```console
-$ meho status --watch --filter op=vault | head -1
-[12:04:02] denied   op-bob     vault.kv.read   (no path / no key)
-```
-
-A `vault.kv.read` event whose payload includes a `path` field would
-be a privacy regression — the integration test
-[`test_broadcast_publisher.py`](../../backend/tests/test_broadcast_publisher.py)
-explicitly negative-asserts this.
-
-Operator + admin overrides on top of the conservative default
-ship as G6.3 (Initiative
-[#376](https://github.com/evoila/meho/issues/376)). Two surfaces:
-the per-call `X-Broadcast-Detail: full` header (any operator, per
-request — upgrades a sensitive class to full detail for one call)
-and the durable `BroadcastOverride` rules (tenant admin, per
-tenant — downgrade or upgrade an op-class for the whole tenant or
-a scoped subset). See [`broadcast-overrides.md`](./broadcast-overrides.md)
-for the operator-side flag and admin-side CRUD recipes (CLI, REST,
-MCP).
+The per-call `X-Broadcast-Detail: full` header and the durable
+`BroadcastOverride` rules (tenant admin) change the recorded level. See
+[`broadcast-overrides.md`](./broadcast-overrides.md) for the header and
+the admin commands (CLI, REST, MCP).
 
 ## Authentication + RBAC
 
-All three transports honour the same gates:
+All transports honour the same gates:
 
 * **JWT validation** — every request carries a Keycloak-minted JWT;
   the chassis `verify_jwt` chain validates issuer / audience / kid
@@ -552,8 +560,7 @@ operator triage.
 Token expired or audience mismatch. Verify:
 
 ```console
-$ meho auth whoami        # prints sub / tenant_id / expiry
-$ meho status             # tests the federation chain end-to-end
+$ meho status             # prints your identity and tests the backplane end to end
 ```
 
 If `meho status` works but `meho status --watch` doesn't, the issue
@@ -570,10 +577,12 @@ elevate to `operator` in Keycloak or switch to the snapshot surface
 
 ### Empty feed despite running operations
 
+* The feed shows agent announcements only. Operation runs are not on
+  it; read them with `meho audit query` or `query_audit`.
 * Check `broadcast_publish_errors_total` on `/metrics` — a sustained
-  nonzero rate indicates the publisher swallowed events (Valkey
-  unreachable, redis-py teardown race). Audit rows still land; only
-  the broadcast feed is degraded.
+  nonzero rate means stored announcements did not wake live readers
+  (Valkey unreachable). Readers still find them on their next check of
+  the table, within about 5 seconds.
 * Check the Valkey pod is reachable from the backplane:
   `/ready` returns 503 with detail `unreachable: <ExcClass>` when
   the `broadcast_readiness_probe` can't reach Valkey.
@@ -594,36 +603,27 @@ The URI bound a `tenant_id` that doesn't match the operator's JWT
 claim. Use the operator's OWN `tenant_id` (visible via the
 `meho://tenant/<id>/info` resource).
 
-### Replay gaps after a Valkey pod restart
+### Gaps
 
-Valkey's RDB snapshot recovers most events on restart, but a
-sub-second window of in-flight XADDs may be lost between snapshot
-intervals. The audit_log row is always durable — a subscriber that
-needs gap-free ordering queries `audit_log` by `audit_id` after
-replay. The load-test acceptance for the chaos case ships in
-[G6.1-T7](https://github.com/evoila/meho/issues/312#issuecomment-pushback-thread)
-(separate task; see issue #312 pushback thread).
+Announcements live in the database, so a Valkey restart loses none.
+A `gap` object (MCP tools) or an `event: gap` frame (SSE) means
+retention removed announcements after your checkpoint, or your
+checkpoint is ahead of the store (for example after a database
+restore).
 
 ## What gets broadcast vs. what doesn't
 
 **Broadcast:**
 
-* Every authenticated HTTP request to `/api/v1/*` (audit-middleware
-  publishes after the audit row commits).
-* Every MCP `tools/call` and `resources/read` (MCP handlers publish
-  in the same finally block as their audit row).
+* Each announcement a registered agent posts with
+  `meho_broadcast_announce`, `POST /api/v1/broadcast/announce` or
+  `meho broadcast announce`.
 
 **Not broadcast:**
 
-* Unauthenticated requests (`/healthz`, `/ready`, `/metrics`,
-  `/.well-known/oauth-protected-resource`) — no operator to
-  attribute, no broadcast row.
-* 401 responses — same reason.
-* The MCP `initialize` / `ping` / `notifications/initialized`
-  JSON-RPC envelope itself — only the wrapped tool/resource calls
-  generate broadcast events.
-* Internal cron jobs and lifespan hooks (engine pre-warm, embedding
-  preload) — no JWT, no operator.
+* Operation runs, REST and MCP calls, approvals, standing grants,
+  checks, topology writes and event ingest. The audit log is their
+  record (`meho audit query`, `query_audit`).
 
 ## References
 
@@ -636,8 +636,9 @@ replay. The load-test acceptance for the chaos case ships in
   [`backend/src/meho_backplane/mcp/resources/tenant_feed.py`](../../backend/src/meho_backplane/mcp/resources/tenant_feed.py).
 * MCP tools (broadcast namespace):
   [`backend/src/meho_backplane/mcp/tools/broadcast.py`](../../backend/src/meho_backplane/mcp/tools/broadcast.py).
-* CLI verb:
-  [`cli/internal/cmd/status_watch.go`](../../cli/internal/cmd/status_watch.go).
+* CLI verbs:
+  [`cli/internal/cmd/status_watch.go`](../../cli/internal/cmd/status_watch.go),
+  [`cli/internal/cmd/broadcast/working_surface.go`](../../cli/internal/cmd/broadcast/working_surface.go).
 * Decision #3 (PII defaults): `docs/decisions/locked-decisions.md`.
 * Valkey Streams reference: <https://valkey.io/topics/streams-intro/>
 * MCP 2025-06-18 Resources spec:

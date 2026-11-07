@@ -24,7 +24,7 @@ Copyright (c) 2026 evoila Group
 
 The G3.11 Initiative ([#1220](https://github.com/evoila/meho/issues/1220))
 ships a `gh-rest-3` typed connector — the first GitHub REST surface
-under Goal #214's "RDC operators progressively retire local wrappers
+under the connector-parity Goal's "operators progressively retire local wrappers
 in favour of `meho <connector> <op>`" charter. The connector reaches
 GitHub through one of two credential paths, picked per target:
 
@@ -66,12 +66,9 @@ configuration must look like so the connector reaches steady state.
   `meho login <backplane-url>` writes a session token the CLI reuses
   across every verb. The `targets import / probe / describe` verbs
   need `tenant_admin`; the `operation call` verbs need `operator`.
-- **`gh-rest-3` connector registered.** Initiative #1220's T1
-  ([#1221](https://github.com/evoila/meho/issues/1221)) ships the
-  `GitHubRestConnector` class + credential loader. The recipe below
-  assumes T1 has landed in the backplane image the operator is
-  deploying — pre-T1, the connector is not yet registered and the
-  Check 1 verification below will fail with `connector not found`.
+- **`gh-rest-3` connector registered.** The backplane image ships
+  the `GitHubRestConnector` class and its credential loader
+  (`backend/src/meho_backplane/connectors/github/`).
 
 ## Recipe
 
@@ -86,7 +83,7 @@ account that will own the App):
    `https://github.com/organizations/<your-org>/settings/apps/new`
    (org-owned App).
 2. **GitHub App name:** `meho-<environment>` (e.g. `meho-prod`,
-   `meho-evba-lab`). The name is visible in GitHub's audit log as
+   `meho-lab`). The name is visible in GitHub's audit log as
    the actor on every API call the connector makes, so pick a name
    the audit reader will recognize.
 3. **Homepage URL:** any URL identifying the deployment (e.g. the
@@ -145,8 +142,8 @@ path the connector ships in T1):
 ```bash
 # Path layout: secret/<tenant>/<target>/github-app
 #
-# The target row's `secret_ref` column points to this exact path
-# (KV-v2 path string, no `/data/` infix in the API form). The
+# The target row's `secret_ref` column holds the path inside the
+# `secret` mount: <tenant>/<target>/github-app (no `secret/`, no `/data/`). The
 # connector reads three fields from the secret: `app_id` (the small
 # integer shown on the App settings page), `installation_id` (the
 # integer from the `/settings/installations/<id>` URL recorded in
@@ -164,7 +161,7 @@ vault kv put secret/<tenant>/<target>/github-app \
 Substitute the placeholders:
 
 - `<tenant>` — the tenant slug the target lives under (e.g.
-  `evba-lab`, `prod`).
+  `my-lab`, `prod`).
 - `<target>` — the target name you will use in the `targets.yaml`
   row in Step 5 (e.g. `github-meho`, `github-evoila`).
 - The `@` prefix on `private_key=@<path>` is mandatory when reading
@@ -203,7 +200,7 @@ targets:
     product: gh
     host: api.github.com
     fqdn: api.github.com
-    secret_ref: secret/<tenant>/github-meho/github-app
+    secret_ref: <tenant>/github-meho/github-app
     auth_model: shared_service_account
     notes: |
       GitHub App "meho-prod" (App ID 123456) installed on
@@ -218,9 +215,9 @@ Notes on the column choices:
 - **`host: api.github.com`** — the connector's HTTP base URL. GHES
   deployments would point this at the org-internal API host, but
   GHES is out of scope for the v0.x connector.
-- **`secret_ref`** — the Vault path string written in Step 4. KV-v2
-  path **without** the `/data/` infix (the connector's Vault session
-  adds it).
+- **`secret_ref`** — the path written in Step 4, inside the `secret`
+  mount: **without** the `secret/` mount name and **without** the
+  `/data/` part (MEHO adds both when it reads the secret).
 - **`auth_model: shared_service_account`** — the App is the single
   machine identity shared across every operator on this target. The
   `AuthModel` enum
@@ -294,9 +291,9 @@ deleting the App:
    before writing the new one so you don't have to fish them out of
    the GitHub UI again.
 4. The connector picks up the new key on its next installation-token
-   mint (within at most 1 hour, when the current installation token
-   expires). Force a refresh by restarting the backplane pods if you
-   need the rotation to take effect immediately.
+   mint (within at most 50 minutes, when MEHO's kept installation
+   token expires). To switch at once, update the target row (any
+   target change drops the kept token) or restart the backplane pods.
 
 During the gap between "new key in Vault" and "old installation
 token expired", the connector continues to use the old token until
@@ -331,8 +328,9 @@ four high-blast-radius write ops Initiative #1220 ships under
 T5 ([#1225](https://github.com/evoila/meho/issues/1225)):
 `gh.issue.create`, `gh.pr.merge`, `gh.workflow_run.dispatch`,
 `gh.release.create`. Every one of these carries
-`requires_approval=true` so the G11.2 approval queue gates the call
-before dispatch — the App permission is the second gate (GitHub's
+`requires_approval=true` once the annotation in
+[`github-write-ops-approval.md`](./github-write-ops-approval.md) runs,
+so the G11.2 approval queue gates the call before dispatch — the App permission is the second gate (GitHub's
 side; meho's approval queue is the first).
 
 | GitHub App permission | Access | Why |
@@ -350,13 +348,9 @@ entry on the same permission name.
 
 Operators running a more conservative install pattern can drop any
 permission whose corresponding op is not in their dispatch
-catalogue. The T5 per-op annotation
-([#1225](https://github.com/evoila/meho/issues/1225)) declares
-which permission each op needs; the operator can run with a strict
-subset by disabling the un-needed ops via
-`meho connector edit-op gh-rest-3 '<op-id>' --disable` after the
-T3 ingest ([#1223](https://github.com/evoila/meho/issues/1223))
-lands the full catalogue.
+catalogue. Keep the ops that need a dropped permission disabled
+with `meho connector edit-op gh-rest-3 '<op-id>' --disable` after
+the `gh/3` catalogue ingest.
 
 ## Vault custody
 
@@ -389,12 +383,12 @@ installation** on the target repos:
 
 - A `meho-prod` App installed on `evoila/meho` production
   repositories — Tier-2 scope, audited.
-- A `meho-evba-lab` App installed on the lab's mirror repositories
+- A `meho-lab` App installed on the lab's mirror repositories
   — Tier-1 scope (read-only).
 
 Vault paths follow the same separation:
 `secret/prod/github-meho/github-app` vs
-`secret/evba-lab/github-meho/github-app`. The shared per-target
+`secret/my-lab/github-meho/github-app`. The shared per-target
 Vault convention applies; do not point production targets at the
 dev App's secret.
 
@@ -425,7 +419,7 @@ governance allows it.
    → **Fine-grained tokens** → **Generate new token**, or jump to
    `https://github.com/settings/personal-access-tokens/new`.
 2. **Token name:** `meho-<environment>-<target>` (e.g.
-   `meho-evba-lab-github-meho`). Names are visible to org owners
+   `meho-lab-github-meho`). Names are visible to org owners
    when they audit token-driven actions.
 3. **Expiration:** the shortest window your rotation cadence allows
    (90 days is the GitHub default ceiling; longer requires a
@@ -472,10 +466,10 @@ targets:
     product: gh
     host: api.github.com
     fqdn: api.github.com
-    secret_ref: secret/<tenant>/github-meho-pat/github-app
+    secret_ref: <tenant>/github-meho-pat/github-app
     auth_model: shared_service_account
     notes: |
-      PAT fallback (operator damir.topic@pmsoft.at). Expires 2026-08-25.
+      PAT fallback (operator operator@example.com). Expires 2026-08-25.
       Tier-1 read-only scope on evoila/meho.
 ```
 
@@ -486,8 +480,10 @@ before the expiry:
 
 1. Mint a new PAT per Step P1 with the same scope set.
 2. `vault kv put secret/<tenant>/<target>/github-app token='<new>'`.
-3. The connector picks up the new PAT on its next call — no token
-   minting / refresh dance to wait for, unlike the App path.
+3. MEHO keeps the PAT in memory. It reads Vault again when GitHub
+   rejects the old PAT with `401`, or after any change to the
+   target row. To switch at once, update the target or restart the
+   backplane pods.
 
 ## Verification
 
@@ -513,14 +509,14 @@ meho targets describe github-meho
 #   name:        github-meho
 #   product:     gh
 #   host:        api.github.com
-#   secret_ref:  secret/<tenant>/github-meho/github-app
+#   secret_ref:  <tenant>/github-meho/github-app
 #   auth_model:  shared_service_account
 ```
 
-`connector list` returns nothing for `gh-rest-3` → T1
-([#1221](https://github.com/evoila/meho/issues/1221)) hasn't landed
-in the backplane image you're running; pin a later image or wait
-for T1 to merge.
+`connector list` shows no `gh-rest-3` row, or it is not `enabled`
+→ the `gh/3` catalogue has not been ingested and enabled in this
+tenant yet. That is normal before the first-day on-ramp; see
+[`github-connector.md` § Step 4](./github-connector.md#step-4--ingest-the-catalog).
 
 `targets describe` returns `404 target not found` → re-run
 `meho targets import targets.yaml` and confirm the YAML loaded
@@ -536,33 +532,42 @@ Expected (abbreviated):
 
 ```json
 {
-  "vendor": "GitHub",
+  "vendor": "github",
   "product": "gh",
   "version": "v3",
   "reachable": true,
   "probed_at": "2026-05-27T14:30:00Z",
-  "probe_method": "GET /app/installations (App) or GET /user (PAT)",
+  "probe_method": "GET /user/installations",
   "extras": {
-    "app_slug": "meho-prod",
-    "installation_count": 1
+    "installations_count": 1,
+    "installation_id": 987654321,
+    "installation_account": "evoila",
+    "app_slug": "meho-prod"
   }
 }
 ```
 
 The connector's `fingerprint()` call exercises the full credential
-chain: Vault read → (App path: JWT mint → installation-token mint →
-`GET /app/installations` call; PAT path: `GET /user` call). A green
-probe confirms the App / PAT is correctly wired end to end.
+chain: Vault read → (App path: JWT mint → installation-token mint)
+→ `GET /user/installations`. When the target `host` is
+`api.github.com/repos/<owner>/<repo>`, the probe calls
+`GET /repos/<owner>/<repo>` instead. A green probe confirms the
+App / PAT is correctly wired end to end.
 
-Failures map to the [Failure modes](#failure-modes) section below;
-the common ones at first install:
+A failed probe shows `reachable: false`, with the code in
+`extras.error_code`. The codes map to the
+[Failure modes](#failure-modes) section below; the common ones at
+first install:
 
-- `503 github_app_not_installed` → Step 3 was skipped or installed
-  the App on the wrong org / repo set.
-- `503 github_jwt_mint_failed` → the `private_key` in Vault is
+- `github_app_not_installed` → Step 3 was skipped, installed the
+  App on the wrong org / repo set, or Vault holds a wrong
+  `installation_id`.
+- `github_jwt_mint_failed` → the `private_key` in Vault is
   malformed (missing newlines, missing BEGIN line, wrong algorithm).
-- `503 github_installation_token_mint_failed` → the App permission
-  scope (Step 1) doesn't cover what the catalogue's read ops need.
+- `github_installation_token_mint_failed` → GitHub refused to mint
+  the installation token (for example a revoked key).
+- `github_ambiguous_vault_payload` → the Vault secret has neither
+  all three App fields nor a `token`.
 
 ### Check 3 — Round-trip a real read op against a known PR
 
@@ -597,58 +602,56 @@ HTTP path resolves under the catalogue ingest, and the response
 round-trips through the connector cleanly. From this point the
 operator can dispatch any other enabled op from the catalogue.
 
-> **Note on T3:** the `meho operation call` verb above assumes
-> Initiative #1220's T3 ([#1223](https://github.com/evoila/meho/issues/1223))
-> has landed the `gh/3` catalogue ingest. Pre-T3 the verb returns
-> `op_not_found` for every GitHub op_id. Run Checks 1 and 2 anyway
-> — those work the moment T1 ships.
+> **Note on the ingest:** the `meho operation call` verb above needs
+> the `gh/3` catalogue ingested and the op enabled (see
+> [`github-connector.md`](./github-connector.md) Steps 4–6). Without
+> the ingest the verb returns `unknown_op` for every ingested GitHub
+> op_id. Checks 1 and 2 work without it, and so does
+> `gh.composite.pr_status_summary`.
 
 ## Failure modes
 
-The four documented failures match the T11 message-shape convention
+The four credential failures below follow the T11 message-shape
+convention
 ([`docs/codebase/error-message-shape.md`](../codebase/error-message-shape.md)):
-each carries a stable `code` token so operator-side runbooks can
-dispatch on it.
+each message starts with a stable `github_*` code so operator-side
+runbooks can dispatch on it. The codes come from
+`backend/src/meho_backplane/connectors/github/session.py`.
 
-### `503 github_app_not_installed`
+Where the code shows up:
+
+- **`meho targets probe`** returns `reachable: false`, with the code
+  in `extras.error_code` and the full message in `extras.error`.
+- **`meho operation call`** returns `status: "error"` with
+  `extras.error_code: connector_error`; `extras.exception_class`
+  names the error class and `extras.exception_message` starts with
+  the `github_*` code.
+
+### `github_app_not_installed`
 
 **What you see:**
 
-```json
-{
-  "code": "github_app_not_installed",
-  "message": "GitHub App 'meho-prod' (App ID 123456) is not installed on owner='evoila' repo='meho'. Install via https://github.com/settings/apps/meho-prod/installations.",
-  "details": {
-    "app_id": 123456,
-    "app_slug": "meho-prod",
-    "owner": "evoila",
-    "repo": "meho"
-  }
-}
+```
+github_app_not_installed: installation_id='987654321' is not reachable for this App — the App may not be installed on the target repo/org, or the installation_id in Vault is stale. ...
 ```
 
 **What happened:** the App exists and the private key is valid (the
-JWT minted successfully), but the App is not installed on the
-target repository / org. The connector hits `GET /repos/{owner}/{repo}/installation`
-and gets `404`.
+JWT was signed), but GitHub answered `404` on
+`POST /app/installations/{installation_id}/access_tokens`. The App is
+not installed on the target account, or the `installation_id` in
+Vault is wrong.
 
 **Fix:** revisit [Step 3](#step-3--install-the-app-on-the-target-repo-or-org).
 Open the App's settings page in GitHub, click **Install App**, pick
-the target org, grant access to the target repos. Re-run Check 2.
+the target org, grant access to the target repos, and write the
+`installation_id` from the URL into Vault. Re-run Check 2.
 
-### `503 github_jwt_mint_failed`
+### `github_jwt_mint_failed`
 
 **What you see:**
 
-```json
-{
-  "code": "github_jwt_mint_failed",
-  "message": "Failed to mint GitHub App JWT: <PyJWT error message>",
-  "details": {
-    "app_id": 123456,
-    "vault_path": "secret/<tenant>/<target>/github-app"
-  }
-}
+```
+github_jwt_mint_failed: cannot sign JWT for app_id='123456' — check the Vault-stored RSA private key (PEM) is well-formed and matches the App's configured public key. ...
 ```
 
 **What happened:** the private key in Vault is malformed. Common
@@ -660,71 +663,65 @@ causes:
 - The PEM was pasted with line endings stripped (CRLF → LF
   conversion, single-line paste from a chat client).
 - The wrong algorithm — GitHub Apps use RSA SHA-256
-  (RS256); ED25519 / EC private keys raise `unsupported key`.
+  (RS256); ED25519 / EC private keys fail to sign.
 
 **Fix:** re-run Step 4 with the `@` prefix and confirm the verify
 command in Step 4 shows a `private_key_present: true` row. Rotate
 the key via [Step 6](#step-6--rotate-the-private-key-when-needed)
 if the original key file was lost.
 
-### `503 github_installation_token_mint_failed`
+### `github_installation_token_mint_failed`
 
 **What you see:**
 
-```json
-{
-  "code": "github_installation_token_mint_failed",
-  "message": "GitHub App 'meho-prod' is installed but lacks permission 'pull_requests:write' on owner='evoila' repo='meho'. Add the permission at https://github.com/settings/apps/meho-prod/permissions.",
-  "details": {
-    "app_id": 123456,
-    "owner": "evoila",
-    "repo": "meho",
-    "missing_permission": "pull_requests:write"
-  }
-}
+```
+github_installation_token_mint_failed: POST https://api.github.com/app/installations/987654321/access_tokens returned HTTP 401. Body excerpt: '...'. ...
 ```
 
-**What happened:** the App is installed, the JWT mint succeeded, but
-the installation-token exchange (`POST /app/installations/{id}/access_tokens`)
-returned a token missing the requested permission. This is the
-**most common write-op failure** — the operator picked the Tier-1
-read-only scope at install and is now trying to dispatch a Tier-2
-write op.
+**What happened:** the JWT was signed, but GitHub refused to mint
+the installation token with a status other than `404` (or the call
+did not reach GitHub at all). Common causes: the private key was
+revoked or belongs to another App, the App is suspended, or a
+network / TLS failure to `api.github.com`.
 
-**Fix:** open the App's permissions page in GitHub, add the missing
-permission, **and then accept the permission upgrade in the
-installation** (GitHub requires explicit consent on the
-installation, separate from the App-level permission change — the
-App owner sees a banner saying "Approve new permissions"; clicking
-through is mandatory before the new scope takes effect).
+**Fix:** check the HTTP status and body excerpt in the message.
+Generate a new private key ([Step 6](#step-6--rotate-the-private-key-when-needed))
+if the key was revoked; check network access to `api.github.com`
+for a transport failure.
 
-### `429 github_rate_limited`
+**Missing permission is a different error.** When the App lacks a
+permission (for example the Tier-1 read-only set, and an agent
+tries a Tier-2 write op), the token mint works and GitHub refuses
+the call itself with `403`. MEHO returns `connector_http_403`; its
+`extras.permission_headers` echoes the permission GitHub wants
+(`X-Accepted-GitHub-Permissions`) when GitHub sends it. Fix: open the
+App's permissions page in GitHub, add the missing permission, **and
+then accept the permission upgrade in the installation** (GitHub
+requires explicit consent on the installation, separate from the
+App-level permission change — the App owner sees a banner saying
+"Approve new permissions"; clicking through is mandatory before the
+new scope takes effect).
+
+### `github_rate_limited`
 
 **What you see:**
 
-```json
-{
-  "code": "github_rate_limited",
-  "message": "GitHub API rate limit exceeded; reset at 2026-05-27T15:00:00Z (in 12m 34s).",
-  "details": {
-    "limit": 5000,
-    "remaining": 0,
-    "reset_at": "2026-05-27T15:00:00Z",
-    "resource": "core"
-  }
-}
+```
+github_rate_limited: api.github.com returned HTTP 403 with X-RateLimit-Remaining: 0 (resets at unix=1779894000). Wait for the reset window or reduce per-target call volume. ...
 ```
 
-**What happened:** the per-installation rate limit (5000 requests/hour
-for App tokens; 5000/hour for fine-grained PATs) is exhausted. The
-`X-RateLimit-Remaining: 0` header on the most recent response carried
-the reset wall-clock time, which the connector surfaces in `details`.
+**What happened:** the rate limit was exhausted while MEHO minted an
+installation token. The per-installation limit is 5000
+requests/hour for App tokens and 5000/hour for fine-grained PATs.
+When the limit hits during an operation call instead, GitHub's `403`
+comes back as `connector_http_403` and a `429` as `connector_error`
+with `extras.http_status: 429`.
 
-**Fix:** wait until `reset_at`, then retry. If the limit hits during
-normal operation rather than a runaway loop, the catalogue's
+**Fix:** wait until the reset time, then retry. If the limit hits
+during normal operation rather than a runaway loop, the catalogue's
 dispatch pattern needs auditing — most read paths should run well
 under 5000/hour. Composites that fan out (e.g.
-`gh.composite.pr_status_summary` makes 4 sub-calls per dispatch)
+`gh.composite.pr_status_summary` makes 3 GitHub calls per dispatch)
 multiply the per-call count; budget accordingly.
 
 ## Audit story
@@ -745,29 +742,30 @@ meho audit query --target github-meho --since 1h
 Expected (abbreviated):
 
 ```
-audit_id                                principal     target       op_id                       result_status
-8c3f...d2a1   damir.topic@pmsoft.at  github-meho  GET:/repos/.../pulls/1193   ok
+AUDIT_ID      TIME                  TENANT  PRINCIPAL              TARGET       OP_ID                                           CLASS  STATUS
+8c3f...d2a1   2026-05-27T14:31:02Z  prod    operator@example.com   github-meho  gh.composite.pr_status_summary                  read   ok
 ```
 
-For a write op that flowed through the approval queue:
+For a write op that went through the approval queue:
 
 ```bash
 meho audit query --target github-meho --op-class write --since 24h
 ```
 
-Expected:
+The run row of an approved call carries the approver as its
+principal, and its `parent_audit_id` points to the approval request
+row. List the request's decision and run rows with:
 
-```
-audit_id   principal              target       op_id                       result_status   approval
-e4c2...   damir.topic@pmsoft.at  github-meho  POST:/repos/.../issues      ok              approved_by:another.operator@pmsoft.at
+```bash
+meho audit query --parent-audit-id <approval-request-audit-id>
 ```
 
-The `approval` column closes the chain-of-custody story Initiative
-#1220 calls out: who approved the agent's request, who actually
-dispatched it, when it landed in GitHub, and what GitHub's own audit
-log will show (the App identity's `meho-prod` actor on the
+This chain answers: who asked (the request row), who approved (the
+decision and run rows), when MEHO ran it, and what GitHub's own
+audit log will show (the App identity's `meho-prod` actor on the
 issue-creation event). All three identities — agent, operator,
 App — are pinned and queryable.
+
 
 ## Why a separate GitHub App (and not the operator's PAT)
 
@@ -807,10 +805,10 @@ fallback PAT.
 
 | Item | Side | State |
 | --- | --- | --- |
-| Recipe (this doc) | producer | landed in this PR ([`./github-app-credential.md`](./github-app-credential.md)) |
-| `GitHubRestConnector` reads App ID + private key from Vault | producer | tracked at T1 [#1221](https://github.com/evoila/meho/issues/1221) |
-| `gh/3` catalogue ingested + dispatchable | producer | tracked at T3 [#1223](https://github.com/evoila/meho/issues/1223) |
-| Operator-side runbook ties this credential doc into the full first-day on-ramp | producer | tracked at T6 [#1226](https://github.com/evoila/meho/issues/1226) |
+| Recipe (this doc) | producer | landed (T2) |
+| `GitHubRestConnector` reads App ID + private key + installation ID (or a PAT) from Vault | producer | landed (T1) — `backend/src/meho_backplane/connectors/github/session.py` |
+| `gh/3` catalogue ingested + dispatchable | producer | landed (T3, with the parser fix in T7) |
+| Operator-side runbook ties this credential doc into the full first-day on-ramp | producer | landed (T6) — [`./github-connector.md`](./github-connector.md) |
 | `meho-prod` App provisioned on the `evoila` org | consumer | pending — applied by the dogfooding lab operator before standing up `github-meho` |
 | Vault path `secret/<tenant>/github-meho/github-app` populated | consumer | pending — same operator step |
 | Check 3 round-trips against a known PR | consumer | pending — the closing-comment artefact on Initiative #1220 |
@@ -818,9 +816,9 @@ fallback PAT.
 ## References
 
 - Parent Initiative: [#1220 — G3.11 github-rest typed connector](https://github.com/evoila/meho/issues/1220) — first GitHub REST surface under Goal #214
-- Parent Goal: [#214 — G-connector-parity](https://github.com/evoila/meho/issues/214) — RDC operators progressively retire local wrappers
-- Sibling Task — code: [T1 #1221](https://github.com/evoila/meho/issues/1221) — `GitHubRestConnector` skeleton + credential loader (this doc precedes T1's merge)
-- Sibling Task — first-day on-ramp recipe: [T6 #1226](https://github.com/evoila/meho/issues/1226) — `docs/cross-repo/github-connector.md` (cross-links into this doc once landed)
+- Parent Goal: G-connector-parity — operators progressively retire local wrappers
+- Sibling Task — code: T1 — `GitHubRestConnector` + credential loader (`backend/src/meho_backplane/connectors/github/`)
+- Sibling Task — first-day on-ramp recipe: T6 — [`./github-connector.md`](./github-connector.md)
 - Sibling Task — catalogue ingest: [T3 #1223](https://github.com/evoila/meho/issues/1223) — `gh/3` Layer-2 ingest acceptance
 - Sibling Task — write-op annotation: [T5 #1225](https://github.com/evoila/meho/issues/1225) — `requires_approval=true` on the 4 write ops
 - Companion shape: [`./keycloak-web-client.md`](./keycloak-web-client.md) — the v0.7.0 G10.0 client recipe this doc mirrors in shape
@@ -833,4 +831,4 @@ fallback PAT.
 - GitHub App authentication (JWT minting + installation tokens): <https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation>
 - GitHub REST API rate limits: <https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api>
 - Error-message-shape convention: [`docs/codebase/error-message-shape.md`](../codebase/error-message-shape.md) — T11 stable-code error envelope
-- Consumer feature request: `claude-rdc-hetzner-dc#753` § "GitHub typed connector — `github-rest-v3` (or `gh-rest`)"
+- Consumer feature request: the consumer's request for a GitHub typed connector (`gh-rest`).

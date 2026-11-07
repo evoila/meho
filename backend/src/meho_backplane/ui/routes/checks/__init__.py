@@ -14,7 +14,7 @@ Why a session BFF and not the Bearer ``/api/v1/checks/dashboards*`` routes
 
 The REST routes are Bearer-gated over a verified JWT; a browser carrying only
 the BFF session cookie cannot authenticate them. So this module's sub-routes
-are ``require_ui_session``-gated and call the in-process
+are ``require_ui_operator``-gated and call the in-process
 :class:`~meho_backplane.checks.dashboard_service.CheckDashboardAdminService`
 (the same ``list_`` / ``get`` the REST surface uses) -- the same
 console-surface pattern the scheduler / connectors surfaces use.

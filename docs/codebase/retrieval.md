@@ -43,6 +43,7 @@ async def retrieve(
     metadata_filters: dict[str, Any] | None = None,
     principal_sub: str | None = None,
     memory_eligibility: MemoryEligibility | None = None,
+    all_principals: bool = False,
 ) -> list[RetrievalHit]
 ```
 
@@ -70,11 +71,13 @@ Filter parameters narrow the candidate set in both signals symmetrically:
   only narrow, never widen, the visible set. Tenant-broadcast kinds
   (`memory-tenant` / `memory-target`) and the kb sources (`kb` /
   `kb-passage`) are unaffected — they carry no per-principal `user_sub`.
-  `None` (default) disables the predicate for callers that query
-  non-principal sources. `MemoryService.search_memories` passes
-  `memory_eligibility` instead, and its principal turns on the same
-  check. So `POST /api/v1/retrieve {source:"memory"}` and the MCP
-  retrieve resource return only the caller's own user-scoped memories.
+  `None` (default) is allowed only for a call where no Memory row can be
+  a candidate (a `source` other than `"memory"`), a call that passes
+  `memory_eligibility`, or a call that sets `all_principals=True` (see
+  below). `MemoryService.search_memories` passes `memory_eligibility`,
+  and its principal turns on the same check. So `POST /api/v1/retrieve
+  {source:"memory"}` and the MCP retrieve resource return only the
+  caller's own user-scoped memories.
 - `memory_eligibility` — a frozen `MemoryEligibility` (tenant,
   principal, visible Memory kinds) built by
   `MemoryRbacResolver.eligibility()` (#3741). When set, `source='memory'`
@@ -85,6 +88,12 @@ Filter parameters narrow the candidate set in both signals symmetrically:
   resource, and the UI diagnostics page (`POST /ui/retrieval/diagnostics`)
   pass it whenever Memory rows can be candidates (`source="memory"` or
   no source). Other sources pass `None`.
+- `all_principals` — the caller says on purpose that a Memory search may
+  rank the user memories of every principal in the tenant. Default
+  `False`: a call with `source="memory"` or no source and neither
+  `principal_sub` nor `memory_eligibility` raises `ValueError`, so no
+  caller can drop the per-principal rule by leaving the argument out.
+  Only tests set it today.
 - **Memory expiry is always enforced in SQL.** Every `source='memory'`
   row must have no `expires_at`, or a valid ISO 8601 timestamp later
   than the database `now()`. Malformed values, `now`, `epoch`, and
@@ -414,6 +423,12 @@ never holds a query or a body, and it never averages across groups.
 - **Retrieval eval counts passages.** `retrieval/eval/runner.py` asks
   for `k` rows and folds passages of one entry into one slug, so fewer
   than `k` slugs can come back.
+- **Retrieval eval runs as the caller.** `eval_all` / `eval_surface`
+  take `principal_sub` and pass it to every `retrieve` call, so the
+  answer of `POST /api/v1/retrieve/eval`, the console Eval tab and the
+  retire checklist (`compute_retire_checklist`) lists no user memory of
+  another person. The memory surface with the real retriever and no
+  `principal_sub` raises `ValueError`.
 - **Per-query re-embed.** Every retrieval calls `encode_one(query)`;
   there is no embedding cache in v0.2. v0.2.next may add an LRU once
   cache-hit ratios are measured.

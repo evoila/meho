@@ -363,7 +363,7 @@ async def test_retrieve_returns_hits_against_real_pg(
     """
     fake = _make_stub_embedding_service()
     with patch("meho_backplane.retrieval.retriever.get_embedding_service", return_value=fake):
-        hits = await retrieve(uuid.UUID(TENANT_A_ID), "kubernetes ingress")
+        hits = await retrieve(uuid.UUID(TENANT_A_ID), "kubernetes ingress", all_principals=True)
 
     assert len(hits) > 0
     # Top hit should contain kubernetes-related content. The corpus
@@ -396,7 +396,10 @@ async def test_rrf_fusion_top_hit_has_both_signal_contributions(
     fake = _make_stub_embedding_service()
     with patch("meho_backplane.retrieval.retriever.get_embedding_service", return_value=fake):
         hits = await retrieve(
-            uuid.UUID(TENANT_A_ID), "kubernetes ingress troubleshooting", limit=10
+            uuid.UUID(TENANT_A_ID),
+            "kubernetes ingress troubleshooting",
+            limit=10,
+            all_principals=True,
         )
 
     assert len(hits) > 0
@@ -436,8 +439,8 @@ async def test_tenant_boundary_holds_across_identical_natural_keys(
     """
     fake = _make_stub_embedding_service()
     with patch("meho_backplane.retrieval.retriever.get_embedding_service", return_value=fake):
-        hits_a = await retrieve(uuid.UUID(TENANT_A_ID), "kubernetes")
-        hits_b = await retrieve(uuid.UUID(TENANT_B_ID), "kubernetes")
+        hits_a = await retrieve(uuid.UUID(TENANT_A_ID), "kubernetes", all_principals=True)
+        hits_b = await retrieve(uuid.UUID(TENANT_B_ID), "kubernetes", all_principals=True)
 
     a_ids = {h.document_id for h in hits_a}
     b_ids = {h.document_id for h in hits_b}
@@ -463,7 +466,9 @@ async def test_retrieve_source_filter_excludes_other_sources(
     fake = _make_stub_embedding_service()
     with patch("meho_backplane.retrieval.retriever.get_embedding_service", return_value=fake):
         kb_hits = await retrieve(uuid.UUID(TENANT_A_ID), "kubernetes", source="kb")
-        memory_hits = await retrieve(uuid.UUID(TENANT_A_ID), "kubernetes", source="memory")
+        memory_hits = await retrieve(
+            uuid.UUID(TENANT_A_ID), "kubernetes", source="memory", all_principals=True
+        )
 
     assert len(kb_hits) > 0
     assert all(h.source == "kb" for h in kb_hits)
@@ -483,6 +488,7 @@ async def test_retrieve_kind_filter_narrows_within_source(
             "kubernetes",
             source="memory",
             kind="memory-user",
+            all_principals=True,
         )
     assert all(h.kind == "memory-user" for h in user_hits)
 

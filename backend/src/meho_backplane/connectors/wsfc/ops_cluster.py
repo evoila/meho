@@ -51,6 +51,7 @@ References
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors._shared.pwsh import ps_single_quote, pwsh_run
@@ -74,6 +75,11 @@ __all__ = [
 #: truncate the read and report a false failure on a validation that in fact
 #: completed. 15 minutes is a generous ceiling for a small cluster.
 _TEST_TIMEOUT: float = 900.0
+
+#: A ``Test-Cluster -ReportName``: a plain file name, never a path or a
+#: share. Windows then writes the report to its default report folder.
+_REPORT_NAME_PATTERN: str = "^[A-Za-z0-9_-][A-Za-z0-9 ._-]{0,63}$"
+_REPORT_NAME_RE = re.compile(_REPORT_NAME_PATTERN)
 
 #: The cluster health rollup script. One round-trip: reads the cluster, its
 #: nodes, groups, and resources, and computes per-state count maps plus the
@@ -203,7 +209,8 @@ async def wsfc_cluster_test(
 
     Long-running (minutes); the handler forwards a raised
     :data:`_TEST_TIMEOUT`. Optional ``include`` scopes the run to named test
-    categories; ``report_name`` names the generated report. Returns the
+    categories; ``report_name`` names the generated report (a plain file
+    name, never a path). Returns the
     generated report path (from the ``Test-Cluster`` FileInfo output).
     """
     include = params.get("include")
@@ -216,8 +223,15 @@ async def wsfc_cluster_test(
     report_name = params.get("report_name")
     report_clause = ""
     if report_name:
-        if not isinstance(report_name, str):
-            raise ValueError("report_name must be a string")
+        if (
+            not isinstance(report_name, str)
+            or not _REPORT_NAME_RE.fullmatch(report_name)
+            or ".." in report_name
+        ):
+            raise ValueError(
+                "report_name must be a plain file name of 1 to 64 letters, digits, "
+                "spaces, dots, dashes or underscores, with no path, share or '..'"
+            )
         report_clause = f" -ReportName {ps_single_quote(report_name)}"
     script = (
         "$ErrorActionPreference = 'Stop'; "
@@ -394,7 +408,12 @@ CLUSTER_OPS: tuple[WsfcOp, ...] = (
                 },
                 "report_name": {
                     "type": "string",
-                    "description": "Optional ``-ReportName`` for the generated report.",
+                    "pattern": _REPORT_NAME_PATTERN,
+                    "description": (
+                        "Optional ``-ReportName`` for the generated report: a "
+                        "plain file name (no path, share or ``..``). Windows "
+                        "writes the report to its default report folder."
+                    ),
                 },
             },
             "additionalProperties": False,

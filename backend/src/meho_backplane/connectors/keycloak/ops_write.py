@@ -310,7 +310,9 @@ async def keycloak_realm_update(
     RealmRepresentation. The handler reads the realm, puts the given fields
     on top, and PUTs the full realm back, so fields the caller did not send
     stay as they are (#3941, see :mod:`.ops_write_merge`). Returns a
-    value-free confirmation plus the read-back check.
+    value-free confirmation plus the read-back check. Both realm names are
+    percent-encoded as one path segment, so a ``/``, a dot or a ``%`` in a
+    name stays part of that name.
     """
     realms = resolve_realm_config(target)
     realm_name = str(params.get("realm") or realms.managed_realm).strip()
@@ -320,9 +322,9 @@ async def keycloak_realm_update(
         self,
         operator,
         target,
-        path=fill_path(_ADMIN_REALM_PATH, {"realm": realm_name}),
+        path=fill_path(_ADMIN_REALM_PATH, {"realm": quote_segment(realm_name)}),
         requested=representation,
-        read_back_path=fill_path(_ADMIN_REALM_PATH, {"realm": new_name}),
+        read_back_path=fill_path(_ADMIN_REALM_PATH, {"realm": quote_segment(new_name)}),
     )
     return {"realm": realm_name, "updated": True, **check}
 
@@ -663,7 +665,9 @@ async def keycloak_role_mapping_assign(
     ``{id, name}`` in the body). The realm role-mappings endpoint is
     idempotent server-side — re-assigning an already-held role is a no-op —
     so this op is naturally re-runnable. Raises
-    :exc:`KeycloakRoleNotFoundError` when a named role does not exist.
+    :exc:`KeycloakRoleNotFoundError` when a named role does not exist, or
+    when Keycloak answers with a role of another name. ``assigned_roles``
+    holds the names of the roles Keycloak returned.
     """
     realms = resolve_realm_config(target)
     uuid = _opt_str(params.get("id"))
@@ -683,7 +687,7 @@ async def keycloak_role_mapping_assign(
     role_reprs: list[dict[str, Any]] = []
     for name in role_names:
         role = await self._find_realm_role(target, realms.managed_realm, name, operator=operator)
-        if role is None:
+        if role is None or role.get("name") != name:
             raise KeycloakRoleNotFoundError(
                 f"keycloak.role_mapping.assign: realm role {name!r} does not exist in realm "
                 f"{realms.managed_realm!r}"
@@ -700,7 +704,11 @@ async def keycloak_role_mapping_assign(
         json=role_reprs,  # type: ignore[arg-type]  # KC accepts a JSON array body here
         idempotent_conflict=False,
     )
-    return {"id": uuid, "username": username, "assigned_roles": role_names}
+    return {
+        "id": uuid,
+        "username": username,
+        "assigned_roles": [role["name"] for role in role_reprs],
+    }
 
 
 def _opt_str(value: Any) -> str | None:

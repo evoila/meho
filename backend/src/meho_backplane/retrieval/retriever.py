@@ -246,6 +246,7 @@ async def retrieve(
     metadata_filters: dict[str, Any] | None = None,
     principal_sub: str | None = None,
     memory_eligibility: MemoryEligibility | None = None,
+    all_principals: bool = False,
 ) -> list[RetrievalHit]:
     """Hybrid BM25 + cosine retrieval with RRF fusion. Tenant-scoped.
 
@@ -299,8 +300,9 @@ async def retrieve(
         -- the predicate is ANDed in unconditionally, so a client value
         can only narrow, never widen, the visible set. Tenant-broadcast
         kinds and non-memory sources are unaffected. ``None`` (default)
-        disables it for callers that scope by ``user_sub`` themselves or
-        query non-principal sources.
+        is allowed only when no Memory row can be a candidate (a
+        ``source`` other than ``"memory"``), when *memory_eligibility* is
+        set, or when *all_principals* is ``True``.
     memory_eligibility
         The Memory service's typed eligibility for this caller (#3741).
         When set, ``source='memory'`` candidates are limited to its
@@ -310,6 +312,13 @@ async def retrieve(
         *tenant_id*, and *principal_sub* must be ``None`` or the same
         value; a mismatch raises :class:`ValueError`. Memory expiry is
         always enforced in SQL, even when this is ``None``.
+    all_principals
+        Say on purpose that a Memory search may rank the user memories of
+        every principal in the tenant. Default ``False``: a call whose
+        ``source`` is ``"memory"`` or ``None`` (so Memory rows can be
+        candidates) with neither *principal_sub* nor *memory_eligibility*
+        raises :class:`ValueError`, so no caller can drop the
+        per-principal rule by leaving the argument out.
 
     Returns
     -------
@@ -359,6 +368,7 @@ async def retrieve(
     """
     if limit < 0:
         raise ValueError(f"limit must be >= 0; got {limit}")
+    _require_memory_principal(source, principal_sub, memory_eligibility, all_principals)
     if limit == 0:
         return []
     # Empty-dict early-normalise: ``@> '{}'::jsonb`` matches every row,
@@ -393,6 +403,27 @@ async def retrieve(
             metadata_filters,
             principal_sub,
             memory_kinds,
+        )
+
+
+def _require_memory_principal(
+    source: str | None,
+    principal_sub: str | None,
+    memory_eligibility: MemoryEligibility | None,
+    all_principals: bool,
+) -> None:
+    """Refuse a Memory search that names no principal, unless the caller asks for all.
+
+    Memory rows are candidates when *source* is ``"memory"`` or ``None``.
+    Such a call must carry *principal_sub* or *memory_eligibility* (the
+    per-principal rule on user memories), or set *all_principals*.
+    """
+    if source not in (None, _MEMORY_SOURCE) or all_principals:
+        return
+    if principal_sub is None and memory_eligibility is None:
+        raise ValueError(
+            "a memory search needs principal_sub or memory_eligibility; "
+            "pass all_principals=True to rank every principal's memories"
         )
 
 

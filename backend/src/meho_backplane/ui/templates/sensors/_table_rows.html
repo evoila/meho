@@ -19,6 +19,9 @@
   here. Fields are read defensively (``StrictUndefined``): a never-evaluated
   Sensor has ``last_state == "unknown"`` and null timestamps, both of which
   render the em-dash placeholder rather than raising.
+
+  The ``Target`` column shows the target's detected product and version. A
+  warning under the operation says when the connector does not fit them.
 -#}
 {% macro _rel(ts) -%}
   {%- set ago = (now_utc - ts).total_seconds() | int -%}
@@ -42,6 +45,19 @@
         <td class="text-xs">
           <span class="font-mono">{{ row.connector_id }}</span>
           <span class="opacity-60">/ {{ row.op_id }}</span>
+          {% if row.fit_warning %}
+            <div class="text-warning mt-1" role="alert" data-fit-warning>{{ row.fit_warning }}</div>
+          {% endif %}
+        </td>
+        <td class="text-xs">
+          {% if row.target_name %}
+            <span class="font-mono">{{ row.target_name }}</span>
+            {% if row.target_label %}
+              <span class="opacity-60">/ {{ row.target_label }}</span>
+            {% endif %}
+          {% else %}
+            <span class="opacity-40">—</span>
+          {% endif %}
         </td>
         <td class="text-xs">{{ row.cadence_label }}</td>
         <td>
@@ -72,7 +88,7 @@
     {% endfor %}
   {% else %}
     <tr>
-      <td colspan="7" class="text-center text-sm opacity-60 py-6">
+      <td colspan="8" class="text-center text-sm opacity-60 py-6">
         No sensors match. Register one via
         <code>meho sensor create &lt;name&gt;</code>.
       </td>

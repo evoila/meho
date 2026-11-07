@@ -52,11 +52,28 @@ halves consult the same
 :func:`meho_backplane.auth.operator.is_human_principal` split, so removing
 a verb from the agent surface here and refusing the machine kind there are
 one decision, not two.
+
+Two registered operator-plane tools are for people too, while their read
+and revoke siblings stay open to machine logins with the role:
+``meho_agents_grant_create`` and ``meho_agent_principals_register``. Only
+a person creates an agent grant or registers an agent principal, the same
+as on REST. Their handlers call :func:`ensure_human_mcp_caller` first, so
+a service login with ``tenant_admin`` and ``mcp:admin`` is refused. The
+login kind comes from the token, also when MEHO infers it (a
+client-credentials token without a ``principal_kind`` claim is a service
+login).
 """
 
 from __future__ import annotations
 
 from typing import Final
+
+import structlog
+
+from meho_backplane.auth.operator import Operator, is_human_principal
+from meho_backplane.mcp.server import McpPermissionDeniedError
+
+_log = structlog.get_logger(__name__)
 
 #: Wire names that have **no** MCP path, mapped to the remediation
 #: string the dispatcher returns on a ``tools/call`` attempt. Each
@@ -94,3 +111,26 @@ def human_only_remediation(name: str) -> str | None:
     ``unknown tool`` rejection when the name resolves to nothing).
     """
     return HUMAN_ONLY_MCP_TOOLS.get(name)
+
+
+def ensure_human_mcp_caller(operator: Operator, tool: str, human_path: str) -> None:
+    """Refuse a machine login on a tool that only a person may call.
+
+    A person (``principal_kind=user``) passes. An agent, service or runner
+    login gets :class:`~meho_backplane.mcp.server.McpPermissionDeniedError`
+    (JSON-RPC ``-32602``, audited as a 403) with the
+    ``human_principal_required:`` prefix that REST uses, and *human_path*,
+    the text that names where a person does it instead.
+    """
+    if is_human_principal(operator):
+        return
+    _log.warning(
+        "mcp_tool_call_human_principal_required",
+        tool=tool,
+        operator_sub=operator.sub,
+        principal_kind=operator.principal_kind.value,
+    )
+    raise McpPermissionDeniedError(
+        f"human_principal_required: {tool} is for people only. A machine login "
+        f"(agent, service or runner) cannot call it. {human_path}"
+    )

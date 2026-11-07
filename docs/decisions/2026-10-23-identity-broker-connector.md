@@ -1,6 +1,6 @@
 # How MEHO talks to VCF Identity Broker and Workspace ONE Access (decision)
 
-**Status:** proposed. It waits for the program owner to agree in the pull request.
+**Status:** proposed. It waits for the program owner to agree in the pull request. The connectors `idb-wsa-3.3` and `idb-rest-9.0` shipped in 0.42.0. Since 0.44.0 they come with the VMware connector package, not in the public image (see [own connectors leave the public tree](2026-10-28-own-connectors-leave-the-public-tree.md)).
 **Date:** 2026-10-23
 **Issue:** [#4507](https://github.com/evoila/meho/issues/4507)
 **Initiative:** [#4306](https://github.com/evoila/meho/issues/4306) — VCF bring-up, fleet lifecycle, identity and platform services through MEHO

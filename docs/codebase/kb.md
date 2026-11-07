@@ -102,6 +102,9 @@ per-signal scores of its best passage (`fused_score`, `bm25_score`,
   `meho://kb/id/{entry}/revision/{revision}`.
 - `coverage` — `complete` when `passages` hold every passage of the
   revision, else `partial`.
+- `tenant_id` and `shared` (#5726) — the tenant that owns the entry,
+  and whether the entry is in the shared knowledge scope. A hit from
+  another tenant is always a shared one.
 
 `snippet` is the first ~200 characters of the best passage
 (`_SNIPPET_CHARS`). An entry indexed before passages existed comes
@@ -151,7 +154,7 @@ before returning. Seven verbs:
 | `get_revision(tenant_id, entry_id, revision_id)` | Exact retained read. Returns `KbEntryRevision` only when the revision belongs to the entry and both belong to the tenant; otherwise `None`, without saying why. | – |
 | `list_entries(tenant_id, filter_pattern=None, limit=100, offset=0, order="slug")` | List entries; slug-sorted by default, `order="newest"` sorts by `updated_at`, newest first; SQL `LIKE` pattern forwarded verbatim. | `ValueError` on negative `limit`/`offset` |
 | `delete_entry(tenant_id, slug)` | Delete the head and all its revisions in one transaction; returns whether a row existed. | Database errors propagate; nothing is removed |
-| `search_entries(tenant_id, query, *, filters=None, limit=10)` | Hybrid BM25 + cosine retrieval with `source=KB_SOURCE` pinned. | `ValueError` on negative `limit` |
+| `search_entries(tenant_id, query, *, filters=None, limit=10, time_window=None, scope="all")` | Hybrid BM25 + cosine retrieval with `source=KB_SOURCE` pinned. `time_window` limits `confirmed_at` and the last write; `scope` is `all`, `tenant` or `shared`. | `ValueError` on negative `limit` |
 | `ingest_directory(directory, tenant_id, dry_run=False)` | Read every `.md` file in sorted order, report slug conflicts without writing them, ingest the rest; idempotent. Per-file failures counted, run continues. | `KbIngestRootError` outside `KB_INGEST_ROOT` |
 
 ### `walk_kb_directory` (`kb/file_walker.py`)
@@ -505,19 +508,55 @@ until the entry is deleted.
      drops the entry. The retriever checks this with PostgreSQL
      `metadata @> filters`.
    - **Values are simple values:** text, a number, `true` / `false`,
-     or `null`. The check compares top-level keys only.
+     or `null`, or a list. A list matches an entry that holds every
+     listed item: `{"tags": ["vm", "snapshot"]}` keeps entries that have
+     both tags (and maybe more). The check compares top-level keys only.
    - Example: `{"kind": "kb-entry", "source_kind": "evoila-distilled"}`
      keeps only curated kb entries. `{"product": "vsphere",
      "version": 8}` keeps only entries whose metadata has both
      `product: "vsphere"` and `version: 8`.
 2. Call `meho_backplane.retrieval.retriever.retrieve` with
-   `source=KB_SOURCE`, the query, the `kind` filter and
-   `limit=CANDIDATE_LIMIT` (50). The retriever maps `source="kb"` (and
+   `source=KB_SOURCE`, the query, the `kind` filter, the `time_window`
+   and `limit=CANDIDATE_LIMIT` (50). The retriever maps `source="kb"` (and
    `kind="kb-entry"`) to the current passage rows and drops a head
-   once its entry has passages, so no entry shows twice.
-3. `_group_by_entry` folds the ranked rows into one `KbEntrySearchHit`
+   once its entry has passages, so no entry shows twice. The time
+   window is checked in the same SQL, before the `LIMIT` (see
+   [Search filters](#search-filters-5726)).
+3. Unless `scope="tenant"`, add the hits of the shared scope
+   (`add_shared_hits`, with the same filters and time window). With
+   `scope="shared"` the own tenant is searched only for its `shared`
+   rows, and not at all when the tenant is not a listed owner.
+4. `_group_by_entry` folds the ranked rows into one `KbEntrySearchHit`
    per entry, best first, up to `limit` entries, each with up to 3
    passages and their locators.
+
+### Search filters (#5726)
+
+`search_knowledge` and `search_memory` take the same named filters on
+the lesson header (`mcp/tools/_search_filters.py`):
+
+| Filter | Meaning | How it is checked |
+|---|---|---|
+| `product`, `version`, `status` | The header field has exactly this value. | Metadata containment (`@>`). |
+| `tags` | The entry has every listed tag. | Metadata containment with a list. |
+| `confirmed_after`, `confirmed_before` | The header `confirmed_at` is in this range (both ends included). An entry without a readable `confirmed_at` is left out. | `_TIME_WINDOW_PREDICATE_SQL` in the retriever. |
+| `updated_after`, `updated_before` | The last write is in this range (both ends included). | The `updated_at` column, same predicate. For knowledge this is the passage row, which every write of the entry refreshes. |
+
+`search_knowledge` also takes `scope`: `all` (default), `tenant` or
+`shared`. A named filter wins over the same key in `filters`.
+
+A time limit is ISO 8601 text. A date alone means midnight UTC; a time
+without an offset is UTC. An unreadable value, or an `after` later
+than its `before`, is refused with JSON-RPC `-32602`. Every filter runs
+inside the candidate SQL, before ranking cuts the candidates, so a
+filtered-out entry never pushes a match out of the top 50.
+
+The `confirmed_at` check reads stored text. Like the Memory expiry
+check, it tests the ISO 8601 shape and `pg_input_is_valid` before any
+cast, so an old row with an odd date cannot fail the query.
+
+The REST and CLI search (`POST /api/v1/retrieve`, `meho kb search`)
+and the console search do not take the named filters yet.
 
 `search_knowledge` (MCP) wraps every snippet, passage text and
 heading title (`locator.heading_path`) as untrusted text and keeps its response inside

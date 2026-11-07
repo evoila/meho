@@ -330,7 +330,8 @@ candidate slot from one they may see.
    * the per-principal predicate: a user-scoped kind needs
      `metadata->>'user_sub' = principal`; tenant and target kinds are
      shared across the tenant;
-   * the expiry predicate (below).
+   * the expiry predicate (below);
+   * the search filters, when the caller gave any (#5726, below).
 4. The service maps each hit to a bounded `MemoryEntrySearchHit`
    (`_hit_to_search_result`): it cuts the body to a query snippet with
    `query_snippet` and numbers the hits with `rank`. It does **not**
@@ -339,6 +340,21 @@ candidate slot from one they may see.
 
 "No match" and "only rows you may not see" give the same answer: an
 empty `hits` list, with no count.
+
+**Search filters (#5726).** MCP `search_memory` takes the same lesson
+header filters as `search_knowledge`: `product`, `version`, `status`
+(exact value), `tags` (every listed tag), `confirmed_after` /
+`confirmed_before` (the header `confirmed_at`) and `updated_after` /
+`updated_before` (the last write, the row's `updated_at`). The tool
+turns them into `metadata_filters` and a `TimeWindow`
+(`retrieval/time_window.py`) and `search_memories` passes both to the
+same `retrieve` call. They run in the candidate SQL next to the
+eligibility rule, so they only narrow what the caller may see, and a
+filtered-out row never takes a candidate slot. A memory without a
+readable `confirmed_at` is left out by a confirmed limit. The rules
+and the time format are in [`kb.md`](./kb.md#search-filters-5726).
+The tag filter of `list_memories` (`tag`, one tag) is unchanged. The
+REST route and `meho recall` do not take these filters yet.
 
 **Expiry predicate (PostgreSQL 16).** It uses the database's `now()`,
 never a client clock, and runs for every `source='memory'` row in

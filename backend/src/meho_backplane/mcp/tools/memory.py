@@ -123,6 +123,12 @@ from meho_backplane.mcp.tools._memory_evidence import (
     bounded_search_response,
     hit_payload,
 )
+from meho_backplane.mcp.tools._search_filters import (
+    FILTER_PROPERTIES,
+    FILTER_TOOL_TEXT,
+    header_filter_terms,
+    time_window_from,
+)
 from meho_backplane.memory.rbac import PermissionDeniedError
 from meho_backplane.memory.schemas import MemoryScope
 from meho_backplane.memory.service import MemoryService
@@ -289,6 +295,9 @@ async def _search_memory_handler(
     ``locator`` (``meho://memory/id/{document_uuid}``) for the full read
     served by :mod:`meho_backplane.mcp.resources.memory`. The whole
     response stays inside the shared completed-call wire limit.
+
+    The lesson header filters (#5726, :mod:`._search_filters`) narrow the
+    search inside the candidate SQL, next to the eligibility rule.
     """
     query: str = arguments["query"]
     scope_raw = arguments.get("scope")
@@ -301,6 +310,8 @@ async def _search_memory_handler(
         query,
         scope=scope,
         limit=limit,
+        metadata_filters=header_filter_terms(arguments) or None,
+        time_window=time_window_from("search_memory", arguments),
     )
     return bounded_search_response([hit_payload(hit) for hit in hits])
 
@@ -477,7 +488,8 @@ register_mcp_tool(
             "visible scopes (user / user-tenant / user-target / tenant / "
             "target); pass one to narrow (e.g. scope='tenant' for shared "
             "team conventions only). "
-            "Do NOT use this for durable team knowledge — that lives in "
+            + FILTER_TOOL_TEXT
+            + "Do NOT use this for durable team knowledge — that lives in "
             "the knowledge base (`search_knowledge`). Memory is for "
             "shorter-lived, operator/tenant/target-scoped state. "
             "Limit defaults to 10; cap is 50 (substrate-enforced)."
@@ -508,6 +520,7 @@ register_mcp_tool(
                         "operator can read."
                     ),
                 },
+                **FILTER_PROPERTIES,
                 "limit": {
                     "type": "integer",
                     "minimum": 1,

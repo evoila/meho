@@ -589,7 +589,9 @@ async def test_search_memories_cross_scope_is_one_eligible_retrieve() -> None:
     assert kwargs["source"] == "memory"
     assert kwargs["limit"] == 7
     assert "kind" not in kwargs
-    assert "metadata_filters" not in kwargs
+    # No filter was asked for, so none narrows the search.
+    assert kwargs.get("metadata_filters") is None
+    assert kwargs.get("time_window") is None
     eligibility = kwargs["memory_eligibility"]
     assert eligibility.tenant_id == tenant
     assert eligibility.principal_sub == "bob"

@@ -90,6 +90,12 @@ from meho_backplane.mcp.registry import (
 )
 from meho_backplane.mcp.resources.kb import read_kb_entry
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
+from meho_backplane.mcp.tools._search_filters import (
+    FILTER_PROPERTIES,
+    FILTER_TOOL_TEXT,
+    header_filter_terms,
+    time_window_from,
+)
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import wrap_untrusted_text
@@ -170,6 +176,11 @@ async def _search_knowledge_handler(
     to scope hits to the curated slice; missing keys exclude rows
     (PG ``@>`` semantics), multi-key dicts behave as an intersection.
 
+    The named lesson header filters (#5726, :mod:`._search_filters`) are
+    added to ``filters``; a named filter wins over the same key in
+    ``filters``. ``scope`` picks the caller's tenant, the shared scope, or
+    both (the default).
+
     With ``slug`` the handler reads that one entry instead, through the
     same code as the ``meho://kb/{slug}`` resource (#4138). This gives a
     full-text read to clients that offer the model only tools.
@@ -182,15 +193,17 @@ async def _search_knowledge_handler(
         raise McpInvalidParamsError(
             "search_knowledge: pass `query` to search, or `slug` to read one entry"
         )
-    filters = arguments.get("filters")
+    filters = {**(arguments.get("filters") or {}), **header_filter_terms(arguments)}
     limit: int = int(arguments.get("limit", _DEFAULT_SEARCH_LIMIT))
 
     service = KbService()
     hits = await service.search_entries(
         tenant_id=operator.tenant_id,
         query=query,
-        filters=filters,
+        filters=filters or None,
         limit=limit,
+        time_window=time_window_from("search_knowledge", arguments),
+        scope=arguments.get("scope") or "all",
     )
     return _bounded_search_response(
         [_hit_payload(hit) for hit in hits],
@@ -366,10 +379,16 @@ register_mcp_tool(
             "Postgres `documents.metadata @>` containment "
             'against the row\'s metadata JSONB (e.g. `{"source_kind": '
             '"evoila-distilled"}` returns only curated entries, '
-            "excluding vendor sidecars). Values must be JSON scalars; "
-            "missing keys exclude rows (containment semantics). "
-            "A header date is stored as text, so filter on "
-            '`{"learned_at": "2026-11-03"}`. '
+            "excluding vendor sidecars). Values are JSON scalars, or a "
+            "list that the entry must fully hold; missing keys exclude "
+            "rows (containment semantics). "
+            + FILTER_TOOL_TEXT
+            + "The search covers this tenant and the shared knowledge "
+            "scope of the instance (company knowledge every tenant can "
+            "read; only its owner tenant writes it). Each hit says its "
+            "owner `tenant_id` and whether it is `shared`. Pass "
+            "`scope='tenant'` for this tenant's own entries only, or "
+            "`scope='shared'` for the shared scope only. "
             "Limit defaults to 10; cap is 50 (substrate-enforced). "
             "Surface-name note: every non-MCP MEHO surface calls this "
             "substrate `kb`, not `knowledge` — REST is `/api/v1/kb` "
@@ -408,16 +427,29 @@ register_mcp_tool(
                         "by document kind; non-'kind' keys translate to "
                         "Postgres `documents.metadata @>` containment "
                         "(missing keys exclude the row, multi-key "
-                        "intersects). Values must be JSON scalars "
-                        "(string / number / boolean / null). A header "
-                        "date or decimal number is stored as text, so "
-                        "filter on the text form (for example "
-                        "'2026-11-03' or '3.10')."
+                        "intersects). Values are JSON scalars "
+                        "(string / number / boolean / null), or a list "
+                        "the entry must fully hold. A decimal number is "
+                        "stored as text, so filter on the text form "
+                        "(for example '3.10'). For dates use the named "
+                        "time filters."
                     ),
                     "properties": {
                         "kind": {"type": "string", "minLength": 1},
                     },
                     "additionalProperties": True,
+                },
+                **FILTER_PROPERTIES,
+                "scope": {
+                    "type": ["string", "null"],
+                    "enum": ["all", "tenant", "shared", None],
+                    "default": "all",
+                    "description": (
+                        "Where to search. 'all' (default): this tenant and "
+                        "the shared scope. 'tenant': only entries this "
+                        "tenant owns. 'shared': only entries in the shared "
+                        "scope, from any tenant."
+                    ),
                 },
                 "limit": {
                     "type": "integer",

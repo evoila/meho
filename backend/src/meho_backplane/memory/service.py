@@ -80,6 +80,7 @@ from meho_backplane.memory.schemas import (
 from meho_backplane.memory.snippet import query_snippet
 from meho_backplane.retrieval.indexer import index_document
 from meho_backplane.retrieval.retriever import RetrievalHit, retrieve
+from meho_backplane.retrieval.time_window import TimeWindow
 
 __all__ = ["MemoryService"]
 
@@ -774,6 +775,8 @@ class MemoryService:
         *,
         scope: MemoryScope | None = None,
         limit: int = 10,
+        metadata_filters: dict[str, Any] | None = None,
+        time_window: TimeWindow | None = None,
     ) -> list[MemoryEntrySearchHit]:
         """Hybrid BM25 + cosine search over the operator's eligible memories.
 
@@ -791,6 +794,12 @@ class MemoryService:
         * ``scope=<scope>`` narrows the eligibility to that scope's kind.
         * User-scoped rows match only the operator's ``sub``; tenant and
           target rows are shared within the tenant.
+        * ``metadata_filters`` (#5726) narrows by metadata containment, for
+          example ``{"status": "confirmed", "tags": ["vm"]}``: a list value
+          matches an entry that holds every listed item. ``time_window``
+          limits ``confirmed_at`` and the time of the last write. Both run
+          in the candidate SQL, next to the eligibility rule, so they can
+          only narrow what the caller may see.
 
         No Python post-filter trims the result: what the substrate returns
         is already eligible. An empty list is the same answer for "no
@@ -804,6 +813,8 @@ class MemoryService:
             source=MEMORY_SOURCE,
             limit=limit,
             memory_eligibility=self._rbac.eligibility(operator, scope),
+            metadata_filters=metadata_filters,
+            time_window=time_window,
         )
         results: list[MemoryEntrySearchHit] = []
         for hit in hits:

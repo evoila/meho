@@ -327,6 +327,40 @@ def test_start_that_fails_after_registration_step_changes_no_row(
     assert asyncio.run(_stored_release()) == stored_before
 
 
+def test_start_that_fails_on_purpose_after_registration_changes_no_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The test-only failure the CI proof uses on a throwaway install (#5024).
+
+    With ``MEHO_TEST_FAIL_START_AFTER_REGISTRATION`` set, the second start
+    writes its changed rows, disables every built-in row and stamps its
+    release, and then fails inside that transaction. The rows and the
+    stamp still equal the copy taken after the first start.
+    """
+    _use_registrars(monkeypatch, widget_registrar)
+    from meho_backplane.main import app
+
+    with TestClient(app):
+        pass
+    before = asyncio.run(_built_in_rows())
+    stored_before = asyncio.run(_stored_release())
+    assert before[_OP_ID]["is_enabled"] is True
+    assert stored_before is not None
+
+    monkeypatch.setenv("GIT_SHA", "new0000000000000000000000000000000000000")
+    monkeypatch.setenv("MEHO_TEST_FAIL_START_AFTER_REGISTRATION", "1")
+    get_settings.cache_clear()
+    _set_new_release()
+    with (
+        pytest.raises(RuntimeError, match="failed on purpose after registration"),
+        TestClient(app),
+    ):
+        pass
+
+    assert asyncio.run(_built_in_rows()) == before
+    assert asyncio.run(_stored_release()) == stored_before
+
+
 def test_start_that_fails_while_starting_background_loops_changes_no_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -182,9 +182,18 @@ jobs:
         # at the next `## ` heading or end-of-file. A missing section
         # falls back to the `[Unreleased]` block — useful for
         # pre-release tags like `v0.1.0-rc.1` that the CHANGELOG may
-        # not have a dedicated section for yet. If both are absent,
-        # the file is left empty and GoReleaser falls back to its
-        # built-in `changelog:` git-log generation.
+        # not have a dedicated section for yet. If both are absent on
+        # a final tag, the file is left empty and GoReleaser falls back
+        # to its built-in `changelog:` git-log generation.
+        #
+        # A pre-release tag (it has a `-`, like `v1.0.0-rc.1`) gets two
+        # more rules (#3860):
+        #   * the notes start with a short header that says this is a
+        #     release candidate and which final release the notes
+        #     count from (the last tag that is not an rc);
+        #   * when both sections are empty the step fails. An rc whose
+        #     Release body is a raw git log is a wrong release; cut the
+        #     next rc after the CHANGELOG is fixed.
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -216,13 +225,37 @@ jobs:
             ' CHANGELOG.md
           }
 
+          # A section with only blank lines counts as empty.
+          has_text() { grep -q '[^[:space:]]' "$1"; }
+
           # Try the exact version first, then [Unreleased].
           extract_section "${VERSION}" > "${NOTES_FILE}"
-          if [[ ! -s "${NOTES_FILE}" ]]; then
+          if ! has_text "${NOTES_FILE}"; then
             extract_section "Unreleased" > "${NOTES_FILE}"
           fi
 
-          if [[ -s "${NOTES_FILE}" ]]; then
+          case "${TAG}" in
+            *-*)
+              if ! has_text "${NOTES_FILE}"; then
+                echo "::error::No CHANGELOG section for ${VERSION} and [Unreleased] is empty. A release candidate needs notes: fill [Unreleased], then cut the next rc."
+                exit 1
+              fi
+              # The last final tag: skip rc tags, as docs/RELEASING.md
+              # (rc series, R1) does for PREV.
+              PREV="$(git describe --tags --abbrev=0 --exclude='v*-rc.*' HEAD 2>/dev/null || true)"
+              {
+                printf '> **Release candidate.** %s is a test version before %s.' "\`${TAG}\`" "\`v${VERSION%%-*}\`"
+                if [[ -n "${PREV}" ]]; then
+                  printf ' The notes below list all changes since %s.' "\`${PREV}\`"
+                fi
+                printf '\n\n'
+                cat "${NOTES_FILE}"
+              } > "${NOTES_FILE}.rc"
+              mv "${NOTES_FILE}.rc" "${NOTES_FILE}"
+              ;;
+          esac
+
+          if has_text "${NOTES_FILE}"; then
             echo "Release notes extracted (${VERSION} or Unreleased):"
             echo "--- BEGIN ---"
             cat "${NOTES_FILE}"

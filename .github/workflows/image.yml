@@ -8,6 +8,8 @@
 #                           plus a trivy scan of backend/uv.lock (see below).
 #   push to main          : publish :<git-sha> (immutable) + :main (moving target).
 #   push tag v*           : publish :v<x.y.z> (alongside :<sha> + :main from main push).
+#                           A pre-release tag keeps its full name: v1.0.0-rc.1 ->
+#                           :v1.0.0-rc.1. A step checks this before the build.
 #
 # Goal #11 explicitly forbids :latest as a deploy target — operators MUST pin
 # to :<git-sha> (immutable), :v<x.y.z> (semver, immutable), or the manifest
@@ -196,6 +198,23 @@ jobs:
           # labels so `docker inspect` shows provenance.
           flavor: |
             latest=false
+
+      - name: Check the release tag is in the image tags
+        # A v* tag push must publish the image under the exact tag name,
+        # also for a pre-release tag: v1.0.0-rc.1 -> :v1.0.0-rc.1.
+        # `type=semver,pattern={{raw}}` gives that today, but a tag that
+        # is not valid semver gives no tag at all, and nothing else
+        # would notice. Fail here, before the long build (#3860).
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          want="ghcr.io/evoila/meho:${GITHUB_REF_NAME}"
+          if ! jq -e --arg want "${want}" '.tags | index($want)' <<< "${DOCKER_METADATA_OUTPUT_JSON}" >/dev/null; then
+            echo "::error::The image tags do not include ${want}. Tags: $(jq -c '.tags' <<< "${DOCKER_METADATA_OUTPUT_JSON}")" >&2
+            exit 1
+          fi
+          echo "OK: the image will be published as ${want}."
 
       - name: Build image to quarantine digest (no release tag)
         id: build

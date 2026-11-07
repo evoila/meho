@@ -2558,7 +2558,19 @@ matching the current tag's version (`## [0.1.0]`) — with
 `$RUNNER_TEMP/release-notes.md`, then passes the path via
 `--release-notes` to GoReleaser. GoReleaser uses the file content
 verbatim as the GitHub Release body, overriding its built-in
-`changelog:` git-log generation.
+`changelog:` git-log generation. A section with only blank lines
+counts as empty.
+
+For a pre-release tag (the tag has a `-`, like `v1.0.0-rc.1`) the step
+does two more things:
+
+- It puts a short header on top of the notes. The header says this is
+  a release candidate for `v1.0.0`, and that the notes list all changes
+  since the last final tag (found with `git describe --tags --abbrev=0
+  --exclude='v*-rc.*'`).
+- It fails when both sections are empty. A final tag only warns and
+  lets GoReleaser fall back to the git log; an rc must not, because a
+  new rc is cheap to cut after the CHANGELOG is fixed.
 
 `cli/.goreleaser.yaml` keeps the `changelog: use: git` block as a
 fallback for snapshot builds (`make release-dry-run` doesn't pass

@@ -40,7 +40,10 @@ One docs version **per minor**, with a `latest` alias:
 - Material's version selector is enabled via `extra.version.provider:
   mike` in `mkdocs.yml`; it reads mike's `versions.json` on gh-pages.
 - Pre-release tags (`v1.0.0-rc.1`) deploy under their minor (`1.0`) —
-  the rc docs are that minor's docs in progress.
+  the rc docs are that minor's docs in progress. A tag with a `-` runs
+  only `mike deploy --push 1.0`: no `latest` alias and no
+  `set-default`. So `latest` and the site root stay on the last final
+  release until the final tag (`v1.0.0`) moves them.
 
 ## Control flow (deploy)
 

@@ -43,7 +43,6 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.main import app
 from meho_backplane.mcp.registry import get_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
-from meho_backplane.mcp.tools import sensors as _sensor_tools  # noqa: F401  (registers the tools)
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.routes.sensors.views import project_sensor_to_row
 from meho_backplane.ui.templating import get_templates
@@ -467,6 +466,8 @@ def _mcp_admin() -> Operator:
 async def test_mcp_create_refuses_with_the_warning_and_accepts_force() -> None:
     await _seed()
     await _seed_target("old-appliance", probed="8.0.3")
+    import meho_backplane.mcp.tools.sensors  # noqa: F401  (registers the tool)
+
     tool = get_tool("meho_sensor_create")
     assert tool is not None
     definition, handler = tool

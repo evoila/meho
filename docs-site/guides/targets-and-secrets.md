@@ -117,6 +117,11 @@ The schema allows keys it does not list. The import keeps them in
 `extras` and warns. The CLI import and the console import map the same
 keys.
 
+The schema has the same limits as the API. A name or alias has no
+spaces, line breaks or `/`. `secret_field_map` holds at most 50
+entries. A CA pin (`tls_ca_pin`) does not go together with
+`verify_tls: false`. `version` is text, for example `"8.0"`, or `null`.
+
 ### Use a secret with different field names
 
 A connector reads fixed field names from the secret. For example, SSH

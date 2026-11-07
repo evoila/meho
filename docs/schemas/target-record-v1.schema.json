@@ -92,9 +92,26 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": true,
   "description": "One entry of the ``targets:`` list.\n\nA key that is not listed here is allowed. The import keeps it in the\ntarget's ``extras`` and prints a warning.",
+  "not": {
+    "properties": {
+      "tls_ca_pin": {
+        "type": "string"
+      },
+      "verify_tls": {
+        "const": false
+      }
+    },
+    "required": [
+      "tls_ca_pin",
+      "verify_tls"
+    ]
+  },
   "properties": {
     "aliases": {
+      "description": "Other names of the target. The same rule as for the name.",
       "items": {
+        "minLength": 1,
+        "pattern": "^[^\\s/\\x00-\\x1f\\x7f-\\x9f]+$",
         "type": "string"
       },
       "title": "Aliases",
@@ -143,19 +160,21 @@
         }
       ],
       "default": null,
+      "description": "An IPv4 address, an IPv6 address or a DNS host name (letters, digits and '-', at most 253 characters). A port or a path after the host is allowed.",
       "title": "Fqdn"
     },
     "host": {
-      "description": "The host or IP address.",
+      "description": "An IPv4 address, an IPv6 address or a DNS host name (letters, digits and '-', at most 253 characters). A port or a path after the host is allowed.",
       "maxLength": 512,
       "minLength": 1,
       "title": "Host",
       "type": "string"
     },
     "name": {
-      "description": "The target's name.",
+      "description": "The target's name. No spaces, line breaks, control characters or '/'.",
       "maxLength": 200,
       "minLength": 1,
+      "pattern": "^[^\\s/\\x00-\\x1f\\x7f-\\x9f]+$",
       "title": "Name",
       "type": "string"
     },
@@ -212,6 +231,7 @@
         "type": "string"
       },
       "description": "Maps a connector field to the field name in your secret. Names only.",
+      "maxProperties": 50,
       "propertyNames": {
         "maxLength": 200,
         "minLength": 1
@@ -242,6 +262,7 @@
         }
       ],
       "default": null,
+      "description": "A CA certificate bundle in PEM form. Not together with verify_tls: false.",
       "title": "Tls Ca Pin"
     },
     "tls_server_name": {

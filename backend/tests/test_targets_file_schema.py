@@ -9,6 +9,8 @@ toolkit's ``targets.yaml``. These tests check three things:
 * the checked-in file matches the model;
 * the keys of the schema match the keys ``meho targets import`` and the
   console import map to a column;
+* the schema refuses what the target write model refuses, and accepts
+  what it accepts;
 * a toolkit file imports into a tenant without edits.
 """
 
@@ -25,10 +27,12 @@ import respx
 import yaml
 from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator
+from pydantic import ValidationError
 from scripts.generate_targets_file_schema import SCHEMA_PATH, render_schema
 
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.file_schema import TargetRecord
+from meho_backplane.targets.schemas import TargetCreate
 from meho_backplane.ui.routes.connectors.import_view import (
     _KNOWN_TOP_LEVEL as CONSOLE_KNOWN_KEYS,
 )
@@ -47,10 +51,14 @@ from ._targets_helpers import (
     _isolated_jwks_cache,  # noqa: F401
     _settings_env,  # noqa: F401
 )
+from .test_targets_schemas import _VALID_CA_PEM
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _FIXTURE = Path(__file__).parent / "fixtures" / "toolkit-targets-v1.yaml"
 _GO_IMPORT = _REPO_ROOT / "cli" / "internal" / "cmd" / "targets" / "import.go"
+
+#: The smallest record both the schema and the write model accept.
+_MINIMAL = {"name": "x", "product": "linux", "host": "h.example.com"}
 
 
 @pytest.fixture(autouse=True)
@@ -92,11 +100,55 @@ def test_schema_keys_match_the_import_keys() -> None:
     assert schema_keys == CONSOLE_KNOWN_KEYS | CONSOLE_SKIPPED_KEYS
 
 
-def test_toolkit_file_is_valid_against_the_schema() -> None:
+def _schema_errors(entry: dict[str, Any]) -> list[str]:
     schema = json.loads((_REPO_ROOT / SCHEMA_PATH).read_text(encoding="utf-8"))
-    validator = Draft202012Validator(schema)
+    return [e.message for e in Draft202012Validator(schema).iter_errors(entry)]
+
+
+def test_toolkit_file_is_valid_against_the_schema_and_the_write_model() -> None:
     for entry in _fixture_entries():
-        assert list(validator.iter_errors(entry)) == [], entry["name"]
+        assert _schema_errors(entry) == [], entry["name"]
+        body, _ = _map_entry(entry)
+        TargetCreate.model_validate(body)
+
+
+@pytest.mark.parametrize(
+    "bad_entry",
+    [
+        {**_MINIMAL, "name": "Example Server"},
+        {**_MINIMAL, "name": "lab/vc"},
+        {**_MINIMAL, "name": "lab\tvc"},
+        {**_MINIMAL, "aliases": [""]},
+        {**_MINIMAL, "aliases": ["vc01", "lab vc"]},
+        {**_MINIMAL, "version": "9" * 101},
+        {**_MINIMAL, "preferred_impl_id": "p" * 201},
+        {**_MINIMAL, "secret_field_map": {"": "login"}},
+        {**_MINIMAL, "secret_field_map": {f"field_{i}": "login" for i in range(51)}},
+        {**_MINIMAL, "tls_ca_pin": _VALID_CA_PEM, "verify_tls": False},
+    ],
+)
+def test_schema_refuses_what_the_write_model_refuses(bad_entry: dict[str, Any]) -> None:
+    assert _schema_errors(bad_entry) != []
+    body, _ = _map_entry(bad_entry)
+    with pytest.raises(ValidationError):
+        TargetCreate.model_validate(body)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {**_MINIMAL, "name": "lab-vc.01", "aliases": ["vc01", "vcenter_lab"]},
+        {**_MINIMAL, "version": None},
+        {**_MINIMAL, "host": "db-01.example.com:27017"},
+        {**_MINIMAL, "tls_ca_pin": _VALID_CA_PEM},
+        {**_MINIMAL, "tls_ca_pin": _VALID_CA_PEM, "verify_tls": True},
+        {**_MINIMAL, "secret_field_map": {f"field_{i}": "login" for i in range(50)}},
+    ],
+)
+def test_schema_accepts_what_the_write_model_accepts(entry: dict[str, Any]) -> None:
+    assert _schema_errors(entry) == []
+    body, _ = _map_entry(entry)
+    TargetCreate.model_validate(body)
 
 
 @pytest.mark.parametrize(
@@ -112,8 +164,7 @@ def test_toolkit_file_is_valid_against_the_schema() -> None:
     ],
 )
 def test_schema_rejects_a_bad_record(bad_entry: dict[str, Any]) -> None:
-    schema = json.loads((_REPO_ROOT / SCHEMA_PATH).read_text(encoding="utf-8"))
-    assert list(Draft202012Validator(schema).iter_errors(bad_entry)) != []
+    assert _schema_errors(bad_entry) != []
 
 
 def test_console_mapping_keeps_version_and_tls_keys_as_columns() -> None:

@@ -10,6 +10,16 @@ schema is checked in as ``docs/schemas/target-record-v1.schema.json``.
 ``tests/test_targets_file_schema.py`` fails when this model changes and the
 file was not made again.
 
+The limits are the ones of the target write model
+(:class:`~meho_backplane.targets.schemas.TargetCreate`): the length limits,
+the name rule of :func:`~meho_backplane.targets.field_rules.check_target_name`,
+the size of ``secret_field_map`` and the rule that a CA pin and
+``verify_tls: false`` do not go together. The host rule
+(:func:`~meho_backplane.targets.field_rules.check_target_host`) allows a
+port or a path after the host, so it is not a pattern here; the schema
+states it in words. A record that passes the schema can still be refused
+when its host is a private or local address and no allow list permits it.
+
 The model is for the schema file and for tests. The import does not use it:
 the import maps keys itself (``cli/internal/cmd/targets/import.go``).
 """
@@ -17,15 +27,34 @@ the import maps keys itself (``cli/internal/cmd/targets/import.go``).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from meho_backplane.connectors.schemas import AuthModel
-from meho_backplane.targets.schemas import SecretFieldName
+from meho_backplane.targets.schemas import SECRET_FIELD_MAP_MAX_ENTRIES, SecretFieldName
 
 #: The number in the schema file name.
 TARGET_RECORD_SCHEMA_VERSION = "1"
+
+#: The name rule of ``check_target_name`` as a pattern: no whitespace, no
+#: control character (Unicode category Cc) and no ``/``.
+_NAME_PATTERN = r"^[^\s/\x00-\x1f\x7f-\x9f]+$"
+
+_HOST_RULE = (
+    "An IPv4 address, an IPv6 address or a DNS host name (letters, digits and "
+    "'-', at most 253 characters). A port or a path after the host is allowed."
+)
+
+#: A ``tls_ca_pin`` with ``verify_tls: false`` is refused by the write model.
+_CA_PIN_NEEDS_VERIFY_TLS: dict[str, Any] = {
+    "not": {
+        "required": ["tls_ca_pin", "verify_tls"],
+        "properties": {"tls_ca_pin": {"type": "string"}, "verify_tls": {"const": False}},
+    }
+}
+
+TargetAlias = Annotated[str, StringConstraints(min_length=1, pattern=_NAME_PATTERN)]
 
 
 class FingerprintRecord(BaseModel):
@@ -55,27 +84,39 @@ class TargetRecord(BaseModel):
     target's ``extras`` and prints a warning.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", json_schema_extra=_CA_PIN_NEEDS_VERIFY_TLS)
 
-    name: str = Field(min_length=1, max_length=200, description="The target's name.")
-    aliases: list[str] = Field(default_factory=list)
+    name: str = Field(
+        min_length=1,
+        max_length=200,
+        pattern=_NAME_PATTERN,
+        description="The target's name. No spaces, line breaks, control characters or '/'.",
+    )
+    aliases: list[TargetAlias] = Field(
+        default_factory=list,
+        description="Other names of the target. The same rule as for the name.",
+    )
     product: str = Field(min_length=1, max_length=100, description="The product token.")
     version: str | None = Field(
         default=None,
         max_length=100,
         description='The product version you state. Write it as text, for example "8.0".',
     )
-    host: str = Field(min_length=1, max_length=512, description="The host or IP address.")
+    host: str = Field(min_length=1, max_length=512, description=_HOST_RULE)
     port: int | None = Field(default=None, ge=1, le=65535)
-    fqdn: str | None = None
+    fqdn: str | None = Field(default=None, description=_HOST_RULE)
     secret_ref: str | None = Field(default=None, description="A path in the credential store.")
     auth_model: AuthModel = AuthModel.SHARED_SERVICE_ACCOUNT
     vpn_required: bool = False
     verify_tls: bool = True
-    tls_ca_pin: str | None = None
+    tls_ca_pin: str | None = Field(
+        default=None,
+        description="A CA certificate bundle in PEM form. Not together with verify_tls: false.",
+    )
     tls_server_name: str | None = Field(default=None, max_length=512)
     secret_field_map: dict[SecretFieldName, SecretFieldName] = Field(
         default_factory=dict,
+        max_length=SECRET_FIELD_MAP_MAX_ENTRIES,
         description="Maps a connector field to the field name in your secret. Names only.",
     )
     extras: dict[str, Any] = Field(default_factory=dict)

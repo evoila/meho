@@ -616,6 +616,12 @@ empty follow-up page. The REST route avoids this by over-fetching
   It covers the product, the version and the `fingerprint` fields
   (vendor, product, version, build, edition, reachable, probed_at,
   probe_method, extras).
+- The schema carries the limits of `TargetCreate`: the length limits, the
+  name rule (no whitespace, control character or `/`, also for aliases),
+  at most 50 entries in `secret_field_map`, and no `tls_ca_pin` together
+  with `verify_tls: false`. The host rule is only stated in words, because
+  a port or path after the host is allowed. `version` may be `null`; the
+  CLI, the console and the API all accept it.
 - The schema is published as `docs/schemas/target-record-v1.schema.json`.
   Make it again with
   `cd backend && uv run python scripts/generate_targets_file_schema.py`.

@@ -198,8 +198,10 @@ does not say the operation ran and failed. The sentences are in
 `ui/routes/approvals/render.py` (`RESUME_REFUSAL_MESSAGES`), keyed by the
 error code of the stored result.
 
-**During a rolling update.** For a short time old and new pods run side
-by side. A new pod ends the waiting requests it finds when it starts. A
+**During a rolling update.** The chart's default update strategy is
+`Recreate` (#5024): the old pod stops before the new pod starts, so this
+does not happen. With `updateStrategy.type: RollingUpdate`, for a short
+time old and new pods run side by side. A new pod ends the waiting requests it finds when it starts. A
 request that an old pod saves after that point still waits; if it is
 approved, a new pod refuses to run it. Once both releases have this
 check, an old pod also refuses to run a request made by a new pod. In both cases nothing from the wrong release

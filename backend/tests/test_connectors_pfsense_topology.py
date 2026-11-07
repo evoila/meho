@@ -31,7 +31,6 @@ import asyncssh
 import pytest
 from sqlalchemy import select
 
-import meho_backplane.connectors.pfsense  # noqa: F401 -- import for registry side-effects
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.pfsense import PfSenseConnector
 from meho_backplane.connectors.pfsense._topology import (

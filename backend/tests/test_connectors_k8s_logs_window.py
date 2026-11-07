@@ -656,7 +656,8 @@ async def test_window_request_headers_match_the_sdk_pod_log_call() -> None:
     assert window_kwargs["headers"]["Accept"] != "text/plain"
     assert window_request.call_args.args == sdk_request.call_args.args
     window_query_params = dict(window_kwargs["query_params"])
-    assert window_query_params.pop("sinceTime") == "2026-08-01T00:00:00Z"
+    since_time = window_query_params.pop("sinceTime")
+    assert since_time == "2026-08-01T00:00:00Z"
     assert window_query_params == dict(sdk_kwargs["query_params"])
 
 

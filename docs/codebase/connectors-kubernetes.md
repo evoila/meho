@@ -458,7 +458,7 @@ the same pattern `ops_workload.py` / `ops_logs.py` use. Every op is
 | `k8s.annotate`         | caution   | Strategic-merge patch of `metadata.annotations` over a kind table (deployment/pod/service/namespace/node); null value removes a key. |
 | `k8s.label`            | caution   | Same as annotate over `metadata.labels`; relabeling a Service-selected workload can re-route traffic. |
 | `k8s.cordon`           | caution   | `CoreV1Api.patch_node(spec.unschedulable)`; `uncordon=true` reverses. Eviction-free. |
-| `k8s.apply`            | dangerous | Server-side apply over `DynamicClient.server_side_apply` (`field_manager="meho"`), GVK resolved per manifest doc from discovery. `dry_run="server"` -> API `?dryRun=All` (mutates nothing, returns the would-be object). |
+| `k8s.apply`            | dangerous | Server-side apply over `DynamicClient.server_side_apply` (`field_manager="meho"`), GVK resolved per manifest doc from discovery. `dry_run="server"` -> API `?dryRun=All` (mutates nothing, returns the would-be object). `force_conflicts=true` takes over fields another tool owns. |
 | `k8s.delete`           | dangerous | Kind dispatch **scoped to pod/job/replicaset in v1** (namespace/PVC/PV rejected); explicit `propagation_policy` / `grace_period_seconds`. |
 | `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). Values may be inline (`string_data` / `data`) or ref-sourced (`string_data_secret_ref` / `data_secret_ref`, resolved server-side through the credential-backend seam). Optional `labels` / `annotations` maps go on the Secret's metadata. |
 | `k8s.job.create`       | dangerous | `BatchV1Api.create_namespaced_job` from a spec body; response is identity only. |
@@ -599,6 +599,27 @@ longer than the value it replaces: the echo keeps at most 16 KB in total
 as stored, counting every entry. A document that does not fit whole
 keeps only its identity; when not even that fits, one closing entry
 counts the documents left out.
+
+**`k8s.apply` and `force_conflicts`.** Kubernetes records which tool owns
+each field of an object. `k8s.apply` applies under the owner `meho`. When
+an object was applied before by another tool (`kubectl apply`, Helm), a
+change to a field that tool owns is a conflict (HTTP 409). A list such as a
+NetworkPolicy's `spec.egress` is one field, so adding one entry to it
+conflicts too. Two ways to handle it:
+
+- **Default (`force_conflicts: false`).** The apply fails. The error names
+  each other owner and its fields, and says that `force_conflicts: true`
+  takes them over.
+- **`force_conflicts: true`.** The apply sends the force switch and takes
+  the conflicting fields over. Use it to change an object that another
+  tool applied. It changes who owns those fields: a later `kubectl apply`
+  of the old file by that tool will then conflict with `meho`.
+
+The approval request shows the switch. The dry-run of a forced apply first
+asks the API server without force, then lists each field it takes over in
+`preview.applied[].takes_over` (`{owner, field}` pairs), so the approver
+sees which fields move from which owner. The real apply forces whatever
+conflicts at that moment.
 
 **`k8s.apply` API-server rejections (#3876).** `DynamicClient.request`
 calls the API with `_preload_content=False`, and kubernetes_asyncio only

@@ -280,8 +280,15 @@ table with the ~700 GitHub REST ops and run the LLM-summarised
 grouping pass:
 
 ```bash
-meho connector ingest --catalog gh/3 --json
+meho connector ingest --catalog gh/3 --tenant-id <your tenant UUID> --json
 ```
+
+`--tenant-id` puts the connector into your own tenant. The
+`tenant_admin` role is enough for that. Without `--tenant-id`, the
+ingest writes to the built-in scope that every tenant shares. That
+needs the `platform_admin` flag, and a `tenant_admin` gets HTTP 403.
+Leave it out only when you set up one shared copy for all tenants
+as a platform admin.
 
 The `--catalog gh/3` shape (G0.14-T9 #1150) resolves the curated
 entry from
@@ -426,12 +433,13 @@ the composite is registered, and the dispatch lands an audit row.
 
 To verify the **write-op approval flow**, attempt a write op
 without an approval first; you should see the call enter the
-queue:
+queue. An ingested operation takes its request fields inside a
+`body` object; MEHO sends that object as the request body:
 
 ```bash
 meho operation call gh-rest-3 'POST:/repos/{owner}/{repo}/issues' \
   --target github-meho \
-  --params '{"owner":"evoila","repo":"meho","title":"smoke-test issue","body":"approval flow smoke"}' \
+  --params '{"owner":"evoila","repo":"meho","body":{"title":"smoke-test issue","body":"approval flow smoke"}}' \
   --json
 ```
 

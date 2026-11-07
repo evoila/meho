@@ -45,7 +45,7 @@ Names are `<release>-core-…`. "alnum 32" means 32 characters from
 | `-core-postgres-superuser` | `password` | alnum 32 | `corePostgres.enabled` | `corePostgres.existingSecrets.superuser` |
 | `-core-postgres-meho` | `password`, `url` | alnum 32; `postgresql+asyncpg://meho:<password>@<release>-postgres:5432/meho` (the owner login that runs the migrations) | `corePostgres.enabled` | none: `postgres.credentialsSecret` must stay empty or name this Secret (#4047) |
 | `-core-postgres-meho-app` | `password`, `url` | alnum 32; `postgresql+asyncpg://meho_app:<password>@<release>-postgres:5432/meho` (the login of the running backplane; `meho` above runs the migrations) | `corePostgres.enabled` | `postgres.runtime.credentialsSecret` (must stay empty or name this Secret, see below) |
-| `-core-postgres-keycloak` | `password` | alnum 32 | `corePostgres.enabled` | `corePostgres.existingSecrets.keycloak` (not while `coreKeycloak.enabled` is on, see below) |
+| `-core-postgres-keycloak` | `password` | alnum 32 | `corePostgres.enabled`, or `coreKeycloak.enabled` with your own PostgreSQL | `corePostgres.existingSecrets.keycloak` (not while `coreKeycloak.enabled` is on, see below); with your own PostgreSQL, `coreKeycloak.database.passwordSecret.name` |
 | `-core-keycloak-bootstrap` | `client_id`, `client_secret` | alnum 32 | `coreKeycloak.enabled` | `coreKeycloak.existingSecrets.bootstrap` |
 | `-core-keycloak-admin` | `client_secret` | alnum 32 | `coreKeycloak.enabled` | `keycloakAdmin.clientSecret.secretName` (not while `coreKeycloak.enabled` is on, see below) |
 | `-core-ui-auth` | `session_encryption_key`, `client_secret` | Fernet; alnum 32 | `coreKeycloak.enabled` | `uiConsole.secretName` (not while `coreKeycloak.enabled` is on, see below) |
@@ -114,6 +114,35 @@ Secret (#4591). To use your own value for one of these Secrets, create it
 with the `<release>-core-…` name before the install: the Job keeps a Secret
 that exists. Only `coreKeycloak.existingSecrets.bootstrap` may name another
 Secret, because the Keycloak subchart reads that key too.
+
+**Built-in Keycloak on your own PostgreSQL.** With `corePostgres.enabled:
+false` and `coreKeycloak.enabled: true`, Keycloak still needs a database and
+a login role of its own. There are two ways, set under
+`coreKeycloak.database` (the subchart's `values.yaml` describes every key):
+
+- *Named in values.* Your database team makes the database and the role.
+  Set `host`, and `passwordSecret.name` (and `key`, default `password`) for
+  the role's password; `name` and `user` default to `keycloak`. The secrets
+  Job checks that the Secret holds the key, and does not make it.
+- *Made by the chart.* Set `create.enabled: true` and
+  `create.adminSecret.name` (a Secret with the keys `username` and
+  `password` of a login that may create a role and a database). Leave
+  `passwordSecret.name` empty: the secrets Job makes
+  `<release>-core-postgres-keycloak` as before. A `pre-install,pre-upgrade`
+  hook Job (`<release>-keycloak-database`, weight `-25`, after the secrets
+  Job and before the migration Job) creates the role and the database when
+  they are missing, and sets the role's password to the one in that Secret.
+  It is safe to run twice. The admin login is read only by this Job.
+
+`sslMode` sets the TLS mode for Keycloak (`KC_DB_URL_PROPERTIES`) and for the
+Job (`PGSSLMODE`). `meho.coreKeycloakChecks` stops the render with a plain
+sentence when the host is empty, when neither a password Secret nor
+`create.enabled` is set, when `create.enabled` has no admin Secret, and when
+any of these keys is set while `corePostgres.enabled` is on. The Keycloak
+pod has no egress rule and the Job pod carries no backplane label, so the
+backplane's `postgresCIDR` rule does not apply to them. A cluster-wide
+default-deny egress policy outside the chart must allow both to reach the
+database.
 
 **With the built-in PostgreSQL.** The PostgreSQL pod mounts
 `<release>-core-postgres-meho-app`, the login of the running backplane, by

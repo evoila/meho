@@ -893,9 +893,9 @@ up a realm by hand. It is **on by default** (`coreKeycloak.enabled:
 true`, since chart 0.2.0). An install that brings its own Keycloak sets it
 to `false`.
 
-**What it needs.** The built-in PostgreSQL (`corePostgres.enabled:
-true`; the schema refuses `coreKeycloak` without it) and five Secrets
-that the install's secrets Job creates. Keycloak only reads them:
+**What it needs.** A PostgreSQL (the built-in one, or your own: see
+"Your own PostgreSQL" below) and five Secrets that the install's secrets
+Job creates. Keycloak only reads them:
 
 | Secret (default name) | Keys | Used for |
 | --- | --- | --- |
@@ -918,6 +918,16 @@ secrets Job would check that Secret, not make the core one, and the
 Keycloak pod would wait for it forever. The render stops with one sentence
 that names the key and the expected Secret (#4591). The pod does not start
 until all five exist.
+
+**Your own PostgreSQL.** With `corePostgres.enabled: false`, Keycloak
+connects to the server in `coreKeycloak.database.host` and needs its own
+database and role there. Either `coreKeycloak.database.create.enabled`
+makes them (a `pre-install,pre-upgrade` hook Job, `database-job.yaml`, safe
+to run twice, with an admin login from `create.adminSecret.name`), or your
+database team makes them and you name them in `database.name`, `user` and
+`passwordSecret`. `database.sslMode` sets the TLS mode. The built-in
+PostgreSQL keeps the fixed names, so its render does not change. See
+[core-secrets.md](core-secrets.md).
 
 **What it renders.**
 
@@ -1415,7 +1425,7 @@ them).
 | `broadcast.enabled` | `true` | Deploys the bundled Valkey broadcast subchart. |
 | `corePostgres.enabled` / `coreKeycloak.enabled` / `coreVault.enabled` | `true` | Built-in core parts (#4041), on by default since chart 0.2.0. When on, the core secrets Job makes the missing `<release>-core-*` Secrets; see [core-secrets.md](core-secrets.md). A bring-your-own install sets all three to `false`. |
 | `corePostgres.existingSecrets.{superuser,keycloak}` / `coreKeycloak.existingSecrets.bootstrap` | `""` | Your own Secret instead of a made one; the Job only checks its keys. |
-| `coreKeycloak.enabled` | `true` | Also deploys the built-in Keycloak subchart (#4040). When true it needs `corePostgres.enabled: true`, `coreKeycloak.hostname` (equal to `ingress.host`) and `coreKeycloak.firstTenantId` (a UUID). See [Built-in Keycloak subchart](#built-in-keycloak-subchart-chartskeycloak). |
+| `coreKeycloak.enabled` | `true` | Also deploys the built-in Keycloak subchart (#4040). When true it needs `coreKeycloak.hostname` (equal to `ingress.host`) and `coreKeycloak.firstTenantId` (a UUID). With `corePostgres.enabled: false` it also needs `coreKeycloak.database.host` and a password Secret, or `coreKeycloak.database.create` (a Job makes the database). See [Built-in Keycloak subchart](#built-in-keycloak-subchart-chartskeycloak). |
 | `connectors.enabled` | `[]` | Opt-in list; pick from the shipped connector catalog (see [`docs/architecture/connectors.md`](../architecture/connectors.md) — VMware/VCF, NSX, Kubernetes, Vault, Harbor, Keycloak, ArgoCD, GCloud, BIND9, pfSense, and more). |
 | `config.ingestJobTimeoutSeconds` | `""` | Async ingest-job watchdog budget override, in seconds (#2318, hardens #2275). Empty (default) omits `INGEST_JOB_TIMEOUT_SECONDS` so the backend's built-in 30-min ceiling applies; set a positive number to raise it for a slow shared executor / large spec fleet. Set via a values file or `--set-string` (bare `--set` coerces to a number and fails the `type: string` schema — as with every `*Seconds` knob here). Non-finite (`inf`/`nan`), non-positive, or malformed values are rejected at the backend (warn + fall back to 30 min), so the watchdog can never be disabled. |
 

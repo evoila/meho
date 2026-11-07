@@ -1,0 +1,108 @@
+{{- if .Values.database.create.enabled }}
+{{- /*
+Makes the role and the database of Keycloak on your own PostgreSQL. It runs
+as a Helm hook after the install's secrets Job (-30) and before Keycloak
+starts. Safe to run twice: it creates only what is missing. The admin login
+is used here and nowhere else. Details: docs/codebase/core-secrets.md.
+*/ -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-database" (include "coreKeycloak.fullname" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "coreKeycloak.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keycloak-database
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-25"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        # Not the backplane's labels, so no backplane NetworkPolicy applies.
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: keycloak-database
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      {{- with include "meho.core.imagePullSecrets" . }}
+      imagePullSecrets:
+        {{- . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.podSecurityContext "global" .Values.global) | nindent 8 }}
+      containers:
+        - name: create-database
+          # The image of the wait-for-database step: it has `psql`.
+          image: {{ include "meho.core.image" (dict "image" .Values.waitForDatabase.image "global" .Values.global) | quote }}
+          imagePullPolicy: {{ .Values.waitForDatabase.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              until pg_isready -q -h "$PGHOST" -p "$PGPORT"; do
+                echo "waiting for PostgreSQL at $PGHOST:$PGPORT"
+                sleep 2
+              done
+              # `format('%I')` and `format('%L')` quote the names and the
+              # password, so no value is read as SQL. `\getenv` reads the values from
+              # the environment, so the password is not on a command line.
+              psql -X -v ON_ERROR_STOP=1 -d postgres <<'SQL'
+              \getenv role KC_DB_USER
+              \getenv pw KC_DB_PASSWORD
+              \getenv db KC_DB_NAME
+              SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'role', :'pw')
+                WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'role') \gexec
+              SELECT format('ALTER ROLE %I LOGIN PASSWORD %L', :'role', :'pw')
+                WHERE EXISTS (SELECT FROM pg_roles WHERE rolname = :'role') \gexec
+              SELECT format('GRANT %I TO CURRENT_USER', :'role')
+                WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = :'db') \gexec
+              SELECT format('CREATE DATABASE %I OWNER %I', :'db', :'role')
+                WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = :'db') \gexec
+              SQL
+              echo "the role and the database exist"
+          env:
+            - name: PGHOST
+              value: {{ include "coreKeycloak.databaseHost" . | quote }}
+            - name: PGPORT
+              value: {{ .Values.database.port | quote }}
+            {{- with .Values.database.sslMode }}
+            - name: PGSSLMODE
+              value: {{ . | quote }}
+            {{- end }}
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.create.adminSecret.name | quote }}
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.create.adminSecret.name | quote }}
+                  key: password
+            - name: KC_DB_NAME
+              value: {{ .Values.database.name | quote }}
+            - name: KC_DB_USER
+              value: {{ .Values.database.user | quote }}
+            - name: KC_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "coreKeycloak.databasePasswordSecret" . }}
+                  key: {{ .Values.database.passwordSecret.key | quote }}
+          resources:
+            {{- toYaml .Values.waitForDatabase.resources | nindent 12 }}
+          securityContext:
+            {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.waitForDatabase.securityContext "global" .Values.global) | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

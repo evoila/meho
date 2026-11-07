@@ -30,7 +30,8 @@ spec:
         # Wait here until PostgreSQL accepts connections. `-U` and `-d` are
         # needed: without them pg_isready looks up the name of the current
         # user, which fails under a user id that has no passwd entry (as on
-        # OpenShift), and then it never reports ready.
+        # OpenShift), and then it never reports ready. The names are plain
+        # words; the schema allows nothing else.
         - name: wait-for-database
           image: {{ include "meho.core.image" (dict "image" .Values.waitForDatabase.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.waitForDatabase.image.pullPolicy }}
@@ -38,7 +39,7 @@ spec:
             - /bin/sh
             - -c
             - |
-              until pg_isready -q -h "$DB_HOST" -p "$DB_PORT" -U keycloak -d keycloak; do
+              until pg_isready -q -h "$DB_HOST" -p "$DB_PORT" -U {{ .Values.database.user }} -d {{ .Values.database.name }}; do
                 echo "waiting for PostgreSQL at $DB_HOST:$DB_PORT"
                 sleep 2
               done
@@ -60,6 +61,7 @@ spec:
             - --import-realm
           env:
             # Database: the `keycloak` database and role of the built-in
+            # PostgreSQL, or the ones named in `database` for your own
             # PostgreSQL. The pool stays at 20 so Keycloak and the backplane
             # fit PostgreSQL's 100 connections together.
             - name: KC_DB
@@ -69,14 +71,18 @@ spec:
             - name: KC_DB_URL_PORT
               value: {{ .Values.database.port | quote }}
             - name: KC_DB_URL_DATABASE
-              value: keycloak
+              value: {{ .Values.database.name | quote }}
             - name: KC_DB_USERNAME
-              value: keycloak
+              value: {{ .Values.database.user | quote }}
             - name: KC_DB_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "coreKeycloak.coreSecret" (dict "root" . "kind" "postgres-keycloak") }}
-                  key: password
+                  name: {{ include "coreKeycloak.databasePasswordSecret" . }}
+                  key: {{ .Values.database.passwordSecret.key | quote }}
+            {{- with .Values.database.sslMode }}
+            - name: KC_DB_URL_PROPERTIES
+              value: {{ printf "?sslmode=%s" . | quote }}
+            {{- end }}
             - name: KC_DB_POOL_INITIAL_SIZE
               value: "2"
             - name: KC_DB_POOL_MIN_SIZE

@@ -62,11 +62,13 @@ that applies to you.
 
 - **Your own secret store.** Set `coreVault.enabled: false`. It works
   with the built-in PostgreSQL and Keycloak.
-- **Your own PostgreSQL.** Set `corePostgres.enabled: false`. The
-  built-in Keycloak keeps its data in the built-in PostgreSQL, and the
-  built-in OpenBao needs the built-in Keycloak. So today your own
-  PostgreSQL also needs your own Keycloak and your own secret store:
-  set all three to `false`, and read the expert note below first.
+- **Your own PostgreSQL.** Set `corePostgres.enabled: false`. You can
+  keep MEHO's Keycloak: it then needs its own database and login role
+  on your PostgreSQL. See
+  [Your own PostgreSQL with the built-in Keycloak](#your-own-postgresql-with-the-built-in-keycloak).
+  The built-in OpenBao needs the built-in Keycloak. If you bring your
+  own Keycloak (expert path, below), also bring your own secret store:
+  set `coreKeycloak.enabled` and `coreVault.enabled` to `false`.
 
 !!! warning "Your own Keycloak (expert path)"
 
@@ -324,6 +326,61 @@ That is all. Leave `postgres.credentialsSecret`, `vault.address`,
 empty: the chart sets them. If you set them, Helm stops with an error
 that names the key. The NetworkPolicy is on by default, and it reaches
 the built-in parts without any address ranges from you.
+
+### Your own PostgreSQL with the built-in Keycloak
+
+Set `corePostgres.enabled: false` and keep `coreKeycloak.enabled: true`.
+Fill `postgres.credentialsSecret` (and `networkPolicy.postgresCIDR`) as
+for any own PostgreSQL. MEHO's Keycloak needs its own database and its
+own login role on your server. Name the server in
+`coreKeycloak.database.host`, then pick one of two ways.
+
+**The chart creates them.** Give the chart a login that may create a
+role and a database. A one-time Job uses it before Keycloak starts. It is
+safe to run twice: it makes only what is missing. The Job sets the
+password of the Keycloak role to the one in the Secret
+`<release>-core-postgres-keycloak`, which the install makes by itself.
+
+```bash
+kubectl create secret generic keycloak-db-admin \
+  --from-literal=username=<admin-user> \
+  --from-literal=password=<admin-password>
+```
+
+```yaml
+corePostgres:
+  enabled: false
+coreKeycloak:
+  database:
+    host: db.example.com
+    create:
+      enabled: true
+      adminSecret:
+        name: keycloak-db-admin
+```
+
+**You name them in values.** Your database team makes the database and
+the role. Put the role's password in a Secret with the key `password`
+(or name another key in `passwordSecret.key`).
+
+```yaml
+corePostgres:
+  enabled: false
+coreKeycloak:
+  database:
+    host: db.example.com
+    name: keycloak            # default
+    user: keycloak            # default
+    passwordSecret:
+      name: keycloak-db-password
+```
+
+Both ways accept `coreKeycloak.database.port` (default `5432`) and
+`coreKeycloak.database.sslMode` (`require`, `verify-full` and so on) for
+a TLS connection. Without a host, or without a password Secret or an
+admin Secret, Helm stops with a message that names the key. These keys
+work only with your own PostgreSQL. Moving the data of an existing
+install from the built-in PostgreSQL to yours is not covered here.
 
 ### With your own PostgreSQL, Keycloak and Vault (expert path)
 

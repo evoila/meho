@@ -195,6 +195,58 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 65535
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z_][a-z0-9_]{0,62}$",
+          "description": "Name of the database Keycloak uses. Default `keycloak`."
+        },
+        "user": {
+          "type": "string",
+          "pattern": "^[a-z_][a-z0-9_]{0,62}$",
+          "description": "Login role Keycloak connects as. Default `keycloak`."
+        },
+        "passwordSecret": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$",
+              "description": "Secret with the role's password. Empty = `<release>-core-postgres-keycloak`."
+            },
+            "key": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Key in that Secret that holds the password."
+            }
+          }
+        },
+        "sslMode": {
+          "type": "string",
+          "enum": ["", "disable", "allow", "prefer", "require", "verify-ca", "verify-full"],
+          "description": "TLS mode of the connection to PostgreSQL. Empty = the driver's default."
+        },
+        "create": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "A Job makes the role and the database on your PostgreSQL before Keycloak starts."
+            },
+            "adminSecret": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$",
+                  "description": "Secret (keys `username` and `password`) of a login that may create a role and a database."
+                }
+              }
+            }
+          }
         }
       }
     },

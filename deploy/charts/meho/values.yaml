@@ -1405,8 +1405,10 @@ coreKeycloak:
   # `-core-keycloak-admin`, `-core-ui-auth` and `-core-check-runner`, and
   # deploys the Keycloak subchart (`charts/keycloak/`): Keycloak on the
   # official image at `https://<host>/auth`, with the MEHO realm loaded at
-  # the first start. Needs `corePostgres.enabled: true`. Every other key is
-  # described in `charts/keycloak/values.yaml`; set it here.
+  # the first start. Works with the built-in PostgreSQL or with your own: with
+  # `corePostgres.enabled: false`, set `database.host` and either a password
+  # Secret or `database.create` (see `charts/keycloak/values.yaml`). Every
+  # other key is described in `charts/keycloak/values.yaml`; set it here.
   #
   # While `coreKeycloak.enabled` is on, `corePostgres.existingSecrets.keycloak`,
   # `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` and

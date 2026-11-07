@@ -7,7 +7,11 @@ values, so the parent checks:
 - the issuer is not set by hand: the chart derives it (meho.keycloakSettings);
 - the four Secret-name keys whose Secrets Keycloak reads are empty or name
   the `<release>-core-…` Secret. Keycloak reads only the core names, so any
-  other name would leave the core Secret unmade and the pod waiting forever.
+  other name would leave the core Secret unmade and the pod waiting forever;
+- the database settings fit the PostgreSQL in use: with the built-in
+  PostgreSQL the `database` keys keep their defaults; with your own
+  PostgreSQL (`corePostgres.enabled: false`) the host is required, and so is
+  a password Secret or an admin Secret for the Job that makes the database.
 */}}
 {{- define "meho.coreKeycloakChecks" -}}
 {{- if and .Values.ingress.enabled (ne .Values.coreKeycloak.hostname .Values.ingress.host) -}}
@@ -18,7 +22,30 @@ values, so the parent checks:
 {{- fail (printf "%s must be empty while coreKeycloak.enabled is on: the chart sets the issuer to https://<coreKeycloak.hostname>/auth/realms/meho." $key) -}}
 {{- end -}}
 {{- end -}}
-{{- $named := dict "corePostgres.existingSecrets.keycloak" (list .Values.corePostgres.existingSecrets.keycloak "postgres-keycloak") "keycloakAdmin.clientSecret.secretName" (list .Values.keycloakAdmin.clientSecret.secretName "keycloak-admin") "uiConsole.secretName" (list .Values.uiConsole.secretName "ui-auth") "checkRunner.clientSecret.secretName" (list .Values.checkRunner.clientSecret.secretName "check-runner") -}}
+{{- $db := .Values.coreKeycloak.database -}}
+{{- if .Values.corePostgres.enabled -}}
+{{- if or (ne $db.name "keycloak") (ne $db.user "keycloak") $db.passwordSecret.name $db.create.enabled $db.sslMode -}}
+{{- fail "coreKeycloak.database.name, user, passwordSecret.name, sslMode and create.enabled are only for your own PostgreSQL: leave them unset while corePostgres.enabled is on (the built-in PostgreSQL makes the database and the role itself)." -}}
+{{- end -}}
+{{- else -}}
+{{- if not $db.host -}}
+{{- fail "coreKeycloak.database.host is empty: with corePostgres.enabled off, the built-in Keycloak needs the host of your PostgreSQL." -}}
+{{- end -}}
+{{- if $db.create.enabled -}}
+{{- if not $db.create.adminSecret.name -}}
+{{- fail "coreKeycloak.database.create.adminSecret.name is empty: name a Secret (keys username and password) with a login that may create a role and a database, or set create.enabled to false." -}}
+{{- end -}}
+{{- if eq $db.create.adminSecret.name (printf "%s-core-keycloak-db-admin" .Release.Name) -}}
+{{- fail (printf "coreKeycloak.database.create.adminSecret.name must not be %q: that name is kept for the install's own Secrets. Pick another name." $db.create.adminSecret.name) -}}
+{{- end -}}
+{{- else if not $db.passwordSecret.name -}}
+{{- fail "coreKeycloak.database.passwordSecret.name is empty: with your own PostgreSQL, name the Secret with the password of Keycloak's database role, or set create.enabled to true so the chart makes the role and the database." -}}
+{{- end -}}
+{{- end -}}
+{{- $named := dict "keycloakAdmin.clientSecret.secretName" (list .Values.keycloakAdmin.clientSecret.secretName "keycloak-admin") "uiConsole.secretName" (list .Values.uiConsole.secretName "ui-auth") "checkRunner.clientSecret.secretName" (list .Values.checkRunner.clientSecret.secretName "check-runner") -}}
+{{- if .Values.corePostgres.enabled -}}
+{{- $_ := set $named "corePostgres.existingSecrets.keycloak" (list .Values.corePostgres.existingSecrets.keycloak "postgres-keycloak") -}}
+{{- end -}}
 {{- range $key, $pair := $named -}}
 {{- $want := printf "%s-core-%s" $.Release.Name (index $pair 1) -}}
 {{- if and (index $pair 0) (ne (index $pair 0) $want) -}}

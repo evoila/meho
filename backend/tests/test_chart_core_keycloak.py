@@ -383,8 +383,6 @@ def test_long_release_name_keeps_statefulset_and_ingress_in_step() -> None:
 @pytest.mark.parametrize(
     ("extra", "messages"),
     [
-        # Helm 3 and Helm 4 word a failed if/then rule differently.
-        (["--set", "corePostgres.enabled=false"], ('Must validate "then"', "'allOf' failed")),
         (["--set", "coreKeycloak.hostname=other.test"], ("must equal ingress.host",)),
         (["--set", "coreKeycloak.hostname="], ("coreKeycloak.hostname is empty",)),
         (["--set", "coreKeycloak.firstTenantId="], ("coreKeycloak.firstTenantId is empty",)),
@@ -403,7 +401,6 @@ def test_long_release_name_keeps_statefulset_and_ingress_in_step() -> None:
         ),
     ],
     ids=[
-        "needs-postgres",
         "host-mismatch",
         "no-hostname",
         "no-tenant-id",

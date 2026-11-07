@@ -19,9 +19,9 @@
 
 # -- Turns the subchart on. The parent's dependency entry uses
 # `condition: coreKeycloak.enabled`. Off by default: the chart then renders
-# exactly what it rendered before the subchart existed. Needs the built-in
-# PostgreSQL (`corePostgres.enabled: true`) and the Secrets the install's
-# secrets Job creates.
+# exactly what it rendered before the subchart existed. Needs a
+# PostgreSQL: the built-in one, or your own (see `database`), and the Secrets
+# the install's secrets Job creates.
 enabled: false
 
 # -- Public DNS name of MEHO, for example `meho.example.com`. Set it to the
@@ -96,10 +96,40 @@ waitForDatabase:
 
 database:
   # -- PostgreSQL host. Empty = `<release>-postgres`, the Service of the
-  # built-in PostgreSQL. Keycloak uses the database `keycloak` as the login
-  # role `keycloak`; the built-in PostgreSQL creates both.
+  # built-in PostgreSQL. With `corePostgres.enabled: false` it is required:
+  # name the host of your own PostgreSQL.
   host: ""
   port: 5432
+  # -- Name of the database Keycloak uses. With the built-in PostgreSQL it
+  # stays `keycloak` (the built-in PostgreSQL creates it). With your own
+  # PostgreSQL you may pick another name.
+  name: keycloak
+  # -- Login role Keycloak connects as. Same rule as `name`.
+  user: keycloak
+  passwordSecret:
+    # -- Secret with the password of that role. Empty = the Secret
+    # `<release>-core-postgres-keycloak`, which the install's secrets Job
+    # makes. With your own PostgreSQL and `create.enabled: false`, name your
+    # own Secret here: it is required then.
+    name: ""
+    # -- Key in that Secret that holds the password.
+    key: password
+  # -- TLS mode of the connection to PostgreSQL: one of `disable`, `allow`,
+  # `prefer`, `require`, `verify-ca`, `verify-full`. Empty = the driver's
+  # default. It applies to Keycloak and to the `create` Job.
+  sslMode: ""
+  create:
+    # -- Only with `corePostgres.enabled: false`. When true, a Job makes the
+    # role and the database on your PostgreSQL before Keycloak starts. It
+    # is safe to run twice: it makes only what is missing and sets the
+    # role's password to the one in `passwordSecret`. When false, your
+    # database team makes the role and the database.
+    enabled: false
+    adminSecret:
+      # -- Secret with a login that may create a role and a database (keys
+      # `username` and `password`). The Job uses it only to make the role
+      # and the database. Required when `create.enabled` is true.
+      name: ""
 
 # Keycloak reads five Secrets that the install's secrets Job creates:
 # `<release>-core-postgres-keycloak` (key `password`),

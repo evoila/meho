@@ -52,3 +52,12 @@ Name of a Secret the install's secrets Job creates: `<release>-core-<kind>`.
 {{- define "coreKeycloak.databaseHost" -}}
 {{- default (printf "%s-postgres" .Release.Name | trunc 63 | trimSuffix "-") .Values.database.host -}}
 {{- end }}
+
+{{/*
+The Secret that holds the password of Keycloak's database role: the one
+named in `database.passwordSecret.name`, else the core Secret the install's
+secrets Job makes.
+*/}}
+{{- define "coreKeycloak.databasePasswordSecret" -}}
+{{- .Values.database.passwordSecret.name | default (include "coreKeycloak.coreSecret" (dict "root" . "kind" "postgres-keycloak")) -}}
+{{- end }}

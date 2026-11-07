@@ -1210,7 +1210,7 @@ keeps a full-screen wall display from logging out mid-stream.
 | `GET /ui/broadcast/stream` | SSE bridge behind `require_ui_operator` (`text/event-stream`). The feed view's `sse-connect` target. Accepts `op_class` / `principal` / `target` filters. |
 | `GET /ui/broadcast/history` | Last-24h replay **fragment** (`broadcast/_history.html`) — the "Last 24h" tab's HTMX target. A finite read of the tenant's last-24h stored announcements seeded into the shared `broadcastFeed` controller. |
 | `GET /ui/broadcast/event/{audit_id}` | Event detail drawer **fragment** (`broadcast/_event_drawer.html`; `_event_drawer_not_found.html` + HTTP 404 for a missing / cross-tenant id). Shared by the live feed, the wall view, and the history pane. |
-| `GET/POST /ui/broadcast/overrides`, `DELETE /ui/broadcast/overrides/{override_id}` | The Overrides tab (`ui/routes/broadcast/overrides.py`). A `tenant_admin` lists, creates and deletes broadcast override rules. Another role sees an empty gated view, not a 403. |
+| `GET/POST /ui/broadcast/overrides`, `DELETE /ui/broadcast/overrides/{override_id}` | The Overrides tab (`ui/routes/broadcast/overrides.py`). A `tenant_admin` lists, creates and deletes broadcast override rules. For another role the list answers 403 with a gated view that shows no rules, and a create or delete answers 403. |
 
 Every broadcast route above except the Overrides tab needs the `operator` role (`require_ui_operator`,
 the floor of `GET /api/v1/broadcast/recent` and `GET /api/v1/feed`); a

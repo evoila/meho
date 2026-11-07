@@ -145,7 +145,8 @@ Every problem is one sentence that names the path, for example
 them at once.
 
 - The file must be UTF-8 YAML (JSON is valid YAML), at most 4 MiB. A
-  bigger body gets 413 before any other check runs.
+  bigger body gets 413 before any check of the file runs. The login and
+  role checks run first.
 - Every unknown key is a mistake, at every level. A key repeated in the same
   block is a mistake (plain YAML loading would silently keep the last one).
   Two tenants with one `id`, or two conventions / targets with one key in a

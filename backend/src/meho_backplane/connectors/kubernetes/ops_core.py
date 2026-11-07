@@ -19,11 +19,10 @@ this module adds three operator-facing inventory ops to that surface:
     "list 1 item, read remaining_item_count" round-trips rather than
     pulling every row of every kind.
   - ``k8s.ls /<namespace>/<kind>`` forwards through the connector's
-    dispatcher shim to ``k8s.<kind>.list`` for that namespace. Kinds
-    whose ``list`` op hasn't been registered yet (T3+ ships pod /
-    deployment / service / ingress / configmap / event) come back
-    through the shim's structured ``unknown_op`` envelope -- the
-    forwarder doesn't pretend to know which kinds will exist when.
+    dispatcher shim to ``k8s.<kind>.list`` for that namespace
+    (``statefulsets`` and ``daemonsets`` go to ``k8s.workload.list``).
+    A kind with no list op, or a failed sub-op, makes ``k8s.ls`` fail
+    with an error that names the kinds it can list.
 
 * ``k8s.namespace.list`` -- ``CoreV1Api.list_namespace()``. Returns one
   row per namespace with name / phase / age / labels.
@@ -540,10 +539,11 @@ CORE_OPS: tuple[KubernetesOp, ...] = (
             "persistentvolumeclaims). With '/<namespace>/<kind>', "
             "forwards to k8s.<kind>.list for that namespace by "
             "dispatching the kind-specific op through the connector's "
-            "dispatcher shim; kinds whose ``list`` op hasn't shipped yet "
-            "(T3/T4 batches) come back through the shim's structured "
-            "unknown_op envelope. The handler does not pre-fetch every "
-            "row of every kind -- it queries with ``limit=1`` and reads "
+            "dispatcher shim (statefulsets and daemonsets go to "
+            "k8s.workload.list). A kind with no list op makes the call "
+            "fail with an error that names the kinds it can list. The "
+            "handler does not pre-fetch every row of every kind -- it "
+            "queries with ``limit=1`` and reads "
             "``remaining_item_count`` from the list metadata so an "
             "``ls`` against a busy namespace stays cheap."
         ),

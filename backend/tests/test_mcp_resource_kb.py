@@ -337,7 +337,9 @@ async def test_exact_revision_survives_overwrite_while_slug_reads_latest(
     client, op = client_with_operator
     service = KbService()
     first, _ = await service.create_entry(op.tenant_id, "cert-renew", "Old steps.")
-    second, _ = await service.create_entry(op.tenant_id, "cert-renew", "New steps.")
+    second, _ = await service.create_entry(
+        op.tenant_id, "cert-renew", "New steps.", expected_revision=first.revision_id
+    )
 
     latest = _payload(_read(client, "meho://kb/cert-renew"))
     assert "New steps." in str(latest["body"])

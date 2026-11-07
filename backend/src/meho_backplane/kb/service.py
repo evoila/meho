@@ -34,11 +34,14 @@ Two write paths with two different rules:
   reported as conflicts and not written, so an existing entry with a
   conflicting slug stays unchanged. Filesystem listing order can no
   longer decide which file wins.
-* **Direct create** (:meth:`create_entry`) is an explicit replace:
-  the caller names one slug and the newest write wins. The route
-  records ``audit_created`` so a replace is visible in the audit log.
-  There is no expected-revision check; that waits for a real
-  multi-writer workflow.
+* **Direct write** (:meth:`create_entry`) names one slug and the
+  revision the writer read (``expected_revision``). A write without it
+  only creates: when the slug exists, the write is refused. A write
+  that names an older revision is refused too. Both raise
+  :class:`~meho_backplane.kb.stale_revision.KbStaleRevisionError` with
+  the current revision and what changed. So two writers never
+  overwrite each other without seeing it. The route records
+  ``audit_created`` so a create is visible in the audit log.
 
 Both paths stamp a provenance block (source kind, relative path,
 write time) through :mod:`meho_backplane.kb.provenance`. No absolute
@@ -103,6 +106,7 @@ from meho_backplane.kb.directory_ingest import ingest_directory as _ingest_direc
 from meho_backplane.kb.passages import revision_uri
 from meho_backplane.kb.provenance import read_provenance, stamp_provenance
 from meho_backplane.kb.revisions import (
+    ExpectedRevision,
     current_revision_id,
     delete_entry_rows,
     get_revision,
@@ -311,27 +315,32 @@ class KbService:
         *,
         actor_sub: str | None = None,
         own_entries_only: bool = False,
+        expected_revision: uuid.UUID | None = None,
     ) -> tuple[KbEntry, bool]:
-        """Insert (or re-index) one kb entry; return ``(entry, created)``.
+        """Create one kb entry, or update it from the revision the writer read.
 
-        Validates *slug* before touching the substrate. Delegates to
-        :func:`~meho_backplane.retrieval.indexer.index_document` so
-        the body-hash short-circuit applies -- callers writing an
-        already-present entry with the same body pay zero embedding
-        cost, just an ``updated_at`` bump.
+        Validates *slug* before touching the substrate. A write that
+        changes neither body nor metadata pays zero embedding cost,
+        just an ``updated_at`` bump; a change to the metadata alone adds
+        a revision but keeps the passages.
+
+        *expected_revision* is the ``revision_id`` a read of the entry
+        returned. ``None`` means the writer read no entry, so the write
+        only creates. When the slug exists and it does not name the
+        current revision, nothing is written and
+        :class:`~meho_backplane.kb.stale_revision.KbStaleRevisionError`
+        is raised, with the current revision and what changed since.
 
         Used by ``POST /api/v1/kb`` (T2) and the MCP
         ``add_to_knowledge`` meta-tool (T3). RBAC (``tenant_admin``)
         enforced by the route layer.
 
-        This is the explicit replace path: last write wins. A second
-        create for the same slug replaces body and metadata with no
-        expected-revision check; the route maps ``created=False`` to
-        HTTP 200 and records ``audit_created`` so the replace is
-        auditable. Directory ingest follows a different rule (see
-        :meth:`ingest_directory`). Every write stamps a provenance
-        block with ``source_kind="direct"`` and no relative path,
-        replacing any ``provenance`` key the caller sent.
+        An update replaces body and metadata; the route maps
+        ``created=False`` to HTTP 200 and records ``audit_created`` so
+        the update is auditable. Directory ingest follows a different
+        rule (see :meth:`ingest_directory`). Every write stamps a
+        provenance block with ``source_kind="direct"`` and no relative
+        path, replacing any ``provenance`` key the caller sent.
 
         Cross-principal writes are wiki-like for a ``tenant_admin`` (any
         ``tenant_admin`` may overwrite any other principal's slug
@@ -376,6 +385,7 @@ class KbService:
             tenant_id=tenant_id,
             slug=slug,
             body=body,
+            expected=ExpectedRevision(expected_revision),
             metadata_for=lambda existing: _direct_write_metadata(
                 existing,
                 slug=slug,

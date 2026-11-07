@@ -1404,6 +1404,13 @@ retrieval substrate's tsvector + embedding indexing:
 * `search_memory.query` / `search_knowledge.query` — 256 chars
   (`_MAX_QUERY_CHARS`), the same class as the other tool slices'
   free-text caps.
+* `add_to_knowledge.expected_revision` — a UUID string, the
+  `revision_id` that a read of the entry returned. Every update names
+  it; a write without it only creates, and a slug that exists is
+  refused with `-32602` and `data.error = "stale_revision"` (the
+  current revision, who changed it and when, and what changed, with
+  stored text inside the untrusted-text envelope). See
+  [`kb.md`](./kb.md#every-update-names-the-revision-it-read-4947).
 * `add_to_memory.body` (and its deprecated `content` alias) /
   `add_to_knowledge.body` — 64 KiB (`_MAX_BODY_CHARS`), aligned with
   the operator console's `BODY_MAX_LENGTH` so a body writable through

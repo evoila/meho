@@ -20,7 +20,7 @@ The default agent surface. No elevation required.
 
 | Tool | Maturity | Extra gate | Summary |
 | --- | --- | --- | --- |
-| `add_to_knowledge` | ga | — | Add a new entry to the tenant's knowledge base. |
+| `add_to_knowledge` | ga | — | Add a new entry to the tenant's knowledge base, or update one. |
 | `add_to_memory` | ga | — | Save a memory: something worth keeping after this session, such as an operator preference, a tenant convention or a gotcha for one target. |
 | `ask_docs` | experimental | capability `meho-docs` | Answer a vendor-reference question with one composed answer and the chunks it cites, from one vendor-document collection (manuals, KB articles, guides), e.g. 'NSX 9.0 config maximums for logical switches?'. |
 | `call_operation` | ga | — | Run an operation. |

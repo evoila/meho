@@ -47,7 +47,8 @@ T3 routes (editor + mobile reflow):
   editor's debounced input listener via HTMX. Any authenticated
   operator can call this endpoint (preview is a read-only transform).
 
-* ``POST /ui/kb/new`` (editor save) — accepts ``slug``, ``body``, and
+* ``POST /ui/kb/new`` (editor save, create only: a slug that exists is
+  refused with the current revision and a link to the entry) — accepts ``slug``, ``body``, and
   ``tags`` as form fields, validates ``tenant_admin`` role by loading
   the full session and re-verifying the access token through
   :func:`~meho_backplane.auth.jwt.verify_jwt_for_audience`, then calls
@@ -151,6 +152,7 @@ from fastapi.responses import HTMLResponse, Response
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.kb import KbEntry, KbEntrySearchHit, KbService
 from meho_backplane.kb.schemas import InvalidKbSlugError
+from meho_backplane.kb.stale_revision import KbStaleRevisionError
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import (
     UISessionContext,
@@ -162,6 +164,7 @@ from meho_backplane.ui.auth.refresh import (
     verify_access_token_with_refresh,
 )
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.routes.kb.exists import exists_message
 from meho_backplane.ui.routes.kb.render import pygments_css, render_markdown
 from meho_backplane.ui.templating import get_templates
 
@@ -648,6 +651,7 @@ def build_kb_router() -> APIRouter:
             metadata["tags"] = tag_list
 
         error_message: str | None = None
+        existing_url: str | None = None
         entry: KbEntry | None = None
         try:
             entry, _created = await kb.create_entry(
@@ -659,6 +663,9 @@ def build_kb_router() -> APIRouter:
             )
         except InvalidKbSlugError as exc:
             error_message = str(exc)
+        except KbStaleRevisionError as exc:
+            error_message = exists_message(exc)
+            existing_url = f"/ui/kb/{exc.detail.slug}"
         except Exception:
             log.exception("kb_editor_save_unexpected_error", slug=slug)
             error_message = "Unexpected error saving entry. Please try again."
@@ -679,6 +686,7 @@ def build_kb_router() -> APIRouter:
         csrf_token = mint_csrf_token(str(session.session_id))
         context = {
             "error_message": error_message,
+            "existing_url": existing_url,
             "slug": slug,
             "body": body,
             "tags": tags,
@@ -870,6 +878,18 @@ def build_kb_router() -> APIRouter:
                         "slug": effective_slug,
                         "status": "error",
                         "message": str(exc),
+                        "entry": None,
+                    }
+                )
+                continue
+            except KbStaleRevisionError as exc:
+                rows.append(
+                    {
+                        "filename": filename,
+                        "slug": effective_slug,
+                        "status": "error",
+                        "message": exists_message(exc),
+                        "existing_url": f"/ui/kb/{exc.detail.slug}",
                         "entry": None,
                     }
                 )

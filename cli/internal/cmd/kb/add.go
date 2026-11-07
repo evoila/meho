@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/google/uuid"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
@@ -23,6 +25,7 @@ import (
 //	meho kb add <slug> \
 //	  --body @file.md|@-|<inline-text> \
 //	  [--metadata key=value,key=value] \
+//	  [--expected-revision <revision-id>] \
 //	  [--json] \
 //	  [--backplane <url>]
 //
@@ -40,6 +43,11 @@ import (
 // commas / equals inside values should construct the JSON body via
 // the REST surface or wait for v0.2.next.
 //
+// A write without --expected-revision only creates. When the slug
+// exists, the backplane refuses it (409 stale_revision) and the error
+// shows the current revision and what changed. To update an entry, read
+// it (`meho kb show <slug> --json`) and pass its revision_id here.
+//
 // Exit codes:
 //   - 0   entry created (201) or updated (200)
 //   - 2   auth_expired
@@ -50,13 +58,14 @@ func newAddCmd() *cobra.Command {
 	var (
 		body              string
 		metadata          string
+		expectedRevision  string
 		jsonOut           bool
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
 		Use:   "add <slug>",
-		Short: "Create or re-index one kb entry (tenant_admin)",
-		Long: "add calls POST /api/v1/kb to create or re-index one " +
+		Short: "Create or update one kb entry (tenant_admin)",
+		Long: "add calls POST /api/v1/kb to create or update one " +
 			"kb entry under the operator's tenant. Tenant_admin only — " +
 			"operator-role JWT lands as 403 insufficient_role.\n\n" +
 			"--body accepts inline text, @<path> to read a file, or " +
@@ -69,10 +78,14 @@ func newAddCmd() *cobra.Command {
 			"are stored as strings; operators needing richer metadata " +
 			"types (lists, nested objects) should construct the JSON " +
 			"body via the REST surface directly.\n\n" +
-			"The substrate's body-hash short-circuit means re-creating " +
-			"an entry with an unchanged body pays only an updated_at " +
-			"bump — `meho kb add` against an existing slug with the " +
-			"same body is effectively a no-op.\n\n" +
+			"To update an existing entry, name the revision you read: " +
+			"--expected-revision <revision_id> (from `meho kb show <slug> " +
+			"--json`). Without it, add only creates; if the slug exists, " +
+			"the backplane refuses the write and shows the current " +
+			"revision, who changed it and when, and what changed. The " +
+			"same refusal applies when the entry changed after the " +
+			"revision you named. A change to the metadata alone counts " +
+			"as a change.\n\n" +
 			"Exit code 0 means the entry was created (HTTP 201) or " +
 			"updated (HTTP 200). The summary line says which one happened.",
 		Args:          cobra.ExactArgs(1),
@@ -83,6 +96,7 @@ func newAddCmd() *cobra.Command {
 				Slug:              args[0],
 				BodyArg:           body,
 				MetadataArg:       metadata,
+				ExpectedRevision:  expectedRevision,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -92,6 +106,8 @@ func newAddCmd() *cobra.Command {
 		"entry body: inline text, @<path> to read a file, or @- to read from stdin")
 	cmd.Flags().StringVar(&metadata, "metadata", "",
 		"comma-separated key=value pairs to attach as entry metadata (e.g. owner=ops,source=runbook)")
+	cmd.Flags().StringVar(&expectedRevision, "expected-revision", "",
+		"revision_id of the entry as you read it (required to update an existing slug)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit raw KbEntry JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -103,6 +119,7 @@ type addOptions struct {
 	Slug              string
 	BodyArg           string
 	MetadataArg       string
+	ExpectedRevision  string
 	JSONOut           bool
 	BackplaneOverride string
 }
@@ -125,11 +142,16 @@ func runAdd(cmd *cobra.Command, opts addOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(err.Error()), opts.JSONOut)
 	}
+	expected, err := parseExpectedRevision(opts.ExpectedRevision)
+	if err != nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(err.Error()), opts.JSONOut)
+	}
 	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	resp, err := postAdd(cmd.Context(), backplaneURL, opts.Slug, body, metadata)
+	resp, err := postAdd(cmd.Context(), backplaneURL, opts.Slug, body, metadata, expected)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
@@ -180,8 +202,12 @@ func runAdd(cmd *cobra.Command, opts addOptions) error {
 // applied. The generated `KbEntryCreate` has no `omitempty` JSON
 // tag on Metadata; passing a nil pointer is the way to keep the
 // field absent.
-func buildAddBody(slug, body string, metadata map[string]any) api.KbEntryCreate {
-	req := api.KbEntryCreate{Slug: slug, Body: body}
+func buildAddBody(
+	slug, body string,
+	metadata map[string]any,
+	expected *openapi_types.UUID,
+) api.KbEntryCreate {
+	req := api.KbEntryCreate{Slug: slug, Body: body, ExpectedRevision: expected}
 	if metadata != nil {
 		// The generated type expects `map[string]interface{}`, which
 		// `map[string]any` aliases (Go 1.18+ `any` == `interface{}`).
@@ -197,12 +223,13 @@ func postAdd(
 	ctx context.Context,
 	backplaneURL, slug, body string,
 	metadata map[string]any,
+	expected *openapi_types.UUID,
 ) (*api.CreateKbApiV1KbPostResponse, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	reqBody := buildAddBody(slug, body, metadata)
+	reqBody := buildAddBody(slug, body, metadata, expected)
 	return retryOn401(ctx, authed,
 		func(ctx context.Context) (*api.CreateKbApiV1KbPostResponse, error) {
 			return authed.CreateKbApiV1KbPostWithResponse(
@@ -234,4 +261,18 @@ func printAddSummary(w io.Writer, e *api.KbEntry, verb string) {
 	fmt.Fprintf(w, "%-14s %s\n", "created_at:", e.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	fmt.Fprintf(w, "%-14s %s\n", "updated_at:", e.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	fmt.Fprintf(w, "%-14s %d bytes\n", "body:", len(e.Body))
+}
+
+// parseExpectedRevision reads --expected-revision. An empty value
+// means "create only" and gives nil, so the field stays off the wire.
+func parseExpectedRevision(value string) (*openapi_types.UUID, error) {
+	if value == "" {
+		return nil, nil
+	}
+	id, err := uuid.Parse(value)
+	if err != nil {
+		return nil, fmt.Errorf("--expected-revision must be a revision id (a UUID): %w", err)
+	}
+	u := openapi_types.UUID(id)
+	return &u, nil
 }

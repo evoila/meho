@@ -560,6 +560,13 @@ async def test_result_state_follows_the_run_phase() -> None:
     row.resume_result = {"status": "error", "op_id": "POST:/vms"}
     assert approval_result_state(row) is ApprovalResultState.FAILED
 
+    row.resume_result = {
+        "status": "error",
+        "op_id": "POST:/vms",
+        "extras": {"error_code": "audit_commit_failed", "execution_outcome": "uncertain"},
+    }
+    assert approval_result_state(row) is ApprovalResultState.UNCERTAIN
+
     row.status = ApprovalRequestStatus.REJECTED.value
     assert approval_result_state(row) is None
 

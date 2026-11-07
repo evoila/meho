@@ -5,9 +5,9 @@ Copyright (c) 2026 evoila Group
 
 # Memory layer (G5.1)
 
-> Reads [CLAUDE.md](../../CLAUDE.md) postulate 5 (the agent surface is a narrow waist of meta-tools — `search_memory` / `add_to_memory` are 2 of the ~17) and postulate 7 (audit is synchronous, append-only). Sister to [docs/architecture/kb.md](kb.md): that doc owns the team-wide knowledge corpus that rides on the G0.4 retrieval substrate; this doc owns the per-operator × per-tenant memory layer that rides on the same substrate.
+> Reads [CLAUDE.md](../../CLAUDE.md) postulate 5 (the agent surface is a narrow waist of meta-tools — `search_memory` / `add_to_memory` are 2 of the 26 working-surface tools listed in [`docs/codebase/mcp.md`](../codebase/mcp.md)) and postulate 7 (audit is synchronous, append-only). Sister to [docs/architecture/kb.md](kb.md): that doc owns the team-wide knowledge corpus that rides on the G0.4 retrieval substrate; this doc owns the per-operator × per-tenant memory layer that rides on the same substrate.
 >
-> Covers the implementation that landed under [Initiative #332 G5.1](https://github.com/evoila/meho/issues/332) (Tasks #421-#427). The operator runbook that uses this surface is [`docs/cross-repo/memory-migration.md`](../cross-repo/memory-migration.md). Sibling Initiatives (auto-expiry + tenant-promotion in [#374 G5.2](https://github.com/evoila/meho/issues/374), laptop-local migration UX in [#375 G5.3](https://github.com/evoila/meho/issues/375)) extend this surface; the read-side `expires_at` filter is wired here and the daily reap is G5.2's.
+> Covers the implementation that landed under [Initiative #332 G5.1](https://github.com/evoila/meho/issues/332) (Tasks #421-#427). The operator runbook that uses this surface is [`docs/cross-repo/memory-migration.md`](../cross-repo/memory-migration.md). Sibling Initiatives (auto-expiry + tenant-promotion in [#374 G5.2](https://github.com/evoila/meho/issues/374), laptop-local migration UX in [#375 G5.3](https://github.com/evoila/meho/issues/375)) extend this surface and have shipped; the read-side `expires_at` filter is wired here and the daily reap is G5.2's.
 
 ## What this surface does
 
@@ -27,6 +27,10 @@ The substrate lives in [`backend/src/meho_backplane/memory/`](../../backend/src/
 | [`_internal.py`](../../backend/src/meho_backplane/memory/_internal.py) | Pure helpers — `MEMORY_SOURCE` constant, `auto_slug()` (12-char UUID hex prefix for unnamed remembers), `encode_source_id()` (colon-joined `scope:user_sub:target_name:slug` segments), `slug_from_source_id()` (`rsplit(':', 1)` inverse), `build_metadata()` (merges caller metadata with the bookkeeping fields `user_sub` / `target_name` / `expires_at`), `document_to_entry()`, `is_expired()`, `metadata_str()` / `metadata_datetime()` / `has_tag()` typed-extractors. |
 | [`rbac.py`](../../backend/src/meho_backplane/memory/rbac.py) | The five-scope RBAC matrix — `MemoryRbacResolver` (`can_read`, `can_write`, `visible_kinds`) plus `PermissionDeniedError`. Stateless and pure; no database access. The matrix codifies consumer-needs.md §G5 L143-148. |
 | [`service.py`](../../backend/src/meho_backplane/memory/service.py) | `MemoryService` — the single class every front-end calls. Stateless, method-scoped: each public method opens its own `AsyncSession` and commits before returning. The constructor takes an optional `MemoryRbacResolver` so tests can inject a fake; production callers leave it `None` and the service builds one internally. |
+| [`ttl.py`](../../backend/src/meho_backplane/memory/ttl.py) | `resolve_default_expires_at` — the default 7-day expiry on `user`-scope writes (see [Expiry](#expiry)). |
+| [`expiry.py`](../../backend/src/meho_backplane/memory/expiry.py) | The daily expiry sweeper (`start_memory_expiry_sweeper` / `stop_memory_expiry_sweeper`, run in the FastAPI lifespan). Deletes expired rows and writes the `INTERNAL` `memory.expire` audit row. |
+| [`audit.py`](../../backend/src/meho_backplane/memory/audit.py) | `write_internal_audit_row` — the writer for `INTERNAL` system rows ([audit.md](audit.md)). |
+| [`snippet.py`](../../backend/src/meho_backplane/memory/snippet.py) | `query_snippet` — the bounded excerpt a search hit carries instead of the body. |
 | [`__init__.py`](../../backend/src/meho_backplane/memory/__init__.py) | Re-exports `MemoryService`, `MemoryRbacResolver`, `PermissionDeniedError`, `MemoryEntry`, `MemoryEntryCreate`, `MemoryEntrySearchHit`, `MemoryScope`. |
 
 ## The five-scope shape
@@ -39,7 +43,7 @@ The scopes from consumer-needs.md §G5 L137-141 are encoded in two parallel ways
 | `USER_TENANT` (`"user-tenant"`) | `memory-user-tenant` | The writing operator, within one tenant | Personal context scoped to one lab ("for this tenant I'm investigating the snapshot regression") |
 | `USER_TARGET` (`"user-target"`) | `memory-user-target` | The writing operator, scoped to one target | Personal notes about one vCenter / k8s cluster |
 | `TENANT` (`"tenant"`) | `memory-tenant` | Every operator in the tenant (read); `tenant_admin` only (write) | Team-wide conventions ("we use GitOps for everything") |
-| `TARGET` (`"target"`) | `memory-target` | Every operator with access to the target (in v0.2: every operator in the target's tenant) | Target-specific gotchas ("rdc-vcenter requires VPN") |
+| `TARGET` (`"target"`) | `memory-target` | Every operator with access to the target (in v0.2: every operator in the target's tenant) | Target-specific gotchas ("my-vcenter requires VPN") |
 
 Each scope's `documents` row carries:
 
@@ -90,7 +94,7 @@ The default-7-day-TTL injection on user-scoped writes (when the caller omits `ex
 
 All four converge on `MemoryService`. None is a wrapper for another — each is a transport front on the same backplane.
 
-### REST (T2 #422) — four routes under `/api/v1/memory*`
+### REST (T2 #422) — routes under `/api/v1/memory*`
 
 [`backend/src/meho_backplane/api/v1/memory.py`](../../backend/src/meho_backplane/api/v1/memory.py):
 
@@ -103,13 +107,15 @@ All four converge on `MemoryService`. None is a wrapper for another — each is 
 
 `POST /api/v1/memory/search` (`read_only` and up, #3741) runs `MemoryService.search_memories`, the same call the MCP `search_memory` tool makes. Body `{query, scope?, limit?}` (query 1-256 chars, limit 1-50, default 10; no scope = all five scopes). Response `{"hits": [MemoryEntrySearchHit]}` (plain snippets) with no count, so "no match" and "only rows you may not see" look the same. Audit op id `memory.search`, class `read`.
 
-Every route binds two contextvars **before** the service call so the chassis [`AuditMiddleware`](../../backend/src/meho_backplane/audit.py) and the publish-on-write broadcast hook classify the row correctly: `audit_op_id` (one of `memory.remember` / `memory.list` / `memory.recall` / `memory.search` / `memory.forget`) + `audit_op_class` (`"read"` for `memory.list` / `memory.recall` / `memory.search`, `"write"` for `memory.remember` / `memory.forget`). The op-class is bound explicitly because the broadcast classifier's suffix table would not match `memory.recall` (no `.list` / `.get` / `.info` suffix), `memory.remember` (no `.create` suffix), or `memory.forget` (no `.delete` suffix) and they would fall through to the `other` bucket. `remember` / `forget` additionally bind `audit_scope` + `audit_slug` so the audit payload carries the natural-key coordinates. The body itself is **never** bound — the audit row is for the operation, not the content.
+`POST /api/v1/memory/{scope}/{slug}/promote` (G5.2) copies a memory to a strictly broader scope (or moves it, with `move`), safe to run twice, along the promotion ladder in `rbac.py` (`_PROMOTION_LADDER`). It backs `meho promote` and the `meho_memory_promote` MCP tool.
+
+Every route binds two contextvars **before** the service call so the chassis [`AuditMiddleware`](../../backend/src/meho_backplane/audit.py) classifies the row correctly (MEHO posts no broadcast event for these calls): `audit_op_id` (one of `memory.remember` / `memory.list` / `memory.recall` / `memory.search` / `memory.forget`) + `audit_op_class` (`"read"` for `memory.list` / `memory.recall` / `memory.search`, `"write"` for `memory.remember` / `memory.forget`). The op-class is bound explicitly because the op-class classifier's suffix table (`classify_op`) would not match `memory.recall` (no `.list` / `.get` / `.info` suffix), `memory.remember` (no `.create` suffix), or `memory.forget` (no `.delete` suffix) and they would fall through to the `other` bucket. `remember` / `forget` additionally bind `audit_scope` + `audit_slug` so the audit payload carries the natural-key coordinates. The body itself is **never** bound — the audit row is for the operation, not the content.
 
 ### MCP meta-tools (T3 #423)
 
-[`backend/src/meho_backplane/mcp/tools/memory.py`](../../backend/src/meho_backplane/mcp/tools/memory.py) — two of the ~17 agent-facing meta-tools (Memory family):
+[`backend/src/meho_backplane/mcp/tools/memory.py`](../../backend/src/meho_backplane/mcp/tools/memory.py) — two of the 26 working-surface meta-tools (Memory family):
 
-- **`search_memory(query, scope?, limit?)`** — `op_class="read"`, `operator` role. Hybrid retrieval over the tenant's memory corpus, post-filtered by the RBAC matrix. Default limit 10, cap 50. Returns `{"hits": [...], "delivery", "omitted_hits", "snippet_max_chars"}` and declares an `outputSchema`. Each hit's snippet is inside the untrusted-text envelope; the response stays inside the shared completed-call wire limit (`delivery="partial"` when low-ranked hits were left out). Drives the agent's recall recipe (search → pick a hit → read its `locator` for the full body).
+- **`search_memory(query, scope?, limit?)`** — `op_class="read"`, `operator` role. Hybrid retrieval over the tenant's memory corpus; the SQL drops rows the RBAC matrix hides before ranking. Default limit 10, cap 50. Returns `{"hits": [...], "delivery", "omitted_hits", "snippet_max_chars"}` and declares an `outputSchema`. Each hit's snippet is inside the untrusted-text envelope; the response stays inside the shared completed-call wire limit (`delivery="partial"` when low-ranked hits were left out). Drives the agent's recall recipe (search → pick a hit → read its `locator` for the full body).
 - **`add_to_memory(body, scope, ttl?, slug?, metadata?, target_name?)`** — `op_class="write"`, `operator` role. The `body` field carries the memory text; the name aligns with `add_to_knowledge` and the REST `POST /api/v1/memory` body schema (renamed from `content` in v0.3.2 per [G0.9.1-T7 #779](https://github.com/evoila/meho/issues/779)). The `ttl` parameter accepts an ISO 8601 duration string (`"P7D"` for 7 days, `"PT1H"` for one hour); the handler parses it into a concrete `expires_at` before calling the service. `PermissionDeniedError` from the service → JSON-RPC `-32602` so the dispatcher's "invalid params" lane stays consistent.
 
 `forget` and `list` are **deliberately absent** from the agent surface (CLAUDE.md postulate 5 carves the agent surface narrow). An agent reaches list-style queries via `search_memory(scope=...)`; `forget` is a deliberate-write op normally driven by operators, not by the agent without explicit confirmation.
@@ -128,7 +134,7 @@ The scope/slug template has no `target_name`, so it resolves `user`, `user-tenan
 
 ### CLI (T4 #424)
 
-[`cli/internal/cmd/memory/`](../../cli/internal/cmd/memory/) — four **top-level** Cobra verbs. Each wraps one REST route (`recall --query` uses `POST /api/v1/memory/search`) and renders human-readable output or `--json`. Auth piggybacks on the token `meho login` wrote.
+[`cli/internal/cmd/memory/`](../../cli/internal/cmd/memory/) — five **top-level** Cobra verbs (`remember`, `recall`, `forget`, `list`, `promote`). Each wraps one REST route (`recall --query` uses `POST /api/v1/memory/search`) and renders human-readable output or `--json`. Auth piggybacks on the token `meho login` wrote.
 
 | Verb | Backend call | Role |
 |---|---|---|
@@ -137,6 +143,7 @@ The scope/slug template has no `target_name`, so it resolves `user`, `user-tenan
 | `meho recall --query "search terms" [--scope SCOPE] [--limit N] [--json]` | `POST /api/v1/memory/search` | `read_only` |
 | `meho forget <scope>/<slug> [--target NAME] [--confirm] [--json]` | `DELETE /api/v1/memory/{scope}/{slug}` | `operator` |
 | `meho list [--scope SCOPE] [--tag T] [--include-expired] [--slug-pattern P] [--limit N] [--json]` | `GET /api/v1/memory` | `operator` |
+| `meho promote <scope>/<slug> --to <scope>` | `POST /api/v1/memory/{scope}/{slug}/promote` | see `rbac.py` |
 
 The verbs are **top-level** (not nested under `meho memory ...`) per the consumer-needs.md §G5 ergonomic shape — "I prefer kubectl over k9s" is a user-scoped `meho remember`, not a `meho memory remember`. The `meho list` verb takes the bare-word slot the issue's acceptance criterion names verbatim (`meho list --scope user`).
 
@@ -153,7 +160,7 @@ Per CLAUDE.md postulate 5, the agent never sees vendor-specific tools. The memor
 1. When the agent starts a session in a tenant, `search_memory(scope=user)` and `search_memory(scope=user-tenant)` for relevant context (the operator's preferences, the lab's conventions). The agent surface is two read tools; the implicit recipe is "search first, ask the operator second".
 2. The agent picks a hit. The hit already carries the entry; its `locator` (`meho://memory/id/{document_uuid}`) is the stable way to read that entry again with `resources/read`.
 3. When the agent (or the operator working with it) learns something durable — a preference, a tenant convention, a target gotcha — it `search_memory` first to avoid duplicates, then `add_to_memory` at the narrowest appropriate scope. Same-slug re-add merges in place via the body-hash short-circuit.
-4. Promotion to a broader scope (e.g. "this user-tenant memory is actually useful tenant-wide") is **operator-initiated only** — the agent does not have a `promote_memory` tool. G5.2's `meho promote` CLI verb is the human-authorised path; AI-suggested promotion is explicitly disallowed per consumer-needs.md §G5 "Out of scope".
+4. Promotion to a broader scope (e.g. "this user-tenant memory is actually useful tenant-wide") is **operator-initiated only** — no promote tool is on the default working surface. G5.2's `meho promote` CLI verb is the human-authorised path; the `meho_memory_promote` MCP tool is an operator-plane tool (`tenant_admin`, only in a session with the `mcp:admin` scope); AI-suggested promotion is explicitly disallowed per consumer-needs.md §G5 "Out of scope".
 
 Ephemeral session notes belong in memory (this surface). Durable team-wide vendor knowledge belongs in the kb (G4.1, [`docs/architecture/kb.md`](kb.md)) — the distinction is who else benefits from the entry over time.
 
@@ -163,9 +170,14 @@ Every route, MCP handler, and CLI verb derives `tenant_id` from the JWT-validate
 
 ## What's intentionally out of scope (for G5.1)
 
-- **Auto-expiry executor** (the daily reap loop + the `INTERNAL/memory.expire` audit row + default-7-day-TTL injection on `memory-user` writes) — [#374 G5.2](https://github.com/evoila/meho/issues/374). G5.1 ships only the read-side filter and the `expires_at` metadata field.
+G5.1 left these to its siblings, which have shipped since:
+
+- **Auto-expiry executor** (the daily reap loop + the `INTERNAL/memory.expire` audit row + the default 7-day expiry on `memory-user` writes) — [#374 G5.2](https://github.com/evoila/meho/issues/374).
 - **Tenant-promotion verb** (`meho promote <scope>/<slug> --to <target-scope>`) and the per-scope promotion RBAC matrix — G5.2.
-- **Laptop-local migration UX** (`meho migrate memory` interactive per-file picker + machine-local heuristic + post-login nudge) — [#375 G5.3](https://github.com/evoila/meho/issues/375). G5.1 ships only the server side + the `meho remember` CLI verb operators can pipe into manually.
+- **Laptop-local migration UX** (`meho migrate memory`) — [#375 G5.3](https://github.com/evoila/meho/issues/375).
+
+Still out of scope:
+
 - **AI-suggested promotion** — every promotion is operator-initiated per consumer-needs.md §G5 "Out of scope".
 - **Cross-tenant memory federation** — explicitly disallowed; the tenant boundary is the substrate's strongest property.
 - **Memory diff / history** — v0.2 stores latest-version only; `metadata.expires_at` plus `updated_at` are the only temporal fields.
@@ -173,8 +185,8 @@ Every route, MCP handler, and CLI verb derives `tenant_id` from the JWT-validate
 
 ## Sibling Initiatives
 
-- **[#374 G5.2](https://github.com/evoila/meho/issues/374) — Auto-expiry background task + tenant-promotion verb + per-scope RBAC tightening.** Adds the daily reap (`MemoryExpirySweeper` running in the FastAPI lifespan, deleting rows whose `metadata.expires_at` is in the past and writing one `INTERNAL/memory.expire` audit row per affected tenant), the default-7-day-TTL injection on `memory-user` writes (with `--persist` opt-out), and the `meho promote <scope>/<slug> --to <target>` verb gated by a scope-aware RBAC helper. G5.1's read-side expiry filter is the contract G5.2 builds on; the `_PROMOTION_LADDER` lives there, not here.
-- **[#375 G5.3](https://github.com/evoila/meho/issues/375) — Laptop-local memory migration UX.** Ships `meho migrate memory` as an interactive, re-runnable Cobra verb (not coupled to `meho login`). The verb walks `~/.claude/projects/<...>/memory/`, runs a machine-local heuristic to flag laptop-only entries, presents a per-file picker (huh-based form), and POSTs each accepted entry to `POST /api/v1/memory` at the operator-chosen scope. Idempotent on re-run via a stable `source_id` derived from the body SHA-256. Until G5.3 ships, the operator runbook ([`docs/cross-repo/memory-migration.md`](../cross-repo/memory-migration.md)) documents the manual migration via piped `meho remember`.
+- **[#374 G5.2](https://github.com/evoila/meho/issues/374) — Auto-expiry background task + tenant-promotion verb + per-scope RBAC tightening.** Adds the daily reap (`start_memory_expiry_sweeper` in [`memory/expiry.py`](../../backend/src/meho_backplane/memory/expiry.py), running in the FastAPI lifespan, deleting rows whose `metadata.expires_at` is in the past and writing one `INTERNAL/memory.expire` audit row per affected tenant), the default 7-day expiry on `memory-user` writes (with `--persist` opt-out), and the `meho promote <scope>/<slug> --to <target>` verb gated by a scope-aware RBAC helper. G5.1's read-side expiry filter is the contract G5.2 builds on; the `_PROMOTION_LADDER` lives there, not here.
+- **[#375 G5.3](https://github.com/evoila/meho/issues/375) — Laptop-local memory migration UX.** Ships `meho migrate memory` as an interactive, re-runnable Cobra verb (not coupled to `meho login`). The verb walks `~/.claude/projects/<...>/memory/`, runs a machine-local heuristic to flag laptop-only entries, presents a per-file picker (huh-based form), and POSTs each accepted entry to `POST /api/v1/memory` at the operator-chosen scope. Idempotent on re-run via a stable `source_id` derived from the body SHA-256. The operator runbook ([`docs/cross-repo/memory-migration.md`](../cross-repo/memory-migration.md)) also documents the manual migration via piped `meho remember`.
 
 ## References
 

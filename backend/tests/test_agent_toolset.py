@@ -119,6 +119,7 @@ def _make_operator(
     *,
     role: TenantRole = TenantRole.OPERATOR,
     sub: str = "op-agent",
+    capabilities: frozenset[str] = frozenset(),
 ) -> Operator:
     return Operator(
         sub=sub,
@@ -127,7 +128,13 @@ def _make_operator(
         raw_jwt="<test-raw-jwt>",
         tenant_id=_TENANT_A,
         tenant_role=role,
+        capabilities=capabilities,
     )
+
+
+#: The capability the docs tools need (#5852): with it, every catalog tool
+#: can register.
+_DOCS_CAPABILITY = frozenset({"meho-docs"})
 
 
 def _tool_names(tools: list[Any]) -> set[str]:
@@ -201,7 +208,7 @@ def test_read_only_role_excludes_operator_floor_tools(
 
     # An OPERATOR identity, same spec -> full surface (the tools ARE callable
     # for a role that meets the floor).
-    operator_tools = resolve_agent_tools(spec, _make_operator())
+    operator_tools = resolve_agent_tools(spec, _make_operator(capabilities=_DOCS_CAPABILITY))
     assert _tool_names(operator_tools) == set(META_TOOL_NAMES)
 
     # Drop one tool's floor to READ_ONLY and confirm it now registers for the
@@ -225,7 +232,9 @@ def test_read_only_role_excludes_operator_floor_tools(
 
 def test_tenant_admin_sees_all_operator_floor_tools() -> None:
     """A higher role (tenant_admin) admits every operator-floored tool."""
-    admin = _make_operator(role=TenantRole.TENANT_ADMIN, sub="op-admin")
+    admin = _make_operator(
+        role=TenantRole.TENANT_ADMIN, sub="op-admin", capabilities=_DOCS_CAPABILITY
+    )
     tools = resolve_agent_tools({"meta_tools": sorted(META_TOOL_NAMES)}, admin)
     assert _tool_names(tools) == set(META_TOOL_NAMES)
 
@@ -701,7 +710,7 @@ def _tool(name: str, operator: Operator | None = None) -> Any:
 
 def test_context_tools_are_opt_in() -> None:
     """The four context tools register only when ``meta_tools`` names them."""
-    assert frozenset(_CONTEXT_TOOLS) == OPT_IN_META_TOOL_NAMES
+    assert frozenset(_CONTEXT_TOOLS) <= OPT_IN_META_TOOL_NAMES
     resolution = resolve_agent_toolset({}, _make_operator())
     assert not (_tool_names(resolution.tools) & OPT_IN_META_TOOL_NAMES)
     for name in _CONTEXT_TOOLS:

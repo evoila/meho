@@ -37,8 +37,8 @@ per-surface; the retire-checklist verb verdicts each surface independently.
 
 | Surface | Pre-MEHO artefact | MEHO replacement | Retire boundary |
 | --- | --- | --- | --- |
-| **kb** | `evoila-bosnia/claude-rdc-hetzner-dc` `kb/` directory | `meho kb search` (`search_knowledge` meta-tool over the `documents` table, `source="kb"`) | Delete `kb/` from the consumer repo + update consumer `CLAUDE.md` to drop the "grep `kb/`" guidance. |
-| **memory** | Laptop-local `~/.claude/{projects}/memory/` files (per-operator) | `meho memory search` (`search_memory` meta-tool over the `documents` table, `source="memory"`) | Archive each operator's laptop-local `memory/` directory locally; agents fetch from MEHO. |
+| **kb** | The consumer repo's `kb/` directory | `meho kb search` (`search_knowledge` meta-tool over the `documents` table, `source="kb"`) | Delete `kb/` from the consumer repo + update consumer `CLAUDE.md` to drop the "grep `kb/`" guidance. |
+| **memory** | Laptop-local `~/.claude/{projects}/memory/` files (per-operator) | `meho recall --query` (`search_memory` meta-tool over the `documents` table, `source="memory"`) | Archive each operator's laptop-local `memory/` directory locally; agents fetch from MEHO. |
 | **operations** | The consumer's `grep docs/<product>-<version>/paths.txt + yq` workflow against locally-cloned vendor specs | `meho operation search` + `meho operation call` (`search_operations` / `call_operation` against the `endpoint_descriptor` table) | Stop using the `grep paths.txt` workflow; agents redirect to `meho operation search`. The `docs/<product>-<version>/` directories **stay** in the consumer repo as grounding for future spec re-ingestion (not retired). |
 
 Per-surface filtering uses the issue's existing area labels
@@ -57,7 +57,7 @@ meho retrieval retire-checklist --surface all         # default; per-surface in 
 meho retrieval retire-checklist --surface kb --json   # machine-readable
 ```
 
-The verb composes audit-log usage telemetry (T5
+The verb composes request usage telemetry (T5
 [#444](https://github.com/evoila/meho/issues/444)) with eval results
 (T2 [#441](https://github.com/evoila/meho/issues/441)) and a local
 `gh issue list` lookup against the
@@ -103,8 +103,8 @@ retire-PR description). Never retire on `NOT YET`.
 ### kb
 
 1. **Capture the retire-checklist output** (`meho retrieval retire-checklist --surface kb --json > retire-kb.json`) as evidence in the retire-PR description; commit `retire-kb.json` to the PR as a checked-in audit artefact.
-2. **Open the retire-PR** in `evoila-bosnia/claude-rdc-hetzner-dc` deleting the `kb/` directory. Title: `chore(kb): retire pre-MEHO kb/ directory (post-#373 G4.3)`. Body cites this runbook + the retire-checklist JSON.
-3. **Update the consumer `CLAUDE.md`** in the same PR: drop the "grep `kb/`" guidance and point agents at `meho kb search` instead. The consumer-side runbook for migrating away from grep will ship with [G4.1-T6 #420](https://github.com/evoila/meho/issues/420) (`docs/cross-repo/kb-migration.md`); link it from the consumer `CLAUDE.md` once that runbook lands.
+2. **Open the retire-PR** in the consumer's repo deleting the `kb/` directory. Title: `chore(kb): retire pre-MEHO kb/ directory (post-#373 G4.3)`. Body cites this runbook + the retire-checklist JSON.
+3. **Update the consumer `CLAUDE.md`** in the same PR: drop the "grep `kb/`" guidance and point agents at `meho kb search` instead. Link the consumer `CLAUDE.md` to [`kb-migration.md`](./kb-migration.md), the runbook for moving off grep.
 4. **Archive the pre-retire SHA** by tagging it `kb-pre-retire-<YYYYMMDD>` and pushing the tag to the consumer repo. The tag is the rollback anchor (see below).
 5. **Merge the retire-PR.** The consumer-side ingestion already covers the deleted files; the delete has zero data loss because the documents already live in MEHO's `documents` table.
 
@@ -113,8 +113,8 @@ retire-PR description). Never retire on `NOT YET`.
 1. **Capture the retire-checklist output** (`meho retrieval retire-checklist --surface memory --json > retire-memory.json`) as evidence; commit to a per-operator retire log (the laptop-local archive — there is no shared PR for memory).
 2. **Run `meho migrate memory`** ([G5.3 #375](https://github.com/evoila/meho/issues/375)) per-operator to bulk-transfer the laptop-local `memory/` files into MEHO. The migration verb is idempotent; rerun if it errors mid-transfer.
 3. **Archive each operator's laptop-local `~/.claude/{projects}/memory/` directory** (e.g. `tar czf ~/memory-pre-retire-<YYYYMMDD>.tgz ~/.claude/.../memory/ && rm -rf ~/.claude/.../memory/`). Keep the archive ≥ 1 month after retire — recovering from a laptop archive is the rollback path; without the archive the rollback degrades to "re-create from server-side memories" (lossy).
-4. **Update the operator's local `CLAUDE.md`** to point at `meho memory search` rather than the `memory/` directory.
-5. **Repeat for every operator** before the surface is fully retired. Until every operator has retired, the audit-log telemetry will still show non-zero `search_memory` from the laggard operators' MCP clients, but the laptop-local files are the actual source of truth for them; the retire-checklist verdict reflects the team aggregate, not per-operator.
+4. **Update the operator's local `CLAUDE.md`** to point at `meho recall --query` rather than the `memory/` directory.
+5. **Repeat for every operator** before the surface is fully retired. Until every operator has retired, the usage telemetry will still show non-zero `search_memory` from the laggard operators' MCP clients, but the laptop-local files are the actual source of truth for them; the retire-checklist verdict reflects the team aggregate, not per-operator.
 
 ### operations
 
@@ -162,8 +162,9 @@ files were one-way archived per-operator.
    ```
 
 2. **If no archive exists**: re-create the laptop-local files from the
-   server-side memories. Run `meho memory export --scope <scope>`
-   per scope and re-shape into the laptop-local `~/.claude/.../memory/`
+   server-side memories. Run `meho list --scope <scope> --json` per
+   scope, fetch each body with `meho recall <scope>/<slug>`, and
+   re-shape into the laptop-local `~/.claude/.../memory/`
    directory layout. This is lossy — memory entries created
    server-side that never existed in the laptop-local files remain
    server-side-only (which is fine; the rollback re-establishes the
@@ -202,7 +203,7 @@ The label is created via the idempotent script in this Task:
 ```bash
 ./scripts/setup-retrieval-migration-blocker-label.sh           # apply against evoila/meho
 ./scripts/setup-retrieval-migration-blocker-label.sh --dry-run # print, do not mutate
-REPO=evoila-bosnia/claude-rdc-hetzner-dc \
+REPO=<your-org>/<your-infra-repo> \
   ./scripts/setup-retrieval-migration-blocker-label.sh         # also apply on the consumer repo
 ```
 
@@ -263,19 +264,19 @@ scripts/setup-retrieval-migration-blocker-label.sh
 
 ## Status
 
-| Surface | Substrate | Retire-checklist | Retire status (as of 2026-05-16) |
+| Surface | Substrate | Retire-checklist | Tooling status |
 | --- | --- | --- | --- |
 | kb | [#331 G4.1](https://github.com/evoila/meho/issues/331) | wired ✓ | tooling ready; retire on operator + team-of-4 call |
-| memory | [G5.1 (#380)](https://github.com/evoila/meho/issues/380) | wired ✓ | corpus ([T4 #443](https://github.com/evoila/meho/issues/443)) + migration verb ([G5.3 #375](https://github.com/evoila/meho/issues/375)) pending |
-| operations | [#388 G0.6](https://github.com/evoila/meho/issues/388) + [#389 G0.7](https://github.com/evoila/meho/issues/389) | wired ✓ | corpus ([T3 #442](https://github.com/evoila/meho/issues/442)) pending |
+| memory | [G5.1 (#380)](https://github.com/evoila/meho/issues/380) | wired ✓ | eval corpus ([T4 #443](https://github.com/evoila/meho/issues/443)) and `meho migrate memory` ([G5.3 #375](https://github.com/evoila/meho/issues/375)) shipped; retire on operator + team call |
+| operations | [#388 G0.6](https://github.com/evoila/meho/issues/388) + [#389 G0.7](https://github.com/evoila/meho/issues/389) | wired ✓ | eval corpus ([T3 #442](https://github.com/evoila/meho/issues/442)) shipped; retire on operator + team call |
 
 ## References
 
 - Parent Initiative: [#373 G4.3](https://github.com/evoila/meho/issues/373) — three-surface retrieval migration tooling.
 - Parent Task: [#446 G4.3-T7](https://github.com/evoila/meho/issues/446) — this runbook + label automation.
-- Sibling runbooks (filed; not yet shipped — link when the docs land):
-  - [G4.1-T6 #420](https://github.com/evoila/meho/issues/420) `docs/cross-repo/kb-migration.md`.
-  - [G5.1-T6 #427](https://github.com/evoila/meho/issues/427) `docs/cross-repo/memory-migration.md`.
+- Sibling runbooks:
+  - [`kb-migration.md`](./kb-migration.md) ([G4.1-T6 #420](https://github.com/evoila/meho/issues/420)).
+  - [`memory-migration.md`](./memory-migration.md) ([G5.1-T6 #427](https://github.com/evoila/meho/issues/427)).
 - Decision #2: [`docs/decisions/locked-decisions.md`](../decisions/locked-decisions.md) — side-by-side migration + 1-month overlap + retire-when-daily-use-shifts.
 - Retire-checklist service: [`backend/src/meho_backplane/retrieval/retire.py`](../../backend/src/meho_backplane/retrieval/retire.py) (T6 #445).
 - Retire-checklist CLI: [`cli/internal/cmd/retrieval/retire_checklist.go`](../../cli/internal/cmd/retrieval/retire_checklist.go).

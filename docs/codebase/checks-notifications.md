@@ -111,6 +111,11 @@ each entry). To change them: `PATCH /api/v1/checks/dashboards/{id}`
 `--notify-min-state`. The edit checks the addresses the same way
 (`normalise_notify_email` in `checks/dashboard_schemas.py`).
 
+Each recipient must be a plain address: the part before the `@` may
+hold only letters, digits and `.`, `_`, `+` and `-`
+(`connectors/mail/allowlist.py`). MEHO refuses any other recipient
+before it connects to the mail server.
+
 ## The notify rule
 
 ```
@@ -306,9 +311,9 @@ state)` window:
   not retried by the next same-state crossing — the #2719
   one-attempt-per-claimed-transition contract, per window. The failure
   is warn-logged either way.
-- **Delivery only.** The memo compare-and-swap, the `checks.transition`
-  broadcast event (#2720), and the investigator's fire gate see every
-  edge, suppressed or not. Finding mail is not flap-suppressed — its
+- **Delivery only.** The memo compare-and-swap and the investigator's
+  fire gate see every edge, suppressed or not. Checks publish no
+  Broadcast event (see `checks-broadcast.md`). Finding mail is not flap-suppressed — its
   volume control is the investigator's fire gate.
 
 ## Three anti-flap layers (#2799 composition)
@@ -321,8 +326,8 @@ compose, none rediscovers another:
    commits a *sensor* state change only after consecutive confirming
    re-checks (soft/hard states, `docs/codebase/sensor.md`). An
    unconfirmed transition never reaches the projection, so the rollup
-   CAS, this notifier, the broadcaster, the investigator, and the
-   advisory are all gated for free — fewer, better edges arrive here.
+   CAS, this notifier, the investigator, and the advisory are all
+   gated for free — fewer, better edges arrive here.
    This is what suppresses the observed one-flaky-reading incident: the
    two nuisance mails were first crossings into *distinct* states,
    which the #2732 window deliberately never suppresses.
@@ -459,8 +464,10 @@ from the memo would mean re-mailing every unchanged evaluation.
   still out of scope: routing rules, per-recipient `notify_min_state`,
   per-Sensor recipients, templating, and digests/batching — the flat
   closed list is deliberate (#2716 boundary). More when a consumer asks.
-- **Deployment-level SMTP.** One MTA and one allowlist for the whole
-  backplane; there is no per-tenant mail config. A tenant admin can
+- **Deployment-level SMTP.** One mail server and one deployment
+  allowlist cover all check mails. The per-tenant recipient allowlist
+  (`connectors/mail/tenant_policy.py`) applies only to a dispatched
+  `mail.send`; check mails do not use it. A tenant admin can
   therefore name a recipient the allowlist refuses. Since #2764 that
   refusal is per-entry: the offending recipient is dropped and
   warn-logged (`checks_notify_recipient_refused`) while the allowlisted
@@ -468,9 +475,10 @@ from the memo would mean re-mailing every unchanged evaluation.
   recipient is refused logs `checks_notify_no_allowed_recipients`.
 - **No delivery record.** Nothing durable says a mail was sent; the
   structlog event is the whole trace (`checks_notify_sent` /
-  `checks_finding_email_sent`). The `checks.transition` broadcast event
-  (#2720) is the queryable record of the edge itself, and the `agent_run`
-  row is the durable record of the finding.
+  `checks_finding_email_sent`). The Dashboard's
+  `check_dashboards.last_rollup_state` memo holds only the current
+  state, not the edge history; the `agent_run` row is the durable record
+  of the finding.
 - **Two mails per incident when both are configured.** A Dashboard with a
   `notify_email` and an enabled investigator mails the transition
   immediately and the finding minutes later, when the run terminates.

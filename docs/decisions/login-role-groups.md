@@ -1,6 +1,7 @@
 # People get their tenant and role from one of five login groups (decision)
 
 **Status:** decided — product owner, 2026-10-19
+**Self-approval for MEHO-SA-Operators:** shipped in 0.44.0. See [approval-groups-and-self-approval.md](approval-groups-and-self-approval.md).
 **Issue:** [#4590](https://github.com/evoila/meho/issues/4590)
 **Initiative:** [#3959](https://github.com/evoila/meho/issues/3959) — people log in with their company account, and their group decides their tenant and role
 **Used by:** `meho admin keycloak bootstrap-clients`, the built-in Keycloak setup ([#4040](https://github.com/evoila/meho/issues/4040)), the company login recipes under #3959 ([`docs-site/install/login/`](../../docs-site/install/login/index.md))

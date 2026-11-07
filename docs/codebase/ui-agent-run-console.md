@@ -14,7 +14,7 @@ Four routes, all under the per-agent `/run` sub-path:
 
 | Method · path | Role | Purpose |
 |---|---|---|
-| `GET /ui/agents/{name}/run` | operator (any authenticated session reaches the page) | The console page: run form (prompt + optional `work_ref`) + the transcript mount. |
+| `GET /ui/agents/{name}/run` | operator (`require_ui_operator`; a `read_only` session gets 403) | The console page: run form (prompt + optional `work_ref`) + the transcript mount. |
 | `POST /ui/agents/{name}/run` | operator | The CSRF-gated run-initiation action. Validates the prompt, confirms the agent is runnable (404 / 409 / 429 surface here), mints a run token, returns the transcript fragment. |
 | `GET /ui/agents/{name}/run/stream?token=…` | operator | The cookie-authed SSE bridge: verifies the token, lifts the operator, proxies `invoker.stream_events`. |
 | `POST /ui/agents/{name}/run/{handle}/cancel` | operator | The Stop button's CSRF-gated cancel proxy (T9 [#1833](https://github.com/evoila/meho/issues/1833)): lifts the operator and drives `invoker.cancel` — the same service path the REST cancel route uses. 204 / 404 / 409 / 403. |
@@ -173,11 +173,12 @@ rather than re-implementing decide).
   `cancelled` status on its next turn boundary. The console flips to the
   `cancelled` pill and closes the `EventSource` immediately; the run's own
   termination follows on the backend.
-- Bulk-cancel / cancel-from-runs-list is a possible follow-up, not in
-  scope here (the runs-list surface is T3 #1830).
-- Cross-agent run history (work_ref / status filters, poll-after-the-fact)
-  is T3 [#1830](https://github.com/evoila/meho/issues/1830); the
-  transcript's `run_id` deep-links to a run-detail page T3 owns.
+- The run list has no cancel button. Only the run console can stop a
+  run.
+- The run list for all agents is `GET /ui/agents/runs`, with `status`
+  and `work_ref` filters (`ui/routes/agents/runs/list_view.py`). The
+  transcript's `run_id` links to the run detail page
+  `GET /ui/agents/runs/{handle}` (`ui/routes/agents/runs/detail.py`).
 - The `awaiting_approval` banner is surfaced if a frame ever stamps an
   `awaiting_approval` status; the decide path itself stays on
   `/ui/approvals` (T7).

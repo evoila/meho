@@ -27,6 +27,14 @@ A tenant can own up to five things in Vault:
 Skip a row that your deployment does not use. For example, a deployment
 that uses only the shared role `meho-mcp` has no tenant login role.
 
+**Built-in OpenBao.** With the built-in OpenBao
+(`coreVault.enabled: true`, the chart default since 0.45.0), a tenant
+owns only its secrets. Every tenant shares the role `meho-mcp`, the three
+tenant policies and the three groups (one per `tenant_role`), so do only
+Step 2. The rule templates in Step 2 read `tenant_id` from the entity
+metadata, which the built-in OpenBao does not set: write the tenant id
+in its place.
+
 ## Before you start
 
 - **Find out which Vault role a call uses.** MEHO picks the role in this
@@ -68,9 +76,11 @@ MEHO login uses the tenant's role. The tenant's users log in under
    instead. It is a soft delete: Vault can undelete the versions. Run
    `vault.kv.metadata.delete` later to remove them for good.
 
-Each call needs its own approval today. `vault.kv.folder.delete` (a soft
-delete of many secrets with one approval) is planned in #3939 and not
-released yet.
+To soft-delete many secrets with one approval, use
+`vault.kv.folder.delete`: list the folder with `vault.kv.list` and
+`recursive=true`, then pass the keys from that answer. The approver sees
+the full list. A permanent removal still needs one
+`vault.kv.metadata.delete` call, and one approval, per secret.
 
 **Which role runs it.** Use one of these two ways:
 
@@ -121,9 +131,9 @@ vault kv metadata delete -mount=secret tenants/<tenant_id>/<key>
 
 ## Step 3: Delete the tenant's login role
 
-MEHO has no operation that deletes a JWT login role. Operations to read,
-list and change JWT login roles are planned in #3694; a delete is not part
-of that work. Until MEHO has one, this is a step for a Vault admin:
+MEHO can list, read and change JWT login roles
+(`vault.auth.jwt.role.list`, `.read`, `.write`), but it has no operation
+that deletes one. So this is a step for a Vault admin:
 
 ```bash
 # Check that it is the right role, and that no other tenant in
@@ -178,10 +188,10 @@ If you followed
 1. Read each: `vault.identity.group.read`.
 2. Delete each: `vault.identity.group.delete`.
 
-**Which role runs it.** The identity operations do not use the target's
-`vault_role` yet. They run under the caller's normal role (the per-tenant
-role, else `VAULT_OIDC_ROLE`), and MEHO does not check the rights before
-it asks for approval. That role needs:
+**Which role runs it.** The identity operations use the same role order
+as the other steps: the `vault_role` of the vault target you call, else
+the per-tenant role, else `VAULT_OIDC_ROLE`. MEHO does not check the
+rights before it asks for approval. That role needs:
 
 ```hcl
 path "identity/group/name/meho-tenant-<tenant_id>-*" {
@@ -189,8 +199,9 @@ path "identity/group/name/meho-tenant-<tenant_id>-*" {
 }
 ```
 
-If you do not want to give that rule to the normal role, a Vault admin
-runs `vault delete identity/group/name/<group>` for each group.
+Give the rule to a teardown role on a vault target, not to `meho-mcp`.
+Or a Vault admin runs `vault delete identity/group/name/<group>` for
+each group.
 
 ## Check that nothing is left
 

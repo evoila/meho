@@ -612,8 +612,9 @@ conflicts too. Two ways to handle it:
   takes them over.
 - **`force_conflicts: true`.** The apply sends the force switch and takes
   the conflicting fields over. Use it to change an object that another
-  tool applied. It changes who owns those fields: a later `kubectl apply`
-  of the old file by that tool will then conflict with `meho`.
+  tool applied. It changes who owns those fields: a later server-side
+  apply of the old file by that tool (`kubectl apply --server-side`) will
+  then conflict with `meho`.
 
 The approval request shows the switch. The dry-run of a forced apply first
 asks the API server without force, then lists each field it takes over in

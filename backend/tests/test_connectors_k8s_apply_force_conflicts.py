@@ -48,11 +48,20 @@ _OWNER = "kubectl-client-side-apply"
 _FIELDS = (".spec.replicas", ".spec.template")
 
 
-def _conflict_response() -> _FakeApplyResponse:
+def _conflict_response(*, short_message: bool = False) -> _FakeApplyResponse:
+    """A 409 conflict body.
+
+    ``short_message`` uses the cause shape ``conflict with "<owner>"`` with
+    the path only in ``field``, which the API server also sends.
+    """
     causes = [
         {
             "reason": "FieldManagerConflict",
-            "message": f'conflict with "{_OWNER}" using apps/v1: {field}',
+            "message": (
+                f'conflict with "{_OWNER}"'
+                if short_message
+                else f'conflict with "{_OWNER}" using apps/v1: {field}'
+            ),
             "field": field,
         }
         for field in _FIELDS
@@ -68,13 +77,13 @@ def _conflict_response() -> _FakeApplyResponse:
     return _FakeApplyResponse(409, json.dumps(body), reason="Conflict")
 
 
-def _owned_by_other_tool() -> Any:
+def _owned_by_other_tool(*, short_message: bool = False) -> Any:
     """A ``server_side_apply`` stub: 409 unless the request forces."""
 
     async def _ssa(_resource: Any, **kwargs: Any) -> _FakeApplyResponse:
         if kwargs.get("force_conflicts"):
             return _applied_obj()
-        return _conflict_response()
+        return _conflict_response(short_message=short_message)
 
     return AsyncMock(side_effect=_ssa)
 
@@ -94,9 +103,12 @@ async def _run_apply(ssa: AsyncMock, **params: Any) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("short_message", [False, True])
 @pytest.mark.parametrize("dry_run", ["none", "server"])
-async def test_conflict_without_force_names_owner_fields_and_the_fix(dry_run: str) -> None:
-    ssa = _owned_by_other_tool()
+async def test_conflict_without_force_names_owner_fields_and_the_fix(
+    dry_run: str, short_message: bool
+) -> None:
+    ssa = _owned_by_other_tool(short_message=short_message)
     with pytest.raises(ApplyRejectedError) as excinfo:
         await _run_apply(ssa, dry_run=dry_run)
     exc = excinfo.value
@@ -105,6 +117,7 @@ async def test_conflict_without_force_names_owner_fields_and_the_fix(dry_run: st
     assert _OWNER in text
     assert all(field in text for field in _FIELDS)
     assert "force_conflicts: true" in text
+    assert f"{_OWNER} owns" in text
     assert exc.upstream_message is not None
     assert "force_conflicts: true" in exc.upstream_message
     assert "force_conflicts" not in ssa.call_args.kwargs
@@ -131,8 +144,9 @@ async def test_force_false_is_the_default_and_sends_no_force() -> None:
 
 
 @pytest.mark.asyncio
-async def test_forced_dry_run_lists_the_fields_it_takes_over() -> None:
-    ssa = _owned_by_other_tool()
+@pytest.mark.parametrize("short_message", [False, True])
+async def test_forced_dry_run_lists_the_fields_it_takes_over(short_message: bool) -> None:
+    ssa = _owned_by_other_tool(short_message=short_message)
     result = await _run_apply(ssa, force_conflicts=True, dry_run="server")
     assert result["applied"][0]["takes_over"] == [
         {"owner": _OWNER, "field": field} for field in _FIELDS

@@ -264,9 +264,11 @@ def _response_warnings(response: Any) -> list[str]:
 
 
 #: ``conflict with "<owner>" using <apiVersion>: <field path>`` -- one cause
-#: of a field-ownership conflict (HTTP 409) in a server-side apply.
+#: of a field-ownership conflict (HTTP 409) in a server-side apply. The
+#: ``using ...: <field path>`` part is optional: the API server can send
+#: only ``conflict with "<owner>"`` and put the path in the cause's ``field``.
 _CONFLICT_CAUSE_RE: re.Pattern[str] = re.compile(
-    r'conflict with "(?P<owner>[^"]*)"[^:]*:\s*(?P<field>.*)'
+    r'conflict with "(?P<owner>[^"]*)"(?:[^:]*:\s*(?P<field>.*))?'
 )
 
 #: Most owner/field pairs named in a conflict message.
@@ -290,7 +292,7 @@ def _field_conflicts(body: str) -> list[dict[str, str]]:
         if not isinstance(cause, dict) or cause.get("reason") != "FieldManagerConflict":
             continue
         match = _CONFLICT_CAUSE_RE.match(str(cause.get("message") or ""))
-        field = str(cause.get("field") or (match["field"] if match else "")).strip()
+        field = str(cause.get("field") or (match["field"] if match else None) or "").strip()
         owner = match["owner"] if match else ""
         if owner or field:
             conflicts.append({"owner": owner, "field": field})

@@ -1,0 +1,5313 @@
+{
+  "tools": [
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "slug": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "body"
+        ],
+        "type": "object"
+      },
+      "name": "add_to_knowledge",
+      "outputSchema": null,
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "content": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "user",
+              "user-tenant",
+              "user-target",
+              "tenant",
+              "target"
+            ],
+            "type": "string"
+          },
+          "slug": {
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tags": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "target_name": {
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ttl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "scope"
+        ],
+        "type": "object"
+      },
+      "name": "add_to_memory",
+      "outputSchema": null,
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "collection": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "limit": {
+            "default": 10,
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "product": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "query": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "target": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "version": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "collection"
+        ],
+        "type": "object"
+      },
+      "name": "ask_docs",
+      "outputSchema": null,
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "async": {
+            "default": false,
+            "type": "boolean"
+          },
+          "connector_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "op_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "params": {
+            "type": "object"
+          },
+          "preview_hash": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "run_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "target": {
+            "minLength": 1,
+            "properties": {
+              "fqdn": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "name": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "type": [
+              "string",
+              "object",
+              "null"
+            ]
+          },
+          "wait_seconds": {
+            "default": 0,
+            "maximum": 50,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "work_ref": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "connector_id",
+          "op_id"
+        ],
+        "type": "object"
+      },
+      "name": "call_operation",
+      "outputSchema": {
+        "properties": {
+          "audit_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "data_notice": {
+            "type": "string"
+          },
+          "delivery": {
+            "enum": [
+              "complete",
+              "partial",
+              "unavailable",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "duration_ms": {
+            "type": "number"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "extras": {
+            "type": "object"
+          },
+          "handle": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "op_id": {
+            "type": "string"
+          },
+          "result": {},
+          "status": {
+            "enum": [
+              "ok",
+              "error",
+              "denied",
+              "awaiting_approval",
+              "rate_limited",
+              "pending",
+              "running"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "op_id",
+          "duration_ms"
+        ],
+        "type": "object"
+      },
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "backend": {
+            "additionalProperties": false,
+            "properties": {
+              "ref": {
+                "type": "object"
+              },
+              "type": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "ref"
+            ],
+            "type": "object"
+          },
+          "collection_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "extras": {
+            "type": "object"
+          },
+          "products": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "vendor": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "when_to_use": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "collection_key",
+          "vendor",
+          "backend"
+        ],
+        "type": "object"
+      },
+      "name": "create_doc_collections",
+      "outputSchema": {
+        "properties": {
+          "backend": {
+            "type": "object"
+          },
+          "collection_key": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "doc_count": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "extras": {
+            "type": "object"
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_ingested_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "products": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "readiness": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "vendor": {
+            "type": "string"
+          },
+          "when_to_use": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "collection_key",
+          "vendor",
+          "products",
+          "backend",
+          "status"
+        ],
+        "type": "object"
+      },
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "collection_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "collection_key"
+        ],
+        "type": "object"
+      },
+      "name": "delete_doc_collections",
+      "outputSchema": {
+        "properties": {
+          "collection_key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "collection_key"
+        ],
+        "type": "object"
+      },
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "limit": {
+            "default": 100,
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "vendor": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_doc_collections",
+      "outputSchema": {
+        "properties": {
+          "collections": {
+            "items": {
+              "properties": {
+                "collection_key": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "doc_count": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "last_ingested_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "products": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "vendor": {
+                  "type": "string"
+                },
+                "when_to_use": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "collection_key",
+                "vendor",
+                "products",
+                "description",
+                "when_to_use",
+                "status",
+                "doc_count",
+                "last_ingested_at"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "collections",
+          "next_cursor"
+        ],
+        "type": "object"
+      },
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "connector_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "cursor": {
+            "maxLength": 256,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": 100,
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "connector_id"
+        ],
+        "type": "object"
+      },
+      "name": "list_operation_groups",
+      "outputSchema": {
+        "properties": {
+          "connector_id": {
+            "type": "string"
+          },
+          "groups": {
+            "items": {
+              "properties": {
+                "enabled_op_count": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "group_key": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "operation_count": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "partial": {
+                  "type": "boolean"
+                },
+                "when_to_use": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "group_key",
+                "name",
+                "when_to_use",
+                "operation_count",
+                "enabled_op_count",
+                "partial"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "connector_id",
+          "groups",
+          "next_cursor"
+        ],
+        "type": "object"
+      },
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "connector_id": {
+            "maxLength": 256,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cursor": {
+            "maxLength": 256,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": 100,
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "tenant": {
+            "deprecated": true,
+            "maxLength": 256,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant_id": {
+            "maxLength": 256,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_targets",
+      "outputSchema": {
+        "properties": {
+          "handle": {
+            "type": "object"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "row_count": {
+            "type": "integer"
+          },
+          "sample_bytes": {
+            "type": "integer"
+          },
+          "sample_rows_returned": {
+            "type": "integer"
+          },
+          "source_key": {
+            "type": "string"
+          },
+          "targets": {
+            "items": {
+              "properties": {
+                "aliases": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "host": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "product": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "aliases",
+                "product",
+                "host"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "next_cursor"
+        ],
+        "type": "object"
+      },
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_revoked": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "meho_agent_principals_list",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_\\-\\.]+$",
+            "type": "string"
+          },
+          "owner_sub": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "meho_agent_principals_register",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "meho_agent_principals_revoke",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "identity_ref": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "model_tier": {
+            "enum": [
+              "standard",
+              "fast",
+              "deep"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_\\-\\.]+$",
+            "type": "string"
+          },
+          "output_schema": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "system_prompt": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "toolset": {
+            "type": "object"
+          },
+          "turn_budget": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "identity_ref",
+          "model_tier",
+          "system_prompt",
+          "turn_budget"
+        ],
+        "type": "object"
+      },
+      "name": "meho_agents_create",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "meho_agents_delete",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "identity_ref": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "model_tier": {
+            "enum": [
+              "standard",
+              "fast",
+              "deep"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "output_schema": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "system_prompt": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "toolset": {
+            "type": "object"
+          },
+          "turn_budget": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "meho_agents_edit",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "op_pattern": {
+            "type": "string"
+          },
+          "principal_kind": {
+            "default": "agent",
+            "enum": [
+              "agent",
+              "user-agent"
+            ],
+            "type": "string"
+          },
+          "principal_sub": {
+            "type": "string"
+          },
+          "target_scope": {
+            "type": "string"
+          },
+          "verdict": {
+            "enum": [
+              "auto-execute",
+              "needs-approval",
+              "deny"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "principal_sub",
+          "op_pattern",
+          "verdict"
+        ],
+        "type": "object"
+      },
+      "name": "meho_agents_grant_create",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_expired": {
+            "default": false,
+            "type": "boolean"
+          },
+          "principal_sub": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "meho_agents_grant_list",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "grant_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "grant_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_agents_grant_revoke",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "grant_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "grant_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_agents_grant_show",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "meho_agents_list",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_name": {
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "running",
+              "awaiting_approval",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "type": "string"
+          },
+          "work_ref": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "meho_agents_list_runs",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "async": {
+            "type": "boolean"
+          },
+          "input": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "work_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "input"
+        ],
+        "type": "object"
+      },
+      "name": "meho_agents_run",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "handle": {
+            "deprecated": true,
+            "minLength": 1,
+            "type": "string"
+          },
+          "run_id": {
+            "format": "uuid",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "meho_agents_run_status",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "meho_agents_show",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_request_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "id": {
+            "deprecated": true,
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "meho_approvals_get",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 50,
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "default": "pending",
+            "enum": [
+              "pending",
+              "approved",
+              "rejected",
+              "expired",
+              "all"
+            ],
+            "type": "string"
+          },
+          "work_ref": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "meho_approvals_list",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_depth": {
+            "default": 20,
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "session_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_audit_replay",
+      "outputSchema": {
+        "properties": {
+          "excluded_null_session_count": {
+            "type": "integer"
+          },
+          "loose_row_count": {
+            "type": "integer"
+          },
+          "root": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "row_count": {
+            "type": "integer"
+          },
+          "session_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "tenant_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "root",
+          "session_id",
+          "tenant_id",
+          "row_count",
+          "excluded_null_session_count",
+          "loose_row_count"
+        ],
+        "type": "object"
+      },
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "meho_automation_list",
+      "outputSchema": {
+        "properties": {
+          "providers": {
+            "items": {
+              "properties": {
+                "addon": {
+                  "type": "string"
+                },
+                "contract_compatible": {
+                  "type": "boolean"
+                },
+                "contract_version": {
+                  "type": "integer"
+                },
+                "last_seen_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "paired_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "surfaces": {
+                  "items": {
+                    "properties": {
+                      "display_label": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "kind": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "name",
+                      "display_label"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "addon",
+                "contract_version",
+                "contract_compatible",
+                "paired_at",
+                "last_seen_at",
+                "surfaces"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "providers"
+        ],
+        "type": "object"
+      },
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "activity": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "claim_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "phase": {
+            "default": "start",
+            "enum": [
+              "start",
+              "update",
+              "completion"
+            ],
+            "type": "string"
+          },
+          "planned_op_class": {
+            "enum": [
+              "read",
+              "write",
+              "credential_read",
+              "credential_write",
+              "credential_mint",
+              "audit_query",
+              "approval",
+              "other"
+            ],
+            "type": "string"
+          },
+          "run_id": {
+            "deprecated": true,
+            "format": "uuid",
+            "type": "string"
+          },
+          "scope": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "target": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "targets": {
+            "items": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 10,
+            "type": "array"
+          },
+          "ttl_minutes": {
+            "maximum": 1440,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "work_ref": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "activity"
+        ],
+        "type": "object"
+      },
+      "name": "meho_broadcast_announce",
+      "outputSchema": null,
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "op_id_pattern": {
+            "maxLength": 128,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "meho_broadcast_overrides_list",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "override_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "override_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_broadcast_overrides_remove",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "enum": [
+              "full",
+              "aggregate"
+            ],
+            "type": "string"
+          },
+          "op_id_pattern": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "scope_field": {
+            "enum": [
+              "namespace",
+              "target_name",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scope_value": {
+            "maxLength": 128,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "op_id_pattern",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "name": "meho_broadcast_overrides_set",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "filter": {
+            "additionalProperties": false,
+            "properties": {
+              "active_only": {
+                "default": false,
+                "type": "boolean"
+              },
+              "actor_sub": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "op_class": {
+                "enum": [
+                  "read",
+                  "write",
+                  "credential_read",
+                  "credential_write",
+                  "credential_mint",
+                  "audit_query",
+                  "approval",
+                  "checks",
+                  "other"
+                ],
+                "type": "string"
+              },
+              "principal": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "target": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "work_ref": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "limit": {
+            "default": 100,
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "since": {
+            "deprecated": true,
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "meho_broadcast_recent",
+      "outputSchema": null,
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "filter": {
+            "additionalProperties": false,
+            "properties": {
+              "active_only": {
+                "default": false,
+                "type": "boolean"
+              },
+              "actor_sub": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "op_class": {
+                "enum": [
+                  "read",
+                  "write",
+                  "credential_read",
+                  "credential_write",
+                  "credential_mint",
+                  "audit_query",
+                  "approval",
+                  "checks",
+                  "other"
+                ],
+                "type": "string"
+              },
+              "principal": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "target": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "work_ref": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "since_cursor": {
+            "deprecated": true,
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "timeout_ms": {
+            "default": 10000,
+            "maximum": 30000,
+            "minimum": 100,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "meho_broadcast_watch",
+      "outputSchema": null,
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "connector_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "tenant_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "connector_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_connector_delete",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "connector_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "tenant_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "connector_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_connector_disable",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "connector_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "group_key": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "when_to_use": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "connector_id",
+          "group_key"
+        ],
+        "type": "object"
+      },
+      "name": "meho_connector_edit_group",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "connector_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "custom_description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "op_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requires_approval": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "safety_level": {
+            "enum": [
+              "safe",
+              "caution",
+              "dangerous",
+              "destructive",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "connector_id",
+          "op_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_connector_edit_op",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "connector_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "tenant_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "connector_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_connector_enable",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "connector_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "prefer": {
+            "enum": [
+              "tenant",
+              "builtin",
+              "legacy",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "connector_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_connector_enable_reads",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "async": {
+            "default": false,
+            "type": "boolean"
+          },
+          "auth_scheme": {
+            "enum": [
+              "basic",
+              "oauth2_mint",
+              "session_login",
+              "session_login_basic",
+              "session_login_token",
+              "static_header",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "auth_secret_fields": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "base_url": {
+            "maxLength": 2048,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dry_run": {
+            "default": false,
+            "type": "boolean"
+          },
+          "impl_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "product": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "specs": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "content": {
+                  "maxLength": 20971520,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "uri": {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "uri"
+              ],
+              "type": "object"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "type": "array"
+          },
+          "tenant_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "version",
+          "impl_id",
+          "specs"
+        ],
+        "type": "object"
+      },
+      "name": "meho_connector_ingest",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_connector_ingest_status",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "default": "short",
+            "enum": [
+              "short",
+              "full"
+            ],
+            "type": "string"
+          },
+          "product": {
+            "type": "string"
+          },
+          "status": {
+            "default": "all",
+            "enum": [
+              "staged",
+              "enabled",
+              "disabled",
+              "all"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "meho_connector_list",
+      "outputSchema": null,
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "connector_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "prefer": {
+            "enum": [
+              "tenant",
+              "builtin",
+              "legacy",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "connector_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_connector_review",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "move": {
+            "default": false,
+            "type": "boolean"
+          },
+          "slug": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "source_scope": {
+            "enum": [
+              "user",
+              "user-tenant",
+              "user-target",
+              "tenant",
+              "target"
+            ],
+            "type": "string"
+          },
+          "target_name": {
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to": {
+            "enum": [
+              "user",
+              "user-tenant",
+              "user-target",
+              "tenant",
+              "target"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_scope",
+          "slug",
+          "to"
+        ],
+        "type": "object"
+      },
+      "name": "meho_memory_promote",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "run_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "name": "meho_runbook_abort",
+      "outputSchema": null,
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "template_slug": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "template_slug",
+          "version"
+        ],
+        "type": "object"
+      },
+      "name": "meho_runbook_deprecate_template",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "template_slug": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "template_slug",
+          "version"
+        ],
+        "type": "object"
+      },
+      "name": "meho_runbook_discard_template",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "additionalProperties": true,
+            "properties": {
+              "description": {
+                "type": "string"
+              },
+              "steps": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "target_kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title",
+              "description",
+              "steps"
+            ],
+            "type": "object"
+          },
+          "template_slug": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "template_slug",
+          "body"
+        ],
+        "type": "object"
+      },
+      "name": "meho_runbook_draft_template",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "additionalProperties": true,
+            "properties": {
+              "description": {
+                "type": "string"
+              },
+              "steps": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "target_kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title",
+              "description",
+              "steps"
+            ],
+            "type": "object"
+          },
+          "template_slug": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "template_slug",
+          "body"
+        ],
+        "type": "object"
+      },
+      "name": "meho_runbook_edit_template",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "assignee": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": 100,
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "in_progress",
+              "completed",
+              "abandoned",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "template_slug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "work_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "meho_runbook_list_runs",
+      "outputSchema": null,
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 100,
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "draft",
+              "published",
+              "deprecated",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "meho_runbook_list_templates",
+      "outputSchema": null,
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "last_verified": {
+            "type": "boolean"
+          },
+          "run_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "verify_response": {
+            "additionalProperties": true,
+            "properties": {
+              "actual": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "answer": {
+                "enum": [
+                  "yes",
+                  "no",
+                  "escalate"
+                ],
+                "type": "string"
+              },
+              "matched": {
+                "type": "boolean"
+              },
+              "type": {
+                "enum": [
+                  "confirm",
+                  "operation_call"
+                ],
+                "type": "string"
+              }
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "last_verified"
+        ],
+        "type": "object"
+      },
+      "name": "meho_runbook_next",
+      "outputSchema": null,
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "template_slug": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "template_slug",
+          "version"
+        ],
+        "type": "object"
+      },
+      "name": "meho_runbook_publish_template",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "new_assignee": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "run_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "new_assignee"
+        ],
+        "type": "object"
+      },
+      "name": "meho_runbook_reassign",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "template_slug": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "template_slug"
+        ],
+        "type": "object"
+      },
+      "name": "meho_runbook_show_template",
+      "outputSchema": null,
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "params": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "target": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "template_slug": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "work_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "template_slug",
+          "target"
+        ],
+        "type": "object"
+      },
+      "name": "meho_runbook_start",
+      "outputSchema": null,
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "trigger_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trigger_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_scheduler_cancel",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_definition_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "cron_expr": {
+            "maxLength": 128,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "event_filter": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "fire_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "identity_sub": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "in_flight_policy": {
+            "enum": [
+              "fail_into_audit",
+              "resume"
+            ],
+            "type": "string"
+          },
+          "inputs": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "kind": {
+            "enum": [
+              "cron",
+              "one_off",
+              "event"
+            ],
+            "type": "string"
+          },
+          "tenant_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timezone": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "work_ref": {
+            "maxLength": 256,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "agent_definition_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_scheduler_create",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "cron",
+              "one_off",
+              "event"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "default": 100,
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "paused",
+              "cancelled",
+              "fired"
+            ],
+            "type": "string"
+          },
+          "work_ref": {
+            "maxLength": 256,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "meho_scheduler_list",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "assertion": {
+            "type": "object"
+          },
+          "cadence_kind": {
+            "enum": [
+              "interval",
+              "cron"
+            ],
+            "type": "string"
+          },
+          "connector_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "cron_expr": {
+            "maxLength": 128,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "for_seconds": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "force": {
+            "type": "boolean"
+          },
+          "identity_sub": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "interval_seconds": {
+            "maximum": 86400,
+            "minimum": 5,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "op_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "params": {
+            "type": "object"
+          },
+          "retry_backoff_seconds": {
+            "maximum": 300,
+            "minimum": 5,
+            "type": "integer"
+          },
+          "retry_times": {
+            "maximum": 5,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "severity": {
+            "enum": [
+              "degraded",
+              "critical"
+            ],
+            "type": "string"
+          },
+          "target": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "tenant_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timezone": {
+            "maxLength": 64,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "connector_id",
+          "op_id",
+          "assertion",
+          "cadence_kind"
+        ],
+        "type": "object"
+      },
+      "name": "meho_sensor_create",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "sensor_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sensor_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_sensor_delete",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cadence_kind": {
+            "enum": [
+              "interval",
+              "cron"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "default": 100,
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "paused"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "meho_sensor_list",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "from": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "limit": {
+            "default": 100,
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "sensor_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "type": "string"
+          },
+          "to": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sensor_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_sensor_results",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "meho_status",
+      "outputSchema": null,
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "aliases": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "auth_model": {
+            "enum": [
+              "impersonation",
+              "shared_service_account",
+              "per_user"
+            ],
+            "type": "string"
+          },
+          "extras": {
+            "type": "object"
+          },
+          "fqdn": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "port": {
+            "maximum": 65535,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "preferred_impl_id": {
+            "maxLength": 200,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "product": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "secret_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tls_ca_pin": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tls_server_name": {
+            "maxLength": 512,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verify_tls": {
+            "type": "boolean"
+          },
+          "version": {
+            "maxLength": 100,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vpn_required": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "product",
+          "host"
+        ],
+        "type": "object"
+      },
+      "name": "meho_targets_register",
+      "outputSchema": {
+        "oneOf": [
+          {
+            "properties": {
+              "host": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "product": {
+                "type": "string"
+              },
+              "target_id": {
+                "type": "string"
+              },
+              "tenant_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_id",
+              "name",
+              "product",
+              "host",
+              "tenant_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approval_request_id": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "op_id": {
+                "type": "string"
+              },
+              "status": {
+                "const": "awaiting_approval"
+              }
+            },
+            "required": [
+              "status",
+              "approval_request_id",
+              "op_id",
+              "message"
+            ],
+            "type": "object"
+          }
+        ],
+        "type": "object"
+      },
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_url": {
+            "maxLength": 2048,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from_name": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "from_node_kind": {
+            "maxLength": 64,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "maxLength": 63,
+            "minLength": 2,
+            "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+            "type": "string"
+          },
+          "note": {
+            "maxLength": 2048,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to_name": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "to_node_kind": {
+            "maxLength": 64,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "from_name",
+          "kind",
+          "to_name"
+        ],
+        "type": "object"
+      },
+      "name": "meho_topology_annotate",
+      "outputSchema": {
+        "oneOf": [
+          {
+            "properties": {
+              "conflicts": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "edge_id": {
+                "type": "string"
+              },
+              "from": {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "kind",
+                  "name"
+                ],
+                "type": "object"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              },
+              "superseded": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "to": {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "kind",
+                  "name"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "edge_id",
+              "from",
+              "to",
+              "kind",
+              "source",
+              "conflicts",
+              "superseded"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approval_request_id": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "op_id": {
+                "type": "string"
+              },
+              "status": {
+                "const": "awaiting_approval"
+              }
+            },
+            "required": [
+              "status",
+              "approval_request_id",
+              "op_id",
+              "message"
+            ],
+            "type": "object"
+          }
+        ],
+        "type": "object"
+      },
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "dry_run": {
+            "default": true,
+            "type": "boolean"
+          },
+          "rows": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "evidence_url": {
+                  "maxLength": 2048,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "from_name": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "from_node_kind": {
+                  "maxLength": 64,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "maxLength": 63,
+                  "minLength": 2,
+                  "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+                  "type": "string"
+                },
+                "note": {
+                  "maxLength": 2048,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "to_name": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "to_node_kind": {
+                  "maxLength": 64,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "from_name",
+                "kind",
+                "to_name"
+              ],
+              "type": "object"
+            },
+            "maxItems": 1000,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "rows"
+        ],
+        "type": "object"
+      },
+      "name": "meho_topology_bulk_import",
+      "outputSchema": {
+        "oneOf": [
+          {
+            "properties": {
+              "conflicts": {
+                "type": "integer"
+              },
+              "created": {
+                "type": "integer"
+              },
+              "dry_run": {
+                "type": "boolean"
+              },
+              "rows": {
+                "items": {
+                  "properties": {
+                    "action": {
+                      "enum": [
+                        "create",
+                        "update",
+                        "conflict"
+                      ],
+                      "type": "string"
+                    },
+                    "conflicts": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "edge_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "from_kind": {
+                      "type": "string"
+                    },
+                    "from_name": {
+                      "type": "string"
+                    },
+                    "index": {
+                      "type": "integer"
+                    },
+                    "kind": {
+                      "type": "string"
+                    },
+                    "superseded": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "to_kind": {
+                      "type": "string"
+                    },
+                    "to_name": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "index",
+                    "action",
+                    "edge_id",
+                    "from_name",
+                    "from_kind",
+                    "to_name",
+                    "to_kind",
+                    "kind",
+                    "superseded",
+                    "conflicts"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "updated": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "dry_run",
+              "created",
+              "updated",
+              "conflicts",
+              "rows"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approval_request_id": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "op_id": {
+                "type": "string"
+              },
+              "status": {
+                "const": "awaiting_approval"
+              }
+            },
+            "required": [
+              "status",
+              "approval_request_id",
+              "op_id",
+              "message"
+            ],
+            "type": "object"
+          }
+        ],
+        "type": "object"
+      },
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_url": {
+            "maxLength": 2048,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "maxLength": 63,
+            "minLength": 2,
+            "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "note": {
+            "maxLength": 2048,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "meho_topology_create_node",
+      "outputSchema": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "node_id": {
+                "type": "string"
+              },
+              "source": {
+                "enum": [
+                  "auto",
+                  "curated"
+                ],
+                "type": "string"
+              },
+              "was_created": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "node_id",
+              "kind",
+              "name",
+              "source",
+              "was_created"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approval_request_id": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "op_id": {
+                "type": "string"
+              },
+              "status": {
+                "const": "awaiting_approval"
+              }
+            },
+            "required": [
+              "status",
+              "approval_request_id",
+              "op_id",
+              "message"
+            ],
+            "type": "object"
+          }
+        ],
+        "type": "object"
+      },
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "node_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "node_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_topology_delete_node",
+      "outputSchema": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "node_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "node_id",
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approval_request_id": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "op_id": {
+                "type": "string"
+              },
+              "status": {
+                "const": "awaiting_approval"
+              }
+            },
+            "required": [
+              "status",
+              "approval_request_id",
+              "op_id",
+              "message"
+            ],
+            "type": "object"
+          }
+        ],
+        "type": "object"
+      },
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "edge_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "from_name": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "from_node_kind": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "maxLength": 63,
+            "minLength": 2,
+            "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+            "type": "string"
+          },
+          "to_name": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "to_node_kind": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "name": "meho_topology_unannotate",
+      "outputSchema": {
+        "oneOf": [
+          {
+            "properties": {
+              "edge_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "edge_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approval_request_id": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "op_id": {
+                "type": "string"
+              },
+              "status": {
+                "const": "awaiting_approval"
+              }
+            },
+            "required": [
+              "status",
+              "approval_request_id",
+              "op_id",
+              "message"
+            ],
+            "type": "object"
+          }
+        ],
+        "type": "object"
+      },
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "connector_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "op_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "params": {
+            "type": "object"
+          },
+          "target": {
+            "minLength": 1,
+            "properties": {
+              "fqdn": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "name": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "type": [
+              "string",
+              "object",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "connector_id",
+          "op_id"
+        ],
+        "type": "object"
+      },
+      "name": "preview_operation",
+      "outputSchema": {
+        "properties": {
+          "connector_id": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "extras": {
+            "type": "object"
+          },
+          "method": {
+            "type": "string"
+          },
+          "op_id": {
+            "type": "string"
+          },
+          "plan_note": {
+            "type": "string"
+          },
+          "plan_shown": {
+            "type": "boolean"
+          },
+          "policy_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "policy_verdict": {
+            "enum": [
+              "auto-execute",
+              "needs-approval",
+              "deny"
+            ],
+            "type": "string"
+          },
+          "preview_hash": {
+            "type": "string"
+          },
+          "proposed_effect": {
+            "type": "object"
+          },
+          "query": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "redacted_body": {},
+          "requires_approval": {
+            "type": "boolean"
+          },
+          "resolved_path": {
+            "type": "string"
+          },
+          "safety_level": {
+            "type": "string"
+          },
+          "source_kind": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "error",
+              "unavailable"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "op_id",
+          "connector_id"
+        ],
+        "type": "object"
+      },
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_session_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "audit_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cursor": {
+            "maxLength": 512,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "event_class": {
+            "enum": [
+              "operation_execution",
+              "policy_decision",
+              "approval_decision",
+              "security_event",
+              "config_change",
+              "legacy_request",
+              null
+            ],
+            "maxLength": 32,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": 100,
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op_class": {
+            "enum": [
+              "read",
+              "write",
+              "credential_read",
+              "credential_write",
+              "credential_mint",
+              "audit_query",
+              "approval",
+              "checks",
+              "other",
+              null
+            ],
+            "maxLength": 64,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "op_id": {
+            "maxLength": 256,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent_audit_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "principal": {
+            "maxLength": 256,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result_status": {
+            "maxLength": 16,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "shape": {
+            "enum": [
+              "flat",
+              "tree",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "since": {
+            "maxLength": 32,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "maxLength": 256,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "until": {
+            "maxLength": 32,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "name": "query_audit",
+      "outputSchema": {
+        "oneOf": [
+          {
+            "properties": {
+              "next_cursor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "rows": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "rows",
+              "next_cursor"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "excluded_null_session_count": {
+                "type": "integer"
+              },
+              "loose_row_count": {
+                "type": "integer"
+              },
+              "root": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "row_count": {
+                "type": "integer"
+              },
+              "session_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "tenant_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "root",
+              "session_id",
+              "tenant_id",
+              "row_count",
+              "excluded_null_session_count",
+              "loose_row_count"
+            ],
+            "type": "object"
+          }
+        ],
+        "type": "object"
+      },
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "changed_only": {
+            "default": false,
+            "type": "boolean"
+          },
+          "conflicts": {
+            "default": false,
+            "type": "boolean"
+          },
+          "cursor": {
+            "maxLength": 1024,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "depth": {
+            "default": 16,
+            "maximum": 64,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "from_name": {
+            "maxLength": 256,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include_edges": {
+            "default": false,
+            "type": "boolean"
+          },
+          "include_stale": {
+            "default": true,
+            "type": "boolean"
+          },
+          "kind": {
+            "enum": [
+              "dependents",
+              "dependencies",
+              "path",
+              "edges",
+              "timeline",
+              "diff",
+              "history"
+            ],
+            "type": "string"
+          },
+          "kind_filter": {
+            "maxLength": 64,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_hops": {
+            "default": 8,
+            "maximum": 32,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "node_kind": {
+            "maxLength": 64,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path_direction": {
+            "default": "undirected",
+            "enum": [
+              "undirected",
+              "forward",
+              "reverse"
+            ],
+            "type": "string"
+          },
+          "relation_class": {
+            "enum": [
+              null,
+              "containment",
+              "placement",
+              "dependency",
+              "unknown"
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "since": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "enum": [
+              null,
+              "auto",
+              "curated"
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "maxLength": 256,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to_name": {
+            "maxLength": 256,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to_node_kind": {
+            "maxLength": 64,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ts1": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ts2": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "until": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "name": "query_topology",
+      "outputSchema": {
+        "properties": {
+          "anchor_node_id": {
+            "type": "string"
+          },
+          "completeness": {
+            "properties": {
+              "found": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "guidance": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "limits": {
+                "type": "object"
+              },
+              "limits_hit": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "retained": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "state": {
+                "enum": [
+                  "complete",
+                  "incomplete",
+                  "unavailable"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "limits_hit",
+              "found",
+              "retained",
+              "limits",
+              "guidance"
+            ],
+            "type": "object"
+          },
+          "data_notice": {
+            "type": "string"
+          },
+          "delivered_bytes": {
+            "type": "integer"
+          },
+          "delivery": {
+            "enum": [
+              "complete",
+              "partial",
+              "unavailable"
+            ],
+            "type": "string"
+          },
+          "delivery_max_bytes": {
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "direction": {
+            "enum": [
+              "undirected",
+              "forward",
+              "reverse"
+            ],
+            "type": "string"
+          },
+          "edge_count": {
+            "type": "integer"
+          },
+          "edges": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "entries": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "evidence": {
+            "type": "object"
+          },
+          "handle": {
+            "type": "object"
+          },
+          "include_edges": {
+            "type": "boolean"
+          },
+          "kind": {
+            "enum": [
+              "dependents",
+              "dependencies",
+              "path",
+              "edges",
+              "timeline",
+              "diff",
+              "history"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node_count": {
+            "type": "integer"
+          },
+          "node_kind": {
+            "type": "string"
+          },
+          "nodes": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "ordering": {
+            "type": "string"
+          },
+          "path": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "preview_omits": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "query": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "relation_class": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "root": {
+            "type": "object"
+          },
+          "row_count": {
+            "type": "integer"
+          },
+          "rows": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "sample_bytes": {
+            "type": "integer"
+          },
+          "sample_rows_returned": {
+            "type": "integer"
+          },
+          "snapshot_at": {
+            "type": "string"
+          },
+          "source_key": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "node_untracked",
+              "found",
+              "no_route"
+            ],
+            "type": "string"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "truncation_hint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "default": 1,
+            "maximum": 3,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "before": {
+            "default": 1,
+            "maximum": 3,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "collection": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "cursor": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "type": "string"
+          },
+          "mode": {
+            "default": "around",
+            "enum": [
+              "around",
+              "page",
+              "section"
+            ],
+            "type": "string"
+          },
+          "product": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "read_handle": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "type": "string"
+          },
+          "version": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "collection",
+          "read_handle"
+        ],
+        "type": "object"
+      },
+      "name": "read_docs",
+      "outputSchema": null,
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "handle_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "limit": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "query": {
+            "additionalProperties": false,
+            "properties": {
+              "aggregate": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "field": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "func": {
+                      "enum": [
+                        "COUNT",
+                        "SUM",
+                        "MIN",
+                        "MAX",
+                        "AVG"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "func"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 8,
+                "type": "array"
+              },
+              "filter": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "field": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "op": {
+                      "enum": [
+                        "=",
+                        "!=",
+                        "<",
+                        "<=",
+                        ">",
+                        ">=",
+                        "IN",
+                        "IS NULL"
+                      ],
+                      "type": "string"
+                    },
+                    "value": {}
+                  },
+                  "required": [
+                    "field",
+                    "op"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 10,
+                "type": "array"
+              },
+              "group_by": {
+                "items": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxItems": 4,
+                "type": "array"
+              },
+              "limit": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "order_by": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "direction": {
+                      "default": "asc",
+                      "enum": [
+                        "asc",
+                        "desc"
+                      ],
+                      "type": "string"
+                    },
+                    "field": {
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "field"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 4,
+                "type": "array"
+              },
+              "path": {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              "select": {
+                "items": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxItems": 64,
+                "type": "array"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "handle_id"
+        ],
+        "type": "object"
+      },
+      "name": "result_query",
+      "outputSchema": {
+        "properties": {
+          "coverage": {
+            "enum": [
+              "complete",
+              "partial"
+            ],
+            "type": "string"
+          },
+          "coverage_note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "data_notice": {
+            "type": "string"
+          },
+          "handle_id": {
+            "type": "string"
+          },
+          "limit": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "returned_chars": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "returned_rows": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rows": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "stored_rows": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "total_chars": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "total_rows": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "value": {},
+          "value_type": {
+            "enum": [
+              "object",
+              "array",
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "handle_id",
+          "rows",
+          "offset",
+          "limit",
+          "returned_rows",
+          "total_rows",
+          "stored_rows",
+          "truncated"
+        ],
+        "type": "object"
+      },
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "collection": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "collections": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 64,
+            "minItems": 1,
+            "type": "array"
+          },
+          "limit": {
+            "default": 10,
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "product": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "query": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "target": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "version": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "search_docs",
+      "outputSchema": null,
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "filters": {
+            "additionalProperties": true,
+            "properties": {
+              "kind": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": 10,
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "query": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "slug": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "search_knowledge",
+      "outputSchema": null,
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 10,
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "query": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "user",
+              "user-tenant",
+              "user-target",
+              "tenant",
+              "target",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "search_memory",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery": {
+            "enum": [
+              "complete",
+              "partial"
+            ],
+            "type": "string"
+          },
+          "hits": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "body_chars": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "created_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "expires_at": {
+                  "format": "date-time",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "expiry_state": {
+                  "enum": [
+                    "never",
+                    "scheduled"
+                  ],
+                  "type": "string"
+                },
+                "id": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "locator": {
+                  "type": "string"
+                },
+                "rank": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "scope": {
+                  "enum": [
+                    "user",
+                    "user-tenant",
+                    "user-target",
+                    "tenant",
+                    "target"
+                  ],
+                  "type": "string"
+                },
+                "slug": {
+                  "type": "string"
+                },
+                "snippet": {
+                  "type": "string"
+                },
+                "snippet_truncated": {
+                  "type": "boolean"
+                },
+                "target_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "updated_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "user_sub": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "rank",
+                "id",
+                "scope",
+                "slug",
+                "user_sub",
+                "target_name",
+                "created_at",
+                "updated_at",
+                "expires_at",
+                "expiry_state",
+                "snippet",
+                "snippet_truncated",
+                "body_chars",
+                "locator"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "omitted_hits": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "remediation": {
+            "type": "string"
+          },
+          "snippet_max_chars": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "hits",
+          "delivery",
+          "omitted_hits",
+          "snippet_max_chars"
+        ],
+        "type": "object"
+      },
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "connector_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "group": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include_scores": {
+            "default": false,
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 10,
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "connector_id"
+        ],
+        "type": "object"
+      },
+      "name": "search_operations",
+      "outputSchema": {
+        "oneOf": [
+          {
+            "properties": {
+              "advisory": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "data_notice": {
+                "type": "string"
+              },
+              "hits": {
+                "items": {
+                  "properties": {
+                    "bm25_score": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "cosine_score": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "description": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "fused_score": {
+                      "type": "number"
+                    },
+                    "group_key": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "op_id": {
+                      "type": "string"
+                    },
+                    "requires_approval": {
+                      "type": "boolean"
+                    },
+                    "safety_level": {
+                      "enum": [
+                        "safe",
+                        "caution",
+                        "dangerous",
+                        "destructive"
+                      ],
+                      "type": "string"
+                    },
+                    "summary": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "op_id",
+                    "safety_level",
+                    "requires_approval"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "narrowing": {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 20,
+                "type": "array"
+              },
+              "outcome": {
+                "enum": [
+                  "matched",
+                  "ambiguous",
+                  "no_match",
+                  "unknown_group",
+                  "zero_enabled_operations",
+                  "package_not_installed",
+                  "code_not_installed"
+                ],
+                "type": "string"
+              },
+              "query_duration_ms": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "hits",
+              "query_duration_ms",
+              "outcome",
+              "narrowing"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data_notice": {
+                "type": "string"
+              },
+              "operation": {
+                "properties": {
+                  "connector_id": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "examples": {
+                    "items": {
+                      "properties": {
+                        "param": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "source": {
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "source",
+                        "param",
+                        "value"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "group_key": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "op_id": {
+                    "type": "string"
+                  },
+                  "pagination_hint": {
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "parameter_schema": {
+                    "type": "object"
+                  },
+                  "recovery": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "requires_approval": {
+                    "type": "boolean"
+                  },
+                  "result_shape": {
+                    "properties": {
+                      "envelope_fields": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "guidance": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "envelope_fields",
+                      "guidance"
+                    ],
+                    "type": "object"
+                  },
+                  "safety_level": {
+                    "enum": [
+                      "safe",
+                      "caution",
+                      "dangerous",
+                      "destructive"
+                    ],
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "target": {
+                    "properties": {
+                      "guidance": {
+                        "type": "string"
+                      },
+                      "required": {
+                        "type": "boolean"
+                      },
+                      "resolves_by": {
+                        "enum": [
+                          "name"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "required",
+                      "resolves_by",
+                      "guidance"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "connector_id",
+                  "op_id",
+                  "safety_level",
+                  "requires_approval",
+                  "parameter_schema",
+                  "examples",
+                  "target",
+                  "result_shape",
+                  "pagination_hint",
+                  "recovery"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "operation"
+            ],
+            "type": "object"
+          }
+        ],
+        "type": "object"
+      },
+      "surface": "working"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "backend": {
+            "additionalProperties": false,
+            "properties": {
+              "ref": {
+                "type": "object"
+              },
+              "type": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "ref"
+            ],
+            "type": "object"
+          },
+          "collection_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "products": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "when_to_use": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "collection_key"
+        ],
+        "type": "object"
+      },
+      "name": "update_doc_collections",
+      "outputSchema": {
+        "properties": {
+          "backend": {
+            "type": "object"
+          },
+          "collection_key": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "doc_count": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "extras": {
+            "type": "object"
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_ingested_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "products": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "readiness": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "vendor": {
+            "type": "string"
+          },
+          "when_to_use": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "collection_key",
+          "vendor",
+          "products",
+          "backend",
+          "status"
+        ],
+        "type": "object"
+      },
+      "surface": "operator"
+    }
+  ]
+}

@@ -78,6 +78,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_ci_backend_python_skip.py",
     "tests/test_ci_check_chart_namespace_scope.py",
     "tests/test_ci_check_connector_kit_release.py",
+    "tests/test_ci_check_contract_compat.py",
     "tests/test_ci_check_plugin_version.py",
     "tests/test_ci_check_release_body_paths.py",
     "tests/test_ci_coverage_shards.py",

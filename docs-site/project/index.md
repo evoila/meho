@@ -27,10 +27,26 @@ Pre-1.0, breaking changes still ship in minors — each one carries a
 a v(N−1) client makes to keep working on v(N); see the *Breaking
 changes* convention in the
 [CHANGELOG](https://github.com/evoila/meho/blob/main/CHANGELOG.md)).
-The formal 1.0 stability promise — frozen contract surfaces, CI
-compatibility gates, and a deprecation window policy — is being built
-under [evoila/meho#2662](https://github.com/evoila/meho/issues/2662)
-and will be documented here when it lands.
+### What CI checks today
+
+A check in CI stops a change that breaks the REST API or the MCP tools.
+It compares each pull request with the version on `main`:
+
+- **REST API:** the public paths under `/api/v1/`. The console paths
+  under `/ui/` are not covered. Examples of a break: a removed path, a
+  removed field in an answer, a new required parameter.
+- **MCP tools:** the tool names, the surface a tool is listed on, and the
+  input and output schemas. Examples of a break: a removed tool, a removed
+  argument, a new required argument, a removed field in the result.
+
+A breaking change merges only on purpose. The pull request must have the
+`breaking-change` label and a *Breaking changes* section that says what a
+client must change. That text goes into the release notes.
+
+Not checked by CI yet: the Helm values, the update from the previous
+release, the CLI verbs and flags, and the environment variables. The full
+1.0 stability promise, with a deprecation window, is tracked in
+[evoila/meho#3861](https://github.com/evoila/meho/issues/3861).
 
 ## Security policy
 

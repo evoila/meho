@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Compatibility gate for the REST API and the MCP tools.
+#
+# Compares the two committed contract snapshots with the base of the pull
+# request and fails on a breaking change:
+#   - cli/api/openapi.json (REST API, public paths under /api/v1/ only),
+#     with oasdiff;
+#   - backend/contracts/mcp-tools-list.json (MCP tool names, surface,
+#     input and output schemas), with scripts/ci/check_contract_compat.py.
+# A breaking change passes only when the pull request has the
+# `breaking-change` label and a "## Breaking changes" section in its text.
+# The job runs again when a label or the text changes.
+#
+# Other checks keep the snapshots equal to the code: the ci.yml job
+# `cli-api-snapshot-freshness` and backend/tests/test_mcp_tools_snapshot_drift.py.
+#
+# Before a release candidate, run it by hand against the previous tag
+# (docs/RELEASING.md, "R3 — Before cutting an rc"):
+#   gh workflow run compat-gates.yml --ref main -f base=<previous tag> -f head=<candidate sha>
+#
+# Not in the merge queue: the label is not visible there. Add a
+# merge_group path before this becomes a required check.
+
+name: compat-gates
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+  workflow_dispatch:
+    inputs:
+      base:
+        description: 'Git ref to compare with (for example the previous tag)'
+        required: true
+      head:
+        description: 'Git ref to check (default: the branch the run starts on)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compat-gates-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+env:
+  OASDIFF_VERSION: '1.36.0'
+  # sha256 of oasdiff_1.36.0_linux_amd64.tar.gz from the release page.
+  OASDIFF_SHA256: 'dba65661f6d0f178a3e4884c309f19527a849388bb9df0e81545db76dbb697d6'
+
+jobs:
+  compat:
+    name: REST API and MCP tools compatibility
+    # GitHub-hosted runner: the job needs only git, Python and a public
+    # download, so a fork pull request is safe here too.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.head || '' }}
+          # A pull request checks out its merge commit; HEAD^1 is the base.
+          # A manual run compares with any tag, so it needs the full history.
+          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && '0' || '2' }}
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: '3.14'
+
+      - name: Install oasdiff
+        run: |
+          set -euo pipefail
+          TAR="oasdiff_${OASDIFF_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "/tmp/${TAR}" \
+            "https://github.com/oasdiff/oasdiff/releases/download/v${OASDIFF_VERSION}/${TAR}"
+          echo "${OASDIFF_SHA256}  /tmp/${TAR}" | sha256sum -c -
+          mkdir -p /tmp/oasdiff
+          tar -xzf "/tmp/${TAR}" -C /tmp/oasdiff oasdiff
+          /tmp/oasdiff/oasdiff --version
+
+      - name: Check for breaking changes
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_INPUT: ${{ inputs.base }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            python scripts/ci/check_contract_compat.py \
+              --base "$BASE_INPUT" --oasdiff /tmp/oasdiff/oasdiff
+          else
+            printf '%s' "$PR_BODY" > /tmp/pr-body.md
+            python scripts/ci/check_contract_compat.py \
+              --base HEAD^1 --oasdiff /tmp/oasdiff/oasdiff \
+              --labels "$PR_LABELS" --pr-body-file /tmp/pr-body.md
+          fi

@@ -718,12 +718,14 @@ Run step 1 as written (Tasks closed; **real** `success` on the
 
 - [ ] **Contract gates green on the candidate commit.** Gate 4 of
   #2661 — "contract snapshots + compat gates green across the rc
-  series" — is what the gates #2662 left in CI can check today. Confirm
-  each on the run you are about to tag:
+  series". Confirm each on the run you are about to tag:
   - `CLI API snapshot freshness` (`ci.yml` job
-    `cli-api-snapshot-freshness`, L2753–2843): `cli/api/openapi.json`,
+    `cli-api-snapshot-freshness`): `cli/api/openapi.json`,
     `cli/internal/api/client.gen.go` and `docs-site/reference/cli.md`
     regenerate to a clean tree.
+  - `backend/tests/test_mcp_tools_snapshot_drift.py` in the Python
+    lanes: the committed MCP tools snapshot
+    `backend/contracts/mcp-tools-list.json` matches the tool registry.
   - The contract test modules in the Python lanes:
     `backend/tests/test_api_v1_list_envelope_contract.py` (the
     `{items, next_cursor}` envelope over the governed list registry
@@ -737,12 +739,27 @@ Run step 1 as written (Tasks closed; **real** `success` on the
   - `migration-compat.yml` (additive-only `upgrade()`). It is
     PR-triggered, so check it on the PRs that carried migrations since
     the previous tag rather than on the `main` run.
-- [ ] **Contract diff since the previous tag is classified.** There is
-  no automated breaking-vs-additive gate yet (Known gap 3), so do it by
-  hand and record the classification on #2661:
+- [ ] **Contract diff since the previous tag is classified.** Each pull
+  request already ran the `compat-gates` workflow (job `REST API and MCP
+  tools compatibility`), which fails on a breaking change to the public
+  REST API (`/api/v1/`) or the MCP tools unless the pull request has the
+  `breaking-change` label and a `## Breaking changes` section
+  ([`docs/codebase/compat-gates.md`](codebase/compat-gates.md)). Run it
+  once more over the whole range, on the candidate commit:
 
   ```bash
-  git diff "${RC_PREV}".."${RC_SHA}" -- cli/api/openapi.json docs-site/reference/cli.md docs-site/reference/maturity.md
+  gh workflow run compat-gates.yml --repo evoila/meho --ref main \
+    -f base="${RC_PREV}" -f head="${RC_SHA}"
+  gh run list --repo evoila/meho --workflow compat-gates.yml --limit 1   # wait for it, then read the log
+  ```
+
+  A manual run has no label, so it fails on every break it finds; each
+  one must have a `### Breaking changes` bullet. The gate does not cover
+  the CLI, the Helm values or the environment variables yet (Known
+  gap 3), so classify those by hand and record the result on #2661:
+
+  ```bash
+  git diff "${RC_PREV}".."${RC_SHA}" -- docs-site/reference/cli.md docs-site/reference/maturity.md deploy/charts/meho/values.yaml
   ```
 
   Anything that is not additive — removed path / operation / field,
@@ -950,18 +967,17 @@ follow-up task.
    no `vX.Y` token and the self-updating badge (L6) short-circuits the
    check at L93–97 — but reintroducing a `**Status:** vX.Y` token while
    an rc is the latest tag would fail it on every merge-queue admission.
-3. **No automated compatibility-diff gate.** #2662 closed 2026-08-30
-   ("All children shipped; contract-freeze gates live in CI"), but the
-   mechanisms its body lists — an oasdiff-class compat gate on the
-   public OpenAPI snapshot, a committed `tools/list` snapshot, an
-   env-var registry snapshot, Helm golden renders, an
-   upgrade-from-previous-tag job, and a `breaking-change` label (no such
-   label exists in `evoila/meho`) — are not in the tree; the CI gates
-   that exist are the ones R3 lists, and
-   `docs-site/project/index.md` L30–33 still says the promise "will be
-   documented here when it lands". Until they exist, gate 4 is the R3
-   hand-classification plus those gates. Suggested fix: file the
-   missing children (at minimum the compat-diff gate) before `rc.1`.
+3. **The compatibility gate covers only the REST API and the MCP
+   tools.** The `compat-gates` workflow
+   ([`docs/codebase/compat-gates.md`](codebase/compat-gates.md)) checks
+   the public OpenAPI snapshot with oasdiff and the committed MCP
+   `tools/list` snapshot (`backend/contracts/mcp-tools-list.json`), and
+   a break needs the `breaking-change` label. Still missing: Helm golden
+   renders, an update-from-previous-tag job, an env-var registry
+   snapshot, and a check of the CLI verbs and flags. Until they exist,
+   R3 classifies those by hand. The workflow also does not run in the
+   merge queue (labels are not visible there), so it is not a required
+   check yet.
 4. **Image alias for a pre-release tag is not asserted in the YAML.**
    `.github/workflows/image.yml` L190–193 configures
    `type=semver,pattern={{raw}}`; the header (L10, L183) documents only

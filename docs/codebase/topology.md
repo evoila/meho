@@ -213,6 +213,27 @@ below the floor cannot approve a parked write, so the approved write was
 approved by a `tenant_admin` whichever resume path runs it. The REST
 routes and MCP tools keep their own
 `tenant_admin` check at the door.
+
+A service login with no standing grant also waits for approval on these
+writes (`_service_safety_gate_reason` in `operations/_validate.py`), and
+so does a person's call made with a token. A person in the web interface
+runs them at once.
+
+**The REST graph writes are for people.** `POST /edges`,
+`POST /edges/bulk`, `DELETE /edges/{edge_id}` and
+`DELETE /nodes/{node_id}` use one gate, `_require_admin_person` in
+`api/v1/topology.py`. It checks the `tenant_admin` role first, then that
+the login is a person (`ensure_human_principal` in `auth/rbac.py`). So:
+
+- A person with `tenant_admin` writes at once (the CLI, scripts).
+- A service or runner login with `tenant_admin` gets 403
+  `human_principal_required`. The text names the `topology.*`
+  operations of `topology-graph-1.x`, which go through the approval
+  check above.
+- An agent login gets 403 `insufficient_role`: MEHO caps its role at
+  `operator`.
+- The reads and `POST /refresh` keep the `operator` role and stay open
+  to machine logins.
 The typed-op handlers unwrap params and call `annotate_edge_with_plan` /
 `create_or_get_node` / `unannotate_edge` / `bulk_import_edges` unchanged;
 domain errors come

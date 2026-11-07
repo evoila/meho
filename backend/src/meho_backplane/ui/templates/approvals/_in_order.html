@@ -18,6 +18,11 @@
   Every form here carries the CSRF token minted for this render; the route
   re-sets the cookie on the same response.
 
+  Every form also carries one hidden ``step_id`` per step in the list. The
+  POST approves nothing when the change ticket has a pending request that is
+  not among them; it renders the list again with those steps in ``unseen``
+  (shown in a banner and marked "new" on their rows), and a fresh Start.
+
   "May I approve this?" sign (#3329): each pending step shows whether this
   person may approve it (``right``, the same service checks as the approve).
   When a step the run has not reached says no, ``next_refused`` names where
@@ -29,7 +34,8 @@
     work_ref, steps (list of {step, request, safety_level, outcome, detail,
     right (ApproveRight | None), self_approval (str | None)}),
     total, pending, started, warnings, waiting, waiting_context, stopped,
-    next_refused (a step | None), sign_in_url (str | None), approved_now,
+    next_refused (a step | None), unseen (list of steps),
+    sign_in_url (str | None), approved_now,
     self_approved_now, reason, csrf_token, status_pill_class,
     result_state_pill
 -#}
@@ -72,6 +78,17 @@
       </div>
     {% endfor %}
 
+    {% set unseen_ids = unseen | map(attribute="request.id") | list %}
+    {% if unseen %}
+      <div role="alert" class="alert alert-warning mt-3 items-start text-sm" data-approval-in-order-unseen>
+        <div>
+          <p class="font-semibold">New steps joined this change ticket after the list was shown. MEHO approved nothing.</p>
+          <p class="[overflow-wrap:anywhere]">New: {% for u in unseen %}step {{ u.step }} ({{ u.request.op_id }}){{ ", " if not loop.last else "" }}{% endfor %}.
+            Check the list below, then start again.</p>
+        </div>
+      </div>
+    {% endif %}
+
     {% if stopped %}
       <div role="alert" class="alert alert-error mt-3 items-start text-sm" data-approval-in-order-stopped="{{ stopped.step }}">
         <div>
@@ -106,9 +123,15 @@
           <div class="min-w-0 space-y-1">
             <div class="flex flex-wrap items-center gap-2">
               <span class="text-xs font-semibold">Step {{ s.step }}</span>
+              {% if s.request.id in unseen_ids %}
+                <span class="badge badge-sm badge-warning" data-approval-in-order-new>new</span>
+              {% endif %}
               <span class="truncate font-mono text-sm">{{ s.request.op_id }}</span>
               {% if s.safety_level %}
                 <span class="badge badge-sm {{ 'badge-error' if s.safety_level in ('dangerous', 'destructive') else 'badge-ghost' }}">{{ s.safety_level }}</span>
+              {% endif %}
+              {% if s.request.reveal_secret %}
+                <span class="badge badge-sm badge-error" data-approval-in-order-reveal-secret title="The approved run returns the hidden values to the requester">returns hidden values</span>
               {% endif %}
             </div>
             {% if s.detail %}
@@ -189,6 +212,9 @@
         hx-disabled-elt="find button"
       >
         <input type="hidden" name="work_ref" value="{{ work_ref }}" />
+        {% for s in steps %}
+          <input type="hidden" name="step_id" value="{{ s.request.id }}" />
+        {% endfor %}
         {% if waiting %}
           <input type="hidden" name="confirm_id" value="{{ waiting.request.id }}" />
           <input type="hidden" name="reason" value="{{ reason }}" />

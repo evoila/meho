@@ -92,6 +92,7 @@ from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.templating import reset_templating_for_testing
 from meho_backplane.untrusted_text import BLOCK_START, wrap_untrusted_text
+from tests._ui_role_helpers import allow_ui_operator_role
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
@@ -106,6 +107,13 @@ from ._oidc_jwt_helpers import (
     mock_discovery_and_jwks,
     public_jwks,
 )
+
+
+@pytest.fixture(autouse=True)
+def _ui_operator_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The console pages under test sit behind the ``operator`` role check."""
+    allow_ui_operator_role(monkeypatch)
+
 
 _ASK_SEAM = "meho_backplane.docs_search.backends.corpus_http.ask_corpus"
 _SEARCH_SEAM = "meho_backplane.docs_search.backends.corpus_http.search_corpus"

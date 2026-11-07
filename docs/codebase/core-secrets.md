@@ -25,8 +25,10 @@ new objects, so existing installs render byte for byte as before.
 The chart points the backplane and the Ingress at these Secrets itself
 (#4047, [devops.md](devops.md#wiring-the-built-in-core-to-the-backplane-templates_core-wiringtpl-4047)):
 `DATABASE_URL` from `-core-postgres-meho`, the approval hand-off key from
-`-core-approval-handoff` (on by default with a built-in part), and the
-Ingress certificate from `-core-tls`. With the built-in PostgreSQL on, the
+`-core-approval-handoff` (on by default with a built-in part),
+`PARAMS_HASH_KEY` (the key of the params hashes and value fingerprints,
+[approvals.md](approvals.md)) from `-core-params-hash`, and the Ingress
+certificate from `-core-tls`. With the built-in PostgreSQL on, the
 database migration runs in the backplane pod, as its `migrate` init
 container (#5233). `postgres.credentialsSecret` cannot name a Secret of
 your own while `corePostgres.enabled` is on: the PostgreSQL pod sets the
@@ -49,6 +51,7 @@ Names are `<release>-core-…`. "alnum 32" means 32 characters from
 | `-core-ui-auth` | `session_encryption_key`, `client_secret` | Fernet; alnum 32 | `coreKeycloak.enabled` | `uiConsole.secretName` (not while `coreKeycloak.enabled` is on, see below) |
 | `-core-check-runner` | `client_secret` | alnum 32 | `coreKeycloak.enabled` | `checkRunner.clientSecret.secretName` (not while `coreKeycloak.enabled` is on, see below) |
 | `-core-approval-handoff` | `approval_handoff_encryption_key` | Fernet | any built-in part | `approvalHandoff.secretName` |
+| `-core-params-hash` | `params_hash_key` | alnum 32 | any built-in part | `paramsHashKey.secretName` |
 | `-core-broadcast-auth` | `requirepass` | alnum 32 | any built-in part, with `broadcast.enabled` and `broadcast.auth.enabled` | `broadcast.auth.existingSecret` |
 | `-core-tls` | `tls.crt`, `tls.key`, `ca.crt` | type `kubernetes.io/tls`; a CA and a certificate for `ingress.host` | any built-in part, with the Ingress and TLS on | `ingress.tls.secretName` |
 

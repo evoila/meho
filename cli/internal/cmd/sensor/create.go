@@ -25,7 +25,7 @@ import (
 //	  (--interval-seconds N | --cron-expr E [--timezone TZ])
 //	  [--severity degraded|critical] [--for-seconds N]
 //	  [--target @file|<json>] [--params @file|<json>] [--identity-sub SUB]
-//	  [--tenant T] [--json] [--backplane <url>]
+//	  [--tenant T] [--force] [--json] [--backplane <url>]
 //
 // Role: tenant_admin.
 func newCreateCmd() *cobra.Command {
@@ -46,6 +46,7 @@ func newCreateCmd() *cobra.Command {
 		paramsArg           string
 		identitySub         string
 		tenant              string
+		force               bool
 		jsonOut             bool
 		backplaneOverride   string
 	)
@@ -76,7 +77,12 @@ func newCreateCmd() *cobra.Command {
 			"(platform_admin cross-tenant).\n\nA non-safe op returns 422 " +
 			"sensor_requires_safe_operation; an unknown op 422 " +
 			"sensor_operation_not_found; a duplicate name 409 " +
-			"sensor_name_conflict.",
+			"sensor_name_conflict.\n\nWhen --target names a target whose " +
+			"detected product or version the connector does not support, " +
+			"the create is refused with 422 sensor_connector_mismatch and a " +
+			"warning that names the connector that fits, when there is one. " +
+			"--force creates the sensor anyway; the warning then shows in " +
+			"`meho sensor list`.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -98,6 +104,7 @@ func newCreateCmd() *cobra.Command {
 				ParamsArg:           paramsArg,
 				IdentitySub:         identitySub,
 				Tenant:              tenant,
+				Force:               force,
 				JSONOut:             jsonOut,
 				BackplaneOverride:   backplaneOverride,
 			})
@@ -132,6 +139,8 @@ func newCreateCmd() *cobra.Command {
 		"identity sub the runner dispatches under (default '__sensor__')")
 	cmd.Flags().StringVar(&tenant, "tenant", "",
 		"target tenant UUID (platform_admin cross-tenant create)")
+	cmd.Flags().BoolVar(&force, "force", false,
+		"create the sensor even when its connector does not fit the target's product and version")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw Sensor JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
@@ -160,6 +169,7 @@ type createOptions struct {
 	ParamsArg           string
 	IdentitySub         string
 	Tenant              string
+	Force               bool
 	JSONOut             bool
 	BackplaneOverride   string
 }
@@ -349,6 +359,10 @@ func buildCreateBody(
 	}
 	if tenantID != nil {
 		body.TenantId = tenantID
+	}
+	if opts.Force {
+		force := true
+		body.Force = &force
 	}
 	return body
 }

@@ -19,7 +19,9 @@ call arrives:
   pipeline) keep their own rule. A standing grant (a person's approval,
   given in advance) lets their `caution` and `dangerous` changes run.
   Without one, they wait. Their `destructive` changes always wait for a
-  person.
+  person. Only a person makes a standing grant. For an operation that
+  needs the **tenant_admin** role (registering a target, changing the
+  topology), that person needs the **tenant_admin** role too.
 
 Who may approve depends on the person's login group (see
 [Who may approve](#who-may-approve)). The web interface is the normal

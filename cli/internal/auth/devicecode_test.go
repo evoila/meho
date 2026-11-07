@@ -28,14 +28,15 @@ import (
 // the only ones we assert against — the loader explicitly ignores
 // extras per the spec.
 func TestFetchDiscoveryOIDCShape(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/.well-known/openid-configuration" {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/realms/meho/.well-known/openid-configuration" {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"issuer":                        "https://kc.example/realms/meho",
+			"issuer":                        srv.URL + "/realms/meho",
 			"device_authorization_endpoint": "https://kc.example/realms/meho/protocol/openid-connect/auth/device",
 			"token_endpoint":                "https://kc.example/realms/meho/protocol/openid-connect/token",
 			"unrelated_field":               "ignored",
@@ -43,11 +44,11 @@ func TestFetchDiscoveryOIDCShape(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	doc, err := FetchDiscovery(context.Background(), srv.Client(), srv.URL+"/.well-known/openid-configuration")
+	doc, err := FetchDiscovery(context.Background(), srv.Client(), srv.URL+"/realms/meho/.well-known/openid-configuration")
 	if err != nil {
 		t.Fatalf("FetchDiscovery: %v", err)
 	}
-	if doc.Issuer != "https://kc.example/realms/meho" {
+	if doc.Issuer != srv.URL+"/realms/meho" {
 		t.Errorf("issuer: %q", doc.Issuer)
 	}
 	if !strings.HasSuffix(doc.DeviceAuthorizationEndpoint, "/auth/device") {
@@ -121,7 +122,8 @@ func TestFetchDiscoveryNon2xxSurfacesStatus(t *testing.T) {
 // second returns the document.
 func TestFetchDiscoveryFromRealmTriesOAuthFallback(t *testing.T) {
 	var oauthHits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/realms/meho/.well-known/openid-configuration":
 			http.NotFound(w, r)
@@ -129,7 +131,7 @@ func TestFetchDiscoveryFromRealmTriesOAuthFallback(t *testing.T) {
 			atomic.AddInt32(&oauthHits, 1)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"issuer":                        "https://kc/realms/meho",
+				"issuer":                        srv.URL + "/realms/meho",
 				"device_authorization_endpoint": "https://kc/device",
 				"token_endpoint":                "https://kc/token",
 			})
@@ -143,7 +145,7 @@ func TestFetchDiscoveryFromRealmTriesOAuthFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchDiscoveryFromRealm: %v", err)
 	}
-	if doc.Issuer != "https://kc/realms/meho" {
+	if doc.Issuer != srv.URL+"/realms/meho" {
 		t.Errorf("issuer: %q", doc.Issuer)
 	}
 	if atomic.LoadInt32(&oauthHits) != 1 {

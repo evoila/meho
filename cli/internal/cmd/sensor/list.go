@@ -203,14 +203,16 @@ func getList(
 }
 
 // printListTable renders the sensors as a compact table:
-// ID, NAME, STATUS, LAST_STATE, CADENCE, NEXT_FIRE_AT, SEVERITY.
+// ID, NAME, CONNECTOR, TARGET, STATUS, LAST_STATE, CADENCE, NEXT_FIRE_AT,
+// SEVERITY. TARGET is the target's detected product and version. A sensor
+// whose connector does not fit them gets a warning line under the table.
 func printListTable(w io.Writer, r *api.SensorListResponse) {
 	if r == nil || len(r.Items) == 0 {
 		fmt.Fprintln(w, "no sensors in this tenant")
 		return
 	}
-	fmt.Fprintf(w, "%-36s %-20s %-8s %-10s %-22s %-24s %s\n",
-		"ID", "NAME", "STATUS", "LAST_STATE", "CADENCE", "NEXT_FIRE_AT", "SEVERITY")
+	fmt.Fprintf(w, "%-36s %-20s %-20s %-16s %-8s %-10s %-22s %-24s %s\n",
+		"ID", "NAME", "CONNECTOR", "TARGET", "STATUS", "LAST_STATE", "CADENCE", "NEXT_FIRE_AT", "SEVERITY")
 	for _, s := range r.Items {
 		cadence := string(s.CadenceKind)
 		switch string(s.CadenceKind) {
@@ -234,8 +236,14 @@ func printListTable(w io.Writer, r *api.SensorListResponse) {
 		// sensor name, cron expression, timezone); sanitize so terminal
 		// control chars / ANSI escapes can't affect the operator's terminal.
 		// The --json path (runList) serialises the raw values unchanged.
-		fmt.Fprintf(w, "%-36s %-20s %-8s %-10s %-22s %-24s %s\n",
-			s.Id.String(), sanitizeCell(s.Name), string(s.Status), string(s.LastState),
+		fmt.Fprintf(w, "%-36s %-20s %-20s %-16s %-8s %-10s %-22s %-24s %s\n",
+			s.Id.String(), sanitizeCell(s.Name), sanitizeCell(s.ConnectorId),
+			sanitizeCell(targetLabel(s.ConnectorFit)), string(s.Status), string(s.LastState),
 			sanitizeCell(cadence), next, string(s.Severity))
+	}
+	for _, s := range r.Items {
+		if warning := fitWarning(s.ConnectorFit); warning != "" {
+			fmt.Fprintf(w, "\nwarning: sensor %s: %s\n", sanitizeCell(s.Name), sanitizeCell(warning))
+		}
 	}
 }

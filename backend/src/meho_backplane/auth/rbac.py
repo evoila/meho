@@ -238,24 +238,46 @@ def authorize_tenant_scope(operator: Operator, requested: UUID | None) -> UUID:
 
     Returns ``operator.tenant_id`` when *requested* is ``None`` or equals
     the operator's own tenant — the common, same-tenant path. A request
-    naming a *different* tenant is the cross-tenant case: it is allowed
-    **only** for a platform-admin (``operator.platform_admin``, the
-    cross-tenant capability primitive #1638) and otherwise raises HTTP 403
-    ``cross_tenant_requires_platform_admin``.
+    naming a *different* tenant is the cross-tenant case. It follows the
+    rules of the ``Meho-Tenant`` header
+    (:func:`~meho_backplane.auth.current_tenant.select_current_tenant`):
 
-    This replaces the prior per-route gate that allowed the claim on
-    ``tenant_admin`` *rank* alone — a tenant-admin of tenant A could pass
-    tenant B's id and read/act on B (a cross-tenant IDOR). Tenant role
-    governs *what* an operator may do within their tenant; crossing the
-    tenant boundary is a separate, platform-level capability.
+    * A tenant in the caller's own tenant list is refused with HTTP 403
+      ``tenant_select_with_header``. The caller selects it with the
+      ``Meho-Tenant`` header, so their own role there applies.
+    * Any other tenant is allowed only for a platform admin
+      (``operator.platform_admin``, the cross-tenant capability) who is a
+      person. A machine login (agent / service / runner) never
+      crosses tenants, also when its token carries the platform-admin
+      claim. Everyone else gets HTTP 403
+      ``cross_tenant_requires_platform_admin``.
+
+    Tenant role governs *what* an operator may do within their tenant;
+    crossing the tenant boundary is a separate, platform-level capability.
     """
     if requested is None or requested == operator.tenant_id:
         return operator.tenant_id
-    if operator.platform_admin:
+    log = structlog.get_logger(__name__)
+    if any(entry.tenant_id == requested for entry in operator.tenants):
+        log.warning(
+            "cross_tenant_own_tenant_denied",
+            operator_sub=operator.sub,
+            operator_tenant_id=str(operator.tenant_id),
+            requested_tenant_id=str(requested),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "tenant_select_with_header: you are a member of this tenant. "
+                "Select it with the Meho-Tenant header, so your own role there applies."
+            ),
+        )
+    if operator.platform_admin and is_human_principal(operator):
         return requested
-    structlog.get_logger(__name__).warning(
+    log.warning(
         "cross_tenant_denied",
         operator_sub=operator.sub,
+        principal_kind=operator.principal_kind.value,
         operator_tenant_id=str(operator.tenant_id),
         requested_tenant_id=str(requested),
     )
@@ -283,7 +305,9 @@ HUMAN_ONLY_REST_REMEDIATION: Final[str] = (
 )
 
 
-def ensure_human_principal(operator: Operator) -> None:
+def ensure_human_principal(
+    operator: Operator, *, remediation: str = HUMAN_ONLY_REST_REMEDIATION
+) -> None:
     """Refuse a machine principal on a human-only governance verb (#289).
 
     Transport-independent guard for the verbs that are a **human**
@@ -305,6 +329,11 @@ def ensure_human_principal(operator: Operator) -> None:
     (#3243) and the seniority self-approval rules are preserved unchanged
     for **human** principals: this gate only removes machine kinds; every
     human decision path downstream is untouched.
+
+    ``remediation`` is the text after the ``human_principal_required:``
+    prefix. A person-only route that is not an approval decision passes
+    its own text (the target writes name the operations a machine login
+    uses instead).
     """
     if is_human_principal(operator):
         return
@@ -315,7 +344,7 @@ def ensure_human_principal(operator: Operator) -> None:
     )
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail=f"human_principal_required: {HUMAN_ONLY_REST_REMEDIATION}",
+        detail=f"human_principal_required: {remediation}",
     )
 
 

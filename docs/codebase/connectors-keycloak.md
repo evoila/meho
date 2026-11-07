@@ -343,6 +343,12 @@ their own idempotency above):
   `?username=&exact=true`; `role_mapping.assign` also resolves each realm
   role name to its `RoleRepresentation`. A create returns the new UUID
   from the `Location` header.
+- **Names in paths.** Every caller value that goes into a path is
+  encoded with `quote_segment` as one path segment: ids, the realm name
+  and the new realm name of `realm.update`, and each role name of
+  `role_mapping.assign`. A `/`, a dot or a `%` stays part of the name.
+  `role_mapping.assign` refuses a role whose returned name is not the
+  name asked for, and its result lists the names Keycloak returned.
 - **Idempotency.** A create that hits HTTP 409 (already-exists) is a
   success (`conflict: true`), and the existing object's UUID is resolved.
 - **Password handling.** `user.create` / `user.reset_password` source the

@@ -118,6 +118,7 @@ from meho_backplane.ui.auth.routes import (
     login_location,
     page_from_htmx_current_url,
 )
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.session_store import load_session
 from meho_backplane.ui.auth.tenant import (
     TENANT_PICKER_PATH,
@@ -473,7 +474,7 @@ async def _load_session_context(cookie_value: str | None, *, path: str) -> UISes
         # back to the UUID).
         log.warning(
             "ui_session_tenant_row_missing",
-            session_id=str(revalidated.id),
+            session_ref=session_ref(revalidated.id),
             tenant_id=str(revalidated.tenant_id),
         )
     return UISessionContext(
@@ -820,7 +821,7 @@ async def _require_ui_role(
         # expired in the gap). Treat as unauthenticated.
         log.info(
             f"{log_prefix}_session_gone",
-            session_id=str(session.session_id),
+            session_ref=session_ref(session.session_id),
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -836,7 +837,7 @@ async def _require_ui_role(
     except HTTPException as exc:
         log.info(
             f"{log_prefix}_jwt_invalid",
-            session_id=str(session.session_id),
+            session_ref=session_ref(session.session_id),
             status_code=exc.status_code,
         )
         raise
@@ -893,7 +894,7 @@ def _assert_min_role(
         log = structlog.get_logger(__name__)
         log.info(
             log_event,
-            session_id=str(session_id),
+            session_ref=session_ref(session_id),
             actual_role=tenant_role.value,
             required_role=minimum.value,
         )

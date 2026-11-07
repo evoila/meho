@@ -203,7 +203,7 @@ async def test_principal_sub_defaults_to_none_for_opt_out_callers() -> None:
         patch("meho_backplane.retrieval.retriever._bm25_candidates", side_effect=fake_bm25),
         patch("meho_backplane.retrieval.retriever._cosine_candidates", side_effect=fake_cosine),
     ):
-        await retrieve(tenant_id=uuid.uuid4(), query="q", session=MagicMock())
+        await retrieve(tenant_id=uuid.uuid4(), query="q", session=MagicMock(), all_principals=True)
 
     assert captured_bm25["principal_sub"] is None
 
@@ -320,7 +320,9 @@ async def test_no_memory_eligibility_binds_no_kind_limit() -> None:
     """Without eligibility the kinds bind is ``None`` (expiry still applies in SQL)."""
     captured: list[tuple[Any, ...]] = []
     with _patched_substrate(captured):
-        await retrieve(tenant_id=uuid.uuid4(), query="anything", session=MagicMock())
+        await retrieve(
+            tenant_id=uuid.uuid4(), query="anything", session=MagicMock(), all_principals=True
+        )
     assert [args[7] for args in captured] == [None, None]
 
 

@@ -8,7 +8,9 @@ change ticket oldest first. Caution steps go on by themselves, a dangerous or
 destructive step waits for a per-step yes (``confirm_id``), and the run stops
 at the first step whose run fails or whose approval is refused. The steps
 after a stop stay pending. A second run skips only the steps that were
-approved and ran OK.
+approved and ran OK. The run approves only the steps the form listed
+(``step_id``): a pending request that joined the ticket later stops it
+before anything is approved.
 
 The harness (app, session, CSRF, the patched operator) is the one
 ``test_ui_approvals.py`` uses. The run of an approved op is replaced by a
@@ -30,7 +32,7 @@ from unittest.mock import AsyncMock, patch
 from urllib.parse import quote
 
 import respx
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -164,6 +166,7 @@ def _post(
     sign_in_age: int | None = 0,
     auth_time: int | None = None,
     operator: Operator | None = None,
+    step_ids: list[str] | None = None,
     **form: str,
 ) -> Any:
     """POST a run as the reviewer.
@@ -171,8 +174,12 @@ def _post(
     *sid* and *auth_time* name the sign-in behind the session: two posts
     with the same pair come from one sign-in. *auth_time* pins the time;
     without it the sign-in is from now minus *sign_in_age* seconds.
-    *operator* replaces the default reviewer (an admin).
+    *operator* replaces the default reviewer (an admin). *step_ids* are the
+    ids the form lists; by default every request of the ticket now, as if
+    the modal had just been rendered.
     """
+    if step_ids is None:
+        step_ids = _ticket_ids()
     csrf = _csrf_token(session_id)
     # An admin, so the reviewer may approve the dangerous and destructive
     # steps of another person too (#3328).
@@ -194,9 +201,28 @@ def _post(
         ):
             return client.post(
                 "/ui/approvals/in-order",
-                data={"work_ref": _REF, "reason": "change window", **form},
+                data={"work_ref": _REF, "reason": "change window", "step_id": step_ids, **form},
                 headers={CSRF_HEADER_NAME: csrf},
             )
+
+
+def _ticket_ids() -> list[str]:
+    """The ids of every request of change ticket ``_REF``."""
+
+    async def _read() -> list[str]:
+        async with get_sessionmaker()() as session:
+            rows = await session.scalars(
+                select(ApprovalRequest.id).where(ApprovalRequest.work_ref == _REF)
+            )
+            return [str(rid) for rid in rows]
+
+    return asyncio.run(_read())
+
+
+def _form_step_ids(body: str) -> list[str]:
+    """The ``step_id`` values of the rendered form."""
+    marker = 'name="step_id" value="'
+    return [part.split('"', 1)[0] for part in body.split(marker)[1:]]
 
 
 def _get(session_id: uuid.UUID, path: str) -> Any:
@@ -651,3 +677,77 @@ def test_group_warnings_name_mixed_requesters_and_equal_times() -> None:
     assert any("2 requesters (alice, bob)" in w for w in warnings)
     assert any("Steps 1 and 2 were created at the same time" in w for w in warnings)
     assert group_warnings(rows[:1]) == []
+
+
+def test_a_caution_step_added_after_the_plan_was_shown_is_not_approved() -> None:
+    """A request that joins the ticket after the plan was rendered stops the run.
+
+    MEHO approves nothing, marks the new step and offers a fresh Start that
+    lists it. Only that second Start approves both steps.
+    """
+    session_id = _session()
+    s1 = _seed(1, "caution")
+    plan = _plan(session_id)
+    shown = _form_step_ids(plan.text)
+    assert shown == [str(s1)]
+    s2 = _seed(2, "caution")
+    resume = _fake_resume(failing_ops=set())
+
+    blocked = _post(session_id, resume, step_ids=shown)
+
+    assert blocked.status_code == 200, blocked.text
+    assert "data-approval-in-order-unseen" in blocked.text
+    assert "MEHO approved nothing" in blocked.text
+    assert "step 2 (op.step2)" in blocked.text
+    assert "data-approval-in-order-new" in _step_row(blocked.text, 2)
+    assert "data-approval-in-order-new" not in _step_row(blocked.text, 1)
+    assert 'data-confirm="in-order-start"' in blocked.text
+    assert "HX-Trigger" not in blocked.headers
+    assert [_request_status(r) for r in (s1, s2)] == ["pending", "pending"]
+    resume.assert_not_awaited()
+
+    again = _post(session_id, resume, step_ids=_form_step_ids(blocked.text))
+
+    assert "data-approval-in-order-done" in again.text
+    assert [_request_status(r) for r in (s1, s2)] == ["approved", "approved"]
+
+
+def test_a_step_added_while_the_run_waits_stops_the_yes() -> None:
+    """The yes for a risky step covers only the list it was shown with."""
+    session_id = _session()
+    s1 = _seed(1, "dangerous")
+    resume = _fake_resume(failing_ops=set())
+    first = _post(session_id, resume)
+    assert 'data-approval-in-order-waiting="1"' in first.text
+    shown = _form_step_ids(first.text)
+    s2 = _seed(2, "caution")
+
+    response = _post(session_id, resume, step_ids=shown, confirm_id=str(s1))
+
+    assert "data-approval-in-order-unseen" in response.text
+    assert [_request_status(r) for r in (s1, s2)] == ["pending", "pending"]
+    resume.assert_not_awaited()
+
+
+def test_a_post_without_step_ids_approves_nothing() -> None:
+    session_id = _session()
+    s1 = _seed(1, "caution")
+    resume = _fake_resume(failing_ops=set())
+
+    response = _post(session_id, resume, step_ids=[])
+
+    assert "data-approval-in-order-unseen" in response.text
+    assert _request_status(s1) == "pending"
+    resume.assert_not_awaited()
+
+
+def test_a_step_id_that_is_not_a_request_id_is_refused() -> None:
+    session_id = _session()
+    s1 = _seed(1, "caution")
+    resume = _fake_resume(failing_ops=set())
+
+    response = _post(session_id, resume, step_ids=["not-an-id"])
+
+    assert response.status_code == 422
+    assert _request_status(s1) == "pending"
+    resume.assert_not_awaited()

@@ -374,8 +374,10 @@ A platform admin **may**:
   the tenants of the person's own groups.
 - act there as `tenant_admin`. When the person has a role group in that
   tenant, the role of that group applies instead.
-- keep the cross-tenant actions of before, for example `--tenant` on the
-  commands that have it.
+- use the cross-tenant options, for example `--tenant` on the commands
+  that have it. For a tenant where the person has a role group, MEHO
+  answers `403 tenant_select_with_header`: pick that tenant with
+  `MEHO_TENANT` or `meho tenants use`, so the role of that group applies.
 
 A platform admin **may not**:
 
@@ -386,7 +388,8 @@ A platform admin **may not**:
 - pick a tenant that does not exist. MEHO answers
   `403 tenant_not_found` and never makes a tenant from a typo.
 - move a machine login. Agent, service and runner logins always stay in
-  their own tenant.
+  their own tenant, also with `--tenant` and also when their token
+  carries the platform admin claim.
 
 Every audit row of a request where the role came from the platform admin
 group carries `tenant_role_source: platform_admin`.

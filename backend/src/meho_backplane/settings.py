@@ -1875,6 +1875,10 @@ class Settings(BaseModel):
     # Dedicated custody key for encrypted credential-write approval handoffs.
     # Unlike the optional UI key this is required only when such an approval parks.
     approval_handoff_encryption_key: str = ""
+    # The key of the params hashes and value fingerprints in audit rows and
+    # approval requests (operations/_validate.py). A secret of its own, so a
+    # new database password keeps every hash. Empty = made from DATABASE_URL.
+    params_hash_key: str = ""
     # G10.1-T3 #869 — BFF sliding-session knobs for the broadcast
     # wall-monitor's long-display requirement. The sliding extension
     # keeps an actively-viewed session alive past its login-time
@@ -3027,6 +3031,7 @@ def get_settings() -> Settings:
         approval_handoff_encryption_key=os.environ.get(
             "APPROVAL_HANDOFF_ENCRYPTION_KEY", ""
         ).strip(),
+        params_hash_key=os.environ.get("PARAMS_HASH_KEY", "").strip(),
         ui_session_sliding_extension_seconds=int(
             os.environ.get("UI_SESSION_SLIDING_EXTENSION_SECONDS", "3600"),
         ),

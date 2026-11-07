@@ -23,7 +23,7 @@ Why a session BFF and not the Bearer ``/api/v1/operations/*`` routes
 The REST operation routes (``api/v1/operations.py``) are Bearer-gated over
 a verified JWT. A browser carrying only the BFF session cookie cannot
 authenticate them. So this module adds ``/ui/operations`` sub-routes that
-are ``require_ui_session``-gated and call the operation meta-tools
+are ``require_ui_operator``-gated and call the operation meta-tools
 (:func:`~meho_backplane.operations.meta_tools.list_operation_groups` /
 :func:`~meho_backplane.operations.meta_tools.search_operations` /
 :func:`~meho_backplane.operations.meta_tools.describe_descriptor`) and the
@@ -58,7 +58,7 @@ Route inventory
   the chosen op + a target + params, it renders the literal would-be HTTP
   request (``method`` / ``resolved_path`` / ``query`` / ``redacted_body``)
   **without dispatching it**. CSRF-gated (it is a ``POST`` under ``/ui/``)
-  and ``require_ui_session``-gated; calls
+  and ``require_ui_operator``-gated; calls
   :func:`~meho_backplane.operations.meta_tools.preview_operation`
   in-process -- the same in-process BFF pattern the approvals decision
   POSTs use, because the Bearer-gated ``POST /api/v1/operations/preview``
@@ -77,7 +77,7 @@ Route inventory
 * ``POST /ui/operations/call`` (Task #1881, T3) -- the **dispatch** action,
   the highest-blast-radius surface the console gains: it executes a real
   connector op against a live target. CSRF-gated (a ``POST`` under ``/ui/``)
-  and ``require_ui_session``-gated; calls
+  and ``require_ui_operator``-gated; calls
   :func:`~meho_backplane.operations.meta_tools.call_operation` IN-PROCESS --
   the same BFF pattern the approvals decision POSTs use, because the
   Bearer-gated ``POST /api/v1/operations/call`` cannot be authenticated by a
@@ -208,7 +208,6 @@ from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import (
     UISessionContext,
     require_ui_operator,
-    require_ui_session,
 )
 from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
@@ -277,7 +276,6 @@ _MAX_PREVIEW_HASH_LENGTH: Final[int] = 128
 
 #: Module-level ``Depends`` closures -- built once (rather than inline) to
 #: satisfy ruff B008, matching the approvals / kb / connectors routers.
-_require_session = Depends(require_ui_session)
 #: The ``operator`` role floor of the preview + call POSTs (the same floor
 #: as REST ``/api/v1/operations/call`` and the MCP ``call_operation`` tool).
 _require_operator = Depends(require_ui_operator)
@@ -424,7 +422,7 @@ def build_operations_router() -> APIRouter:
     @router.get("/ui/operations/search", response_class=HTMLResponse)
     async def operations_search(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         connector_id: str = Query(default="", max_length=_MAX_CONNECTOR_ID_LENGTH),
         q: str = Query(default="", max_length=_MAX_QUERY_LENGTH),
     ) -> HTMLResponse:
@@ -441,7 +439,7 @@ def build_operations_router() -> APIRouter:
     async def operations_descriptor(
         request: Request,
         descriptor_id: uuid.UUID,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         role_probe: OperatorRoleProbe = _role_probe_dep,
     ) -> HTMLResponse:
         """Render the operation detail drawer fragment (read-only).
@@ -479,7 +477,7 @@ def build_operations_router() -> APIRouter:
     async def operations_run(
         request: Request,
         descriptor_id: uuid.UUID,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
     ) -> HTMLResponse:
         """Render the run-confirm modal fragment for *descriptor_id* (T3).
 
@@ -527,7 +525,7 @@ def build_operations_router() -> APIRouter:
     @router.get("/ui/operations", response_class=HTMLResponse)
     async def operations_index(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         connector_id: str = Query(default="", max_length=_MAX_CONNECTOR_ID_LENGTH),
         q: str = Query(default="", max_length=_MAX_QUERY_LENGTH),
     ) -> HTMLResponse:

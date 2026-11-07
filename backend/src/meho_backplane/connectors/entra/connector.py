@@ -143,6 +143,10 @@ class EntraConnector(HttpConnector):
     product = "entra"
     version = "1.0"
     impl_id = "entra-graph"
+    summary = (
+        "Reads Microsoft Entra ID users, groups, app registrations, service principals and role "
+        "assignments."
+    )
     supported_version_range: str | None = None
     priority = 1
     #: No redirect is followed: every tenant shares one Graph host.

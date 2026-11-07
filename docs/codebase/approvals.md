@@ -330,6 +330,23 @@ Two kinds of rows carry a keyed hash of a call's params:
     credential write. A flag sent again with the params of a run comes off
     before the hash check and does not change the stored choice (see
     [redaction.md](redaction.md#secret-named-fields-in-every-answer-reveal_secret-for-people-and-service-principals)).
+  - Every approval surface shows the choice, so the approver knows that
+    approving returns the secret values to the requester. REST
+    (`ApprovalRequestView.reveal_secret`) and MCP (`meho_approvals_list` /
+    `meho_approvals_get`) carry the field (`false` when not asked). The
+    console request window names it in the detail list on every status
+    (`data-approval-reveal-secret`) and in the warning above Approve of a
+    pending request (`data-approval-gate-reveal-secret`). The in-order
+    window marks the step (`data-approval-in-order-reveal-secret`). The
+    CLI prints the line "Hidden values: ..." in `meho approvals show` and
+    in the prompt of `approve` for several requests or in order
+    (`cli/internal/cmd/approvals/reveal.go`). Tests:
+    `tests/test_approval_surfaces_reveal_secret.py`,
+    `cli/internal/cmd/approvals/reveal_test.go`.
+  - A service principal's `reveal_secret: true` always waits for a
+    person's approval, also on a call the policy gate would run at once
+    (`dispatcher._reveal_waits_for_approval`). So the request reaches
+    these surfaces before any value is returned.
 - **Audit rows** (`payload.params_hash` on dispatch, MCP and hosted-agent
   tool rows, and `operation_run.params_hash`) store the hash, not the params.
   They use the same keyed hash, but each secret-named value (`password`,
@@ -338,20 +355,51 @@ Two kinds of rows carry a keyed hash of a call's params:
   Two calls with the same other values get the same hash. For a call without
   secret-named values, both hashes are equal.
 
-The server key is derived from `DATABASE_URL` (HMAC-SHA256 under a fixed
-label). Every install has that value, the key is never stored, and there is
-no new setting. What follows:
+The server key is HMAC-SHA256 of `PARAMS_HASH_KEY` under a fixed label.
+`PARAMS_HASH_KEY` is a secret of its own. The same key also makes the audit
+digest hashes and the value fingerprints (`compute_audit_digest_hash`,
+`compute_value_fingerprint`). The key itself is never stored. What follows:
 
-- Hashes can be compared inside one install. Rows written before the keyed
-  hash hold a plain SHA-256: they stay readable, but they do not match new
-  hashes. The column format (64 hex characters) is unchanged, so there is no
-  migration.
-- A request that was already waiting for approval when MEHO was upgraded
-  holds the plain hash. The approval check accepts it for the request's own
-  params, so the request can still be approved.
-- When `DATABASE_URL` changes (for example a new database password), the key
-  changes: new hashes no longer match older ones, and a request that waits
-  for approval at that moment must be asked for again.
+- **A new database password keeps every hash.** The key does not come from
+  `DATABASE_URL`, so a password rotation changes no hash and no
+  fingerprint, and a request that waits for approval stays valid.
+- **Where the key comes from.** With a built-in core part on, the install
+  makes it once in the Secret `<release>-core-params-hash` (key
+  `params_hash_key`, 32 random characters) and keeps it on every upgrade
+  ([core-secrets.md](core-secrets.md)). Your own Secret:
+  `paramsHashKey.secretName` (and `paramsHashKey.secretKey`), with at least
+  32 random characters.
+- **Without the key.** When `PARAMS_HASH_KEY` is empty (no built-in part and
+  no `paramsHashKey.secretName`), MEHO makes the key from `DATABASE_URL`
+  under the same label. Then a new database password changes the key: new
+  hashes do not match older ones, and a request that waits for approval at
+  that moment must be asked for again.
+- **Requests made before the key was set.** With `PARAMS_HASH_KEY` set, the
+  approval check also accepts the hash under the key made from
+  `DATABASE_URL`, for the request's own params only. So a request made
+  before the key was set (for example by an older pod during a rolling
+  update) can still be approved. This works while `DATABASE_URL` is the
+  same as when the request was made. Audit rows written before the key was
+  set keep their hashes. They do not match new hashes of the same params.
+- **Rows with a plain SHA-256.** Rows written before the keyed hash hold a
+  plain SHA-256: they stay readable, but they do not match new hashes. A
+  request that was already waiting for approval then holds the plain hash,
+  and the approval check accepts it for the request's own params. The
+  column format (64 hex characters) is the same for all of them, so there
+  is no migration.
+- **Rotating `PARAMS_HASH_KEY`.** Change the key only when you must, for
+  example when it was exposed. Steps: decide or withdraw every request that
+  waits for approval; put a new value of 32 random characters into the
+  Secret; restart the backplane pods. With the built-in core:
+
+  ```bash
+  kubectl -n <namespace> patch secret <release>-core-params-hash --type merge \
+    -p "{\"stringData\":{\"params_hash_key\":\"$(openssl rand -hex 16)\"}}"
+  kubectl -n <namespace> rollout restart deployment/<release>-meho
+  ```
+
+  After that, requests made under the old key must be asked for again, and
+  audit hashes and fingerprints from before and after do not match.
 - A client cannot compute these hashes itself, because they need the server
   key. To match a request to a call, use the `approval_request_id` the call
   returns, or the `preview_hash` of a destructive call.
@@ -1912,7 +1960,7 @@ fan-out composites (`vm.power.bulk`, `host.evacuate`,
 the same read-only listing helpers the handlers use — `{..., resolved,
 total_resolved}` with the list capped — and the single-entity
 composites echo their params; see
-`connectors-vmware-rest.md` "Park-time
+`connectors-vmware-rest.md` (in the private connectors repository), section "Park-time
 approval previews". The Keycloak write ops register bespoke builders in
 `connectors/keycloak/ops_write_preview.py` (#1857): `keycloak.realm.create`
 populates `{resource, realm, representation}`, `keycloak.user.create`
@@ -2183,7 +2231,7 @@ Requirement 1 of
 `vmware.composite.vm.destroy` (`safety_level="destructive"`,
 `requires_approval=True`; the dual-arm handler + blast-radius preview
 builder are documented in
-`connectors-vmware-rest.md`). Wiring it in
+`connectors-vmware-rest.md`, in the private connectors repository). Wiring it in
 surfaced — and this task closed — three gaps in the tier's *human*-side
 enforcement that #3196/#3197 left, plus one machinery limitation:
 
@@ -2821,7 +2869,7 @@ no new gate, service call, route, or migration.
 | `POST` | `/ui/approvals/{id}/approve` | Approve in-process + re-dispatch the parked op + the fail-open `approval.approved` add-on step event. Needs a recent console sign-in that asked for the credentials (the fresh approval sign-in rule above); otherwise the modal re-renders with the sign-in link. |
 | `POST` | `/ui/approvals/{id}/reject` | Reject in-process + the `approval.rejected` add-on step event; the op never runs. |
 | `GET` | `/ui/approvals/in-order?work_ref=` | The "Approve group in order" modal: the change ticket's requests oldest first and a Start button (#3597). |
-| `POST` | `/ui/approvals/in-order` | Runs the steps in order (form: `work_ref`, `reason`, `confirm_id`); renders what happened to each step (#3597). |
+| `POST` | `/ui/approvals/in-order` | Runs the steps in order (form: `work_ref`, `reason`, `confirm_id`, one `step_id` per step shown); renders what happened to each step (#3597). Approves nothing when a pending request of the ticket is not among the posted `step_id`s. |
 
 The console is **read-only over substrate that already exists** — it adds
 no new service call, no `api/v1` Bearer route, no CLI verb, and no
@@ -2984,7 +3032,13 @@ requester.
   round trip per step. At a dangerous or destructive step the POST returns
   the modal with that step's context and an **Approve step k and go on**
   button. That button posts `confirm_id` = the id of that one request, so a
-  yes never covers another step. Every form in the modal carries a CSRF
+  yes never covers another step. Every form also carries one hidden
+  `step_id` for each step it lists. Before anything is approved, the POST
+  reads the ticket again: when a pending request is not among the posted
+  ids (it joined the ticket after the modal was rendered), the run
+  approves nothing and shows the list again with a banner that names the
+  new steps and marks them "new". The operator starts again from that
+  list. So a run covers only the requests the operator saw. Every form in the modal carries a CSRF
   token minted for that render, and the response re-sets the cookie. The
   response fires `meho:approval-bump`, not `meho:approval-decided`, so the
   bell and the history refresh but the modal stays open.

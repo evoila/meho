@@ -115,6 +115,10 @@ _ALL_ON = [
     "--set",
     "agent.secretName=agent",
     "--set",
+    "agent.openai.enabled=true",
+    "--set",
+    "agent.openai.secretName=agent-openai",
+    "--set",
     "keycloakAdmin.enabled=true",
     "--set",
     "keycloakAdmin.url=https://keycloak.test",
@@ -146,6 +150,7 @@ _EXPECTED_PODS = {
     "Deployment/test-result-cache",
     "Pod/test-meho-test-pgvector",
     "Pod/test-meho-test-agent-runtime-config",
+    "Pod/test-meho-test-agent-openai-config",
     "Pod/test-meho-test-ui-console-config",
 }
 

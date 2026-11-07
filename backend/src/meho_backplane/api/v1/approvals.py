@@ -151,6 +151,7 @@ from meho_backplane.operations.approval_rerun import (
 )
 from meho_backplane.operations.approval_rights import ApproveRight, approve_right
 from meho_backplane.operations.operation_run_service import get_operation_run_service
+from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME, envelope_is_uncertain
 from meho_backplane.settings import get_settings
 
 __all__ = ["router"]
@@ -519,6 +520,12 @@ def _resume_outcome_view(row: ApprovalRequest) -> ApprovalResumeOutcomeView | No
         guidance=outcome.guidance,
         execution_outcome=outcome.execution_outcome,
     )
+
+
+def _execution_outcome(dispatch_result: Any) -> str | None:
+    """``uncertain`` when the run's result says MEHO does not know (#5025), else ``None``."""
+    envelope = {"status": dispatch_result.status, "extras": dispatch_result.extras}
+    return UNCERTAIN_OUTCOME if envelope_is_uncertain(envelope) else None
 
 
 def _view(
@@ -1426,6 +1433,13 @@ class DecideResponseBody(BaseModel):
     (``sa_operator_self_approval``, ``break_glass_self_approval``,
     ``sa_operator_or_admin`` or ``reviewer``). The command line prints a
     self-approval line from them. Both are ``None`` on a rejection.
+
+    ``dispatch_execution_outcome`` (#5025) is ``uncertain`` when the run
+    ended without MEHO knowing if the change happened (a lost vendor answer
+    after the request was sent, or a failed audit write): do not run it
+    again, check the target first. ``None`` for any other run, so a client
+    that reads it can tell this run from a plain failure without a second
+    read. Additive.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -1439,6 +1453,7 @@ class DecideResponseBody(BaseModel):
     dispatch_op_id: str | None = None
     dispatch_result: dict[str, Any] | list[Any] | None = None
     dispatch_error: str | None = None
+    dispatch_execution_outcome: str | None = None
     self_approved: bool | None = None
     approval_rule: str | None = None
 
@@ -1535,6 +1550,7 @@ async def decide_approval_request(
             dispatch_op_id=dispatch_result.op_id,
             dispatch_result=dispatch_result.result,
             dispatch_error=dispatch_result.error,
+            dispatch_execution_outcome=_execution_outcome(dispatch_result),
             self_approved=request.principal_sub == operator.sub,
             approval_rule=str(request._approval_rule),  # type: ignore[attr-defined]
         )

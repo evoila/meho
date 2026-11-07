@@ -4970,18 +4970,26 @@ type DecideRequestBody struct {
 // (“sa_operator_self_approval“, “break_glass_self_approval“,
 // “sa_operator_or_admin“ or “reviewer“). The command line prints a
 // self-approval line from them. Both are “None“ on a rejection.
+//
+// “dispatch_execution_outcome“ (#5025) is “uncertain“ when the run
+// ended without MEHO knowing if the change happened (a lost vendor answer
+// after the request was sent, or a failed audit write): do not run it
+// again, check the target first. “None“ for any other run, so a client
+// that reads it can tell this run from a plain failure without a second
+// read. Additive.
 type DecideResponseBody struct {
-	ApprovalRequestId openapi_types.UUID                 `json:"approval_request_id"`
-	ApprovalRule      *string                            `json:"approval_rule"`
-	DecidedBy         *string                            `json:"decided_by"`
-	DecidedByName     *string                            `json:"decided_by_name"`
-	Decision          string                             `json:"decision"`
-	DispatchError     *string                            `json:"dispatch_error"`
-	DispatchOpId      *string                            `json:"dispatch_op_id"`
-	DispatchResult    *DecideResponseBody_DispatchResult `json:"dispatch_result"`
-	DispatchStatus    *string                            `json:"dispatch_status"`
-	Reason            string                             `json:"reason"`
-	SelfApproved      *bool                              `json:"self_approved"`
+	ApprovalRequestId        openapi_types.UUID                 `json:"approval_request_id"`
+	ApprovalRule             *string                            `json:"approval_rule"`
+	DecidedBy                *string                            `json:"decided_by"`
+	DecidedByName            *string                            `json:"decided_by_name"`
+	Decision                 string                             `json:"decision"`
+	DispatchError            *string                            `json:"dispatch_error"`
+	DispatchExecutionOutcome *string                            `json:"dispatch_execution_outcome"`
+	DispatchOpId             *string                            `json:"dispatch_op_id"`
+	DispatchResult           *DecideResponseBody_DispatchResult `json:"dispatch_result"`
+	DispatchStatus           *string                            `json:"dispatch_status"`
+	Reason                   string                             `json:"reason"`
+	SelfApproved             *bool                              `json:"self_approved"`
 }
 
 // DecideResponseBodyDispatchResult0 defines model for .

@@ -1724,6 +1724,14 @@ MEHO never runs an uncertain change again. `retry` is `false`, an approved
 request starts only once (`resumed_at`), and the re-run (#5417) refuses a
 request whose state is not `failed`, so it refuses `uncertain` too.
 
+The summary of such a run (`resume_outcome`, see below) carries the advice
+as its `guidance`, because a timeout, a failed audit write and a restart
+store no guidance stamp. `POST /decide` answers
+`dispatch_execution_outcome: "uncertain"` next to `dispatch_status` and
+`dispatch_error`, so a client that reads only the decide answer (`meho
+approvals approve --in-order`) can tell this run from a plain failure
+without a second read.
+
 **Restart recovery.** At start-up (`main.py`, after the release check),
 `recover_interrupted_approvals` gives every `approved` request that has
 `resumed_at` set and no result a stored `uncertain` result and one audit row
@@ -1763,7 +1771,7 @@ example a Vault write that Vault refused). `result_state` already tells
 | `error_code` | `extras.error_code` of a failed run, for example `connector_error`. |
 | `audit_id` | The audit row the dispatcher wrote for the run. |
 | `execution_outcome` | `uncertain` when MEHO does not know if the change happened (#5025). `null` for any other run. |
-| `guidance` | The next step a failed multi-step operation names (#5377), for example "The VM waits on question _vmx1: show it to the user and answer it with vmware.vm.question.answer." `null` for any other run. |
+| `guidance` | The next step a failed multi-step operation names (#5377), for example "The VM waits on question _vmx1: show it to the user and answer it with vmware.vm.question.answer." For an `uncertain` run without such a stamp, MEHO's fixed advice: "MEHO does not know if the change happened. Do not run it again. Check the target first." `null` for any other run. |
 
 `resume_outcome` is `null` for a request that is not approved, and before
 the run starts. The result body and the free-text `error` stay on the
@@ -1814,7 +1822,8 @@ Where it shows:
 - **CLI** `meho approvals list`: a `RUN` column (`not-run`, `started`,
   `ok`, `FAILED`, or `-` when the request is not approved). `meho approvals
   show` and `approve`: `Run:`, `Run started:`, `Run result:`, `Error code:`,
-  `Next step:` (the `guidance`, when set) and `Run audit:` lines, with the
+  `Next step:` (the `guidance`, when set; for an `UNCERTAIN` run one
+  `Warning:` line with the advice instead) and `Run audit:` lines, with the
   `meho audit show <id>` command for the audit row. `approve` reads the
   request again after the decision, so it prints the same summary as
   `show`.
@@ -3040,6 +3049,7 @@ For each request of the `work_ref`, oldest first (`status=all`,
 |---|---|
 | `approved` and its run is `executed` (ran OK) | skips it; this makes a second run after a stop safe |
 | `approved` and its run is `started` (claimed, no stored result yet) | stops: the outcome is not known yet; run the action again when the step has ended |
+| `approved` and its run is `uncertain` (MEHO does not know if the change happened) | stops: do not run it again, check the target first (#5025) |
 | `approved` and its run is `failed` or `not_started` | stops: an approval is used once, so the step cannot run again from here; the requester must send it again |
 | `rejected`, `expired` or `withdrawn` | stops: the steps after it may need it |
 | `pending`, risk level `dangerous` or `destructive` | waits for a yes for this one step, then approves it |
@@ -3066,8 +3076,10 @@ requester.
 - **CLI** (`cli/internal/cmd/approvals/approve_in_order.go`). Lists the
   group through `GET /api/v1/approvals` (no `limit`, so the whole group),
   then posts `/decide` per step and reads
-  `DecideResponseBody.dispatch_status` / `dispatch_error` (the single-id
-  `approve` only checks the HTTP status). After `already_resumed` it polls
+  `DecideResponseBody.dispatch_status` / `dispatch_error` /
+  `dispatch_execution_outcome` (the single-id `approve` only checks the HTTP
+  status). A step whose own run ends `uncertain` stops the run with the
+  target-check advice, never with "send it again". After `already_resumed` it polls
   `GET /api/v1/approvals/{id}` for `result_state`. At every pending step
   (#5515) it prints what the step does (`reviewer_context` and
   `proposed_effect` from `GET /api/v1/approvals/{id}`: operation,

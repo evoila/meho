@@ -318,10 +318,13 @@ async def test_ls_forwards_persistentvolumeclaims_to_new_op() -> None:
     forwarded.model_dump.return_value = {"status": "ok"}
     connector.execute = AsyncMock(return_value=forwarded)  # type: ignore[method-assign]
 
-    result = await connector._k8s_ls_namespace_kind(_TARGET, "team-a", "persistentvolumeclaims")
+    operator = _make_operator()
+    result = await connector._k8s_ls_namespace_kind(
+        _TARGET, operator, "team-a", "persistentvolumeclaims"
+    )
 
     connector.execute.assert_awaited_once_with(
-        _TARGET, "k8s.persistentvolumeclaim.list", {"namespace": "team-a"}
+        _TARGET, "k8s.persistentvolumeclaim.list", {"namespace": "team-a"}, operator=operator
     )
     assert result["forwarded_to"] == "k8s.persistentvolumeclaim.list"
 

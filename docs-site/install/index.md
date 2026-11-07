@@ -375,6 +375,13 @@ coreKeycloak:
       name: keycloak-db-password
 ```
 
+If the Keycloak role already exists, the Job sets its password again. This
+can fail when the admin login is not allowed to manage that role. This is
+the case on PostgreSQL 16 and later when another login made the role. The
+Job then stops with an error. Fix it in one of two ways: give the admin
+login the rights to manage the role, or make the role yourself and use the
+"You name them in values" way.
+
 Both ways accept `coreKeycloak.database.port` (default `5432`) and
 `coreKeycloak.database.sslMode` (`require`, `verify-full` and so on) for
 a TLS connection. Without a host, or without a password Secret or an

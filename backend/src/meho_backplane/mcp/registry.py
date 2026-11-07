@@ -74,7 +74,7 @@ from typing import Any, Final
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.features import FEATURE_MATURITY
 
 __all__ = [
@@ -101,6 +101,7 @@ __all__ = [
     "registered_tool_names",
     "role_at_least",
     "surface_visible",
+    "tool_role_gate_met",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -428,6 +429,12 @@ class ToolDefinition(BaseModel):
     arguments' hash). Empty by default. MEHO-internal: dropped from the wire
     shape like the RBAC fields.
 
+    ``approver_may_call`` widens the role gate of one tool: a person who
+    can decide approvals in the tenant (:attr:`Operator.approver`, a human
+    principal) may list and call it even below ``required_role``. Those
+    people are the tenant's reviewers. ``False`` by default.
+    MEHO-internal: dropped from the wire shape like the RBAC fields.
+
     ``annotations`` (#4202) are the MCP tool hints, see
     :class:`ToolAnnotations`. A tool that only reads passes
     :data:`READ_ONLY`. ``meta`` is the MCP ``_meta`` object of the tool, for
@@ -449,6 +456,7 @@ class ToolDefinition(BaseModel):
     required_capability: str | None = None
     required_addon_family: str | None = None
     broadcast_omit_args: frozenset[str] = frozenset()
+    approver_may_call: bool = False
     annotations: ToolAnnotations | None = None
     meta: dict[str, Any] | None = None
 
@@ -776,11 +784,22 @@ def all_tools_for(
     return [
         defn
         for defn, _ in _TOOLS.values()
-        if role_at_least(operator.tenant_role, defn.required_role)
+        if tool_role_gate_met(operator, defn)
         and capability_satisfied(operator, defn.required_capability)
         and surface_visible(operator, defn.surface)
         and addon_family_active(active_addon_families, defn.required_addon_family)
     ]
+
+
+def tool_role_gate_met(operator: Operator, defn: ToolDefinition) -> bool:
+    """Return True when *operator* passes the role gate of the tool *defn*.
+
+    The role must meet ``required_role``. A tool with
+    ``approver_may_call`` also admits a human who can decide approvals.
+    """
+    if role_at_least(operator.tenant_role, defn.required_role):
+        return True
+    return defn.approver_may_call and operator.approver and is_human_principal(operator)
 
 
 def has_addon_gated_tools() -> bool:

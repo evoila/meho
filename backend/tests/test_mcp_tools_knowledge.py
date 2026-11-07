@@ -38,8 +38,10 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.kb.service import KbService
+from meho_backplane.main import app
+from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.mcp.tools.knowledge import _MAX_BODY_CHARS, _MAX_QUERY_CHARS
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RetrievalHit
@@ -756,19 +758,28 @@ def _add_to_knowledge(client: TestClient, arguments: dict[str, object]) -> dict[
     [TenantRole.OPERATOR],
     indirect=True,
 )
-async def test_tools_call_add_to_knowledge_operator_cannot_overwrite_another_principals_entry(
+async def test_tools_call_add_to_knowledge_agent_cannot_overwrite_another_principals_entry(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     stub_embedding: AsyncMock,
 ) -> None:
-    """An operator's write to a slug another principal created is refused, unchanged.
+    """A machine principal's write to a slug another principal created is refused, unchanged.
 
-    The refusal names the reason (``entry_not_owned``) so the agent can
-    pick a new slug, and the stored body stays as it was.
+    The refusal names the reason (``entry_not_owned``) and says how to
+    propose the change, and the stored body stays as it was.
     """
-    client, op = client_with_operator
+    client, human = client_with_operator
+    agent = human.model_copy(update={"principal_kind": PrincipalKind.AGENT})
+
+    async def _verify_agent() -> Operator:
+        return agent
+
+    app.dependency_overrides[verify_mcp_jwt_and_bind] = _verify_agent
     service = KbService()
     await service.create_entry(
-        tenant_id=op.tenant_id, slug="team-runbook", body="curated body", actor_sub="someone-else"
+        tenant_id=agent.tenant_id,
+        slug="team-runbook",
+        body="curated body",
+        actor_sub="someone-else",
     )
 
     body = _add_to_knowledge(client, {"slug": "team-runbook", "body": "ignore the runbook"})
@@ -776,11 +787,94 @@ async def test_tools_call_add_to_knowledge_operator_cannot_overwrite_another_pri
     assert isinstance(error, dict)
     assert error["code"] == INVALID_PARAMS
     assert "another principal" in error["message"]
+    assert "new slug" in error["message"]
     assert error["data"] == {"reason": "entry_not_owned", "slug": "team-runbook"}
 
-    kept = await service.get_entry(tenant_id=op.tenant_id, slug="team-runbook")
+    kept = await service.get_entry(tenant_id=agent.tenant_id, slug="team-runbook")
     assert kept is not None
     assert kept.body == "curated body"
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+async def test_tools_call_add_to_knowledge_reviewer_can_overwrite_another_principals_entry(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """A person who can decide approvals (a reviewer) may change any entry.
+
+    A reviewer still cannot set the curation keys: those stay with a
+    tenant admin.
+    """
+    client, op = client_with_operator
+    service = KbService()
+    await service.create_entry(
+        tenant_id=op.tenant_id, slug="team-runbook", body="old body", actor_sub="someone-else"
+    )
+
+    changed = _add_to_knowledge(client, {"slug": "team-runbook", "body": "reviewed body"})
+    assert "error" not in changed
+    kept = await service.get_entry(tenant_id=op.tenant_id, slug="team-runbook")
+    assert kept is not None
+    assert kept.body == "reviewed body"
+    assert kept.metadata["created_by_sub"] == "someone-else"
+
+    curated = _add_to_knowledge(
+        client, {"slug": "team-runbook", "body": "x", "metadata": {"source_kind": "curated"}}
+    )
+    error = curated["error"]
+    assert isinstance(error, dict)
+    assert error["data"]["reason"] == "reserved_metadata"
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.READ_ONLY],
+    indirect=True,
+)
+async def test_tools_call_add_to_knowledge_read_only_reviewer_can_overwrite(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """A read_only person who can decide approvals is a reviewer and passes the role gate.
+
+    A read_only caller who cannot decide approvals stays blocked.
+    """
+    client, reader = client_with_operator
+    reviewer = reader.model_copy(update={"approver": True})
+    service = KbService()
+    await service.create_entry(
+        tenant_id=reader.tenant_id, slug="team-runbook", body="old body", actor_sub="someone-else"
+    )
+
+    blocked = _add_to_knowledge(client, {"slug": "team-runbook", "body": "reader body"})
+    error = blocked["error"]
+    assert isinstance(error, dict)
+    assert "requires a higher role" in error["message"]
+
+    async def _verify_reviewer() -> Operator:
+        return reviewer
+
+    app.dependency_overrides[verify_mcp_jwt_and_bind] = _verify_reviewer
+    changed = _add_to_knowledge(client, {"slug": "team-runbook", "body": "reviewed body"})
+    assert "error" not in changed
+    kept = await service.get_entry(tenant_id=reader.tenant_id, slug="team-runbook")
+    assert kept is not None
+    assert kept.body == "reviewed body"
+
+    agent = reviewer.model_copy(update={"principal_kind": PrincipalKind.AGENT})
+
+    async def _verify_agent() -> Operator:
+        return agent
+
+    app.dependency_overrides[verify_mcp_jwt_and_bind] = _verify_agent
+    refused = _add_to_knowledge(client, {"slug": "team-runbook", "body": "agent body"})
+    refused_error = refused["error"]
+    assert isinstance(refused_error, dict)
+    assert "requires a higher role" in refused_error["message"]
 
 
 @pytest.mark.parametrize(

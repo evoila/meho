@@ -838,6 +838,7 @@ def test_kb_detail_code_block_is_theme_scoped(ui_env: Environment) -> None:
         code_css=pygments_css(),
         source_path=None,
         body_hash=None,
+        header_rows=[],
     )
 
     match = re.search(r"<style>.*?</style>", html, re.S)

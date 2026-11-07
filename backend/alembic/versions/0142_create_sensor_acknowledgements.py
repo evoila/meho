@@ -4,7 +4,7 @@
 """Create the ``sensor_acknowledgements`` table.
 
 Revision ID: 0142
-Revises: 0140
+Revises: 0141
 Create Date: 2026-11-07
 
 A person can acknowledge a Sensor that is not green, for a set time and
@@ -32,7 +32,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "0142"
-down_revision: str | None = "0140"
+down_revision: str | None = "0141"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

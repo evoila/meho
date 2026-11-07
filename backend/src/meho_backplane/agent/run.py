@@ -692,6 +692,11 @@ def _request_usages(messages: Iterable[ModelMessage]) -> list[TokenUsage]:
     ]
 
 
+def _usages_so_far(run: Any, child_usages: list[TokenUsage]) -> list[TokenUsage]:
+    """Usage of the requests a loop has finished, with those of its child runs."""
+    return [*_request_usages(run.new_messages()), *child_usages]
+
+
 def _capability_omissions(resolution: ToolsetResolution) -> tuple[ContextOmission, ...]:
     """Return the requested tools a run did not get, as receipt omissions.
 
@@ -784,6 +789,10 @@ class AgentRunHandle:
 
     run_id: UUID
     _task: asyncio.Task[AgentRunResult]
+    #: Usage of every model request the loop has finished so far (also the
+    #: requests of child runs). The loop keeps it current, so the caller can
+    #: charge a run that failed or was cancelled for the calls it made.
+    request_usages: list[TokenUsage] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -861,6 +870,7 @@ class AgentRun(Protocol):
         operator: Operator,
         inputs: str,
         run_id: UUID,
+        usage_sink: list[TokenUsage] | None = None,
         *,
         model: Model | None = None,
     ) -> AsyncIterator[AgentRunEvent]:
@@ -875,6 +885,10 @@ class AgentRun(Protocol):
         is the run's lifetime. ``run_id`` is supplied by the caller (the
         T6 ``agent_run`` row id) so the streamed events share the run's
         lineage key. *model* works as in :meth:`start`.
+
+        *usage_sink*, when given, is kept current with the usage of every
+        model request the loop has finished, so the caller can charge a run
+        that ends by an error or a closed stream.
         """
         ...
 
@@ -1290,6 +1304,7 @@ class PydanticAgentRun:
         inputs: str,
         run_id: UUID,
         receipts: list[HostedContextReceipt] | None = None,
+        request_usages: list[TokenUsage] | None = None,
     ) -> AgentRunResult:
         """Drive one bounded loop and return its result.
 
@@ -1300,10 +1315,20 @@ class PydanticAgentRun:
         type is uniform regardless of which framework exception fired.
         """
         limits = UsageLimits(request_limit=definition.request_limit)
-        request_usages: list[TokenUsage] = []
-        token = _run_request_usages_var.set(request_usages)
+        if request_usages is None:
+            request_usages = []
+        child_usages: list[TokenUsage] = []
+        token = _run_request_usages_var.set(child_usages)
         try:
-            run_result = await agent.run(inputs, deps=operator, usage_limits=limits)
+            async with agent.iter(inputs, deps=operator, usage_limits=limits) as run:
+                try:
+                    async for _node in run:
+                        request_usages[:] = _usages_so_far(run, child_usages)
+                finally:
+                    # Also when the loop fails or is cancelled: the requests
+                    # it finished spent tokens.
+                    request_usages[:] = _usages_so_far(run, child_usages)
+                run_result = run.result
         except UsageLimitExceeded as exc:
             _log.warning(
                 "agent_run_budget_exhausted",
@@ -1313,9 +1338,15 @@ class PydanticAgentRun:
                 operator_sub=operator.sub,
             )
             raise AgentRunError(f"turn budget exhausted: {exc}") from exc
+        except AgentRunError:
+            raise
+        except Exception as exc:
+            _log.warning("agent_run_failed", run_id=str(run_id), error=str(exc))
+            raise AgentRunError(f"agent run {run_id} failed: {exc}") from exc
         finally:
             _run_request_usages_var.reset(token)
-        request_usages.extend(_request_usages(run_result.new_messages()))
+        if run_result is None:  # pragma: no cover - iter always sets a result
+            raise AgentRunError(f"agent run {run_id} produced no result")
         usage = run_result.usage
         totals = TokenUsage.from_run_usage(usage)
         result = AgentRunResult(
@@ -1441,8 +1472,9 @@ class PydanticAgentRun:
         if run_id is None:
             run_id = uuid4()
         agent = self._build_agent(definition, operator, run_id, receipts, model)
+        request_usages: list[TokenUsage] = []
         task = asyncio.create_task(
-            self._run_loop(agent, definition, operator, inputs, run_id, receipts),
+            self._run_loop(agent, definition, operator, inputs, run_id, receipts, request_usages),
             name=f"agent-run-{run_id}",
         )
         _log.info(
@@ -1453,7 +1485,7 @@ class PydanticAgentRun:
             structured_output=definition.output_type is not None,
             operator_sub=operator.sub,
         )
-        return AgentRunHandle(run_id=run_id, _task=task)
+        return AgentRunHandle(run_id=run_id, _task=task, request_usages=request_usages)
 
     def poll(self, handle: AgentRunHandle) -> AgentRunStatus:
         """Return the run's current lifecycle state without blocking.
@@ -1509,6 +1541,7 @@ class PydanticAgentRun:
         operator: Operator,
         inputs: str,
         run_id: UUID,
+        usage_sink: list[TokenUsage] | None = None,
         *,
         model: Model | None = None,
     ) -> AsyncIterator[AgentRunEvent]:
@@ -1540,28 +1573,34 @@ class PydanticAgentRun:
 
         The ``FINAL`` event carries the run's usage, the same totals and
         per-request usages :meth:`_run_loop` returns, so the invoker charges a
-        streamed run like a run that is not streamed.
+        streamed run like a run that is not streamed. *usage_sink* is kept
+        current after every node, so a run that ends by an error or a closed
+        stream is charged for the requests it finished.
         """
         emitted_tool_returns = 0
         request_usages: list[TokenUsage] = []
+        sink = usage_sink if usage_sink is not None else []
         usages_token = _run_request_usages_var.set(request_usages)
         try:
             agent = self._build_agent(definition, operator, run_id, model=model)
             limits = UsageLimits(request_limit=definition.request_limit)
             async with agent.iter(inputs, deps=operator, usage_limits=limits) as run:
-                async for node in run:
-                    events, emitted_tool_returns = _node_events(node, run, emitted_tool_returns)
-                    for event in events:
-                        yield event
+                try:
+                    async for node in run:
+                        sink[:] = _usages_so_far(run, request_usages)
+                        events, emitted_tool_returns = _node_events(node, run, emitted_tool_returns)
+                        for event in events:
+                            yield event
+                finally:
+                    sink[:] = _usages_so_far(run, request_usages)
                 result = run.result
                 if result is None:  # pragma: no cover - iter always sets a result
                     raise AgentRunError(f"agent run {run_id} produced no result")
-                request_usages.extend(_request_usages(result.new_messages()))
                 yield AgentRunEvent(
                     kind=AgentRunEventKind.FINAL,
                     data={"output": _coerce_output(result.output)},
                     usage=TokenUsage.from_run_usage(result.usage),
-                    request_usages=tuple(request_usages),
+                    request_usages=tuple(sink),
                 )
         except UsageLimitExceeded as exc:
             _log.warning(

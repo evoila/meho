@@ -236,7 +236,7 @@ kit.register_retired_operations(
 ```
 
 At start, MEHO deletes each listed row that your package wrote, and logs
-`dead_handler_op_retired` once. It never deletes a row of MEHO itself or
+`dead_handler_op_retired` once for each row it deletes. It never deletes a row of MEHO itself or
 of another package. Keep each entry in later versions, because an
 install can skip a version. Never use a listed operation id again. A row
 whose code is gone and that no list names stays, and MEHO logs
@@ -271,7 +271,7 @@ wheels without any package index, against the kit of the base image, so a
 package that does not fit the kit cannot be installed.
 
 The kit is never published on a public package index. It ships only with
-MEHO's own image and release files.
+MEHO's own image and its source code.
 
 ## 7. Test
 

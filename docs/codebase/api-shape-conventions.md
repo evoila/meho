@@ -4,8 +4,7 @@ How MEHO's REST + MCP + CLI surfaces are shaped, and the strategic
 framing that picks which shapes ship at all. The conventions here
 exist so a future contributor adding a new endpoint, a new connector,
 or a new MCP tool doesn't have to re-litigate the same eight surface-
-shape questions the v0.8.0 consumer dogfood
-(`claude-rdc-hetzner-dc#771`)
+shape questions the v0.8.0 consumer review
 surfaced one at a time.
 
 Companion documents:
@@ -13,16 +12,16 @@ Companion documents:
 - [connector-release-readiness.md](connector-release-readiness.md) — how
   to honestly describe a connector's ship state.
 - [error-message-shape.md](error-message-shape.md) — how to shape error
-  envelopes (sibling discipline, codified out of `#697`'s feedback).
+  envelopes (sibling discipline, codified from consumer feedback).
 
 ## 1. Strategic context — curated daily-driver + OpenAPI escape hatch
 
 **MEHO's connector surface is hand-curated, operator-shaped wrappers.
 OpenAPI-derived ingest is the escape hatch, not the eventual default.**
 
-This is a deliberate choice surfaced by RDC #771 Finding 23 and
+This is a deliberate choice surfaced by consumer review finding 23 and
 confirmed in the v0.9 planning conversation. The release-body framing
-and the `composite_l2_missing` error envelope at v0.8.0 implied the
+and an error envelope of v0.8.0 implied the
 opposite — that running `meho connector ingest --catalog <product>/<version>`
 against a vendor spec was the path to a usable connector — and the gap
 between that implication and what actually works produced most of the
@@ -38,10 +37,10 @@ URL grammar. The K8s connector at v0.8.0 is the reference: 14 ops
 
 ```json
 {"total": 3, "rows": [
-  {"name": "rke2-infra-01", "status": "Ready",
+  {"name": "node-01", "status": "Ready",
    "roles": ["control-plane", "etcd"],
    "version": "v1.34.5+rke2r1",
-   "internal_ip": "10.5.50.150",
+   "internal_ip": "192.0.2.10",
    "age_seconds": 6174825,
    "labels": {...}, "taints": []},
   ...
@@ -94,12 +93,6 @@ willing to handle vendor-shape responses (`apiVersion` / `kind` /
   with 1 L1 composite + 4 approval-gated writes; full ingest is the
   escape hatch" reads honest. "github-rest ships with the GitHub
   REST API" reads aspirational.
-- **`composite_l2_missing` envelope wording.** The error names the
-  missing op + recommends curated-op authoring (file an issue, ask
-  the meho team for the missing L1 wrapper, OR use the dispatch
-  escape hatch via raw `call_operation`). The `catalog_command`
-  field stays as the escape-hatch recipe; it stops being the
-  recommended path.
 - **`docs/cross-repo/` operator runbooks** describe what's curated.
   Operators who reach for ingest learn the escape-hatch caveats
   (raw shape, no approval annotations, possible commit-pass cost) up
@@ -117,28 +110,17 @@ stays Ready. Operators poll
 `GET /api/v1/connectors/ingest/jobs/{job_id}` for status. The
 `dry_run=true` path stays synchronous because the parse-only leg
 already returns inside the liveness budget on real-world specs
-(per RDC #771 Finding 21). Full shape in
+(per consumer review finding 21). Full shape in
 [spec-ingestion.md](spec-ingestion.md) §"Async ingest mode".
 
-The same task reworded the `composite_l2_missing` envelope per the
-strategic framing in this section: the human message stops
-describing the catalog command as "the remediation path"
-(operators read that as a recommendation and followed it into the
-pod-restart loop) and names the curation-gap framing first, with
-the L1-wrapper request as the recommended path and the
-`catalog_command` retained as the escape-hatch recipe. The
-structured `extras` payload (`error_code`, `missing_op_ids`,
-`catalog_command`) is unchanged -- agents that branch on those
-fields continue to work without migration. It's a SEV-3 ("escape
-hatch shouldn't crash the pod") not a SEV-1 ("daily-driver path
-broken"). The curated daily-driver works; the escape hatch now
-fails gracefully.
+MEHO has no separate error for a missing multi-step operation:
+every composite runs directly.
 
 ## 2. List-endpoint envelope shape
 
 **Every list endpoint returns `{items, next_cursor?, ...sidecars}`.**
 
-RDC #771 Finding 3 catalogued 5 list endpoints across one OpenAPI
+Consumer review finding 3 catalogued 5 list endpoints across one OpenAPI
 shipping 3 different shapes:
 
 | Endpoint | v0.8.0 shape |
@@ -263,7 +245,7 @@ forward), so they are unaffected by the REST wire-shape flip.
 
 **One identifier per concept across every layer that names it.**
 
-RDC #771 Findings 6 + 7 caught two enum mismatches:
+Consumer review findings 6 + 7 caught two enum mismatches:
 
 - **Finding 6: product enum.** The TargetCreate enum spelled the
   SDDC Manager product as `"sddc-manager"`; `meho connector list`
@@ -273,7 +255,7 @@ RDC #771 Findings 6 + 7 caught two enum mismatches:
   cannot change. An operator copying `sddc` out of the listing into
   a target create saw a 422 saying `sddc-manager`. Resolved by a
   **product alias** (see "Aliases for split-token concepts" below),
-  not by churning either spelling: RDC #789 Finding 6 re-verified
+  not by churning either spelling: consumer review finding 6 (v0.8.1) re-verified
   G0.16-T6's "verified already aligned" claim as **false** (the
   split persisted on v0.8.1) and re-tracked it as #1355, which made
   the listed `sddc` token accept-equivalent at the POST validator.
@@ -298,7 +280,7 @@ is named:
   pins the catalog ↔ enum convergence structurally so a future
   drift fails at unit-test time rather than surfacing as a 422
   on the operator's first POST (G0.16-T6 Finding B #1312;
-  closes the residual surface of RDC #771 Finding 6).
+  closes the residual surface of Consumer review finding 6).
 
 #### One product identity per connector (no aliases)
 
@@ -364,7 +346,7 @@ boundary").
 
 ### The enum-validation 422 envelope
 
-Already good — see RDC #771 Finding 7's quoted envelope, which
+Already good — see Consumer review finding 7's quoted envelope, which
 includes the line "The resolver silently ignores unknown impl_id
 overrides; this 422 surfaces the foot-gun at write time." That
 style of envelope-explains-why-it-validated stays. The convention
@@ -375,7 +357,7 @@ violations.
 
 **Sister operations return the same shape on REST and MCP.**
 
-RDC #771 Finding 10: `query_topology dependents` returns a bare
+Consumer review finding 10: `query_topology dependents` returns a bare
 array on REST and `{kind: "dependents", nodes: [...]}` on MCP.
 A script that calls both surfaces has to write two parsers.
 
@@ -404,9 +386,10 @@ helper from Finding A). Default response stays the v0.8.0 bare
 `list[TopologyNode]` so no client breaks; the opt-in returns
 `{"kind": "dependents", "nodes": [...]}` matching the MCP
 `query_topology` tool's response. The wider topology endpoint
-set (`path` / `edges` / `timeline` / `diff` / `history`) ships
+set (`path` / `timeline` / `diff` / `history`) ships
 in a follow-up Task — those endpoints already return typed
-dict envelopes (no bare list) so the v2 opt-in needs an
+dict envelopes, while `edges` returns a bare
+`list[TopologyEdge]`. The v2 opt-in needs an
 endpoint-specific decision on whether to retain the existing
 field names or migrate to the §2 `items` form.
 
@@ -414,7 +397,7 @@ field names or migrate to the §2 `items` form.
 
 **List endpoints return the same fields as their detail siblings.**
 
-RDC #771 Finding 8: `GET /api/v1/targets` returned
+Consumer review finding 8: `GET /api/v1/targets` returned
 `version: null, secret_ref: null, preferred_impl_id: null` for a
 target whose `GET /api/v1/targets/{name}` returned actual values.
 Adopters either write N+1 calls (list → loop → detail) or accept
@@ -456,7 +439,7 @@ update fails CI (G0.16-T6 Finding D #1312).
 
 **Multi-shape event streams carry an explicit `kind` field.**
 
-RDC #771 Finding 13: `meho:feed:{tenant_id}` carries two distinct
+Consumer review finding 13: `meho:feed:{tenant_id}` carries two distinct
 event shapes:
 
 - `event_kind: "agent_announcement"` with `activity / target /
@@ -505,12 +488,16 @@ field on both writers:
   switches on the top-level `kind` first, falling back to
   `event_kind` for the v0.8.0 shape.
 
+Today only agent announcements are written to the stream, and
+readers use the stored announcement archive. The `kind` switch in
+`parse_entry` stays for older stream entries.
+
 ## 7. Probe ↔ dispatch path agreement
 
 **The probe path and the dispatch path read credentials, resolve
 connectors, and surface errors through the same code.**
 
-RDC #771 Findings 4 + 17: K8s probe fails with Vault OIDC
+Consumer review findings 4 + 17: K8s probe fails with Vault OIDC
 `malformed jwt: must have three parts` while K8s dispatch
 succeeds against the same target. gh-rest probe rejects the
 `auth_model` enum that gh-rest dispatch accepts.
@@ -520,7 +507,7 @@ and dispatch path diverged. They must converge.
 
 ### The convention
 
-`POST /api/v1/probe/{target}` and `POST /api/v1/operations/call`
+`POST /api/v1/targets/{name}/probe` and `POST /api/v1/operations/call`
 share one credential-loader call site, one connector-resolver
 call site, and (where relevant) one connector-instance method.
 
@@ -538,7 +525,7 @@ manifestations of the same convention violation.
 **Tool descriptions and OpenAPI parameter docs say what the
 implementation actually accepts.**
 
-RDC #771 Finding 15: MCP `broadcast.recent`'s `since` parameter
+Consumer review finding 15: MCP `broadcast.recent`'s `since` parameter
 description says "ISO-8601 timestamp or Valkey stream cursor";
 the implementation rejects ISO with `invalid_cursor: expected
 Valkey stream id`. Adopters trust the docs.
@@ -557,18 +544,16 @@ The anti-pattern is "the docs are aspirational; the impl is
 what it is". Both are part of the API surface; they must agree.
 
 Code reference: G0.16-T6 Finding G (#1312) reconciled the
-``since`` parameter across both fronts on resolution (a)
-(extend the impl). The MCP ``meho_broadcast_recent`` parser
-in
-[`backend/src/meho_backplane/broadcast/history.py`](../../backend/src/meho_backplane/broadcast/history.py)
-(``_normalise_since`` + ``_iso8601_to_min_cursor``) already
-accepted ISO; the REST ``GET /api/v1/feed`` cursor validator
-in
-[`backend/src/meho_backplane/api/v1/feed.py`](../../backend/src/meho_backplane/api/v1/feed.py)
-(``_validate_cursor_or_400`` + ``_normalize_iso_to_cursor``)
-joined it on the same dual-acceptance contract — operator
-types a timestamp, both surfaces normalise to a bare-ms Valkey
-cursor under the hood.
+``since`` parameter across both fronts on resolution 2
+(extend the impl). Both fronts accept an ISO-8601 time or a MEHO
+cursor, and both read the stored announcement archive:
+
+- REST ``GET /api/v1/feed`` uses ``resolve_feed_start`` in
+  [`backend/src/meho_backplane/api/v1/feed.py`](../../backend/src/meho_backplane/api/v1/feed.py).
+- MCP ``meho_broadcast_recent`` passes ``cursor`` (``since`` is a
+  deprecated alias) to ``read_announcement_history``, which parses
+  it with ``_parse_history_cursor`` in
+  [`backend/src/meho_backplane/broadcast/archive_reader.py`](../../backend/src/meho_backplane/broadcast/archive_reader.py).
 
 A `make check-docs-impl-agreement` CI gate is the long-game
 enforcement here, generated by parsing tool descriptions and
@@ -582,11 +567,11 @@ follow-up Task.
 one connector_id per logical connector, or document the
 divergence explicitly.**
 
-RDC #771 Finding 22: the vmware catalog entry registers as
+Consumer review finding 22: the vmware catalog entry registers as
 `vmware-rest-9.0`; the explicit-quadruple ingest with the same
 spec's `info.version="9.0.0.0"` produces `vmware-rest-9.0.0.0`.
 Two connector_ids, two distinct catalogs, one logical connector.
-The resolver routes the rdc-vcenter target to `vmware-rest-9.0`,
+The resolver routes a vCenter target to `vmware-rest-9.0`,
 so the explicit-quadruple ingest doesn't help that target's
 dispatch path.
 
@@ -629,7 +614,7 @@ divergence (``"3"`` ↔ ``"1.1.4"``) blocks ingest without it.
 **Sibling list operations on one connector share one input-parameter
 shape.**
 
-RDC #771 post-cycle rolling dogfood (2026-05-29) Finding 24:
+Consumer review finding 24 (2026-05-29):
 `k8s.event.list` required `namespace` and rejected `all_namespaces`,
 while `k8s.pod.list` on the same connector accepted
 `{all_namespaces: true}` and listed cluster-wide in one call. The
@@ -708,18 +693,19 @@ resources, mechanical to add later by spreading `LIMIT_PARAM` +
 When a future contributor lands a new endpoint, the conventions
 above should already be visible in the adjacent code:
 
-- **List endpoints** — `meho_backplane/api/v1/connectors.py`,
+- **List endpoints** — `meho_backplane/api/v1/connectors_ingest.py`,
   `meho_backplane/api/v1/targets.py`,
   `meho_backplane/api/v1/conventions.py` — the §2 envelope.
-- **Enum sources** — `meho_backplane/models/targets.py`
+- **Enum sources** — `meho_backplane/targets/schemas.py`
   (`TargetCreate` / `TargetUpdate` Pydantic schemas) carry the
   canonical product / `auth_model` / `preferred_impl_id` enums.
 - **REST ↔ MCP sister operations** —
   `meho_backplane/mcp/tools/` and `meho_backplane/api/v1/` mirror
   each other; the §4 convention is enforced by mirroring tests.
-- **Probe ↔ dispatch** —
-  `meho_backplane/operations/dispatch.py` is the shared call
-  site; `meho_backplane/api/v1/probe.py` calls into it.
+- **Probe ↔ dispatch** — the probe route
+  `POST /api/v1/targets/{name}/probe` (`meho_backplane/api/v1/targets.py`)
+  and `meho_backplane/operations/dispatcher.py` share
+  `resolve_connector_or_label` in `meho_backplane/connectors/resolver.py`.
 - **Connector list-op input shapes** —
   `meho_backplane/connectors/kubernetes/ops_listparams.py`
   (`LIST_BASE_PROPERTIES` + `NAMESPACE_XOR_ALL_NAMESPACES` + the
@@ -747,7 +733,7 @@ endpoint is the lone, deliberate carve-out at `/mcp` — root-mounted,
 unversioned, single-path. Tool *names* are not URL path segments;
 splicing a tool name onto the REST prefix produces a phantom path.**
 
-RDC #789's `mcp-route-and-response-format-changed-v0.8.0` finding
+The v0.8.1 consumer review's `mcp-route-and-response-format-changed-v0.8.0` finding
 (judged INVALID-as-framed) is the third dogfood cycle in a row where
 a consumer's probe script reached for `/api/v1/mcp` (and, paired,
 `/api/v1/query/topology`) on the assumption that "everything else is
@@ -834,10 +820,9 @@ that grep this section before trying to derive a URL:
 | `POST /api/v1/query/topology` | "The MCP tool is called `query_topology` so the REST endpoint must be too." | REST: `GET /api/v1/topology/{dependents,dependencies,path,…}/{name}` (since v0.2.1 #560). MCP: the `query_topology` tool dispatches under `POST /mcp` with `method="tools/call"` and `params.name="query_topology"`. The string `query_topology` is a JSON-RPC method-call parameter, not a path segment. |
 | `POST /api/v1/query/audit`, `…/call/operation`, `…/search/operations`, … (any `/api/v1/<tool-name-with-underscores-rewritten-as-slashes>`) | Same splice as the topology row. | `POST /mcp` for the MCP tool; the REST sister (if any) names the *resource* (`/api/v1/audit/*`, `/api/v1/operations/call`, `/api/v1/operations/search`), not the tool. |
 
-The complete agent-facing MCP tool surface (~17 meta-tools) is
-listed in [`docs/architecture/mcp.md`](../architecture/mcp.md) "Architectural
-correction (2026-05-14)"; none of these names is ever a URL path
-segment.
+The full MCP tool list (26 working-surface tools, 81 in total) is
+in [`docs/codebase/mcp.md`](mcp.md); none of these names is ever a
+URL path segment.
 
 ### Response format (so consumers don't re-litigate "format changed")
 
@@ -881,10 +866,10 @@ segment.
 
 ## 14. Intra-MCP `tools/list` shape parity
 
-**Sibling MCP tools share one convention per concept across the 51-tool
+**Sibling MCP tools share one convention per concept across the MCP
 surface — no per-tool wire-shape dialect.**
 
-`claude-rdc-hetzner-dc#789` N4 (the v0.8.1 dogfood cycle) catalogued
+Finding N4 of the v0.8.1 consumer review catalogued
 seven sibling-tool drifts on the MCP `tools/list` surface — the MCP-
 side analogue of the REST/MCP sweep §1–§9 close for `/api/v1`. None
 were breaking (every drift was an agent-ergonomics papercut), but the
@@ -895,7 +880,7 @@ G0.18-T5 (#1358) reconciled the seven drifts and pinned the
 conventions structurally in
 [`backend/tests/test_mcp_tools_list_shape_conventions.py`](../../backend/tests/test_mcp_tools_list_shape_conventions.py)
 so a future regression fails CI rather than surfacing as the next
-RDC dogfood-cycle finding.
+consumer review finding.
 
 ### §14.1 — `op_class` enum: one source per filtering surface
 
@@ -1087,7 +1072,7 @@ Tool descriptions state which key round-trips into which sibling verb.
 The pack of regression tests in
 [`backend/tests/test_mcp_tools_list_shape_conventions.py`](../../backend/tests/test_mcp_tools_list_shape_conventions.py)
 exercises every convention above. A future drift on any of them
-fails CI rather than surfacing as the next RDC dogfood-cycle
+fails CI rather than surfacing as the next dogfood-cycle
 finding.
 
 ## 15. Free-text filter param named `q` on every list/search surface

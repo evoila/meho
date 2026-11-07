@@ -10,7 +10,8 @@ what changed.
 The design is the internal note `core.md` §5. The code is in
 `backend/src/meho_backplane/instance_settings/` (`schema.py`, `diff.py`,
 `service.py`) and `backend/src/meho_backplane/api/v1/instance_settings.py`.
-The command-line verbs and the console page are a separate Task (#4048).
+MEHO 0.45.0 ships the REST endpoints below. The command line and the
+console do not have the settings file yet.
 
 Do not confuse this with `backend/src/meho_backplane/settings.py`: those are
 the environment variables, read once at start. They are never in the file.
@@ -30,7 +31,7 @@ apiVersion: meho.evoila.com/v1
 kind: Settings
 metadata:                      # written by export, ignored by import
   exportedAt: 2026-10-14T12:00:00Z
-  exportedFrom: { mehoVersion: v0.35.22, migrationHead: "0136" }
+  exportedFrom: { mehoVersion: v0.45.0, migrationHead: "0137" }
 spec:
   tenants:
     - id: 4f0c…                 # the tenant's Keycloak id (UUID)
@@ -87,9 +88,8 @@ spec:
   convention is new. `kind` cannot change on import, the same as on
   `PATCH /api/v1/conventions/{slug}`; delete the convention and import it
   again. The preamble budget check of the conventions routes applies.
-- `targets[]` — keyed by `name`; the keys of `TargetCreate` (the same entry
-  shape as `meho targets export`, #4048). `name`, `product` and `host` are
-  required. `extras` is a mapping with named keys. `secret_ref` is a path,
+- `targets[]` — keyed by `name`; the keys of `TargetCreate`. `name`,
+  `product` and `host` are required. `extras` is a mapping with named keys. `secret_ref` is a path,
   never a password: export leaves it out when MEHO can work it out from the
   name (`tenants/<tenant_id>/<name>`), and writes `secret_ref: null` for a
   target with no credential. An explicit `secret_ref` must sit under the
@@ -115,10 +115,12 @@ spec:
 The schema refuses unknown keys, so none of these can be added by hand; the
 secret check and the CI check (below) catch secret-shaped values anywhere.
 
-- The 15 settings that carry secrets: `DATABASE_URL`,
-  `BROADCAST_REDIS_PASSWORD`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+- The 17 settings that carry secrets: `DATABASE_URL`,
+  `BROADCAST_REDIS_PASSWORD`, `RESULT_CACHE_REDIS_PASSWORD`,
+  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
   `KEYCLOAK_ADMIN_CLIENT_SECRET`, `UI_KEYCLOAK_CLIENT_SECRET`,
   `UI_SESSION_ENCRYPTION_KEY`, `APPROVAL_HANDOFF_ENCRYPTION_KEY`,
+  `PARAMS_HASH_KEY`,
   `CHECK_RUNNER_CLIENT_SECRET`, `VAULT_SCHEDULER_TOKEN`,
   `SATELLITE_WRITE_SIGNING_KEY`, `VCF_PAIF_OIDC_CLIENT_SECRET`,
   `MAIL_SMTP_PASSWORD`, `METRICS_AUTH_TOKEN`, `CORPUS_SERVICE_TOKEN`.
@@ -143,7 +145,9 @@ Every problem is one sentence that names the path, for example
 ``"`spec.tenants[0].targets[3].host` is required."``. A preview lists all of
 them at once.
 
-- The file must be UTF-8 YAML (JSON is valid YAML), at most 4 MiB.
+- The file must be UTF-8 YAML (JSON is valid YAML), at most 4 MiB. A
+  bigger body gets 413 before any check of the file runs. The login and
+  role checks run first.
 - Every unknown key is a mistake, at every level. A key repeated in the same
   block is a mistake (plain YAML loading would silently keep the last one).
   Two tenants with one `id`, or two conventions / targets with one key in a
@@ -192,8 +196,9 @@ them at once.
 ## Who may call
 
 All four endpoints need a login; without a token they answer 401. There is
-no page before login: the first admin from #4043 signs in and uses the
-settings page (#4048) or `meho settings import`.
+no page before login. The first admin signs in and calls the endpoints with
+their own token. The console and the command line do not have the settings
+file yet.
 
 | Caller | Export | Preview / import | History |
 |---|---|---|---|
@@ -234,7 +239,7 @@ again.
 
 Body: the file as sent. Reads the database and nothing else: it writes
 nothing and calls no outside system. Always 200 (403 for a file the caller
-may not import):
+may not import, 413 for a body over 4 MiB):
 
 ```json
 {
@@ -258,8 +263,6 @@ When there are no mistakes, `diff` holds one entry per section — `tenants`,
   the dotted name (`flight_recorder.retention_days`);
 - `not_in_file`: `{tenant, key}` — information only; nothing is deleted.
   `tenants.not_in_file` is filled only for a `platform_admin`.
-
-This is the answer `meho settings import --preview --json` (#4048) prints.
 
 ### `POST /api/v1/settings/import`
 
@@ -286,7 +289,8 @@ body and writes nothing. Otherwise it adds or updates, never deletes:
 
 ### `GET /api/v1/settings/history?limit=50`
 
-The revisions the caller may see, newest first: `id`, `ts`, `actor_sub`,
+The revisions the caller may see, newest first. `limit` is 1 to 500 (default
+50). Each revision has `id`, `ts`, `actor_sub`,
 `audit_id`, `file_sha256`, `api_version`, `exported_from`, `summary` and
 `diff` (worked out from `spec_before` and `spec_after` when read, without
 `not_in_file`).

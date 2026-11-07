@@ -26,27 +26,37 @@ Source: `backend/src/meho_backplane/connectors/bind9/`.
 
 - **`Bind9Connector`** (`connector.py`) -- `SshConnector` subclass.
   Class attributes: `product="bind9"`, `version="9.x"`,
-  `impl_id="bind9-ssh"`. Inherits the per-target asyncssh connection
+  `impl_id="bind9-ssh"`. It sets no `supported_version_range` and keeps
+  the default `priority` of 0. Inherits the per-target asyncssh connection
   pool, the key-or-password auth selection, and `aclose()` from the
   adapter; overrides `fingerprint`, `probe`, `execute`, and adds the
   `about` op handler.
 - **`_remote_bash_with_sudo()`** -- the load-bearing safety
   primitive. The only sudo-shell-construction path in the connector
-  layer. The constructed remote argv is the fixed string
-  `"sudo -S -p '' bash -s"`; the sudo password is streamed via
-  `input=` (stdin) as the first line, and the bash script body is
-  streamed as the remainder. The caller passes `script` and
+  layer. The remote command is a fixed template built by
+  `_build_sudo_bash_remote_cmd` (`connector.py`). Its only variable
+  part is the byte count of the script:
+  `set -e; umask 077; f=$(mktemp); trap "rm -f $f" EXIT; head -c <N> > "$f"; sudo -S -p "" bash "$f"`.
+  Stdin carries the script bytes first, then the sudo password and a
+  newline. `head -c <N>` copies the script into a private temp file,
+  `sudo -S` reads the password from the rest of stdin, and `bash`
+  runs the temp file. The caller passes `script` and
   `sudo_password` as separate arguments and cannot express a
   mis-ordered payload because the helper builds the stdin string
-  itself. The password never appears in the remote argv, the remote
-  shell-history file, or any local structured-log event.
+  itself. A password with a newline, carriage return or NUL is
+  refused with `ValueError` before any connection opens. The
+  password never appears in the remote argv, the remote
+  shell-history file, or any local structured-log event. The output
+  is read through the SSH adapter's `run_capped`, so a command whose
+  output passes 16 MiB fails with `SshOutputTooLargeError`.
 - **Op metadata** (`ops.py`) -- the `Bind9Op` dataclass plus the
   `BIND9_OPS` tuple the connector's `register_operations` walks at
   startup. T1 shipped a single-element tuple with `bind9.about`;
   T2 added the read op group via a `_bind9_ops()` composition
   function (mirrors K8s `_kubernetes_ops()`) that splats per-area
   tuples from `ops_zone.py`, `ops_record.py`, and `ops_config.py`.
-  T4 will follow the same shape.
+  T4's config writes use the same shape (`CONFIG_OPS` in
+  `ops_config.py`).
 - **`ops_zone.py`** -- T2 zone-read ops module. Pure parsers
   (`parse_named_checkconf_zones`, `parse_zonefile`), bound-method
   handler functions (`bind9_zone_list`, `bind9_zone_read`), and the
@@ -109,8 +119,9 @@ wrong position. The replacement encodes safety by construction:
 
 | Property | How the API enforces it |
 | -------- | ----------------------- |
-| Password not in remote argv | Constructed argv is a fixed constant (`sudo -S -p '' bash -s`); the password streams via `input=` |
-| Password not in shell history | `bash -s` reads from stdin; commands fed on stdin are not recorded |
+| Password not in remote argv | The remote command is a fixed template; its only variable part is the script's byte count. Script and password stream via stdin |
+| Password not in shell history | `bash` runs the script from a private temp file (`umask 077`, removed on exit); nothing is typed into an interactive shell |
+| Password is one line | A password with `\n`, `\r` or `\x00` is refused with `ValueError` before the connection opens |
 | Password not in local logs | The structured log event binds `cmd_len` / `script_len` / `exit_code` only |
 | Caller cannot mis-order the payload | `script` and `sudo_password` are separate arguments; the helper assembles the stdin string |
 | `sudo_password` cannot be passed positionally | The parameter is keyword-only (signature uses `*,` separator) |
@@ -145,8 +156,8 @@ both share one connection):
 
 `probe_method` is the fixed string `"ssh: named -v"`.
 `extras["named_conf_path"]` carries the Debian-family default
-(`/etc/bind/named.conf`); RHEL-family detection lands in a follow-up
-once T2 ships `bind9.config.show`.
+(`/etc/bind/named.conf`); the connector has no RHEL-family detection
+(`connector.py`, `fingerprint`).
 
 The `_run_command` calls are wrapped in a `(OSError, asyncssh.Error)`
 guard so a connection drop, an `asyncssh.Error`, or a timeout
@@ -157,13 +168,13 @@ from `about` (#986).
 
 ## `probe(target)`
 
-Five distinct failure-reason values:
+Six distinct failure-reason values:
 
 | Reason | Trigger |
 | ------ | ------- |
 | `tcp_unreachable` | `OSError` raised by `asyncssh.connect()` (host down, firewall, wrong port) |
 | `ssh_handshake_failed` | `asyncssh.DisconnectError` (host-key mismatch under a future pinning regime, protocol mismatch) |
-| `auth_failed` | `asyncssh.PermissionDenied` (credentials rejected) |
+| `auth_failed` | `asyncssh.PermissionDenied` (credentials rejected), or the credential read fails (`ValueError` / `VaultClientError` / `CredentialsReadError`) |
 | `named_not_running` | `pgrep -x named` exited non-zero |
 | `named_config_invalid` | `named-checkconf -p > /dev/null` exited non-zero |
 | `command_failed` | a post-connect command (`pgrep` / `named-checkconf`) raised after a successful connect (drop / `asyncssh.Error` / timeout) |
@@ -258,6 +269,14 @@ All refusal envelopes carry `status` / `deleted=False` / `guidance` — the
 `vm.destroy` structured-refusal shape. See the approvals-plane note in
 `approvals.md`.
 
+Right before an approved run of `record.delete` or `record.remove`, MEHO
+builds the preview card again against the nameserver and compares the
+record fields on it with the approved card
+(`operations/approval_object_check.py`). If the fields differ, if records
+appeared under a name the approved card showed as empty, or if the card
+does not build, the run is refused with `object_changed_since_approval`
+and nothing is changed on the nameserver.
+
 ### Governed whole-name clear (`bind9.record.remove`, #3247)
 
 `bind9.record.remove` clears **every** A + AAAA record at a name in one write
@@ -296,8 +315,9 @@ is directed to `record.delete` by the op's `llm_instructions`.
 
 ## Atomic-apply primitive (T3 #589)
 
-`_atomic.py` exposes one async `atomic_apply()` helper used by every
-mutating op (record-writes today, config-writes when T4 lands). The
+`_atomic.py` exposes one async `atomic_apply()` helper used by the
+record writes (`record.add`, `record.remove`, `record.delete`) and the
+two config apply ops (`config.apply_file`, `config.apply_views`). The
 discipline is the load-bearing safety contract Initiative #367 calls
 WI5 -- DNS is global; a half-applied zone change wedges every
 consumer of this nameserver. The primitive runs a fixed seven-step
@@ -313,11 +333,12 @@ pipeline inside one `_remote_bash_with_sudo` invocation:
 3. **Stage.** Write the caller's `staged_bytes` to the audit-slice
    path. Staged bytes arrive base64-encoded via env var so arbitrary
    bytes (control characters, embedded NULs) round-trip unchanged.
-4. **Validate.** `named-checkzone <zone> <file>` against the staged
-   file. Non-zero exit -> rollback + raise `AtomicApplyError("checkconf",
-   detail)`. (Per-zone, not the parent-config-tree `named-checkconf -p`,
-   so the validation gate matches the blast-radius of the operator's
-   change.)
+4. **Validate.** Run the caller-supplied `BIND9_VALIDATE_CMD`. Record
+   writes use the default, `named-checkzone <zone> <file>` against the
+   staged file; the config apply ops pass `named-checkconf -p`.
+   Non-zero exit -> rollback + raise `AtomicApplyError("checkconf",
+   detail)`. (Per-zone for record writes, so the validation gate
+   matches the blast-radius of the operator's change.)
 5. **Reload.** `rndc reload`. Non-zero exit -> rollback + raise
    `AtomicApplyError("reload", detail)`.
 6. **Verify.** Run the caller-supplied verify command (e.g.
@@ -354,11 +375,11 @@ emits and returns `(zone_name, zonefile_path, view)`:
   serves; otherwise (no `explicit_zone`, **or** an `explicit_zone` this
   server does not serve) longest-suffix match (`resolve_zone_for_fqdn`)
   over the **distinct** zone names. The FQDN's label sequence must end
-  with the zone's (`api.evba.lab` matches `evba.lab`, not `ba.lab`); the
+  with the zone's (`api.example.test` matches `example.test`, not `le.test`); the
   root zone (`.`) is excluded. Walking on an unserved `explicit_zone`
   (rather than refusing it verbatim) lets a record that lives flat in a
-  configured ancestor's zonefile -- e.g. `host.sub.evba.lab` written into
-  the `evba.lab` zone, where `sub.evba.lab` is not itself a zone --
+  configured ancestor's zonefile -- e.g. `host.sub.example.test` written into
+  the `example.test` zone, where `sub.example.test` is not itself a zone --
   resolve to that ancestor instead of failing closed (#3304); the FQDN is
   authoritative for a record op, so the walk can only land on a zone the
   FQDN belongs to. A genuinely-configured subzone still wins by longest
@@ -433,9 +454,10 @@ verify, not the reload.
 
 ### Audit integration
 
-Both write handlers emit `op_class="write"` plus
+The record write handlers (`record.add`, `record.remove`,
+`record.delete`) and the two config apply ops emit `op_class="write"` plus
 `result_state_before` / `result_state_after` (the full pre/post-op
-zonefile text captured by `atomic_apply`). These power the G8.2
+text of the changed file, captured by `atomic_apply`). These power the G8.2
 audit-replay path; the broadcast classifier's `_WRITE_SUFFIXES`
 tuple is extended to include `.add` / `.remove` so a future
 broadcast leak via `classify_op` falling through to `other` cannot
@@ -475,11 +497,12 @@ rationale is documented in
   doubles the spill-path implementation and locks the threshold at
   the connector boundary.
 
-The handlers ship raw row lists plus a `total` count so a future
-JSONFlux reducer has the inlined-sample-size + total-count signals to
-drive its threshold check. The `bind9.zone.read` `llm_instructions`
-mention the future handle-wrapping behaviour so the agent already
-expects a handle when the reducer ships.
+The handlers ship raw row lists plus a `total` count. The dispatcher's
+JSONFlux reducer (`operations/jsonflux_reducer.py`, installed at startup
+in `main.py`) turns a payload above 50 rows or 4 KB into a summary plus
+a result handle, which the agent pages with `result_query`. The
+`bind9.zone.read` `llm_instructions` tell the agent that large zones
+come back as a handle.
 
 ### Path-safety filter (`bind9.config.show`)
 
@@ -531,7 +554,10 @@ Two phases, mirroring the `connectors/vault/__init__.py` and
 
 1. **Synchronous (import time)** -- `register_connector_v2(product="bind9",
    version="9.x", impl_id="bind9-ssh", cls=Bind9Connector)` runs at
-   `connectors/bind9/__init__.py` import time.
+   `connectors/bind9/__init__.py` import time. A second entry
+   (`version=""`, `impl_id=""`) is the wildcard fallback, so a target
+   with no version yet still resolves to `Bind9Connector`; the
+   versioned entry wins when both match.
 2. **Asynchronous (lifespan startup)** --
    `register_typed_op_registrar(register_bind9_typed_operations)`
    queues the typed-op upsert onto the lifespan-driven registrar
@@ -542,12 +568,33 @@ The connector does **not** call the v1 `register_connector` because
 bind9 has no v1 chassis history -- the deprecated chassis route was
 removed by G0.6-T11 (#412) and bind9 has never shipped behind it.
 
+## CLI
+
+`meho bind9` (`cli/internal/cmd/bind9/`, mounted in
+`cli/internal/cmd/root.go`) has one verb per op, except
+`bind9.record.delete`, which has no CLI verb (call it with
+`call_operation`):
+
+- `meho bind9 about`
+- `meho bind9 zone list`, `meho bind9 zone read <zone>`
+- `meho bind9 record get <fqdn>`, `record add <fqdn> <ip>`,
+  `record remove <fqdn>`
+- `meho bind9 config show <file>`, `config apply-file <name> <local-src>`,
+  `config apply-views <local-views.conf> <zones-dir>`, `config backup`,
+  `config reload`
+
+`record remove` sends a preview first and then the call with the
+`preview_hash`, so the result waits for a second person to approve it.
+If the preview fails, the command stops and sends nothing
+(`record.go`, `PreviewAndCall`). The operator guide is
+[`docs/cross-repo/bind9-onboarding.md`](../cross-repo/bind9-onboarding.md).
+
 ## Tests
 
 - `backend/tests/test_connectors_bind9.py` -- T1 unit suite. Covers the
   registry-v2 class attrs, the package-import registration shape, the
   parse helpers, the safe-sudo primitive's argv / stdin / log-shape
-  contracts, the fingerprint version-and-OS parsing, the five probe
+  contracts, the fingerprint version-and-OS parsing, the six probe
   reason values, the register_operations upsert + idempotency loop,
   and the execute() dispatcher shim's unknown / valid / invalid
   branches.
@@ -600,8 +647,8 @@ removed by G0.6-T11 (#412) and bind9 has never shipped behind it.
 - `backend/tests/integration/test_connectors_bind9_container.py` --
   containerised smoke test against a Debian-bookworm image with
   `bind9 bind9-host bind9utils dnsutils openssh-server` installed.
-  Builds the image inline from a Dockerfile fixture (T2 seeds an
-  `evba.lab` zone with each supported record type so the read-op
+  Builds the image inline from a Dockerfile fixture (T2 seeds a
+  test zone with each supported record type so the read-op
   tests assert against a real container). T3 extended with end-to-end
   add / remove tests, longest-suffix zone resolution against a real
   `named-checkconf -p`, and the two byte-identical-tree rollback
@@ -612,6 +659,13 @@ removed by G0.6-T11 (#412) and bind9 has never shipped behind it.
   assertions for the apply ops (invalid fragment / invalid views
   tree both refuse via `named-checkconf -p` and roll back cleanly).
   Skip-on-no-Docker matches the rest of `tests/integration/`.
+- `backend/tests/test_connectors_bind9_record_delete.py` and
+  `backend/tests/test_connectors_bind9_record_remove.py` -- the
+  governed `record.delete` and `record.remove`: registration metadata,
+  the refusals, the preview builders, and the check of the object
+  right before an approved run.
+- `backend/tests/integration/test_g3_4_bind9_e2e.py` -- end-to-end
+  acceptance suite for the connector.
 
 ## References
 

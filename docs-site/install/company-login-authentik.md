@@ -64,7 +64,7 @@ MEHO has five role groups. Each group gives a role:
 |---|---|---|
 | `MEHO-Readers` | `read_only` | Read only. |
 | `MEHO-Operators` | `operator` | Run actions. Risky changes wait until a second person approves. |
-| `MEHO-SA-Operators` | `operator` | Same as Operators for now. |
+| `MEHO-SA-Operators` | `operator` | Run actions, and approve their own risky changes on purpose. Also approve other people's `dangerous` and `destructive` changes. |
 | `MEHO-Admins` | `tenant_admin` | Manage the tenant. |
 | `MEHO-Approvers` | `read_only`, plus `approver: true` | Approve other people's changes. Cannot run actions. |
 
@@ -73,8 +73,9 @@ The rule: **put each person in exactly one of these groups.**
 - A person in no group gets no tenant. MEHO refuses them with
   `401 missing_tenant_claim`.
 - A person in two groups is refused with `401 multiple_role_groups`.
-- Operators and admins can already approve other people's changes, so
-  nobody needs two groups.
+- Each group already carries its approval rights, so nobody needs two
+  groups. Who may approve what is in
+  [Approvals and break-glass](../guides/approvals-and-break-glass.md#who-may-approve).
 
 The easiest setup is to give the authentik groups the same five names.
 You can also use groups you already have and map them (see `groupMap`
@@ -462,11 +463,14 @@ Keycloak admin console. With the built-in Keycloak:
 
 - The console is not on the ingress by default. Set
   `coreKeycloak.ingress.exposeAdmin: true` to reach it at
-  `https://<host>/auth/admin/`.
-- The install makes no admin account for people. Make one with
-  Keycloak's
-  [bootstrap admin recovery](https://www.keycloak.org/server/bootstrap-admin-recovery)
-  command, and remove it when you are done.
+  `https://<host>/auth/admin/master/console/#/meho`.
+- Log in as the console admin that the first install made. The Secret
+  `<release>-core-console-admin` holds its user name and temporary
+  password (keys `username` and `password`). See
+  [The console admin](keycloak-realm.md#the-console-admin).
+- On an install older than the console admin, that Secret is missing.
+  Then follow
+  [Console admin on an older install](keycloak-realm.md#console-admin-on-an-older-install).
 
 ## If something fails
 

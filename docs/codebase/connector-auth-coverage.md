@@ -1,11 +1,9 @@
 # Connector `auth_headers` coverage — grounding for the ExecutionProfile auth catalog
 
-G0.28-T3 (#1969), Initiative #1965, Goal #1964.
-
-This is the first deliverable of #1969: a grounded trace of every HTTP
-connector's `auth_headers` (and session-login) implementation, used to
-decide which auth shapes the closed `ExecutionProfile` named-auth catalog
-covers and which stay typed (hand-coded). The catalog
+This page is a grounded trace of the HTTP connectors' `auth_headers` (and
+session-login) code, made in September 2026. It decided which auth shapes
+the closed `ExecutionProfile` named-auth catalog covers and which stay
+typed (hand-coded). The catalog
 (`AuthSchemeName` in `backend/src/meho_backplane/connectors/profile.py`)
 is derived from this table, **not** from a list picked from memory.
 
@@ -21,37 +19,39 @@ return something other than a header dict (kubeconfig-backed `ApiClient`)
 cannot be a named scheme — they are listed as **reserved** and a profile
 naming one raises `ReservedAuthSchemeError` ("author a typed connector").
 
-## Coverage table (14 HTTP connectors)
+## Coverage table (the HTTP connectors of September 2026)
+
+The table is a record of September 2026. Later HTTP connectors (for example
+azure, entra, freeipa, loki, phpipam, prometheus, proxmox, rabbitmq and
+tempo) have their own `auth_headers` and are not in it. Rows marked
+"VMware package" are connectors that ship in the separate VMware connector
+package, not in this repository.
 
 | # | Connector | File (auth method) | Mechanism | Secret field names | Returns | Catalog verdict |
 |---|-----------|--------------------|-----------|--------------------|---------|-----------------|
 | 1 | harbor | `harbor/connector.py` `auth_headers` | HTTP Basic `base64(user:pass)` → `Authorization: Basic` | `username`, `password` | `dict[str,str]` | **`basic`** |
-| 2 | sddc_manager | `sddc_manager/connector.py` `auth_headers` | Session login `POST /v1/tokens` (JSON `{username,password}`) → `accessToken` → cached Bearer; re-login once on `401` (HTTP Basic rejected by the appliance) | `username`, `password` | `dict[str,str]` (Bearer) | **`session_login_token`** |
-| 3 | vcf_fleet | `vcf_fleet/connector.py` (`_shared/vcf_auth.basic_auth_header`) | HTTP Basic (shared helper) | `username`, `password` | `dict[str,str]` | **`basic`** |
-| 4 | vcf_operations | `vcf_operations/connector.py` `auth_headers` | HTTP Basic + optional `?auth-source=` query | `username`, `password` | `dict[str,str]` | **`basic`** |
+| 2 | sddc_manager (VMware package) | `sddc_manager/connector.py` `auth_headers` | Session login `POST /v1/tokens` (JSON `{username,password}`) → `accessToken` → cached Bearer; re-login once on `401` (HTTP Basic rejected by the appliance) | `username`, `password` | `dict[str,str]` (Bearer) | **`session_login_token`** |
+| 3 | vcf_fleet (VMware package) | `vcf_fleet/connector.py` (`_shared/vcf_auth.basic_auth_header`) | HTTP Basic (shared helper) | `username`, `password` | `dict[str,str]` | **`basic`** |
+| 4 | vcf_operations (VMware package) | `vcf_operations/connector.py` `auth_headers` | HTTP Basic + optional `?auth-source=` query | `username`, `password` | `dict[str,str]` | **`basic`** |
 | 5 | hetzner_robot | `hetzner_robot/connector.py` `_basic_auth_header` | HTTP Basic (hard-fail on first 401, IP-block guard) | `username`, `password` | `dict[str,str]` | **`basic`** |
 | 6 | argocd | `argocd/connector.py` `auth_headers` | Static pre-issued token → `Authorization: Bearer <token>` | `token` | `dict[str,str]` | **`static_header`** (`value_kind=bearer`) |
 | 7 | keycloak | `keycloak/connector.py` `auth_headers` | OAuth2 client-credentials form grant `POST /realms/{r}/protocol/openid-connect/token` → cached Bearer (target-relative by default; an optional external `token_url` + `scope`/`audience` covers an issuer on a separate host, #3571) | `client_id`, `client_secret` | `dict[str,str]` (Bearer) | **`oauth2_mint`** |
-| 8 | vcf_logs (vRLI) | `vcf_logs/connector.py` `auth_headers` | Session login `POST /api/v2/sessions` (JSON `{username,password,provider}`) → `sessionId` → cached Bearer | `username`, `password` | `dict[str,str]` (Bearer) | **`session_login`** |
-| 9 | vmware_rest | `vmware_rest/connector.py` `_establish_session` | Session login `POST /api/session` (HTTP Basic, no body) → raw JSON-string token from body → cached, sent in `vmware-api-session-id` header | `username`, `password` | `dict[str,str]` (raw `vmware-api-session-id`) | **`session_login_basic`** |
+| 8 | vcf_logs (vRLI) (VMware package) | `vcf_logs/connector.py` `auth_headers` | Session login `POST /api/v2/sessions` (JSON `{username,password,provider}`) → `sessionId` → cached Bearer | `username`, `password` | `dict[str,str]` (Bearer) | **`session_login`** |
+| 9 | vmware_rest (VMware package) | `vmware_rest/connector.py` `_establish_session` | Session login `POST /api/session` (HTTP Basic, no body) → raw JSON-string token from body → cached, sent in `vmware-api-session-id` header | `username`, `password` | `dict[str,str]` (raw `vmware-api-session-id`) | **`session_login_basic`** |
 | 10 | github | `github/connector.py` `auth_headers` | App-JWT: mint RS256 JWT → exchange for installation token (or PAT passthrough) | `app_id`, `private_key_pem`, `installation_id` (or `token`) | `dict[str,str]` (Bearer) | **RESERVED** `github_app_jwt` |
 | 11 | gcloud | `gcloud/connector.py` `auth_headers` | ADC + `impersonated_credentials` for `target.gcp_impersonate_sa` → refreshed token | ADC source + impersonation target (no static secret) | `dict[str,str]` (Bearer) | **RESERVED** `gcp_sa_impersonation` |
 | 12 | vault | `vault/connector.py` (`vault_client_for_operator`) | Operator-context OIDC JWT forward; no per-call header dict | operator `raw_jwt` | not a header dict | **RESERVED** `operator_jwt_forward` |
 | 13 | kubernetes | `kubernetes/connector.py` | kubeconfig loaded from Vault → cert/token embedded in `ApiClient` | kubeconfig payload | embedded in `ApiClient` | **RESERVED** `kubeconfig` |
-| 14 | nsx | `nsx/session.py` | Session create `POST /api/session/create` (form `j_username`/`j_password`) → `Set-Cookie JSESSIONID` jar + `X-XSRF-TOKEN` | `username`, `password` | mutated cookie jar + `dict[str,str]` | **RESERVED** `cookie_jar_session` |
-| 15 | vcf_automation | `vcf_automation/_auth.py` | Dual-plane: provider login (`/cloudapi/.../sessions/provider`) + tenant login (`/iaas/api/login`), token from header / body | `username`, `password`, `domain` | `dict[str,str]` (plane-specific Bearer) | **RESERVED** `dual_plane_session` |
-| 16 | vcf_installer | `vcf_installer/connector.py` `auth_headers` | Session login `POST /v1/tokens` (JSON `{username,password}` → `TokenPair.accessToken`) → cached Bearer; re-login once on `401`. Second member of the scheme (SDDC Manager shape) | `username`, `password` | `dict[str,str]` (Bearer) | **`session_login_token`** |
+| 14 | nsx (VMware package) | `nsx/session.py` | Session create `POST /api/session/create` (form `j_username`/`j_password`) → `Set-Cookie JSESSIONID` jar + `X-XSRF-TOKEN` | `username`, `password` | mutated cookie jar + `dict[str,str]` | **RESERVED** `cookie_jar_session` |
+| 15 | vcf_automation (VMware package) | `vcf_automation/_auth.py` | Dual-plane: provider login (`/cloudapi/.../sessions/provider`) + tenant login (`/iaas/api/login`), token from header / body | `username`, `password`, `domain` | `dict[str,str]` (plane-specific Bearer) | **RESERVED** `dual_plane_session` |
+| 16 | vcf_installer (VMware package) | `vcf_installer/connector.py` `auth_headers` | Session login `POST /v1/tokens` (JSON `{username,password}` → `TokenPair.accessToken`) → cached Bearer; re-login once on `401`. Second member of the scheme (SDDC Manager shape) | `username`, `password` | `dict[str,str]` (Bearer) | **`session_login_token`** |
 
-> Row count note: the connectors directory ships 15 HTTP-family connector
-> packages; the issue's "14" excludes `vcf_automation`'s dual-plane shape
-> as a special case. It is included here for completeness and is reserved.
-> Pure non-HTTP connectors (bind9, pfsense, holodeck, secret-broker) are
-> out of scope — they have no `auth_headers` HTTP surface.
+> Pure non-HTTP connectors (bind9, pfsense, secret-broker) are out of
+> scope — they have no `auth_headers` HTTP surface.
 
 ## Named-scheme partition (what the catalog covers)
 
-Six connectors (five if `vcf_operations`'s query-param merge is counted as
-`basic` with a transport quirk) fit a named scheme:
+Ten connectors in the table fit one of the six named schemes:
 
 - **`basic`** — harbor, vcf_fleet, vcf_operations, hetzner_robot
 - **`static_header`** — argocd
@@ -60,15 +60,13 @@ Six connectors (five if `vcf_operations`'s query-param merge is counted as
 - **`session_login_basic`** — vmware_rest (vCenter: HTTP Basic login, no body
   → token from a raw JSON-string body or the legacy `{"value": "<tok>"}`
   object body → `vmware-api-session-id` header; #2025, legacy shape #2047)
-- **`session_login_token`** — sddc_manager (SDDC Manager: JSON creds body
-  `{username, password}` → response-body `accessToken` field → Bearer). First
-  member of this shape; the appliance's HTTP Basic surface is rejected —
-  token-only. Grounded in `POST /v1/tokens` live evidence (#2287). The shipped
-  `sddc_manager_minimal.yaml` profile selects it and the typed
-  `SddcManagerConnector` derives its session from the same scheme (#2290, row 2
-  above).
+- **`session_login_token`** — sddc_manager and vcf_installer (SDDC Manager: JSON creds body
+  `{username, password}` → response-body `accessToken` field → Bearer). SDDC
+  Manager is the first member of this shape; its HTTP Basic surface is
+  rejected — token-only. The SDDC Manager connector and its profile ship in the
+  VMware connector package.
 
-Eight stay **reserved/typed** — github, gcloud, vault, kubernetes, nsx,
+Six stay **reserved/typed** — github, gcloud, vault, kubernetes, nsx,
 vcf_automation — because their auth is stateful, asymmetric-crypto, or
 non-`dict[str,str]`. A profile naming any reserved scheme raises
 `ReservedAuthSchemeError`; the catalog's closed `Literal` does not list
@@ -165,7 +163,7 @@ for `scheme="oauth2_mint"` and forbidden on every other scheme:
 
 | Field | Default | Effect |
 |-------|---------|--------|
-| `token_url` | `None` → target-relative `/realms/master/...` | Absolute URL of the token endpoint. When set, the mint dials it directly (the pooled client resolves an absolute URL as-is, so the target `base_url` is bypassed for the mint only). |
+| `token_url` | `None` → target-relative `/realms/master/...` | Absolute URL of the token endpoint. When set, the mint dials it directly (the pooled client resolves an absolute URL as-is, so the mint does not use the target `base_url`). |
 | `scope` | `None` → no `scope` form param | Forwarded verbatim as the `scope` form parameter of the grant. |
 | `audience` | `None` → no `audience` form param | Forwarded verbatim as the `audience` form parameter (Keycloak / RFC 8693-style). |
 
@@ -196,16 +194,16 @@ catalog's existing behaviour fixed and to fail closed on the new surface:
   scheme-load guard, which is transparent to the optional fields.
 - **No secret / token in logs or spans.** `client_id`/`client_secret` still
   resolve from the Vault-backed target credential; the mint's login POST goes
-  through the pooled `httpx.AsyncClient` **directly**, bypassing the recorded
+  through the pooled `httpx.AsyncClient` **directly**, not through the recorded
   `_post_json` flight-recorder span, so neither the grant body nor the minted
   access token enters a vendor-call span. The only emitted event
   (`profiled_session_established`) carries the login path — never a secret or
   the token.
-- **SSRF screening still applies to the issuer.** The pooled client's pinned
+- **Address screening still applies to the issuer.** The pooled client's pinned
   transport screens whatever host it dials at the socket boundary, so a mint
-  to an external issuer is subject to the same SSRF allowlist / private-range
-  guard as a dispatch to the target. An internal issuer must therefore be
-  admitted by the deploy-side SSRF allowlist, exactly like the target.
+  to an external issuer gets the same address allowlist and private-range
+  check as a dispatch to the target. An internal issuer must therefore be
+  on the deploy-side target address allowlist, exactly like the target.
 - **Known limitation.** A target's `tls_server_name` SNI override (#2398) is
   still threaded onto the login POST; it is meaningful only for a
   target-relative mint. A target that sets it *and* points at an external

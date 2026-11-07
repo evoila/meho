@@ -102,7 +102,7 @@ signal that a surface has no client-side reflex lever.
 ISO-8601, reusing `retrieval.usage.parse_since`; `until` defaults to
 now; malformed → 400), binds the audit overrides
 (`audit_op_id="meho.audit.reflex"`, `audit_op_class="audit_query"`)
-so the row broadcasts aggregate-only per decision #3, then calls
+so the audit row is tagged as an audit query (locked decision 3), then calls
 `compute_reflex_report`. `audit_row_count` is bound to the total
 write-class ops scored.
 
@@ -141,18 +141,23 @@ a per-surface table (or `--json` for the raw envelope). Nil ratios read
   (bounded by `AgentAnnouncement.ttl_minutes`) is a future refinement;
   it is a subset of the current boolean, so v1 is the looser, simpler
   definition.
+- **The read count uses the tool name `broadcast_recent`.** The report
+  counts envelope rows with path `/mcp/tools/call/broadcast_recent`
+  (`BROADCAST_RECENT_TOOL` in `reflex/adoption.py`). The MCP tool is
+  registered as `meho_broadcast_recent`, so its rows carry
+  `/mcp/tools/call/meho_broadcast_recent`. So read-before-act counts no
+  reads today and reads `0.0` on the `agent` surface. The reflex advisory
+  uses the right path (see [reflex-advisory.md](reflex-advisory.md)).
 - **Emission wiring may lag the metric.** As with #444's usage surface,
   the metric is defined against audit-row shapes that some meta-tools
   may not yet emit; the report degrades to all-`None`/zero gracefully.
 
-## Delineation from meho-internal#200 (taint metrics)
+## How this differs from adoption metrics
 
 These reflex KPIs measure *in-session discipline* (did the agent read /
-announce / write back). meho-internal#200's taint metrics measure
-meho-vs-local-fallback *adoption* (is work going through MEHO at all).
-Related, not merged — the reflex numbers may feed that monthly roll-up
-later, but the two are computed from different signals and answer
-different questions.
+announce / write back). Adoption metrics measure whether work goes
+through MEHO at all, or falls back to local tools. They are computed
+from different signals and answer different questions.
 
 ## References
 

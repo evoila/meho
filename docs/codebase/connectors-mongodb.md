@@ -115,6 +115,27 @@ op wired to a command off the allowlist fails closed.
   target reached without an authenticated operator (the operator-less `execute`
   shim / `probe`) fails closed inside the loader.
 
+### Address check at connect time
+
+`connect_client` hands the dial to `connect_checked`
+(`connectors/_shared/dial_guard.py`). It checks the target address again
+with the same rules and allowlist as when the target is saved:
+
+- A host name is looked up once. The client gets one checked IP address.
+  When that address does not answer (`ConnectionFailure`), MEHO builds a
+  client for the next checked address. The client is pinged once to find
+  out.
+- A host name that does not resolve is refused, unless the exact name is
+  on the allowlist.
+- A target takes one host. A connection string or a list of hosts in
+  `target.host` is refused.
+- `directConnection=True` keeps the client on that one node. The driver
+  does not add replica-set members that the server reports.
+
+A refusal is a `ValueError`, so it shows as a normal connector error.
+`probe` and `fingerprint` report it with the reason `auth_failed`, the same
+reason as a credential error.
+
 ### Fingerprint / probe
 
 `fingerprint()` reads `buildInfo` (version, gitVersion, edition), `hello`
@@ -146,6 +167,8 @@ replication lag, and treats the standalone code-76 (`NoReplicationEnabled`) as
   (`AsyncMongoClient`) + BSON types. Native async replaces Motor (deprecated).
 - `_shared/vault_creds.py` — `load_basic_credentials` for the optional
   operator-context credential read.
+- `_shared/dial_guard.py` — `connect_checked` for the connect-time address
+  check.
 - `operations/typed_register.py` — `register_typed_operation` and the registrar
   queue.
 - `operations.dispatch` — the `execute` shim delegates to it.

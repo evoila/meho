@@ -57,9 +57,19 @@ class MetaToolSpec:
       shapes the meta-tool *arguments*, not the per-op params).
     * ``required_role`` — the :class:`TenantRole` floor; the identity must
       meet it (via :func:`role_at_least`) for the tool to register.
+    * ``required_capability`` — the tenant capability the tool needs, or
+      ``None``. A bridged MCP tool keeps the MCP tool's capability (the docs
+      tools need ``meho-docs``); without it the tool does not register.
     """
 
-    __slots__ = ("description", "handler", "name", "parameter_schema", "required_role")
+    __slots__ = (
+        "description",
+        "handler",
+        "name",
+        "parameter_schema",
+        "required_capability",
+        "required_role",
+    )
 
     def __init__(
         self,
@@ -69,12 +79,14 @@ class MetaToolSpec:
         description: str,
         parameter_schema: dict[str, Any],
         required_role: TenantRole,
+        required_capability: str | None = None,
     ) -> None:
         self.name = name
         self.handler = handler
         self.description = description
         self.parameter_schema = parameter_schema
         self.required_role = required_role
+        self.required_capability = required_capability
 
 
 @contextmanager

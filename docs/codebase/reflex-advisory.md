@@ -56,7 +56,7 @@ dedupe where a dedupe applies.
 ### Advisory (success path, after the audit commit)
 
 ```text
-dispatcher._reduce_and_audit_success(...)   # after audit + broadcast
+dispatcher._reduce_and_audit_success(...)   # after the audit commit
   → build_target_activity_advisory(...)     # #2550 fragment (write-gated)
   → build_checks_alert_advisory(...)        # #2718 fragment (all classes)
   → build_reflex_advisory(operator, op_class, target_name)   # this fragment
@@ -182,8 +182,11 @@ cache-aware fail-open resolver that mirrors the `broadcast_override`
 resolver pattern (`broadcast/overrides.py`: 60s per-tenant TTL cache,
 fail-open-to-default). A dedicated rules table + CRUD/REST/MCP/UI surface
 (the full `broadcast_override` shape) is more than a one-flag policy
-warrants; opt-in tenants set the flag through seeding / tenant
-administration, and a management verb is a clean follow-up.
+warrants. The flag has no REST route of its own. A tenant opts in through
+the settings file: `spec.tenants[].policies.announce_gate_enabled`, applied
+by `POST /api/v1/settings/import` (see [settings.md](settings.md)). The
+write goes through `tenancy/policies.set_announce_gate_enabled`, which is
+audited and clears the 60s cache for that tenant.
 
 ## Known issues / limitations
 
@@ -220,33 +223,19 @@ administration, and a management verb is a clean follow-up.
 The fragment is present on a response only when **all** of these hold.
 Any one absent is a silent, correct `{}` — never a defect:
 
-1. **The feature is deployed.** `build_reflex_advisory` and the
-   `reflex_advisory_window_minutes` setting ship in **PR #3141**
-   (merge `6367f7`), which landed **after** the `v0.30.0` tag
-   (`d33419f`). A backplane running `v0.30.0` or earlier has no
-   `meho_backplane.broadcast.reflex` module and no
-   `reflex_advisory_window_minutes` setting, so **`extras` never carries
-   `reflex_advisory`** — the merge seam calls a builder that isn't there.
-   This is the root cause of the F5 field observation (#3149): the lab
-   ran `v0.30.0`, one release behind the feature. The advisory first
-   fires on the release *after* `v0.30.0`. Confirm the deployment is on
-   that release before treating an absent fragment as a bug — a live
-   read of the running image settles it:
-   `python -c "import meho_backplane.broadcast.reflex"` succeeds only
-   where the feature is deployed.
-2. **The window is non-zero.** `REFLEX_ADVISORY_WINDOW_MINUTES=0`
+1. **The window is non-zero.** `REFLEX_ADVISORY_WINDOW_MINUTES=0`
    short-circuits to `{}` before any session resolution or I/O.
-3. **The dispatch has an agent session.** `resolve_agent_session_id()`
+2. **The dispatch has an agent session.** `resolve_agent_session_id()`
    is non-`None` — an agent-run id (`agent_session_id_var`) *or* a
    direct MCP session's `Mcp-Session-Id` header. An operator CLI / REST
    call, a system sweep, **and a header-less MCP client that POSTed
    `tools/call` without completing `initialize`** all resolve to `None`
    and get no nudge (`audit_log.agent_session_id` lands NULL for that
    same header-less call — see `mcp_session_id_capture_mode`).
-4. **The dispatch succeeded.** The fragment rides an already-ok
+3. **The dispatch succeeded.** The fragment rides an already-ok
    response, built after the audit commit — never a denied / error /
    awaiting-approval envelope.
-5. **A heuristic both qualifies and wins its dedupe claim.** Read: no
+4. **A heuristic both qualifies and wins its dedupe claim.** Read: no
    prior `meho_broadcast_recent` row for the session. Announce:
    write-class op with no covering active claim. And the
    `(session, heuristic)` key must be unclaimed this window — a second

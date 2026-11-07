@@ -49,6 +49,13 @@ ingress:
     secretName: meho-tls
 ```
 
+With the built-in parts and an empty `ingress.tls.secretName`, the
+install makes a certificate for `ingress.host` and a small CA that
+signs it, in the Secret `<release>-core-tls`. The CA is the `ca.crt`
+key of that Secret. Install
+that CA on each operator workstation
+([Your workstation: OS trust store](#your-workstation-os-trust-store)).
+
 A **publicly-trusted** certificate here keeps workstation trust simple
 — operator machines, and the local MCP shims they run, trust it out of
 the box with no OS-store import. An **internal CA** works just as well

@@ -89,7 +89,7 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "connector",
-		Short:        "G0.7 spec-ingestion + review workflow (ingest / list / catalog / review / edit / enable / enable-reads / disable / delete)",
+		Short:        "Ingest vendor specs and review connectors (ingest / ingest-status / list / catalog / review / edit-group / edit-op / enable / enable-reads / disable / delete / overrides / remove-override / tenant-setting)",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newIngestCmd())

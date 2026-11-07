@@ -185,12 +185,9 @@ diagnostic.
 ## Per-tenant recipient allowlist (#3499)
 
 `MAIL_RECIPIENT_ALLOWLIST` is deployment-level (one MTA, one floor). On a
-**shared** instance that single floor cannot be narrowed per tenant, so an
-approved `mail.send` in one tenant could deliver to the recipients another
-tenant configured — the Envision-stand threat (meho-internal#320): an untrusted
-visitor tenant's approved send reaching real evoila mailboxes / a live Teams
-channel. #3499 adds a **per-tenant narrowing** override on top of the instance
-floor.
+**shared** instance, MEHO also keeps a **per-tenant narrowing** override on
+top of the instance floor. With it, an operator can limit the recipients of
+one tenant, or turn its dispatched mail off, without changing other tenants.
 
 **Where it lives.** `tenant.mail_recipient_allowlist` (nullable `Text`,
 migration `0101`) resolved per dispatch by
@@ -229,7 +226,10 @@ holds for that one send only, so a transient error does not pin the tenant.
 
 **Operator surface.** Set/clear the override through
 `PATCH /api/v1/tenants/mail-recipient-policy` (tenant_admin) or
-`meho tenants mail-recipient-policy set --allowlist … | --clear`. Full write-path
+`meho tenants mail-recipient-policy set --allowlist … | --clear`. The
+instance settings file can set it too
+(`spec.tenants[].policies.mail_recipient_allowlist`, see
+[`settings.md`](settings.md)). Full write-path
 detail: [`tenant-mail-policy.md`](tenant-mail-policy.md).
 
 ## Safety posture
@@ -268,6 +268,8 @@ events carry host/port/reason only, never the password or body.
 - `backend/src/meho_backplane/connectors/mail/` — package
   (`transport.py`, `allowlist.py`, `ops.py`).
 - `backend/tests/test_connectors_mail.py` — contract coverage.
+- `backend/tests/test_api_v1_tenants_mail_recipient.py` — the per-tenant
+  recipient policy route.
 - Mould: `backend/src/meho_backplane/connectors/net/` +
   [`connectors-net-diagnostics.md`](connectors-net-diagnostics.md).
 - Task #2717; Initiative #2716 (checks alerting delivery); notifier

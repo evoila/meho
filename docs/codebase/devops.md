@@ -270,6 +270,25 @@ probes — that's the fail-closed chassis state, not a bug. During chassis-
 stage dev installs the readinessProbe will hold the Pod out of rotation
 until those probes land; that's the intended signal.
 
+### Update strategy and pod stop (#5024)
+
+The Deployment sets `strategy` from `updateStrategy` (default `Recreate`),
+so the old pod has stopped before the new one starts: two releases never
+work on the shared database at the same time. The backplane container
+has a `preStop` hook that sleeps `shutdown.preStopSleepSeconds` (default
+5), so the Service and the ingress drop the pod before it closes; without
+it a request can reach the closing pod and get a short 502. The pod's
+`terminationGracePeriodSeconds` is `preStopSleepSeconds + drainSeconds +
+30`. Both drain limits get `shutdown.drainSeconds`: `SHUTDOWN_DRAIN_SECONDS`
+for MEHO and `UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN` for uvicorn's wait on open
+requests. What the backplane does in that time is in
+[shutdown-drain.md](shutdown-drain.md). Render tests:
+`backend/tests/test_chart_safe_updates.py`. The `helm-test` CI job proves
+the order on a kind cluster, and the rollback after a start that fails
+right after it wrote its operation rows (the test-only setting
+`MEHO_TEST_FAIL_START_AFTER_REGISTRATION`, see
+[rollback.md](../acceptance/rollback.md)).
+
 ### Security context
 
 The Pod runs with `runAsNonRoot: true`, `runAsUser: 1001`,
@@ -430,8 +449,10 @@ mode the chart renders no Job; the backplane Deployment
 - `migrationJob.backoffLimit` and `ttlSecondsAfterFinished` do not apply;
   the kubelet restarts a failed init container with back-off.
 - **Failure semantics.** A failed migration keeps the pod out of Ready.
-  `helm install --wait` / `helm upgrade --wait` fail at their timeout, and
-  on an upgrade the old pods keep serving. Without `--wait`, Helm reports
+  `helm install --wait` / `helm upgrade --wait` fail at their timeout. On
+  an upgrade with the default `Recreate` strategy (#5024) the old pod has
+  already stopped, so MEHO is down until `helm rollback`
+  ([rollback.md](../acceptance/rollback.md)). Without `--wait`, Helm reports
   success and only the pod status shows the failure, so install the
   built-in core with `--wait` (the form-2 installer does). Logs:
   `kubectl logs <pod> -c migrate`.
@@ -538,7 +559,7 @@ is `meho.keycloakSettings` in `_core-keycloak.tpl` (#4591).
 | --- | --- | --- |
 | `corePostgres` | `DATABASE_URL` from `<release>-core-postgres-meho`, key `url` (`migrate` init container, helm test pod; the running backplane uses `<release>-core-postgres-meho-app`, #5699); NetworkPolicy egress by pod | `postgres.credentialsSecret` (or that name), `eso.enabled` |
 | `coreVault` | `VAULT_ADDR=http://<release>-vault:<coreVault.service.port>`, `VAULT_OIDC_ROLE=meho-mcp`, `VAULT_OIDC_MOUNT_PATH=jwt`, `VAULT_SCHEDULER_TOKEN_FILE` from `<release>-core-vault-scheduler` (an optional Secret volume, so the pod starts before the setup Job made it, and the file is read at every use); NetworkPolicy egress by pod | `vault.address`, `config.vaultAddr`; `config.credentialBackend` must be `vault`; `extraEnv` must not set `VAULT_KV_TENANT_SCOPE_PREFIX` empty |
-| any part | `APPROVAL_HANDOFF_ENCRYPTION_KEY` from `<release>-core-approval-handoff` while `approvalHandoff.enabled` is unset; the Ingress certificate `<release>-core-tls` while `ingress.tls.secretName` is empty | |
+| any part | `APPROVAL_HANDOFF_ENCRYPTION_KEY` from `<release>-core-approval-handoff` while `approvalHandoff.enabled` is unset; `PARAMS_HASH_KEY` from `<release>-core-params-hash` while `paramsHashKey.secretName` is empty; the Ingress certificate `<release>-core-tls` while `ingress.tls.secretName` is empty | |
 
 **Tenant separation.** The setup Job makes one login role, `meho-mcp`, for
 every tenant: it copies the token's `tenant_id` into the login, and the
@@ -1344,6 +1365,8 @@ them).
 | Path | Default | Notes |
 | --- | --- | --- |
 | `replicaCount` | `1` | Single-replica baseline. |
+| `updateStrategy` | `{type: Recreate}` | The old pod stops before the new one starts (#5024). `RollingUpdate` only for installs with several pods. See [shutdown-drain.md](shutdown-drain.md). |
+| `shutdown.preStopSleepSeconds` / `shutdown.drainSeconds` | `5` / `60` | The `preStop` sleep and the drain limit (`SHUTDOWN_DRAIN_SECONDS`, `UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN`). The grace period is their sum plus 30 seconds. |
 | `image.repository` | `ghcr.io/evoila/meho` | OCI repo from the image pipeline. |
 | `image.pullPolicy` | `IfNotPresent` | `Always` \| `IfNotPresent` \| `Never`. |
 | `service.type` / `service.port` | `ClusterIP` / `8000` | Service shape. |

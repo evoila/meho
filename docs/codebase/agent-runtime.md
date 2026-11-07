@@ -134,12 +134,12 @@ Which meta-tools register is decided by `resolve_agent_tools` in
 the run's operator. The registered set is the **intersection** of:
 
 - **toolset spec** — the definition author's allow-list (`AgentDefinition.toolset`).
-- **identity permissions** — what the run's identity may call. The G11.2
-  per-op permission *model* is not built yet; the permission an identity
-  carries today is its `TenantRole`, gated by `role_at_least` exactly as the
-  MCP and REST surfaces gate it. Each meta-tool declares a role floor; an
-  identity below the floor does not get the tool. This Task *consumes* that
-  gate, it does not invent a new one.
+- **identity permissions** — what the run's identity may call. For tool
+  registration this is the identity's `TenantRole`, gated by `role_at_least`
+  exactly as the MCP and REST surfaces gate it. Each meta-tool declares a
+  role floor; an identity below the floor does not get the tool. The agent's
+  per-op grants are checked later, at dispatch, by the policy gate (see
+  [agent-permission-model.md](agent-permission-model.md)).
 
 A meta-tool failing either side is **not registered** — it is absent from the
 agent's tool surface, so the model cannot attempt it (least-privilege:
@@ -287,7 +287,9 @@ The empty spec `{}` resolves, in order: `list_operation_groups`,
 `list_targets`, `preview_operation`, `result_query`, `broadcast_announce`,
 `broadcast_recent`, `broadcast_watch`. A definition with `toolset is None`
 keeps the legacy two tools until it is migrated to a spec. Runbook, approval, and admin tools stay
-out of the catalog on purpose; this is not full parity with the MCP working surface.
+out of the catalog on purpose. For each working-surface tool a hosted run has
+or does not have, see
+[Hosted tools compared with the MCP working surface](#hosted-tools-compared-with-the-mcp-working-surface-5852).
 
 Hosted calls to these four tools do not write the per-call MCP audit row
 (`mcp/audit.py`); that row belongs to the MCP transport. They write the
@@ -447,6 +449,77 @@ Fixtures in `tests/test_agent_toolset.py` pin the configured-empty, legacy
 run-id (two concurrent runs, a bound durable id, a parent and its child)
 cases.
 
+### Hosted tools compared with the MCP working surface (#5852)
+
+An agent over MCP sees 26 working-surface tools. A hosted agent can get 19 of
+them. This table says, for each MCP tool, whether a hosted run can have it,
+and why not when it cannot. A test (`tests/test_agent_toolset_working_surface.py`)
+checks that this table and the hosted catalog agree.
+
+"Default" means a definition gets the tool when its spec leaves out
+`meta_tools`. "Opt-in" means the spec must name it in `meta_tools`. Every
+hosted tool also needs its role floor, and the docs tools need the tenant's
+`meho-docs` capability, as on MCP.
+
+| MCP tool | Hosted | How, or why not |
+|---|---|---|
+| `meho_status` | yes | Default. Same health payload, without the MCP session fields. |
+| `meho_connector_list` | yes | Default. Shows only the allowed connectors when the spec has a `connectors` list. |
+| `list_operation_groups` | yes | Default. |
+| `search_operations` | yes | Default. |
+| `call_operation` | yes | Default. Same dispatch: policy, grants, approval and audit. |
+| `preview_operation` | yes | Default. |
+| `result_query` | yes | Default. |
+| `list_targets` | yes | Default. |
+| `meho_broadcast_announce` | yes | Default, named `broadcast_announce`. |
+| `meho_broadcast_recent` | yes | Default, named `broadcast_recent`. |
+| `meho_broadcast_watch` | yes | Default, named `broadcast_watch`. |
+| `query_topology` | yes | Opt-in. |
+| `search_memory` | yes | Opt-in. |
+| `search_knowledge` | yes | Opt-in. |
+| `add_to_memory` | yes | Opt-in. Writes with the agent's limits: only a `tenant_admin` writes `tenant` scope, and a direct run narrows a `tenant_admin` caller to `operator`. |
+| `add_to_knowledge` | yes | Opt-in. Writes with the agent's limits: an `operator` changes only its own entries and cannot set `source_kind`. |
+| `list_doc_collections` | yes | Opt-in. Needs the docs add-on. |
+| `search_docs` | yes | Opt-in. Needs the docs add-on. |
+| `read_docs` | yes | Opt-in. Needs the docs add-on. |
+| `ask_docs` | no | It makes its own model call to write the answer. That call does not use the run's model setting, so a run on our own model server would still send text to another model provider. Its cost is also not counted in the run's budget. A hosted agent uses `search_docs` and `read_docs` and writes the answer itself. |
+| `meho_runbook_start` | no | Each runbook step must be confirmed by a person. An agent loop cannot do that for them (#2077). A run whose prompt asks to run a runbook is refused at start. |
+| `meho_runbook_next` | no | Same reason as `meho_runbook_start`: it confirms or answers a step, and only a person may do that. |
+| `meho_runbook_abort` | no | Ends a runbook run. A hosted agent cannot start one, and stopping a person's run is their decision. |
+| `meho_runbook_list_runs` | no | Lists runbook runs. Useful only with the run tools above, which a hosted agent does not have. |
+| `meho_runbook_list_templates` | no | A hosted agent cannot run a runbook. With the steps in front of it, a model may do them one by one through `call_operation` and skip the confirm a person gives at each step. |
+| `meho_runbook_show_template` | no | Same reason as `meho_runbook_list_templates`. |
+
+Tools that come with a paired add-on (for example the automation add-on) are
+not part of the 26 and are not in the hosted catalog.
+
+The hosted run also has two tools MCP does not: `read_context_resource`
+(reads a Memory, knowledge or convention URI; MCP clients use
+`resources/read`) and `invoke_agent` (starts a child run).
+
+How the five added tools are wired (`agent/toolset_discovery.py`):
+
+- `build_write_meta_tools` and `build_docs_meta_tools` use the same `_bridge`
+  and `_governed_handler` as the tools above. So the MCP handler, the MCP
+  wire schema, the role floor, the capability, and the input schema check
+  are the same code as on MCP. `MetaToolSpec.required_capability` carries the
+  capability; `resolve_agent_toolset` leaves a tool out with the reason
+  `capability_missing` when the tenant does not have it.
+- A docs backend that is down (`CorpusUnavailable`) or a collection that is
+  not ready yet (`CollectionNotReadyError`) goes back to the model as a
+  failed tool result (`ToolFailed`). On MCP it is a retryable internal error;
+  in a hosted run any other exception would end the run. The text for a
+  backend that is down is fixed, so it never names the backend.
+- The hosted descriptions add one sentence to `add_to_knowledge` and
+  `search_docs`: there is no `resources/read`, so use `read_context_resource`
+  or `read_docs`.
+- Each call writes the agent tool call row, with the MCP tool's `op_class`
+  (`write` for the two add tools).
+
+Known gap: the delivery receipt lists a tool the role may not use
+(`role_below_floor`), but not a docs tool left out for `capability_missing`.
+The `agent_toolset_resolved` log line shows both.
+
 ### Audit of agent tool calls (#4234)
 
 Every tool call a hosted agent makes leaves one `audit_log` row, keyed by
@@ -478,8 +551,11 @@ carry the child's run id (see [Lineage](#lineage--the-cascade-tree-is-reconstruc
   `error_type` on a failure, and the agent model and provider. A call the
   toolset refused also holds `error` with `error_code` `denied`, a
   `reason_code` (`role_insufficient` or `connector_not_allowed`) and a short
-  `reason` that names the rule (#5773). Arguments and error text are never
-  stored.
+  `reason` that names the rule. A call the dispatcher refuses carries the
+  same kind of `reason_code` in its own dispatch row (the list is in
+  `operations/deny_reasons.py`, for example `agent_grant_denied`). Audit
+  answers name the agent (`actor_sub`, `actor_name`). Arguments and error
+  text are never stored.
 - **Status.** 200 success, 403 a call the toolset refused (role floor or
   connector allow-list; `_make_meta_tool` raises `ToolRefusedRetry`), 400 bad
   arguments, a retry the tool asked for, or a call to a tool name the run
@@ -612,7 +688,8 @@ is charged to the person's spend cap like a run that is not streamed.
 
 - **REST** (`api/v1/agent_runs.py`): `POST /api/v1/agents/{name}/run`
   (200 with the result for a terminal sync run; 202 with a handle for async
-  / converted-to-async), `GET /api/v1/agents/runs/{handle}` (poll),
+  / converted-to-async), `GET /api/v1/agents/runs` (list runs, newest
+  first), `GET /api/v1/agents/runs/{handle}` (poll),
   `POST /api/v1/agents/runs/{handle}/cancel` (cancel — #1828: transitions a
   non-terminal run to `cancelled` via the shared `cancel_run` service path,
   returns the updated `AgentRunSummaryResponse`; 404 for an unknown /
@@ -622,14 +699,17 @@ is charged to the person's spend cap like a run that is not streamed.
   two-or-more segments deep so they never collide with the one-segment
   `/{name}` definition-CRUD routes.
 - **MCP** (`mcp/tools/agent_runs.py`): `meho_agents_run` (sync/async via an
-  `async` arg) + `meho_agents_run_status` (poll). SSE is REST-only; an MCP
+  `async` arg), `meho_agents_run_status` (poll) and `meho_agents_list_runs`
+  (list runs). All three are on the operator surface, so they list only
+  for a session with the `mcp:admin` scope. SSE is REST-only; an MCP
   caller polls. Cancel is REST/CLI-only (no MCP verb). Both drive the same
   `AgentInvoker` singleton, so a run started over MCP is poll-able over REST
   and vice versa.
 - **CLI** (`cli/internal/cmd/agent/run.go`, `run_status.go`,
-  `run_cancel.go`, `run_events.go`): `meho agent run <name> --input …
-  [--async]`, `meho agent run-status <handle>`, `meho agent run-cancel
-  <handle>` (#1828), `meho agent run-events <name> --input …`.
+  `run_cancel.go`, `run_events.go`, `run_list.go`): `meho agent run <name>
+  --input … [--async]`, `meho agent run-status <handle>`, `meho agent
+  run-cancel <handle>`, `meho agent run-events <name> --input …`, and
+  `meho agent run-list`.
 
 All fronts require the `operator` role and are tenant-scoped via the JWT.
 
@@ -974,10 +1054,11 @@ correlated by `approval_request_id`.
 
 ## Dependencies
 
-- **`pydantic-ai-slim[anthropic,bedrock]`** (pinned in
+- **`pydantic-ai-slim[anthropic,bedrock,openai]>=2.53.0`** (in
   `backend/pyproject.toml`) — the loop framework + the Anthropic
   provider (`[anthropic]`) + the Bedrock Converse provider (`[bedrock]`,
-  G11.5-T2 #1076; pulls in `boto3`). Both providers are confined to
+  pulls in `boto3`) + the OpenAI-compatible provider (`[openai]`, see
+  "OpenAI-compatible backend" below). The providers are confined to
   `meho_backplane.agent.run` (legacy `default_model_factory`) and
   `meho_backplane.agent.models` (the per-tenant builders).
 - **`anthropic`** — the Anthropic SDK, pulled in transitively from
@@ -1021,6 +1102,60 @@ its loop through a framework `Model`, so the agent seam mirrors the
 than the one-shot method. The G11 initiative shipped against Anthropic;
 G11.5-T1 layered a per-tenant resolver on top of that pattern.
 
+## How a live run picks its model (#5850)
+
+One setting picks the model server for every agent run that MEHO starts:
+hosted runs (REST, MCP, console, the event stream), scheduled runs,
+event-triggered runs, agents started by an agent, and the investigator.
+
+| `AGENT_MODEL_BACKEND` | Model server | Model name from |
+|---|---|---|
+| `anthropic` (default) | Anthropic, key `ANTHROPIC_API_KEY` | `AGENT_DEFAULT_MODEL` |
+| `openai` | An OpenAI-compatible endpoint (OpenAI, vLLM, Ollama, OpenRouter): `OPENAI_BASE_URL`, key `OPENAI_API_KEY` | `OPENAI_DEFAULT_MODEL` |
+| `bedrock` | AWS Bedrock | `BEDROCK_DEFAULT_MODEL` |
+| `vcf-paif` | VCF Private AI Foundation | `VCF_PAIF_MODEL` |
+
+An unknown value stops the start. How a run gets its model:
+
+1. **Risk level to tier.** A stored agent has a model tier: `fast`,
+   `standard` or `deep`. `AgentInvoker._to_agent_definition` maps it
+   with `agent_tier_for` (`agent/models.py`): `fast` → `triage`,
+   `standard` → `summarize`, `deep` → `investigate`. The map follows
+   cost, so the budget gate's "one tier cheaper" step (`investigate` →
+   `summarize` → `triage`) is the same as `deep` → `standard` → `fast`.
+2. **Resolver.** The live `AgentInvoker` builds its `PydanticAgentRun`
+   with `settings_model_resolver()`. It reads `AGENT_MODEL_BACKEND` on
+   each run and sends every tier of every tenant to that one backend,
+   through the settings-driven builders below. There is no fallback:
+   when the chosen backend is not set up (for example no
+   `OPENAI_API_KEY`), the run fails and sends no model request at all.
+3. **Choose before the run row.** `AgentInvoker._choose_model` calls
+   `PydanticAgentRun.choose_model`, which builds the model once. The
+   model is passed on to `start` / `stream_events`, so the run uses
+   exactly the model that its records name.
+4. **Records.** The run row (`agent_run.provider`, `agent_run.model`)
+   and the model names on every audit row of the run's tool calls
+   (`AgentRunAuditMeta`) come from the built model: `Model.system`
+   (`anthropic`, `openai`, `bedrock`) and `Model.model_name`, the name
+   sent to the server. When the model cannot be built, the row names
+   the backend and model the setting chose (`settings_model_id()`), and
+   the run fails with the builder's error. A child run started by an
+   agent records its parent's model; with one backend for every tier,
+   that is the model the child uses.
+
+**The `openai:` prefix.** The default model settings are written as
+`openai:<name>`. pydantic-ai removes that prefix only when it builds a
+model from a string (`Agent("openai:gpt-4o-mini")`). `OpenAIChatModel`
+sends its model name unchanged (pydantic-ai-slim 2.53), and an endpoint
+answers "model not found" for `openai:gpt-4o-mini`. So both
+OpenAI-compatible builders call `bare_openai_model_name` first. It
+removes only a leading `openai:`; an Ollama name such as `llama3.1:8b`
+stays whole.
+
+Tests use fake servers only (`test_agent_model_backend_setting.py`). A
+run against a real OpenAI-compatible server is a separate step of the
+same work.
+
 ## Per-tenant tier→Model resolver (G11.5-T1 #1075)
 
 The zero-arg `ModelFactory` shape was right for one-deploy → one-provider.
@@ -1040,6 +1175,13 @@ resolver builds the model; otherwise the legacy `model_factory` runs.
 This dual path keeps every existing test (which injects
 `model_factory=lambda: FunctionModel(...)`) unmodified — definitions
 without a tier still resolve through the factory.
+
+A stored agent definition never sets this tier. Its `model_tier`
+(`standard` / `fast` / `deep`) is a different set of names, and
+`AgentInvoker._to_agent_definition` does not map it. So every hosted run
+of a stored definition uses the `model_factory` path; the resolver is
+reached only by code that builds an `AgentDefinition` with a `tier`
+directly.
 
 ### The three gates
 
@@ -1415,6 +1557,13 @@ the architecture grounding it links back to.
   streamed, and that `AGENT_MAX_OUTPUT_TOKENS=8192` reaches the
   request. `test_settings.py` checks the default, an override, and that
   a value outside [1, 128000] stops the start.
+- `backend/tests/test_agent_model_backend_setting.py` (#5850) — the live
+  invoker with `AGENT_MODEL_BACKEND`: direct, scheduled and streamed
+  runs finish on a fake OpenAI-compatible server that answers "model not
+  found" for any name but the bare one, no request goes elsewhere, and
+  the run row and audit names are the endpoint's model; the default
+  setting still runs on Anthropic; a missing key fails with no request;
+  the tier map, the prefix handling and the setting check.
 - `backend/tests/test_agent_openai_compat_backend.py` (G11.5-T3) — unit
   tests for the OpenAI-compat builder, per-vendor profile dispatch
   (OpenAI / vLLM / Ollama), the air-gapped + on-prem registration path,
@@ -1508,11 +1657,11 @@ the architecture grounding it links back to.
   child row already in a terminal state when the finalizer runs — e.g. a direct
   cancel against the child — is handled: the finalizer swallows the resulting
   `IllegalTransitionError`.)
-- The identity-permission side of the intersection is the tenant role today.
-  When the G11.2 per-op permission model lands, the resolver's role gate is
-  the seam to extend (or replace) with the real per-op grant check — the
-  intersection shape (spec ∩ identity perms) and the "absent, not denied"
-  posture stay the same.
+- The identity-permission side of the toolset intersection is the tenant
+  role. The per-op grants of the agent permission model do not decide
+  which tools register; they apply per call in the dispatcher's policy
+  gate. So a
+  tool can be on the agent's surface while a grant denies the op it calls.
 
 ## References
 

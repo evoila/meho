@@ -146,8 +146,8 @@ before returning. Seven verbs:
 
 | Verb | What it does | Throws |
 |---|---|---|
-| `create_entry(tenant_id, slug, body, metadata=None, *, actor_sub=None, own_entries_only=False)` | Insert or replace one entry (explicit last-write-wins); returns `(entry, created)`. Validates slug, stamps attribution and `direct` provenance, runs `kb/revisions.py::write_entry`. | `InvalidKbSlugError` on bad slug |
-| `get_entry(tenant_id, slug)` | Natural-key SELECT; returns the latest `KbEntry` (with its current `revision_id`) or `None`. | – |
+| `create_entry(tenant_id, slug, body, metadata=None, *, actor_sub=None, own_entries_only=False, may_set_curation_keys=None)` | Insert or replace one entry (explicit last-write-wins); returns `(entry, created)`. Validates slug, checks the lesson header, stamps attribution and `direct` provenance, runs `kb/revisions.py::write_entry`. | `InvalidKbSlugError` on bad slug; `LessonHeaderError` on a wrong header value; `KbSharedNotAllowedError`, `KbSharedSlugError` (shared scope) |
+| `get_entry(tenant_id, slug)` | Natural-key SELECT; returns the latest `KbEntry` (with its current `revision_id`) or `None`. Also finds a shared entry of another tenant. | – |
 | `get_revision(tenant_id, entry_id, revision_id)` | Exact retained read. Returns `KbEntryRevision` only when the revision belongs to the entry and both belong to the tenant; otherwise `None`, without saying why. | – |
 | `list_entries(tenant_id, filter_pattern=None, limit=100, offset=0, order="slug")` | List entries; slug-sorted by default, `order="newest"` sorts by `updated_at`, newest first; SQL `LIKE` pattern forwarded verbatim. | `ValueError` on negative `limit`/`offset` |
 | `delete_entry(tenant_id, slug)` | Delete the head and all its revisions in one transaction; returns whether a row existed. | Database errors propagate; nothing is removed |
@@ -254,17 +254,27 @@ no-op).
 
 An `operator` writes only through the MCP `add_to_knowledge` tool
 (REST `POST /api/v1/kb` needs `tenant_admin`). The tool calls
-`create_entry(..., own_entries_only=True)` for every caller below
-`tenant_admin`, and then the service:
+`create_entry(..., own_entries_only=True)` for every caller that may
+not change any entry, and then the service. Who may change any entry
+(the owner rule, `_may_change_any_entry` in `mcp/tools/knowledge.py`):
+the owner of the entry, a `tenant_admin`, or a **reviewer**. A reviewer
+is a person who can decide approvals in the tenant: a human principal
+that is `operator` or higher, or has the `approver` capability (the
+same rule as `_check_reviewer_role` in the approvals queue, one list
+for approvals and reviews). Agent, service and runner principals are
+never reviewers. Only a `tenant_admin` may set the curation keys
+(`may_set_curation_keys`). For every other caller the service:
 
 - refuses to overwrite an entry whose `created_by_sub` is missing or
   is another principal (`KbEntryNotOwnedError`; the tool answers with
   a permission refusal, `reason: entry_not_owned`, and nothing is
-  written). A row with no `created_by_sub` (directory ingest, or a row
+  written). The message says how to propose a change: save it under a
+  new slug, or ask a reviewer or tenant admin. A row with no `created_by_sub` (directory ingest, or a row
   from before attribution) belongs to nobody, so an operator cannot
   change it either;
 - refuses caller `metadata` with a key from `CURATION_METADATA_KEYS`
-  (`source_kind`, the key the curated-slice search filter scopes to;
+  (`source_kind`, the key the curated-slice search filter scopes to,
+  and `shared`, see "Lesson header and shared scope";
   `KbReservedMetadataError`, `reason: reserved_metadata`). So an
   operator's entry cannot look curated.
 
@@ -343,10 +353,69 @@ or `..` paths. Older directory-ingested rows may still carry a
 read as `provenance.state="legacy"`, and the next ingest of the same
 file replaces their metadata (dropping `source_path`).
 
+### Lesson header and shared scope (`lesson_header.py`, `kb/shared.py`)
+
+Knowledge and memory entries accept the same header in `metadata`
+(`meho_backplane/lesson_header.py`). A wrong value raises
+`LessonHeaderError` (REST `422`, MCP invalid params, a counted error
+for a file in a directory import) and nothing is written.
+
+| Field | Values |
+|---|---|
+| `type` | `fact`, `lesson`, `decision`, `rule`, `person-and-role`, `preference`, `observation` |
+| `applies_to` | `tenant`, `customer`, `target`, `product-and-version`, `team`, `person` |
+| `status` | `candidate`, `confirmed`, `disputed`, `replaced`, `retired` |
+| `learned_at`, `confirmed_at`, `expires_at` | a date, a datetime or ISO 8601 text; stored as ISO 8601 text with a time zone |
+| `product`, `version`, `source`, `author`, `summary` | text (a number such as `9.0` is stored as text) |
+| `tags` | a list of text |
+
+An `observation` is a story of what happened, such as a lab field
+note. It is never a confirmed lesson. Fields that are absent stay
+absent. A directory import carries the header from the YAML
+front-matter; quote dates or leave them unquoted, both work.
+
+MEHO keeps four names for itself: `slug`, `provenance`, `kind` and
+`scope`. The header never uses them. A direct write refuses `slug`,
+`kind` and `scope` in the metadata (`provenance` is replaced, as
+before); a directory import also lets `slug` through, as the slug
+override it always was.
+
+**Expiry.** An entry with `status: candidate` gets `learned_at` (the
+stored one, else now) and, when it names no `expires_at`, an
+`expires_at` six months after `learned_at`. A re-write or re-import of
+the same note keeps these dates. A confirmed entry gets no expiry.
+Nothing deletes or hides an expired entry yet: the date is recorded and
+returned on every read surface.
+
+**Owner.** The owner is `created_by_sub` (see above).
+
+**Shared scope.** An entry with `shared: true` in its metadata is
+readable from every tenant on the instance, if its owner tenant is
+listed in `KB_SHARED_TENANT_IDS` (comma-separated tenant ids; empty by
+default, so nothing is shared). Only reading is shared:
+
+- the entry stays in its owner tenant (`KbEntry.tenant_id` is the
+  owner's id);
+- `get_entry`, `list_entries`, `search_entries` and `get_revision` of
+  another tenant include it (`kb/shared.py::visible_to`; search asks
+  each owner tenant for its `shared` rows and merges by score);
+- when a tenant has the same slug itself, its own entry wins;
+- a tenant that is not listed cannot set `shared: true`
+  (`KbSharedNotAllowedError`, REST `403`);
+- no other tenant can write a slug that is a shared entry of the owner
+  (`KbSharedSlugError`, REST `403`), and `delete_entry` only ever
+  touches the caller's own tenant;
+- only the JSON value `true` counts. The SQL test (`_IsShared`) does not
+  cast, so an old row with text under `shared` cannot fail a query.
+
+`shared` is a curation key: an operator on the MCP tool cannot set it.
+Customer facts never go into the shared scope. They belong in the
+customer's own tenant or instance.
+
 ### Read path — `get_entry` / `list_entries`
 
 Both are natural SQL — no retrieval. `get_entry` is a natural-key
-SELECT; `list_entries` is `SELECT ... WHERE tenant_id=? AND
+SELECT; `list_entries` is `SELECT ... WHERE visible_to(tenant) AND
 source='kb' ORDER BY source_id LIMIT ? OFFSET ?`, with an optional
 `AND source_id LIKE :pattern` clause. Both add a correlated subquery
 (`current_revision_id()`) for the highest-numbered revision, which

@@ -922,6 +922,17 @@ class Tenant(Base):
         nullable=True,
         default=None,
     )
+    # Tenant setting of the run approval (#4126). ``True`` lets a run
+    # approval list a target kind (a product, for example ``vcenter``) in
+    # place of one target, so targets the run registers itself are covered.
+    # ``False`` (default): every entry names one target or no target.
+    # ``server_default=false`` in migration ``0141`` backfills existing rows.
+    run_approval_target_kinds_enabled: Mapped[bool] = mapped_column(
+        sa.Boolean(),
+        nullable=False,
+        default=False,
+        server_default=sa.false(),
+    )
 
     __table_args__ = (
         Index(
@@ -6128,6 +6139,50 @@ class ServicePrincipalReadScope(Base):
             "tenant_id", "principal_sub", name="uq_service_principal_read_scope_principal"
         ),
     )
+
+
+class RunApproval(Base):
+    """A person's approval of the operation list of one automation run (#4126).
+
+    A service principal (the automation add-on) asks for it with its run
+    reference (``work_ref``) and the list of operations the run may use.
+    Each entry is a ``connector_id``, an ``op_id`` and one target, a target
+    kind (``target_product``, only when the tenant setting
+    :attr:`Tenant.run_approval_target_kinds_enabled` is on), or no target.
+    A person approves the whole list once. Then a call of that principal
+    with that ``Meho-Work-Ref`` that matches an entry runs without a new
+    approval; the policy gate writes one ``approval.decision`` audit row
+    that names this row
+    (:func:`meho_backplane.operations.run_approvals.consult_and_record_run_approval`).
+
+    The approval is keyed on the token subject (``principal_sub``), never
+    on a client name. A row is live while it is approved, not revoked, not
+    ended and before ``expires_at``. Rows are never deleted, so the history
+    stays visible. Destructive operations are never covered.
+    """
+
+    __tablename__ = "run_approval"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), ForeignKey("tenant.id"), nullable=False)
+    # JWT ``sub`` of the service principal that asked. Soft reference, no FK
+    # -- same discipline as ServicePrincipalGrant.principal_sub.
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    work_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    entries: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revoked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (Index("run_approval_lookup_idx", "tenant_id", "principal_sub", "work_ref"),)
 
 
 class SandboxModeState(Base):

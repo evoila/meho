@@ -56,7 +56,12 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from meho_backplane.api.v1 import approvals as approvals_api
-from meho_backplane.api.v1 import connector_tenant_settings, service_grants, service_read_scopes
+from meho_backplane.api.v1 import (
+    connector_tenant_settings,
+    run_approvals,
+    service_grants,
+    service_read_scopes,
+)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.main import app
 from meho_backplane.mcp import registry as mcp_registry
@@ -152,6 +157,24 @@ _TENANT_SETTINGS_CLI_VERBS: dict[tuple[str, str], str] = {
         "meho connector tenant-setting set-group"
     ),
 }
+
+_RUN_APPROVALS_PREFIX = "/api/v1/service-principals/run-approvals"
+
+#: The run-approval routes (#4126) a person uses and their ``meho`` verbs.
+#: Asking (``POST``) and ending (``/end``) are the add-on's own calls: a
+#: service principal makes them, so they have no CLI verb.
+_RUN_APPROVALS_CLI_VERBS: dict[tuple[str, str], str] = {
+    ("GET", _RUN_APPROVALS_PREFIX): "meho approvals runs list",
+    ("GET", _RUN_APPROVALS_PREFIX + "/{run_approval_id}"): "meho approvals runs show",
+    ("POST", _RUN_APPROVALS_PREFIX + "/{run_approval_id}/approve"): "meho approvals runs approve",
+    ("POST", _RUN_APPROVALS_PREFIX + "/{run_approval_id}/revoke"): "meho approvals runs revoke",
+}
+_RUN_APPROVALS_ADDON_ONLY: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("POST", _RUN_APPROVALS_PREFIX),
+        ("POST", _RUN_APPROVALS_PREFIX + "/{run_approval_id}/end"),
+    }
+)
 
 # backend/tests/<this> -> parents[2] == repo root
 _CLI_REFERENCE = Path(__file__).resolve().parents[2] / "docs-site" / "reference" / "cli.md"
@@ -393,6 +416,20 @@ def test_connector_tenant_settings_rest_plane_has_cli_parity() -> None:
         assert f"#### `{verb}`" in cli_reference, f"{verb} is missing from the CLI reference"
 
 
+def test_run_approvals_rest_plane_has_cli_parity() -> None:
+    """Every run-approval route a person uses has its `meho` CLI verb (#4126)."""
+    routes = {
+        (method, route.path)
+        for route in run_approvals.router.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods or ()
+    }
+    assert routes == set(_RUN_APPROVALS_CLI_VERBS) | _RUN_APPROVALS_ADDON_ONLY
+    cli_reference = _CLI_REFERENCE.read_text(encoding="utf-8")
+    for verb in _RUN_APPROVALS_CLI_VERBS.values():
+        assert f"#### `{verb}`" in cli_reference, f"{verb} is missing from the CLI reference"
+
+
 def test_pinned_surfaces_partition_the_live_registry() -> None:
     """The pinned listings partition the whole registry (exhaustive + disjoint).
 
@@ -469,6 +506,7 @@ _APPROVAL_DECISION_NAMES: frozenset[str] = frozenset(
         "approve_approval_request",
         "reject_approval_request",
         "decide_approval_request",
+        "approve_run_approval",
     }
 )
 
@@ -595,7 +633,7 @@ def test_approval_decision_names_are_real_functions() -> None:
     the old name would match nothing and the check would pass for the
     wrong reason. This test fails first, so the list gets updated.
     """
-    modules = (approval_queue, approvals_api)
+    modules = (approval_queue, approvals_api, run_approvals)
     missing = [
         name
         for name in sorted(_APPROVAL_DECISION_NAMES)

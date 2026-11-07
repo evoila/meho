@@ -26,6 +26,7 @@ DEFAULT_POLICIES: Final[dict[str, Any]] = {
     "announce_gate_enabled": False,
     "flight_recorder": {"enabled": False, "retention_days": None, "agent_readable": None},
     "mail_recipient_allowlist": None,
+    "run_approval_target_kinds": False,
 }
 
 SECTIONS: Final[tuple[str, ...]] = ("tenants", "policies", "conventions", "targets")

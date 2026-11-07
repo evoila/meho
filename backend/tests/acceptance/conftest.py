@@ -297,6 +297,9 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # tenant(id)`` FK from migration ``0117`` (#4992 read scope), the same
     # shape as ``service_principal_grant`` above.
     "service_principal_read_scope",
+    # ``run_approval.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
+    # migration ``0141`` (#4126 run approvals), the same shape as above.
+    "run_approval",
     # ``addon_pairing.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
     # migration ``0079`` (#3025 add-on pairing handshake). PG rejects
     # truncating ``tenant`` unless every referencing table is listed in the

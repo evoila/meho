@@ -358,6 +358,7 @@ def test_migration_installs_tenant_table_and_indexes(
                 "flight_recorder_agent_readable",  # #3216 F5 per-tenant agent-read gate
                 "mail_recipient_allowlist",  # #3499 per-tenant mail recipient allowlist
                 "agent_model_prices",  # #5853 per-tenant prices of unknown agent models
+                "run_approval_target_kinds_enabled",  # #4126 target kinds in run approvals
             }
 
             audit_columns = {col["name"] for col in inspector.get_columns("audit_log")}

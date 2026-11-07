@@ -453,6 +453,63 @@ meho approvals result <id> [flags]
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit the raw JSON answer instead of the human-readable view
 
+### `meho approvals runs`
+
+Approve the operation list of one automation run once (list / show / approve / revoke)
+
+```
+meho approvals runs
+```
+
+#### `meho approvals runs approve`
+
+Approve the whole operation list of one run, once
+
+```
+meho approvals runs approve <run-approval-id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--confirm` — approve without showing the list and asking
+- `--json` — emit raw RunApprovalRead JSON
+
+#### `meho approvals runs list`
+
+List run approvals (default: pending ones)
+
+```
+meho approvals runs list [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw RunApprovalListResponse JSON
+- `--limit` — the most rows to show (1-500)
+- `--principal` — only the run approvals of this service principal (token subject)
+- `--status` — pending, approved, revoked, ended, expired or all
+
+#### `meho approvals runs revoke`
+
+Revoke a run approval; the next listed call waits for approval
+
+```
+meho approvals runs revoke <run-approval-id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw RunApprovalRead JSON
+- `--reason` — optional reason, stored with the revoke
+
+#### `meho approvals runs show`
+
+Show one run approval and its operation list
+
+```
+meho approvals runs show <run-approval-id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw RunApprovalRead JSON
+
 ### `meho approvals show`
 
 Inspect a pending approval request

@@ -11882,6 +11882,378 @@
         }
       }
     },
+    "/api/v1/service-principals/run-approvals": {
+      "post": {
+        "tags": [
+          "service-principal-run-approvals"
+        ],
+        "summary": "Request Run Approval",
+        "description": "The add-on asks a person to approve the operation list of one run.\n\nOnly a service principal asks: the approval is keyed on its token\nsubject and the run reference, and only a service principal's calls\nconsult it.",
+        "operationId": "request_run_approval_api_v1_service_principals_run_approvals_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunApprovalCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunApprovalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "service-principal-run-approvals"
+        ],
+        "summary": "List Run Approvals",
+        "description": "List the run approvals of the caller's tenant, newest first.",
+        "operationId": "list_run_approvals_api_v1_service_principals_run_approvals_get",
+        "parameters": [
+          {
+            "name": "principal_sub",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Principal Sub"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "pending",
+                "approved",
+                "revoked",
+                "ended",
+                "expired"
+              ],
+              "type": "string",
+              "nullable": true,
+              "title": "Status"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunApprovalListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/service-principals/run-approvals/{run_approval_id}": {
+      "get": {
+        "tags": [
+          "service-principal-run-approvals"
+        ],
+        "summary": "Show Run Approval",
+        "description": "Show one run approval; the add-on reads its status here while it waits.",
+        "operationId": "show_run_approval_api_v1_service_principals_run_approvals__run_approval_id__get",
+        "parameters": [
+          {
+            "name": "run_approval_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Approval Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunApprovalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/service-principals/run-approvals/{run_approval_id}/approve": {
+      "post": {
+        "tags": [
+          "service-principal-run-approvals"
+        ],
+        "summary": "Approve Run Approval",
+        "description": "A person approves the whole operation list of one run, once.",
+        "operationId": "approve_run_approval_api_v1_service_principals_run_approvals__run_approval_id__approve_post",
+        "parameters": [
+          {
+            "name": "run_approval_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Approval Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunApprovalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/service-principals/run-approvals/{run_approval_id}/revoke": {
+      "post": {
+        "tags": [
+          "service-principal-run-approvals"
+        ],
+        "summary": "Revoke Run Approval",
+        "description": "A person revokes a run approval; the next listed call waits for approval.",
+        "operationId": "revoke_run_approval_api_v1_service_principals_run_approvals__run_approval_id__revoke_post",
+        "parameters": [
+          {
+            "name": "run_approval_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Approval Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunApprovalRevoke"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunApprovalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/service-principals/run-approvals/{run_approval_id}/end": {
+      "post": {
+        "tags": [
+          "service-principal-run-approvals"
+        ],
+        "summary": "End Run Approval",
+        "description": "The principal that asked ends its run; the approval covers nothing more.",
+        "operationId": "end_run_approval_api_v1_service_principals_run_approvals__run_approval_id__end_post",
+        "parameters": [
+          {
+            "name": "run_approval_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Approval Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunApprovalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/addons/pairings": {
       "post": {
         "tags": [
@@ -35405,6 +35777,221 @@
         "title": "ReviewerContextView",
         "description": "Redacted, human-legible context for judging a parked request (#3353).\n\nThe additive, redaction-safe summary the shared\n:func:`~meho_backplane.operations.approval_context.resolve_reviewer_context`\nresolver produces, carried on the single-request view so ``meho\napprovals show`` can render a name instead of a GUID and a resolved\nsubject instead of an unresolved ``{vm}``. Every field fails open to\n``None`` (the CLI keeps the raw id it already had); the object carries\n**identity fields only** -- never a raw param, body, or secret value.\nThe console modal renders from the same resolver, so the two surfaces\nnever drift. Populated on ``GET /{id}`` only; the list view omits it."
       },
+      "RunApprovalCreate": {
+        "properties": {
+          "work_ref": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Work Ref",
+            "description": "The run reference. Calls of the run send it in the Meho-Work-Ref header."
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/RunApprovalEntry"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Entries"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Reason",
+            "description": "What the run does, for the approver."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At",
+            "description": "When the approval ends at the latest. Default: 24 hours; at most 7 days."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "work_ref",
+          "entries",
+          "reason"
+        ],
+        "title": "RunApprovalCreate",
+        "description": "Body of ``POST /api/v1/service-principals/run-approvals``."
+      },
+      "RunApprovalEntry": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Op Id"
+          },
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Target Id",
+            "description": "Exactly this target."
+          },
+          "target_product": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Target Product",
+            "description": "Every target of this product (target kind). Needs the tenant setting."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "connector_id",
+          "op_id"
+        ],
+        "title": "RunApprovalEntry",
+        "description": "One operation the run may use.\n\n``target_id`` names one target. ``target_product`` names a target kind,\nso targets the run registers later are covered; it works only when the\ntenant setting allows target kinds. With neither, the entry covers only\ncalls without a target (no target is not \"any target\")."
+      },
+      "RunApprovalListResponse": {
+        "properties": {
+          "run_approvals": {
+            "items": {
+              "$ref": "#/components/schemas/RunApprovalRead"
+            },
+            "type": "array",
+            "title": "Run Approvals"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_approvals"
+        ],
+        "title": "RunApprovalListResponse",
+        "description": "``GET /api/v1/service-principals/run-approvals`` response."
+      },
+      "RunApprovalRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub"
+          },
+          "work_ref": {
+            "type": "string",
+            "title": "Work Ref"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/RunApprovalEntry"
+            },
+            "type": "array",
+            "title": "Entries"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "approved",
+              "revoked",
+              "ended",
+              "expired"
+            ],
+            "title": "Status"
+          },
+          "requested_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Requested At"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At"
+          },
+          "approved_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Approved At"
+          },
+          "approved_by_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Approved By Sub"
+          },
+          "revoked_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Revoked At"
+          },
+          "revoked_by_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Revoked By Sub"
+          },
+          "revoked_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Revoked Reason"
+          },
+          "ended_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Ended At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "principal_sub",
+          "work_ref",
+          "entries",
+          "reason",
+          "status",
+          "requested_at",
+          "expires_at"
+        ],
+        "title": "RunApprovalRead",
+        "description": "One run approval with its status."
+      },
+      "RunApprovalRevoke": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "RunApprovalRevoke",
+        "description": "Body of ``POST /api/v1/service-principals/run-approvals/{id}/revoke``."
+      },
       "RunCompletedResponse": {
         "properties": {
           "kind": {
@@ -40145,6 +40732,10 @@
     },
     {
       "name": "service-principal-read-scopes",
+      "x-maturity": "ga"
+    },
+    {
+      "name": "service-principal-run-approvals",
       "x-maturity": "ga"
     },
     {

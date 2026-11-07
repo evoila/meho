@@ -576,7 +576,8 @@ into the pod's environment and re-deploy.
 ### 6b. Rollback drill — the migration ↔ rollback contract
 
 **Contract** (#1607, hardened after the 2026-06-08 outage):
-`helm rollback` / `--atomic` reverts **manifests only** — the
+`helm rollback` / `--rollback-on-failure` (Helm 4's name for the
+deprecated `--atomic`) reverts **manifests only** — the
 migration's schema commit survives the rollback. The migration runs in
 the `pre-install,pre-upgrade` hook Job when the install brings its own
 PostgreSQL, and in the `migrate` init container of each new backplane
@@ -608,39 +609,63 @@ tolerance lives in the image being rolled back **to** — rolling back
 to a pre-tolerance release (strict `current == head` probe) across a
 migration still bricks readiness; recover those by rolling forward.
 
-**Failure-injection drill** — run on a sandbox (kind/minikube or the
-staging namespace, never prod) when the release carries a migration,
-and whenever the migration Job, the `migrate` init container, the
-migration runner or the `db` probe changes. Run it in the mode the
-release targets; with the built-in PostgreSQL, also delete one
-rolled-back pod after step 4 and check that the new pod's `migrate`
-init container logs `migration_skipped` and the pod gets Ready:
+**Failure-injection drill** — run it when the release carries a
+migration, and whenever the migration Job, the `migrate` init container,
+the migration runner or the `db` probe changes.
 
-- [ ] 1. Install the prior release `v(n)` (DB at migration `00NN`);
-  wait Ready. Per the caveat above, `v(n)` must already carry the
-  db-ahead-tolerant probe (#1607) — the drill proves the safety net
-  of the release being rolled back *to*.
+**In CI (the normal way).** Start the `rollback-drill` job: GitHub
+Actions → workflow `chart` → **Run workflow**. Pick the commit to test
+(the release-cutting commit on `main`, or the candidate tag) and enter
+the prior release in `prior` (for example `v0.44.0`; `v0.39.0` or later).
+
+```bash
+gh workflow run chart.yml --repo evoila/meho --ref <branch-or-tag> -f prior=v<n>
+```
+
+The job runs steps 1 to 5 below on a kind cluster, with a
+bring-your-own PostgreSQL (the migration runs in the hook Job). It uses
+the prior release's published chart and image, and the chart and image
+of the chosen commit. The run summary says whether the way back works.
+It fails when the database did not move, because then there is no new
+migration and the drill proves nothing. There is no login server and no
+Vault in the job, so logins are not tested.
+
+**By hand.** Run the same steps on a sandbox (kind/minikube or the
+staging namespace, never prod) when you need the built-in PostgreSQL or
+your own values. Use Helm 4. Run it in the mode the release targets:
+
+- [ ] 1. Install the prior release `v(n)` (DB at migration `00NN`) with
+  your values file; wait Ready. Per the caveat above, `v(n)` must already
+  carry the db-ahead-tolerant probe (#1607) — the drill proves the
+  safety net of the release being rolled back *to*.
 - [ ] 2. Upgrade to the candidate `v(n+1)` (carrying `00NN+1`) with
   readiness deliberately broken, so the rollout must fail and
-  auto-roll-back:
+  auto-roll-back. Pass the same values file as a normal install. Do not
+  use `--reuse-values`: it keeps the old chart's defaults, so the upgrade
+  can fail for another reason than the broken probe.
 
   ```bash
   helm upgrade meho oci://ghcr.io/evoila/meho-chart \
-    --version <candidate> --reuse-values --atomic --timeout 5m \
+    --version <candidate> --values <your-values-file> \
+    --rollback-on-failure --timeout 5m \
     --set probes.readiness.httpGet.path=/definitely-404
   ```
 
 - [ ] 3. Confirm the upgrade fails and Helm auto-rolls-back:
-  `helm history meho` shows a rollback revision; pods run the `v(n)`
-  image again.
-- [ ] 4. Assert the rolled-back pods reach `READY 1/1` **without any
-  manual `alembic` command**, and `GET /ready` returns 200 with the
-  `db` check `ok=true`, detail `current=00NN+1 head=00NN
-  db_ahead=true`.
+  `helm history meho` shows a failed revision and then a deployed
+  rollback revision; the Deployment runs the `v(n)` image again.
+- [ ] 4. Delete the backplane pod, every time. A failed upgrade can leave
+  the old pod running, so the rollback alone may start nothing. The
+  proof is a brand new `v(n)` pod. Assert it reaches `READY 1/1`
+  **without any manual `alembic` command**, and that the `db` check of
+  `GET /ready` is `ok=true` with detail `current=00NN+1 head=00NN
+  db_ahead=true`. With the built-in PostgreSQL, also check that the new
+  pod's `migrate` init container logs `migration_skipped`.
 - [ ] 5. Clean up by rolling **forward**: re-run the upgrade with
   readiness intact. The DB is already at `00NN+1`; the migration Job
   (or the new pods' `migrate` init container) re-runs as a no-op
-  (`alembic upgrade head` is idempotent).
+  (`alembic upgrade head` is idempotent). The `db` check of the new
+  version shows `revision=00NN+1`.
 
 ### 7. Post-release
 
@@ -1013,8 +1038,9 @@ follow-up task.
 [ ] 6a. Post-deploy enablement — for each gate in /ready features:
         configure the env vars per the cited doc; verify gate
         flips to configured (read features with the metrics token)
-[ ] 6b. Rollback drill (releases carrying a migration): broken-readiness
-        upgrade auto-rolls-back; rolled-back pods reach Ready with
+[ ] 6b. Rollback drill (releases carrying a migration): run the
+        `rollback-drill` job of chart.yml; broken-readiness upgrade
+        auto-rolls-back; a new rolled-back pod reaches Ready with
         db_ahead=true and no manual alembic (#1607)
 [ ] 7. Initiative closed; board/roadmap updated; consumers notified
 

@@ -58,8 +58,11 @@ Tenant scoping
 
 The route passes ``operator.tenant_id`` to ``retrieve``; the JWT
 verifier (G0.1-T2) is what made it a UUID. There is no API surface
-that accepts a different tenant_id from the body / query string --
-cross-tenant retrieval is impossible by construction.
+that accepts a different tenant_id from the body / query string.
+One exception, set by the instance and not by the caller: with
+``source="kb"`` the hits also include the shared knowledge entries of
+the tenants listed in ``KB_SHARED_TENANT_IDS``
+(:func:`meho_backplane.kb.service.add_shared_hits`).
 
 Out of scope (deferred per Initiative body)
 -------------------------------------------
@@ -88,6 +91,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.kb.schemas import KB_SOURCE
+from meho_backplane.kb.service import add_shared_hits
 from meho_backplane.memory.rbac import MemoryRbacResolver
 from meho_backplane.retrieval.retriever import MemoryEligibility, RetrievalHit, retrieve
 
@@ -302,6 +307,17 @@ async def retrieve_endpoint(
         principal_sub=operator.sub,
         memory_eligibility=_memory_eligibility(operator, body.source),
     )
+    if body.source == KB_SOURCE:
+        # ``meho kb search`` reads here: add the shared knowledge scope,
+        # the same as the knowledge search tool does.
+        hits = await add_shared_hits(
+            hits,
+            tenant_id=operator.tenant_id,
+            query=body.query,
+            kind=body.kind,
+            limit=body.limit,
+            metadata_filters=body.metadata_filters,
+        )
 
     structlog.contextvars.bind_contextvars(audit_hit_count=len(hits))
     duration_ms = round((time.monotonic() - start) * 1000, 2)

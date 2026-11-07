@@ -292,6 +292,7 @@ cli/
     │   │   ├── groups.go         # `meho operation groups` (GET /api/v1/operations/groups) — typed via api.GetGroupsApiV1OperationsGroupsGetParams.
     │   │   ├── search.go         # `meho operation search` (GET /api/v1/operations/search) — typed via api.GetSearchApiV1OperationsSearchGetParams. A 200 with the backplane's `status: "rate_limited"` envelope is rendered as unexpected_response (exit 4) with the wait, in both ranked and `--op-id` mode.
     │   │   ├── call.go           # `meho operation call`   (POST /api/v1/operations/call) — typed via api.CallOperationBody + FromCallOperationBodyTarget0.
+    │   │   ├── run_status.go     # `meho operation run-status <run id> [--wait]` (GET /api/v1/operations/runs/{id}) — state, stored result, failure reason; the read side of `call --async`.
     │   │   ├── subops.go         # `meho operation subops` (#4983; GET /api/v1/operations/governed-subops) — child steps, risk level, grantable; the 404 `no_governed_subops` answer prints a plain note, exit 0.
     │   │   ├── operation_test.go # render + helper + sentinel tests.
     │   │   └── client_test.go    # G0.12-T2 #1260 — fakeOperationsClient mocks the operationsAPI seam; asserts typed request params + 401 refresh dance + error classification.
@@ -1664,7 +1665,7 @@ narrow-waist contract.
   `tenant_admin` (#3668). With `--op-id <op_id>` (no query needed) it
   prints that one operation's call contract instead: parameter
   schema, examples, target rule, result shape and retry rules.
-- `meho operation call <connector_id> <op_id> --target <slug> [--params ...] [--work-ref gh:<owner>/<repo>#<n>] [--preview-hash <hash>]`
+- `meho operation call <connector_id> <op_id> --target <slug> [--params ...] [--work-ref gh:<owner>/<repo>#<n>] [--preview-hash <hash>] [--async]`
   — calls `POST /api/v1/operations/call`. Invokes the G0.6 dispatcher
   end-to-end (parameter validation, policy gate, audit, JSONFlux,
   broadcast). The dispatcher always returns a structured
@@ -1672,7 +1673,18 @@ narrow-waist contract.
   `status="error"` outcomes. The verb exits 1 on a non-ok envelope so
   shell pipelines see the gate-failed signal. `--preview-hash` threads
   the destructive-tier binding (#3197) into
-  `CallOperationBody.preview_hash` (see below).
+  `CallOperationBody.preview_hash` (see below). `--async` sends
+  `async: true`: the server answers HTTP 202 and a run id, and the verb
+  prints the run id and the `run-status` command at once (`--json` prints
+  the 202 answer as it is). Without the flag nothing changes.
+- `meho operation run-status <run_id> [--wait] [--json]` — calls
+  `GET /api/v1/operations/runs/{run_id}`, the read side of `call --async`.
+  Prints the state while the run waits or runs, the stored result when it
+  ended (same render and exit code as `call`; the run state `succeeded`
+  only says a result was stored, the stored `status` decides), and the
+  reason for a `failed`, `cancelled` or `uncertain` run (exit 1). An
+  unknown run id is an error. `--wait` checks every few seconds
+  (`wait_seconds=20` per short request) until the run ends.
 - `meho operation preview <connector_id> <op_id> [--target <slug>] [--params ...]`
   — calls `POST /api/v1/operations/preview`, the read-only diagnosis
   sibling of `/call` (#1683) and the CLI twin of the MCP

@@ -44,7 +44,14 @@ lists every breaking change.
   longer always returned (`required`), a field changed type, or the whole
   output schema is gone.
 
-The rules look into nested `properties` and array `items`. A new tool, a
+A schema without `type` accepts any type. So adding a `type` to such an
+argument is breaking, and removing the `type` of an output field is
+breaking too.
+
+The rules look into nested `properties`, array `items`, and the branches of
+`oneOf` and `anyOf`. The branches are compared by their position in the
+list. A branch removed from an input, or a new branch in an output, is
+breaking. A new tool, a
 new optional argument, a new output field and a new enum value in an input
 are not breaking.
 

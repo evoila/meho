@@ -50,6 +50,7 @@ def _tool(name: str = "list_things", surface: str = "working", **extra: Any) -> 
                 "limit": {"type": "integer"},
                 "status": {"type": "string", "enum": ["open", "closed"]},
                 "filter": {"type": "object", "properties": {"kind": {"type": "string"}}},
+                "value": {},
             },
             "required": [],
         },
@@ -150,6 +151,14 @@ def test_move_off_the_working_surface_is_breaking_but_the_reverse_is_not() -> No
             lambda t: t.update(outputSchema=None),
             "MCP tool list_things: output schema removed",
         ),
+        (
+            lambda t: t["inputSchema"]["properties"]["value"].update(type="string"),
+            "MCP tool list_things input.value: type changed from any to ['string']",
+        ),
+        (
+            lambda t: t["outputSchema"]["properties"]["next_cursor"].pop("type"),
+            "MCP tool list_things output.next_cursor: type changed from ['null', 'string'] to any",
+        ),
     ],
 )
 def test_breaking_schema_changes_are_found(edit: Any, expected: str) -> None:
@@ -163,6 +172,7 @@ def test_breaking_schema_changes_are_found(edit: Any, expected: str) -> None:
         lambda t: t["inputSchema"]["properties"]["status"]["enum"].append("archived"),
         lambda t: t["inputSchema"]["properties"]["limit"].update(type=["integer", "null"]),
         lambda t: t["inputSchema"]["properties"]["status"].pop("enum"),
+        lambda t: t["inputSchema"]["properties"]["limit"].pop("type"),
         lambda t: t["outputSchema"]["properties"].update(extra={"type": "string"}),
         lambda t: t["outputSchema"]["required"].append("extra"),
         lambda t: t["outputSchema"]["properties"]["items"]["items"]["properties"].update(
@@ -185,6 +195,109 @@ def test_new_required_argument_on_a_new_property_is_breaking() -> None:
         t["inputSchema"]["required"].append("target")
 
     assert _changed(edit) == ["MCP tool list_things input: argument 'target' is now required"]
+
+
+def _branched() -> dict[str, Any]:
+    """A tool whose input and output have ``anyOf`` / ``oneOf`` branches."""
+    return _tool(
+        name="search",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+            },
+        },
+        outputSchema={
+            "type": "object",
+            "oneOf": [
+                {
+                    "properties": {"hits": {"type": "array"}, "took_ms": {"type": "integer"}},
+                    "required": ["hits", "took_ms"],
+                },
+                {"properties": {"operation": {"type": "object"}}, "required": ["operation"]},
+            ],
+        },
+    )
+
+
+def _branched_changed(edit: Any) -> list[str]:
+    base = _branched()
+    head = copy.deepcopy(base)
+    edit(head)
+    return compat.mcp_breaking(_snap(base), _snap(head))
+
+
+def _drop_hits(t: dict[str, Any]) -> None:
+    branch = t["outputSchema"]["oneOf"][0]
+    branch["properties"].pop("hits")
+    branch["required"].remove("hits")
+
+
+@pytest.mark.parametrize(
+    ("edit", "expected"),
+    [
+        (
+            _drop_hits,
+            [
+                "MCP tool search output oneOf[0]: field 'hits' is no longer always returned",
+                "MCP tool search output oneOf[0]: field 'hits' removed",
+            ],
+        ),
+        (
+            lambda t: t["outputSchema"]["oneOf"][1]["required"].remove("operation"),
+            ["MCP tool search output oneOf[1]: field 'operation' is no longer always returned"],
+        ),
+        (
+            lambda t: t["outputSchema"]["oneOf"][0]["properties"]["took_ms"].update(type="string"),
+            [
+                "MCP tool search output oneOf[0].took_ms: "
+                "type changed from ['integer'] to ['string']"
+            ],
+        ),
+        (
+            lambda t: t["outputSchema"]["oneOf"].append({"properties": {}}),
+            ["MCP tool search output: oneOf has 3 branches instead of 2"],
+        ),
+        (
+            lambda t: t["outputSchema"].pop("oneOf"),
+            ["MCP tool search output: oneOf removed"],
+        ),
+        (
+            lambda t: t["inputSchema"]["properties"]["query"]["anyOf"].pop(),
+            ["MCP tool search input.query: anyOf has 1 branches instead of 2"],
+        ),
+        (
+            lambda t: t["inputSchema"]["properties"]["query"]["anyOf"][0].update(type="boolean"),
+            ["MCP tool search input.query anyOf[0]: type changed from ['string'] to ['boolean']"],
+        ),
+        (
+            lambda t: t["inputSchema"]["properties"].update(mode={"oneOf": [{"type": "string"}]}),
+            [],
+        ),
+    ],
+)
+def test_branch_changes(edit: Any, expected: list[str]) -> None:
+    assert _branched_changed(edit) == expected
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda t: t["outputSchema"]["oneOf"][0]["properties"].update(extra={"type": "string"}),
+        lambda t: t["outputSchema"]["oneOf"].pop(),
+        lambda t: t["inputSchema"]["properties"]["query"]["anyOf"].append({"type": "null"}),
+        lambda t: t["inputSchema"]["properties"]["query"].pop("anyOf"),
+    ],
+)
+def test_branch_changes_that_are_not_breaking(edit: Any) -> None:
+    assert _branched_changed(edit) == []
+
+
+def test_new_branches_on_an_input_are_breaking() -> None:
+    def edit(t: dict[str, Any]) -> None:
+        t["inputSchema"]["properties"]["filter"]["oneOf"] = [{"required": ["kind"]}]
+
+    assert _changed(edit) == ["MCP tool list_things input.filter: oneOf added"]
 
 
 def test_committed_snapshot_has_no_break_against_itself() -> None:

@@ -23,7 +23,9 @@ tree and lists every breaking change:
   operator surface; in an input schema a removed argument, a newly
   required argument, a narrower type or a removed enum value; in an output
   schema a removed field, a field that is no longer required, a changed
-  type, or a removed output schema.
+  type, or a removed output schema. A schema without ``type`` accepts any
+  type. ``oneOf`` and ``anyOf`` branches are compared by position; a
+  branch removed from an input or added to an output is breaking.
 
 A breaking change is allowed only on a pull request that has the
 ``breaking-change`` label **and** a ``## Breaking changes`` section in its
@@ -143,22 +145,55 @@ def openapi_breaking(oasdiff: str, base_file: pathlib.Path, head_file: pathlib.P
 # ---------------------------------------------------------------------------
 
 
-def _types(schema: dict[str, Any]) -> set[str] | None:
+_ANY_TYPE = frozenset({"array", "boolean", "integer", "null", "number", "object", "string"})
+_BRANCH_KEYS = ("oneOf", "anyOf")
+
+
+def _types(schema: dict[str, Any]) -> frozenset[str]:
+    """Return the JSON types *schema* allows; no ``type`` key allows every type."""
     value = schema.get("type")
     if value is None:
-        return None
-    return {value} if isinstance(value, str) else set(value)
+        return _ANY_TYPE
+    return frozenset({value} if isinstance(value, str) else value)
+
+
+def _type_text(types: frozenset[str]) -> str:
+    return "any" if types == _ANY_TYPE else str(sorted(types))
 
 
 def _compare_type(
     where: str, base: dict[str, Any], head: dict[str, Any], is_input: bool
 ) -> list[str]:
     old, new = _types(base), _types(head)
-    if old is None or new is None or old == new:
+    if old == new or (is_input and old <= new):
         return []
-    if is_input and old <= new:
-        return []
-    return [f"{where}: type changed from {sorted(old)} to {sorted(new)}"]
+    return [f"{where}: type changed from {_type_text(old)} to {_type_text(new)}"]
+
+
+def _compare_branches(
+    where: str, base: dict[str, Any], head: dict[str, Any], is_input: bool
+) -> list[str]:
+    """Compare ``oneOf`` and ``anyOf`` branches, paired by their position."""
+    found: list[str] = []
+    for key in _BRANCH_KEYS:
+        old, new = base.get(key), head.get(key)
+        if not isinstance(old, list) and not isinstance(new, list):
+            continue
+        if not isinstance(new, list):
+            if not is_input:
+                found.append(f"{where}: {key} removed")
+            continue
+        if not isinstance(old, list):
+            if is_input:
+                found.append(f"{where}: {key} added")
+            continue
+        if is_input and len(new) < len(old):
+            found.append(f"{where}: {key} has {len(new)} branches instead of {len(old)}")
+        if not is_input and len(new) > len(old):
+            found.append(f"{where}: {key} has {len(new)} branches instead of {len(old)}")
+        for index, (old_branch, new_branch) in enumerate(zip(old, new, strict=False)):
+            found += compare_schema(f"{where} {key}[{index}]", old_branch, new_branch, is_input)
+    return found
 
 
 def _compare_enum(
@@ -192,6 +227,7 @@ def compare_schema(where: str, base: Any, head: Any, is_input: bool) -> list[str
     found = _compare_type(where, base, head, is_input)
     found += _compare_enum(where, base, head, is_input)
     found += _compare_required(where, base, head, is_input)
+    found += _compare_branches(where, base, head, is_input)
     old_props = base.get("properties", {})
     new_props = head.get("properties", {})
     kind = "argument" if is_input else "field"

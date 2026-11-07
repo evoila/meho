@@ -45,7 +45,7 @@ apiVersion: meho.evoila.com/v1
 kind: Settings
 metadata:                      # written by export, ignored by import
   exportedAt: 2026-10-14T12:00:00Z
-  exportedFrom: { mehoVersion: v0.45.0, migrationHead: "0138" }
+  exportedFrom: { mehoVersion: v0.45.0, migrationHead: "0139" }
 spec:
   tenants:
     - id: <tenant-uuid>
